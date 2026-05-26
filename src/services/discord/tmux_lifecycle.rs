@@ -1000,7 +1000,8 @@ mod tests {
         .await
         .unwrap();
         let status: String = row.try_get("status").unwrap();
-        let result: serde_json::Value = row.try_get("result").unwrap();
+        let result_raw: String = row.try_get("result").unwrap();
+        let result: serde_json::Value = serde_json::from_str(&result_raw).unwrap();
         assert_eq!(status, "failed");
         assert_eq!(
             result.get("error").and_then(|value| value.as_str()),
@@ -1088,7 +1089,8 @@ mod tests {
         .await
         .unwrap();
         let status: String = row.try_get("status").unwrap();
-        let result: serde_json::Value = row.try_get("result").unwrap();
+        let result_raw: String = row.try_get("result").unwrap();
+        let result: serde_json::Value = serde_json::from_str(&result_raw).unwrap();
         assert_eq!(status, "completed");
         assert_eq!(
             result.get("summary").and_then(|value| value.as_str()),

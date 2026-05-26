@@ -177,7 +177,8 @@ if [ "$LOCAL_RC" -ne 0 ]; then
   echo "local deploy FAILED (rc=$LOCAL_RC) — peer step skipped"; exit "$LOCAL_RC"
 fi
 echo "-- step 2: peer deploy via ssh --"
-ssh -o BatchMode=yes "{peer}" "cd \$(git -C ~/AgentDesk rev-parse --show-toplevel 2>/dev/null || echo ~/AgentDesk) && \
+ssh -o BatchMode=yes "{peer}" "REMOTE_REPO=\"\${{AGENTDESK_REPO_DIR:-\$HOME/.adk/release/workspaces/agentdesk}}\"; \
+  cd \$(git -C \"\$REMOTE_REPO\" rev-parse --show-toplevel 2>/dev/null || echo \"\$REMOTE_REPO\") && \
   AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS=1 bash scripts/deploy-release.sh" 2>&1 | tail -40
 PEER_RC=${{PIPESTATUS[0]}}
 if [ "$PEER_RC" -ne 0 ]; then
@@ -438,6 +439,9 @@ mod tests {
         assert!(preflight < local && local < peer);
         assert!(s.contains("scripts/deploy-release.sh"));
         assert!(s.contains("mac-book"));
+        assert!(s.contains("$HOME/.adk/release/workspaces/agentdesk"));
+        assert!(s.contains("${AGENTDESK_REPO_DIR:-"));
+        assert!(!s.contains("~/AgentDesk"));
     }
 
     #[test]

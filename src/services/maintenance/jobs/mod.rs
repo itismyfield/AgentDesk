@@ -34,9 +34,9 @@
 //! leader-only worker_registry::MaintenanceScheduler path that owns
 //! persistent state in PG (same path as `storage.cancel_tombstone_prune`).
 //!
-//! Log rotation for `dcserver.stdout.log` / `dcserver.stderr.log` is intentionally
-//! deferred to a follow-up — it requires wiring `tracing-appender::rolling` into
-//! the existing `logging.rs` subscriber init, which is out of scope for this PR.
+//! `dcserver.stdout.log` rotation is handled directly by `logging.rs` because
+//! launchd/systemd open stdout before the process starts and cannot safely
+//! rotate the active descriptor themselves.
 
 use std::time::Duration;
 

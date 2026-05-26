@@ -526,6 +526,7 @@ impl TestHealthHarness {
         let queue = (0..depth)
             .map(|idx| super::Intervention {
                 author_id: serenity::UserId::new(idx as u64 + 1),
+                author_is_bot: false,
                 message_id: serenity::MessageId::new(idx as u64 + 1),
                 source_message_ids: vec![serenity::MessageId::new(idx as u64 + 1)],
                 text: format!("queued-{idx}"),
@@ -630,6 +631,7 @@ impl TestHealthHarness {
             .iter()
             .map(|(message_id, text)| super::Intervention {
                 author_id: serenity::UserId::new(1),
+                author_is_bot: false,
                 message_id: serenity::MessageId::new(*message_id),
                 source_message_ids: vec![serenity::MessageId::new(*message_id)],
                 text: (*text).to_string(),
@@ -5331,6 +5333,7 @@ mod tests {
         // failure mode where a previous restart left the file behind.
         let intervention = super::super::Intervention {
             author_id: UserId::new(123),
+            author_is_bot: false,
             message_id: MessageId::new(987_654_321),
             source_message_ids: vec![MessageId::new(987_654_321)],
             text: "stranded-on-disk".to_string(),
@@ -5433,6 +5436,7 @@ mod tests {
         let disk_items = vec![
             super::super::Intervention {
                 author_id: UserId::new(7),
+                author_is_bot: false,
                 message_id: MessageId::new(1001),
                 source_message_ids: vec![MessageId::new(1001)],
                 text: "disk-1".to_string(),
@@ -5445,6 +5449,7 @@ mod tests {
             },
             super::super::Intervention {
                 author_id: UserId::new(7),
+                author_is_bot: false,
                 message_id: MessageId::new(1002),
                 source_message_ids: vec![MessageId::new(1002)],
                 text: "disk-2".to_string(),
@@ -5534,6 +5539,7 @@ mod tests {
 
         let intervention = super::super::Intervention {
             author_id: UserId::new(8),
+            author_is_bot: false,
             message_id: MessageId::new(3001),
             source_message_ids: vec![MessageId::new(3001)],
             text: "only-once".to_string(),

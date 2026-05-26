@@ -13,6 +13,12 @@ pub(crate) struct VoiceTranscriptAnnouncement {
     pub(crate) started_at: Option<String>,
     pub(crate) completed_at: Option<String>,
     pub(crate) samples_written: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) control_channel_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) stt_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) stt_latency_ms: Option<u64>,
 }
 
 const VOICE_TRANSCRIPT_ANNOUNCEMENT_PREFIX: &str = "ADK_VOICE_TRANSCRIPT v1";
@@ -314,6 +320,9 @@ pub(crate) fn voice_transcript_announcement_meta(
     started_at: &str,
     completed_at: &str,
     samples_written: usize,
+    control_channel_id: Option<u64>,
+    stt_mode: Option<&str>,
+    stt_latency_ms: Option<u64>,
 ) -> VoiceTranscriptAnnouncement {
     VoiceTranscriptAnnouncement {
         transcript: transcript.trim().to_string(),
@@ -324,6 +333,12 @@ pub(crate) fn voice_transcript_announcement_meta(
         started_at: Some(started_at.to_string()),
         completed_at: Some(completed_at.to_string()),
         samples_written: Some(samples_written),
+        control_channel_id,
+        stt_mode: stt_mode
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        stt_latency_ms,
     }
 }
 
@@ -381,6 +396,9 @@ pub(crate) fn parse_voice_transcript_announcement(
         started_at,
         completed_at,
         samples_written,
+        control_channel_id: None,
+        stt_mode: None,
+        stt_latency_ms: None,
     })
 }
 
@@ -604,6 +622,9 @@ mod tests {
             "2026-05-14T18:00:00+09:00",
             "2026-05-14T18:00:01+09:00",
             48_000,
+            Some(123),
+            Some("file"),
+            Some(321),
         );
 
         assert_eq!(meta.transcript, "@everyone 배포해줘");
@@ -620,6 +641,9 @@ mod tests {
             Some("2026-05-14T18:00:01+09:00")
         );
         assert_eq!(meta.samples_written, Some(48_000));
+        assert_eq!(meta.control_channel_id, Some(123));
+        assert_eq!(meta.stt_mode.as_deref(), Some("file"));
+        assert_eq!(meta.stt_latency_ms, Some(321));
     }
 
     #[test]

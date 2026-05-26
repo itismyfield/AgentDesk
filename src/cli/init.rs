@@ -495,9 +495,9 @@ fn generate_launchd_plist_for_flavor_with_root(
 {extra_env_xml}
   </dict>
   <key>StandardOutPath</key>
-  <string>{logs_str}/dcserver.stdout.log</string>
+  <string>{logs_str}/dcserver.launchd.stdout.log</string>
   <key>StandardErrorPath</key>
-  <string>{logs_str}/dcserver.stderr.log</string>
+  <string>{logs_str}/dcserver.launchd.stderr.log</string>
 </dict>
 </plist>"#,
     )
@@ -1270,7 +1270,17 @@ mod tests {
         assert!(plist.contains(&format!("{}/.local/bin", home.display())));
         assert!(plist.contains(&format!(
             "<string>{}</string>",
-            root_dir.join("logs").join("dcserver.stdout.log").display()
+            root_dir
+                .join("logs")
+                .join("dcserver.launchd.stdout.log")
+                .display()
+        )));
+        assert!(plist.contains(&format!(
+            "<string>{}</string>",
+            root_dir
+                .join("logs")
+                .join("dcserver.launchd.stderr.log")
+                .display()
         )));
         assert_plist_xml_valid(&plist);
     }
@@ -1527,8 +1537,8 @@ fn install_service(home: &Path, agentdesk_bin: &Path, _reconfigure: bool) -> Res
          Restart=on-failure\n\
          RestartSec=5\n\
          Environment=AGENTDESK_ROOT_DIR={root}\n\
-         StandardOutput=append:{logs}/dcserver.stdout.log\n\
-         StandardError=append:{logs}/dcserver.stderr.log\n\n\
+         StandardOutput=append:{logs}/dcserver.launchd.stdout.log\n\
+         StandardError=append:{logs}/dcserver.launchd.stderr.log\n\n\
          [Install]\n\
          WantedBy=default.target\n",
         bin = agentdesk_bin.display(),

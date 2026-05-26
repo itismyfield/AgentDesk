@@ -38,6 +38,7 @@ async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
         })?
         .config;
     }
+    crate::services::provider_hosting::install_provider_hosting_config(&config);
 
     let engine = crate::engine::PolicyEngine::new_with_pg(&config, pg_pool.clone())
         .context("Failed to init policy engine")?;

@@ -829,10 +829,49 @@ function buildReviewDispatchContext(workDispatch) {
   if (workDispatch.id) {
     reviewContext.parent_dispatch_id = workDispatch.id;
   }
+  var result = workDispatch.result || {};
   var workContext = workDispatch.context || {};
+  if (workContext.entry_id) {
+    reviewContext.entry_id = workContext.entry_id;
+  }
   var slotIndex = normalizeSlotIndex(workContext.slot_index);
   if (slotIndex !== null) {
     reviewContext.slot_index = slotIndex;
+  }
+  var reviewedCommit = firstPresent(
+    result.completed_commit,
+    result.reviewed_commit,
+    result.head_sha,
+    workContext.completed_commit,
+    workContext.reviewed_commit,
+    workContext.head_sha
+  );
+  if (reviewedCommit) {
+    reviewContext.reviewed_commit = reviewedCommit;
+  }
+  var worktreePath = firstPresent(
+    result.completed_worktree_path,
+    result.worktree_path,
+    workContext.completed_worktree_path,
+    workContext.worktree_path
+  );
+  if (worktreePath) {
+    reviewContext.worktree_path = worktreePath;
+  }
+  var branch = firstPresent(
+    result.completed_branch,
+    result.worktree_branch,
+    result.branch,
+    workContext.completed_branch,
+    workContext.worktree_branch,
+    workContext.branch
+  );
+  if (branch) {
+    reviewContext.branch = branch;
+  }
+  var targetRepo = firstPresent(result.target_repo, workContext.target_repo);
+  if (targetRepo) {
+    reviewContext.target_repo = targetRepo;
   }
   return reviewContext;
 }
@@ -885,6 +924,50 @@ function loadLatestCompletedWorkTarget(cardId) {
   };
 }
 
+function isMainlineBranch(branch) {
+  return branch === "main" || branch === "master" || branch === "origin/main" || branch === "origin/master";
+}
+
+function gitCommandOutput(repoPath, args) {
+  if (!repoPath) return null;
+  try {
+    var output = agentdesk.exec("git", ["-C", repoPath].concat(args));
+    if (output && String(output).indexOf("ERROR") === 0) return null;
+    return String(output || "");
+  } catch (e) {
+    return null;
+  }
+}
+
+function gitRefExists(repoPath, ref) {
+  var output = gitCommandOutput(repoPath, ["rev-parse", "--verify", ref]);
+  return output !== null && output.trim() !== "";
+}
+
+function gitCommandOk(repoPath, args) {
+  if (!repoPath) return false;
+  try {
+    var output = agentdesk.exec("git", ["-C", repoPath].concat(args));
+    return !(output && String(output).indexOf("ERROR") === 0);
+  } catch (e) {
+    return false;
+  }
+}
+
+function workTargetAlreadyOnRemoteMain(workTarget) {
+  if (!workTarget || !workTarget.head_sha || !workTarget.worktree_path) return false;
+  if (workTarget.branch && !isMainlineBranch(workTarget.branch)) return false;
+  var remoteRefs = ["origin/main", "origin/master"];
+  for (var i = 0; i < remoteRefs.length; i++) {
+    var ref = remoteRefs[i];
+    if (!gitRefExists(workTarget.worktree_path, ref)) continue;
+    if (gitCommandOk(workTarget.worktree_path, ["merge-base", "--is-ancestor", workTarget.head_sha, ref])) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function loadPrTracking(cardId) {
   return prTracking.load(cardId);
 }
@@ -923,6 +1006,11 @@ function attemptCreatePrDispatchForReviewPass(cardId, noopVerification) {
   // not a failure, so callers should terminal the card.
   var latestWorkTarget = loadLatestCompletedWorkTarget(cardId);
   if (!latestWorkTarget) return { status: "noop", reason: "no_work_target" };
+
+  if (workTargetAlreadyOnRemoteMain(latestWorkTarget)) {
+    agentdesk.log.info("[review] Card " + cardId + " work target is already on origin mainline — skipping create-pr dispatch");
+    return { status: "noop", reason: "already_on_remote_main" };
+  }
 
   var prCardInfo = agentdesk.db.query(
     "SELECT assigned_agent_id, title, github_issue_number, repo_id, github_issue_url FROM kanban_cards WHERE id = ?",

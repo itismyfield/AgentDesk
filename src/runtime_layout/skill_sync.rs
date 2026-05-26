@@ -115,7 +115,7 @@ pub(super) fn sync_managed_skills(root: &Path) -> Result<SkillSyncReport, String
             }
         }
 
-        for workspace_target in deployment.workspace_targets {
+        for workspace_target in &deployment.workspace_targets {
             if !workspace_target.root.is_dir() {
                 continue;
             }
@@ -136,6 +136,14 @@ pub(super) fn sync_managed_skills(root: &Path) -> Result<SkillSyncReport, String
                 }
             }
         }
+
+        prune_unplanned_managed_skill_links(
+            root,
+            &skill_name,
+            &skill_dir,
+            &deployment,
+            &workspace_names,
+        )?;
     }
 
     Ok(report)
@@ -170,7 +178,7 @@ fn skill_deployment_plan(
             }
         });
         let workspace_targets = if entry.workspaces.is_empty() {
-            workspace_targets_for_names(root, workspace_names, &providers)
+            Vec::new()
         } else {
             workspace_targets_for_names(
                 root,
@@ -221,7 +229,7 @@ fn skill_deployment_plan(
         } else {
             Vec::new()
         },
-        workspace_targets: workspace_targets_for_names(root, workspace_names, &providers),
+        workspace_targets: Vec::new(),
     }
 }
 
@@ -240,6 +248,66 @@ fn workspace_targets_for_names(
             root: workspace_root,
             providers: providers.to_vec(),
         });
+    }
+    result
+}
+
+fn prune_unplanned_managed_skill_links(
+    root: &Path,
+    skill_name: &str,
+    skill_dir: &Path,
+    deployment: &SkillDeploymentPlan,
+    workspace_names: &[String],
+) -> Result<(), String> {
+    let mut desired_dirs = BTreeSet::new();
+    if let Some(home) = current_home_dir() {
+        for provider in &deployment.global_providers {
+            desired_dirs.insert(provider_target_dir(provider, &home));
+        }
+    }
+    for target in &deployment.workspace_targets {
+        for provider in &target.providers {
+            desired_dirs.insert(provider_target_dir(provider, &target.root));
+        }
+    }
+
+    for (provider, target_dir) in all_candidate_skill_target_dirs(root, workspace_names) {
+        if desired_dirs.contains(&target_dir) {
+            continue;
+        }
+        let (source_path, link_path, _is_dir_link) =
+            skill_link_paths(&provider, skill_name, skill_dir, &target_dir);
+        if !path_exists(&link_path) {
+            continue;
+        }
+        let Ok(metadata) = fs::symlink_metadata(&link_path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() && same_canonical_path(&link_path, &source_path) {
+            remove_link_or_path(&link_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn all_candidate_skill_target_dirs(
+    root: &Path,
+    workspace_names: &[String],
+) -> Vec<(String, PathBuf)> {
+    let mut result = Vec::new();
+    if let Some(home) = current_home_dir() {
+        for provider in all_skill_providers() {
+            result.push((provider.clone(), provider_target_dir(&provider, &home)));
+        }
+    }
+    for workspace_name in workspace_names {
+        let workspace_root = root.join("workspaces").join(workspace_name);
+        for provider in all_skill_providers() {
+            result.push((
+                provider.clone(),
+                provider_target_dir(&provider, &workspace_root),
+            ));
+        }
     }
     result
 }
@@ -585,15 +653,8 @@ fn deploy_skill_link(
     fs::create_dir_all(target_dir)
         .map_err(|e| format!("Failed to create '{}': {e}", target_dir.display()))?;
 
-    let (source_path, link_path, is_dir_link) = if provider == "claude" {
-        (
-            skill_dir.join("SKILL.md"),
-            target_dir.join(format!("{skill_name}.md")),
-            false,
-        )
-    } else {
-        (skill_dir.to_path_buf(), target_dir.join(skill_name), true)
-    };
+    let (source_path, link_path, is_dir_link) =
+        skill_link_paths(provider, skill_name, skill_dir, target_dir);
 
     if !path_exists(&source_path) {
         return Ok(LinkState::SkippedExisting);
@@ -607,6 +668,9 @@ fn deploy_skill_link(
         if existing_target == desired || same_canonical_path(&link_path, &source_path) {
             return Ok(LinkState::Unchanged);
         }
+        if existing_skill_link_is_compatible(provider, skill_name, &link_path) {
+            return Ok(LinkState::SkippedExisting);
+        }
         remove_link_or_path(&link_path)?;
         create_symlink_entry(&source_path, &link_path, is_dir_link)?;
         return Ok(LinkState::Updated);
@@ -618,6 +682,63 @@ fn deploy_skill_link(
 
     create_symlink_entry(&source_path, &link_path, is_dir_link)?;
     Ok(LinkState::Created)
+}
+
+fn existing_skill_link_is_compatible(provider: &str, skill_name: &str, link_path: &Path) -> bool {
+    let Ok(resolved) = fs::canonicalize(link_path) else {
+        return false;
+    };
+
+    if provider == "claude" {
+        return resolved
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("SKILL.md"))
+            && resolved.is_file()
+            && resolved
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == skill_name);
+    }
+
+    let skill_dir = if resolved.is_dir() {
+        resolved
+    } else if resolved
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("SKILL.md"))
+    {
+        match resolved.parent() {
+            Some(parent) => parent.to_path_buf(),
+            None => return false,
+        }
+    } else {
+        return false;
+    };
+
+    skill_dir.join("SKILL.md").is_file()
+        && skill_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == skill_name)
+}
+
+fn skill_link_paths(
+    provider: &str,
+    skill_name: &str,
+    skill_dir: &Path,
+    target_dir: &Path,
+) -> (PathBuf, PathBuf, bool) {
+    if provider == "claude" {
+        (
+            skill_dir.join("SKILL.md"),
+            target_dir.join(format!("{skill_name}.md")),
+            false,
+        )
+    } else {
+        (skill_dir.to_path_buf(), target_dir.join(skill_name), true)
+    }
 }
 
 fn copy_skill_dir_resolving_symlinks(src: &Path, dest: &Path) -> Result<(), String> {

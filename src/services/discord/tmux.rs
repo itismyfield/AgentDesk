@@ -84,6 +84,7 @@ pub(crate) use super::watcher_lifecycle_decision::{
     watcher_stop_decision_after_terminal_success,
 };
 const READY_FOR_INPUT_IDLE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+const SOFT_TERMINAL_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(1500);
 pub(super) const WATCHER_ACTIVITY_HEARTBEAT_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(30);
 const READY_FOR_INPUT_STUCK_LABEL: &str = "stuck_at_ready";
@@ -109,6 +110,8 @@ pub(super) use self::tmux_kill_policy::{
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct WatcherLineOutcome {
     pub found_result: bool,
+    pub terminal_kind: Option<WatcherTerminalKind>,
+    pub soft_terminal_candidate: bool,
     pub is_prompt_too_long: bool,
     pub is_auth_error: bool,
     pub auth_error_message: Option<String>,
@@ -118,6 +121,27 @@ pub(super) struct WatcherLineOutcome {
     pub auto_compacted: bool,
     pub task_notification_kind: Option<TaskNotificationKind>,
     pub assistant_text_seen: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WatcherTerminalKind {
+    HardResult,
+    SoftStopHookSummary,
+    SoftUserBoundary,
+    AuthError,
+    ProviderOverload,
+}
+
+impl WatcherTerminalKind {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::HardResult => "hard_result",
+            Self::SoftStopHookSummary => "soft_stop_hook_summary",
+            Self::SoftUserBoundary => "soft_user_boundary",
+            Self::AuthError => "auth_error",
+            Self::ProviderOverload => "provider_overload",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -406,6 +430,16 @@ fn terminal_relay_decision(
         should_enqueue_notify_outbox: false,
         suppressed: is_task_notification && !has_user_visible_assistant_text,
     }
+}
+
+fn watcher_should_render_status_only_placeholder(
+    placeholder_exists: bool,
+    current_tool_line: Option<&str>,
+    task_notification_kind: Option<TaskNotificationKind>,
+) -> bool {
+    placeholder_exists
+        || current_tool_line.is_some_and(|line| !line.trim().is_empty())
+        || task_notification_kind.is_some()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1491,8 +1525,8 @@ fn is_terminal_finalize_stop_candidate(
 /// We currently only gate `RuntimeHandoffKind::ClaudeTui`. `LegacyTmuxWrapper`
 /// drives a non-interactive wrapper script whose `result` event coincides
 /// with the script exiting, so no extra quiescence step is needed.
-/// `CodexTui` has its own completion contract and is intentionally excluded
-/// from this gate to keep the fix minimal and reviewable.
+/// The gate is based on structured provider JSONL state, not visible TUI
+/// composer chrome.
 ///
 /// `task_notification_kind` is accepted but intentionally does NOT skip the
 /// gate — a Background or MonitorAutoTurn that runs inside ClaudeTui still
@@ -1743,6 +1777,11 @@ mod tui_completion_gate_outcome_tests {
     }
 
     #[test]
+    fn skipped_dead_emits() {
+        assert!(TuiCompletionGateOutcome::SkippedDead.should_emit_completion());
+    }
+
+    #[test]
     fn timed_out_suppresses_emit() {
         // Codex H2: timeout MUST suppress the TurnCompleted emit;
         // placeholder sweeper / next-turn intake reconciles later.
@@ -1758,7 +1797,7 @@ mod tui_completion_gate_outcome_tests {
 /// `recovery_engine`. The pure derivation lives in this module's
 /// `should_emit_completion` contract, but the consumers compute their flag
 /// inline via `matches!(outcome, TuiCompletionGateOutcome::TimedOut)` — these
-/// tests pin the matrix so a future refactor that adds a fourth variant
+/// tests pin the matrix so a future refactor that adds another variant
 /// cannot silently widen the "proceed" set without also updating the side-
 /// effect gates.
 #[cfg(test)]
@@ -1778,6 +1817,9 @@ mod lifecycle_stage_pause_matrix_tests {
         assert!(!lifecycle_stage_paused(
             TuiCompletionGateOutcome::ConfirmedIdle
         ));
+        assert!(!lifecycle_stage_paused(
+            TuiCompletionGateOutcome::SkippedDead
+        ));
         assert!(lifecycle_stage_paused(TuiCompletionGateOutcome::TimedOut));
     }
 
@@ -1791,6 +1833,7 @@ mod lifecycle_stage_pause_matrix_tests {
         for outcome in [
             TuiCompletionGateOutcome::NotGated,
             TuiCompletionGateOutcome::ConfirmedIdle,
+            TuiCompletionGateOutcome::SkippedDead,
             TuiCompletionGateOutcome::TimedOut,
         ] {
             assert_eq!(
@@ -2355,6 +2398,37 @@ mod buffer_offset_tests {
     }
 }
 
+#[cfg(test)]
+mod watcher_placeholder_status_tests {
+    use super::watcher_should_render_status_only_placeholder;
+    use crate::services::agent_protocol::TaskNotificationKind;
+
+    #[test]
+    fn status_only_placeholder_requires_existing_card_or_activity() {
+        assert!(!watcher_should_render_status_only_placeholder(
+            false, None, None
+        ));
+        assert!(!watcher_should_render_status_only_placeholder(
+            false,
+            Some("   "),
+            None
+        ));
+        assert!(watcher_should_render_status_only_placeholder(
+            true, None, None
+        ));
+        assert!(watcher_should_render_status_only_placeholder(
+            false,
+            Some("⚙ Bash: cargo check"),
+            None
+        ));
+        assert!(watcher_should_render_status_only_placeholder(
+            false,
+            None,
+            Some(TaskNotificationKind::Background)
+        ));
+    }
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
     use super::FallbackPlaceholderCleanupDecision;
@@ -2654,6 +2728,45 @@ mod tests {
         );
         assert!(watchers.contains_key(&channel_a));
         assert!(!watchers.contains_key(&channel_b));
+        watchers.assert_invariants_for_tests();
+    }
+
+    #[test]
+    fn watcher_panic_cleanup_removes_only_matching_handle() {
+        let watchers = TmuxWatcherRegistry::new();
+        let channel_a = ChannelId::new(1485506232256168138);
+        let channel_b = ChannelId::new(1485506232256168139);
+        let tmux_name = "AgentDesk-codex-adk-cdx-panic-cleanup";
+
+        let old = test_watcher_handle(tmux_name);
+        let old_cancel = old.cancel.clone();
+        assert!(super::try_claim_watcher(&watchers, channel_a, old));
+
+        let replacement = test_watcher_handle(tmux_name);
+        let replacement_cancel = replacement.cancel.clone();
+        assert!(
+            watchers.insert(channel_b, replacement).is_some(),
+            "replacement should displace the old watcher for the same tmux session"
+        );
+
+        assert!(
+            watchers
+                .remove_tmux_session_if_current(tmux_name, &old_cancel)
+                .is_none(),
+            "cleanup from an older watcher task must not remove the replacement"
+        );
+        assert_eq!(
+            watchers.owner_channel_for_tmux_session(tmux_name),
+            Some(channel_b)
+        );
+
+        assert!(
+            watchers
+                .remove_tmux_session_if_current(tmux_name, &replacement_cancel)
+                .is_some(),
+            "cleanup from the current watcher task should remove the registry entry"
+        );
+        assert_eq!(watchers.owner_channel_for_tmux_session(tmux_name), None);
         watchers.assert_invariants_for_tests();
     }
 
@@ -5908,7 +6021,7 @@ mod tests {
                 format!("channel:{}", channel.get()),
                 expected_content,
                 "notify".to_string(),
-                "system".to_string(),
+                "lifecycle_notifier".to_string(),
                 Some(MONITOR_AUTO_TURN_REASON_CODE.to_string()),
                 Some(format!("monitor_auto_turn:ch:{}:off:14900", channel.get())),
             ))
@@ -6085,6 +6198,7 @@ mod tests {
             channel,
             super::super::Intervention {
                 author_id: UserId::new(99),
+                author_is_bot: false,
                 message_id: MessageId::new(200),
                 source_message_ids: vec![MessageId::new(200)],
                 text: "queued behind monitor".to_string(),

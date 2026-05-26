@@ -21,6 +21,7 @@ pub fn run(
     codex_bin: &str,
     codex_model: Option<&str>,
     reasoning_effort: Option<&str>,
+    developer_instructions: Option<&str>,
     resume_session_id: Option<&str>,
     fast_mode_enabled: Option<bool>,
     goals_enabled: Option<bool>,
@@ -60,16 +61,14 @@ pub fn run(
     if input_mode == InputMode::Fifo {
         let prompt_tx = prompt_tx.clone();
         std::thread::spawn(move || {
-            let stdin = std::io::stdin();
-            let reader = BufReader::new(stdin.lock());
-            for line in reader.lines() {
-                let Ok(line) = line else {
-                    break;
-                };
-                if line.trim().is_empty() {
-                    continue;
+            loop {
+                let reader = open_codex_terminal_input_reader();
+                match read_codex_terminal_input_lines(reader, &prompt_tx) {
+                    TerminalInputLoopOutcome::RetryReader => {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                    TerminalInputLoopOutcome::Stop => break,
                 }
-                let _ = prompt_tx.send(line);
             }
         });
     }
@@ -135,6 +134,7 @@ pub fn run(
         codex_bin,
         codex_model,
         reasoning_effort,
+        developer_instructions,
         &expanded_dir,
         &prompt,
         &mut thread_id,
@@ -174,6 +174,7 @@ pub fn run(
             codex_bin,
             codex_model,
             reasoning_effort,
+            developer_instructions,
             &expanded_dir,
             next_prompt.trim(),
             &mut thread_id,
@@ -258,11 +259,54 @@ fn cleanup(output_file: &str, input_fifo: &str) {
     let _ = std::fs::remove_file(input_fifo);
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalInputLoopOutcome {
+    RetryReader,
+    Stop,
+}
+
+fn open_codex_terminal_input_reader() -> Box<dyn BufRead> {
+    match std::fs::OpenOptions::new().read(true).open("/dev/tty") {
+        Ok(tty) => Box::new(BufReader::new(tty)),
+        Err(err) => {
+            eprintln!("\x1b[90m[terminal input tty open failed: {}]\x1b[0m", err);
+            Box::new(BufReader::new(std::io::stdin()))
+        }
+    }
+}
+
+fn read_codex_terminal_input_lines<R: BufRead>(
+    mut reader: R,
+    prompt_tx: &mpsc::Sender<String>,
+) -> TerminalInputLoopOutcome {
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => return TerminalInputLoopOutcome::RetryReader,
+            Ok(_) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                emit_status("[terminal message received]");
+                if prompt_tx.send(trimmed.to_string()).is_err() {
+                    return TerminalInputLoopOutcome::Stop;
+                }
+            }
+            Err(err) => {
+                eprintln!("\x1b[90m[terminal input read error: {}]\x1b[0m", err);
+                return TerminalInputLoopOutcome::RetryReader;
+            }
+        }
+    }
+}
+
 fn run_turn(
     output: &mut RotatingJsonlWriter,
     codex_bin: &str,
     codex_model: Option<&str>,
     reasoning_effort: Option<&str>,
+    developer_instructions: Option<&str>,
     working_dir: &str,
     prompt: &str,
     thread_id: &mut Option<String>,
@@ -285,6 +329,7 @@ fn run_turn(
     let args = build_codex_exec_args(
         &CodexLaunchOptions::new(prompt)
             .with_resume_session_id(thread_id.as_deref())
+            .with_developer_instructions(developer_instructions)
             .with_model(codex_model)
             .with_reasoning_effort(effective_reasoning_effort)
             .with_compact_token_limit(compact_token_limit)
@@ -483,8 +528,8 @@ fn run_turn(
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
     use super::{
-        decode_external_prompt, emit_json_line, handle_background_event, handle_item_completed,
-        normalize_resume_session_id,
+        TerminalInputLoopOutcome, decode_external_prompt, emit_json_line, handle_background_event,
+        handle_item_completed, normalize_resume_session_id, read_codex_terminal_input_lines,
     };
     use crate::services::codex::{
         CODEX_BACKGROUND_TASK_NOTIFICATION_ID, CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
@@ -511,6 +556,29 @@ mod tests {
         );
         assert_eq!(normalize_resume_session_id(Some("   ")), None);
         assert_eq!(normalize_resume_session_id(None), None);
+    }
+
+    #[test]
+    fn terminal_input_reader_retries_after_eof_instead_of_exiting() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::io::Cursor::new(" direct prompt \n\n");
+
+        let outcome = read_codex_terminal_input_lines(reader, &tx);
+
+        assert_eq!(outcome, TerminalInputLoopOutcome::RetryReader);
+        assert_eq!(rx.try_recv().unwrap(), "direct prompt");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn terminal_input_reader_stops_when_consumer_is_gone() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        drop(rx);
+        let reader = std::io::Cursor::new("direct prompt\n");
+
+        let outcome = read_codex_terminal_input_lines(reader, &tx);
+
+        assert_eq!(outcome, TerminalInputLoopOutcome::Stop);
     }
 
     #[test]

@@ -203,6 +203,110 @@ fn status_panel_turn_completed_renders_foreground_completion() {
 }
 
 #[test]
+fn status_panel_turn_completed_drops_recent_live_block() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(174);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Bash",
+            &json!({"command": "printf E2E_TOOL_OK"}).to_string(),
+        ),
+    );
+    events.push_event(
+        channel_id,
+        RecentPlaceholderEvent::tool_use(
+            "Bash",
+            &json!({"command": "printf E2E_TOOL_OK"}).to_string(),
+        )
+        .unwrap(),
+    );
+
+    let active = events.render_status_panel_with_heartbeat(
+        channel_id,
+        &ProviderKind::Claude,
+        1_700_000_000,
+        1_700_000_005,
+    );
+    assert!(active.contains("🖥️ Recent"));
+    assert!(active.contains("[Bash]"));
+    assert!(!active.contains("계속 처리 중"));
+
+    events.push_status_event(channel_id, StatusEvent::TurnCompleted { background: false });
+
+    let completed = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(completed.starts_with("✅ **응답 완료** — claude"));
+    assert!(!completed.contains("🖥️ Recent"));
+    assert!(!completed.contains("[Bash]"));
+    assert!(!completed.contains("계속 처리 중"));
+}
+
+#[test]
+fn status_panel_codex_active_omits_processing_tail_after_recent_block() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(175);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Bash",
+            &json!({"command": "cargo test --package agentdesk"}).to_string(),
+        ),
+    );
+    events.push_event(
+        channel_id,
+        RecentPlaceholderEvent::tool_use(
+            "Bash",
+            &json!({"command": "cargo test --package agentdesk"}).to_string(),
+        )
+        .unwrap(),
+    );
+
+    let rendered = events.render_status_panel_with_heartbeat(
+        channel_id,
+        &ProviderKind::Codex,
+        1_700_000_000,
+        1_700_000_005,
+    );
+
+    assert!(rendered.contains("🔧 도구 실행 중"));
+    assert!(rendered.contains("🖥️ Recent"));
+    assert!(rendered.contains("[Bash]"));
+    assert!(!rendered.contains("계속 처리 중"));
+}
+
+#[test]
+fn status_panel_truncates_long_body_without_processing_tail() {
+    let sections = vec!["x".repeat(STATUS_PANEL_MAX_CHARS + 100)];
+
+    let rendered = truncate_status_panel_sections(sections);
+
+    assert!(rendered.chars().count() <= STATUS_PANEL_MAX_CHARS);
+    assert!(!rendered.contains("계속 처리 중"));
+}
+
+#[test]
+fn status_panel_heartbeat_without_new_events_is_stable() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(176);
+
+    let first = events.render_status_panel_with_heartbeat(
+        channel_id,
+        &ProviderKind::Codex,
+        1_700_000_000,
+        1_700_000_005,
+    );
+    let second = events.render_status_panel_with_heartbeat(
+        channel_id,
+        &ProviderKind::Codex,
+        1_700_000_000,
+        1_700_000_010,
+    );
+
+    assert_eq!(first, second);
+    assert!(!second.contains("계속 처리 중"));
+}
+
+#[test]
 fn status_panel_turn_completed_after_monitor_wait_renders_background_completion() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(172);
@@ -350,10 +454,26 @@ fn status_panel_omits_recovery_line_when_count_is_zero_or_missing() {
 fn status_panel_omits_session_line_when_lifecycle_details_are_absent() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(180);
-    assert!(!events.set_session_panel_lifecycle_event(channel_id, "session_resumed", &json!({}),));
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        "session_fresh",
+        &json!({
+            "reason": "idle_timeout",
+            "recoveryMessageCount": 25,
+        }),
+    ));
+    assert!(
+        events
+            .render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000)
+            .contains("🆕 새 세션 시작")
+    );
+
+    assert!(events.set_session_panel_lifecycle_event(channel_id, "session_resumed", &json!({}),));
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
     assert!(!rendered.contains("Lifecycle "));
+    assert!(!rendered.contains("새 세션 시작"));
+    assert!(!rendered.contains("최근 대화"));
 }
 
 #[test]
@@ -373,6 +493,9 @@ fn recent_header_prefers_dispatch_owner_over_local_node() {
         card_id: None,
         dispatch_type: None,
         owner_instance_id: Some("mac-book-release".to_string()),
+        card_title: None,
+        dispatch_title: None,
+        github_issue_number: None,
     };
     assert_eq!(
         render_recent_section_header(Some(&snapshot), true, Some("mac-mini-release")),
@@ -391,6 +514,9 @@ fn recent_header_falls_back_to_local_node_when_no_dispatch_owner() {
         card_id: None,
         dispatch_type: None,
         owner_instance_id: None,
+        card_title: None,
+        dispatch_title: None,
+        github_issue_number: None,
     };
     assert_eq!(
         render_recent_section_header(
@@ -409,6 +535,9 @@ fn recent_header_omits_node_when_cluster_disabled_or_unknown() {
         card_id: None,
         dispatch_type: None,
         owner_instance_id: Some("mac-book-release".to_string()),
+        card_title: None,
+        dispatch_title: None,
+        github_issue_number: None,
     };
     assert_eq!(
         render_recent_section_header(Some(&snapshot), false, Some("mac-mini-release")),
@@ -418,20 +547,71 @@ fn recent_header_omits_node_when_cluster_disabled_or_unknown() {
 }
 
 #[test]
-fn status_panel_renders_task_line_from_dispatch_metadata() {
+fn status_panel_renders_task_line_with_card_title() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(185);
     assert!(events.set_task_panel_info(
         channel_id,
-        "dsp_123",
-        Some("42"),
-        Some("implementation"),
-        None,
+        TaskPanelInfo {
+            dispatch_id: "bddc480d-43d1-4f1f-b3fd-e0d96b3b3d82",
+            card_id: Some("e781f0c4-ea65-4dc3-814a-279d6eecadac"),
+            dispatch_type: Some("review"),
+            card_title: Some("Resolve runtime maintenance issues"),
+            ..Default::default()
+        },
     ));
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Codex, 1_700_000_000);
 
-    assert!(rendered.contains("Task      dispatch #dsp\\_123 · card #42 · implementation"));
+    assert!(
+        rendered.contains("Task      review · \"Resolve runtime maintenance issues\" · #bddc480d")
+    );
+    assert!(!rendered.contains("card #"));
+    assert!(!rendered.contains("e781f0c4"));
+}
+
+#[test]
+fn status_panel_renders_task_line_with_github_issue() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(188);
+    assert!(events.set_task_panel_info(
+        channel_id,
+        TaskPanelInfo {
+            dispatch_id: "bddc480d-43d1-4f1f-b3fd-e0d96b3b3d82",
+            card_id: Some("card-xyz"),
+            dispatch_type: Some("review"),
+            card_title: Some("Fix CI inventory drift"),
+            github_issue_number: Some(1234),
+            ..Default::default()
+        },
+    ));
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+
+    assert!(
+        rendered.contains("Task      review · gh#1234 \"Fix CI inventory drift\" · dsp #bddc480d")
+    );
+}
+
+#[test]
+fn status_panel_falls_back_to_dispatch_title_when_card_title_missing() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(189);
+    assert!(events.set_task_panel_info(
+        channel_id,
+        TaskPanelInfo {
+            dispatch_id: "dsp_abcdef12345",
+            dispatch_type: Some("implementation"),
+            dispatch_title: Some("Backfill outbox claims"),
+            ..Default::default()
+        },
+    ));
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+
+    assert!(
+        rendered.contains("Task      implementation · \"Backfill outbox claims\" · #dsp\\_abcd")
+    );
 }
 
 #[test]
@@ -448,7 +628,13 @@ fn status_panel_omits_task_line_without_dispatch_id() {
 fn status_panel_renders_task_line_with_dispatch_fallback() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(187);
-    assert!(events.set_task_panel_info(channel_id, "dsp_404", None, None, None));
+    assert!(events.set_task_panel_info(
+        channel_id,
+        TaskPanelInfo {
+            dispatch_id: "dsp_404",
+            ..Default::default()
+        },
+    ));
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
 
@@ -460,7 +646,7 @@ fn status_panel_renders_task_line_with_dispatch_fallback() {
 fn status_panel_renders_context_usage_severity_levels() {
     let events = PlaceholderLiveEvents::default();
     let normal_channel_id = ChannelId::new(182);
-    assert!(events.set_context_panel_usage(normal_channel_id, 740, 0, 0, 1000, 90));
+    assert!(events.set_context_panel_usage(normal_channel_id, None, 740, 0, 0, 1000, 90));
     let normal =
         events.render_status_panel(normal_channel_id, &ProviderKind::Claude, 1_700_000_000);
     assert!(normal.contains("Context   📦 740 / 1.0k tokens (74%) · auto-compact 90%"));
@@ -468,13 +654,13 @@ fn status_panel_renders_context_usage_severity_levels() {
     assert!(!normal.contains("자동 압축 직전"));
 
     let approaching_channel_id = ChannelId::new(183);
-    events.set_context_panel_usage(approaching_channel_id, 700, 40, 10, 1000, 90);
+    events.set_context_panel_usage(approaching_channel_id, None, 700, 40, 10, 1000, 90);
     let approaching =
         events.render_status_panel(approaching_channel_id, &ProviderKind::Claude, 1_700_000_000);
     assert!(approaching.contains("Context   📦 750 / 1.0k tokens (75%) · auto-compact 90% (임박)"));
 
     let critical_channel_id = ChannelId::new(184);
-    events.set_context_panel_usage(critical_channel_id, 700, 100, 50, 1000, 90);
+    events.set_context_panel_usage(critical_channel_id, None, 700, 100, 50, 1000, 90);
     let critical =
         events.render_status_panel(critical_channel_id, &ProviderKind::Claude, 1_700_000_000);
     assert!(
@@ -487,7 +673,7 @@ fn status_panel_renders_context_usage_severity_levels() {
 fn status_panel_caps_context_usage_display_at_100_percent() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(188);
-    assert!(events.set_context_panel_usage(channel_id, 4000, 80, 10, 1000, 60));
+    assert!(events.set_context_panel_usage(channel_id, None, 4000, 80, 10, 1000, 60));
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
 

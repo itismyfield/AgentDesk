@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { createSqlRouter, loadPolicy } = require("./support/harness");
+const { createExecRouter, createSqlRouter, loadPolicy } = require("./support/harness");
 
 test("review-automation immediately terminals cards when review_enabled is false", () => {
   const { policy, state } = loadPolicy("policies/review-automation.js", {
@@ -112,8 +112,12 @@ test("review-automation carries the completed work slot into review dispatch con
           {
             id: "dispatch-work-slot",
             dispatch_type: "implementation",
-            result: JSON.stringify({ completed_commit: "abc123" }),
-            context: JSON.stringify({ slot_index: 2 })
+            result: JSON.stringify({
+              completed_commit: "abc123",
+              completed_worktree_path: "/repo",
+              completed_branch: "wt/slot"
+            }),
+            context: JSON.stringify({ slot_index: 2, entry_id: "entry-slot" })
           }
         ]
       }
@@ -130,7 +134,11 @@ test("review-automation carries the completed work slot into review dispatch con
       title: "[Review R1] card-slot-review",
       context: {
         parent_dispatch_id: "dispatch-work-slot",
-        slot_index: 2
+        entry_id: "entry-slot",
+        slot_index: 2,
+        reviewed_commit: "abc123",
+        worktree_path: "/repo",
+        branch: "wt/slot"
       }
     }
   ]);
@@ -228,6 +236,68 @@ test("review-automation noop verification passes go terminal without creating a 
   ]);
   assert.deepEqual(state.statusCalls, [{ cardId: "card-5", status: "done", force: true }]);
   assert.equal(state.dispatchCreates.length, 0);
+});
+
+test("review-automation skips create-pr when reviewed work is already on origin mainline", () => {
+  const { module, state } = loadPolicy("policies/review-automation.js", {
+    exec: createExecRouter([
+      {
+        match: (cmd, args) => cmd === "git" && args.includes("rev-parse") && args.includes("origin/main"),
+        result: "abc123\n"
+      },
+      {
+        match: (cmd, args) => cmd === "git" && args.includes("merge-base") && args.includes("abc123"),
+        result: ""
+      }
+    ]),
+    dbQuery: createSqlRouter([
+      {
+        match: "SELECT status FROM kanban_cards WHERE id = ?",
+        result: [{ status: "review" }]
+      },
+      {
+        match: "WHERE id = ? AND kanban_card_id = ? AND dispatch_type = 'review' LIMIT 1",
+        result: [{ context: JSON.stringify({ review_mode: "normal" }) }]
+      },
+      {
+        match: "SELECT pipeline_stage_id, repo_id FROM kanban_cards WHERE id = ?",
+        result: [{ pipeline_stage_id: null, repo_id: "itismyfield/AgentDesk" }]
+      },
+      {
+        match: "trigger_after = 'review_pass'",
+        result: []
+      },
+      {
+        match: "AND dispatch_type IN ('implementation', 'rework')",
+        result: [
+          {
+            id: "dispatch-direct-push",
+            dispatch_type: "implementation",
+            result: JSON.stringify({
+              completed_commit: "abc123",
+              completed_worktree_path: "/repo",
+              completed_branch: "main"
+            }),
+            context: JSON.stringify({})
+          }
+        ]
+      }
+    ])
+  });
+
+  module.__test.processVerdict(
+    "card-direct-push",
+    "pass",
+    { verdict: "pass" },
+    { review_dispatch_id: "review-direct-push" }
+  );
+
+  assert.deepEqual(state.statusCalls, [{ cardId: "card-direct-push", status: "done", force: true }]);
+  assert.equal(state.dispatchCreates.length, 0);
+  assert.equal(
+    state.logs.info.some((line) => line.includes("already on origin mainline")),
+    true
+  );
 });
 
 // #2051 Finding 6 (P1): without a round filter, the loader used to fall back

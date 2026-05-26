@@ -1,7 +1,14 @@
 use anyhow::Result;
-use std::sync::OnceLock;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use tracing::field;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::writer::MakeWriter;
+
+const DEFAULT_DCSERVER_LOG_MAX_BYTES: u64 = 100 * 1024 * 1024;
+const DEFAULT_DCSERVER_LOG_MAX_FILES: usize = 10;
 
 fn tracing_env_filter() -> Result<EnvFilter> {
     let directive = "agentdesk=info"
@@ -11,8 +18,10 @@ fn tracing_env_filter() -> Result<EnvFilter> {
 }
 
 fn init_tracing_once() -> Result<()> {
+    crate::utils::redact::register_common_env_secrets();
     tracing_subscriber::fmt()
         .with_env_filter(tracing_env_filter()?)
+        .with_writer(RedactingStdout)
         .try_init()
         .map_err(|error| anyhow::anyhow!("Failed to initialize tracing subscriber: {error}"))?;
     Ok(())
@@ -27,6 +36,257 @@ pub(crate) fn init_tracing() -> Result<()> {
         .as_ref()
         .map(|_| ())
         .map_err(|error| anyhow::anyhow!(error.clone()))
+}
+
+fn init_dcserver_tracing_once() -> Result<()> {
+    crate::utils::redact::register_common_env_secrets();
+    let root = crate::config::runtime_root()
+        .ok_or_else(|| anyhow::anyhow!("Failed to resolve AgentDesk runtime root"))?;
+    let log_path = root.join("logs").join("dcserver.stdout.log");
+    let writer =
+        RotatingLogWriter::new(log_path, dcserver_log_max_bytes(), dcserver_log_max_files())?;
+
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_env_filter()?)
+        .with_writer(writer)
+        .try_init()
+        .map_err(|error| {
+            anyhow::anyhow!("Failed to initialize dcserver tracing subscriber: {error}")
+        })?;
+    Ok(())
+}
+
+pub(crate) fn init_dcserver_tracing() -> Result<()> {
+    static DCSERVER_TRACING_INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+
+    let init_result = DCSERVER_TRACING_INIT
+        .get_or_init(|| init_dcserver_tracing_once().map_err(|error| error.to_string()));
+    init_result
+        .as_ref()
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!(error.clone()))
+}
+
+fn dcserver_log_max_bytes() -> u64 {
+    std::env::var("AGENTDESK_DCSERVER_LOG_MAX_BYTES")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_DCSERVER_LOG_MAX_BYTES)
+}
+
+fn dcserver_log_max_files() -> usize {
+    std::env::var("AGENTDESK_DCSERVER_LOG_MAX_FILES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_DCSERVER_LOG_MAX_FILES)
+}
+
+#[derive(Clone)]
+struct RotatingLogWriter {
+    inner: Arc<Mutex<RotatingLogState>>,
+}
+
+struct RotatingLogState {
+    path: PathBuf,
+    max_bytes: u64,
+    max_files: usize,
+    file: File,
+    size: u64,
+}
+
+impl RotatingLogWriter {
+    fn new(path: PathBuf, max_bytes: u64, max_files: usize) -> io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if max_files > 0 {
+            compact_oversized_current_log(&path, max_bytes, max_files)?;
+        }
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let size = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        Ok(Self {
+            inner: Arc::new(Mutex::new(RotatingLogState {
+                path,
+                max_bytes,
+                max_files,
+                file,
+                size,
+            })),
+        })
+    }
+}
+
+impl<'a> MakeWriter<'a> for RotatingLogWriter {
+    type Writer = RotatingLogGuard;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        RotatingLogGuard {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+struct RotatingLogGuard {
+    inner: Arc<Mutex<RotatingLogState>>,
+}
+
+#[derive(Clone, Copy)]
+struct RedactingStdout;
+
+struct RedactingIoGuard<W> {
+    inner: W,
+}
+
+impl<'a> MakeWriter<'a> for RedactingStdout {
+    type Writer = RedactingIoGuard<io::Stdout>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        RedactingIoGuard {
+            inner: io::stdout(),
+        }
+    }
+}
+
+fn redacted_log_bytes(buf: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(buf);
+    crate::utils::redact::redact_known_secrets(&text).into_bytes()
+}
+
+impl<W: Write> Write for RedactingIoGuard<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let redacted = redacted_log_bytes(buf);
+        self.inner.write_all(&redacted)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl Write for RotatingLogGuard {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other("rotating log writer lock poisoned"))?;
+        let redacted = redacted_log_bytes(buf);
+        if state.max_files > 0
+            && state.max_bytes > 0
+            && state.size > 0
+            && state.size.saturating_add(redacted.len() as u64) > state.max_bytes
+        {
+            state.rotate()?;
+        }
+        state.file.write_all(&redacted)?;
+        state.size = state.size.saturating_add(redacted.len() as u64);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other("rotating log writer lock poisoned"))?;
+        state.file.flush()
+    }
+}
+
+impl RotatingLogState {
+    fn rotate(&mut self) -> io::Result<()> {
+        self.file.flush()?;
+        rotate_log_files(&self.path, self.max_bytes, self.max_files)?;
+        self.file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        self.size = self
+            .file
+            .metadata()
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        Ok(())
+    }
+}
+
+fn rotated_path(path: &Path, index: usize) -> PathBuf {
+    PathBuf::from(format!("{}.{}", path.display(), index))
+}
+
+fn compact_oversized_current_log(path: &Path, max_bytes: u64, max_files: usize) -> io::Result<()> {
+    if max_bytes == 0 || max_files == 0 {
+        return Ok(());
+    }
+    let Ok(metadata) = fs::metadata(path) else {
+        return Ok(());
+    };
+    if metadata.len() <= max_bytes {
+        return Ok(());
+    }
+    rotate_log_files(path, max_bytes, max_files)
+}
+
+fn rotate_log_files(path: &Path, max_bytes: u64, max_files: usize) -> io::Result<()> {
+    if max_files == 0 {
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
+        return Ok(());
+    }
+
+    let oldest = rotated_path(path, max_files);
+    match fs::remove_file(&oldest) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    for index in (1..max_files).rev() {
+        let from = rotated_path(path, index);
+        let to = rotated_path(path, index + 1);
+        match fs::rename(&from, &to) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    if path.exists() {
+        copy_tail(path, &rotated_path(path, 1), max_bytes)?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)?;
+    Ok(())
+}
+
+fn copy_tail(source: &Path, dest: &Path, max_bytes: u64) -> io::Result<()> {
+    let mut input = File::open(source)?;
+    let len = input.metadata()?.len();
+    let start = len.saturating_sub(max_bytes);
+    input.seek(SeekFrom::Start(start))?;
+    let mut output = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(dest)?;
+
+    let mut remaining = len - start;
+    let mut buffer = [0_u8; 64 * 1024];
+    while remaining > 0 {
+        let limit = buffer.len().min(remaining as usize);
+        let read = input.read(&mut buffer[..limit])?;
+        if read == 0 {
+            break;
+        }
+        output.write_all(&buffer[..read])?;
+        remaining -= read as u64;
+    }
+    output.flush()
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -156,5 +416,60 @@ mod tests {
 
         let output = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
         assert!(output.contains("watcher started"));
+    }
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::{RotatingLogWriter, redacted_log_bytes};
+    use std::fs;
+    use std::io::Write;
+    use tracing_subscriber::fmt::writer::MakeWriter;
+
+    #[test]
+    fn redacted_log_bytes_masks_registered_plain_secret() {
+        crate::utils::redact::register_known_secret("disk-log-secret");
+
+        let redacted = String::from_utf8(redacted_log_bytes(
+            b"connection error carried disk-log-secret into Display",
+        ))
+        .unwrap();
+
+        assert_eq!(redacted, "connection error carried *** into Display");
+    }
+
+    #[test]
+    fn rotating_writer_compacts_oversized_existing_log_on_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dcserver.stdout.log");
+        fs::write(&path, b"0123456789abcdefghijklmnopqrstuvwxyz").unwrap();
+
+        let writer = RotatingLogWriter::new(path.clone(), 10, 2).unwrap();
+        let mut guard = writer.make_writer();
+        guard.write_all(b"new\n").unwrap();
+        guard.flush().unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("dcserver.stdout.log.1")).unwrap(),
+            "qrstuvwxyz"
+        );
+    }
+
+    #[test]
+    fn rotating_writer_keeps_bounded_generation_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dcserver.stdout.log");
+        let writer = RotatingLogWriter::new(path.clone(), 8, 2).unwrap();
+
+        for index in 0..5 {
+            let mut guard = writer.make_writer();
+            writeln!(guard, "line-{index}").unwrap();
+        }
+
+        assert!(path.exists());
+        assert!(dir.path().join("dcserver.stdout.log.1").exists());
+        assert!(dir.path().join("dcserver.stdout.log.2").exists());
+        assert!(!dir.path().join("dcserver.stdout.log.3").exists());
     }
 }

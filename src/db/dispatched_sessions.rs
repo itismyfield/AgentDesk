@@ -68,7 +68,12 @@ pub(crate) async fn load_force_kill_session_pg(
     .bind(session_key)
     .fetch_optional(pool)
     .await
-    .map_err(|error| format!("load postgres session {session_key}: {error}"))?;
+    .map_err(|error| {
+        format!(
+            "load postgres session {session_key}: {}",
+            crate::utils::redact::redact_known_secrets(&error.to_string())
+        )
+    })?;
 
     let Some(row) = row else {
         return Ok(None);

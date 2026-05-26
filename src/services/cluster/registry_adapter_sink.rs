@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 
-use super::stream_relay::{RelaySink, RelaySinkError, StreamFrame};
+use super::stream_relay::{RelaySink, RelaySinkError, RelaySinkOutcome, StreamFrame};
 use super::watcher_supervisor::{SupervisorConfig, run_watcher_supervisor_loop};
 
 /// Metrics-only [`RelaySink`] used by tests and by runtimes that cannot build
@@ -82,7 +82,7 @@ impl RegistryAdapterSink {
 
 #[async_trait]
 impl RelaySink for RegistryAdapterSink {
-    async fn deliver(&self, frame: &StreamFrame) -> Result<(), RelaySinkError> {
+    async fn deliver(&self, frame: &StreamFrame) -> Result<RelaySinkOutcome, RelaySinkError> {
         self.frames_total.fetch_add(1, Ordering::AcqRel);
         if let Ok(mut by_session) = self.by_session.lock() {
             let entry = by_session
@@ -101,7 +101,7 @@ impl RelaySink for RegistryAdapterSink {
             sequence = frame.sequence,
             "registry-adapter-sink: counted frame"
         );
-        Ok(())
+        Ok(RelaySinkOutcome::FrameAccepted)
     }
 }
 

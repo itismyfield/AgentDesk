@@ -77,7 +77,7 @@ fn spawn_retry_with_history_with_release(
     retry_text: String,
 ) {
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel::<()>();
-    tokio::spawn(async move {
+    super::task_supervisor::spawn_observed("retry_with_history_dispatch", async move {
         gateway
             .schedule_retry_with_history_with_completion(
                 channel_id,
@@ -87,7 +87,7 @@ fn spawn_retry_with_history_with_release(
             )
             .await;
     });
-    tokio::spawn(async move {
+    super::task_supervisor::spawn_observed("retry_with_history_release", async move {
         // 120s safety net: if completion_tx is dropped without a send
         // (panic, wedged future), the recv resolves with Err and we still
         // release. If 120s elapses with neither send nor drop, force
@@ -1423,7 +1423,7 @@ use turn_analytics::{
 };
 
 use super::watcher_lifecycle_decision::should_resume_watcher_after_turn;
-use crate::db::session_status::{AWAITING_BG, AWAITING_USER, IDLE};
+use crate::db::session_status::{AWAITING_BG, IDLE, TURN_ACTIVE};
 use sqlx::Row;
 
 #[cfg(unix)]
@@ -1611,7 +1611,9 @@ async fn refresh_session_panel_line_from_lifecycle(
         Ok(Some(event)) => shared
             .placeholder_live_events
             .set_session_panel_lifecycle_event(channel_id, &event.kind, &event.details_json),
-        Ok(None) => false,
+        Ok(None) => shared
+            .placeholder_live_events
+            .clear_session_panel(channel_id),
         Err(error) => {
             tracing::debug!(
                 "[turn_bridge] failed to load session lifecycle line for turn {} in channel {}: {}",
@@ -1629,6 +1631,9 @@ struct TaskPanelDispatchMetadata {
     card_id: Option<String>,
     dispatch_type: Option<String>,
     claim_owner: Option<String>,
+    card_title: Option<String>,
+    dispatch_title: Option<String>,
+    github_issue_number: Option<i64>,
 }
 
 async fn load_task_panel_dispatch_metadata(
@@ -1639,8 +1644,14 @@ async fn load_task_panel_dispatch_metadata(
         return Ok(None);
     };
     let row = sqlx::query(
-        "SELECT td.kanban_card_id, td.dispatch_type, dox.claim_owner
+        "SELECT td.kanban_card_id,
+                td.dispatch_type,
+                td.title AS dispatch_title,
+                kc.title AS card_title,
+                kc.github_issue_number,
+                dox.claim_owner
          FROM task_dispatches td
+         LEFT JOIN kanban_cards kc ON kc.id = td.kanban_card_id
          LEFT JOIN dispatch_outbox dox ON dox.dispatch_id = td.id
          WHERE td.id = $1
          ORDER BY dox.created_at DESC NULLS LAST
@@ -1661,6 +1672,15 @@ async fn load_task_panel_dispatch_metadata(
             })?,
             claim_owner: row.try_get("claim_owner").map_err(|error| {
                 format!("decode task panel claim_owner for {dispatch_id}: {error}")
+            })?,
+            card_title: row.try_get("card_title").map_err(|error| {
+                format!("decode task panel card_title for {dispatch_id}: {error}")
+            })?,
+            dispatch_title: row.try_get("dispatch_title").map_err(|error| {
+                format!("decode task panel dispatch_title for {dispatch_id}: {error}")
+            })?,
+            github_issue_number: row.try_get("github_issue_number").map_err(|error| {
+                format!("decode task panel github_issue_number for {dispatch_id}: {error}")
             })?,
         })
     })
@@ -1691,14 +1711,25 @@ async fn refresh_task_panel_line_from_dispatch(
         };
     shared.placeholder_live_events.set_task_panel_info(
         channel_id,
-        dispatch_id,
-        metadata.as_ref().and_then(|value| value.card_id.as_deref()),
-        metadata
-            .as_ref()
-            .and_then(|value| value.dispatch_type.as_deref()),
-        metadata
-            .as_ref()
-            .and_then(|value| value.claim_owner.as_deref()),
+        crate::services::discord::placeholder_live_events::TaskPanelInfo {
+            dispatch_id,
+            card_id: metadata.as_ref().and_then(|value| value.card_id.as_deref()),
+            dispatch_type: metadata
+                .as_ref()
+                .and_then(|value| value.dispatch_type.as_deref()),
+            owner_instance_id: metadata
+                .as_ref()
+                .and_then(|value| value.claim_owner.as_deref()),
+            card_title: metadata
+                .as_ref()
+                .and_then(|value| value.card_title.as_deref()),
+            dispatch_title: metadata
+                .as_ref()
+                .and_then(|value| value.dispatch_title.as_deref()),
+            github_issue_number: metadata
+                .as_ref()
+                .and_then(|value| value.github_issue_number),
+        },
     )
 }
 
@@ -1790,12 +1821,12 @@ async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
     last_status_panel_text: &mut String,
     background: bool,
     source: &'static str,
-) {
+) -> bool {
     if !shared.status_panel_v2_enabled {
-        return;
+        return true;
     }
     let Some(status_msg_id) = status_panel_msg_id else {
-        return;
+        return true;
     };
     shared
         .placeholder_live_events
@@ -1805,14 +1836,26 @@ async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
             .placeholder_live_events
             .render_status_panel(channel_id, provider, started_at_unix);
     if panel_text == *last_status_panel_text {
-        return;
+        return true;
     }
-    match gateway
-        .edit_message(channel_id, status_msg_id, &panel_text)
-        .await
-    {
+    let edit_result = if gateway.can_chain_locally() {
+        gateway
+            .edit_message(channel_id, status_msg_id, &panel_text)
+            .await
+    } else if let Some(http) = shared.serenity_http_or_token_fallback() {
+        super::http::edit_channel_message(&http, channel_id, status_msg_id, &panel_text)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    } else {
+        gateway
+            .edit_message(channel_id, status_msg_id, &panel_text)
+            .await
+    };
+    match edit_result {
         Ok(()) => {
             *last_status_panel_text = panel_text;
+            true
         }
         Err(error) => {
             tracing::warn!(
@@ -1822,7 +1865,174 @@ async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
                 source,
                 error
             );
+            false
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HeadlessPlaceholderCleanupAction {
+    Delete,
+    Edit(String),
+    Skip,
+}
+
+fn is_synthetic_headless_message_id(message_id: MessageId) -> bool {
+    message_id.get() >= 8_000_000_000_000_000_000
+}
+
+fn is_codex_tool_log_marker_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let Some(rest) = trimmed.strip_prefix('[') else {
+        return false;
+    };
+    let Some((name, _)) = rest.split_once(']') else {
+        return false;
+    };
+    const CODEX_TOOL_MARKER_NAMES: &[&str] = &[
+        "bash",
+        "read",
+        "edit",
+        "multiedit",
+        "grep",
+        "glob",
+        "ls",
+        "task",
+        "todowrite",
+        "webfetch",
+        "websearch",
+        "applypatch",
+        "notebookread",
+        "notebookedit",
+    ];
+    let normalized = name.trim().to_ascii_lowercase();
+    normalized.starts_with("mcp__")
+        || CODEX_TOOL_MARKER_NAMES
+            .iter()
+            .any(|candidate| *candidate == normalized)
+}
+
+fn strip_headless_placeholder_artifacts(text: &str, provider: &ProviderKind) -> String {
+    let strip_codex_tool_logs = matches!(provider, ProviderKind::Codex);
+    let mut kept = Vec::new();
+    let mut pending_fence: Option<Vec<&str>> = None;
+
+    for line in text.lines() {
+        if let Some(fence) = pending_fence.as_mut() {
+            fence.push(line);
+            if line.trim_start().starts_with("```") {
+                let inner = &fence[1..fence.len().saturating_sub(1)];
+                let tool_log_only = strip_codex_tool_logs
+                    && inner
+                        .iter()
+                        .filter(|inner_line| !inner_line.trim().is_empty())
+                        .all(|inner_line| is_codex_tool_log_marker_line(inner_line));
+                if !tool_log_only {
+                    kept.extend(fence.iter().copied());
+                }
+                pending_fence = None;
+            }
+            continue;
+        }
+
+        let trimmed = line.trim();
+        if super::formatting::is_streaming_placeholder_status_line(trimmed) {
+            continue;
+        }
+        if strip_codex_tool_logs && is_codex_tool_log_marker_line(line) {
+            continue;
+        }
+        if line.trim_start().starts_with("```") {
+            pending_fence = Some(vec![line]);
+            continue;
+        }
+        kept.push(line);
+    }
+
+    if let Some(fence) = pending_fence {
+        let inner = &fence[1..];
+        let tool_log_only = strip_codex_tool_logs
+            && inner
+                .iter()
+                .filter(|inner_line| !inner_line.trim().is_empty())
+                .all(|inner_line| is_codex_tool_log_marker_line(inner_line));
+        if !tool_log_only {
+            kept.extend(fence);
+        }
+    }
+
+    kept.join("\n").trim().to_string()
+}
+
+fn headless_streaming_placeholder_cleanup_action(
+    last_edit_text: &str,
+    provider: &ProviderKind,
+    status_panel_v2_enabled: bool,
+) -> HeadlessPlaceholderCleanupAction {
+    let mut cleaned = if status_panel_v2_enabled {
+        super::formatting::format_for_discord_with_status_panel(last_edit_text, provider)
+    } else {
+        super::formatting::format_for_discord_with_provider(last_edit_text, provider)
+    };
+    if status_panel_v2_enabled {
+        cleaned = strip_headless_placeholder_artifacts(&cleaned, provider);
+    }
+    if cleaned.trim().is_empty() {
+        HeadlessPlaceholderCleanupAction::Delete
+    } else if cleaned == last_edit_text {
+        HeadlessPlaceholderCleanupAction::Skip
+    } else {
+        HeadlessPlaceholderCleanupAction::Edit(cleaned)
+    }
+}
+
+async fn cleanup_headless_streaming_placeholder_after_delivery(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    current_msg_id: MessageId,
+    status_panel_msg_id: Option<MessageId>,
+    last_edit_text: &str,
+    provider: &ProviderKind,
+) {
+    if current_msg_id.get() == 0
+        || status_panel_msg_id == Some(current_msg_id)
+        || is_synthetic_headless_message_id(current_msg_id)
+    {
+        return;
+    }
+    let Some(http) = shared.serenity_http_or_token_fallback() else {
+        return;
+    };
+    match headless_streaming_placeholder_cleanup_action(
+        last_edit_text,
+        provider,
+        shared.status_panel_v2_enabled,
+    ) {
+        HeadlessPlaceholderCleanupAction::Delete => {
+            if let Err(error) =
+                super::http::delete_channel_message(&http, channel_id, current_msg_id).await
+            {
+                tracing::warn!(
+                    "[turn_bridge] failed to delete stale headless streaming placeholder {} in channel {}: {}",
+                    current_msg_id,
+                    channel_id,
+                    error
+                );
+            }
+        }
+        HeadlessPlaceholderCleanupAction::Edit(cleaned) => {
+            if let Err(error) =
+                super::http::edit_channel_message(&http, channel_id, current_msg_id, &cleaned).await
+            {
+                tracing::warn!(
+                    "[turn_bridge] failed to clean stale headless streaming placeholder {} in channel {}: {}",
+                    current_msg_id,
+                    channel_id,
+                    error
+                );
+            }
+        }
+        HeadlessPlaceholderCleanupAction::Skip => {}
     }
 }
 
@@ -2085,6 +2295,317 @@ fn response_portion_after_offset(full_response: &str, response_sent_offset: usiz
     full_response.get(response_sent_offset..).unwrap_or("")
 }
 
+fn terminal_delivery_response_after_offset(
+    full_response: &str,
+    response_sent_offset: usize,
+    empty_response_notice: Option<&str>,
+) -> String {
+    let raw_response =
+        response_portion_after_offset(full_response, response_sent_offset).to_string();
+    let stripped_response =
+        super::response_sanitizer::strip_leading_tui_response_chrome(&raw_response);
+    if !raw_response.trim().is_empty() && stripped_response.trim().is_empty() {
+        return String::new();
+    }
+    let mut delivery_response = stripped_response;
+    if delivery_response.trim().is_empty()
+        && let Some(notice) = empty_response_notice
+    {
+        delivery_response = notice.to_string();
+    }
+    delivery_response
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatcherHandoffClaimOutcome {
+    None,
+    ReusedExisting,
+    Spawned,
+}
+
+fn should_delete_bridge_created_watcher_orphan_response(
+    status_panel_v2_enabled: bool,
+    watcher_handoff_claim_outcome: WatcherHandoffClaimOutcome,
+    bridge_created_response_placeholder_msg_id: Option<MessageId>,
+    current_msg_id: MessageId,
+) -> bool {
+    status_panel_v2_enabled
+        && watcher_handoff_claim_outcome == WatcherHandoffClaimOutcome::ReusedExisting
+        && bridge_created_response_placeholder_msg_id == Some(current_msg_id)
+}
+
+fn should_retry_watcher_orphan_spinner_cleanup(
+    outcome: &super::placeholder_cleanup::PlaceholderCleanupOutcome,
+) -> bool {
+    matches!(
+        outcome,
+        super::placeholder_cleanup::PlaceholderCleanupOutcome::Failed {
+            class: super::placeholder_cleanup::PlaceholderCleanupFailureClass::LifecycleFailure,
+            ..
+        }
+    )
+}
+
+fn record_watcher_orphan_spinner_cleanup(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    tmux_session_name: Option<&str>,
+    outcome: super::placeholder_cleanup::PlaceholderCleanupOutcome,
+    source: &'static str,
+) {
+    if let super::placeholder_cleanup::PlaceholderCleanupOutcome::Failed { class, detail } =
+        &outcome
+    {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ watcher orphan spinner cleanup failed ({}) for channel {} msg {}: {}",
+            class.as_str(),
+            channel_id.get(),
+            message_id.get(),
+            detail
+        );
+    }
+    shared
+        .placeholder_cleanup
+        .record(super::placeholder_cleanup::PlaceholderCleanupRecord {
+            provider: provider.clone(),
+            channel_id,
+            message_id,
+            tmux_session_name: tmux_session_name.map(str::to_string),
+            operation: super::placeholder_cleanup::PlaceholderCleanupOperation::DeleteNonterminal,
+            outcome,
+            source,
+        });
+}
+
+fn spawn_watcher_orphan_spinner_cleanup_retry(
+    shared: Arc<SharedData>,
+    provider: ProviderKind,
+    gateway: Arc<dyn TurnGateway>,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    tmux_session_name: Option<String>,
+) {
+    const RETRY_DELAYS: &[std::time::Duration] = &[
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(15),
+    ];
+
+    super::task_supervisor::spawn_observed("watcher_orphan_spinner_cleanup_retry", async move {
+        for (attempt, delay) in RETRY_DELAYS.iter().enumerate() {
+            tokio::time::sleep(*delay).await;
+            let outcome = match gateway.delete_message(channel_id, message_id).await {
+                Ok(()) => super::placeholder_cleanup::PlaceholderCleanupOutcome::Succeeded,
+                Err(error) => super::placeholder_cleanup::classify_delete_error(&error),
+            };
+            let committed = outcome.is_committed();
+            let should_retry = should_retry_watcher_orphan_spinner_cleanup(&outcome);
+            record_watcher_orphan_spinner_cleanup(
+                shared.as_ref(),
+                &provider,
+                channel_id,
+                message_id,
+                tmux_session_name.as_deref(),
+                outcome,
+                "turn_bridge_watcher_orphan_spinner_cleanup_retry",
+            );
+            if committed || !should_retry {
+                return;
+            }
+            if attempt + 1 == RETRY_DELAYS.len() {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⚠ watcher orphan spinner cleanup exhausted retries for channel {} msg {}",
+                    channel_id.get(),
+                    message_id.get()
+                );
+            }
+        }
+    });
+}
+
+fn build_turn_bridge_streaming_edit_text(
+    status_panel_v2_enabled: bool,
+    current_portion: &str,
+    status_block: &str,
+    provider: &ProviderKind,
+) -> String {
+    if status_panel_v2_enabled {
+        super::formatting::build_status_panel_streaming_edit_text(
+            current_portion,
+            status_block,
+            provider,
+        )
+    } else {
+        super::formatting::build_streaming_placeholder_text(current_portion, status_block)
+    }
+}
+
+#[cfg(test)]
+mod streaming_edit_text_tests {
+    use super::*;
+
+    #[test]
+    fn status_panel_v2_streaming_edit_moves_processing_footer_to_response_message() {
+        let rendered = build_turn_bridge_streaming_edit_text(
+            true,
+            "E2E-CODEX-1-OK\n- Working on the backend now",
+            "⠙ 계속 처리 중",
+            &ProviderKind::Codex,
+        );
+
+        assert_eq!(
+            rendered,
+            "E2E-CODEX-1-OK\n- Working on the backend now\n\n⠙ 계속 처리 중"
+        );
+    }
+
+    #[test]
+    fn legacy_streaming_edit_keeps_processing_footer() {
+        let rendered = build_turn_bridge_streaming_edit_text(
+            false,
+            "Partial answer",
+            "⠙ 계속 처리 중",
+            &ProviderKind::Codex,
+        );
+
+        assert_eq!(rendered, "Partial answer\n\n⠙ 계속 처리 중");
+    }
+
+    #[test]
+    fn status_panel_v2_empty_streaming_edit_keeps_placeholder() {
+        let rendered =
+            build_turn_bridge_streaming_edit_text(true, "", "⠙ 계속 처리 중", &ProviderKind::Codex);
+
+        assert_eq!(rendered, "⠙ 계속 처리 중");
+    }
+
+    #[test]
+    fn empty_response_notice_is_delivery_only_not_history_payload() {
+        let full_response = String::new();
+        let rendered =
+            terminal_delivery_response_after_offset(&full_response, 0, Some("(No response)"));
+
+        assert_eq!(rendered, "(No response)");
+        assert!(full_response.is_empty());
+    }
+
+    #[test]
+    fn watcher_reuse_deletes_only_bridge_created_response_placeholder() {
+        let bridge_placeholder = MessageId::new(20);
+
+        assert!(should_delete_bridge_created_watcher_orphan_response(
+            true,
+            WatcherHandoffClaimOutcome::ReusedExisting,
+            Some(bridge_placeholder),
+            bridge_placeholder,
+        ));
+        assert!(!should_delete_bridge_created_watcher_orphan_response(
+            true,
+            WatcherHandoffClaimOutcome::Spawned,
+            Some(bridge_placeholder),
+            bridge_placeholder,
+        ));
+        assert!(!should_delete_bridge_created_watcher_orphan_response(
+            true,
+            WatcherHandoffClaimOutcome::ReusedExisting,
+            Some(bridge_placeholder),
+            MessageId::new(10),
+        ));
+        assert!(!should_delete_bridge_created_watcher_orphan_response(
+            false,
+            WatcherHandoffClaimOutcome::ReusedExisting,
+            Some(bridge_placeholder),
+            bridge_placeholder,
+        ));
+        assert!(!should_delete_bridge_created_watcher_orphan_response(
+            true,
+            WatcherHandoffClaimOutcome::None,
+            Some(bridge_placeholder),
+            bridge_placeholder,
+        ));
+    }
+
+    #[test]
+    fn watcher_orphan_spinner_cleanup_retries_only_lifecycle_failures() {
+        use super::super::placeholder_cleanup::{
+            PlaceholderCleanupFailureClass, PlaceholderCleanupOutcome,
+        };
+
+        assert!(should_retry_watcher_orphan_spinner_cleanup(
+            &PlaceholderCleanupOutcome::Failed {
+                class: PlaceholderCleanupFailureClass::LifecycleFailure,
+                detail: "HTTP 500".to_string(),
+            }
+        ));
+        assert!(!should_retry_watcher_orphan_spinner_cleanup(
+            &PlaceholderCleanupOutcome::Failed {
+                class: PlaceholderCleanupFailureClass::PermissionOrRoutingDiagnostic,
+                detail: "HTTP 403".to_string(),
+            }
+        ));
+        assert!(!should_retry_watcher_orphan_spinner_cleanup(
+            &PlaceholderCleanupOutcome::Succeeded
+        ));
+        assert!(!should_retry_watcher_orphan_spinner_cleanup(
+            &PlaceholderCleanupOutcome::AlreadyGone
+        ));
+    }
+
+    #[test]
+    fn headless_cleanup_deletes_status_only_codex_placeholder() {
+        let action = headless_streaming_placeholder_cleanup_action(
+            "[Bash] /bin/zsh -lc 'cargo test'\n⠙ Processing...",
+            &ProviderKind::Codex,
+            true,
+        );
+
+        assert_eq!(action, HeadlessPlaceholderCleanupAction::Delete);
+    }
+
+    #[test]
+    fn headless_cleanup_deletes_processing_with_codex_tool_log_block() {
+        let action = headless_streaming_placeholder_cleanup_action(
+            "⠂ Processing...\n\n```\n[Bash] /bin/zsh -lc 'grep -n foo src/lib.rs'\n[Bash] /bin/zsh -lc \"sed -n '1,40p' src/lib.rs\"\n```",
+            &ProviderKind::Codex,
+            true,
+        );
+
+        assert_eq!(action, HeadlessPlaceholderCleanupAction::Delete);
+    }
+
+    #[test]
+    fn headless_cleanup_edits_partial_answer_without_processing_footer() {
+        let action = headless_streaming_placeholder_cleanup_action(
+            "partial answer\n\n⠙ Processing...",
+            &ProviderKind::Codex,
+            true,
+        );
+
+        assert_eq!(
+            action,
+            HeadlessPlaceholderCleanupAction::Edit("partial answer".to_string())
+        );
+    }
+
+    #[test]
+    fn headless_cleanup_edits_partial_answer_without_korean_processing_footer() {
+        let action = headless_streaming_placeholder_cleanup_action(
+            "partial answer\n\n⠙ 계속 처리 중",
+            &ProviderKind::Codex,
+            true,
+        );
+
+        assert_eq!(
+            action,
+            HeadlessPlaceholderCleanupAction::Edit("partial answer".to_string())
+        );
+    }
+}
+
 fn bridge_pre_submission_tui_prompt_error(provider: &ProviderKind, full_response: &str) -> bool {
     let Some(error_text) = full_response
         .trim_start()
@@ -2099,6 +2620,41 @@ fn bridge_pre_submission_tui_prompt_error(provider: &ProviderKind, full_response
         }
         ProviderKind::Codex => {
             crate::services::codex_tui::input::is_prompt_ready_timeout_error(error_text)
+        }
+        _ => false,
+    }
+}
+
+fn bridge_tui_transport_error_should_skip_quiescence(
+    provider: &ProviderKind,
+    runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+    full_response: &str,
+) -> bool {
+    let Some(error_text) = full_response
+        .trim_start()
+        .strip_prefix("Error:")
+        .map(str::trim_start)
+    else {
+        return false;
+    };
+
+    match (provider, runtime_kind) {
+        (
+            ProviderKind::Claude,
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
+        ) => {
+            bridge_pre_submission_tui_prompt_error(provider, full_response)
+                || error_text == "Timeout waiting for output file"
+                || error_text.starts_with("timeout waiting for claude tui transcript file")
+                || error_text.contains("claude tui session died")
+        }
+        (
+            ProviderKind::Codex,
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui),
+        ) => {
+            bridge_pre_submission_tui_prompt_error(provider, full_response)
+                || error_text == "Timeout waiting for output file"
+                || error_text.contains("codex tui session died")
         }
         _ => false,
     }
@@ -2127,6 +2683,37 @@ mod pre_submission_tui_prompt_error_tests {
             "timeout waiting for claude tui follow-up prompt input readiness after 45s",
         ));
     }
+
+    #[test]
+    fn tui_transport_errors_skip_quiescence_only_for_matching_tui_runtime() {
+        use crate::services::agent_protocol::RuntimeHandoffKind;
+
+        assert!(bridge_tui_transport_error_should_skip_quiescence(
+            &ProviderKind::Claude,
+            Some(RuntimeHandoffKind::ClaudeTui),
+            "Error: Timeout waiting for output file",
+        ));
+        assert!(bridge_tui_transport_error_should_skip_quiescence(
+            &ProviderKind::Claude,
+            Some(RuntimeHandoffKind::ClaudeTui),
+            "Error: timeout waiting for claude tui transcript file after 120s; capture_available=true; prompt_marker_detected=true; prompt_draft_detected=false",
+        ));
+        assert!(bridge_tui_transport_error_should_skip_quiescence(
+            &ProviderKind::Codex,
+            Some(RuntimeHandoffKind::CodexTui),
+            "Error: timeout waiting for codex tui follow-up prompt input readiness after 45s; reason=composer_not_detected; previous_tui_turn_still_running=true; capture_available=true",
+        ));
+        assert!(!bridge_tui_transport_error_should_skip_quiescence(
+            &ProviderKind::Claude,
+            Some(RuntimeHandoffKind::LegacyTmuxWrapper),
+            "Error: Timeout waiting for output file",
+        ));
+        assert!(!bridge_tui_transport_error_should_skip_quiescence(
+            &ProviderKind::Claude,
+            Some(RuntimeHandoffKind::ClaudeTui),
+            "Error: upstream API returned 500",
+        ));
+    }
 }
 
 fn should_delegate_bridge_relay_to_watcher(
@@ -2152,6 +2739,14 @@ fn live_watcher_registered_for_relay(shared: &SharedData, owner_channel_id: Chan
         .tmux_watchers
         .get(&owner_channel_id)
         .is_some_and(|watcher| !watcher.cancel.load(Ordering::Relaxed))
+}
+
+fn bridge_should_reclaim_relay_from_missing_watcher(
+    watcher_owns_assistant_relay: bool,
+    standby_relay_owns_output: bool,
+    live_watcher_registered: bool,
+) -> bool {
+    watcher_owns_assistant_relay && !standby_relay_owns_output && !live_watcher_registered
 }
 
 fn advance_tmux_relay_confirmed_end(
@@ -2303,8 +2898,13 @@ fn maybe_refresh_active_turn_activity_heartbeat_at(
     };
     let thread_channel_id = active_turn_thread_channel_id(adk_session_name, inflight_state);
 
+    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+    let legacy_db = shared.sqlite.as_ref();
+    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
+    let legacy_db = None::<&crate::db::Db>;
+
     if super::tmux::refresh_session_heartbeat_from_tmux_output(
-        None::<&crate::db::Db>,
+        legacy_db,
         shared.pg_pool.as_ref(),
         &shared.token_hash,
         provider,
@@ -2643,6 +3243,13 @@ pub(super) fn persist_turn_analytics_row_with_handles(
     };
 
     let Some(pg_pool) = pg_pool else {
+        #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+        if let Some(db) = _db {
+            if let Err(error) = crate::db::turns::upsert_turn_owned_sqlite(db, &entry) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!("  [{ts}] ⚠ failed to persist sqlite turn analytics row: {error}");
+            }
+        }
         return;
     };
     if let Ok(runtime) = tokio::runtime::Handle::try_current() {
@@ -2680,6 +3287,7 @@ fn handle_watcher_runtime_handoff(
     watcher_owner_channel_id: &mut ChannelId,
     standby_relay_owns_output: &mut bool,
     watcher_relay_available_for_turn: &mut bool,
+    watcher_handoff_claim_outcome: &mut WatcherHandoffClaimOutcome,
     tmux_handed_off: &mut bool,
     watcher_owns_assistant_relay: &mut bool,
     bridge_published_finalize_owed_for_this_turn: &mut bool,
@@ -2762,6 +3370,11 @@ fn handle_watcher_runtime_handoff(
     let mut watcher_ready_for_relay = !watcher_claimed;
     #[cfg(not(unix))]
     let mut watcher_ready_for_relay = false;
+    *watcher_handoff_claim_outcome = if watcher_claimed {
+        WatcherHandoffClaimOutcome::Spawned
+    } else {
+        WatcherHandoffClaimOutcome::ReusedExisting
+    };
     let _ = watcher_claim_replaced_existing;
     if watcher_claimed {
         #[cfg(unix)]
@@ -2786,23 +3399,26 @@ fn handle_watcher_runtime_handoff(
                     let cancel_for_standby = Arc::new(std::sync::atomic::AtomicBool::new(false));
                     let shared_for_standby = shared_owned.clone();
                     let provider_for_standby = provider.clone();
-                    tokio::spawn(super::standby_relay::run_standby_relay(
-                        http_for_standby,
-                        channel_id,
-                        placeholder_msg_id_opt,
-                        output_path_for_standby,
-                        turn_binding_for_standby,
-                        last_offset,
-                        cancel_for_standby,
-                        shared_for_standby,
-                        provider_for_standby,
-                        // #2448: bumped from 900s (15min) heuristic stop
-                        // signal to a 1800s (30min) safety backstop. The
-                        // authoritative exit signal is now
-                        // `InflightSignal::Completed`, broadcast by
-                        // `CompletionGuard` on bridge drop.
-                        std::time::Duration::from_secs(1800),
-                    ));
+                    super::task_supervisor::spawn_observed(
+                        "turn_bridge_standby_relay",
+                        super::standby_relay::run_standby_relay(
+                            http_for_standby,
+                            channel_id,
+                            placeholder_msg_id_opt,
+                            output_path_for_standby,
+                            turn_binding_for_standby,
+                            last_offset,
+                            cancel_for_standby,
+                            shared_for_standby,
+                            provider_for_standby,
+                            // #2448: bumped from 900s (15min) heuristic stop
+                            // signal to a 1800s (30min) safety backstop. The
+                            // authoritative exit signal is now
+                            // `InflightSignal::Completed`, broadcast by
+                            // `CompletionGuard` on bridge drop.
+                            std::time::Duration::from_secs(1800),
+                        ),
+                    );
                     *standby_relay_owns_output = true;
                     inflight_state
                         .set_relay_owner_kind(super::inflight::RelayOwnerKind::StandbyRelay);
@@ -2877,22 +3493,28 @@ fn handle_watcher_runtime_handoff(
                 if watcher_claim_replaced_existing {
                     shared_owned.record_tmux_watcher_reconnect(channel_id);
                 }
-                tokio::spawn(super::tmux::tmux_output_watcher_with_restore(
-                    channel_id,
-                    http_bg,
-                    shared_bg,
-                    output_path,
-                    tmux_session_name,
-                    last_offset,
-                    cancel,
-                    paused,
-                    resume_offset,
-                    pause_epoch,
-                    turn_delivered,
-                    last_heartbeat_ts_ms,
-                    mailbox_finalize_owed,
-                    restored_turn,
-                ));
+                super::task_supervisor::spawn_observed_tmux_watcher(
+                    "turn_bridge_tmux_output_watcher_with_restore",
+                    shared_bg.clone(),
+                    tmux_session_name.clone(),
+                    cancel.clone(),
+                    super::tmux::tmux_output_watcher_with_restore(
+                        channel_id,
+                        http_bg,
+                        shared_bg,
+                        output_path,
+                        tmux_session_name,
+                        last_offset,
+                        cancel,
+                        paused,
+                        resume_offset,
+                        pause_epoch,
+                        turn_delivered,
+                        last_heartbeat_ts_ms,
+                        mailbox_finalize_owed,
+                        restored_turn,
+                    ),
+                );
                 *watcher_relay_available_for_turn = true;
                 let _ = save_inflight_state(inflight_state);
                 watcher_ready_for_relay = true;
@@ -2916,6 +3538,7 @@ fn handle_watcher_runtime_handoff(
         *tmux_handed_off = true;
         inflight_state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
         *watcher_owns_assistant_relay = true;
+        let _ = save_inflight_state(inflight_state);
         if let Some(watcher) = shared_owned.tmux_watchers.get(watcher_owner_channel_id) {
             *watcher_relay_available_for_turn = true;
             if let Ok(mut guard) = watcher.resume_offset.lock() {
@@ -2957,7 +3580,7 @@ pub(super) fn spawn_turn_bridge(
         provider = bridge.provider.as_str(),
         dispatch_id = tracing::field::debug(bridge.dispatch_id.as_deref()),
     );
-    tokio::spawn(async move {
+    super::task_supervisor::spawn_observed("discord_turn_bridge", async move {
         const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let mut rx = spawn_stream_message_receiver_adapter(rx);
         let channel_id = bridge.channel_id;
@@ -2999,6 +3622,7 @@ pub(super) fn spawn_turn_bridge(
             };
 
         let mut full_response = bridge.full_response.clone();
+        let mut terminal_empty_response_notice: Option<String> = None;
         let mut last_edit_text = String::new();
         let mut done = false;
         let mut cancelled = false;
@@ -3023,6 +3647,7 @@ pub(super) fn spawn_turn_bridge(
             matches!(initial_relay_owner_kind, super::inflight::RelayOwnerKind::Watcher);
         let mut watcher_relay_available_for_turn = watcher_owns_assistant_relay
             && live_watcher_registered_for_relay(shared_owned.as_ref(), channel_id);
+        let mut watcher_handoff_claim_outcome = WatcherHandoffClaimOutcome::None;
         // Durable recovery must honor typed non-bridge owners too. `Unknown`
         // is treated like a live external owner so future relay variants do
         // not fail open and duplicate bridge-owned Discord delivery.
@@ -3119,6 +3744,7 @@ pub(super) fn spawn_turn_bridge(
         let mut response_sent_offset = bridge.response_sent_offset;
         let mut tmux_last_offset = bridge.tmux_last_offset;
         let mut watcher_owner_channel_id = channel_id;
+        let mut bridge_created_response_placeholder_msg_id: Option<MessageId> = None;
         let mut new_session_id = bridge.new_session_id.clone();
         let mut new_raw_provider_session_id: Option<String> = None;
         let defer_watcher_resume = bridge.defer_watcher_resume;
@@ -3189,32 +3815,21 @@ pub(super) fn spawn_turn_bridge(
         let status_panel_started_at = chrono::Utc::now().timestamp();
         let turn_start = std::time::Instant::now();
 
-        if shared_owned.status_panel_v2_enabled && status_panel_msg_id.is_none() {
+        if shared_owned.status_panel_v2_enabled
+            && (status_panel_msg_id.is_none() || status_panel_msg_id == Some(current_msg_id))
+        {
             let response_placeholder = super::formatting::build_processing_status_block(SPINNER[0]);
             match gateway.send_message(channel_id, &response_placeholder).await {
                 Ok(response_msg_id) => {
-                    let status_panel_placeholder_msg_id = current_msg_id;
                     status_panel_msg_id = Some(current_msg_id);
                     inflight_state.status_message_id = Some(current_msg_id.get());
                     current_msg_id = response_msg_id;
+                    bridge_created_response_placeholder_msg_id = Some(response_msg_id);
                     last_edit_text = response_placeholder.to_string();
                     inflight_state.current_msg_id = current_msg_id.get();
                     inflight_state.current_msg_len = last_edit_text.len();
                     inflight_state.response_sent_offset = response_sent_offset;
                     inflight_state.full_response = full_response.clone();
-                    let status_panel_pin_key = super::placeholder_controller::PlaceholderKey {
-                        provider: provider.clone(),
-                        channel_id,
-                        message_id: status_panel_placeholder_msg_id,
-                    };
-                    shared_owned
-                        .placeholder_controller
-                        .unpin_placeholder_message(
-                            gateway.as_ref(),
-                            &status_panel_pin_key,
-                            "status_panel_response_message_split",
-                        )
-                        .await;
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -3254,25 +3869,12 @@ pub(super) fn spawn_turn_bridge(
             inflight_state.long_running_placeholder_active = false;
         }
 
-        match save_inflight_state(&inflight_state) {
-            Ok(()) => {
-                let placeholder_pin_key = super::placeholder_controller::PlaceholderKey {
-                    provider: provider.clone(),
-                    channel_id,
-                    message_id: current_msg_id,
-                };
-                shared_owned
-                    .placeholder_controller
-                    .pin_placeholder_message(gateway.as_ref(), &placeholder_pin_key)
-                    .await;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    "[turn_bridge] failed to persist inflight state before pinning placeholder in channel {}: {}",
-                    channel_id,
-                    error
-                );
-            }
+        if let Err(error) = save_inflight_state(&inflight_state) {
+            tracing::warn!(
+                "[turn_bridge] failed to persist inflight state in channel {}: {}",
+                channel_id,
+                error
+            );
         }
         crate::services::observability::emit_turn_started(
             provider.as_str(),
@@ -3324,7 +3926,6 @@ pub(super) fn spawn_turn_bridge(
             }};
         }
 
-        let mut pending_placeholder_pin_transition_after_state_save = None;
         let mut pending_long_running_open_after_state_save = None;
         let mut pending_long_running_retarget_after_state_save = None;
 
@@ -3512,6 +4113,13 @@ pub(super) fn spawn_turn_bridge(
                                 continue;
                             }
                             full_response.push_str(&content);
+                            if (watcher_owns_assistant_relay
+                                && watcher_relay_available_for_turn)
+                                || standby_relay_owns_output
+                            {
+                                response_sent_offset = full_response.len();
+                                inflight_state.response_sent_offset = response_sent_offset;
+                            }
                             // #1255: remember the last non-empty single-line
                             // assistant prose so we can surface it on a
                             // long-running tool placeholder card. Mid-stream
@@ -3745,7 +4353,6 @@ pub(super) fn spawn_turn_bridge(
                             )
                                 && long_running_placeholder_active.is_none()
                                 && pending_long_running_open_after_state_save.is_none()
-                                && pending_placeholder_pin_transition_after_state_save.is_none()
                                 && pending_long_running_retarget_after_state_save.is_none()
                             {
                                 if let Some((reason, close_trigger, reason_detail)) =
@@ -3925,14 +4532,6 @@ pub(super) fn spawn_turn_bridge(
                                         let _ =
                                             pending_long_running_retarget_after_state_save.take();
                                         shared_owned.placeholder_controller.detach(&key);
-                                        shared_owned
-                                            .placeholder_controller
-                                            .unpin_placeholder_message(
-                                                gateway.as_ref(),
-                                                &key,
-                                                "terminal_before_retarget_persisted",
-                                            )
-                                            .await;
                                         inflight_state.long_running_placeholder_active = false;
                                         state_dirty = true;
                                     } else {
@@ -4146,14 +4745,6 @@ pub(super) fn spawn_turn_bridge(
                                 if pending_retarget_matches_key {
                                     let _ = pending_long_running_retarget_after_state_save.take();
                                     shared_owned.placeholder_controller.detach(&key);
-                                    shared_owned
-                                        .placeholder_controller
-                                        .unpin_placeholder_message(
-                                            gateway.as_ref(),
-                                            &key,
-                                            "done_before_retarget_persisted",
-                                        )
-                                        .await;
                                     inflight_state.long_running_placeholder_active = false;
                                 } else {
                                     let outcome = shared_owned
@@ -4353,10 +4944,15 @@ pub(super) fn spawn_turn_bridge(
                                 accumulated_output_tokens = accumulated_output_tokens.max(ot);
                             }
                             if shared_owned.status_panel_v2_enabled && has_context_token_data {
+                                let context_provider_session_id = new_raw_provider_session_id
+                                    .as_deref()
+                                    .or(new_session_id.as_deref())
+                                    .or(inflight_state.session_id.as_deref());
                                 status_panel_dirty |= shared_owned
                                     .placeholder_live_events
                                     .set_context_panel_usage(
                                         channel_id,
+                                        context_provider_session_id,
                                         accumulated_input_tokens,
                                         accumulated_cache_create_tokens,
                                         accumulated_cache_read_tokens,
@@ -4429,6 +5025,11 @@ pub(super) fn spawn_turn_bridge(
                             let mut watcher_ready_for_relay = !watcher_claimed;
                             #[cfg(not(unix))]
                             let mut watcher_ready_for_relay = false;
+                            watcher_handoff_claim_outcome = if watcher_claimed {
+                                WatcherHandoffClaimOutcome::Spawned
+                            } else {
+                                WatcherHandoffClaimOutcome::ReusedExisting
+                            };
                             if watcher_claimed {
                                 #[cfg(unix)]
                                 {
@@ -4508,7 +5109,9 @@ pub(super) fn spawn_turn_bridge(
                                             );
                                             let shared_for_standby = shared_owned.clone();
                                             let provider_for_standby = provider.clone();
-                                            tokio::spawn(super::standby_relay::run_standby_relay(
+                                            super::task_supervisor::spawn_observed(
+                                                "turn_bridge_runtime_standby_relay",
+                                                super::standby_relay::run_standby_relay(
                                                 http_for_standby,
                                                 channel_id,
                                                 placeholder_msg_id_opt,
@@ -4523,7 +5126,8 @@ pub(super) fn spawn_turn_bridge(
                                                 // backstop after broadcast
                                                 // exit signal landed.
                                                 std::time::Duration::from_secs(1800),
-                                            ));
+                                                ),
+                                            );
                                             standby_relay_owns_output = true;
                                             inflight_state.set_relay_owner_kind(
                                                 super::inflight::RelayOwnerKind::StandbyRelay,
@@ -4573,7 +5177,12 @@ pub(super) fn spawn_turn_bridge(
                                         if watcher_claim_replaced_existing {
                                             shared_owned.record_tmux_watcher_reconnect(channel_id);
                                         }
-                                        tokio::spawn(super::tmux::tmux_output_watcher_with_restore(
+                                        super::task_supervisor::spawn_observed_tmux_watcher(
+                                            "turn_bridge_runtime_tmux_output_watcher_with_restore",
+                                            shared_bg.clone(),
+                                            tmux_session_name.clone(),
+                                            cancel.clone(),
+                                            super::tmux::tmux_output_watcher_with_restore(
                                             channel_id,
                                             http_bg,
                                             shared_bg,
@@ -4588,7 +5197,8 @@ pub(super) fn spawn_turn_bridge(
                                             last_heartbeat_ts_ms,
                                             mailbox_finalize_owed,
                                             restored_turn,
-                                        ));
+                                            ),
+                                        );
                                         watcher_relay_available_for_turn = true;
                                         let _ = save_inflight_state(&inflight_state);
                                         watcher_ready_for_relay = true;
@@ -4614,6 +5224,7 @@ pub(super) fn spawn_turn_bridge(
                                     super::inflight::RelayOwnerKind::Watcher,
                                 );
                                 watcher_owns_assistant_relay = true;
+                                let _ = save_inflight_state(&inflight_state);
                                 if let Some(watcher) =
                                     shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
                                 {
@@ -4690,6 +5301,7 @@ pub(super) fn spawn_turn_bridge(
                                     &mut watcher_owner_channel_id,
                                     &mut standby_relay_owns_output,
                                     &mut watcher_relay_available_for_turn,
+                                    &mut watcher_handoff_claim_outcome,
                                     &mut tmux_handed_off,
                                     &mut watcher_owns_assistant_relay,
                                     &mut bridge_published_finalize_owed_for_this_turn,
@@ -4717,6 +5329,7 @@ pub(super) fn spawn_turn_bridge(
                                     &mut watcher_owner_channel_id,
                                     &mut standby_relay_owns_output,
                                     &mut watcher_relay_available_for_turn,
+                                    &mut watcher_handoff_claim_outcome,
                                     &mut tmux_handed_off,
                                     &mut watcher_owns_assistant_relay,
                                     &mut bridge_published_finalize_owed_for_this_turn,
@@ -4731,26 +5344,31 @@ pub(super) fn spawn_turn_bridge(
                                 tmux_session_name,
                                 last_offset,
                             } => {
-                                tmux_last_offset = Some(last_offset);
-                                inflight_state.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
-                                inflight_state.tmux_session_name = Some(tmux_session_name);
-                                inflight_state.output_path = Some(rollout_path);
-                                inflight_state.input_fifo_path = None;
                                 if let Some(thread_id) = thread_id {
                                     inflight_state.session_id = Some(thread_id);
                                 }
-                                inflight_state.last_offset = last_offset;
-                                state_dirty = true;
-                                // #2235: persist immediately after stamping
-                                // runtime_kind so a bridge crash between this
-                                // assignment and the centralized state_dirty
-                                // flush cannot leave a row whose runtime_kind
-                                // contradicts its other fields (e.g. CodexTui
-                                // semantics with a stale FIFO path).
-                                let _ = save_inflight_state(&inflight_state);
-                                if done {
-                                    terminal_control_drain_until = None;
-                                }
+                                handle_watcher_runtime_handoff(
+                                    &shared_owned,
+                                    &provider,
+                                    channel_id,
+                                    &mut inflight_state,
+                                    RuntimeHandoffKind::CodexTui,
+                                    rollout_path,
+                                    None,
+                                    tmux_session_name,
+                                    last_offset,
+                                    &mut tmux_last_offset,
+                                    &mut watcher_owner_channel_id,
+                                    &mut standby_relay_owns_output,
+                                    &mut watcher_relay_available_for_turn,
+                                    &mut watcher_handoff_claim_outcome,
+                                    &mut tmux_handed_off,
+                                    &mut watcher_owns_assistant_relay,
+                                    &mut bridge_published_finalize_owed_for_this_turn,
+                                    &mut state_dirty,
+                                    done,
+                                    &mut terminal_control_drain_until,
+                                );
                             }
                             RuntimeHandoff::ProcessBackend {
                                 output_path,
@@ -4921,7 +5539,6 @@ pub(super) fn spawn_turn_bridge(
                     {
                         Ok(()) => match gateway.send_message(channel_id, &status_block).await {
                             Ok(next_msg_id) => {
-                                let previous_msg_id = current_msg_id;
                                 let next_response_sent_offset =
                                     response_sent_offset + plan.split_at;
                                 assert_response_sent_offset_progress(
@@ -4944,24 +5561,6 @@ pub(super) fn spawn_turn_bridge(
                                 inflight_state.response_sent_offset = response_sent_offset;
                                 inflight_state.full_response = full_response.clone();
                                 state_dirty = true;
-                                let previous_pin_key =
-                                    super::placeholder_controller::PlaceholderKey {
-                                        provider: provider.clone(),
-                                        channel_id,
-                                        message_id: previous_msg_id,
-                                    };
-                                let next_pin_key = super::placeholder_controller::PlaceholderKey {
-                                    provider: provider.clone(),
-                                    channel_id,
-                                    message_id: current_msg_id,
-                                };
-                                pending_placeholder_pin_transition_after_state_save =
-                                    Some(match pending_placeholder_pin_transition_after_state_save {
-                                        Some((first_previous_pin_key, _)) => {
-                                            (first_previous_pin_key, next_pin_key)
-                                        }
-                                        None => (previous_pin_key, next_pin_key),
-                                    });
                                 if let Some((_, _, _, _, pending_new_key)) =
                                     pending_long_running_retarget_after_state_save.as_mut()
                                 {
@@ -5046,8 +5645,12 @@ pub(super) fn spawn_turn_bridge(
                         &full_response,
                     )
                 };
-                let stable_display_text =
-                    super::formatting::build_streaming_placeholder_text(current_portion, &status_block);
+                let stable_display_text = build_turn_bridge_streaming_edit_text(
+                    shared_owned.status_panel_v2_enabled,
+                    current_portion,
+                    &status_block,
+                    &provider,
+                );
 
                 // #1255 codex round-1 P2: while a long-running placeholder owns
                 // `current_msg_id`, the controller is the sole writer. Skipping the
@@ -5095,8 +5698,23 @@ pub(super) fn spawn_turn_bridge(
                 }
             }
 
+            if bridge_should_reclaim_relay_from_missing_watcher(
+                watcher_owns_assistant_relay,
+                standby_relay_owns_output,
+                live_watcher_registered_for_relay(shared_owned.as_ref(), watcher_owner_channel_id),
+            ) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⚠ turn_bridge reclaiming assistant relay for channel {} after watcher disappeared",
+                    channel_id.get()
+                );
+                watcher_owns_assistant_relay = false;
+                watcher_relay_available_for_turn = false;
+                inflight_state.set_relay_owner_kind(super::inflight::RelayOwnerKind::None);
+                state_dirty = true;
+            }
+
             if state_dirty
-                || pending_placeholder_pin_transition_after_state_save.is_some()
                 || pending_long_running_open_after_state_save.is_some()
                 || pending_long_running_retarget_after_state_save.is_some()
                 || inflight_state.current_tool_line != current_tool_line
@@ -5110,22 +5728,6 @@ pub(super) fn spawn_turn_bridge(
                 inflight_state.prev_tool_status = prev_tool_status.clone();
                 match save_inflight_state(&inflight_state) {
                     Ok(()) => {
-                        if let Some((previous_pin_key, next_pin_key)) =
-                            pending_placeholder_pin_transition_after_state_save.take()
-                        {
-                            shared_owned
-                                .placeholder_controller
-                                .pin_placeholder_message(gateway.as_ref(), &next_pin_key)
-                                .await;
-                            shared_owned
-                                .placeholder_controller
-                                .unpin_placeholder_message(
-                                    gateway.as_ref(),
-                                    &previous_pin_key,
-                                    "streaming_rollover_old_message",
-                                )
-                                .await;
-                        }
                         if let Some((key, snapshot, close_trigger, ack_consumed)) =
                             pending_long_running_open_after_state_save.take()
                         {
@@ -5283,14 +5885,6 @@ pub(super) fn spawn_turn_bridge(
             {
                 let _ = pending_long_running_retarget_after_state_save.take();
                 shared_owned.placeholder_controller.detach(&key);
-                shared_owned
-                    .placeholder_controller
-                    .unpin_placeholder_message(
-                        gateway.as_ref(),
-                        &key,
-                        "relay_stream_end_before_retarget_persisted",
-                    )
-                    .await;
                 inflight_state.long_running_placeholder_active = false;
                 let _ = save_inflight_state(&inflight_state);
             }
@@ -5308,14 +5902,6 @@ pub(super) fn spawn_turn_bridge(
                 if pending_retarget_matches_key {
                     let _ = pending_long_running_retarget_after_state_save.take();
                     shared_owned.placeholder_controller.detach(&key);
-                    shared_owned
-                        .placeholder_controller
-                        .unpin_placeholder_message(
-                            gateway.as_ref(),
-                            &key,
-                            "stream_end_before_retarget_persisted",
-                        )
-                        .await;
                     inflight_state.long_running_placeholder_active = false;
                 } else {
                     let outcome = shared_owned
@@ -5474,19 +6060,20 @@ pub(super) fn spawn_turn_bridge(
             && bridge_output_owner.is_none();
         let should_fail_dispatch_after_delivery = transport_error && !cancelled;
 
-        let final_session_status = if cancelled || transport_error {
+        let final_session_status = if active_background_child_session_ids.is_empty() {
             IDLE
-        } else if active_background_child_session_ids.is_empty() {
-            AWAITING_USER
         } else {
             AWAITING_BG
         };
 
+        // Keep the session visibly active while Discord terminal delivery and
+        // status-panel finalization are still pending. Publishing idle here lets
+        // observers race ahead of the final response/status edit.
         post_adk_session_status(
             adk_session_key.as_deref(),
             adk_session_name.as_deref(),
             Some(provider.as_str()),
-            final_session_status,
+            TURN_ACTIVE,
             &provider,
             adk_session_info.as_deref(),
             persisted_context_tokens(
@@ -5608,7 +6195,66 @@ pub(super) fn spawn_turn_bridge(
                     "watcher_owner_channel_id": watcher_owner_channel_id.get(),
                 }),
             );
-            false
+            if handoff_recorded {
+                false
+            } else if bridge_early_gate_blocks_mailbox_release {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    provider = %provider.as_str(),
+                    channel = channel_id.get(),
+                    "  [{ts}] ⚠ bridge watcher handoff missing finalizer, but TUI gate timed out; leaving mailbox for sweeper/watchdog reconciliation"
+                );
+                false
+            } else {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    provider = %provider.as_str(),
+                    channel = channel_id.get(),
+                    watcher_owner_channel = watcher_owner_channel_id.get(),
+                    "  [{ts}] ⚠ bridge watcher handoff missing finalizer; bridge is releasing mailbox to avoid stranded queued turns"
+                );
+                let finish =
+                    super::mailbox_finish_turn(&shared_owned, &provider, channel_id).await;
+                record_turn_bridge_invariant(
+                    finish.removed_token.is_some(),
+                    &provider,
+                    channel_id,
+                    dispatch_id.as_deref(),
+                    adk_session_key.as_deref(),
+                    Some(turn_id.as_str()),
+                    "mailbox_active_turn_recovered_after_missing_watcher_handoff",
+                    "src/services/discord/turn_bridge/mod.rs:bridge_relay_delegated_to_watcher",
+                    "missing watcher handoff finalizer must not leave the channel mailbox active",
+                    serde_json::json!({
+                        "has_pending": finish.has_pending,
+                        "mailbox_online": finish.mailbox_online,
+                        "watcher_owner_channel_id": watcher_owner_channel_id.get(),
+                    }),
+                );
+                if let Some(removed_token) = finish.removed_token {
+                    removed_token
+                        .cancelled
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    let _ = shared_owned.global_active.fetch_update(
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                        |current| current.checked_sub(1),
+                    );
+                }
+                super::clear_watchdog_deadline_override(channel_id.get()).await;
+                shared_owned
+                    .dispatch_thread_parents
+                    .retain(|_, thread| *thread != channel_id);
+                let voice_deferred_enqueued = shared_owned
+                    .voice_barge_in
+                    .drain_deferred_after_turn(&shared_owned, &provider, channel_id)
+                    .await;
+                let has_pending_after_voice = finish.has_pending || voice_deferred_enqueued;
+                if !has_pending_after_voice {
+                    shared_owned.dispatch_role_overrides.remove(&channel_id);
+                }
+                has_pending_after_voice
+            }
         } else {
             // #1452 non-delegation path. The watcher-unpause site
             // optimistically publishes `mailbox_finalize_owed = true`, but
@@ -5817,14 +6463,6 @@ pub(super) fn spawn_turn_bridge(
                 if pending_retarget_matches_key {
                     let _ = pending_long_running_retarget_after_state_save.take();
                     shared_owned.placeholder_controller.detach(&key);
-                    shared_owned
-                        .placeholder_controller
-                        .unpin_placeholder_message(
-                            gateway.as_ref(),
-                            &key,
-                            "cancel_before_retarget_persisted",
-                        )
-                        .await;
                     inflight_state.long_running_placeholder_active = false;
                     let _ = save_inflight_state(&inflight_state);
                 } else {
@@ -6023,10 +6661,68 @@ pub(super) fn spawn_turn_bridge(
         } else if let Some(owner) = bridge_output_owner {
             let ts = chrono::Local::now().format("%H:%M:%S");
             match owner {
-                BridgeOutputOwner::WatcherRelay => tracing::info!(
-                    "  [{ts}] 👁 tmux watcher owns assistant relay; bridge skipped direct response delivery (channel {})",
-                    channel_id
-                ),
+                BridgeOutputOwner::WatcherRelay => {
+                    tracing::info!(
+                        "  [{ts}] 👁 tmux watcher owns assistant relay; bridge skipped direct response delivery (channel {})",
+                        channel_id
+                    );
+                    if should_delete_bridge_created_watcher_orphan_response(
+                        shared_owned.status_panel_v2_enabled,
+                        watcher_handoff_claim_outcome,
+                        bridge_created_response_placeholder_msg_id,
+                        current_msg_id,
+                    ) {
+                        let cleanup_outcome =
+                            match gateway.delete_message(channel_id, current_msg_id).await {
+                                Ok(()) => {
+                                    super::placeholder_cleanup::PlaceholderCleanupOutcome::Succeeded
+                                }
+                                Err(error) => {
+                                    super::placeholder_cleanup::classify_delete_error(&error)
+                                }
+                            };
+                        let cleanup_committed = cleanup_outcome.is_committed();
+                        let cleanup_should_retry =
+                            should_retry_watcher_orphan_spinner_cleanup(&cleanup_outcome);
+                        let cleanup_already_gone = matches!(
+                            cleanup_outcome,
+                            super::placeholder_cleanup::PlaceholderCleanupOutcome::AlreadyGone
+                        );
+                        record_watcher_orphan_spinner_cleanup(
+                            shared_owned.as_ref(),
+                            &provider,
+                            channel_id,
+                            current_msg_id,
+                            inflight_state.tmux_session_name.as_deref(),
+                            cleanup_outcome,
+                            "turn_bridge_watcher_orphan_spinner_cleanup",
+                        );
+                        if cleanup_committed {
+                            if cleanup_already_gone {
+                                tracing::info!(
+                                    "  [{ts}] 🧹 bridge orphan watcher-handoff spinner card already gone (channel {}, msg {})",
+                                    channel_id,
+                                    current_msg_id
+                                );
+                            } else {
+                                tracing::info!(
+                                    "  [{ts}] 🧹 bridge removed orphan watcher-handoff spinner card (channel {}, msg {})",
+                                    channel_id,
+                                    current_msg_id
+                                );
+                            }
+                        } else if cleanup_should_retry {
+                            spawn_watcher_orphan_spinner_cleanup_retry(
+                                shared_owned.clone(),
+                                provider.clone(),
+                                gateway.clone(),
+                                channel_id,
+                                current_msg_id,
+                                inflight_state.tmux_session_name.clone(),
+                            );
+                        }
+                    }
+                }
                 BridgeOutputOwner::StandbyRelay => tracing::info!(
                     "  [{ts}] 👁 standby relay owns assistant relay; bridge skipped direct response delivery (channel {})",
                     channel_id
@@ -6224,8 +6920,8 @@ pub(super) fn spawn_turn_bridge(
                     }
                     if !resume_failed {
                         if rx_disconnected {
-                            full_response =
-                                "(No response — 프로세스가 응답 없이 종료됨)".to_string();
+                            terminal_empty_response_notice =
+                                Some("(No response — 프로세스가 응답 없이 종료됨)".to_string());
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::warn!(
                                 "  [{ts}] ⚠ Empty response: rx disconnected before any text \
@@ -6235,7 +6931,7 @@ pub(super) fn spawn_turn_bridge(
                                 inflight_state.last_offset
                             );
                         } else {
-                            full_response = "(No response)".to_string();
+                            terminal_empty_response_notice = Some("(No response)".to_string());
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::warn!(
                                 "  [{ts}] ⚠ Empty response: done without text (channel {})",
@@ -6262,8 +6958,11 @@ pub(super) fn spawn_turn_bridge(
                 tracing::warn!("  [{ts}] ⚠ invalid API_FRICTION marker: {error}");
             }
 
-            let mut delivery_response =
-                response_portion_after_offset(&full_response, response_sent_offset).to_string();
+            let mut delivery_response = terminal_delivery_response_after_offset(
+                &full_response,
+                response_sent_offset,
+                terminal_empty_response_notice.as_deref(),
+            );
             if let Some(warning) = review_dispatch_warning.as_deref() {
                 let warning = warning.trim();
                 if !warning.is_empty() {
@@ -6356,6 +7055,15 @@ pub(super) fn spawn_turn_bridge(
                     .await
                     {
                         Ok(()) => {
+                            cleanup_headless_streaming_placeholder_after_delivery(
+                                shared_owned.as_ref(),
+                                channel_id,
+                                current_msg_id,
+                                status_panel_msg_id,
+                                &last_edit_text,
+                                &provider,
+                            )
+                            .await;
                             terminal_delivery_committed = true;
                         }
                         Err(error) => {
@@ -6425,7 +7133,7 @@ pub(super) fn spawn_turn_bridge(
                             || transport_error
                             || recovery_retry
                             || resume_failure_detected;
-                        tokio::spawn(async move {
+                        super::task_supervisor::spawn_observed("voice_background_completion_summary", async move {
                             voice_barge_in
                                 .speak_voice_background_completion_summary(
                                     &shared_for_voice,
@@ -6483,11 +7191,15 @@ pub(super) fn spawn_turn_bridge(
             // the two gate sites.
             #[cfg(unix)]
             {
-                let pre_submission_tui_prompt_error =
-                    transport_error && bridge_pre_submission_tui_prompt_error(&provider, &full_response);
+                let tui_transport_error_skip_gate = transport_error
+                    && bridge_tui_transport_error_should_skip_quiescence(
+                        &provider,
+                        inflight_state.runtime_kind,
+                        &full_response,
+                    );
                 let bridge_gate_outcome = if terminal_delivery_committed
                     && !preserve_inflight_for_cleanup_retry
-                    && !pre_submission_tui_prompt_error
+                    && !tui_transport_error_skip_gate
                 {
                     if let Some(outcome) = bridge_tui_gate_outcome_early {
                         outcome
@@ -6505,11 +7217,12 @@ pub(super) fn spawn_turn_bridge(
                         super::tmux::TuiCompletionGateOutcome::NotGated
                     }
                 } else {
-                    if terminal_delivery_committed && pre_submission_tui_prompt_error {
+                    if terminal_delivery_committed && tui_transport_error_skip_gate {
                         tracing::info!(
                             provider = %provider.as_str(),
                             channel = channel_id.get(),
-                            "pre-submission TUI prompt readiness error was already delivered; skipping quiescence gate so inflight cleanup can complete"
+                            runtime_kind = ?inflight_state.runtime_kind,
+                            "TUI transport error was already delivered; skipping quiescence gate so inflight cleanup can complete"
                         );
                     }
                     super::tmux::TuiCompletionGateOutcome::NotGated
@@ -6585,12 +7298,13 @@ pub(super) fn spawn_turn_bridge(
                 terminal_delivery_committed && !preserve_inflight_for_cleanup_retry;
         }
 
+        let mut status_panel_completion_committed = true;
         if status_panel_terminal_committed && bridge_should_emit_completion {
             // #2161 (Codex H1): the bridge-owned delivery path runs the
             // gate ABOVE so it can also block dispatch completion on
             // TimedOut. Here we just reuse the outcome and skip the
             // visible `응답 완료` if the pane was still busy.
-            complete_status_panel_v2(
+            status_panel_completion_committed = complete_status_panel_v2(
                 shared_owned.as_ref(),
                 gateway.as_ref(),
                 channel_id,
@@ -6602,6 +7316,43 @@ pub(super) fn spawn_turn_bridge(
                 "turn_terminal_delivery",
             )
             .await;
+        }
+
+        if status_panel_terminal_committed
+            && status_panel_completion_committed
+            && !preserve_inflight_for_cleanup_retry
+        {
+            post_adk_session_status(
+                adk_session_key.as_deref(),
+                adk_session_name.as_deref(),
+                Some(provider.as_str()),
+                final_session_status,
+                &provider,
+                adk_session_info.as_deref(),
+                persisted_context_tokens(
+                    accumulated_input_tokens,
+                    accumulated_cache_create_tokens,
+                    accumulated_cache_read_tokens,
+                    accumulated_output_tokens,
+                ),
+                adk_cwd.as_deref(),
+                dispatch_id.as_deref(),
+                adk_session_name.as_deref().and_then(
+                    crate::services::discord::adk_session::parse_thread_channel_id_from_name,
+                ),
+                Some(channel_id),
+                role_binding
+                    .as_ref()
+                    .map(|binding| binding.role_id.as_str()),
+                shared_owned.api_port,
+            )
+            .await;
+        } else if status_panel_terminal_committed && !status_panel_completion_committed {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                "turn bridge withheld final idle status because status-panel completion edit did not commit"
+            );
         }
 
         if !bridge_relay_delegated_to_watcher
@@ -7065,25 +7816,6 @@ pub(super) fn spawn_turn_bridge(
                 "  [{ts}] ✓ Cleared restart report for channel {} (turn completed normally)",
                 channel_id
             );
-        }
-
-        if bridge_output_owner.is_none()
-            && (cancelled
-                || is_prompt_too_long
-                || terminal_delivery_committed
-                || status_panel_terminal_committed
-                || recovery_retry)
-            && current_msg_id.get() != 0
-        {
-            let pin_key = super::placeholder_controller::PlaceholderKey {
-                provider: provider.clone(),
-                channel_id,
-                message_id: current_msg_id,
-            };
-            shared_owned
-                .placeholder_controller
-                .unpin_placeholder_message(gateway.as_ref(), &pin_key, "turn_finalization")
-                .await;
         }
 
         if cancelled && cancel_token.restart_mode().is_some() {

@@ -81,6 +81,16 @@ impl RuntimeHandoffKind {
         }
     }
 
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value.trim() {
+            "legacy_tmux_wrapper" => Some(Self::LegacyTmuxWrapper),
+            "claude_tui" => Some(Self::ClaudeTui),
+            "codex_tui" => Some(Self::CodexTui),
+            "process_backend" => Some(Self::ProcessBackend),
+            _ => None,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::LegacyTmuxWrapper => "legacy tmux wrapper",
@@ -285,10 +295,15 @@ impl StatusTodoStatus {
 /// Cached regex pattern for session ID validation.
 pub(crate) fn session_id_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| Regex::new(r"^[a-zA-Z0-9_-]+$").expect("Invalid session ID regex pattern"))
+    REGEX.get_or_init(|| {
+        Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$").expect("Invalid session ID regex pattern")
+    })
 }
 
-/// Validate session ID format (alphanumeric, dashes, underscores only).
+/// Validate session ID format for provider resume flags.
+///
+/// Leading dashes are rejected so a session id can never be interpreted as a
+/// provider CLI flag when appended after `--resume`/`--resume-session-id`.
 /// Max length reduced to 64 characters for security.
 pub(crate) fn is_valid_session_id(session_id: &str) -> bool {
     !session_id.is_empty() && session_id.len() <= 64 && session_id_regex().is_match(session_id)
@@ -303,6 +318,8 @@ mod tests {
         assert!(is_valid_session_id("abc123"));
         assert!(is_valid_session_id("session-1"));
         assert!(is_valid_session_id("session_2"));
+        assert!(is_valid_session_id("session.3"));
+        assert!(is_valid_session_id("session:4"));
         assert!(is_valid_session_id("ABC-XYZ_123"));
         assert!(is_valid_session_id("a"));
     }
@@ -331,7 +348,9 @@ mod tests {
         assert!(!is_valid_session_id("session\0null"));
         assert!(!is_valid_session_id("path/traversal"));
         assert!(!is_valid_session_id("session with space"));
-        assert!(!is_valid_session_id("session.dot"));
+        assert!(!is_valid_session_id("-config"));
+        assert!(!is_valid_session_id("--resume-session-id"));
+        assert!(!is_valid_session_id("_leading_underscore"));
         assert!(!is_valid_session_id("session@email"));
     }
 

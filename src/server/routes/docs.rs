@@ -5343,24 +5343,6 @@ fn guide_index() -> Vec<Value> {
     ]
 }
 
-/// GET /api/docs/card-lifecycle-ops — #1443.
-///
-/// Long-form decision tree for card-lifecycle operations
-/// (/redispatch, /retry, /transition, /queue/generate, /dispatch-next).
-/// Authored to make the 2026-04-30 #1435 duplicate-dispatch incident
-/// non-repeatable: every common scenario maps to a single-call answer, and
-/// the anti-pattern section names the exact 3-call chain that caused the
-/// outage.
-///
-/// Routed through `resolve_docs_segment` (the shared `/api/docs/{segment}`
-/// resolver), so this dedicated handler is reserved for in-process callers
-/// (e.g. CLI shims) that want the body without going through the segment
-/// dispatcher.
-#[allow(dead_code)]
-pub async fn api_docs_card_lifecycle_ops() -> (StatusCode, Json<Value>) {
-    (StatusCode::OK, Json(card_lifecycle_ops_body()))
-}
-
 fn card_lifecycle_ops_body() -> Value {
     json!({
         "title": "Card Lifecycle Ops Guide",
@@ -5518,18 +5500,6 @@ fn card_lifecycle_ops_body() -> Value {
             }
         }
     })
-}
-
-/// GET /api/docs/api-friction-markers — #1549.
-///
-/// Long-form marker contract for agents that discover an API docs gap while
-/// working. The runtime already extracts these markers from turn output,
-/// removes valid markers before user-facing delivery, persists them to
-/// Postgres, optionally stores Memento memory, and aggregates repeated
-/// fingerprints into GitHub issues from the policy tick.
-#[allow(dead_code)]
-pub async fn api_docs_api_friction_markers() -> (StatusCode, Json<Value>) {
-    (StatusCode::OK, Json(api_friction_markers_body()))
 }
 
 fn api_friction_markers_body() -> Value {

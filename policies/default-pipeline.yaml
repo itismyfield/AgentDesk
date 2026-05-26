@@ -107,7 +107,7 @@ gates:
   active_dispatch:
     type: builtin
     check: has_active_dispatch
-    description: Card must have a pending or dispatched dispatch
+    description: Card must have a pending/dispatched dispatch, or the just-completed latest work dispatch when entering review
 
   review_passed:
     type: builtin

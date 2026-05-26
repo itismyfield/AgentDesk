@@ -2,6 +2,7 @@ use super::common::{CONTEXT_PANEL_LINE_MAX_CHARS, truncate_chars};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ContextPanelSnapshot {
+    pub(super) provider_session_id: Option<String>,
     pub(super) input_tokens: u64,
     pub(super) cache_create_tokens: u64,
     pub(super) cache_read_tokens: u64,

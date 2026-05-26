@@ -14,6 +14,7 @@ use crate::services::process::{
 use crate::services::provider::{
     CancelToken, ProviderKind, StreamAttemptFailure, StreamAttemptResult, StreamFinalState,
     cancel_requested, is_readonly_tool_policy, register_child_pid, run_retrying_stream_attempts,
+    spawn_cancel_watchdog,
 };
 use crate::services::provider_runtime::{LineStreamEvent, spawn_line_stream_reader};
 use crate::services::remote::RemoteProfile;
@@ -456,6 +457,8 @@ fn execute_gemini_streaming_attempt(
         .map_err(|e| format!("Failed to start Gemini: {}", e))?;
 
     register_child_pid(cancel_token.as_deref(), child.id());
+    let _cancel_watchdog =
+        spawn_cancel_watchdog(cancel_token.clone(), child.id(), "gemini-direct-stream");
     if cancel_requested(cancel_token.as_deref()) {
         kill_child_tree(&mut child);
         return Ok(StreamAttemptResult::Cancelled);

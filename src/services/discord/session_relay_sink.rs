@@ -18,7 +18,9 @@ use super::health::HealthRegistry;
 use super::inflight::{InflightTurnState, RelayOwnerKind};
 use super::tmux::{WatcherToolState, process_watcher_lines};
 use crate::services::agent_protocol::TaskNotificationKind;
-use crate::services::cluster::stream_relay::{RelaySink, RelaySinkError, StreamFrame};
+use crate::services::cluster::stream_relay::{
+    RelaySink, RelaySinkError, RelaySinkOutcome, StreamFrame,
+};
 use crate::services::cluster::watcher_supervisor::{SupervisorConfig, run_watcher_supervisor_loop};
 use crate::services::provider::ProviderKind;
 use crate::services::session_backend::StreamLineState;
@@ -51,6 +53,12 @@ enum SessionBoundTerminalDeliveryRoute {
     PlaceholderEdit(MessageId),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionBoundTerminalDeliveryRouteDecision {
+    Route(SessionBoundTerminalDeliveryRoute),
+    Skipped,
+}
+
 fn session_bound_terminal_delivery_route(
     inflight: Option<&InflightTurnState>,
     tmux_session_name: &str,
@@ -70,6 +78,39 @@ fn session_bound_terminal_delivery_route(
         ));
     }
     Some(SessionBoundTerminalDeliveryRoute::NewMessage)
+}
+
+fn session_bound_terminal_delivery_route_or_skip(
+    inflight: Option<&InflightTurnState>,
+    tmux_session_name: &str,
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Result<SessionBoundTerminalDeliveryRoute, String> {
+    session_bound_terminal_delivery_route(inflight, tmux_session_name).ok_or_else(|| {
+        format!(
+            "session-bound terminal delivery route skipped for provider={} channel={} tmux_session={}",
+            provider.as_str(),
+            channel_id,
+            tmux_session_name
+        )
+    })
+}
+
+fn session_bound_terminal_delivery_route_decision(
+    inflight: Option<&InflightTurnState>,
+    tmux_session_name: &str,
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> SessionBoundTerminalDeliveryRouteDecision {
+    match session_bound_terminal_delivery_route_or_skip(
+        inflight,
+        tmux_session_name,
+        provider,
+        channel_id,
+    ) {
+        Ok(route) => SessionBoundTerminalDeliveryRouteDecision::Route(route),
+        Err(_) => SessionBoundTerminalDeliveryRouteDecision::Skipped,
+    }
 }
 
 pub(in crate::services::discord) struct SessionBoundDiscordRelaySink {
@@ -100,15 +141,42 @@ impl SessionBoundDiscordRelaySink {
             .ingest_frame(frame)
     }
 
-    async fn deliver_response(&self, delivery: SessionRelayDelivery) -> Result<(), RelaySinkError> {
+    fn finish_terminal_candidate(&self, session_name: &str) {
+        let Ok(mut sessions) = self.by_session.lock() else {
+            return;
+        };
+        if let Some(parser) = sessions.get_mut(session_name) {
+            parser.reset_turn();
+        }
+    }
+
+    async fn deliver_response(
+        &self,
+        delivery: SessionRelayDelivery,
+    ) -> Result<SessionRelayDeliveryOutcome, RelaySinkError> {
         let channel_id = delivery.channel_id;
         let provider = delivery.provider;
-        // Channel-aware: with multi-bot deployments a name-only lookup would
-        // deliver this session relay frame through the wrong runtime, so the
-        // owning bot's turn never visibly progresses.
+        let inflight = super::inflight::load_inflight_state(&provider, channel_id);
+        let route = match session_bound_terminal_delivery_route_decision(
+            inflight.as_ref(),
+            &delivery.session_name,
+            &provider,
+            channel_id,
+        ) {
+            SessionBoundTerminalDeliveryRouteDecision::Route(route) => route,
+            SessionBoundTerminalDeliveryRouteDecision::Skipped => {
+                tracing::debug!(
+                    provider = provider.as_str(),
+                    channel = channel_id,
+                    tmux_session = %delivery.session_name,
+                    "session-bound relay sink skipped bridge-owned or mismatched inflight"
+                );
+                return Ok(SessionRelayDeliveryOutcome::Skipped);
+            }
+        };
         let shared = self
             .health_registry
-            .shared_for_provider_on_channel(&provider, ChannelId::new(channel_id))
+            .shared_for_provider(&provider)
             .await
             .ok_or_else(|| {
                 RelaySinkError::Transient(format!(
@@ -122,19 +190,6 @@ impl SessionBoundDiscordRelaySink {
                 provider.as_str()
             ))
         })?;
-
-        let inflight = super::inflight::load_inflight_state(&provider, channel_id);
-        let route =
-            session_bound_terminal_delivery_route(inflight.as_ref(), &delivery.session_name);
-        let Some(route) = route else {
-            tracing::debug!(
-                provider = provider.as_str(),
-                channel = channel_id,
-                tmux_session = %delivery.session_name,
-                "session-bound relay sink skipped bridge-owned or mismatched inflight"
-            );
-            return Ok(());
-        };
 
         let formatted = if shared.status_panel_v2_enabled {
             formatting::format_for_discord_with_status_panel(&delivery.response_text, &provider)
@@ -160,8 +215,7 @@ impl SessionBoundDiscordRelaySink {
             )
             .await
             {
-                Ok(ReplaceLongMessageOutcome::EditedOriginal)
-                | Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. }) => {
+                Ok(ReplaceLongMessageOutcome::EditedOriginal) => {
                     self.delivered_total.fetch_add(1, Ordering::AcqRel);
                     tracing::info!(
                         provider = provider.as_str(),
@@ -171,7 +225,37 @@ impl SessionBoundDiscordRelaySink {
                         chars = relay_text.chars().count(),
                         "session-bound relay sink delivered terminal response via placeholder edit"
                     );
-                    Ok(())
+                    crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
+                        provider.as_str(),
+                        &delivery.session_name,
+                        channel_id,
+                    );
+                    Ok(SessionRelayDeliveryOutcome::Committed)
+                }
+                Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error }) => {
+                    // #2757: do not delete msg_id here. The 3e158e588 path
+                    // deleted the placeholder assuming it was stale, but
+                    // msg_id is the bridge's current_msg_id which may already
+                    // contain streamed response content. A transient edit
+                    // failure (rate limit, network) then leads to the actual
+                    // response being removed. Leave the original message in
+                    // place; the fallback copy is the redundant one.
+                    self.delivered_total.fetch_add(1, Ordering::AcqRel);
+                    tracing::warn!(
+                        provider = provider.as_str(),
+                        channel = channel_id,
+                        message = msg_id.get(),
+                        tmux_session = %delivery.session_name,
+                        chars = relay_text.chars().count(),
+                        error = %edit_error,
+                        "session-bound relay sink delivered terminal response via fallback; preserving original msg_id (#2757)"
+                    );
+                    crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
+                        provider.as_str(),
+                        &delivery.session_name,
+                        channel_id,
+                    );
+                    Ok(SessionRelayDeliveryOutcome::Committed)
                 }
                 Ok(ReplaceLongMessageOutcome::PartialContinuationFailure { error, .. }) => {
                     Err(RelaySinkError::Transient(error.to_string()))
@@ -198,6 +282,11 @@ impl SessionBoundDiscordRelaySink {
                 clear_ssh_direct_prompt_anchor(&provider, &delivery.session_name, prompt_anchor);
             }
             self.delivered_total.fetch_add(1, Ordering::AcqRel);
+            crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
+                provider.as_str(),
+                &delivery.session_name,
+                channel_id,
+            );
             tracing::info!(
                 provider = provider.as_str(),
                 channel = channel_id,
@@ -207,19 +296,47 @@ impl SessionBoundDiscordRelaySink {
                 chars = relay_text.chars().count(),
                 "session-bound relay sink delivered terminal response via new message"
             );
-            Ok(())
+            Ok(SessionRelayDeliveryOutcome::Committed)
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionRelayDeliveryOutcome {
+    Committed,
+    Skipped,
+}
+
 #[async_trait]
 impl RelaySink for SessionBoundDiscordRelaySink {
-    async fn deliver(&self, frame: &StreamFrame) -> Result<(), RelaySinkError> {
+    async fn deliver(&self, frame: &StreamFrame) -> Result<RelaySinkOutcome, RelaySinkError> {
         let deliveries = self.ingest_frame(frame);
+        let mut terminal_committed = false;
+        let mut terminal_skipped = false;
         for delivery in deliveries {
-            self.deliver_response(delivery).await?;
+            let session_name = delivery.session_name.clone();
+            match self.deliver_response(delivery).await {
+                Ok(SessionRelayDeliveryOutcome::Committed) => {
+                    terminal_committed = true;
+                    self.finish_terminal_candidate(&session_name);
+                }
+                Ok(SessionRelayDeliveryOutcome::Skipped) => {
+                    terminal_skipped = true;
+                    self.finish_terminal_candidate(&session_name);
+                }
+                Err(error) => {
+                    self.finish_terminal_candidate(&session_name);
+                    return Err(error);
+                }
+            }
         }
-        Ok(())
+        if terminal_committed {
+            Ok(RelaySinkOutcome::TerminalCommitted)
+        } else if terminal_skipped {
+            Ok(RelaySinkOutcome::TerminalSkipped)
+        } else {
+            Ok(RelaySinkOutcome::FrameAccepted)
+        }
     }
 }
 
@@ -303,8 +420,18 @@ impl SessionRelayParser {
                 break;
             }
 
-            let has_user_visible_response = !self.full_response.trim().is_empty()
-                && (self.task_notification_kind.is_none() || self.assistant_text_seen);
+            // #2749: Background task notifications (e.g. CronCreate self-prompts)
+            // must still deliver their final response. assistant_text_seen may be
+            // false when the parser fell back to result.result text only, but the
+            // user still expects to see the answer. Subagent / MonitorAutoTurn keep
+            // requiring assistant text to avoid noisy intermediate notifications.
+            let task_kind_allows_delivery = match self.task_notification_kind {
+                None => true,
+                Some(TaskNotificationKind::Background) => true,
+                Some(_) => self.assistant_text_seen,
+            };
+            let has_user_visible_response =
+                !self.full_response.trim().is_empty() && task_kind_allows_delivery;
             if has_user_visible_response {
                 deliveries.push(SessionRelayDelivery {
                     provider: frame.binding.provider.clone(),
@@ -313,8 +440,10 @@ impl SessionRelayParser {
                     response_text: self.full_response.clone(),
                     task_notification_kind: self.task_notification_kind,
                 });
+                break;
+            } else {
+                self.reset_turn();
             }
-            self.reset_turn();
             if self.buffer.trim().is_empty() {
                 break;
             }
@@ -529,6 +658,82 @@ mod tests {
     }
 
     #[test]
+    fn terminal_delivery_route_skip_is_not_sink_error_for_ack_fallback() {
+        let tmux = "AgentDesk-claude-relay-test";
+        let bridge_owned = inflight_for(tmux, RelayOwnerKind::None, false);
+        let result = session_bound_terminal_delivery_route_or_skip(
+            Some(&bridge_owned),
+            tmux,
+            &ProviderKind::Claude,
+            42,
+        );
+        assert!(result.is_err());
+
+        let watcher_owned = inflight_for(tmux, RelayOwnerKind::Watcher, false);
+        let result = session_bound_terminal_delivery_route_or_skip(
+            Some(&watcher_owned),
+            "AgentDesk-claude-other",
+            &ProviderKind::Claude,
+            42,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn terminal_delivery_route_skip_maps_to_terminal_skipped_outcome() {
+        let tmux = "AgentDesk-claude-relay-test";
+        let bridge_owned = inflight_for(tmux, RelayOwnerKind::None, false);
+        assert_eq!(
+            session_bound_terminal_delivery_route_decision(
+                Some(&bridge_owned),
+                tmux,
+                &ProviderKind::Claude,
+                42,
+            ),
+            SessionBoundTerminalDeliveryRouteDecision::Skipped
+        );
+    }
+
+    #[tokio::test]
+    async fn session_sink_frame_consumed_without_terminal_delivery_returns_frame_accepted() {
+        let binding = matched("44");
+        let sink = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
+        let payload = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"partial only\"}]}}\n";
+
+        let outcome = sink
+            .deliver(&frame(&binding, payload, 1))
+            .await
+            .expect("frame without terminal delivery should be accepted");
+
+        assert_eq!(outcome, RelaySinkOutcome::FrameAccepted);
+    }
+
+    #[test]
+    fn parser_keeps_stop_hook_summary_soft_until_late_assistant_text_and_result() {
+        let binding = matched("45");
+        let mut parser = SessionRelayParser::default();
+        let stop_hook_candidate = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"early \"}]}}\n",
+            "{\"type\":\"system\",\"subtype\":\"stop_hook_summary\",\"sessionId\":\"sess-tui\",\"hookCount\":1,\"hasOutput\":true}\n"
+        );
+
+        assert!(
+            parser
+                .ingest_frame(&frame(&binding, stop_hook_candidate, 1))
+                .is_empty(),
+            "stop_hook_summary is only a soft terminal candidate and must not reset the turn"
+        );
+
+        let late_tail_and_result = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"late tail\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}\n"
+        );
+        let deliveries = parser.ingest_frame(&frame(&binding, late_tail_and_result, 2));
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].response_text, "early late tail");
+    }
+
+    #[test]
     fn parser_emits_only_user_visible_task_notification_response() {
         let binding = matched("42");
         let mut parser = SessionRelayParser::default();
@@ -556,6 +761,53 @@ mod tests {
         assert_eq!(
             deliveries[0].task_notification_kind,
             Some(TaskNotificationKind::Subagent)
+        );
+    }
+
+    #[test]
+    fn parser_preserves_text_across_tool_uses_within_turn() {
+        // #2749 Pattern A: [text1] → [tool_use, text2] → [tool_use, no post-text]
+        // → result. The trailing tool_use without post-text used to clear
+        // full_response and overwrite with result.result, dropping text1+text2.
+        let binding = matched("44");
+        let mut parser = SessionRelayParser::default();
+        let payload = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"first chunk \"}]}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"Bash\",\"input\":{\"command\":\"ls\"}},{\"type\":\"text\",\"text\":\"second chunk \"}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_1\",\"content\":\"ok\"}]}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_2\",\"name\":\"Bash\",\"input\":{\"command\":\"pwd\"}}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_2\",\"content\":\"/tmp\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"third chunk\"}\n"
+        );
+        let deliveries = parser.ingest_frame(&frame(&binding, payload, 1));
+        assert_eq!(deliveries.len(), 1);
+        // Exact equality guards against accidental duplication or chunk reorder.
+        assert_eq!(
+            deliveries[0].response_text,
+            "first chunk second chunk \nthird chunk"
+        );
+    }
+
+    #[test]
+    fn parser_delivers_background_task_notification_with_result_text() {
+        // #2749 Pattern B: a Background-classified turn (e.g. cron self-prompt)
+        // whose response is captured via result.result only used to drop because
+        // assistant_text_seen was false. Background turns should still deliver.
+        let binding = matched("45");
+        let mut parser = SessionRelayParser::default();
+        let payload = concat!(
+            "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"bg-2\",\"status\":\"completed\",\"summary\":\"background work\"}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"OK | cron self-prompt response\"}\n"
+        );
+        let deliveries = parser.ingest_frame(&frame(&binding, payload, 1));
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(
+            deliveries[0].response_text,
+            "OK | cron self-prompt response"
+        );
+        assert_eq!(
+            deliveries[0].task_notification_kind,
+            Some(TaskNotificationKind::Background)
         );
     }
 

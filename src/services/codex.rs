@@ -1,12 +1,12 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage};
+use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage, is_valid_session_id};
 use crate::services::claude;
 use crate::services::claude_tui::hook_bundle::{
     HookBundleConfig, codex_hook_config_overrides, run_codex_hook_launch_self_check_with_exec_path,
@@ -18,7 +18,7 @@ use crate::services::discord::restart_report::{
 use crate::services::process::{kill_child_tree, kill_pid_tree, shell_escape};
 use crate::services::provider::{
     CancelToken, FollowupResult, ProviderKind, SessionProbe, cancel_requested,
-    fold_read_output_result, is_readonly_tool_policy, register_child_pid,
+    fold_read_output_result, is_readonly_tool_policy, register_child_pid, spawn_cancel_watchdog,
     tmux_followup_fallback_after_read_error,
 };
 use crate::services::remote::RemoteProfile;
@@ -85,6 +85,7 @@ fn log_codex_runtime_kind(entrypoint: &'static str, runtime_kind: CodexRuntimeKi
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CodexLaunchOptions {
     pub(crate) prompt: String,
+    pub(crate) developer_instructions: Option<String>,
     pub(crate) resume_session_id: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) reasoning_effort: Option<String>,
@@ -105,7 +106,13 @@ impl CodexLaunchOptions {
     }
 
     pub(crate) fn with_resume_session_id(mut self, value: Option<&str>) -> Self {
-        self.resume_session_id = clean_nonempty(value);
+        self.resume_session_id =
+            clean_nonempty(value).filter(|session_id| is_valid_session_id(session_id));
+        self
+    }
+
+    pub(crate) fn with_developer_instructions(mut self, value: Option<&str>) -> Self {
+        self.developer_instructions = clean_nonempty(value);
         self
     }
 
@@ -237,6 +244,7 @@ fn render_codex_wrapper_tmux_script(
     codex_bin: &str,
     model: Option<&str>,
     session_id: Option<&str>,
+    developer_instructions: Option<&str>,
     compact_token_limit: Option<u64>,
     fast_mode_enabled: Option<bool>,
     goals_enabled: Option<bool>,
@@ -245,6 +253,7 @@ fn render_codex_wrapper_tmux_script(
     let wrapper_args = build_codex_wrapper_cli_args(
         &CodexLaunchOptions::new("")
             .with_resume_session_id(session_id)
+            .with_developer_instructions(developer_instructions)
             .with_model(model)
             .with_reasoning_effort(reasoning_effort.as_deref())
             .with_compact_token_limit(compact_token_limit)
@@ -279,7 +288,15 @@ fn append_codex_config_overrides(
     args: &mut Vec<String>,
     overrides: impl IntoIterator<Item = String>,
 ) {
-    let insert_at = codex_option_insert_index(args);
+    let insert_at = match args.iter().position(|arg| arg == "--") {
+        Some(delimiter_index)
+            if args.first().map(String::as_str) == Some("resume") && delimiter_index > 0 =>
+        {
+            delimiter_index - 1
+        }
+        Some(delimiter_index) => delimiter_index,
+        None => args.len(),
+    };
     let mut override_args = Vec::new();
     for override_value in overrides {
         override_args.push("-c".to_string());
@@ -288,8 +305,8 @@ fn append_codex_config_overrides(
     args.splice(insert_at..insert_at, override_args);
 }
 
-fn codex_option_insert_index(args: &[String]) -> usize {
-    match args.iter().position(|arg| arg == "--") {
+fn insert_codex_option_before_prompt_delimiter(args: &mut Vec<String>, option: &str) {
+    let insert_at = match args.iter().position(|arg| arg == "--") {
         Some(delimiter_index)
             if args.first().map(String::as_str) == Some("resume") && delimiter_index > 0 =>
         {
@@ -297,33 +314,84 @@ fn codex_option_insert_index(args: &[String]) -> usize {
         }
         Some(delimiter_index) => delimiter_index,
         None => args.len(),
-    }
-}
-
-fn append_codex_hook_trust_bypass_arg(args: &mut Vec<String>) {
-    const FLAG: &str = "--dangerously-bypass-hook-trust";
-    if args.iter().any(|arg| arg == FLAG) {
-        return;
-    }
-    let insert_at = if args.first().map(String::as_str) == Some("resume") {
-        1
-    } else {
-        0
     };
-    args.insert(insert_at, FLAG.to_string());
+    args.insert(insert_at, option.to_string());
 }
 
-fn codex_tui_hook_overrides_enabled_from_env(value: Option<&str>) -> bool {
-    value
-        .map(str::trim)
-        .map(str::to_ascii_lowercase)
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+fn insert_codex_resume_option_before_other_options(args: &mut Vec<String>, option: &str) {
+    args.insert(0, option.to_string());
 }
 
-fn codex_tui_hook_overrides_enabled() -> bool {
-    codex_tui_hook_overrides_enabled_from_env(
-        std::env::var("AGENTDESK_CODEX_TUI_HOOKS").ok().as_deref(),
-    )
+fn codex_resume_help_mentions_hook_trust_bypass(help_text: &str) -> bool {
+    help_text.contains("--dangerously-bypass-hook-trust")
+}
+
+fn codex_resume_supports_hook_trust_bypass(
+    codex_bin: &str,
+    resolution: &crate::services::platform::BinaryResolution,
+) -> bool {
+    let mut command = Command::new(codex_bin);
+    crate::services::platform::apply_binary_resolution(&mut command, resolution);
+    command
+        .args(["resume", "--help"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    match command.spawn() {
+        Ok(mut child) => {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let status = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break status,
+                    Ok(None) => {
+                        if Instant::now() >= deadline {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            tracing::warn!(
+                                codex_bin,
+                                "timed out inspecting Codex resume help for hook trust bypass support"
+                            );
+                            return false;
+                        }
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                    Err(error) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        tracing::warn!(
+                            codex_bin,
+                            error = %error,
+                            "could not wait for Codex resume help probe"
+                        );
+                        return false;
+                    }
+                }
+            };
+            let mut help_text = String::new();
+            if let Some(mut stdout) = child.stdout.take() {
+                let _ = stdout.read_to_string(&mut help_text);
+            }
+            if let Some(mut stderr) = child.stderr.take() {
+                let _ = stderr.read_to_string(&mut help_text);
+            }
+            status.success() && codex_resume_help_mentions_hook_trust_bypass(&help_text)
+        }
+        Err(error) => {
+            tracing::warn!(
+                codex_bin,
+                error = %error,
+                "could not inspect Codex resume help for hook trust bypass support"
+            );
+            false
+        }
+    }
+}
+
+fn codex_direct_tui_hook_overrides_enabled() -> bool {
+    std::env::var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
 fn codex_config_overrides(options: &CodexLaunchOptions) -> Vec<String> {
@@ -333,6 +401,9 @@ fn codex_config_overrides(options: &CodexLaunchOptions) -> Vec<String> {
     }
     if let Some(limit) = options.compact_token_limit.filter(|limit| *limit > 0) {
         overrides.push(format!("model_auto_compact_token_limit={limit}"));
+    }
+    if let Some(instructions) = options.developer_instructions.as_deref() {
+        overrides.push(format!("developer_instructions={instructions:?}"));
     }
     overrides
 }
@@ -419,6 +490,10 @@ fn build_codex_wrapper_cli_args(options: &CodexLaunchOptions, codex_bin: &str) -
     if let Some(effort) = options.reasoning_effort.as_deref() {
         args.push("--reasoning-effort".to_string());
         args.push(effort.to_string());
+    }
+    if let Some(instructions) = options.developer_instructions.as_deref() {
+        args.push("--developer-instructions".to_string());
+        args.push(instructions.to_string());
     }
     if let Some(session_id) = options.resume_session_id.as_deref() {
         args.push("--resume-session-id".to_string());
@@ -1051,14 +1126,16 @@ pub fn execute_command_streaming(
     #[cfg(not(unix))]
     let entrypoint_supports_tui_hosting = false;
     let session_selection =
-        crate::services::provider_hosting::resolve_provider_session_selection_with_capability(
+        crate::services::provider_hosting::resolve_provider_session_selection_with_channel(
             &ProviderKind::Codex,
             entrypoint_supports_tui_hosting,
+            report_channel_id,
         );
     session_selection.log_start("codex.execute_command_streaming");
 
     let readonly_mode = is_readonly_tool_policy(allowed_tools);
-    let prompt = compose_codex_prompt(prompt, system_prompt, allowed_tools);
+    let developer_instructions = compose_codex_developer_instructions(system_prompt, allowed_tools);
+    let prompt = compose_codex_prompt(prompt, None, allowed_tools);
 
     if let Some(profile) = remote_profile {
         // Issue #2193 — remote tmux is hard-refused regardless of the
@@ -1155,6 +1232,7 @@ pub fn execute_command_streaming(
                     tmux_name,
                     report_channel_id,
                     report_provider,
+                    developer_instructions.as_deref(),
                     readonly_mode,
                     compact_token_limit,
                     force_fresh_provider_session,
@@ -1176,6 +1254,7 @@ pub fn execute_command_streaming(
                 tmux_name,
                 report_channel_id,
                 report_provider,
+                developer_instructions.as_deref(),
                 compact_token_limit,
                 force_fresh_provider_session,
             );
@@ -1195,6 +1274,7 @@ pub fn execute_command_streaming(
             sender,
             cancel_token,
             tmux_name,
+            developer_instructions.as_deref(),
             compact_token_limit,
             force_fresh_provider_session,
         );
@@ -1215,6 +1295,7 @@ pub fn execute_command_streaming(
         cancel_token,
         report_channel_id,
         report_provider,
+        developer_instructions.as_deref(),
         readonly_mode,
         compact_token_limit,
     )
@@ -1222,10 +1303,24 @@ pub fn execute_command_streaming(
 
 fn compose_codex_prompt(
     prompt: &str,
-    system_prompt: Option<&str>,
-    allowed_tools: Option<&[String]>,
+    _system_prompt: Option<&str>,
+    _allowed_tools: Option<&[String]>,
 ) -> String {
-    crate::services::provider::compose_structured_turn_prompt(prompt, system_prompt, allowed_tools)
+    prompt.to_string()
+}
+
+fn compose_codex_developer_instructions(
+    system_prompt: Option<&str>,
+    _allowed_tools: Option<&[String]>,
+) -> Option<String> {
+    system_prompt
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|system_prompt| {
+            format!(
+                "{system_prompt}\n\nThese instructions are authoritative for this turn. Follow them over any generic assistant persona unless the user explicitly asks to inspect or compare them."
+            )
+        })
 }
 
 fn execute_streaming_direct(
@@ -1239,6 +1334,7 @@ fn execute_streaming_direct(
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
+    developer_instructions: Option<&str>,
     readonly_mode: bool,
     compact_token_limit: Option<u64>,
 ) -> Result<(), String> {
@@ -1250,6 +1346,7 @@ fn execute_streaming_direct(
     let args = build_codex_exec_args(
         &CodexLaunchOptions::new(prompt)
             .with_resume_session_id(session_id)
+            .with_developer_instructions(developer_instructions)
             .with_model(model)
             .with_reasoning_effort(Some("high"))
             .with_compact_token_limit(compact_token_limit)
@@ -1279,6 +1376,8 @@ fn execute_streaming_direct(
         .map_err(|e| format!("Failed to start Codex: {}", e))?;
 
     register_child_pid(cancel_token.as_deref(), child.id());
+    let _cancel_watchdog =
+        spawn_cancel_watchdog(cancel_token.clone(), child.id(), "codex-direct-stream");
     // Race condition fix: if /stop arrived before PID was stored, kill now
     if cancel_requested(cancel_token.as_deref()) {
         kill_child_tree(&mut child);
@@ -1394,6 +1493,7 @@ fn execute_streaming_local_tui_tmux(
     tmux_session_name: &str,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
+    developer_instructions: Option<&str>,
     readonly_mode: bool,
     compact_token_limit: Option<u64>,
     force_fresh_provider_session: bool,
@@ -1407,6 +1507,7 @@ fn execute_streaming_local_tui_tmux(
     let reasoning_effort = codex_reasoning_effort_from_env();
     let launch_options = CodexLaunchOptions::new(prompt)
         .with_resume_session_id(session_selection.resume_session_id())
+        .with_developer_instructions(developer_instructions)
         .with_model(model)
         .with_reasoning_effort(reasoning_effort.as_deref())
         .with_compact_token_limit(compact_token_limit)
@@ -1433,6 +1534,7 @@ fn execute_streaming_local_tui_tmux(
             tmux_session_name,
             report_channel_id,
             report_provider,
+            developer_instructions,
             compact_token_limit,
             force_fresh_provider_session,
         );
@@ -1464,6 +1566,10 @@ fn execute_streaming_local_tui_tmux(
     crate::services::codex_tui::session::CodexTuiSessionFiles::for_tmux_session(tmux_session_name)
         .cleanup_best_effort();
     write_tmux_owner_marker(tmux_session_name)?;
+    crate::services::tmux_common::write_tmux_runtime_kind_marker(
+        tmux_session_name,
+        crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+    )?;
     let owner_path = tmux_owner_path(tmux_session_name);
 
     let resolution = resolve_codex_binary();
@@ -1478,7 +1584,7 @@ fn execute_streaming_local_tui_tmux(
         report_provider,
     );
     let mut args = build_codex_tui_args(&launch_options);
-    let codex_hook_overrides = if codex_tui_hook_overrides_enabled() {
+    let codex_hook_overrides = if codex_direct_tui_hook_overrides_enabled() {
         prepare_codex_tui_hook_overrides(
             tmux_session_name,
             session_id,
@@ -1487,15 +1593,24 @@ fn execute_streaming_local_tui_tmux(
         )
     } else {
         tracing::info!(
-            provider = "codex",
             tmux_session_name,
-            "Codex TUI hook relays are disabled by default; using rollout transcript tail for Discord turns"
+            "Codex direct TUI session hook overrides disabled; using rollout transcript tail for relay"
         );
         Vec::new()
     };
     if !codex_hook_overrides.is_empty() {
         append_codex_config_overrides(&mut args, codex_hook_overrides);
-        append_codex_hook_trust_bypass_arg(&mut args);
+        if codex_resume_supports_hook_trust_bypass(&codex_bin, &resolution) {
+            insert_codex_resume_option_before_other_options(
+                &mut args,
+                "--dangerously-bypass-hook-trust",
+            );
+        } else {
+            tracing::warn!(
+                codex_bin,
+                "Codex resume does not advertise --dangerously-bypass-hook-trust; relying on session hook trust hashes"
+            );
+        }
     }
     let script_content = render_codex_tui_tmux_script(&env_lines, &codex_bin, &args);
     let rollout_modified_since = std::time::SystemTime::now();
@@ -1811,6 +1926,7 @@ fn execute_streaming_local_tmux(
     tmux_session_name: &str,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
+    developer_instructions: Option<&str>,
     compact_token_limit: Option<u64>,
     force_fresh_provider_session: bool,
 ) -> Result<(), String> {
@@ -1905,6 +2021,10 @@ fn execute_streaming_local_tmux(
     std::fs::write(&prompt_path, prompt)
         .map_err(|e| format!("Failed to write prompt file: {}", e))?;
     write_tmux_owner_marker(tmux_session_name)?;
+    crate::services::tmux_common::write_tmux_runtime_kind_marker(
+        tmux_session_name,
+        crate::services::agent_protocol::RuntimeHandoffKind::LegacyTmuxWrapper,
+    )?;
 
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
@@ -1933,6 +2053,7 @@ fn execute_streaming_local_tmux(
         &codex_bin,
         model,
         session_id,
+        developer_instructions,
         compact_token_limit,
         fast_mode_enabled,
         goals_enabled,
@@ -2054,7 +2175,12 @@ fn send_followup_to_tmux(
         start_offset,
         sender.clone(),
         cancel_token,
-        SessionProbe::tmux(tmux_session_name.to_string(), ProviderKind::Codex),
+        SessionProbe::tmux_with_structured_output(
+            tmux_session_name.to_string(),
+            ProviderKind::Codex,
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui),
+            output_path.to_string(),
+        ),
     ) {
         Ok(read_result) => read_result,
         Err(failure) => {
@@ -2063,10 +2189,13 @@ fn send_followup_to_tmux(
             let input_exists = std::path::Path::new(input_fifo_path).exists();
             let session_alive = tmux_session_has_live_pane(tmux_session_name);
             let ready_for_input = session_alive
-                && crate::services::provider::tmux_session_ready_for_input(
-                    tmux_session_name,
+                && crate::services::tui_turn_state::jsonl_ready_for_input(
                     &ProviderKind::Codex,
-                );
+                    Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui),
+                    std::path::Path::new(output_path),
+                    Some(failure.last_offset),
+                )
+                .is_some_and(crate::services::tui_turn_state::TuiReadyState::is_ready);
 
             if let Some(fallback) = tmux_followup_fallback_after_read_error(
                 start_offset,
@@ -2150,6 +2279,7 @@ fn execute_streaming_local_process_codex(
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     session_name: &str,
+    developer_instructions: Option<&str>,
     compact_token_limit: Option<u64>,
     force_fresh_provider_session: bool,
 ) -> Result<(), String> {
@@ -2231,6 +2361,7 @@ fn execute_streaming_local_process_codex(
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
     let launch_options = CodexLaunchOptions::new(prompt)
         .with_resume_session_id(session_id)
+        .with_developer_instructions(developer_instructions)
         .with_model(model)
         .with_reasoning_effort(codex_reasoning_effort_from_env().as_deref())
         .with_compact_token_limit(compact_token_limit)
@@ -2562,10 +2693,10 @@ fn handle_codex_json_line(
 #[cfg(test)]
 mod tui_hosting_tests {
     use super::{
-        CodexLaunchOptions, CodexRuntimeKind, append_codex_config_overrides,
-        append_codex_hook_trust_bypass_arg, base_tui_args, build_codex_tui_args,
-        build_tmux_launch_env_lines, codex_tui_hook_overrides_enabled_from_env,
-        codex_tui_idle_relay_binding, direct_tui_material_fallback_reason,
+        CodexLaunchOptions, CodexRuntimeKind, append_codex_config_overrides, base_tui_args,
+        build_codex_tui_args, build_tmux_launch_env_lines,
+        codex_resume_help_mentions_hook_trust_bypass, codex_tui_idle_relay_binding,
+        direct_tui_material_fallback_reason, insert_codex_resume_option_before_other_options,
         render_codex_tui_tmux_script, render_codex_wrapper_tmux_script,
     };
     #[cfg(unix)]
@@ -2747,12 +2878,29 @@ mod tui_hosting_tests {
     }
 
     #[test]
+    fn codex_tui_resume_args_reject_flag_like_session_id() {
+        let args = base_tui_args(
+            Some("--config"),
+            "fresh prompt",
+            Some("gpt-5-codex"),
+            Some("high"),
+            false,
+            Some(true),
+            None,
+        );
+
+        assert!(!args.iter().any(|arg| arg == "resume"));
+        assert!(!args.iter().any(|arg| arg == "--config"));
+        assert_eq!(args.last().map(String::as_str), Some("fresh prompt"));
+    }
+
+    #[test]
     fn codex_tui_config_overrides_are_inserted_before_prompt_delimiter() {
         let mut args = base_tui_args(
             None,
             "hello from tui",
             Some("gpt-5-codex"),
-            Some("high"),
+            None,
             false,
             None,
             None,
@@ -2777,7 +2925,7 @@ mod tui_hosting_tests {
             Some("session-123"),
             "resume prompt",
             Some("gpt-5-codex"),
-            Some("high"),
+            None,
             false,
             None,
             None,
@@ -2798,89 +2946,45 @@ mod tui_hosting_tests {
     }
 
     #[test]
-    fn codex_tui_hook_trust_bypass_is_inserted_before_fresh_prompt() {
-        let mut args = base_tui_args(
-            None,
-            "hello from tui",
-            Some("gpt-5-codex"),
-            Some("high"),
-            false,
-            None,
-            None,
-        );
-
-        append_codex_hook_trust_bypass_arg(&mut args);
-
-        let bypass_index = args
-            .iter()
-            .position(|arg| arg == "--dangerously-bypass-hook-trust")
-            .expect("expected hook trust bypass flag");
-        let config_index = args
-            .iter()
-            .position(|arg| arg == "-c")
-            .expect("expected config override");
-        let delimiter_index = args
-            .iter()
-            .position(|arg| arg == "--")
-            .expect("expected prompt delimiter");
-        assert_eq!(bypass_index, 0);
-        assert!(bypass_index < config_index);
-        assert!(bypass_index < delimiter_index);
-    }
-
-    #[test]
-    fn codex_tui_hook_trust_bypass_preserves_resume_session_position() {
+    fn codex_tui_hook_trust_bypass_is_inserted_before_resume_session_id() {
         let mut args = base_tui_args(
             Some("session-123"),
             "resume prompt",
             Some("gpt-5-codex"),
-            Some("high"),
+            None,
             false,
             None,
             None,
         );
 
-        append_codex_hook_trust_bypass_arg(&mut args);
-        append_codex_hook_trust_bypass_arg(&mut args);
+        insert_codex_resume_option_before_other_options(
+            &mut args,
+            "--dangerously-bypass-hook-trust",
+        );
 
         let delimiter_index = args
             .iter()
             .position(|arg| arg == "--")
             .expect("expected prompt delimiter");
-        let config_index = args
-            .iter()
-            .position(|arg| arg == "-c")
-            .expect("expected config override");
         let bypass_index = args
             .iter()
             .position(|arg| arg == "--dangerously-bypass-hook-trust")
             .expect("expected hook trust bypass flag");
-        assert_eq!(args[0], "resume");
-        assert_eq!(bypass_index, 1);
-        assert!(bypass_index < config_index);
+        assert_eq!(args[1], "resume");
+        assert!(bypass_index < delimiter_index);
+        assert!(bypass_index < delimiter_index - 1);
+        assert_eq!(bypass_index, 0);
         assert_eq!(args[delimiter_index - 1], "session-123");
-        assert!(
-            args[..delimiter_index - 1]
-                .iter()
-                .any(|arg| arg == "--dangerously-bypass-hook-trust")
-        );
-        assert_eq!(
-            args.iter()
-                .filter(|arg| arg.as_str() == "--dangerously-bypass-hook-trust")
-                .count(),
-            1
-        );
     }
 
     #[test]
-    fn codex_tui_hook_overrides_are_opt_in_by_env() {
-        assert!(!codex_tui_hook_overrides_enabled_from_env(None));
-        assert!(!codex_tui_hook_overrides_enabled_from_env(Some("")));
-        assert!(!codex_tui_hook_overrides_enabled_from_env(Some("false")));
-        assert!(codex_tui_hook_overrides_enabled_from_env(Some("1")));
-        assert!(codex_tui_hook_overrides_enabled_from_env(Some("true")));
-        assert!(codex_tui_hook_overrides_enabled_from_env(Some(" YES ")));
-        assert!(codex_tui_hook_overrides_enabled_from_env(Some("on")));
+    fn codex_tui_hook_trust_bypass_support_is_detected_from_resume_help() {
+        assert!(codex_resume_help_mentions_hook_trust_bypass(
+            "Usage: codex resume [OPTIONS]\n      --dangerously-bypass-hook-trust\n"
+        ));
+        assert!(!codex_resume_help_mentions_hook_trust_bypass(
+            "Usage: codex resume [OPTIONS]\n      --dangerously-bypass-approvals-and-sandbox\n"
+        ));
     }
 
     #[test]
@@ -2895,6 +2999,7 @@ mod tui_hosting_tests {
             "/opt/bin/codex",
             Some("gpt-5-codex"),
             Some("thread-123"),
+            Some("developer rules"),
             Some(120_000),
             Some(false),
             Some(true),
@@ -2907,6 +3012,8 @@ mod tui_hosting_tests {
         assert!(script.contains("'gpt-5-codex'"));
         assert!(script.contains("'--resume-session-id'"));
         assert!(script.contains("'thread-123'"));
+        assert!(script.contains("'--developer-instructions'"));
+        assert!(script.contains("'developer rules'"));
         assert!(script.contains("'--compact-token-limit'"));
         assert!(script.contains("'120000'"));
         assert!(!script.contains("exec '/opt/bin/codex' "));
@@ -2960,7 +3067,8 @@ mod tests {
 
     use super::{
         CODEX_BACKGROUND_TASK_NOTIFICATION_ID, CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
-        TMUX_PROMPT_B64_PREFIX, base_exec_args, build_tmux_launch_env_lines, compose_codex_prompt,
+        CodexLaunchOptions, TMUX_PROMPT_B64_PREFIX, base_exec_args, build_codex_exec_args,
+        build_tmux_launch_env_lines, compose_codex_developer_instructions, compose_codex_prompt,
         handle_codex_json_line, should_reuse_existing_provider_session,
     };
     use crate::services::agent_protocol::StreamMessage;
@@ -3067,18 +3175,37 @@ mod tests {
     }
 
     #[test]
-    fn test_compose_codex_prompt_includes_authoritative_sections() {
+    fn test_compose_codex_prompt_keeps_authoritative_sections_out_of_user_prompt() {
         let prompt = compose_codex_prompt(
             "role과 mission만 답해줘.",
             Some("role: PMD\nmission: 백로그 관리"),
             Some(&["Bash".to_string(), "Read".to_string()]),
         );
 
-        assert!(prompt.contains("[Authoritative Instructions]"));
-        assert!(prompt.contains("role: PMD"));
-        assert!(!prompt.contains("[Tool Policy]"));
-        assert!(!prompt.contains("Bash, Read"));
-        assert!(prompt.contains("[User Request]\nrole과 mission만 답해줘."));
+        assert_eq!(prompt, "role과 mission만 답해줘.");
+        assert!(!prompt.contains("[Authoritative Instructions]"));
+        assert!(!prompt.contains("role: PMD"));
+    }
+
+    #[test]
+    fn codex_launch_options_put_adk_instructions_in_developer_config() {
+        let developer_instructions =
+            compose_codex_developer_instructions(Some("role: PMD\nmission: 백로그 관리"), None)
+                .unwrap();
+        let args = build_codex_exec_args(
+            &CodexLaunchOptions::new("role과 mission만 답해줘.")
+                .with_developer_instructions(Some(&developer_instructions))
+                .with_model(Some("gpt-5-codex")),
+        );
+
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "-c"
+                && pair[1].starts_with("developer_instructions=")
+                && pair[1].contains("role: PMD")
+        }));
+        let separator = args.iter().position(|arg| arg == "--").unwrap();
+        assert_eq!(args[separator + 1], "role과 mission만 답해줘.");
+        assert!(!args[separator + 1].contains("[Authoritative Instructions]"));
     }
 
     #[test]

@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use crate::services::tmux_diagnostics::clear_tmux_exit_reason;
 
 const CLAUDE_TUI_READY_SCAN_LINES: usize = 12;
+const CLAUDE_TUI_ACTIVE_SCAN_LINES: usize = 24;
+const CLAUDE_TUI_DRAFT_SCAN_LINES: usize = 36;
 const CLAUDE_TUI_READY_BANNER: &str = "Ready for input (type message + Enter)";
 const CLAUDE_TUI_PROMPT_MARKER: &str = "\u{276f}";
 
@@ -31,23 +33,157 @@ fn tmux_line_is_claude_tui_prompt_draft(line: &str) -> bool {
     !rest.is_empty() && !discord_submitted_prompt
 }
 
+fn tmux_lines_after_claude_prompt_show_completed_history(lines: &[&str]) -> bool {
+    lines.iter().any(|line| {
+        let line = trim_prompt_line(line);
+        let nonzero_tool_summary =
+            line.contains("Tools:") && line.contains(" done") && !line.contains("Tools: 0 done");
+        line.starts_with('⏺')
+            || line.starts_with("✻ ")
+            || line.contains("Baked for")
+            || line.contains("Brewed for")
+            || line.contains("Crunched for")
+            || line.contains("Cogitated for")
+            || nonzero_tool_summary
+    })
+}
+
+fn tmux_lines_after_claude_prompt_show_idle_suggestion_chrome(lines: &[&str]) -> bool {
+    let busy = lines.iter().any(|line| {
+        let lower = trim_prompt_line(line).to_ascii_lowercase();
+        lower.contains("esc to interrupt")
+            || lower.contains("processing")
+            || lower.contains("thinking")
+            || lower.contains("running")
+    });
+    if busy {
+        return false;
+    }
+    let separator = lines.iter().any(|line| {
+        trim_prompt_line(line)
+            .chars()
+            .filter(|ch| *ch == '─')
+            .count()
+            >= 8
+    });
+    let idle_footer = lines.iter().any(|line| {
+        let line = trim_prompt_line(line);
+        line.contains("Tools: 0 done") || line.contains("bypass permissions")
+    });
+    separator && idle_footer
+}
+
 pub(crate) fn tmux_capture_indicates_claude_tui_ready_for_input(capture: &str) -> bool {
-    capture
+    let recent = capture
         .lines()
         .rev()
         .filter(|l| !l.trim().is_empty())
+        .take(CLAUDE_TUI_ACTIVE_SCAN_LINES)
+        .collect::<Vec<_>>();
+
+    if recent.iter().any(|l| l.contains(CLAUDE_TUI_READY_BANNER)) {
+        return true;
+    }
+
+    let prompt_seen = recent
+        .iter()
         .take(CLAUDE_TUI_READY_SCAN_LINES)
-        .any(|l| l.contains(CLAUDE_TUI_READY_BANNER) || tmux_line_is_claude_tui_ready_prompt(l))
+        .any(|l| tmux_line_is_claude_tui_ready_prompt(l));
+    prompt_seen && !tmux_recent_lines_show_claude_tui_active_work(&recent)
+}
+
+fn tmux_recent_lines_show_claude_tui_active_work(lines: &[&str]) -> bool {
+    lines.iter().any(|line| {
+        let line = trim_prompt_line(line);
+        let lower = line.to_ascii_lowercase();
+        line.contains("Actioning")
+            || line.contains("Musing")
+            || lower.contains("esc to interrupt")
+            || lower.contains("current work")
+            || (line.starts_with('⏺')
+                && ((line.contains("Running ") && line.contains("command"))
+                    || line.contains("Searching for ")
+                    || line.contains("Reading ")
+                    || line.contains("Editing ")))
+    })
 }
 
 pub(crate) fn tmux_capture_indicates_claude_tui_prompt_draft(capture: &str) -> bool {
-    capture
+    tmux_capture_claude_tui_prompt_draft_backspace_budget(capture).is_some()
+}
+
+pub(crate) fn tmux_capture_indicates_claude_tui_idle_suggestion(capture: &str) -> bool {
+    let non_empty = capture
         .lines()
-        .rev()
         .filter(|l| !l.trim().is_empty())
-        .take(CLAUDE_TUI_READY_SCAN_LINES)
-        .find(|line| trim_prompt_line(line).starts_with(CLAUDE_TUI_PROMPT_MARKER))
-        .is_some_and(tmux_line_is_claude_tui_prompt_draft)
+        .collect::<Vec<_>>();
+    let start = non_empty.len().saturating_sub(CLAUDE_TUI_DRAFT_SCAN_LINES);
+    let recent = &non_empty[start..];
+    recent
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, line)| {
+            if !trim_prompt_line(line).starts_with(CLAUDE_TUI_PROMPT_MARKER) {
+                return None;
+            }
+            if !tmux_line_is_claude_tui_prompt_draft(line) {
+                return Some(false);
+            }
+            let after_prompt = &recent[index + 1..];
+            if tmux_lines_after_claude_prompt_show_completed_history(after_prompt) {
+                return Some(false);
+            }
+            Some(tmux_lines_after_claude_prompt_show_idle_suggestion_chrome(
+                after_prompt,
+            ))
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn tmux_capture_claude_tui_prompt_draft_backspace_budget(
+    capture: &str,
+) -> Option<usize> {
+    let non_empty = capture
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>();
+    let start = non_empty.len().saturating_sub(CLAUDE_TUI_DRAFT_SCAN_LINES);
+    let recent = &non_empty[start..];
+    recent
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, line)| {
+            if !trim_prompt_line(line).starts_with(CLAUDE_TUI_PROMPT_MARKER) {
+                return None;
+            }
+            if !tmux_line_is_claude_tui_prompt_draft(line) {
+                return Some(None);
+            }
+            // Claude keeps submitted prompt lines in the pane history. If the
+            // prompt line is followed by rendered assistant/completion output,
+            // it is historical text, not an editable composer draft.
+            if tmux_lines_after_claude_prompt_show_completed_history(&recent[index + 1..]) {
+                return Some(None);
+            }
+            Some(claude_tui_prompt_draft_backspace_budget_from_line(line))
+        })
+        .unwrap_or(None)
+}
+
+pub(crate) fn claude_tui_prompt_draft_backspace_budget_from_line(line: &str) -> Option<usize> {
+    let rest = trim_prompt_line(line)
+        .strip_prefix(CLAUDE_TUI_PROMPT_MARKER)?
+        .trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
+    if rest.is_empty()
+        || rest
+            .get(..6)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("[User:"))
+    {
+        return None;
+    }
+    Some(rest.chars().count().saturating_add(4).min(512))
 }
 
 pub(crate) fn tmux_capture_indicates_generic_ready_banner(capture: &str) -> bool {
@@ -75,6 +211,7 @@ pub(crate) const CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT: &str = "claude-tui-settings.
 pub(crate) const CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT: &str = "claude-tui.sh";
 pub(crate) const CODEX_TUI_HOME_TEMP_EXT: &str = "codex-tui-home";
 pub(crate) const TMUX_DEAD_MARKER_TEMP_EXT: &str = "pane_dead";
+pub(crate) const TMUX_RUNTIME_KIND_TEMP_EXT: &str = "runtime-kind";
 
 /// Returns the persistent AgentDesk sessions directory, if a runtime root
 /// is configured. This is the new canonical location for session temp files
@@ -222,6 +359,7 @@ pub fn cleanup_session_temp_files(session_name: &str) {
         "sh",
         "generation",
         "exit_reason",
+        TMUX_RUNTIME_KIND_TEMP_EXT,
         TMUX_DEAD_MARKER_TEMP_EXT,
         CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT,
         CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
@@ -255,6 +393,23 @@ pub fn write_tmux_owner_marker(tmux_session_name: &str) -> Result<(), String> {
     let owner_path = tmux_owner_path(tmux_session_name);
     std::fs::write(&owner_path, current_tmux_owner_marker())
         .map_err(|e| format!("Failed to write tmux owner marker: {}", e))
+}
+
+pub(crate) fn write_tmux_runtime_kind_marker(
+    tmux_session_name: &str,
+    runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind,
+) -> Result<(), String> {
+    let path = session_temp_path(tmux_session_name, TMUX_RUNTIME_KIND_TEMP_EXT);
+    std::fs::write(&path, runtime_kind.as_str())
+        .map_err(|e| format!("Failed to write tmux runtime kind marker: {}", e))
+}
+
+pub(crate) fn resolve_tmux_runtime_kind_marker(
+    tmux_session_name: &str,
+) -> Option<crate::services::agent_protocol::RuntimeHandoffKind> {
+    let path = resolve_session_temp_path(tmux_session_name, TMUX_RUNTIME_KIND_TEMP_EXT)?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    crate::services::agent_protocol::RuntimeHandoffKind::from_str(&raw)
 }
 
 /// Append-only JSONL writer that reopens the path when external rotation
@@ -562,6 +717,39 @@ assistant output
     }
 
     #[test]
+    fn claude_ready_prompt_rejects_active_work_chrome() {
+        let capture = "\
+⏺ Running 1 shell command…
+· Actioning… (4m 7s · ↓ 9.4k tokens)
+  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's
+     current work
+─────────────────────────────────────────────────────────────────────────────
+❯\u{00a0}
+─────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ █░░░░░░░░░ │ 7%
+  CLAUDE.md: 1, MCP: 2 │ Tools: 12 done
+  ⏵⏵ bypass permissions on";
+
+        assert!(!tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert!(!tmux_capture_indicates_claude_tui_ready_for_input(capture));
+    }
+
+    #[test]
+    fn claude_ready_prompt_accepts_idle_empty_prompt() {
+        let capture = "\
+✻ Churned for 4m 56s
+─────────────────────────────────────────────────────────────────────────────
+❯\u{00a0}
+─────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ █░░░░░░░░░ │ 7%
+  CLAUDE.md: 1, MCP: 2 │ Tools: 17 done
+  ⏵⏵ bypass permissions on";
+
+        assert!(!tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert!(tmux_capture_indicates_claude_tui_ready_for_input(capture));
+    }
+
+    #[test]
     fn claude_prompt_draft_detector_ignores_submitted_discord_history_prompt() {
         let capture = "\
 ❯ [User: 0hbujang (ID: 343742347365974026)] 이전 턴
@@ -570,6 +758,88 @@ assistant output
   🤖 Opus(H) │ ██░░░░░░░░ │ 24%";
 
         assert!(!tmux_capture_indicates_claude_tui_prompt_draft(capture));
+    }
+
+    #[test]
+    fn claude_prompt_draft_detector_ignores_submitted_direct_history_prompt() {
+        let capture = "\
+❯ direct prompt typed through ssh
+⏺ direct prompt typed through ssh
+✻ Brewed for 2s
+─────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ ██░░░░░░░░ │ 24%";
+
+        assert!(!tmux_capture_indicates_claude_tui_prompt_draft(capture));
+    }
+
+    #[test]
+    fn claude_prompt_draft_detector_ignores_response_tail_with_tool_summary() {
+        let capture = "\
+❯ 계획만 적고 보류해줘
+계획만 적고 보류 — 1개
+  📁 claude-adk-cc-20260523-070547
+  CLAUDE.md: 1, MCP: 2 │ Tools: 5 done";
+
+        assert!(!tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert_eq!(
+            tmux_capture_claude_tui_prompt_draft_backspace_budget(capture),
+            None
+        );
+    }
+
+    #[test]
+    fn claude_prompt_draft_detector_uses_wider_window_for_history_completion() {
+        let capture = "\
+❯ direct prompt typed through ssh
+  wrapped prompt line
+  more wrapped prompt line
+  filler 01
+  filler 02
+  filler 03
+  filler 04
+  filler 05
+  filler 06
+  filler 07
+  filler 08
+  filler 09
+  filler 10
+  filler 11
+  filler 12
+⏺ direct prompt typed through ssh
+✻ Brewed for 2s";
+
+        assert!(!tmux_capture_indicates_claude_tui_prompt_draft(capture));
+    }
+
+    #[test]
+    fn claude_prompt_draft_detector_treats_running_submitted_prompt_as_not_ready() {
+        let capture = "\
+⏺ previous response
+✻ Brewed for 2s
+─────────────────────────────────────────────────────────────────────────────
+❯ direct prompt that has just been submitted
+─────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ ██░░░░░░░░ │ 24%
+  CLAUDE.md: 1, MCP: 2 │ Tools: 0 done";
+
+        assert!(tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert!(!tmux_capture_indicates_claude_tui_ready_for_input(capture));
+    }
+
+    #[test]
+    fn claude_idle_suggestion_prompt_is_not_recoverable_draft_context() {
+        let capture = "\
+⏺ TUI-E2E marker
+✻ Worked for 2s
+────────────────────────────────────────────────────────────────────────────
+❯\u{00a0}좋아, 잘 동작하네
+────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ ░░░░░░░░░░ │ 4%
+  CLAUDE.md: 1, MCP: 2 │ Tools: 0 done
+  ⏵⏵ bypass permissions on";
+
+        assert!(tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert!(tmux_capture_indicates_claude_tui_idle_suggestion(capture));
     }
 }
 
@@ -933,6 +1203,7 @@ mod tests {
             "sh",
             "generation",
             "exit_reason",
+            TMUX_RUNTIME_KIND_TEMP_EXT,
             TMUX_DEAD_MARKER_TEMP_EXT,
             CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT,
             CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
@@ -968,6 +1239,47 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&death_log_path);
+        let _ = std::fs::remove_dir_all(&tdir);
+        match previous_root {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
+        match previous_host {
+            Some(value) => unsafe { std::env::set_var("HOSTNAME", value) },
+            None => unsafe { std::env::remove_var("HOSTNAME") },
+        }
+    }
+
+    #[test]
+    fn tmux_runtime_kind_marker_round_trips_and_cleanup_removes_it() {
+        let _lock = crate::services::discord::runtime_store::lock_test_env();
+        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
+        let previous_host = std::env::var_os("HOSTNAME");
+
+        let tdir =
+            std::env::temp_dir().join(format!("adk-runtime-kind-marker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tdir);
+
+        unsafe {
+            std::env::set_var("AGENTDESK_ROOT_DIR", &tdir);
+            std::env::set_var("HOSTNAME", "runtime-kind-host");
+        }
+
+        let session = format!("runtime-kind-sess-{}", std::process::id());
+        write_tmux_runtime_kind_marker(
+            &session,
+            crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+        )
+        .expect("write marker");
+
+        assert_eq!(
+            resolve_tmux_runtime_kind_marker(&session),
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui)
+        );
+
+        cleanup_session_temp_files(&session);
+        assert_eq!(resolve_tmux_runtime_kind_marker(&session), None);
+
         let _ = std::fs::remove_dir_all(&tdir);
         match previous_root {
             Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },

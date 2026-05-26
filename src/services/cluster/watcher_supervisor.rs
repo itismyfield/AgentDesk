@@ -375,7 +375,9 @@ mod tests {
     use super::*;
     use crate::services::cluster::session_matcher::expected_rollout_path_for;
     use crate::services::cluster::session_registry::SessionRegistry;
-    use crate::services::cluster::stream_relay::{RelaySink, RelaySinkError, StreamFrame};
+    use crate::services::cluster::stream_relay::{
+        RelaySink, RelaySinkError, RelaySinkOutcome, StreamFrame,
+    };
     use crate::services::provider::ProviderKind;
     use async_trait::async_trait;
     use std::sync::Mutex;
@@ -412,14 +414,14 @@ mod tests {
 
     #[async_trait]
     impl RelaySink for CountingSink {
-        async fn deliver(&self, frame: &StreamFrame) -> Result<(), RelaySinkError> {
+        async fn deliver(&self, frame: &StreamFrame) -> Result<RelaySinkOutcome, RelaySinkError> {
             self.per_session
                 .lock()
                 .unwrap()
                 .entry(frame.session_name.clone())
                 .or_default()
                 .push(frame.clone());
-            Ok(())
+            Ok(RelaySinkOutcome::FrameAccepted)
         }
     }
 

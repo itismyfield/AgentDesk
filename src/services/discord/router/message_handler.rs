@@ -45,13 +45,66 @@ use crate::services::memory::{
 #[cfg(test)]
 use crate::services::observability::turn_lifecycle::TurnEvent;
 use crate::services::provider::{CancelToken, cancel_requested};
+use std::future::Future;
 use std::sync::Arc;
+use url::Url;
 
 const WATCHDOG_DEADLOCK_PREALERT_MS: i64 = 5 * 60 * 1000;
 const WATCHDOG_DEADLOCK_PREALERT_BOT: &str = "announce";
 const WATCHDOG_TIMEOUT_REASON: &str = "watchdog timeout";
 const WATCHDOG_TIMEOUT_CANCEL_SOURCE: &str = "watchdog_timeout";
 const CLAUDE_TUI_BUSY_FOLLOWUP_NOTICE: &str = "⚠ Claude TUI가 아직 이전 터미널 턴을 처리 중이라 이 메시지를 주입하지 않았습니다. 현재 응답이 끝난 뒤 다시 보내 주세요.";
+const CLAUDE_TUI_BUSY_FOLLOWUP_ALREADY_QUEUED_NOTICE: &str =
+    "📬 이 메시지는 이미 큐에 들어가 있어 추가 적재하지 않았습니다. 큐 결과를 기다려 주세요.";
+const CLAUDE_TUI_BUSY_FOLLOWUP_DEDUP_NOTICE: &str =
+    "📬 방금 동일한 메시지가 큐에 적재되어 중복으로 무시했습니다. 큐 결과를 기다려 주세요.";
+const CLAUDE_TUI_BUSY_FOLLOWUP_QUEUE_UNREACHABLE_NOTICE: &str =
+    "⚠ 내부 처리 큐에 접근하지 못해 이 메시지를 적재하지 못했습니다. 잠시 후 다시 보내 주세요.";
+const DISCORD_ATTACHMENT_HOSTS: &[&str] = &["cdn.discordapp.com", "media.discordapp.net"];
+
+fn claude_tui_busy_followup_refusal_notice(
+    reason: Option<crate::services::turn_orchestrator::EnqueueRefusalReason>,
+) -> &'static str {
+    match reason {
+        Some(crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued) => {
+            CLAUDE_TUI_BUSY_FOLLOWUP_ALREADY_QUEUED_NOTICE
+        }
+        Some(crate::services::turn_orchestrator::EnqueueRefusalReason::LastItemDedup) => {
+            CLAUDE_TUI_BUSY_FOLLOWUP_DEDUP_NOTICE
+        }
+        Some(crate::services::turn_orchestrator::EnqueueRefusalReason::ActorUnreachable) => {
+            CLAUDE_TUI_BUSY_FOLLOWUP_QUEUE_UNREACHABLE_NOTICE
+        }
+        None => CLAUDE_TUI_BUSY_FOLLOWUP_NOTICE,
+    }
+}
+
+fn is_allowed_discord_attachment_url(raw_url: &str) -> bool {
+    let Ok(url) = Url::parse(raw_url) else {
+        return false;
+    };
+    if url.scheme() != "https" {
+        return false;
+    }
+    url.host_str()
+        .is_some_and(|host| DISCORD_ATTACHMENT_HOSTS.contains(&host))
+}
+
+async fn download_discord_attachment(raw_url: &str) -> Result<Vec<u8>, String> {
+    if !is_allowed_discord_attachment_url(raw_url) {
+        return Err("attachment URL host is not allowed".to_string());
+    }
+    let response = reqwest::get(raw_url)
+        .await
+        .map_err(|error| format!("Download failed: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("Download failed: {error}"))?;
+    response
+        .bytes()
+        .await
+        .map(|bytes| bytes.to_vec())
+        .map_err(|error| format!("Download failed: {error}"))
+}
 
 fn watchdog_deadlock_prealert_bot_name() -> &'static str {
     WATCHDOG_DEADLOCK_PREALERT_BOT
@@ -157,27 +210,17 @@ fn classify_claude_tui_followup_submission(
     transcript_turn_state: crate::services::tui_turn_state::TuiTurnState,
     tmux_session_name: &str,
 ) -> Option<ClaudeTuiBusyFollowupDiagnostic> {
-    if transcript_turn_state == crate::services::tui_turn_state::TuiTurnState::Idle {
+    let structured_turn_busy = transcript_turn_state.is_busy();
+    let draft_blocks_submission =
+        snapshot.tmux_pane_alive && snapshot.prompt_draft_detected && inflight_state != "missing";
+    if !structured_turn_busy && !draft_blocks_submission {
         return None;
-    }
-    if snapshot.tmux_pane_alive
-        && snapshot.prompt_draft_detected
-        && transcript_turn_state == crate::services::tui_turn_state::TuiTurnState::Unknown
-        && matches!(watcher_state, "missing" | "cancelled")
-        && inflight_state == "missing"
-    {
-        return None;
-    }
-    if snapshot.prompt_marker_detected || !snapshot.tmux_pane_alive {
-        if !transcript_turn_state.is_busy() {
-            return None;
-        }
     }
     Some(ClaudeTuiBusyFollowupDiagnostic {
         tmux_session_name: tmux_session_name.to_string(),
         prompt_marker_detected: snapshot.prompt_marker_detected,
         prompt_draft_detected: snapshot.prompt_draft_detected,
-        previous_tui_turn_still_running: true,
+        previous_tui_turn_still_running: structured_turn_busy,
         tmux_pane_alive: snapshot.tmux_pane_alive,
         capture_available: snapshot.capture_available,
         watcher_state,
@@ -366,9 +409,10 @@ fn tui_busy_followup_diagnostic(
     }
     let tmux_session_name = tmux_session_name?;
     let selection =
-        crate::services::provider_hosting::resolve_provider_session_selection_with_capability(
+        crate::services::provider_hosting::resolve_provider_session_selection_with_channel(
             provider,
             claude::is_tmux_available(),
+            Some(channel_id.get()),
         );
     if selection.driver != crate::services::provider_hosting::ProviderSessionDriver::TuiHosting
         || crate::services::claude_tui::hook_server::current_hook_endpoint().is_none()
@@ -511,6 +555,7 @@ fn prelaunch_runtime_kind_for_managed_session(
     provider: &ProviderKind,
     remote_profile_is_none: bool,
     has_tmux_session_name: bool,
+    channel_id: Option<u64>,
 ) -> Option<RuntimeHandoffKind> {
     if !remote_profile_is_none
         || !has_tmux_session_name
@@ -520,8 +565,8 @@ fn prelaunch_runtime_kind_for_managed_session(
         return None;
     }
     let selection =
-        crate::services::provider_hosting::resolve_provider_session_selection_with_capability(
-            provider, true,
+        crate::services::provider_hosting::resolve_provider_session_selection_with_channel(
+            provider, true, channel_id,
         );
     if selection.driver == crate::services::provider_hosting::ProviderSessionDriver::TuiHosting {
         return match provider {
@@ -542,8 +587,107 @@ fn prelaunch_runtime_kind_for_managed_session(
     _provider: &ProviderKind,
     _remote_profile_is_none: bool,
     _has_tmux_session_name: bool,
+    _channel_id: Option<u64>,
 ) -> Option<RuntimeHandoffKind> {
     None
+}
+
+#[cfg(unix)]
+fn observed_runtime_kind_for_managed_tmux(
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+) -> Option<RuntimeHandoffKind> {
+    if let Some(binding) =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name)
+    {
+        return Some(binding.runtime_kind);
+    }
+    if let Some(marker) =
+        crate::services::tmux_common::resolve_tmux_runtime_kind_marker(tmux_session_name)
+    {
+        return Some(marker);
+    }
+    if crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "input").is_some()
+    {
+        return Some(RuntimeHandoffKind::LegacyTmuxWrapper);
+    }
+    match provider {
+        ProviderKind::Claude => Some(RuntimeHandoffKind::ClaudeTui),
+        ProviderKind::Codex => Some(RuntimeHandoffKind::CodexTui),
+        _ => None,
+    }
+}
+
+#[cfg(unix)]
+fn reconcile_managed_tmux_runtime_kind_for_config(
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    tmux_session_name: Option<&str>,
+    expected_runtime_kind: Option<RuntimeHandoffKind>,
+) {
+    let (Some(tmux_session_name), Some(expected_runtime_kind)) =
+        (tmux_session_name, expected_runtime_kind)
+    else {
+        return;
+    };
+    if !provider.uses_managed_tmux_backend()
+        || !crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name)
+    {
+        return;
+    }
+    let Some(observed_runtime_kind) =
+        observed_runtime_kind_for_managed_tmux(provider, tmux_session_name)
+    else {
+        return;
+    };
+    if observed_runtime_kind == expected_runtime_kind {
+        return;
+    }
+
+    let reason = format!(
+        "tui_hosting config changed: expected {}, found {}; recreating tmux session",
+        expected_runtime_kind.as_str(),
+        observed_runtime_kind.as_str()
+    );
+    tracing::warn!(
+        provider = provider.as_str(),
+        channel_id = channel_id.get(),
+        tmux_session_name,
+        expected_runtime_kind = expected_runtime_kind.as_str(),
+        observed_runtime_kind = observed_runtime_kind.as_str(),
+        "managed tmux runtime kind mismatch detected; killing stale session before dispatch"
+    );
+    crate::services::termination_audit::record_termination_for_tmux(
+        tmux_session_name,
+        None,
+        "discord_dispatch",
+        "runtime_kind_mismatch_recreate",
+        Some(&reason),
+        None,
+    );
+    crate::services::tmux_diagnostics::record_tmux_exit_reason(tmux_session_name, &reason);
+    crate::services::platform::tmux::kill_session(tmux_session_name, &reason);
+    crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
+    let cleared_runtime_binding =
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(tmux_session_name);
+    tracing::debug!(
+        provider = provider.as_str(),
+        channel_id = channel_id.get(),
+        tmux_session_name,
+        cleared_runtime_binding,
+        "cleared stale tmux runtime binding after runtime kind mismatch"
+    );
+}
+
+#[cfg(test)]
+fn runtime_kind_mismatch_requires_recreate(
+    observed_runtime_kind: Option<RuntimeHandoffKind>,
+    expected_runtime_kind: Option<RuntimeHandoffKind>,
+) -> bool {
+    matches!(
+        (observed_runtime_kind, expected_runtime_kind),
+        (Some(observed), Some(expected)) if observed != expected
+    )
 }
 
 fn apply_prelaunch_runtime_kind(
@@ -945,21 +1089,27 @@ fn attach_paused_turn_watcher(
             if claim.replaced_existing() {
                 shared.record_tmux_watcher_reconnect(channel_id);
             }
-            tokio::spawn(super::super::tmux::tmux_output_watcher(
-                channel_id,
-                http,
+            super::super::task_supervisor::spawn_observed_tmux_watcher(
+                "router_tmux_output_watcher",
                 shared.clone(),
-                output_path,
-                tmux_session_name,
-                initial_offset,
-                cancel,
-                paused,
-                resume_offset,
-                pause_epoch,
-                turn_delivered,
-                last_heartbeat_ts_ms,
-                mailbox_finalize_owed,
-            ));
+                tmux_session_name.clone(),
+                cancel.clone(),
+                super::super::tmux::tmux_output_watcher(
+                    channel_id,
+                    http,
+                    shared.clone(),
+                    output_path,
+                    tmux_session_name,
+                    initial_offset,
+                    cancel,
+                    paused,
+                    resume_offset,
+                    pause_epoch,
+                    turn_delivered,
+                    last_heartbeat_ts_ms,
+                    mailbox_finalize_owed,
+                ),
+            );
         }
     }
 
@@ -2371,7 +2521,7 @@ async fn start_reserved_headless_turn_with_owner(
 
         let watchdog_channel_id_num = channel_id.get();
         let watchdog_provider = provider.clone();
-        tokio::spawn(async move {
+        super::super::task_supervisor::spawn_observed("headless_turn_watchdog", async move {
             const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
             let mut last_deadlock_prealert_deadline_ms: Option<i64> = None;
 
@@ -2513,7 +2663,22 @@ async fn start_reserved_headless_turn_with_owner(
                     .cloned()
             })
     };
+    let prelaunch_runtime_kind = prelaunch_runtime_kind_for_managed_session(
+        &provider,
+        remote_profile.is_none(),
+        tmux_session_name.is_some(),
+        Some(channel_id.get()),
+    );
+    #[cfg(unix)]
+    reconcile_managed_tmux_runtime_kind_for_config(
+        &provider,
+        channel_id,
+        tmux_session_name.as_deref(),
+        prelaunch_runtime_kind,
+    );
 
+    let model_for_turn =
+        super::super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
     let adk_session_name = channel_name.clone();
     let adk_session_info =
         derive_adk_session_info(Some(prompt), channel_name.as_deref(), Some(&current_path));
@@ -2523,7 +2688,7 @@ async fn start_reserved_headless_turn_with_owner(
     post_adk_session_status(
         adk_session_key.as_deref(),
         adk_session_name.as_deref(),
-        Some(provider.as_str()),
+        model_for_turn.as_deref(),
         "working",
         &provider,
         Some(&adk_session_info),
@@ -2588,14 +2753,7 @@ async fn start_reserved_headless_turn_with_owner(
         inflight_input_fifo.clone(),
         inflight_offset,
     );
-    apply_prelaunch_runtime_kind(
-        &mut inflight_state,
-        prelaunch_runtime_kind_for_managed_session(
-            &provider,
-            remote_profile.is_none(),
-            tmux_session_name.is_some(),
-        ),
-    );
+    apply_prelaunch_runtime_kind(&mut inflight_state, prelaunch_runtime_kind);
     let (worktree_path, worktree_branch, base_commit) = {
         let data = shared.core.lock().await;
         data.sessions
@@ -2668,8 +2826,6 @@ async fn start_reserved_headless_turn_with_owner(
         }
     }
 
-    let model_for_turn =
-        super::super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
     let native_fast_mode_override = native_fast_mode_override_for_turn(
         &provider,
         super::super::commands::channel_fast_mode_setting(shared, fast_mode_channel_id).await,
@@ -3028,7 +3184,7 @@ pub(crate) async fn execute_intake_turn_core(
 }
 
 async fn claim_voice_transcript_announcement_processing(
-    shared: &Arc<SharedData>,
+    pg_pool: Option<&sqlx::PgPool>,
     channel_id: ChannelId,
     message_id: MessageId,
     already_accepted: bool,
@@ -3037,7 +3193,7 @@ async fn claim_voice_transcript_announcement_processing(
     if already_accepted {
         return true;
     }
-    let Some(pool) = shared.pg_pool.as_ref() else {
+    let Some(pool) = pg_pool else {
         return true;
     };
     match crate::voice::announce_meta::mark_voice_announcement_durable_consumed(pool, message_id)
@@ -3064,6 +3220,65 @@ async fn claim_voice_transcript_announcement_processing(
             false
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VoiceTranscriptAnnouncementRouteOutcome {
+    NotVoiceAnnouncement,
+    DuplicateSuppressed,
+    ForegroundHandled,
+    FallbackNormalTurn,
+}
+
+impl VoiceTranscriptAnnouncementRouteOutcome {
+    fn bypasses_normal_turn(self) -> bool {
+        matches!(self, Self::DuplicateSuppressed | Self::ForegroundHandled)
+    }
+}
+
+async fn route_voice_transcript_announcement_once<F, Fut>(
+    pg_pool: Option<&sqlx::PgPool>,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    voice_announcement_already_accepted: bool,
+    voice_announcement: Option<&crate::voice::prompt::VoiceTranscriptAnnouncement>,
+    mut foreground_handler: F,
+) -> VoiceTranscriptAnnouncementRouteOutcome
+where
+    F: FnMut(crate::voice::prompt::VoiceTranscriptAnnouncement) -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let Some(announcement) = voice_announcement else {
+        return VoiceTranscriptAnnouncementRouteOutcome::NotVoiceAnnouncement;
+    };
+    if !claim_voice_transcript_announcement_processing(
+        pg_pool,
+        channel_id,
+        message_id,
+        voice_announcement_already_accepted,
+        "handle_text_message_pre_accept",
+    )
+    .await
+    {
+        return VoiceTranscriptAnnouncementRouteOutcome::DuplicateSuppressed;
+    }
+    if foreground_handler(announcement.clone()).await {
+        return VoiceTranscriptAnnouncementRouteOutcome::ForegroundHandled;
+    }
+
+    let mut event = crate::voice::flight::VoiceFlightEvent::new(
+        crate::voice::flight::VoiceFlightRoute::FallbackNormalTurn,
+    );
+    event.voice_channel_id = Some(channel_id.get());
+    event.control_channel_id = Some(announcement.control_channel_id.unwrap_or(channel_id.get()));
+    event.user_id = Some(announcement.user_id.clone());
+    event.utterance_id = Some(announcement.utterance_id.clone());
+    event.stt_mode = announcement.stt_mode.clone();
+    event.stt_latency_ms = announcement.stt_latency_ms;
+    event.transcript_chars = Some(announcement.transcript.chars().count());
+    event.reason = Some("voice_foreground_not_handled".to_string());
+    crate::voice::flight::record_voice_flight_event(event);
+    VoiceTranscriptAnnouncementRouteOutcome::FallbackNormalTurn
 }
 
 pub(in crate::services::discord) async fn handle_text_message(
@@ -3246,18 +3461,6 @@ pub(in crate::services::discord) async fn handle_text_message(
         );
     }
     let is_voice_announcement = voice_announcement.is_some();
-    if is_voice_announcement
-        && !claim_voice_transcript_announcement_processing(
-            shared,
-            channel_id,
-            user_msg_id,
-            voice_announcement_already_accepted,
-            "handle_text_message_pre_accept",
-        )
-        .await
-    {
-        return Ok(());
-    }
     let voice_prompt_text = voice_announcement.as_ref().map(|announcement| {
         let mut context = format!("voice_utterance_id: {}", announcement.utterance_id);
         if let Some(started_at) = announcement.started_at.as_deref() {
@@ -3303,12 +3506,24 @@ pub(in crate::services::discord) async fn handle_text_message(
         .as_ref()
         .map(|announcement| announcement.transcript.as_str())
         .unwrap_or(user_text);
-    if let Some(announcement) = voice_announcement.as_ref()
-        && shared
-            .voice_barge_in
-            .try_handle_voice_transcript_announcement(shared, channel_id, announcement)
-            .await
-    {
+    let voice_route_outcome = route_voice_transcript_announcement_once(
+        shared.pg_pool.as_ref(),
+        channel_id,
+        user_msg_id,
+        voice_announcement_already_accepted,
+        voice_announcement.as_ref(),
+        |announcement| {
+            let voice_barge_in = shared.voice_barge_in.clone();
+            let shared = Arc::clone(shared);
+            async move {
+                voice_barge_in
+                    .try_handle_voice_transcript_announcement(&shared, channel_id, &announcement)
+                    .await
+            }
+        },
+    )
+    .await;
+    if voice_route_outcome.bypasses_normal_turn() {
         return Ok(());
     }
     if !is_voice_announcement
@@ -4357,6 +4572,38 @@ pub(in crate::services::discord) async fn handle_text_message(
     )
     .await;
 
+    if started
+        && let Some(stale) =
+            super::super::stale_dispatch_turn_for_text(shared.pg_pool.as_ref(), user_text).await
+    {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⏭ DISPATCH-GUARD: aborted terminal dispatch at turn start in channel {} (dispatch={}, status={})",
+            channel_id,
+            stale.dispatch_id,
+            stale.status
+        );
+        let finish =
+            super::super::mailbox_finish_turn(shared.as_ref(), &provider, channel_id).await;
+        super::super::advance_last_message_checkpoint(shared, &provider, channel_id, user_msg_id);
+        super::super::formatting::add_reaction_raw(
+            http,
+            channel_id,
+            user_msg_id,
+            super::super::queue_exit_feedback_emoji(stale.queue_exit_kind),
+        )
+        .await;
+        if finish.has_pending {
+            super::super::schedule_deferred_idle_queue_kickoff(
+                shared.clone(),
+                provider.clone(),
+                channel_id,
+                "terminal dispatch skipped at turn start",
+            );
+        }
+        return Ok(());
+    }
+
     // #1332 dispatch hand-off: if this turn was previously enqueued and is now
     // being dispatched, reuse the Queued placeholder card so the user sees a
     // single message transition `📬 → 🔄` instead of two distinct placeholders.
@@ -4474,9 +4721,16 @@ pub(in crate::services::discord) async fn handle_text_message(
             super::super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳')
                 .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
+            // #2728: log which refusal branch fired so race-loss dedup
+            // incidents can be classified without re-reading code.
+            let refusal_str = enqueue_outcome
+                .refusal_reason
+                .map(|r| r.as_str())
+                .unwrap_or("unknown");
             tracing::info!(
-                "  [{ts}] 🔁 RACE: race-lost intervention dedup-merged into existing queue entry (channel {}); skipping placeholder POST",
-                channel_id
+                "  [{ts}] 🔁 RACE: race-lost intervention refused by mailbox (channel {}, refusal_reason={}); skipping placeholder POST",
+                channel_id,
+                refusal_str,
             );
             return Ok(());
         }
@@ -5287,7 +5541,7 @@ pub(in crate::services::discord) async fn handle_text_message(
 
         let watchdog_channel_id_num = channel_id.get();
         let watchdog_provider = provider.clone();
-        tokio::spawn(async move {
+        super::super::task_supervisor::spawn_observed("text_turn_watchdog", async move {
             const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
             let mut last_deadlock_prealert_deadline_ms: Option<i64> = None;
 
@@ -5474,7 +5728,22 @@ pub(in crate::services::discord) async fn handle_text_message(
                     .cloned()
             })
     };
+    let prelaunch_runtime_kind = prelaunch_runtime_kind_for_managed_session(
+        &provider,
+        remote_profile.is_none(),
+        tmux_session_name.is_some(),
+        Some(channel_id.get()),
+    );
+    #[cfg(unix)]
+    reconcile_managed_tmux_runtime_kind_for_config(
+        &provider,
+        channel_id,
+        tmux_session_name.as_deref(),
+        prelaunch_runtime_kind,
+    );
 
+    let model_for_turn =
+        super::super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
     let adk_session_name = channel_name.clone();
     let adk_session_info = derive_adk_session_info(
         Some(user_text),
@@ -5503,7 +5772,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     post_adk_session_status(
         adk_session_key.as_deref(),
         adk_session_name.as_deref(),
-        Some(provider.as_str()),
+        model_for_turn.as_deref(),
         "working",
         &provider,
         Some(&adk_session_info),
@@ -5831,14 +6100,21 @@ pub(in crate::services::discord) async fn handle_text_message(
         } else if enqueue_outcome.enqueued {
             let _ = channel_id.delete_message(http, placeholder_msg_id).await;
         } else {
+            let notice = claude_tui_busy_followup_refusal_notice(enqueue_outcome.refusal_reason);
             let _ = super::super::http::edit_channel_message(
                 http,
                 channel_id,
                 placeholder_msg_id,
-                CLAUDE_TUI_BUSY_FOLLOWUP_NOTICE,
+                notice,
             )
             .await;
         }
+        let queue_kickoff_scheduled = release_mailbox_after_hosted_tui_busy_pre_submit(
+            shared,
+            &bot_owner_provider,
+            channel_id,
+        )
+        .await;
         let mut diagnostic_json = diagnostic.to_json();
         if let Some(object) = diagnostic_json.as_object_mut() {
             object.insert(
@@ -5857,6 +6133,20 @@ pub(in crate::services::discord) async fn handle_text_message(
                 "queued_card_rendered".to_string(),
                 serde_json::json!(queued_card_rendered),
             );
+            object.insert(
+                "queue_kickoff_scheduled".to_string(),
+                serde_json::json!(queue_kickoff_scheduled),
+            );
+            // #2728: when `enqueued == false` we previously had no signal in
+            // the producer-exit diagnostic to distinguish dup-guard / dedup /
+            // actor-unreachable refusals. Surface the refusal kind so the
+            // next adk-cc-style incident can be classified from the log.
+            if let Some(reason) = enqueue_outcome.refusal_reason {
+                object.insert(
+                    "enqueue_refusal_reason".to_string(),
+                    serde_json::json!(reason.as_str()),
+                );
+            }
         }
         tracing::warn!(
             channel_id = channel_id.get(),
@@ -5874,8 +6164,6 @@ pub(in crate::services::discord) async fn handle_text_message(
             diagnostic_json,
         );
         super::super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳').await;
-        release_mailbox_after_hosted_tui_busy_pre_submit(shared, &bot_owner_provider, channel_id)
-            .await;
         shared
             .global_active
             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -5906,7 +6194,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             enqueue_outcome.merged,
             queue_depth_after_busy_enqueue,
             queued_card_rendered,
-            false
+            queue_kickoff_scheduled
         );
         cancel_token
             .cancelled
@@ -5955,14 +6243,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         inflight_input_fifo.clone(),
         inflight_offset,
     );
-    apply_prelaunch_runtime_kind(
-        &mut inflight_state,
-        prelaunch_runtime_kind_for_managed_session(
-            &provider,
-            remote_profile.is_none(),
-            tmux_session_name.is_some(),
-        ),
-    );
+    apply_prelaunch_runtime_kind(&mut inflight_state, prelaunch_runtime_kind);
     let (worktree_path, worktree_branch, base_commit) = {
         let data = shared.core.lock().await;
         data.sessions
@@ -6049,8 +6330,6 @@ pub(in crate::services::discord) async fn handle_text_message(
         }
     }
 
-    let model_for_turn =
-        super::super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
     let native_fast_mode_override = native_fast_mode_override_for_turn(
         &provider,
         super::super::commands::channel_fast_mode_setting(shared, fast_mode_channel_id).await,
@@ -6317,22 +6596,18 @@ pub(super) async fn handle_file_upload(
     for attachment in &msg.attachments {
         let file_name = &attachment.filename;
 
-        // Download file from Discord CDN
-        let buf = match reqwest::get(&attachment.url).await {
-            Ok(resp) => match resp.bytes().await {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    rate_limit_wait(shared, channel_id).await;
-                    let _ = channel_id
-                        .say(&ctx.http, format!("Download failed: {}", e))
-                        .await;
-                    continue;
-                }
-            },
+        // Download only from Discord-owned attachment hosts.
+        let buf = match download_discord_attachment(&attachment.url).await {
+            Ok(bytes) => bytes,
             Err(e) => {
+                tracing::warn!(
+                    channel_id = channel_id.get(),
+                    attachment_url = %attachment.url,
+                    "skipping Discord attachment download: {e}"
+                );
                 rate_limit_wait(shared, channel_id).await;
                 let _ = channel_id
-                    .say(&ctx.http, format!("Download failed: {}", e))
+                    .say(&ctx.http, format!("Download failed: {e}"))
                     .await;
                 continue;
             }
@@ -6697,7 +6972,7 @@ pub(super) async fn handle_text_command(
                             )
                             .await;
 
-                        tokio::spawn(async move {
+                        super::super::task_supervisor::spawn_observed("meeting_start_command", async move {
                             match meeting::start_meeting(
                                 &*http,
                                 channel_id,
@@ -6756,7 +7031,7 @@ pub(super) async fn handle_text_command(
                             )
                             .await;
 
-                        tokio::spawn(async move {
+                        super::super::task_supervisor::spawn_observed("meeting_start_command_with_agenda", async move {
                             match meeting::start_meeting(
                                 &*http,
                                 channel_id,
@@ -7855,7 +8130,7 @@ mod session_strategy_lifecycle_tests {
 
     #[cfg(unix)]
     #[test]
-    fn claude_tui_direct_busy_followup_blocks_before_prompt_submit() {
+    fn claude_tui_structured_busy_followup_blocks_before_prompt_submit() {
         let snapshot = HostedTuiPromptReadinessSnapshot {
             prompt_marker_detected: false,
             prompt_draft_detected: false,
@@ -7869,10 +8144,10 @@ mod session_strategy_lifecycle_tests {
             "attached",
             Some(1479671301387059200),
             "missing",
-            crate::services::tui_turn_state::TuiTurnState::Unknown,
+            crate::services::tui_turn_state::TuiTurnState::Streaming,
             "AgentDesk-claude-adk-cdx-direct",
         )
-        .expect("busy direct TUI turn should block follow-up submission");
+        .expect("structured busy TUI turn should block follow-up submission");
 
         assert!(diagnostic.previous_tui_turn_still_running);
         assert!(!diagnostic.prompt_marker_detected);
@@ -8035,7 +8310,7 @@ mod session_strategy_lifecycle_tests {
 
     #[cfg(unix)]
     #[test]
-    fn claude_tui_unknown_transcript_with_active_evidence_still_blocks() {
+    fn claude_tui_unknown_transcript_with_stranded_draft_ignores_persistent_watcher() {
         let snapshot = HostedTuiPromptReadinessSnapshot {
             prompt_marker_detected: false,
             prompt_draft_detected: true,
@@ -8053,9 +8328,22 @@ mod session_strategy_lifecycle_tests {
                 crate::services::tui_turn_state::TuiTurnState::Unknown,
                 "AgentDesk-claude-active",
             )
-            .is_some(),
-            "active watcher evidence keeps unknown transcript conservative"
+            .is_none(),
+            "a persistent attached watcher is idle coverage, not active-turn evidence by itself"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_tui_unknown_transcript_with_active_inflight_still_blocks() {
+        let snapshot = HostedTuiPromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "❯ possible redraw".to_string(),
+        };
+
         assert!(
             classify_claude_tui_followup_submission(
                 &snapshot,
@@ -8556,6 +8844,202 @@ mod session_strategy_lifecycle_tests {
     }
 }
 
+#[cfg(test)]
+mod voice_route_tests {
+    use super::*;
+    use poise::serenity_prelude::{ChannelId, MessageId};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    fn voice_announcement_fixture(
+        transcript: &str,
+        utterance_id: &str,
+    ) -> crate::voice::prompt::VoiceTranscriptAnnouncement {
+        crate::voice::prompt::VoiceTranscriptAnnouncement {
+            transcript: transcript.to_string(),
+            user_id: "42".to_string(),
+            utterance_id: utterance_id.to_string(),
+            language: "ko-KR".to_string(),
+            verbose_progress: true,
+            started_at: Some("2026-05-24T21:00:00+09:00".to_string()),
+            completed_at: Some("2026-05-24T21:00:01+09:00".to_string()),
+            samples_written: Some(48_000),
+            control_channel_id: Some(44_001),
+            stt_mode: Some("file".to_string()),
+            stt_latency_ms: Some(120),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn voice_announcement_foreground_response_bypasses_normal_turn() {
+        let channel_id = ChannelId::new(44_001);
+        let message_id = MessageId::new(55_001);
+        let announcement = voice_announcement_fixture("지금 상태 알려줘", "utt-foreground");
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let outcome = route_voice_transcript_announcement_once(
+            None,
+            channel_id,
+            message_id,
+            false,
+            Some(&announcement),
+            {
+                let calls = Arc::clone(&calls);
+                move |seen| {
+                    let calls = Arc::clone(&calls);
+                    async move {
+                        assert_eq!(seen.utterance_id, "utt-foreground");
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        true
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            VoiceTranscriptAnnouncementRouteOutcome::ForegroundHandled
+        );
+        assert!(
+            outcome.bypasses_normal_turn(),
+            "foreground voice responses must return before normal text turn handling"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "foreground handler must be invoked exactly once"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn voice_announcement_foreground_miss_falls_back_to_normal_turn() {
+        let channel_id = ChannelId::new(44_002);
+        let message_id = MessageId::new(55_002);
+        let announcement = voice_announcement_fixture("긴 작업 처리해줘", "utt-fallback");
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let outcome = route_voice_transcript_announcement_once(
+            None,
+            channel_id,
+            message_id,
+            false,
+            Some(&announcement),
+            {
+                let calls = Arc::clone(&calls);
+                move |_seen| {
+                    let calls = Arc::clone(&calls);
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        false
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            VoiceTranscriptAnnouncementRouteOutcome::FallbackNormalTurn
+        );
+        assert!(
+            !outcome.bypasses_normal_turn(),
+            "only an actual foreground response or duplicate claim may bypass the normal turn"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_duplicate_voice_announcement_invokes_foreground_once() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let channel_id = ChannelId::new(44_003);
+        let message_id = MessageId::new(55_003);
+        let announcement = voice_announcement_fixture("상태 알려줘", "utt-durable-once");
+        let pending_key = crate::voice::announce_meta::durable_voice_announcement_pending_key(
+            "voice:1:44003:utt-durable-once",
+            "announce:generation:1",
+        );
+
+        crate::voice::announce_meta::persist_voice_announcement_reservation_durable(
+            &pool,
+            &pending_key,
+            channel_id,
+            "🎙️ \"상태 알려줘\"",
+            &announcement,
+        )
+        .await
+        .expect("persist durable voice announcement");
+        assert!(
+            crate::voice::announce_meta::bind_voice_announcement_durable_message_id(
+                &pool,
+                &pending_key,
+                message_id,
+            )
+            .await
+            .expect("bind durable announcement message id")
+        );
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let first = route_voice_transcript_announcement_once(
+            Some(&pool),
+            channel_id,
+            message_id,
+            false,
+            Some(&announcement),
+            {
+                let calls = Arc::clone(&calls);
+                move |seen| {
+                    let calls = Arc::clone(&calls);
+                    async move {
+                        assert_eq!(seen.utterance_id, "utt-durable-once");
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        true
+                    }
+                }
+            },
+        )
+        .await;
+        let duplicate = route_voice_transcript_announcement_once(
+            Some(&pool),
+            channel_id,
+            message_id,
+            false,
+            Some(&announcement),
+            {
+                let calls = Arc::clone(&calls);
+                move |_seen| {
+                    let calls = Arc::clone(&calls);
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        true
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(
+            first,
+            VoiceTranscriptAnnouncementRouteOutcome::ForegroundHandled
+        );
+        assert_eq!(
+            duplicate,
+            VoiceTranscriptAnnouncementRouteOutcome::DuplicateSuppressed
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "durable consumed_at must suppress duplicate Discord delivery before foreground handling"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
     use super::super::super::DiscordSession;
@@ -8567,6 +9051,7 @@ mod tests {
     use crate::services::memory::RecallResponse;
     use crate::ui::ai_screen::{HistoryItem, HistoryType};
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    use std::sync::Arc;
     use std::time::Duration;
 
     fn sample_recall() -> RecallResponse {
@@ -8612,6 +9097,54 @@ mod tests {
         assert!(seed >= HEADLESS_TURN_MESSAGE_ID_BASE);
         assert!(later_seed > seed);
         assert_ne!(seed, other_process_seed);
+    }
+
+    #[test]
+    fn claude_tui_busy_followup_notice_names_enqueue_refusal_reason() {
+        use crate::services::turn_orchestrator::EnqueueRefusalReason;
+
+        assert_eq!(
+            claude_tui_busy_followup_refusal_notice(Some(
+                EnqueueRefusalReason::SourceIdAlreadyQueued
+            )),
+            CLAUDE_TUI_BUSY_FOLLOWUP_ALREADY_QUEUED_NOTICE
+        );
+        assert_eq!(
+            claude_tui_busy_followup_refusal_notice(Some(EnqueueRefusalReason::LastItemDedup)),
+            CLAUDE_TUI_BUSY_FOLLOWUP_DEDUP_NOTICE
+        );
+        assert_eq!(
+            claude_tui_busy_followup_refusal_notice(Some(EnqueueRefusalReason::ActorUnreachable)),
+            CLAUDE_TUI_BUSY_FOLLOWUP_QUEUE_UNREACHABLE_NOTICE
+        );
+        assert_eq!(
+            claude_tui_busy_followup_refusal_notice(None),
+            CLAUDE_TUI_BUSY_FOLLOWUP_NOTICE
+        );
+    }
+
+    #[test]
+    fn tui_hosting_runtime_kind_mismatch_requires_session_recreate() {
+        assert!(runtime_kind_mismatch_requires_recreate(
+            Some(RuntimeHandoffKind::ClaudeTui),
+            Some(RuntimeHandoffKind::LegacyTmuxWrapper)
+        ));
+        assert!(runtime_kind_mismatch_requires_recreate(
+            Some(RuntimeHandoffKind::LegacyTmuxWrapper),
+            Some(RuntimeHandoffKind::CodexTui)
+        ));
+        assert!(!runtime_kind_mismatch_requires_recreate(
+            Some(RuntimeHandoffKind::CodexTui),
+            Some(RuntimeHandoffKind::CodexTui)
+        ));
+        assert!(!runtime_kind_mismatch_requires_recreate(
+            None,
+            Some(RuntimeHandoffKind::CodexTui)
+        ));
+        assert!(!runtime_kind_mismatch_requires_recreate(
+            Some(RuntimeHandoffKind::CodexTui),
+            None
+        ));
     }
 
     #[test]
@@ -9742,6 +10275,9 @@ mod tests {
             started_at: Some("2026-05-16T10:00:00+09:00".to_string()),
             completed_at: Some("2026-05-16T10:00:01+09:00".to_string()),
             samples_written: Some(48_000),
+            control_channel_id: None,
+            stt_mode: None,
+            stt_latency_ms: None,
         };
         let queued = build_race_requeued_intervention(
             UserId::new(7),
@@ -9789,6 +10325,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             samples_written: None,
+            control_channel_id: None,
+            stt_mode: None,
+            stt_latency_ms: None,
         };
 
         // Step 1: active turn consumes the store entry (mirroring
@@ -9856,6 +10395,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             samples_written: None,
+            control_channel_id: None,
+            stt_mode: None,
+            stt_latency_ms: None,
         };
 
         // The race-loss enqueue path uses `original_request_owner`, which is
@@ -9899,6 +10441,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             samples_written: None,
+            control_channel_id: None,
+            stt_mode: None,
+            stt_latency_ms: None,
         };
 
         let store = crate::voice::announce_meta::VoiceAnnouncementMetaStore::default();
@@ -9938,9 +10483,13 @@ mod tests {
             started_at: Some("2026-05-16T10:00:00+09:00".to_string()),
             completed_at: Some("2026-05-16T10:00:01+09:00".to_string()),
             samples_written: Some(48_000),
+            control_channel_id: None,
+            stt_mode: None,
+            stt_latency_ms: None,
         };
         let item = crate::services::turn_orchestrator::PendingQueueItem {
             author_id: 555,
+            author_is_bot: false,
             message_id: 2_266_003,
             source_message_ids: vec![2_266_003],
             text: "회의록 정리해줘".to_string(),
@@ -10286,6 +10835,7 @@ mod tests {
             channel_id,
             super::super::super::Intervention {
                 author_id: owner,
+                author_is_bot: false,
                 message_id: queued_msg_id,
                 source_message_ids: vec![queued_msg_id],
                 text: "race-loser queued message".to_string(),
@@ -10334,7 +10884,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn busy_pre_submit_requeues_without_immediate_idle_kickoff() {
+    async fn busy_pre_submit_requeues_and_schedules_idle_kickoff_when_pending() {
         use crate::services::provider::CancelToken;
         use std::sync::Arc;
         use std::sync::atomic::Ordering;
@@ -10376,12 +10926,17 @@ mod tests {
         );
 
         let backlog_before = shared.deferred_hook_backlog.load(Ordering::Relaxed);
-        release_mailbox_after_hosted_tui_busy_pre_submit(&shared, &provider, channel_id).await;
+        let kicked =
+            release_mailbox_after_hosted_tui_busy_pre_submit(&shared, &provider, channel_id).await;
 
+        assert!(
+            kicked,
+            "hosted TUI busy pre-submit must schedule a deferred kickoff when it leaves a queued item behind"
+        );
         assert_eq!(
             shared.deferred_hook_backlog.load(Ordering::Relaxed),
-            backlog_before,
-            "hosted TUI busy pre-submit must not immediately re-kick the same queued retry"
+            backlog_before + 1,
+            "hosted TUI busy pre-submit must not leave an idle mailbox with a queued retry"
         );
 
         let snapshot = shared.mailbox(channel_id).snapshot().await;
@@ -10504,6 +11059,7 @@ mod tests {
             channel_id,
             super::super::super::Intervention {
                 author_id: owner,
+                author_is_bot: false,
                 message_id: race_lost_msg_id_clone,
                 source_message_ids: vec![race_lost_msg_id_clone],
                 text: "queued during race".to_string(),
@@ -10813,5 +11369,34 @@ mod tests {
                 "provider-session-123",
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod attachment_url_tests {
+    use super::is_allowed_discord_attachment_url;
+
+    #[test]
+    fn discord_attachment_url_guard_allows_discord_cdn_hosts() {
+        assert!(is_allowed_discord_attachment_url(
+            "https://cdn.discordapp.com/attachments/1/2/file.txt"
+        ));
+        assert!(is_allowed_discord_attachment_url(
+            "https://media.discordapp.net/attachments/1/2/image.png"
+        ));
+    }
+
+    #[test]
+    fn discord_attachment_url_guard_rejects_ssrf_shapes() {
+        assert!(!is_allowed_discord_attachment_url(
+            "http://cdn.discordapp.com/attachments/1/2/file.txt"
+        ));
+        assert!(!is_allowed_discord_attachment_url(
+            "https://cdn.discordapp.com.evil.test/attachments/1/2/file.txt"
+        ));
+        assert!(!is_allowed_discord_attachment_url(
+            "https://127.0.0.1/attachments/1/2/file.txt"
+        ));
+        assert!(!is_allowed_discord_attachment_url("not a url"));
     }
 }

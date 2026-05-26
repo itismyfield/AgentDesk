@@ -71,16 +71,6 @@ fn emit_dispatch_quality_event(
     );
 }
 
-fn is_noop_completion_result(result: Option<&serde_json::Value>) -> bool {
-    result.is_some_and(|value| {
-        value.get("work_outcome").and_then(|entry| entry.as_str()) == Some("noop")
-            || value
-                .get("completed_without_changes")
-                .and_then(|entry| entry.as_bool())
-                == Some(true)
-    })
-}
-
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 fn auto_queue_review_disabled_for_dispatch_on_conn(
     conn: &sqlite_test::Connection,
@@ -291,7 +281,7 @@ async fn restore_auto_queue_mainline_after_review_skip_on_pg(
 fn should_skip_auto_queue_terminal_sync(
     dispatch_type: Option<&str>,
     to_status: &str,
-    result: Option<&serde_json::Value>,
+    _result: Option<&serde_json::Value>,
     sync_auto_queue_terminal_entries: bool,
     auto_queue_review_disabled: bool,
 ) -> bool {
@@ -305,9 +295,7 @@ fn should_skip_auto_queue_terminal_sync(
 
     match dispatch_type {
         Some("consultation") => true,
-        Some("implementation" | "rework") => {
-            is_noop_completion_result(result) && !auto_queue_review_disabled
-        }
+        Some("implementation" | "rework") => !auto_queue_review_disabled,
         _ => false,
     }
 }
@@ -739,11 +727,10 @@ async fn set_dispatch_status_on_pg_with_sync(
         }
 
         // Sync any auto_queue_entry bound to this dispatch when the dispatch
-        // reaches a terminal status. The card-terminal SyncAutoQueue intent
-        // (transition.rs) only fires when the *card* goes terminal — but an
-        // implementation dispatch typically completes into `review`, leaving
-        // the entry stuck at `dispatched` until the card eventually reaches
-        // `done`. Mirror dispatch terminal here so the slot frees promptly.
+        // reaches a terminal status. Review-enabled implementation/rework
+        // entries deliberately stay `dispatched` until the card reaches a
+        // terminal state so auto-queue capacity cannot advance before review
+        // is durably created and resolved (#2765).
         let auto_queue_review_disabled =
             if matches!(dispatch_type.as_deref(), Some("implementation" | "rework")) {
                 auto_queue_review_disabled_for_dispatch_on_pg(&mut tx, dispatch_id).await?
@@ -1363,7 +1350,7 @@ fn set_dispatch_status_on_conn_with_sync(
 
             // Sync any auto_queue_entry bound to this dispatch when the
             // dispatch reaches a terminal status. See PG twin in
-            // set_dispatch_status_on_pg for the rationale.
+            // set_dispatch_status_on_pg for the review-enabled hold rationale.
             let auto_queue_review_disabled =
                 matches!(dispatch_type.as_deref(), Some("implementation" | "rework"))
                     && auto_queue_review_disabled_for_dispatch_on_conn(conn, dispatch_id);
@@ -2178,6 +2165,65 @@ fn check_entry_is_pass(entry: &serde_json::Value) -> bool {
         return s.eq_ignore_ascii_case("pass") || s.eq_ignore_ascii_case("passed");
     }
     false
+}
+
+#[cfg(test)]
+mod auto_queue_terminal_sync_policy_tests {
+    use super::should_skip_auto_queue_terminal_sync;
+
+    #[test]
+    fn review_enabled_work_dispatches_hold_auto_queue_entry_until_card_terminal() {
+        let result = serde_json::json!({"summary": "implemented"});
+
+        assert!(should_skip_auto_queue_terminal_sync(
+            Some("implementation"),
+            "completed",
+            Some(&result),
+            true,
+            false
+        ));
+        assert!(should_skip_auto_queue_terminal_sync(
+            Some("rework"),
+            "completed",
+            Some(&result),
+            true,
+            false
+        ));
+        assert!(!should_skip_auto_queue_terminal_sync(
+            Some("implementation"),
+            "completed",
+            Some(&result),
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn non_work_or_non_completed_dispatches_keep_existing_terminal_sync_behavior() {
+        let result = serde_json::json!({"summary": "reviewed"});
+
+        assert!(!should_skip_auto_queue_terminal_sync(
+            Some("review"),
+            "completed",
+            Some(&result),
+            true,
+            false
+        ));
+        assert!(!should_skip_auto_queue_terminal_sync(
+            Some("implementation"),
+            "failed",
+            Some(&result),
+            true,
+            false
+        ));
+        assert!(should_skip_auto_queue_terminal_sync(
+            Some("consultation"),
+            "completed",
+            Some(&result),
+            true,
+            false
+        ));
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]

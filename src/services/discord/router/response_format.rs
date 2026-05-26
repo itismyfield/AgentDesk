@@ -316,6 +316,7 @@ pub(super) fn build_race_requeued_intervention(
 ) -> Intervention {
     Intervention {
         author_id: request_owner,
+        author_is_bot: false,
         message_id: user_msg_id,
         source_message_ids: vec![user_msg_id],
         text: user_text.to_string(),

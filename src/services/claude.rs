@@ -15,7 +15,7 @@ use crate::services::discord::restart_report::{
 use crate::services::process::{kill_child_tree, kill_pid_tree, shell_escape};
 use crate::services::provider::{
     CancelToken, ProviderKind, ReadOutputResult, SessionProbe, cancel_requested,
-    fold_read_output_result, register_child_pid,
+    fold_read_output_result, register_child_pid, spawn_cancel_watchdog,
 };
 use crate::services::provider_hosting::ProviderSessionDriver;
 use crate::services::remote::RemoteProfile;
@@ -39,6 +39,10 @@ const CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS: usize = 2;
 const CLAUDE_TUI_FRESH_PROMPT_READY_BACKOFF_BASE: Duration = Duration::from_secs(5);
 #[cfg(unix)]
 const CLAUDE_TUI_STRANDED_DRAFT_CLEAR_ATTEMPTS: usize = 2;
+#[cfg(unix)]
+const CLAUDE_TUI_TRANSCRIPT_INITIAL_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
+#[cfg(unix)]
+const CLAUDE_TUI_TRANSCRIPT_INITIAL_WAIT_MAX_INTERVAL: Duration = Duration::from_millis(500);
 
 #[cfg(unix)]
 type ClaudeTuiSessionTurnLock = Arc<Mutex<()>>;
@@ -714,9 +718,10 @@ pub fn execute_command_streaming(
     #[cfg(not(unix))]
     let entrypoint_supports_tui_hosting = false;
     let session_selection =
-        crate::services::provider_hosting::resolve_provider_session_selection_with_capability(
+        crate::services::provider_hosting::resolve_provider_session_selection_with_channel(
             &ProviderKind::Claude,
             entrypoint_supports_tui_hosting,
+            report_channel_id,
         );
     session_selection.log_start("claude.execute_command_streaming");
 
@@ -959,6 +964,8 @@ IMPORTANT: Format your responses using Markdown for better readability:
 
     // Store child PID in cancel token so the caller can kill it externally
     register_child_pid(cancel_token.as_deref(), child.id());
+    let _cancel_watchdog =
+        spawn_cancel_watchdog(cancel_token.clone(), child.id(), "claude-direct-stream");
 
     // Write prompt to stdin
     if let Some(mut stdin) = child.stdin.take() {
@@ -1514,18 +1521,18 @@ fn emit_claude_tui_busy_followup_notice(
         tmux_session_name,
         prompt_marker_detected = snapshot.prompt_marker_detected,
         prompt_draft_detected = snapshot.prompt_draft_detected,
-        previous_tui_turn_still_running = snapshot.tmux_pane_alive && !snapshot.prompt_marker_detected,
+        prompt_draft_blocks_submission = snapshot.tmux_pane_alive && snapshot.prompt_draft_detected,
         tmux_pane_alive = snapshot.tmux_pane_alive,
         capture_available = snapshot.capture_available,
         pane_tail = %snapshot.pane_tail,
         "claude_tui follow-up blocked before prompt submission because hosted TUI is busy"
     );
     debug_log(&format!(
-        "Claude TUI follow-up blocked before prompt submission: session={} prompt_marker_detected={} prompt_draft_detected={} previous_tui_turn_still_running={} tmux_pane_alive={} capture_available={} pane_tail:\n{}",
+        "Claude TUI follow-up blocked before prompt submission: session={} prompt_marker_detected={} prompt_draft_detected={} prompt_draft_blocks_submission={} tmux_pane_alive={} capture_available={} pane_tail:\n{}",
         tmux_session_name,
         snapshot.prompt_marker_detected,
         snapshot.prompt_draft_detected,
-        snapshot.tmux_pane_alive && !snapshot.prompt_marker_detected,
+        snapshot.tmux_pane_alive && snapshot.prompt_draft_detected,
         snapshot.tmux_pane_alive,
         snapshot.capture_available,
         snapshot.pane_tail
@@ -1573,7 +1580,7 @@ fn claude_tui_followup_busy_before_submit_from_snapshot(
             _ => {}
         }
     }
-    if snapshot.tmux_pane_alive && !snapshot.prompt_marker_detected {
+    if snapshot.tmux_pane_alive && snapshot.prompt_draft_detected {
         Some(snapshot)
     } else {
         None
@@ -1598,6 +1605,24 @@ impl ClaudeTuiStrandedPromptDraftState {
 }
 
 #[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClaudeTuiWarmFollowupSubmitPlan {
+    submit_existing_session: bool,
+    recheck_busy_before_submit: bool,
+}
+
+#[cfg(unix)]
+fn claude_tui_warm_followup_submit_plan(
+    recreate_before_submit: bool,
+    prompt_draft_cleared_before_submit: bool,
+) -> ClaudeTuiWarmFollowupSubmitPlan {
+    ClaudeTuiWarmFollowupSubmitPlan {
+        submit_existing_session: !recreate_before_submit,
+        recheck_busy_before_submit: !prompt_draft_cleared_before_submit,
+    }
+}
+
+#[cfg(unix)]
 fn claude_tui_followup_stranded_prompt_draft_state(
     snapshot: &crate::services::claude_tui::input::PromptReadinessSnapshot,
     transcript_path: &std::path::Path,
@@ -1606,7 +1631,7 @@ fn claude_tui_followup_stranded_prompt_draft_state(
         crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(
             transcript_path,
         );
-    if !snapshot.tmux_pane_alive || !snapshot.prompt_draft_detected {
+    if !claude_tui_snapshot_has_recoverable_prompt_draft(snapshot) {
         return None;
     }
     match transcript_turn_state {
@@ -1618,6 +1643,42 @@ fn claude_tui_followup_stranded_prompt_draft_state(
         }
         _ => None,
     }
+}
+
+#[cfg(unix)]
+fn claude_tui_snapshot_has_recoverable_prompt_draft(
+    snapshot: &crate::services::claude_tui::input::PromptReadinessSnapshot,
+) -> bool {
+    snapshot.tmux_pane_alive
+        && snapshot.prompt_draft_detected
+        && !crate::services::claude_tui::input::claude_prompt_draft_is_idle_suggestion_tail(
+            &snapshot.pane_tail,
+        )
+        && crate::services::claude_tui::input::claude_prompt_draft_backspace_budget_from_tail(
+            &snapshot.pane_tail,
+        )
+        .is_some()
+}
+
+#[cfg(unix)]
+fn claude_tui_unknown_transcript_draft_recreate_allowed(
+    snapshot: &crate::services::claude_tui::input::PromptReadinessSnapshot,
+) -> bool {
+    if !snapshot.tmux_pane_alive || !snapshot.prompt_draft_detected || !snapshot.capture_available {
+        return false;
+    }
+    let tail = snapshot.pane_tail.as_str();
+    let tail_lower = tail.to_ascii_lowercase();
+    if tail_lower.contains("esc to interrupt")
+        || tail_lower.contains("processing")
+        || tail_lower.contains("thinking")
+        || tail_lower.contains("running")
+    {
+        return false;
+    }
+    tail.contains("Baked for")
+        || tail.contains("Brewed for")
+        || (tail.contains("Tools:") && tail.contains(" done"))
 }
 
 #[cfg(unix)]
@@ -1634,6 +1695,38 @@ fn ensure_tmux_key_send_success(
     } else {
         Err(format!("tmux send {action_name} failed: {stderr}"))
     }
+}
+
+#[cfg(unix)]
+fn clear_claude_tui_draft_with_backspaces(
+    tmux_session_name: &str,
+    snapshot: &mut crate::services::claude_tui::input::PromptReadinessSnapshot,
+    cancel_token: Option<&CancelToken>,
+) -> Result<(), String> {
+    let Some(mut remaining) =
+        crate::services::claude_tui::input::claude_prompt_draft_backspace_budget_from_tail(
+            &snapshot.pane_tail,
+        )
+    else {
+        return Ok(());
+    };
+    let output = crate::services::platform::tmux::send_keys(tmux_session_name, &["C-e"])?;
+    ensure_tmux_key_send_success(output, "draft-clear-cursor-end")?;
+    while remaining > 0 {
+        if cancel_requested(cancel_token) {
+            return Err(
+                crate::services::claude_tui::input::PROMPT_READY_CANCELLED_ERROR.to_string(),
+            );
+        }
+        let batch = remaining.min(32);
+        let keys = vec!["BSpace"; batch];
+        let output = crate::services::platform::tmux::send_keys(tmux_session_name, &keys)?;
+        ensure_tmux_key_send_success(output, "draft-clear-backspace")?;
+        remaining -= batch;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    *snapshot = crate::services::claude_tui::input::prompt_readiness_snapshot(tmux_session_name);
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1668,6 +1761,10 @@ fn clear_claude_tui_stranded_prompt_draft(
             if !snapshot.prompt_draft_detected || !snapshot.tmux_pane_alive {
                 return Ok(snapshot);
             }
+        }
+        clear_claude_tui_draft_with_backspaces(tmux_session_name, &mut snapshot, cancel_token)?;
+        if !snapshot.prompt_draft_detected || !snapshot.tmux_pane_alive {
+            return Ok(snapshot);
         }
         tracing::warn!(
             tmux_session_name,
@@ -1706,6 +1803,10 @@ fn gently_clear_claude_tui_prompt_draft(
         ensure_tmux_key_send_success(output, "gentle-clear-draft")?;
         std::thread::sleep(std::time::Duration::from_millis(120));
         snapshot = crate::services::claude_tui::input::prompt_readiness_snapshot(tmux_session_name);
+        if !snapshot.prompt_draft_detected || !snapshot.tmux_pane_alive {
+            return Ok(snapshot);
+        }
+        clear_claude_tui_draft_with_backspaces(tmux_session_name, &mut snapshot, cancel_token)?;
         if !snapshot.prompt_draft_detected || !snapshot.tmux_pane_alive {
             return Ok(snapshot);
         }
@@ -1769,6 +1870,24 @@ fn resolve_claude_tui_session_for_launch(
         session_id,
         transcript_path,
         resume,
+    })
+}
+
+#[cfg(unix)]
+fn fresh_claude_tui_session_resolution(
+    working_dir: &std::path::Path,
+    claude_home: Option<&std::path::Path>,
+) -> Result<ClaudeTuiSessionResolution, String> {
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let transcript_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        working_dir,
+        &session_id,
+        claude_home,
+    )?;
+    Ok(ClaudeTuiSessionResolution {
+        session_id,
+        transcript_path,
+        resume: false,
     })
 }
 
@@ -1877,10 +1996,10 @@ fn execute_streaming_local_tui_tmux(
     let working_dir_path = std::path::Path::new(working_dir);
     let session_resolution =
         resolve_claude_tui_session_for_launch(working_dir_path, session_id, None)?;
-    let resolved_session_id = session_resolution.session_id;
-    let transcript_path = session_resolution.transcript_path;
-    let transcript_path_string = transcript_path.display().to_string();
-    let resume = session_resolution.resume;
+    let mut resolved_session_id = session_resolution.session_id;
+    let mut transcript_path = session_resolution.transcript_path;
+    let mut transcript_path_string = transcript_path.display().to_string();
+    let mut resume = session_resolution.resume;
 
     let session_exists = tmux_session_exists(tmux_session_name);
     let has_live_pane = tmux_session_has_live_pane(tmux_session_name);
@@ -1961,7 +2080,14 @@ fn execute_streaming_local_tui_tmux(
                         } else {
                             "claude tui pane died while clearing stranded prompt draft"
                         };
-                        if !allow_recreate {
+                        let recreate_after_persistent_draft = allow_recreate
+                            || (matches!(
+                                draft_state,
+                                ClaudeTuiStrandedPromptDraftState::UnknownTranscript
+                            ) && claude_tui_unknown_transcript_draft_recreate_allowed(
+                                &post_clear_snapshot,
+                            ));
+                        if !recreate_after_persistent_draft {
                             tracing::warn!(
                                 tmux_session_name,
                                 transcript_turn_state = draft_state.as_str(),
@@ -2003,6 +2129,12 @@ fn execute_streaming_local_tui_tmux(
                                 tmux_session_name,
                                 reason,
                             );
+                            let fresh_resolution =
+                                fresh_claude_tui_session_resolution(working_dir_path, None)?;
+                            resolved_session_id = fresh_resolution.session_id;
+                            transcript_path = fresh_resolution.transcript_path;
+                            transcript_path_string = transcript_path.display().to_string();
+                            resume = fresh_resolution.resume;
                             recreate_before_submit = true;
                         }
                     }
@@ -2028,7 +2160,14 @@ fn execute_streaming_local_tui_tmux(
                         return Ok(());
                     }
                     Err(error) => {
-                        if !allow_recreate {
+                        let recreate_after_clear_error = allow_recreate
+                            || (matches!(
+                                draft_state,
+                                ClaudeTuiStrandedPromptDraftState::UnknownTranscript
+                            ) && claude_tui_unknown_transcript_draft_recreate_allowed(
+                                &snapshot,
+                            ));
+                        if !recreate_after_clear_error {
                             tracing::warn!(
                                 tmux_session_name,
                                 error = %error,
@@ -2069,15 +2208,28 @@ fn execute_streaming_local_tui_tmux(
                                     error
                                 ),
                             );
+                            let fresh_resolution =
+                                fresh_claude_tui_session_resolution(working_dir_path, None)?;
+                            resolved_session_id = fresh_resolution.session_id;
+                            transcript_path = fresh_resolution.transcript_path;
+                            transcript_path_string = transcript_path.display().to_string();
+                            resume = fresh_resolution.resume;
                             recreate_before_submit = true;
                         }
                     }
                 }
             }
         }
-        if !recreate_before_submit && !prompt_draft_cleared_before_submit {
-            if let Some(snapshot) =
-                claude_tui_followup_busy_before_submit(tmux_session_name, Some(&transcript_path))
+        let submit_plan = claude_tui_warm_followup_submit_plan(
+            recreate_before_submit,
+            prompt_draft_cleared_before_submit,
+        );
+        if submit_plan.submit_existing_session {
+            if submit_plan.recheck_busy_before_submit
+                && let Some(snapshot) = claude_tui_followup_busy_before_submit(
+                    tmux_session_name,
+                    Some(&transcript_path),
+                )
             {
                 // #2416: instead of dropping the user's message when the TUI is busy,
                 // wait for the next prompt-ready window. The transcript-idle
@@ -2140,7 +2292,7 @@ fn execute_streaming_local_tui_tmux(
                                 "transcript_path": transcript_path_string,
                                 "prompt_marker_detected": post_wait_snapshot.prompt_marker_detected,
                                 "prompt_draft_detected": post_wait_snapshot.prompt_draft_detected,
-                                "previous_tui_turn_still_running": post_wait_snapshot.tmux_pane_alive && !post_wait_snapshot.prompt_marker_detected,
+                                "prompt_draft_blocks_submission": post_wait_snapshot.tmux_pane_alive && post_wait_snapshot.prompt_draft_detected,
                                 "tmux_pane_alive": post_wait_snapshot.tmux_pane_alive,
                                 "capture_available": post_wait_snapshot.capture_available,
                                 "initial_busy_snapshot_prompt_marker_detected": snapshot.prompt_marker_detected,
@@ -2320,6 +2472,10 @@ fn execute_streaming_local_tui_tmux(
 
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
     write_tmux_owner_marker(tmux_session_name)?;
+    crate::services::tmux_common::write_tmux_runtime_kind_marker(
+        tmux_session_name,
+        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+    )?;
     let owner_path = tmux_owner_path(tmux_session_name);
     let mut prepared_session_files = None;
     let launch_result = (|| -> Result<std::process::Output, String> {
@@ -2584,7 +2740,7 @@ fn read_claude_tui_transcript_until_done(
     let expected_session_id = session_id.to_string();
     let expected_session_id_for_result = expected_session_id.clone();
     let tmux_name_alive = tmux_session_name.to_string();
-    let tmux_name_ready = tmux_session_name.to_string();
+    let transcript_path_for_ready = std::path::PathBuf::from(transcript_path);
     let probe = SessionProbe::new(
         move || tmux_session_has_live_pane(&tmux_name_alive),
         move || {
@@ -2594,19 +2750,112 @@ fn read_claude_tui_transcript_until_done(
                 &hook_rx_for_probe,
                 &expected_session_id,
                 hook_events_after,
-                || {
-                    crate::services::provider::tmux_session_ready_for_input(
-                        &tmux_name_ready,
-                        &ProviderKind::Claude,
-                    )
-                },
+                || claude_tui_transcript_turn_is_idle(&transcript_path_for_ready),
             )
         },
     );
+    if let Some(early_result) = wait_for_claude_tui_transcript_file(
+        transcript_path,
+        start_offset,
+        cancel_token.as_deref(),
+        tmux_session_name,
+    )? {
+        return Ok(early_result);
+    }
     let result =
         read_output_file_until_result(transcript_path, start_offset, sender, cancel_token, probe);
     log_claude_tui_hook_relay_failures(&expected_session_id_for_result);
     result
+}
+
+#[cfg(unix)]
+fn claude_tui_transcript_turn_is_idle(transcript_path: &std::path::Path) -> bool {
+    crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(transcript_path)
+        == crate::services::tui_turn_state::TuiTurnState::Idle
+}
+
+#[cfg(unix)]
+fn wait_for_claude_tui_transcript_file(
+    transcript_path: &str,
+    start_offset: u64,
+    cancel_token: Option<&CancelToken>,
+    tmux_session_name: &str,
+) -> Result<Option<ReadOutputResult>, String> {
+    wait_for_claude_tui_transcript_file_inner(
+        transcript_path,
+        start_offset,
+        cancel_token,
+        tmux_session_name,
+        CLAUDE_TUI_TRANSCRIPT_INITIAL_WAIT_TIMEOUT,
+        || std::fs::metadata(transcript_path).is_ok(),
+        || tmux_session_has_live_pane(tmux_session_name),
+        || crate::services::claude_tui::input::prompt_readiness_snapshot(tmux_session_name),
+    )
+}
+
+#[cfg(unix)]
+fn wait_for_claude_tui_transcript_file_inner<Exists, Alive, Snapshot>(
+    transcript_path: &str,
+    start_offset: u64,
+    cancel_token: Option<&CancelToken>,
+    tmux_session_name: &str,
+    timeout: Duration,
+    mut exists: Exists,
+    mut alive: Alive,
+    mut snapshot: Snapshot,
+) -> Result<Option<ReadOutputResult>, String>
+where
+    Exists: FnMut() -> bool,
+    Alive: FnMut() -> bool,
+    Snapshot: FnMut() -> crate::services::claude_tui::input::PromptReadinessSnapshot,
+{
+    if exists() {
+        return Ok(None);
+    }
+
+    let started_at = std::time::Instant::now();
+    let mut wait_interval = Duration::from_millis(10);
+    loop {
+        if cancel_requested(cancel_token) {
+            return Ok(Some(ReadOutputResult::Cancelled {
+                offset: start_offset,
+            }));
+        }
+        if exists() {
+            return Ok(None);
+        }
+        if !alive() {
+            return Ok(Some(ReadOutputResult::SessionDied {
+                offset: start_offset,
+            }));
+        }
+        if started_at.elapsed() >= timeout {
+            let snapshot = snapshot();
+            tracing::warn!(
+                tmux_session_name = %tmux_session_name,
+                transcript_path = %transcript_path,
+                timeout_secs = timeout.as_secs(),
+                prompt_marker_detected = snapshot.prompt_marker_detected,
+                prompt_draft_detected = snapshot.prompt_draft_detected,
+                tmux_pane_alive = snapshot.tmux_pane_alive,
+                capture_available = snapshot.capture_available,
+                pane_tail = %snapshot.pane_tail,
+                "claude_tui transcript file did not appear after prompt submission"
+            );
+            return Err(format!(
+                "timeout waiting for claude tui transcript file after {}s; capture_available={}; prompt_marker_detected={}; prompt_draft_detected={}",
+                timeout.as_secs(),
+                snapshot.capture_available,
+                snapshot.prompt_marker_detected,
+                snapshot.prompt_draft_detected
+            ));
+        }
+        std::thread::sleep(wait_interval);
+        wait_interval = std::cmp::min(
+            Duration::from_millis((wait_interval.as_millis() as f64 * 1.5) as u64),
+            CLAUDE_TUI_TRANSCRIPT_INITIAL_WAIT_MAX_INTERVAL,
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -2674,7 +2923,7 @@ mod claude_tui_ready_probe_tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
-    fn ready_probe_uses_tmux_fallback_when_stop_hook_is_missing() {
+    fn ready_probe_uses_fallback_when_stop_hook_is_missing() {
         let (_tx, rx) = tokio::sync::broadcast::channel(4);
         let hook_rx = Mutex::new(rx);
         let stop_seen = AtomicBool::new(false);
@@ -2687,6 +2936,24 @@ mod claude_tui_ready_probe_tests {
             || true
         ));
         assert!(!stop_seen.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn claude_tui_transcript_idle_helper_uses_jsonl_turn_state() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#,
+        )
+        .unwrap();
+        assert!(!claude_tui_transcript_turn_is_idle(file.path()));
+
+        std::fs::write(
+            file.path(),
+            r#"{"type":"system","subtype":"turn_duration","sessionId":"s"}"#,
+        )
+        .unwrap();
+        assert!(claude_tui_transcript_turn_is_idle(file.path()));
     }
 
     #[test]
@@ -2971,6 +3238,10 @@ fn execute_streaming_local_tmux(
     std::fs::write(&prompt_path, prompt)
         .map_err(|e| format!("Failed to write prompt file: {}", e))?;
     write_tmux_owner_marker(tmux_session_name)?;
+    crate::services::tmux_common::write_tmux_runtime_kind_marker(
+        tmux_session_name,
+        crate::services::agent_protocol::RuntimeHandoffKind::LegacyTmuxWrapper,
+    )?;
 
     // Get paths
     let exe =
@@ -3631,6 +3902,107 @@ mod local_tmux_lifecycle_tests {
     }
 
     #[test]
+    fn claude_tui_transcript_wait_returns_ready_when_file_exists() {
+        let snapshot = crate::services::claude_tui::input::PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: String::new(),
+        };
+        let result = wait_for_claude_tui_transcript_file_inner(
+            "/tmp/agentdesk-existing-transcript.jsonl",
+            7,
+            None,
+            "claude-tui-test",
+            Duration::from_millis(1),
+            || true,
+            || true,
+            || snapshot.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn claude_tui_transcript_wait_returns_session_died_before_timeout() {
+        let snapshot = crate::services::claude_tui::input::PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: false,
+            tmux_pane_alive: false,
+            capture_available: true,
+            pane_tail: String::new(),
+        };
+        let result = wait_for_claude_tui_transcript_file_inner(
+            "/tmp/agentdesk-missing-transcript.jsonl",
+            9,
+            None,
+            "claude-tui-test",
+            Duration::from_secs(10),
+            || false,
+            || false,
+            || snapshot.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(result, Some(ReadOutputResult::SessionDied { offset: 9 }));
+    }
+
+    #[test]
+    fn claude_tui_transcript_wait_respects_cancel_token() {
+        let token = CancelToken::new();
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let snapshot = crate::services::claude_tui::input::PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: String::new(),
+        };
+        let result = wait_for_claude_tui_transcript_file_inner(
+            "/tmp/agentdesk-missing-transcript.jsonl",
+            11,
+            Some(&token),
+            "claude-tui-test",
+            Duration::from_secs(10),
+            || false,
+            || true,
+            || snapshot.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(result, Some(ReadOutputResult::Cancelled { offset: 11 }));
+    }
+
+    #[test]
+    fn claude_tui_transcript_wait_timeout_uses_tui_error_prefix() {
+        let snapshot = crate::services::claude_tui::input::PromptReadinessSnapshot {
+            prompt_marker_detected: true,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "ready".to_string(),
+        };
+        let error = wait_for_claude_tui_transcript_file_inner(
+            "/tmp/agentdesk-missing-transcript.jsonl",
+            13,
+            None,
+            "claude-tui-test",
+            Duration::ZERO,
+            || false,
+            || true,
+            || snapshot.clone(),
+        )
+        .unwrap_err();
+
+        assert!(error.starts_with("timeout waiting for claude tui transcript file"));
+        assert!(crate::services::claude_tui::input::is_prompt_ready_timeout_error(&error));
+    }
+
+    #[test]
     fn claude_tui_turn_lock_serializes_same_tmux_session() {
         let session_name = format!("claude-tui-lock-{}", uuid::Uuid::new_v4());
         let first_lock = claude_tui_session_turn_lock(&session_name);
@@ -3733,6 +4105,30 @@ mod claude_tui_session_resolution_tests {
     }
 
     #[test]
+    fn stranded_draft_recreate_forces_non_resume_session() {
+        let cwd = tempfile::tempdir().unwrap();
+        let claude_home = tempfile::tempdir().unwrap();
+        let stale_session_id = uuid::Uuid::new_v4().to_string();
+        let stale_transcript =
+            crate::services::claude_tui::transcript_tail::claude_transcript_path(
+                cwd.path(),
+                &stale_session_id,
+                Some(claude_home.path()),
+            )
+            .unwrap();
+        std::fs::create_dir_all(stale_transcript.parent().unwrap()).unwrap();
+        std::fs::write(&stale_transcript, "old transcript").unwrap();
+
+        let resolution =
+            fresh_claude_tui_session_resolution(cwd.path(), Some(claude_home.path())).unwrap();
+
+        assert!(!resolution.resume);
+        assert_ne!(resolution.session_id, stale_session_id);
+        assert_ne!(resolution.transcript_path, stale_transcript);
+        assert!(uuid::Uuid::parse_str(&resolution.session_id).is_ok());
+    }
+
+    #[test]
     fn forced_fresh_resolution_still_skips_existing_transcript_bytes() {
         let cwd = tempfile::tempdir().unwrap();
         let claude_home = tempfile::tempdir().unwrap();
@@ -3773,7 +4169,7 @@ mod claude_tui_session_resolution_tests {
             prompt_draft_detected: true,
             tmux_pane_alive: true,
             capture_available: true,
-            pane_tail: "draft".to_string(),
+            pane_tail: "❯ stranded draft".to_string(),
         };
 
         assert_eq!(
@@ -3823,6 +4219,59 @@ mod claude_tui_session_resolution_tests {
     }
 
     #[test]
+    fn response_residue_draft_heuristic_does_not_recreate_claude_tui() {
+        let transcript_dir = tempfile::tempdir().unwrap();
+        let transcript_path = transcript_dir.path().join("session.jsonl");
+        std::fs::write(
+            &transcript_path,
+            r#"{"type":"system","subtype":"turn_duration","session_id":"s"}"#,
+        )
+        .unwrap();
+        let snapshot = crate::services::claude_tui::input::PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "계획만 적고 보류 — 1개\n  CLAUDE.md: 1, MCP: 2 │ Tools: 5 done".to_string(),
+        };
+
+        assert_eq!(
+            claude_tui_followup_stranded_prompt_draft_state(&snapshot, &transcript_path),
+            None
+        );
+    }
+
+    #[test]
+    fn idle_suggestion_prompt_does_not_recreate_claude_tui() {
+        let transcript_dir = tempfile::tempdir().unwrap();
+        let transcript_path = transcript_dir.path().join("session.jsonl");
+        std::fs::write(
+            &transcript_path,
+            r#"{"type":"system","subtype":"turn_duration","session_id":"s"}"#,
+        )
+        .unwrap();
+        let snapshot = crate::services::claude_tui::input::PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "\
+✻ Worked for 2s
+────────────────────────────────────────────────────────────────────────────
+❯\u{00a0}좋아, 잘 동작하네
+────────────────────────────────────────────────────────────────────────────
+  CLAUDE.md: 1, MCP: 2 │ Tools: 0 done
+  ⏵⏵ bypass permissions on"
+                .to_string(),
+        };
+
+        assert_eq!(
+            claude_tui_followup_stranded_prompt_draft_state(&snapshot, &transcript_path),
+            None
+        );
+    }
+
+    #[test]
     fn unknown_transcript_with_prompt_marker_and_draft_reaches_recovery() {
         let snapshot = crate::services::claude_tui::input::PromptReadinessSnapshot {
             prompt_marker_detected: true,
@@ -3838,6 +4287,47 @@ mod claude_tui_session_resolution_tests {
         );
 
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn unknown_transcript_quiescent_draft_can_recreate_hosted_tui() {
+        let quiescent = crate::services::claude_tui::input::PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "⏺ marker\n\n✻ Baked for 13s\n\n❯ stale draft\n  🤖 Opus(H) │ Tools: 1 done"
+                .to_string(),
+        };
+        assert!(claude_tui_unknown_transcript_draft_recreate_allowed(
+            &quiescent
+        ));
+
+        let active = crate::services::claude_tui::input::PromptReadinessSnapshot {
+            pane_tail: "❯ draft\n  Thinking... Esc to interrupt".to_string(),
+            ..quiescent
+        };
+        assert!(!claude_tui_unknown_transcript_draft_recreate_allowed(
+            &active
+        ));
+    }
+
+    #[test]
+    fn warm_followup_continues_after_prompt_draft_clear() {
+        let normal = claude_tui_warm_followup_submit_plan(false, false);
+        assert!(normal.submit_existing_session);
+        assert!(normal.recheck_busy_before_submit);
+
+        let draft_cleared = claude_tui_warm_followup_submit_plan(false, true);
+        assert!(draft_cleared.submit_existing_session);
+        assert!(
+            !draft_cleared.recheck_busy_before_submit,
+            "cleared draft must proceed to prompt submission instead of skipping warm follow-up"
+        );
+
+        let recreate = claude_tui_warm_followup_submit_plan(true, false);
+        assert!(!recreate.submit_existing_session);
+        assert!(recreate.recheck_busy_before_submit);
     }
 }
 
@@ -3972,6 +4462,8 @@ mod tests {
         assert!(is_valid_session_id("abc123"));
         assert!(is_valid_session_id("session-1"));
         assert!(is_valid_session_id("session_2"));
+        assert!(is_valid_session_id("session.3"));
+        assert!(is_valid_session_id("session:4"));
         assert!(is_valid_session_id("ABC-XYZ_123"));
         assert!(is_valid_session_id("a")); // Single char
     }
@@ -4002,7 +4494,9 @@ mod tests {
         assert!(!is_valid_session_id("session\0null"));
         assert!(!is_valid_session_id("path/traversal"));
         assert!(!is_valid_session_id("session with space"));
-        assert!(!is_valid_session_id("session.dot"));
+        assert!(!is_valid_session_id("-config"));
+        assert!(!is_valid_session_id("--resume-session-id"));
+        assert!(!is_valid_session_id("_leading_underscore"));
         assert!(!is_valid_session_id("session@email"));
     }
 

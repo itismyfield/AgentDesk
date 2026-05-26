@@ -10,6 +10,7 @@ fn read_trimmed_token(path: &Path) -> Option<String> {
     if trimmed.is_empty() {
         None
     } else {
+        crate::utils::redact::register_known_secret(&trimmed);
         Some(trimmed)
     }
 }

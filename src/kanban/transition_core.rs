@@ -10,9 +10,191 @@ use super::transition_cleanup::{
     execute_allowed_cleanup_on_pg_tx,
 };
 use crate::db::Db;
+use crate::dispatch::DispatchCreateOptions;
 use crate::engine::PolicyEngine;
 use anyhow::Result;
+use serde_json::json;
 use sqlx::Row as SqlxRow;
+
+fn state_enters_review(pipeline: &crate::pipeline::PipelineConfig, status: &str) -> bool {
+    pipeline
+        .hooks_for_state(status)
+        .is_some_and(|hooks| hooks.on_enter.iter().any(|name| name == "OnReviewEnter"))
+}
+
+async fn ensure_review_dispatch_after_review_enter_pg(
+    pg_pool: &sqlx::PgPool,
+    pipeline: &crate::pipeline::PipelineConfig,
+    card_id: &str,
+    source: Option<&str>,
+) -> Result<()> {
+    let Some(row) = sqlx::query(
+        "SELECT status,
+                assigned_agent_id,
+                COALESCE(review_round, 0)::bigint AS review_round
+         FROM kanban_cards
+         WHERE id = $1",
+    )
+    .bind(card_id)
+    .fetch_optional(pg_pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("reload review-enter card {card_id}: {error}"))?
+    else {
+        return Ok(());
+    };
+
+    let status: String = row
+        .try_get("status")
+        .map_err(|error| anyhow::anyhow!("decode review-enter status for {card_id}: {error}"))?;
+    if !state_enters_review(pipeline, &status) {
+        return Ok(());
+    }
+
+    let assigned_agent_id: Option<String> = row.try_get("assigned_agent_id").map_err(|error| {
+        anyhow::anyhow!("decode review-enter assigned_agent_id for {card_id}: {error}")
+    })?;
+    let Some(assigned_agent_id) = assigned_agent_id.filter(|agent_id| !agent_id.trim().is_empty())
+    else {
+        return Ok(());
+    };
+
+    let (has_review_dispatch, has_active_work): (bool, bool) = sqlx::query_as(
+        "SELECT
+            EXISTS (
+                SELECT 1
+                FROM task_dispatches
+                WHERE kanban_card_id = $1
+                  AND dispatch_type IN ('review', 'review-decision')
+                  AND status IN ('pending', 'dispatched')
+            ) AS has_review_dispatch,
+            EXISTS (
+                SELECT 1
+                FROM task_dispatches
+                WHERE kanban_card_id = $1
+                  AND dispatch_type IN ('implementation', 'rework')
+                  AND status IN ('pending', 'dispatched')
+            ) AS has_active_work",
+    )
+    .bind(card_id)
+    .fetch_one(pg_pool)
+    .await
+    .map_err(|error| {
+        anyhow::anyhow!("load review-enter dispatch gap state for {card_id}: {error}")
+    })?;
+
+    if has_review_dispatch || has_active_work {
+        return Ok(());
+    }
+
+    let mut review_round: i64 = row.try_get("review_round").map_err(|error| {
+        anyhow::anyhow!("decode review-enter review_round for {card_id}: {error}")
+    })?;
+    if review_round < 1 {
+        review_round = 1;
+    }
+
+    sqlx::query(
+        "UPDATE kanban_cards
+         SET review_status = 'reviewing',
+             review_round = $2,
+             review_entered_at = COALESCE(review_entered_at, NOW()),
+             blocked_reason = NULL,
+             updated_at = NOW()
+         WHERE id = $1
+           AND status = $3",
+    )
+    .bind(card_id)
+    .bind(review_round)
+    .bind(&status)
+    .execute(pg_pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("prime review-enter card state for {card_id}: {error}"))?;
+
+    sqlx::query(
+        "INSERT INTO card_review_state (
+            card_id,
+            state,
+            review_round,
+            review_entered_at,
+            updated_at
+         ) VALUES (
+            $1,
+            'reviewing',
+            $2,
+            NOW(),
+            NOW()
+         )
+         ON CONFLICT(card_id) DO UPDATE SET
+            state = 'reviewing',
+            review_round = EXCLUDED.review_round,
+            review_entered_at = COALESCE(card_review_state.review_entered_at, EXCLUDED.review_entered_at),
+            pending_dispatch_id = NULL,
+            updated_at = NOW()",
+    )
+    .bind(card_id)
+    .bind(review_round)
+    .execute(pg_pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("sync review-enter state for {card_id}: {error}"))?;
+
+    let parent_dispatch_id: Option<String> = sqlx::query_scalar(
+        "SELECT id
+         FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND dispatch_type IN ('implementation', 'rework')
+           AND status = 'completed'
+         ORDER BY COALESCE(completed_at, updated_at) DESC, id DESC
+         LIMIT 1",
+    )
+    .bind(card_id)
+    .fetch_optional(pg_pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("load review-enter parent dispatch for {card_id}: {error}"))?;
+
+    let mut context = json!({
+        "review_dispatch_recovery": "missing_after_review_enter",
+        "source": source.unwrap_or("transition"),
+    });
+    if let Some(parent_dispatch_id) = parent_dispatch_id
+        && let Some(obj) = context.as_object_mut()
+    {
+        obj.insert("parent_dispatch_id".to_string(), json!(parent_dispatch_id));
+    }
+
+    let title = format!("[Review R{review_round}] {card_id}");
+    match crate::dispatch::create_dispatch_core_with_options(
+        pg_pool,
+        card_id,
+        &assigned_agent_id,
+        "review",
+        &title,
+        &context,
+        DispatchCreateOptions::default(),
+    )
+    .await
+    {
+        Ok((dispatch_id, _, reused)) => {
+            tracing::warn!(
+                card_id,
+                dispatch_id,
+                reused,
+                "[kanban] review-enter guard created missing review dispatch after OnReviewEnter"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                card_id,
+                %error,
+                "[kanban] review-enter guard failed to create missing review dispatch"
+            );
+            return Err(anyhow::anyhow!(
+                "review-enter guard failed to create missing review dispatch for {card_id}: {error}"
+            ));
+        }
+    }
+
+    Ok(())
+}
 
 async fn transition_status_with_opts_pg_inner(
     db: Option<&Db>,
@@ -84,13 +266,36 @@ async fn transition_status_with_opts_pg_inner(
         resolve_pipeline_with_pg(pg_pool, card_repo_id.as_deref(), card_agent_id.as_deref())
             .await?;
 
+    let transition_rule = effective.find_transition(&old_status, new_status);
+    let is_review_enter = state_enters_review(&effective, new_status);
+    let active_gate_allows_completed_work = is_review_enter
+        && transition_rule.is_some_and(|transition| {
+            transition.gates.iter().any(|gate_name| {
+                effective
+                    .gates
+                    .get(gate_name.as_str())
+                    .is_some_and(|gate| gate.check.as_deref() == Some("has_active_dispatch"))
+            })
+        });
+
     let has_active_dispatch = sqlx::query_scalar::<_, bool>(
         "SELECT COUNT(*) > 0
          FROM task_dispatches
          WHERE kanban_card_id = $1
-           AND status IN ('pending', 'dispatched')",
+           AND (
+                status IN ('pending', 'dispatched')
+                OR (
+                    $2::text IS NOT NULL
+                    AND id = $2::text
+                    AND status = 'completed'
+                    AND dispatch_type IN ('implementation', 'rework')
+                    AND $3::boolean
+                )
+           )",
     )
     .bind(card_id)
+    .bind(latest_dispatch_id.as_deref())
+    .bind(active_gate_allows_completed_work)
     .fetch_one(pg_pool)
     .await
     .map_err(|error| anyhow::anyhow!("load active dispatch gate for {card_id}: {error}"))?;
@@ -282,6 +487,10 @@ async fn transition_status_with_opts_pg_inner(
         new_status,
         Some(source),
     );
+    if is_review_enter {
+        ensure_review_dispatch_after_review_enter_pg(pg_pool, &effective, card_id, Some(source))
+            .await?;
+    }
 
     if effective.is_terminal(new_status)
         && record_true_negative_if_pass_with_backends(db, Some(pg_pool), card_id)
@@ -435,6 +644,36 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
+    async fn attach_completed_work_target_pg(pool: &sqlx::PgPool, dispatch_id: &str) -> String {
+        let reviewed_commit =
+            crate::services::platform::git_head_commit(env!("CARGO_MANIFEST_DIR"))
+                .expect("repo head commit");
+        sqlx::query(
+            "UPDATE task_dispatches
+             SET result = $1::jsonb,
+                 context = $2::jsonb,
+                 completed_at = NOW()
+             WHERE id = $3",
+        )
+        .bind(
+            json!({
+                "completed_commit": reviewed_commit,
+            })
+            .to_string(),
+        )
+        .bind(
+            json!({
+                "target_repo": env!("CARGO_MANIFEST_DIR"),
+            })
+            .to_string(),
+        )
+        .bind(dispatch_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        reviewed_commit
+    }
+
     #[tokio::test]
     async fn completed_dispatch_only_does_not_authorize_transition_pg() {
         let pg_db = KanbanPgDatabase::create().await;
@@ -460,6 +699,147 @@ mod tests {
         assert!(
             err.contains("active dispatch"),
             "error should mention active dispatch"
+        );
+        pg_db.close_pool_and_drop(pool).await;
+    }
+
+    #[tokio::test]
+    async fn latest_completed_work_dispatch_authorizes_review_entry_pg() {
+        let pg_db = KanbanPgDatabase::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_card_pg(&pool, "card-completed-review-entry", "in_progress").await;
+        seed_dispatch_with_type_pg(
+            &pool,
+            "dispatch-completed-review-entry",
+            "card-completed-review-entry",
+            "implementation",
+            "completed",
+        )
+        .await;
+        attach_completed_work_target_pg(&pool, "dispatch-completed-review-entry").await;
+        sqlx::query(
+            "UPDATE kanban_cards
+             SET latest_dispatch_id = 'dispatch-completed-review-entry'
+             WHERE id = 'card-completed-review-entry'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let result = transition_status_with_opts_pg_only(
+            &pool,
+            &engine,
+            "card-completed-review-entry",
+            "review",
+            "system",
+            crate::engine::transition::ForceIntent::None,
+        )
+        .await;
+
+        if let Err(error) = &result {
+            panic!(
+                "latest completed implementation dispatch should authorize review entry: {error:#}"
+            );
+        }
+        let (status, review_entered_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
+            sqlx::query_as(
+                "SELECT status, review_entered_at
+                 FROM kanban_cards
+                 WHERE id = 'card-completed-review-entry'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "review");
+        assert!(
+            review_entered_at.is_some(),
+            "OnReviewEnter should stamp review_entered_at"
+        );
+        let (review_dispatch_count, latest_dispatch_type): (i64, Option<String>) = sqlx::query_as(
+            "SELECT
+                    COUNT(*) FILTER (
+                        WHERE td.dispatch_type = 'review'
+                          AND td.status IN ('pending', 'dispatched')
+                    )::bigint,
+                    latest.dispatch_type
+                 FROM kanban_cards kc
+                 LEFT JOIN task_dispatches td
+                   ON td.kanban_card_id = kc.id
+                 LEFT JOIN task_dispatches latest
+                   ON latest.id = kc.latest_dispatch_id
+                 WHERE kc.id = 'card-completed-review-entry'
+                 GROUP BY latest.dispatch_type",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            review_dispatch_count, 1,
+            "OnReviewEnter should create one active review dispatch"
+        );
+        assert_eq!(latest_dispatch_type.as_deref(), Some("review"));
+        pg_db.close_pool_and_drop(pool).await;
+    }
+
+    #[tokio::test]
+    async fn review_enter_guard_creates_dispatch_when_hook_does_not_materialize_pg() {
+        let pg_db = KanbanPgDatabase::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let policies_dir = TempDir::new().unwrap();
+        let engine = test_engine_with_pg_and_dir(pool.clone(), policies_dir.path());
+        seed_card_pg(&pool, "card-review-guard", "in_progress").await;
+        seed_dispatch_with_type_pg(
+            &pool,
+            "dispatch-review-guard-parent",
+            "card-review-guard",
+            "implementation",
+            "completed",
+        )
+        .await;
+        attach_completed_work_target_pg(&pool, "dispatch-review-guard-parent").await;
+        sqlx::query(
+            "UPDATE kanban_cards
+             SET latest_dispatch_id = 'dispatch-review-guard-parent'
+             WHERE id = 'card-review-guard'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let result = transition_status_with_opts_pg_only(
+            &pool,
+            &engine,
+            "card-review-guard",
+            "review",
+            "system",
+            crate::engine::transition::ForceIntent::None,
+        )
+        .await;
+
+        if let Err(error) = &result {
+            panic!("review-enter guard should create a missing review dispatch: {error:#}");
+        }
+        let (review_dispatch_count, recovery_marker): (i64, Option<String>) = sqlx::query_as(
+            "SELECT
+                    COUNT(*) FILTER (
+                        WHERE dispatch_type = 'review'
+                          AND status IN ('pending', 'dispatched')
+                    )::bigint,
+                    MAX(context::jsonb ->> 'review_dispatch_recovery')
+                 FROM task_dispatches
+                 WHERE kanban_card_id = 'card-review-guard'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            review_dispatch_count, 1,
+            "guard must create one active review dispatch when OnReviewEnter does not"
+        );
+        assert_eq!(
+            recovery_marker.as_deref(),
+            Some("missing_after_review_enter")
         );
         pg_db.close_pool_and_drop(pool).await;
     }

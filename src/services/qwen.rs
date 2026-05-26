@@ -1,5 +1,4 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use regex::Regex;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Read, Write};
@@ -7,12 +6,11 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::Duration;
 use uuid::Uuid;
 
-use crate::services::agent_protocol::StreamMessage;
+use crate::services::agent_protocol::{StreamMessage, is_valid_session_id};
 use crate::services::claude;
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
@@ -1148,6 +1146,19 @@ fn remote_profile_not_supported_message() -> String {
     "NotSupported: Qwen provider does not support remote execution yet. Remove `remote_profile` or use a provider with remote support.".to_string()
 }
 
+fn validated_resume_session_id(session_id: Option<&str>) -> Result<Option<&str>, String> {
+    let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if !is_valid_session_id(session_id) {
+        return Err(
+            "InvalidArgument: Qwen session_id must use a resumable token produced by the CLI"
+                .to_string(),
+        );
+    }
+    Ok(Some(session_id))
+}
+
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn execute_streaming_local_tmux(
@@ -1163,6 +1174,7 @@ fn execute_streaming_local_tmux(
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
 ) -> Result<(), String> {
+    let resume_session_id = validated_resume_session_id(session_id)?;
     let output_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
     let input_fifo_path =
         crate::services::tmux_common::session_temp_path(tmux_session_name, "input");
@@ -1301,9 +1313,7 @@ fn execute_streaming_local_tmux(
             .filter(|value| !value.is_empty())
             .map(|value| format!(" \\\n  --qwen-model {}", shell_escape(value)))
             .unwrap_or_default(),
-        resume_arg = session_id
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+        resume_arg = resume_session_id
             .map(|value| format!(" \\\n  --resume-session-id {}", shell_escape(value)))
             .unwrap_or_default(),
         core_tool_args = allowed_core_tools
@@ -1586,6 +1596,7 @@ fn execute_streaming_local_process(
 ) -> Result<(), String> {
     use crate::services::session_backend::{ProcessBackend, SessionBackend, SessionConfig};
 
+    let resume_session_id = validated_resume_session_id(session_id)?;
     let output_path = format!(
         "{}/agentdesk-{}.jsonl",
         std::env::temp_dir().display(),
@@ -1660,7 +1671,7 @@ fn execute_streaming_local_process(
                 args.push("--qwen-model".to_string());
                 args.push(model.to_string());
             }
-            if let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) {
+            if let Some(session_id) = resume_session_id {
                 args.push("--resume-session-id".to_string());
                 args.push(session_id.to_string());
             }
@@ -1963,15 +1974,6 @@ fn expand_home_dir(path: &str) -> PathBuf {
         }
     }
     PathBuf::from(path)
-}
-
-fn is_valid_session_id(session_id: &str) -> bool {
-    static SESSION_ID_RE: OnceLock<Regex> = OnceLock::new();
-    !session_id.is_empty()
-        && session_id.len() <= 128
-        && SESSION_ID_RE
-            .get_or_init(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$").unwrap())
-            .is_match(session_id)
 }
 
 fn track_session_id(state: &mut QwenAttemptState, session_id: Option<&str>) {
@@ -2505,6 +2507,18 @@ mod tests {
                 normalize_resume_strategy(None, working_dir.path().to_str().unwrap()).unwrap(),
                 QwenResumeStrategy::Fresh
             ));
+        });
+    }
+
+    #[test]
+    fn normalize_resume_strategy_rejects_flag_like_session_id() {
+        with_temp_qwen_home(|_temp_home, working_dir| {
+            let error = normalize_resume_strategy(
+                Some("--resume-session-id"),
+                working_dir.path().to_str().unwrap(),
+            )
+            .unwrap_err();
+            assert!(error.contains("InvalidArgument"));
         });
     }
 

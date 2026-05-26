@@ -14,11 +14,16 @@ static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("./migrations/postgres");
 const LEGACY_AGENT_PREFIX: &str = "openclaw-";
 const DEFAULT_PG_ACQUIRE_TIMEOUT_SECS: u64 = 3;
 const STARTUP_PG_ACQUIRE_TIMEOUT_SECS: u64 = 60;
+const DEFAULT_PG_IDLE_TIMEOUT_SECS: u64 = 5 * 60;
+const DEFAULT_PG_MAX_LIFETIME_SECS: u64 = 30 * 60;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PoolConnectSettings {
     max_connections: u32,
     acquire_timeout: Duration,
+    idle_timeout: Duration,
+    max_lifetime: Duration,
+    test_before_acquire: bool,
 }
 
 /// Session-scoped PostgreSQL advisory lock lease.
@@ -108,9 +113,12 @@ pub fn connect_options(config: &Config) -> Result<Option<PgConnectOptions>, Stri
     }
 
     if let Some(url) = database_url_override() {
-        return PgConnectOptions::from_str(&url)
-            .map(Some)
-            .map_err(|error| format!("parse DATABASE_URL: {error}"));
+        return PgConnectOptions::from_str(&url).map(Some).map_err(|error| {
+            format!(
+                "parse DATABASE_URL {}: {error}",
+                crate::utils::redact::mask_dsn_password(&url)
+            )
+        });
     }
 
     let mut options = PgConnectOptions::new()
@@ -128,6 +136,9 @@ fn runtime_pool_settings(config: &Config) -> PoolConnectSettings {
     PoolConnectSettings {
         max_connections: config.database.pool_max.max(1),
         acquire_timeout: Duration::from_secs(DEFAULT_PG_ACQUIRE_TIMEOUT_SECS),
+        idle_timeout: Duration::from_secs(DEFAULT_PG_IDLE_TIMEOUT_SECS),
+        max_lifetime: Duration::from_secs(DEFAULT_PG_MAX_LIFETIME_SECS),
+        test_before_acquire: true,
     }
 }
 
@@ -136,6 +147,9 @@ fn startup_pool_settings(config: &Config) -> PoolConnectSettings {
     PoolConnectSettings {
         max_connections: steady_max.saturating_mul(3).div_ceil(2).max(2),
         acquire_timeout: Duration::from_secs(STARTUP_PG_ACQUIRE_TIMEOUT_SECS),
+        idle_timeout: Duration::from_secs(DEFAULT_PG_IDLE_TIMEOUT_SECS),
+        max_lifetime: Duration::from_secs(DEFAULT_PG_MAX_LIFETIME_SECS),
+        test_before_acquire: true,
     }
 }
 
@@ -151,6 +165,9 @@ async fn connect_with_settings(
     let pool = PgPoolOptions::new()
         .max_connections(settings.max_connections)
         .acquire_timeout(settings.acquire_timeout)
+        .idle_timeout(settings.idle_timeout)
+        .max_lifetime(settings.max_lifetime)
+        .test_before_acquire(settings.test_before_acquire)
         .connect_with(options)
         .await
         .map_err(|error| format!("{context}: {error}"))?;
@@ -961,7 +978,8 @@ mod tests {
         AdvisoryLockLease, POSTGRES_MIGRATOR, STARTUP_PG_ACQUIRE_TIMEOUT_SECS, close_test_pool,
         config_database_summary, connect_options, connect_test_pool_and_migrate_config,
         create_test_database, database_enabled, database_summary, health_check,
-        run_test_postgres_sqlx_op_with_timeout, startup_pool_settings, startup_reseed,
+        run_test_postgres_sqlx_op_with_timeout, runtime_pool_settings, startup_pool_settings,
+        startup_reseed,
     };
     use sqlx::Row;
     use std::collections::BTreeMap;
@@ -1189,6 +1207,24 @@ mod tests {
             settings.acquire_timeout,
             Duration::from_secs(STARTUP_PG_ACQUIRE_TIMEOUT_SECS)
         );
+        assert_eq!(settings.idle_timeout, Duration::from_secs(5 * 60));
+        assert_eq!(settings.max_lifetime, Duration::from_secs(30 * 60));
+        assert!(settings.test_before_acquire);
+    }
+
+    #[test]
+    fn runtime_pool_settings_enable_dead_peer_detection() {
+        let mut config = crate::config::Config::default();
+        config.database.enabled = true;
+        config.database.pool_max = 5;
+
+        let settings = runtime_pool_settings(&config);
+
+        assert_eq!(settings.max_connections, 5);
+        assert_eq!(settings.acquire_timeout, Duration::from_secs(3));
+        assert_eq!(settings.idle_timeout, Duration::from_secs(5 * 60));
+        assert_eq!(settings.max_lifetime, Duration::from_secs(30 * 60));
+        assert!(settings.test_before_acquire);
     }
 
     #[tokio::test]

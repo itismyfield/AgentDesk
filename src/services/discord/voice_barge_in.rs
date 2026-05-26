@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -20,6 +22,7 @@ use crate::voice::commands::{
     wake_word_decision,
 };
 use crate::voice::config::DEFAULT_STT_LANGUAGE;
+use crate::voice::flight::{VoiceFlightEvent, VoiceFlightRoute, record_voice_flight_event};
 use crate::voice::progress;
 use crate::voice::runtime_boundary::VoiceRuntimeConfigSnapshot;
 use crate::voice::sanitizer::{foreground_spoken_only_with_limit, spoken_result_only_with_limit};
@@ -31,6 +34,8 @@ use crate::voice::tts::{
 use crate::voice::{CompletedUtterance, VoiceConfig, VoiceReceiveHook};
 
 use super::SharedData;
+#[cfg(test)]
+use super::voice_background_driver::{VoiceBackgroundDriverKind, VoiceBackgroundStartOutcome};
 use super::voice_background_driver::{
     VoiceBackgroundStartRequest, VoiceBackgroundTurnDriver, default_voice_announce_generation,
     select_voice_background_driver, voice_announce_delivery_id,
@@ -86,6 +91,7 @@ pub(in crate::services::discord) enum VoiceBargeInTranscriptOutcome {
     ExplicitStop {
         cancelled: bool,
         already_stopping: bool,
+        cancel_channel_id: u64,
     },
     IgnoredNoise,
     TranscriptUnavailable,
@@ -102,6 +108,59 @@ pub(in crate::services::discord) struct VoiceProgressEvent {
     pub label: String,
 }
 
+#[derive(Debug, Clone)]
+struct TranscribedVoiceUtterance {
+    text: String,
+    stt_mode: &'static str,
+    stt_latency_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct VoiceFlightUtteranceContext {
+    voice_channel_id: u64,
+    control_channel_id: Option<u64>,
+    user_id: u64,
+    utterance_id: String,
+    stt_mode: String,
+    stt_latency_ms: u64,
+    transcript_chars: usize,
+}
+
+impl VoiceFlightUtteranceContext {
+    fn from_utterance(
+        voice_channel_id: ChannelId,
+        utterance: &CompletedUtterance,
+        transcript: &str,
+        stt: &TranscribedVoiceUtterance,
+    ) -> Self {
+        Self {
+            voice_channel_id: voice_channel_id.get(),
+            control_channel_id: Some(
+                utterance
+                    .control_channel_id
+                    .unwrap_or(voice_channel_id.get()),
+            ),
+            user_id: utterance.user_id,
+            utterance_id: utterance.utterance_id.clone(),
+            stt_mode: stt.stt_mode.to_string(),
+            stt_latency_ms: stt.stt_latency_ms,
+            transcript_chars: transcript.chars().count(),
+        }
+    }
+
+    fn event(&self, route: VoiceFlightRoute) -> VoiceFlightEvent {
+        let mut event = VoiceFlightEvent::new(route);
+        event.voice_channel_id = Some(self.voice_channel_id);
+        event.control_channel_id = self.control_channel_id;
+        event.user_id = Some(self.user_id.to_string());
+        event.utterance_id = Some(self.utterance_id.clone());
+        event.stt_mode = Some(self.stt_mode.clone());
+        event.stt_latency_ms = Some(self.stt_latency_ms);
+        event.transcript_chars = Some(self.transcript_chars);
+        event
+    }
+}
+
 /// #2374 — return value from `dispatch_voice_background_handoff`. The
 /// caller needs both the dispatched `turn_id` (for tracing /
 /// follow-up cancellation) AND the handoff message id so it can key
@@ -111,6 +170,7 @@ pub(in crate::services::discord) struct VoiceProgressEvent {
 struct VoiceBackgroundHandoffOutcome {
     turn_id: String,
     handoff_message_id: Option<MessageId>,
+    correlation_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,6 +300,63 @@ enum VoiceForegroundDecision {
     Silence,
     HandoffBackground(String),
     Speak(String),
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TestVoiceBackgroundStart {
+    driver_kind: VoiceBackgroundDriverKind,
+    source_channel_id: ChannelId,
+    target_channel_id: ChannelId,
+    utterance_id: String,
+    summary: String,
+    message_content: String,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct VoiceBargeInTestState {
+    foreground_decisions: StdMutex<VecDeque<VoiceForegroundDecision>>,
+    background_result_summaries: StdMutex<VecDeque<Option<String>>>,
+    background_handoff_outcomes: StdMutex<VecDeque<Result<VoiceBackgroundStartOutcome, String>>>,
+    background_starts: StdMutex<Vec<TestVoiceBackgroundStart>>,
+    synth_requests: StdMutex<Vec<(u64, String, &'static str)>>,
+    play_requests: StdMutex<Vec<(u64, &'static str)>>,
+    force_synth_success: AtomicBool,
+}
+
+fn voice_flight_event_from_announcement(
+    route: VoiceFlightRoute,
+    source_channel_id: ChannelId,
+    target_channel_id: Option<ChannelId>,
+    announcement: &crate::voice::prompt::VoiceTranscriptAnnouncement,
+) -> VoiceFlightEvent {
+    let mut event = VoiceFlightEvent::new(route);
+    event.voice_channel_id = Some(source_channel_id.get());
+    event.control_channel_id = Some(
+        announcement
+            .control_channel_id
+            .unwrap_or(source_channel_id.get()),
+    );
+    event.background_channel_id = target_channel_id.map(|id| id.get());
+    event.user_id = Some(announcement.user_id.clone());
+    event.utterance_id = Some(announcement.utterance_id.clone());
+    event.stt_mode = announcement.stt_mode.clone();
+    event.stt_latency_ms = announcement.stt_latency_ms;
+    event.transcript_chars = Some(announcement.transcript.chars().count());
+    event
+}
+
+fn attach_foreground_flight_metadata(
+    event: &mut VoiceFlightEvent,
+    foreground: &EffectiveVoiceForegroundConfig,
+    foreground_latency_ms: u64,
+    decision: &'static str,
+) {
+    event.foreground_provider = Some(foreground.provider.clone());
+    event.foreground_model = Some(foreground.model.clone());
+    event.foreground_latency_ms = Some(foreground_latency_ms);
+    event.foreground_decision = Some(decision.to_string());
 }
 
 fn voice_lobby_accepts_source_channel(config: &VoiceConfig, channel_id: ChannelId) -> bool {
@@ -442,20 +559,27 @@ async fn generate_foreground_ack_text(
         }
     };
 
-    Some(parse_voice_foreground_decision(&text, language, max_chars))
+    Some(parse_voice_foreground_decision(
+        &text, transcript, language, max_chars,
+    ))
 }
 
 fn parse_voice_foreground_decision(
     text: &str,
+    transcript: &str,
     language: &str,
     max_chars: usize,
 ) -> VoiceForegroundDecision {
     let trimmed = text.trim();
-    if trimmed.eq_ignore_ascii_case(VOICE_SILENCE_MARKER) {
-        return VoiceForegroundDecision::Silence;
-    }
-    if let Some(summary) = parse_voice_background_handoff_summary(trimmed) {
-        return VoiceForegroundDecision::HandoffBackground(summary);
+    if let Some(marker_line) = first_voice_foreground_marker_candidate(trimmed) {
+        if marker_line.eq_ignore_ascii_case(VOICE_SILENCE_MARKER) {
+            return VoiceForegroundDecision::Silence;
+        }
+        if let Some(summary) =
+            parse_voice_background_handoff_summary(&marker_line, transcript, language, max_chars)
+        {
+            return VoiceForegroundDecision::HandoffBackground(summary);
+        }
     }
     let spoken = foreground_spoken_only_with_limit(trimmed, language, max_chars);
     if spoken.trim().is_empty() {
@@ -465,22 +589,140 @@ fn parse_voice_foreground_decision(
     }
 }
 
-fn parse_voice_background_handoff_summary(text: &str) -> Option<String> {
-    let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
-    let summary = line
-        .strip_prefix(VOICE_HANDOFF_BACKGROUND_MARKER)
-        .or_else(|| {
-            let marker_len = VOICE_HANDOFF_BACKGROUND_MARKER.len();
-            line.get(..marker_len)
-                .filter(|prefix| prefix.eq_ignore_ascii_case(VOICE_HANDOFF_BACKGROUND_MARKER))
-                .and_then(|_| line.get(marker_len..))
-        })?
-        .trim();
+fn first_voice_foreground_marker_candidate(text: &str) -> Option<String> {
+    let mut skipped_leading_fence = false;
+    for raw_line in text.lines() {
+        let line = strip_voice_marker_leading_wrappers(raw_line);
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Some(after_fence) = strip_code_fence_prefix(line) {
+            let after_fence = strip_voice_marker_trailing_wrappers(after_fence);
+            if starts_with_voice_foreground_marker(after_fence) {
+                return Some(after_fence.to_string());
+            }
+            if !skipped_leading_fence {
+                skipped_leading_fence = true;
+                continue;
+            }
+        }
+
+        return Some(strip_voice_marker_trailing_wrappers(line).to_string());
+    }
+    None
+}
+
+fn strip_voice_marker_leading_wrappers(mut line: &str) -> &str {
+    for _ in 0..8 {
+        let trimmed = line.trim();
+        let Some(first) = trimmed.chars().next() else {
+            return "";
+        };
+        if first == '>' {
+            line = &trimmed[first.len_utf8()..];
+            continue;
+        }
+        if let Some(rest) = ["- ", "* ", "+ "]
+            .iter()
+            .find_map(|prefix| trimmed.strip_prefix(prefix))
+        {
+            line = rest;
+            continue;
+        }
+        if matches!(first, '"' | '\'') {
+            let rest = trimmed[first.len_utf8()..].trim_start();
+            if starts_with_wrapped_voice_foreground_marker(rest)
+                || strip_code_fence_prefix(rest).is_some()
+            {
+                line = rest;
+                continue;
+            }
+        }
+        return trimmed;
+    }
+    line.trim()
+}
+
+fn strip_voice_marker_trailing_wrappers(mut line: &str) -> &str {
+    for _ in 0..4 {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed
+            .strip_suffix("```")
+            .or_else(|| trimmed.strip_suffix("~~~"))
+        {
+            line = rest;
+            continue;
+        }
+        if let Some(last) = trimmed.chars().last()
+            && matches!(last, '"' | '\'')
+        {
+            line = &trimmed[..trimmed.len() - last.len_utf8()];
+            continue;
+        }
+        return trimmed;
+    }
+    line.trim()
+}
+
+fn strip_code_fence_prefix(line: &str) -> Option<&str> {
+    line.strip_prefix("```")
+        .or_else(|| line.strip_prefix("~~~"))
+}
+
+fn starts_with_voice_foreground_marker(line: &str) -> bool {
+    line.eq_ignore_ascii_case(VOICE_SILENCE_MARKER)
+        || strip_ascii_case_prefix(line, VOICE_HANDOFF_BACKGROUND_MARKER).is_some()
+}
+
+fn starts_with_wrapped_voice_foreground_marker(line: &str) -> bool {
+    starts_with_voice_foreground_marker(strip_voice_marker_trailing_wrappers(line))
+}
+
+fn strip_ascii_case_prefix<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let candidate = text.get(..prefix.len())?;
+    candidate
+        .eq_ignore_ascii_case(prefix)
+        .then(|| &text[prefix.len()..])
+}
+
+fn parse_voice_background_handoff_summary(
+    marker_line: &str,
+    transcript: &str,
+    language: &str,
+    max_chars: usize,
+) -> Option<String> {
+    let summary = strip_ascii_case_prefix(marker_line, VOICE_HANDOFF_BACKGROUND_MARKER)?.trim();
     if summary.is_empty() {
-        None
+        Some(fallback_voice_background_handoff_summary(
+            transcript, language, max_chars,
+        ))
     } else {
         Some(summary.to_string())
     }
+}
+
+fn fallback_voice_background_handoff_summary(
+    transcript: &str,
+    language: &str,
+    max_chars: usize,
+) -> String {
+    let summary = foreground_spoken_only_with_limit(transcript, language, max_chars);
+    let summary = summary.trim();
+    if !summary.is_empty() && !contains_voice_foreground_marker(summary) {
+        return summary.to_string();
+    }
+    if language.trim().to_ascii_lowercase().starts_with("en") {
+        "User requested background work.".to_string()
+    } else {
+        "사용자가 백그라운드 작업을 요청함".to_string()
+    }
+}
+
+fn contains_voice_foreground_marker(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains(&VOICE_SILENCE_MARKER.to_ascii_lowercase())
+        || lower.contains(&VOICE_HANDOFF_BACKGROUND_MARKER.to_ascii_lowercase())
 }
 
 fn voice_background_handoff_ack(language: &str) -> &'static str {
@@ -887,6 +1129,8 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     // natural exit.
     inflight_foreground_cancels:
         dashmap::DashMap<u64, Vec<Arc<crate::services::provider::CancelToken>>>,
+    #[cfg(test)]
+    test_state: Arc<VoiceBargeInTestState>,
 }
 
 impl VoiceBargeInRuntime {
@@ -937,6 +1181,8 @@ impl VoiceBargeInRuntime {
             config_cache: std::sync::Mutex::new(None),
             alias_collision_signature: std::sync::Mutex::new(None),
             inflight_foreground_cancels: dashmap::DashMap::new(),
+            #[cfg(test)]
+            test_state: Arc::new(VoiceBargeInTestState::default()),
         }
     }
 
@@ -971,7 +1217,88 @@ impl VoiceBargeInRuntime {
             config_cache: std::sync::Mutex::new(None),
             alias_collision_signature: std::sync::Mutex::new(None),
             inflight_foreground_cancels: dashmap::DashMap::new(),
+            #[cfg(test)]
+            test_state: Arc::new(VoiceBargeInTestState::default()),
         }
+    }
+
+    async fn generate_foreground_ack_text_for_runtime(
+        &self,
+        transcript: &str,
+        language: &str,
+        foreground: &EffectiveVoiceForegroundConfig,
+        cancel_token: Arc<crate::services::provider::CancelToken>,
+    ) -> Option<VoiceForegroundDecision> {
+        #[cfg(test)]
+        if let Some(decision) = self
+            .test_state
+            .foreground_decisions
+            .lock()
+            .expect("voice test foreground decisions lock")
+            .pop_front()
+        {
+            return Some(decision);
+        }
+
+        generate_foreground_ack_text(transcript, language, foreground, cancel_token).await
+    }
+
+    async fn generate_voice_background_result_summary_for_runtime(
+        &self,
+        background_result: &str,
+        language: &str,
+        foreground: &EffectiveVoiceForegroundConfig,
+        cancel_token: Arc<crate::services::provider::CancelToken>,
+    ) -> Option<String> {
+        #[cfg(test)]
+        if let Some(summary) = self
+            .test_state
+            .background_result_summaries
+            .lock()
+            .expect("voice test background summaries lock")
+            .pop_front()
+        {
+            return summary;
+        }
+
+        generate_voice_background_result_summary(
+            background_result,
+            language,
+            foreground,
+            cancel_token,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    fn take_test_background_handoff_outcome(
+        &self,
+        driver_kind: VoiceBackgroundDriverKind,
+        source_channel_id: ChannelId,
+        target_channel_id: ChannelId,
+        announcement: &crate::voice::prompt::VoiceTranscriptAnnouncement,
+        summary: &str,
+        message_content: &str,
+    ) -> Option<Result<VoiceBackgroundStartOutcome, String>> {
+        let outcome = self
+            .test_state
+            .background_handoff_outcomes
+            .lock()
+            .expect("voice test background handoff outcomes lock")
+            .pop_front()?;
+        self.test_state
+            .background_starts
+            .lock()
+            .expect("voice test background starts lock")
+            .push(TestVoiceBackgroundStart {
+                driver_kind,
+                source_channel_id,
+                target_channel_id,
+                utterance_id: announcement.utterance_id.clone(),
+                summary: summary.to_string(),
+                message_content: message_content.to_string(),
+            });
+        Some(outcome)
     }
 
     pub(in crate::services::discord) fn enabled(&self) -> bool {
@@ -1667,13 +1994,14 @@ impl VoiceBargeInRuntime {
             .await;
         let cancel_token = Arc::new(crate::services::provider::CancelToken::new());
         self.register_inflight_foreground_cancel(voice_channel_id, cancel_token.clone());
-        let summary_result = generate_voice_background_result_summary(
-            background_result,
-            &language,
-            &foreground,
-            cancel_token.clone(),
-        )
-        .await;
+        let summary_result = self
+            .generate_voice_background_result_summary_for_runtime(
+                background_result,
+                &language,
+                &foreground,
+                cancel_token.clone(),
+            )
+            .await;
         self.unregister_inflight_foreground_cancel(voice_channel_id, &cancel_token);
         // #2250: if cancel won the race (e.g. user barge-in or guild
         // teardown), suppress fallback speech and skip TTS entirely.
@@ -2108,6 +2436,7 @@ impl VoiceBargeInRuntime {
                 VoiceBargeInTranscriptOutcome::ExplicitStop {
                     cancelled: result.token.is_some(),
                     already_stopping: result.already_stopping,
+                    cancel_channel_id: cancel_channel.get(),
                 }
             }
             ProcessingBargeInDecision::DeferPrompt(prompt) => {
@@ -2150,14 +2479,16 @@ impl VoiceBargeInRuntime {
         self.play_processing_chime(shared, source_channel_id).await;
         let cancel_token = Arc::new(crate::services::provider::CancelToken::new());
         self.register_inflight_foreground_cancel(source_channel_id, cancel_token.clone());
-        let decision = generate_foreground_ack_text(
-            &announcement.transcript,
-            &language,
-            &foreground,
-            cancel_token.clone(),
-        )
-        .await
-        .unwrap_or(VoiceForegroundDecision::Silence);
+        let decision = self
+            .generate_foreground_ack_text_for_runtime(
+                &announcement.transcript,
+                &language,
+                &foreground,
+                cancel_token.clone(),
+            )
+            .await
+            .unwrap_or(VoiceForegroundDecision::Silence);
+        let foreground_latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
 
         // Issue #2335 (c) — Codex round 2: keep the foreground cancel token
         // REGISTERED through every suppressible side effect (synth, play,
@@ -2185,6 +2516,28 @@ impl VoiceBargeInRuntime {
             token: cancel_token.clone(),
         };
 
+        let record_cancel_suppressed = |label: &'static str| {
+            let mut event = voice_flight_event_from_announcement(
+                VoiceFlightRoute::ExplicitStop,
+                source_channel_id,
+                Some(target_channel_id),
+                announcement,
+            );
+            attach_foreground_flight_metadata(
+                &mut event,
+                &foreground,
+                foreground_latency_ms,
+                "cancelled",
+            );
+            event.cancel_source = cancel_token
+                .cancel_source()
+                .or_else(|| Some(label.to_string()));
+            event.cancel_channel_id = Some(target_channel_id.get());
+            event.cancelled = Some(true);
+            event.reason = Some(label.to_string());
+            record_voice_flight_event(event);
+        };
+
         let log_cancel_suppressed = |label: &'static str| {
             tracing::info!(
                 source_channel_id = source_channel_id.get(),
@@ -2199,12 +2552,26 @@ impl VoiceBargeInRuntime {
 
         // First gate: cancel that arrived during ack generation.
         if cancel_token.cancelled.load(Ordering::Relaxed) {
+            record_cancel_suppressed("post_generation");
             log_cancel_suppressed("post_generation");
             return true;
         }
 
         match decision {
             VoiceForegroundDecision::Silence => {
+                let mut event = voice_flight_event_from_announcement(
+                    VoiceFlightRoute::ForegroundSilence,
+                    source_channel_id,
+                    Some(target_channel_id),
+                    announcement,
+                );
+                attach_foreground_flight_metadata(
+                    &mut event,
+                    &foreground,
+                    foreground_latency_ms,
+                    "silence",
+                );
+                record_voice_flight_event(event);
                 tracing::info!(
                     source_channel_id = source_channel_id.get(),
                     target_channel_id = target_channel_id.get(),
@@ -2217,6 +2584,7 @@ impl VoiceBargeInRuntime {
             }
             VoiceForegroundDecision::Speak(spoken) => {
                 if cancel_token.cancelled.load(Ordering::Relaxed) {
+                    record_cancel_suppressed("pre_speak_synth");
                     log_cancel_suppressed("pre_speak_synth");
                     return true;
                 }
@@ -2225,12 +2593,27 @@ impl VoiceBargeInRuntime {
                     .await
                 {
                     if cancel_token.cancelled.load(Ordering::Relaxed) {
+                        record_cancel_suppressed("post_speak_synth");
                         log_cancel_suppressed("post_speak_synth");
                         return true;
                     }
                     self.play_acknowledgement(shared, source_channel_id, path)
                         .await;
                 }
+                let mut event = voice_flight_event_from_announcement(
+                    VoiceFlightRoute::ForegroundSpeak,
+                    source_channel_id,
+                    Some(target_channel_id),
+                    announcement,
+                );
+                attach_foreground_flight_metadata(
+                    &mut event,
+                    &foreground,
+                    foreground_latency_ms,
+                    "speak",
+                );
+                event.tts_chars = Some(spoken.chars().count());
+                record_voice_flight_event(event);
                 tracing::info!(
                     source_channel_id = source_channel_id.get(),
                     target_channel_id = target_channel_id.get(),
@@ -2243,6 +2626,7 @@ impl VoiceBargeInRuntime {
             }
             VoiceForegroundDecision::HandoffBackground(summary) => {
                 if cancel_token.cancelled.load(Ordering::Relaxed) {
+                    record_cancel_suppressed("pre_background_handoff");
                     log_cancel_suppressed("pre_background_handoff");
                     return true;
                 }
@@ -2260,6 +2644,7 @@ impl VoiceBargeInRuntime {
                         let VoiceBackgroundHandoffOutcome {
                             turn_id,
                             handoff_message_id,
+                            correlation_id,
                         } = handoff_outcome;
                         let tombstone = handoff_message_id.and_then(|id| {
                             crate::voice::cancel_tombstone::global_store().lookup(id)
@@ -2273,9 +2658,29 @@ impl VoiceBargeInRuntime {
                                 target_channel_id,
                                 &turn_id,
                                 handoff_message_id,
-                                observation,
+                                observation.clone(),
                             )
                             .await;
+                            let mut event = voice_flight_event_from_announcement(
+                                VoiceFlightRoute::ExplicitStop,
+                                source_channel_id,
+                                Some(target_channel_id),
+                                announcement,
+                            );
+                            attach_foreground_flight_metadata(
+                                &mut event,
+                                &foreground,
+                                foreground_latency_ms,
+                                "handoff_cancelled",
+                            );
+                            event.handoff_correlation_id = Some(correlation_id.clone());
+                            event.handoff_message_id = handoff_message_id.map(|id| id.get());
+                            event.background_turn_id = Some(turn_id.clone());
+                            event.cancel_source = Some(observation.cancel_reason);
+                            event.cancel_channel_id = Some(target_channel_id.get());
+                            event.cancelled = Some(true);
+                            event.reason = Some("post_background_handoff_started".to_string());
+                            record_voice_flight_event(event);
                             log_cancel_suppressed("post_background_handoff_started");
                             return true;
                         }
@@ -2299,9 +2704,29 @@ impl VoiceBargeInRuntime {
                                 target_channel_id,
                                 &turn_id,
                                 handoff_message_id,
-                                observation,
+                                observation.clone(),
                             )
                             .await;
+                            let mut event = voice_flight_event_from_announcement(
+                                VoiceFlightRoute::ExplicitStop,
+                                source_channel_id,
+                                Some(target_channel_id),
+                                announcement,
+                            );
+                            attach_foreground_flight_metadata(
+                                &mut event,
+                                &foreground,
+                                foreground_latency_ms,
+                                "handoff_cancelled",
+                            );
+                            event.handoff_correlation_id = Some(correlation_id.clone());
+                            event.handoff_message_id = handoff_message_id.map(|id| id.get());
+                            event.background_turn_id = Some(turn_id.clone());
+                            event.cancel_source = Some(observation.cancel_reason);
+                            event.cancel_channel_id = Some(target_channel_id.get());
+                            event.cancelled = Some(true);
+                            event.reason = Some("post_background_handoff_play".to_string());
+                            record_voice_flight_event(event);
                             log_cancel_suppressed("post_background_handoff_play");
                             return true;
                         }
@@ -2309,6 +2734,23 @@ impl VoiceBargeInRuntime {
                             self.play_acknowledgement(shared, source_channel_id, path)
                                 .await;
                         }
+                        let mut event = voice_flight_event_from_announcement(
+                            VoiceFlightRoute::BackgroundHandoff,
+                            source_channel_id,
+                            Some(target_channel_id),
+                            announcement,
+                        );
+                        attach_foreground_flight_metadata(
+                            &mut event,
+                            &foreground,
+                            foreground_latency_ms,
+                            "handoff_background",
+                        );
+                        event.handoff_correlation_id = Some(correlation_id.clone());
+                        event.handoff_message_id = handoff_message_id.map(|id| id.get());
+                        event.background_turn_id = Some(turn_id.clone());
+                        event.tts_chars = Some(ack.chars().count());
+                        record_voice_flight_event(event);
                         tracing::info!(
                             source_channel_id = source_channel_id.get(),
                             target_channel_id = target_channel_id.get(),
@@ -2321,6 +2763,20 @@ impl VoiceBargeInRuntime {
                         );
                     }
                     Err(error) => {
+                        let mut event = voice_flight_event_from_announcement(
+                            VoiceFlightRoute::BackgroundHandoff,
+                            source_channel_id,
+                            Some(target_channel_id),
+                            announcement,
+                        );
+                        attach_foreground_flight_metadata(
+                            &mut event,
+                            &foreground,
+                            foreground_latency_ms,
+                            "handoff_background",
+                        );
+                        event.reason = Some(format!("handoff_failed:{error}"));
+                        record_voice_flight_event(event);
                         tracing::warn!(
                             error = %error,
                             source_channel_id = source_channel_id.get(),
@@ -2430,18 +2886,48 @@ impl VoiceBargeInRuntime {
             }
         }
 
-        let outcome = match driver
-            .start(VoiceBackgroundStartRequest {
-                guild_id,
-                voice_channel_id: source_channel_id,
-                channel_id: target_channel_id,
-                shared,
-                utterance_id: &announcement.utterance_id,
-                generation,
-                message_content: &prompt,
-            })
-            .await
-        {
+        let start_result = {
+            #[cfg(test)]
+            {
+                if let Some(result) = self.take_test_background_handoff_outcome(
+                    driver.kind(),
+                    source_channel_id,
+                    target_channel_id,
+                    announcement,
+                    summary,
+                    &prompt,
+                ) {
+                    result
+                } else {
+                    driver
+                        .start(VoiceBackgroundStartRequest {
+                            guild_id,
+                            voice_channel_id: source_channel_id,
+                            channel_id: target_channel_id,
+                            shared,
+                            utterance_id: &announcement.utterance_id,
+                            generation,
+                            message_content: &prompt,
+                        })
+                        .await
+                }
+            }
+            #[cfg(not(test))]
+            {
+                driver
+                    .start(VoiceBackgroundStartRequest {
+                        guild_id,
+                        voice_channel_id: source_channel_id,
+                        channel_id: target_channel_id,
+                        shared,
+                        utterance_id: &announcement.utterance_id,
+                        generation,
+                        message_content: &prompt,
+                    })
+                    .await
+            }
+        };
+        let outcome = match start_result {
             Ok(outcome) => outcome,
             Err(error) => {
                 store.cancel_handoff_reservation(&correlation_id);
@@ -2592,6 +3078,7 @@ impl VoiceBargeInRuntime {
         Ok(VoiceBackgroundHandoffOutcome {
             turn_id: outcome.turn_id,
             handoff_message_id: outcome.message_id,
+            correlation_id,
         })
     }
 
@@ -2602,6 +3089,7 @@ impl VoiceBargeInRuntime {
         target_channel_id: ChannelId,
         utterance: &CompletedUtterance,
         transcript: &str,
+        flight_context: &VoiceFlightUtteranceContext,
     ) -> VoiceBargeInTranscriptOutcome {
         let verbose_progress = self.verbose_progress_enabled();
         let language = self.spoken_result_language().await;
@@ -2637,6 +3125,13 @@ impl VoiceBargeInRuntime {
             &utterance.started_at,
             &utterance.completed_at,
             utterance.samples_written,
+            Some(
+                utterance
+                    .control_channel_id
+                    .unwrap_or(source_channel_id.get()),
+            ),
+            Some(flight_context.stt_mode.as_str()),
+            Some(flight_context.stt_latency_ms),
         );
         let generation = default_voice_announce_generation();
         let voice_delivery_id = guild_id.map(|guild_id| {
@@ -2775,6 +3270,16 @@ impl VoiceBargeInRuntime {
                     foreground_max_chars = foreground.max_chars,
                     "voice transcript announcement posted to voice channel as canonical foreground trigger"
                 );
+                let mut event = flight_context.event(VoiceFlightRoute::Queued);
+                event.background_channel_id = Some(target_channel_id.get());
+                event.turn_id = Some(outcome.turn_id.clone());
+                event.foreground_provider = Some(foreground.provider.clone());
+                event.foreground_model = Some(foreground.model.clone());
+                event.foreground_decision = Some("queued_foreground_trigger".to_string());
+                if let Some(route) = self.active_voice_routes.get(&source_channel_id.get()) {
+                    event.agent_id = Some(route.agent_id.clone());
+                }
+                record_voice_flight_event(event);
                 return VoiceBargeInTranscriptOutcome::VoiceTurnStarted {
                     turn_id: outcome.turn_id,
                 };
@@ -2807,6 +3312,13 @@ impl VoiceBargeInRuntime {
                     utterance_id = %utterance.utterance_id,
                     "voice transcript announcement failed; refusing direct voice turn fallback"
                 );
+                let mut event = flight_context.event(VoiceFlightRoute::Queued);
+                event.background_channel_id = Some(target_channel_id.get());
+                event.foreground_provider = Some(foreground.provider.clone());
+                event.foreground_model = Some(foreground.model.clone());
+                event.foreground_decision = Some("queue_failed".to_string());
+                event.reason = Some(format!("voice_turn_start_failed:{error}"));
+                record_voice_flight_event(event);
                 return VoiceBargeInTranscriptOutcome::VoiceTurnStartFailed(format!(
                     "voice transcript announcement failed: {error}"
                 ));
@@ -3227,7 +3739,7 @@ impl VoiceBargeInRuntime {
             return VoiceBargeInTranscriptOutcome::Disabled;
         }
 
-        let transcript = match self
+        let transcribed = match self
             .transcribe_completed_utterance(channel_id, utterance)
             .await
         {
@@ -3235,8 +3747,17 @@ impl VoiceBargeInRuntime {
             None => return VoiceBargeInTranscriptOutcome::TranscriptUnavailable,
         };
 
-        let transcript = transcript.trim();
+        let transcript = transcribed.text.trim();
+        let flight_context = VoiceFlightUtteranceContext::from_utterance(
+            channel_id,
+            utterance,
+            transcript,
+            &transcribed,
+        );
         if transcript.is_empty() {
+            let mut event = flight_context.event(VoiceFlightRoute::IgnoredNoise);
+            event.reason = Some("empty_transcript".to_string());
+            record_voice_flight_event(event);
             return VoiceBargeInTranscriptOutcome::EmptyTranscript;
         }
 
@@ -3250,12 +3771,18 @@ impl VoiceBargeInRuntime {
                 WakeWordDecision::NotRequired(transcript) => transcript,
                 WakeWordDecision::Matched(matched) => matched.remaining,
                 WakeWordDecision::Missing => {
+                    let mut event = flight_context.event(VoiceFlightRoute::IgnoredNoise);
+                    event.reason = Some("wake_word_required".to_string());
+                    record_voice_flight_event(event);
                     return VoiceBargeInTranscriptOutcome::WakeWordRequired;
                 }
             }
         };
         let transcript = transcript.trim();
         if transcript.is_empty() {
+            let mut event = flight_context.event(VoiceFlightRoute::IgnoredNoise);
+            event.reason = Some("empty_after_wake_word".to_string());
+            record_voice_flight_event(event);
             return VoiceBargeInTranscriptOutcome::EmptyTranscript;
         }
 
@@ -3274,9 +3801,47 @@ impl VoiceBargeInRuntime {
             .is_some()
             || has_inflight_foreground
         {
-            return self
+            let outcome = self
                 .handle_processing_transcript(shared, provider, channel_id, transcript)
                 .await;
+            let mut event = match &outcome {
+                VoiceBargeInTranscriptOutcome::ExplicitStop {
+                    cancelled,
+                    already_stopping,
+                    cancel_channel_id,
+                } => {
+                    let mut event = flight_context.event(VoiceFlightRoute::ExplicitStop);
+                    event.cancel_channel_id = Some(*cancel_channel_id);
+                    event.barge_in = Some(true);
+                    event.cancel_source = Some("voice_barge_in_explicit_stop".to_string());
+                    event.cancelled = Some(*cancelled);
+                    event.already_stopping = Some(*already_stopping);
+                    event
+                }
+                VoiceBargeInTranscriptOutcome::Deferred(_) => {
+                    let mut event = flight_context.event(VoiceFlightRoute::Deferred);
+                    event.barge_in = Some(true);
+                    event.reason = Some("processing_barge_in_defer".to_string());
+                    event
+                }
+                VoiceBargeInTranscriptOutcome::IgnoredNoise => {
+                    let mut event = flight_context.event(VoiceFlightRoute::IgnoredNoise);
+                    event.barge_in = Some(true);
+                    event.reason = Some("processing_barge_in_noise".to_string());
+                    event
+                }
+                _ => {
+                    let mut event = flight_context.event(VoiceFlightRoute::IgnoredNoise);
+                    event.reason = Some("processing_barge_in_no_route".to_string());
+                    event
+                }
+            };
+            if let Some(route) = self.active_voice_routes.get(&channel_id.get()) {
+                event.agent_id = Some(route.agent_id.clone());
+                event.background_channel_id = Some(route.channel_id.get());
+            }
+            record_voice_flight_event(event);
+            return outcome;
         }
 
         if let Some(outcome) = self.apply_dispatcher_command(channel_id, transcript).await {
@@ -3292,10 +3857,16 @@ impl VoiceBargeInRuntime {
                 transcript,
             } => (channel_id, transcript),
             VoiceTurnTargetResolution::NeedsAgent => {
+                let mut event = flight_context.event(VoiceFlightRoute::Deferred);
+                event.reason = Some("agent_routing_required".to_string());
+                record_voice_flight_event(event);
                 self.ask_for_agent(shared, channel_id).await;
                 return VoiceBargeInTranscriptOutcome::AgentRoutingRequired;
             }
             VoiceTurnTargetResolution::Ignored => {
+                let mut event = flight_context.event(VoiceFlightRoute::IgnoredNoise);
+                event.reason = Some("no_active_voice_route".to_string());
+                record_voice_flight_event(event);
                 return VoiceBargeInTranscriptOutcome::NoActiveTurn;
             }
         };
@@ -3306,6 +3877,7 @@ impl VoiceBargeInRuntime {
             target_channel_id,
             utterance,
             &transcript,
+            &flight_context,
         )
         .await
     }
@@ -3379,6 +3951,24 @@ impl VoiceBargeInRuntime {
         channel_id: ChannelId,
         context: &'static str,
     ) -> Option<PathBuf> {
+        #[cfg(test)]
+        {
+            let request_index = {
+                let mut requests = self
+                    .test_state
+                    .synth_requests
+                    .lock()
+                    .expect("voice test synth requests lock");
+                requests.push((channel_id.get(), text.to_string(), context));
+                requests.len()
+            };
+            if self.test_state.force_synth_success.load(Ordering::Relaxed) {
+                return Some(
+                    std::env::temp_dir()
+                        .join(format!("agentdesk-test-voice-progress-{request_index}.wav")),
+                );
+            }
+        }
         let Some(tts) = self.tts.read().await.clone() else {
             return None;
         };
@@ -3422,6 +4012,13 @@ impl VoiceBargeInRuntime {
         path: PathBuf,
         context: &'static str,
     ) {
+        #[cfg(test)]
+        self.test_state
+            .play_requests
+            .lock()
+            .expect("voice test play requests lock")
+            .push((channel_id.get(), context));
+
         let Some(guild_id) = self
             .voice_guilds
             .get(&channel_id.get())
@@ -3638,7 +4235,7 @@ impl VoiceBargeInRuntime {
         &self,
         channel_id: ChannelId,
         utterance: &CompletedUtterance,
-    ) -> Option<String> {
+    ) -> Option<TranscribedVoiceUtterance> {
         let stt_started_at = std::time::Instant::now();
         if let Some(stt) = self.stt.read().await.clone() {
             if stt.is_streaming() {
@@ -3650,12 +4247,18 @@ impl VoiceBargeInRuntime {
                 if let Some((_, session)) = self.streaming_stt_sessions.remove(&key) {
                     match stt.finalize(session).await {
                         Ok(transcript) if !transcript.text.trim().is_empty() => {
+                            let stt_latency_ms =
+                                stt_started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
                             crate::voice::metrics::record_stt(
                                 channel_id.get(),
                                 Some(&utterance.utterance_id),
-                                stt_started_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                                stt_latency_ms,
                             );
-                            return Some(transcript.text);
+                            return Some(TranscribedVoiceUtterance {
+                                text: transcript.text,
+                                stt_mode: "stream",
+                                stt_latency_ms,
+                            });
                         }
                         Ok(_) => {
                             tracing::debug!(
@@ -3684,12 +4287,22 @@ impl VoiceBargeInRuntime {
 
             match stt.transcribe_file(&utterance.path).await {
                 Ok(transcript) => {
+                    let stt_latency_ms =
+                        stt_started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
                     crate::voice::metrics::record_stt(
                         channel_id.get(),
                         Some(&utterance.utterance_id),
-                        stt_started_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                        stt_latency_ms,
                     );
-                    return Some(transcript);
+                    return Some(TranscribedVoiceUtterance {
+                        text: transcript,
+                        stt_mode: if stt.is_streaming() {
+                            "file_fallback"
+                        } else {
+                            "file"
+                        },
+                        stt_latency_ms,
+                    });
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -3712,12 +4325,17 @@ impl VoiceBargeInRuntime {
             );
             return None;
         };
+        let stt_latency_ms = stt_started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
         crate::voice::metrics::record_stt(
             channel_id.get(),
             Some(&utterance.utterance_id),
-            stt_started_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
+            stt_latency_ms,
         );
-        Some(transcript)
+        Some(TranscribedVoiceUtterance {
+            text: transcript,
+            stt_mode: "sidecar",
+            stt_latency_ms,
+        })
     }
 
     async fn wait_for_stt_transcript(&self, utterance: &CompletedUtterance) -> Option<String> {
@@ -4185,6 +4803,372 @@ mod tests {
         })
     }
 
+    fn voice_transcript_announcement_for_tests(
+        transcript: &str,
+        utterance_id: &str,
+    ) -> crate::voice::prompt::VoiceTranscriptAnnouncement {
+        crate::voice::prompt::VoiceTranscriptAnnouncement {
+            transcript: transcript.to_string(),
+            user_id: "42".to_string(),
+            utterance_id: utterance_id.to_string(),
+            language: "ko-KR".to_string(),
+            verbose_progress: true,
+            started_at: Some("2026-05-24T21:00:00+09:00".to_string()),
+            completed_at: Some("2026-05-24T21:00:01+09:00".to_string()),
+            samples_written: Some(48_000),
+            control_channel_id: None,
+            stt_mode: Some("file".to_string()),
+            stt_latency_ms: Some(120),
+        }
+    }
+
+    fn install_active_voice_route(
+        runtime: &VoiceBargeInRuntime,
+        source_channel: ChannelId,
+        target_channel: ChannelId,
+    ) {
+        runtime.active_voice_routes.insert(
+            source_channel.get(),
+            ActiveVoiceRoute {
+                agent_id: "project-agentdesk".to_string(),
+                channel_id: target_channel,
+                updated_at: Instant::now(),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn voice_transcript_simple_question_uses_foreground_tts_without_background_handoff() {
+        let runtime = Arc::new(enabled_runtime());
+        let shared = voice_handoff_shared_for_tests();
+        let source_channel = ChannelId::new(2_776_101);
+        let target_channel = ChannelId::new(2_776_102);
+        install_active_voice_route(&runtime, source_channel, target_channel);
+        runtime
+            .test_state
+            .force_synth_success
+            .store(true, Ordering::Relaxed);
+        runtime
+            .test_state
+            .foreground_decisions
+            .lock()
+            .expect("voice test foreground decisions lock")
+            .push_back(VoiceForegroundDecision::Speak(
+                "상태 확인했어요.".to_string(),
+            ));
+        let announcement =
+            voice_transcript_announcement_for_tests("지금 상태 알려줘", "issue-2776-simple");
+
+        assert!(
+            runtime
+                .try_handle_voice_transcript_announcement(&shared, source_channel, &announcement)
+                .await,
+            "mapped voice transcript announcements must be consumed by foreground routing"
+        );
+
+        assert!(
+            runtime
+                .test_state
+                .background_starts
+                .lock()
+                .expect("voice test background starts lock")
+                .is_empty(),
+            "a simple foreground answer must not start a background provider turn"
+        );
+        let synths = runtime
+            .test_state
+            .synth_requests
+            .lock()
+            .expect("voice test synth requests lock")
+            .clone();
+        assert!(
+            synths.iter().any(|(channel_id, text, context)| {
+                *channel_id == source_channel.get()
+                    && text == "상태 확인했어요."
+                    && *context == "voice barge-in acknowledgement"
+            }),
+            "foreground speak decisions must synthesize the short TTS answer"
+        );
+        let plays = runtime
+            .test_state
+            .play_requests
+            .lock()
+            .expect("voice test play requests lock")
+            .clone();
+        assert!(
+            plays.iter().any(|(channel_id, context)| {
+                *channel_id == source_channel.get() && *context == "voice barge-in acknowledgement"
+            }),
+            "foreground TTS output must be routed back to the voice channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn voice_transcript_work_request_hands_off_via_announce_bot_and_tts_ack() {
+        let runtime = Arc::new(enabled_runtime());
+        let shared = voice_handoff_shared_for_tests();
+        let source_channel = ChannelId::new(2_776_201);
+        let target_channel = ChannelId::new(2_776_202);
+        let handoff_message = MessageId::new(2_776_203);
+        crate::voice::announce_meta::global_store().forget_handoff(handoff_message);
+        install_active_voice_route(&runtime, source_channel, target_channel);
+        runtime
+            .test_state
+            .force_synth_success
+            .store(true, Ordering::Relaxed);
+        runtime
+            .test_state
+            .foreground_decisions
+            .lock()
+            .expect("voice test foreground decisions lock")
+            .push_back(VoiceForegroundDecision::HandoffBackground(
+                "로그 확인 후 원인 요약".to_string(),
+            ));
+        runtime
+            .test_state
+            .background_handoff_outcomes
+            .lock()
+            .expect("voice test background handoff outcomes lock")
+            .push_back(Ok(VoiceBackgroundStartOutcome {
+                turn_id: format!("voice-announce:{}", handoff_message.get()),
+                driver_kind: VoiceBackgroundDriverKind::AnnounceBotTranscript,
+                message_id: Some(handoff_message),
+            }));
+        let announcement =
+            voice_transcript_announcement_for_tests("로그 확인해줘", "issue-2776-handoff");
+
+        assert!(
+            runtime
+                .try_handle_voice_transcript_announcement(&shared, source_channel, &announcement)
+                .await,
+            "background handoff decisions are still handled by the foreground voice layer"
+        );
+
+        let starts = runtime
+            .test_state
+            .background_starts
+            .lock()
+            .expect("voice test background starts lock")
+            .clone();
+        assert_eq!(
+            starts.len(),
+            1,
+            "work request must start exactly one background turn"
+        );
+        let start = &starts[0];
+        assert_eq!(
+            start.driver_kind,
+            VoiceBackgroundDriverKind::AnnounceBotTranscript,
+            "voice background work must enter through the canonical announce-bot transcript driver"
+        );
+        assert_eq!(start.source_channel_id, source_channel);
+        assert_eq!(start.target_channel_id, target_channel);
+        assert_eq!(start.utterance_id, "issue-2776-handoff");
+        assert_eq!(start.summary, "로그 확인 후 원인 요약");
+        assert!(start.message_content.contains("로그 확인해줘"));
+        assert!(start.message_content.contains("로그 확인 후 원인 요약"));
+        assert!(
+            start
+                .message_content
+                .contains("ADK_VOICE_BACKGROUND_HANDOFF v1"),
+            "background prompt must carry the typed handoff marker for the turn bridge"
+        );
+        let handoff_meta = crate::voice::announce_meta::global_store()
+            .get_handoff(handoff_message)
+            .expect("handoff metadata must be bound to the announce-bot message id");
+        assert_eq!(handoff_meta.voice_channel_id, source_channel.get());
+        assert_eq!(handoff_meta.background_channel_id, target_channel.get());
+        assert_eq!(handoff_meta.agent_id.as_deref(), Some("project-agentdesk"));
+
+        let synths = runtime
+            .test_state
+            .synth_requests
+            .lock()
+            .expect("voice test synth requests lock")
+            .clone();
+        assert!(
+            synths.iter().any(|(channel_id, text, context)| {
+                *channel_id == source_channel.get()
+                    && text == voice_background_handoff_ack("ko-KR")
+                    && *context == "voice barge-in acknowledgement"
+            }),
+            "handoff ack must be spoken in the foreground voice channel"
+        );
+        crate::voice::announce_meta::global_store().forget_handoff(handoff_message);
+    }
+
+    #[tokio::test]
+    async fn background_handoff_stop_suppresses_ack_and_cancels_started_turn() {
+        let runtime = Arc::new(enabled_runtime());
+        let shared = voice_handoff_shared_for_tests();
+        let source_channel = ChannelId::new(2_777_101);
+        let target_channel = ChannelId::new(2_777_102);
+        let handoff_message = MessageId::new(2_777_103);
+        crate::voice::announce_meta::global_store().forget_handoff(handoff_message);
+        crate::voice::cancel_tombstone::global_store().forget(handoff_message);
+        install_active_voice_route(&runtime, source_channel, target_channel);
+        runtime
+            .test_state
+            .force_synth_success
+            .store(true, Ordering::Relaxed);
+        runtime
+            .test_state
+            .foreground_decisions
+            .lock()
+            .expect("voice test foreground decisions lock")
+            .push_back(VoiceForegroundDecision::HandoffBackground(
+                "로그 확인 후 원인 요약".to_string(),
+            ));
+        runtime
+            .test_state
+            .background_handoff_outcomes
+            .lock()
+            .expect("voice test background handoff outcomes lock")
+            .push_back(Ok(VoiceBackgroundStartOutcome {
+                turn_id: format!("voice-announce:{}", handoff_message.get()),
+                driver_kind: VoiceBackgroundDriverKind::AnnounceBotTranscript,
+                message_id: Some(handoff_message),
+            }));
+        let active_token = Arc::new(crate::services::provider::CancelToken::new());
+        assert!(
+            shared
+                .mailbox(target_channel)
+                .try_start_turn(
+                    active_token.clone(),
+                    serenity::UserId::new(42),
+                    handoff_message
+                )
+                .await
+        );
+        crate::voice::cancel_tombstone::global_store()
+            .record(handoff_message, "voice_barge_in_explicit_stop");
+        let announcement =
+            voice_transcript_announcement_for_tests("로그 확인해줘", "issue-2777-handoff-stop");
+
+        assert!(
+            runtime
+                .try_handle_voice_transcript_announcement(&shared, source_channel, &announcement)
+                .await
+        );
+
+        assert!(active_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(
+            active_token.cancel_source().as_deref(),
+            Some("voice_barge_in_explicit_stop")
+        );
+        assert_eq!(
+            crate::voice::cancel_tombstone::global_store()
+                .lookup(handoff_message)
+                .as_deref(),
+            Some("voice_barge_in_explicit_stop")
+        );
+        assert!(
+            runtime
+                .test_state
+                .synth_requests
+                .lock()
+                .expect("voice test synth requests lock")
+                .is_empty(),
+            "stop immediately after handoff start must suppress the stale spoken ack"
+        );
+        let plays = runtime
+            .test_state
+            .play_requests
+            .lock()
+            .expect("voice test play requests lock")
+            .clone();
+        assert!(
+            !plays
+                .iter()
+                .any(|(_, context)| *context == "voice barge-in acknowledgement"),
+            "suppressed handoff ack must not reach playback"
+        );
+        let event = crate::services::observability::events::recent(200)
+            .into_iter()
+            .rev()
+            .find(|event| {
+                event.event_type == crate::voice::flight::VOICE_FLIGHT_EVENT_TYPE
+                    && event
+                        .payload
+                        .get("utterance_id")
+                        .and_then(|value| value.as_str())
+                        == Some("issue-2777-handoff-stop")
+            })
+            .expect("handoff stop must emit a flight event");
+        assert_eq!(
+            event.payload.get("route").and_then(|value| value.as_str()),
+            Some("explicit_stop")
+        );
+        assert_eq!(
+            event.payload.get("reason").and_then(|value| value.as_str()),
+            Some("post_background_handoff_started")
+        );
+        assert_eq!(
+            event
+                .payload
+                .get("handoff_message_id")
+                .and_then(|value| value.as_u64()),
+            Some(handoff_message.get())
+        );
+        crate::voice::announce_meta::global_store().forget_handoff(handoff_message);
+        crate::voice::cancel_tombstone::global_store().forget(handoff_message);
+    }
+
+    #[tokio::test]
+    async fn voice_background_completion_summary_uses_foreground_tts() {
+        let runtime = Arc::new(enabled_runtime());
+        let shared = voice_handoff_shared_for_tests();
+        let source_channel = ChannelId::new(2_776_301);
+        let target_channel = ChannelId::new(2_776_302);
+        runtime
+            .test_state
+            .force_synth_success
+            .store(true, Ordering::Relaxed);
+        runtime
+            .test_state
+            .background_result_summaries
+            .lock()
+            .expect("voice test background summaries lock")
+            .push_back(Some("작업이 끝났어요.".to_string()));
+
+        runtime
+            .speak_voice_background_completion_summary(
+                &shared,
+                source_channel,
+                target_channel,
+                "작업 완료. 상세 로그는 채널에 남겼습니다.",
+                false,
+            )
+            .await;
+
+        let synths = runtime
+            .test_state
+            .synth_requests
+            .lock()
+            .expect("voice test synth requests lock")
+            .clone();
+        assert!(
+            synths.iter().any(|(channel_id, text, context)| {
+                *channel_id == source_channel.get()
+                    && text == "작업이 끝났어요."
+                    && *context == "voice background result summary"
+            }),
+            "background completion summaries must be converted back into foreground TTS"
+        );
+        let plays = runtime
+            .test_state
+            .play_requests
+            .lock()
+            .expect("voice test play requests lock")
+            .clone();
+        assert!(
+            plays.iter().any(|(channel_id, context)| {
+                *channel_id == source_channel.get() && *context == "voice background result summary"
+            }),
+            "completion summary audio must target the original voice channel"
+        );
+    }
+
     #[test]
     fn voice_handoff_cancel_observation_uses_local_reason_before_tombstone() {
         let token = crate::services::provider::CancelToken::new();
@@ -4499,21 +5483,114 @@ mod tests {
     #[test]
     fn foreground_decision_parses_silence_handoff_and_spoken_text() {
         assert_eq!(
-            parse_voice_foreground_decision("ADK_VOICE_SILENCE", "ko", 120),
+            parse_voice_foreground_decision("ADK_VOICE_SILENCE", "조용히 해줘", "ko", 120),
             VoiceForegroundDecision::Silence
         );
         assert_eq!(
             parse_voice_foreground_decision(
                 "ADK_VOICE_HANDOFF_BACKGROUND: 로그 확인하고 원인 요약",
+                "로그 확인해줘",
                 "ko",
                 120,
             ),
             VoiceForegroundDecision::HandoffBackground("로그 확인하고 원인 요약".to_string())
         );
         assert_eq!(
-            parse_voice_foreground_decision("바로 확인해볼게요.", "ko", 120),
+            parse_voice_foreground_decision("바로 확인해볼게요.", "지금 상태 알려줘", "ko", 120),
             VoiceForegroundDecision::Speak("바로 확인해볼게요.".to_string())
         );
+    }
+
+    #[test]
+    fn foreground_decision_accepts_safe_wrapped_mixed_case_markers() {
+        assert_eq!(
+            parse_voice_foreground_decision(
+                "> adk_voice_silence\n이 줄은 무시되어야 함",
+                "잡음",
+                "ko",
+                120,
+            ),
+            VoiceForegroundDecision::Silence
+        );
+        assert_eq!(
+            parse_voice_foreground_decision("\"ADK_VOICE_SILENCE\"", "잡음", "ko", 120),
+            VoiceForegroundDecision::Silence
+        );
+        assert_eq!(
+            parse_voice_foreground_decision(
+                "- AdK_VoIcE_HaNdOfF_BaCkGrOuNd: 로그 확인\n뒤 설명",
+                "로그 확인해줘",
+                "ko",
+                120,
+            ),
+            VoiceForegroundDecision::HandoffBackground("로그 확인".to_string())
+        );
+        assert_eq!(
+            parse_voice_foreground_decision(
+                "```text\nADK_VOICE_HANDOFF_BACKGROUND: inspect the build log\n```",
+                "inspect the build log",
+                "en-US",
+                120,
+            ),
+            VoiceForegroundDecision::HandoffBackground("inspect the build log".to_string())
+        );
+        assert_eq!(
+            parse_voice_foreground_decision(
+                "```ADK_VOICE_HANDOFF_BACKGROUND: run cargo test```",
+                "run cargo test",
+                "en-US",
+                120,
+            ),
+            VoiceForegroundDecision::HandoffBackground("run cargo test".to_string())
+        );
+    }
+
+    #[test]
+    fn foreground_decision_only_first_content_line_controls_marker() {
+        assert!(matches!(
+            parse_voice_foreground_decision(
+                "바로 확인해볼게요.\nADK_VOICE_SILENCE",
+                "지금 상태 알려줘",
+                "ko",
+                120,
+            ),
+            VoiceForegroundDecision::Speak(_)
+        ));
+        assert!(matches!(
+            parse_voice_foreground_decision(
+                "ADK_VOICE_HANDOFF_BACKGROUND 로그 확인",
+                "로그 확인해줘",
+                "ko",
+                120,
+            ),
+            VoiceForegroundDecision::Speak(_)
+        ));
+    }
+
+    #[test]
+    fn foreground_decision_empty_handoff_summary_falls_back_to_transcript() {
+        assert_eq!(
+            parse_voice_foreground_decision(
+                "ADK_VOICE_HANDOFF_BACKGROUND:",
+                "로그 확인하고 원인 요약해줘",
+                "ko",
+                120,
+            ),
+            VoiceForegroundDecision::HandoffBackground("로그 확인하고 원인 요약해줘".to_string())
+        );
+
+        match parse_voice_foreground_decision(
+            "> ADK_VOICE_HANDOFF_BACKGROUND:",
+            "ADK_VOICE_HANDOFF_BACKGROUND:",
+            "en-US",
+            120,
+        ) {
+            VoiceForegroundDecision::HandoffBackground(summary) => {
+                assert_eq!(summary, "User requested background work.");
+                assert!(!summary.contains("ADK_VOICE_HANDOFF_BACKGROUND"));
+            }
+            other => panic!("expected background handoff fallback, got {other:?}"),
+        }
     }
 
     #[test]
@@ -4682,14 +5759,59 @@ mod tests {
             outcome,
             VoiceBargeInTranscriptOutcome::ExplicitStop {
                 cancelled: true,
-                already_stopping: false
-            }
+                already_stopping: false,
+                cancel_channel_id,
+            } if cancel_channel_id == target_channel_id.get()
         ));
         assert!(token.cancelled.load(Ordering::Relaxed));
         assert_eq!(
             token.cancel_source().as_deref(),
             Some("voice_barge_in_explicit_stop")
         );
+    }
+
+    #[tokio::test]
+    async fn background_active_followup_speech_is_deferred_not_cancelled() {
+        let runtime = enabled_runtime();
+        let shared = voice_handoff_shared_for_tests();
+        let source_channel_id = ChannelId::new(2_777_201);
+        let target_channel_id = ChannelId::new(2_777_202);
+        install_active_voice_route(&runtime, source_channel_id, target_channel_id);
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        assert!(
+            shared
+                .mailbox(target_channel_id)
+                .try_start_turn(
+                    token.clone(),
+                    serenity::UserId::new(7),
+                    MessageId::new(2_777_203),
+                )
+                .await
+        );
+
+        let outcome = runtime
+            .handle_processing_transcript(
+                &shared,
+                &ProviderKind::Claude,
+                source_channel_id,
+                "이 내용도 반영해줘",
+            )
+            .await;
+
+        assert!(matches!(
+            outcome,
+            VoiceBargeInTranscriptOutcome::Deferred(prompt) if prompt == "이 내용도 반영해줘"
+        ));
+        assert!(
+            !token.cancelled.load(Ordering::Relaxed),
+            "follow-up speech during a background turn must not abort without an explicit stop"
+        );
+        assert!(token.cancel_source().is_none());
+        let drain = runtime
+            .take_deferred_prompt(source_channel_id)
+            .await
+            .expect("deferred follow-up must be buffered for the next turn");
+        assert_eq!(drain.prompt, "이 내용도 반영해줘");
     }
 
     #[tokio::test]
@@ -4869,6 +5991,48 @@ mod tests {
         assert!(runtime.observe_live_pcm_i16(channel_id, &loud).is_none());
     }
 
+    #[tokio::test]
+    async fn live_pcm_hook_cuts_playback_and_cancels_foreground_token() {
+        use crate::services::provider::CancelSource;
+
+        let runtime = Arc::new(enabled_runtime());
+        let shared = voice_handoff_shared_for_tests();
+        let hook = DiscordVoiceBargeInHook::new(runtime.clone(), shared, ProviderKind::Claude);
+        let channel_id = ChannelId::new(2_777_301);
+        let player = Arc::new(MockPlayer::default());
+        let playback_cancel = CancellationToken::new();
+        let foreground_token = Arc::new(crate::services::provider::CancelToken::new());
+        runtime.reset_after_playback_start(channel_id, player.clone(), playback_cancel.clone());
+        runtime.register_inflight_foreground_cancel(channel_id, foreground_token.clone());
+
+        let loud = [16_384, -16_384, 16_384, -16_384];
+        hook.observe_pcm(channel_id.get(), 42, &loud);
+        hook.observe_pcm(channel_id.get(), 42, &loud);
+        tokio::task::yield_now().await;
+
+        assert_eq!(player.stops.load(Ordering::SeqCst), 1);
+        assert!(playback_cancel.is_cancelled());
+        assert!(
+            !runtime.playbacks.contains_key(&channel_id.get()),
+            "live cut must remove the stale playback registration"
+        );
+        assert!(foreground_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(
+            foreground_token.cancel_source().as_deref(),
+            Some("voice_barge_in_live_cut")
+        );
+        assert_eq!(
+            foreground_token.cancel_source_kind(),
+            Some(CancelSource::UserBargeIn)
+        );
+        assert!(
+            !runtime
+                .inflight_foreground_cancels
+                .contains_key(&channel_id.get()),
+            "synchronous hook cancel must drain the foreground cancel registry"
+        );
+    }
+
     #[test]
     fn new_spoken_result_playback_cancels_previous_channel_playback() {
         let runtime = enabled_runtime();
@@ -4938,6 +6102,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             samples_written: None,
+            control_channel_id: None,
+            stt_mode: None,
+            stt_latency_ms: None,
         };
 
         let error = runtime

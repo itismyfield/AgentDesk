@@ -44,9 +44,20 @@ pub async fn current_batch_phase_pg(
            AND (
                e.status IN ('pending', 'dispatched')
                OR (
-                   e.status = 'done'
+                   e.status IN ('done', 'skipped')
                    AND e.kanban_card_id IS NOT NULL
                    AND c.id IS NOT NULL
+                   AND (
+                       e.status = 'done'
+                       OR COALESCE((
+                           SELECT t.trigger_source
+                           FROM auto_queue_entry_transitions t
+                           WHERE t.entry_id = e.id
+                             AND t.to_status = 'skipped'
+                           ORDER BY t.created_at DESC
+                           LIMIT 1
+                       ), '') != 'manual_skip'
+                   )
                    AND (
                        COALESCE(c.status, 'unknown') NOT IN ('done', 'cancelled', 'failed')
                        OR EXISTS (
@@ -1633,6 +1644,19 @@ mod current_batch_phase_pg_tests {
         .expect("seed entry");
     }
 
+    async fn insert_skip_transition(pool: &PgPool, entry_id: &str, trigger_source: &str) {
+        sqlx::query(
+            "INSERT INTO auto_queue_entry_transitions
+                (entry_id, from_status, to_status, trigger_source)
+             VALUES ($1, 'dispatched', 'skipped', $2)",
+        )
+        .bind(entry_id)
+        .bind(trigger_source)
+        .execute(pool)
+        .await
+        .expect("seed skip transition");
+    }
+
     async fn insert_review_dispatch(pool: &PgPool, id: &str, card_id: &str, status: &str) {
         insert_typed_dispatch(pool, id, card_id, "review", status).await;
     }
@@ -1715,6 +1739,51 @@ mod current_batch_phase_pg_tests {
             current_batch_phase_pg(&pool, "run-pg-test").await.unwrap(),
             Some(0),
             "phase 0 must remain current while a card under it is still in review"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #2780 regression: recovery/cancel can mark the queue entry skipped
+    /// while the card is still active. That must keep the current phase pinned
+    /// so a later dependent entry is not dispatched early.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_manual_skipped_entry_with_active_card_blocks_phase_advance() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        setup_phase_gate_fixture(&pool).await;
+        insert_card(&pool, "c0", "review").await;
+        insert_entry(&pool, "e0", "c0", 0, "skipped").await;
+        insert_skip_transition(&pool, "e0", "run_cancel").await;
+        insert_card(&pool, "c1", "in_progress").await;
+        insert_entry(&pool, "e1", "c1", 1, "pending").await;
+
+        assert_eq!(
+            current_batch_phase_pg(&pool, "run-pg-test").await.unwrap(),
+            Some(0),
+            "non-manual skipped entries with active cards must hold the phase"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manual_skipped_entry_with_active_card_does_not_block_phase_advance() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        setup_phase_gate_fixture(&pool).await;
+        insert_card(&pool, "c0", "review").await;
+        insert_entry(&pool, "e0", "c0", 0, "skipped").await;
+        insert_skip_transition(&pool, "e0", "manual_skip").await;
+        insert_card(&pool, "c1", "in_progress").await;
+        insert_entry(&pool, "e1", "c1", 1, "pending").await;
+
+        assert_eq!(
+            current_batch_phase_pg(&pool, "run-pg-test").await.unwrap(),
+            Some(1),
+            "explicit manual skip remains an operator override"
         );
 
         pool.close().await;

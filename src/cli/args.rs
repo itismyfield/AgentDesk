@@ -255,6 +255,9 @@ pub(crate) enum Commands {
         /// Optional reasoning effort (low, normal, high, xhigh)
         #[arg(long)]
         reasoning_effort: Option<String>,
+        /// Optional developer instructions passed through Codex config
+        #[arg(long)]
+        developer_instructions: Option<String>,
         /// Optional resume session id for the first turn
         #[arg(long)]
         resume_session_id: Option<String>,

@@ -19,16 +19,15 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use poise::serenity_prelude::{
-    self as serenity, ButtonStyle, ChannelId, CreateActionRow, CreateButton, MessageId,
+    self as serenity, ButtonKind, ButtonStyle, ChannelId, CreateActionRow, CreateButton, MessageId,
 };
 use sqlx::PgPool;
 use tokio::task;
 
 use crate::services::provider::{CancelToken, ProviderKind};
 
-const CLAUDE_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
-const CODEX_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 const FALLBACK_CONTEXT_WINDOW_TOKENS: u64 = 128_000;
+const SESSION_TOKEN_FRESHNESS_MAX_SECS: i64 = 30 * 60;
 
 /// Lines of tmux scrollback captured for the opencode recap summary. Earlier
 /// 500-line snapshots routinely overran the 20s OPENCODE_SUMMARY_TIMEOUT when
@@ -47,19 +46,31 @@ const OPENCODE_SUMMARY_TIMEOUT: Duration = Duration::from_secs(20);
 /// `sessions.idle_recap_message_id` index.
 pub(crate) const IDLE_RECAP_CLEAR_BUTTON_PREFIX: &str = "idle_recap:clear:";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RecapLiveContextUsage {
+    pub(crate) used_tokens: u64,
+    pub(crate) context_window_tokens: u64,
+}
+
 /// Snapshot of the data the recap renderer needs in a single SQL round-trip.
-///
-/// NOTE: `sessions.tokens_updated_at` ships in migration 0054 (PR #2086) and
-/// is NOT read here — this branch's base is `feat/idle-recap-notification`
-/// (migration 0055 only), so depending on 0054 would crash at runtime if
-/// 0055 merges first. PR #3c (renderer-stage-2, opencode summary + clear
-/// button) will rebase on main after both 0054 and 0055 land and can rely on
-/// the freshness stamp at that point.
 #[derive(Debug, Clone)]
 pub(crate) struct RecapSnapshot {
+    pub(crate) session_key: String,
     pub(crate) provider: String,
+    pub(crate) model: Option<String>,
     pub(crate) tokens: Option<i64>,
+    pub(crate) tokens_updated_at: Option<DateTime<Utc>>,
     pub(crate) last_heartbeat: Option<DateTime<Utc>>,
+    pub(crate) claude_session_id: Option<String>,
+    pub(crate) raw_provider_session_id: Option<String>,
+    pub(crate) live_context_usage: Option<RecapLiveContextUsage>,
+    pub(crate) latest_turn_provider: Option<String>,
+    pub(crate) latest_turn_session_key: Option<String>,
+    pub(crate) latest_turn_session_id: Option<String>,
+    pub(crate) latest_turn_finished_at: Option<DateTime<Utc>>,
+    pub(crate) latest_turn_input_tokens: Option<i64>,
+    pub(crate) latest_turn_cache_create_tokens: Option<i64>,
+    pub(crate) latest_turn_cache_read_tokens: Option<i64>,
     pub(crate) previous_message_id: Option<i64>,
     pub(crate) previous_channel_id: Option<i64>,
     pub(crate) discord_channel_id: Option<String>,
@@ -68,23 +79,75 @@ pub(crate) struct RecapSnapshot {
     pub(crate) discord_channel_alt: Option<String>,
 }
 
+impl RecapSnapshot {
+    pub(crate) fn has_resumable_provider_session(&self) -> bool {
+        self.claude_session_id
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+            || self
+                .raw_provider_session_id
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty())
+    }
+}
+
 /// Load everything the renderer needs in one SQL hit.
 pub(crate) async fn load_recap_snapshot(
     pool: &PgPool,
     session_key: &str,
 ) -> Result<Option<RecapSnapshot>, sqlx::Error> {
     sqlx::query_as::<_, RecapSnapshotRow>(
-        "SELECT s.provider,
+        "SELECT s.session_key,
+                s.provider,
+                s.model,
                 s.tokens,
+                s.tokens_updated_at,
                 s.last_heartbeat,
+                s.claude_session_id,
+                s.raw_provider_session_id,
                 s.idle_recap_message_id,
                 s.idle_recap_channel_id,
                 a.discord_channel_id,
                 a.discord_channel_cc,
                 a.discord_channel_cdx,
-                a.discord_channel_alt
+                a.discord_channel_alt,
+                lt.provider AS latest_turn_provider,
+                lt.session_key AS latest_turn_session_key,
+                lt.session_id AS latest_turn_session_id,
+                lt.finished_at AS latest_turn_finished_at,
+                lt.input_tokens::BIGINT AS latest_turn_input_tokens,
+                lt.cache_create_tokens::BIGINT AS latest_turn_cache_create_tokens,
+                lt.cache_read_tokens::BIGINT AS latest_turn_cache_read_tokens
          FROM sessions s
          LEFT JOIN agents a ON a.id = s.agent_id
+         LEFT JOIN LATERAL (
+            SELECT t.provider,
+                   t.session_key,
+                   t.session_id,
+                   t.finished_at,
+                   t.input_tokens,
+                   t.cache_create_tokens,
+                   t.cache_read_tokens
+            FROM turns t
+            WHERE lower(COALESCE(t.provider, '')) = lower(COALESCE(s.provider, ''))
+              AND (
+                t.session_key = s.session_key
+                OR (
+                    s.claude_session_id IS NOT NULL
+                    AND BTRIM(s.claude_session_id) != ''
+                    AND t.session_id = s.claude_session_id
+                )
+                OR (
+                    s.raw_provider_session_id IS NOT NULL
+                    AND BTRIM(s.raw_provider_session_id) != ''
+                    AND t.session_id = s.raw_provider_session_id
+                )
+              )
+            ORDER BY t.finished_at DESC, t.started_at DESC, t.created_at DESC
+            LIMIT 1
+         ) lt ON true
          WHERE s.session_key = $1",
     )
     .bind(session_key)
@@ -95,23 +158,48 @@ pub(crate) async fn load_recap_snapshot(
 
 #[derive(Debug, sqlx::FromRow)]
 struct RecapSnapshotRow {
+    session_key: String,
     provider: String,
+    model: Option<String>,
     tokens: Option<i64>,
+    tokens_updated_at: Option<DateTime<Utc>>,
     last_heartbeat: Option<DateTime<Utc>>,
+    claude_session_id: Option<String>,
+    raw_provider_session_id: Option<String>,
     idle_recap_message_id: Option<i64>,
     idle_recap_channel_id: Option<i64>,
     discord_channel_id: Option<String>,
     discord_channel_cc: Option<String>,
     discord_channel_cdx: Option<String>,
     discord_channel_alt: Option<String>,
+    latest_turn_provider: Option<String>,
+    latest_turn_session_key: Option<String>,
+    latest_turn_session_id: Option<String>,
+    latest_turn_finished_at: Option<DateTime<Utc>>,
+    latest_turn_input_tokens: Option<i64>,
+    latest_turn_cache_create_tokens: Option<i64>,
+    latest_turn_cache_read_tokens: Option<i64>,
 }
 
 impl RecapSnapshotRow {
     fn into_snapshot(self) -> RecapSnapshot {
         RecapSnapshot {
+            session_key: self.session_key,
             provider: self.provider,
+            model: self.model,
             tokens: self.tokens,
+            tokens_updated_at: self.tokens_updated_at,
             last_heartbeat: self.last_heartbeat,
+            claude_session_id: self.claude_session_id,
+            raw_provider_session_id: self.raw_provider_session_id,
+            live_context_usage: None,
+            latest_turn_provider: self.latest_turn_provider,
+            latest_turn_session_key: self.latest_turn_session_key,
+            latest_turn_session_id: self.latest_turn_session_id,
+            latest_turn_finished_at: self.latest_turn_finished_at,
+            latest_turn_input_tokens: self.latest_turn_input_tokens,
+            latest_turn_cache_create_tokens: self.latest_turn_cache_create_tokens,
+            latest_turn_cache_read_tokens: self.latest_turn_cache_read_tokens,
             previous_message_id: self.idle_recap_message_id,
             previous_channel_id: self.idle_recap_channel_id,
             discord_channel_id: self.discord_channel_id,
@@ -145,6 +233,38 @@ pub(crate) fn resolve_post_channel(snapshot: &RecapSnapshot) -> Option<u64> {
     candidate.trim().parse::<u64>().ok()
 }
 
+pub(crate) async fn attach_live_context_usage(
+    registry: &super::health::HealthRegistry,
+    snapshot: &mut RecapSnapshot,
+    channel_id: u64,
+) {
+    let Some(provider) = ProviderKind::from_str(&snapshot.provider) else {
+        return;
+    };
+    let Some(shared) = registry.shared_for_provider(&provider).await else {
+        return;
+    };
+    let Some(live) = shared
+        .placeholder_live_events
+        .context_panel_snapshot(ChannelId::new(channel_id))
+    else {
+        return;
+    };
+    let live_session_matches = live
+        .provider_session_id
+        .as_deref()
+        .and_then(normalized_text)
+        .is_some_and(|session_id| {
+            provider_session_ids(snapshot).any(|active| active == session_id)
+        });
+    if live_session_matches && live.used_tokens > 0 && live.context_window_tokens > 0 {
+        snapshot.live_context_usage = Some(RecapLiveContextUsage {
+            used_tokens: live.used_tokens,
+            context_window_tokens: live.context_window_tokens,
+        });
+    }
+}
+
 /// Compose the recap card body. PR #3b shipped a header-only card; PR #3c
 /// adds an optional `summary` line below the header (rendered as a Discord
 /// blockquote when present).
@@ -168,14 +288,31 @@ fn compose_recap_header(snapshot: &RecapSnapshot) -> String {
         .map(|t| format_korean_duration(now - t))
         .unwrap_or_else(|| "방금 전".to_string());
 
-    match (snapshot.tokens, context_window_for(snapshot)) {
-        (Some(used), window) if used > 0 => {
-            let pct = ((u128::from(used as u64) * 100) / u128::from(window)) as u64;
-            let used_label = format_token_count(used as u64);
+    match select_recap_context(snapshot, now) {
+        RecapContextDisplay::Known { used, window } => {
+            let used_label = format_token_count(used);
             let window_label = format_token_count(window);
-            format!("📦 {used_label} / {window_label} tokens ({pct}%) · idle {idle_since}")
+            let pct = if window == 0 {
+                None
+            } else {
+                Some(((u128::from(used) * 100) / u128::from(window)).min(100) as u64)
+            };
+            match pct {
+                Some(percent) if used > window => {
+                    format!(
+                        "📦 {used_label} / {window_label} tokens ({percent}%+, over limit) · idle {idle_since}"
+                    )
+                }
+                Some(percent) => {
+                    format!(
+                        "📦 {used_label} / {window_label} tokens ({percent}%) · idle {idle_since}"
+                    )
+                }
+                None => format!("📦 context unknown · idle {idle_since}"),
+            }
         }
-        _ => format!("📦 idle {idle_since}"),
+        RecapContextDisplay::Stale => format!("📦 context stale · idle {idle_since}"),
+        RecapContextDisplay::Unknown => format!("📦 context unknown · idle {idle_since}"),
     }
 }
 
@@ -268,17 +405,153 @@ pub(crate) async fn summarize_with_opencode(scrollback: &str) -> Option<String> 
 }
 
 fn format_token_count(n: u64) -> String {
-    if n < 1_000 {
-        format!("{n}")
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
     } else {
-        format!("{}k", n / 1_000)
+        n.to_string()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecapContextDisplay {
+    Known { used: u64, window: u64 },
+    Stale,
+    Unknown,
+}
+
+fn select_recap_context(snapshot: &RecapSnapshot, now: DateTime<Utc>) -> RecapContextDisplay {
+    if let Some(live) = snapshot.live_context_usage {
+        if live.used_tokens > 0 && live.context_window_tokens > 0 {
+            return RecapContextDisplay::Known {
+                used: live.used_tokens,
+                window: live.context_window_tokens,
+            };
+        }
+    }
+
+    let window = context_window_for(snapshot);
+    if let Some(used) = latest_turn_context_tokens(snapshot) {
+        return RecapContextDisplay::Known { used, window };
+    }
+
+    if session_tokens_are_stale_or_incompatible(snapshot, now) {
+        return RecapContextDisplay::Stale;
+    }
+
+    if let Some(used) = fresh_session_tokens(snapshot, now) {
+        return RecapContextDisplay::Known { used, window };
+    }
+
+    RecapContextDisplay::Unknown
+}
+
+fn latest_turn_context_tokens(snapshot: &RecapSnapshot) -> Option<u64> {
+    if !latest_turn_matches_active_session(snapshot) {
+        return None;
+    }
+    let input = non_negative_i64_to_u64(snapshot.latest_turn_input_tokens?)?;
+    let cache_create =
+        non_negative_i64_to_u64(snapshot.latest_turn_cache_create_tokens.unwrap_or(0))?;
+    let cache_read = non_negative_i64_to_u64(snapshot.latest_turn_cache_read_tokens.unwrap_or(0))?;
+    let used = input
+        .saturating_add(cache_create)
+        .saturating_add(cache_read);
+    (used > 0).then_some(used)
+}
+
+fn latest_turn_matches_active_session(snapshot: &RecapSnapshot) -> bool {
+    if snapshot.latest_turn_finished_at.is_none() {
+        return false;
+    }
+    if !same_normalized_opt(
+        snapshot.latest_turn_provider.as_deref(),
+        Some(snapshot.provider.as_str()),
+    ) {
+        return false;
+    }
+    if same_normalized_opt(
+        snapshot.latest_turn_session_key.as_deref(),
+        Some(snapshot.session_key.as_str()),
+    ) {
+        return true;
+    }
+    let latest_session_id = snapshot
+        .latest_turn_session_id
+        .as_deref()
+        .and_then(normalized_text);
+    let Some(latest_session_id) = latest_session_id else {
+        return false;
+    };
+    provider_session_ids(snapshot).any(|session_id| session_id == latest_session_id)
+}
+
+fn provider_session_ids(snapshot: &RecapSnapshot) -> impl Iterator<Item = &str> {
+    [
+        snapshot.claude_session_id.as_deref(),
+        snapshot.raw_provider_session_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(normalized_text)
+}
+
+fn session_tokens_are_stale_or_incompatible(snapshot: &RecapSnapshot, now: DateTime<Utc>) -> bool {
+    let Some(tokens) = snapshot.tokens.filter(|value| *value > 0) else {
+        return false;
+    };
+    if non_negative_i64_to_u64(tokens).is_none() {
+        return true;
+    }
+    if snapshot.latest_turn_finished_at.is_some() && !latest_turn_matches_active_session(snapshot) {
+        return true;
+    }
+    !session_tokens_are_fresh(snapshot, now)
+}
+
+fn fresh_session_tokens(snapshot: &RecapSnapshot, now: DateTime<Utc>) -> Option<u64> {
+    let tokens = non_negative_i64_to_u64(snapshot.tokens?)?;
+    if tokens == 0 || !session_tokens_are_fresh(snapshot, now) {
+        return None;
+    }
+    Some(tokens)
+}
+
+fn session_tokens_are_fresh(snapshot: &RecapSnapshot, now: DateTime<Utc>) -> bool {
+    let Some(updated_at) = snapshot.tokens_updated_at else {
+        return false;
+    };
+    let age = now - updated_at;
+    age.num_seconds() >= 0 && age.num_seconds() <= SESSION_TOKEN_FRESHNESS_MAX_SECS
+}
+
+fn non_negative_i64_to_u64(value: i64) -> Option<u64> {
+    u64::try_from(value).ok()
+}
+
+fn same_normalized_opt(left: Option<&str>, right: Option<&str>) -> bool {
+    match (
+        left.and_then(normalized_text),
+        right.and_then(normalized_text),
+    ) {
+        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+        _ => false,
+    }
+}
+
+fn normalized_text(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
     }
 }
 
 fn context_window_for(snapshot: &RecapSnapshot) -> u64 {
     match ProviderKind::from_str(&snapshot.provider) {
-        Some(ProviderKind::Claude) => CLAUDE_CONTEXT_WINDOW_TOKENS,
-        Some(ProviderKind::Codex) => CODEX_CONTEXT_WINDOW_TOKENS,
+        Some(provider) => provider.resolve_context_window(snapshot.model.as_deref()),
         _ => FALLBACK_CONTEXT_WINDOW_TOKENS,
     }
 }
@@ -360,16 +633,63 @@ fn make_recap_components(message_id_suffix: &str) -> Vec<CreateActionRow> {
     ])]
 }
 
-/// Delete the previous recap card if one is recorded. Errors are swallowed
-/// so the renderer never fails the cycle just because Discord has GC'd the
-/// old message itself. Same allowlist rationale as `post_recap_card`.
+fn content_looks_like_idle_recap_card(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    trimmed == "📦" || trimmed.starts_with("📦 ")
+}
+
+fn component_is_idle_recap_clear_button(component: &serenity::ActionRowComponent) -> bool {
+    match component {
+        serenity::ActionRowComponent::Button(button) => match &button.data {
+            ButtonKind::NonLink { custom_id, .. } => {
+                custom_id.starts_with(IDLE_RECAP_CLEAR_BUTTON_PREFIX)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn message_is_idle_recap_card(message: &serenity::Message) -> bool {
+    content_looks_like_idle_recap_card(&message.content)
+        && message.components.iter().any(|row| {
+            row.components
+                .iter()
+                .any(component_is_idle_recap_clear_button)
+        })
+}
+
+/// Delete the previous recap card if one is recorded and still looks like an
+/// idle-recap card. A stale/corrupt `sessions.idle_recap_message_id` must
+/// never be allowed to delete a real turn response, so this probes Discord
+/// first and only deletes messages carrying both the recap content marker and
+/// the recap button custom id. Errors are swallowed so the renderer never
+/// fails the cycle just because Discord has GC'd the old message itself.
+/// Same allowlist rationale as `post_recap_card`.
 pub(crate) async fn delete_previous_card(http: &serenity::Http, channel_id: u64, message_id: u64) {
-    let _ = super::http::delete_channel_message(
-        http,
-        ChannelId::new(channel_id),
-        MessageId::new(message_id),
-    )
-    .await;
+    let channel = ChannelId::new(channel_id);
+    let message = MessageId::new(message_id);
+    match http.get_message(channel, message).await {
+        Ok(current) if message_is_idle_recap_card(&current) => {
+            let _ = super::http::delete_channel_message(http, channel, message).await;
+        }
+        Ok(current) => {
+            tracing::warn!(
+                channel_id = channel_id,
+                message_id = message_id,
+                author_id = current.author.id.get(),
+                "idle_recap: preserving recorded message because it is not an idle recap card"
+            );
+        }
+        Err(error) => {
+            tracing::debug!(
+                channel_id = channel_id,
+                message_id = message_id,
+                error = %error,
+                "idle_recap: previous card probe failed; skipping destructive delete"
+            );
+        }
+    }
 }
 
 /// Persist the freshly-posted message id (and the channel it lives in) so
@@ -420,7 +740,7 @@ pub(crate) async fn clear_recap_pointer(
     pool: &PgPool,
     session_key: &str,
     expected_message_id: u64,
-) -> Result<(), sqlx::Error> {
+) -> Result<bool, sqlx::Error> {
     sqlx::query(
         "UPDATE sessions
          SET idle_recap_message_id = NULL,
@@ -432,7 +752,7 @@ pub(crate) async fn clear_recap_pointer(
     .bind(expected_message_id as i64)
     .execute(pool)
     .await
-    .map(|_| ())
+    .map(|result| result.rows_affected() > 0)
 }
 
 /// Lookup the active recap pointer for a Discord channel id so the
@@ -462,4 +782,170 @@ pub(crate) fn tmux_session_name_from_key(session_key: &str) -> Option<&str> {
         .rsplit_once(':')
         .map(|(_, name)| name)
         .filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot_with_sessions(
+        claude_session_id: Option<&str>,
+        raw_provider_session_id: Option<&str>,
+    ) -> RecapSnapshot {
+        RecapSnapshot {
+            session_key: "discord:codex:AgentDesk-codex-test".to_string(),
+            provider: "codex".to_string(),
+            model: None,
+            tokens: None,
+            tokens_updated_at: None,
+            last_heartbeat: None,
+            claude_session_id: claude_session_id.map(str::to_string),
+            raw_provider_session_id: raw_provider_session_id.map(str::to_string),
+            live_context_usage: None,
+            latest_turn_provider: None,
+            latest_turn_session_key: None,
+            latest_turn_session_id: None,
+            latest_turn_finished_at: None,
+            latest_turn_input_tokens: None,
+            latest_turn_cache_create_tokens: None,
+            latest_turn_cache_read_tokens: None,
+            previous_message_id: None,
+            previous_channel_id: None,
+            discord_channel_id: None,
+            discord_channel_cc: None,
+            discord_channel_cdx: Some("1506295335096549406".to_string()),
+            discord_channel_alt: None,
+        }
+    }
+
+    #[test]
+    fn recap_requires_resumable_provider_session_id() {
+        assert!(!snapshot_with_sessions(None, None).has_resumable_provider_session());
+        assert!(!snapshot_with_sessions(Some("  "), Some("")).has_resumable_provider_session());
+        assert!(snapshot_with_sessions(Some("session-1"), None).has_resumable_provider_session());
+        assert!(snapshot_with_sessions(None, Some("raw-1")).has_resumable_provider_session());
+    }
+
+    #[test]
+    fn idle_recap_delete_guard_requires_recap_content_marker() {
+        assert!(content_looks_like_idle_recap_card("📦 idle 8분"));
+        assert!(content_looks_like_idle_recap_card(
+            "📦 12k / 200k tokens (6%) · idle 8분"
+        ));
+        assert!(!content_looks_like_idle_recap_card(
+            "✅ **응답 완료** — codex"
+        ));
+        assert!(!content_looks_like_idle_recap_card(
+            "> 📦 mentioned inside a normal response"
+        ));
+    }
+
+    #[test]
+    fn recap_prefers_known_live_session_context_window() {
+        let mut snapshot = snapshot_with_sessions(None, Some("raw-1"));
+        snapshot.live_context_usage = Some(RecapLiveContextUsage {
+            used_tokens: 117_600,
+            context_window_tokens: 272_000,
+        });
+
+        let display = select_recap_context(&snapshot, Utc::now());
+        assert_eq!(
+            display,
+            RecapContextDisplay::Known {
+                used: 117_600,
+                window: 272_000
+            }
+        );
+        let header = compose_recap_header(&snapshot);
+        assert!(header.contains("117.6k / 272.0k tokens (43%)"));
+    }
+
+    #[test]
+    fn recap_uses_provider_registry_window_for_matching_latest_turn() {
+        let mut snapshot = snapshot_with_sessions(Some("claude-session-1"), None);
+        snapshot.provider = "claude".to_string();
+        snapshot.latest_turn_provider = Some("claude".to_string());
+        snapshot.latest_turn_session_id = Some("claude-session-1".to_string());
+        snapshot.latest_turn_finished_at = Some(Utc::now());
+        snapshot.latest_turn_input_tokens = Some(12_000);
+        snapshot.latest_turn_cache_create_tokens = Some(3_000);
+        snapshot.latest_turn_cache_read_tokens = Some(5_000);
+
+        assert_eq!(
+            select_recap_context(&snapshot, Utc::now()),
+            RecapContextDisplay::Known {
+                used: 20_000,
+                window: ProviderKind::Claude.default_context_window()
+            }
+        );
+    }
+
+    #[test]
+    fn recap_unknown_provider_uses_conservative_fallback_when_tokens_are_fresh() {
+        let mut snapshot = snapshot_with_sessions(None, Some("raw-1"));
+        snapshot.provider = "unknown-provider".to_string();
+        snapshot.tokens = Some(10_000);
+        snapshot.tokens_updated_at = Some(Utc::now());
+
+        assert_eq!(
+            select_recap_context(&snapshot, Utc::now()),
+            RecapContextDisplay::Known {
+                used: 10_000,
+                window: FALLBACK_CONTEXT_WINDOW_TOKENS
+            }
+        );
+    }
+
+    #[test]
+    fn recap_stale_session_tokens_are_not_rendered_as_live_context() {
+        let mut snapshot = snapshot_with_sessions(None, Some("raw-1"));
+        let now = Utc::now();
+        snapshot.tokens = Some(303_000);
+        snapshot.tokens_updated_at =
+            Some(now - chrono::Duration::seconds(SESSION_TOKEN_FRESHNESS_MAX_SECS + 1));
+
+        assert_eq!(
+            select_recap_context(&snapshot, now),
+            RecapContextDisplay::Stale
+        );
+        let header = compose_recap_header(&snapshot);
+        assert!(header.contains("context stale"));
+        assert!(!header.contains("303.0k"));
+    }
+
+    #[test]
+    fn recap_over_window_usage_is_capped_and_flagged() {
+        let mut snapshot = snapshot_with_sessions(None, Some("raw-1"));
+        snapshot.live_context_usage = Some(RecapLiveContextUsage {
+            used_tokens: 303_000,
+            context_window_tokens: 272_000,
+        });
+
+        let header = compose_recap_header(&snapshot);
+        assert!(header.contains("303.0k / 272.0k tokens (100%+, over limit)"));
+        assert!(!header.contains("(111%)"));
+    }
+
+    #[test]
+    fn recap_latest_turn_usage_must_match_active_provider_session() {
+        let mut snapshot = snapshot_with_sessions(None, Some("raw-active"));
+        snapshot.latest_turn_provider = Some("codex".to_string());
+        snapshot.latest_turn_session_id = Some("raw-stale".to_string());
+        snapshot.latest_turn_finished_at = Some(Utc::now());
+        snapshot.latest_turn_input_tokens = Some(42_000);
+
+        assert_eq!(
+            select_recap_context(&snapshot, Utc::now()),
+            RecapContextDisplay::Unknown
+        );
+
+        snapshot.latest_turn_session_id = Some("raw-active".to_string());
+        assert_eq!(
+            select_recap_context(&snapshot, Utc::now()),
+            RecapContextDisplay::Known {
+                used: 42_000,
+                window: ProviderKind::Codex.default_context_window()
+            }
+        );
+    }
 }

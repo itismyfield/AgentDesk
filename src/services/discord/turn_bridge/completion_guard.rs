@@ -8,6 +8,7 @@ pub(super) struct DispatchSnapshot {
     pub(super) dispatch_type: String,
     pub(super) status: String,
     pub(super) kanban_card_id: Option<String>,
+    pub(super) context: Option<serde_json::Value>,
 }
 
 pub(super) async fn fetch_dispatch_snapshot(
@@ -25,6 +26,11 @@ pub(super) async fn fetch_dispatch_snapshot(
             .get("kanban_card_id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
+        context: dispatch.get("context").and_then(|value| match value {
+            serde_json::Value::Object(_) => Some(value.clone()),
+            serde_json::Value::String(raw) => serde_json::from_str(raw).ok(),
+            _ => None,
+        }),
     })
 }
 
@@ -213,6 +219,67 @@ pub(in crate::services::discord) fn extract_explicit_review_verdict(
     }
 }
 
+fn phase_gate_pass_verdict(snapshot: &DispatchSnapshot) -> String {
+    snapshot
+        .context
+        .as_ref()
+        .and_then(|context| context.get("phase_gate"))
+        .and_then(|phase_gate| phase_gate.get("pass_verdict"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("phase_gate_passed")
+        .to_string()
+}
+
+pub(in crate::services::discord) fn extract_phase_gate_pass(full_response: &str) -> bool {
+    let explicit_verdict = regex::Regex::new(
+        r"(?im)^\s*(?:verdict|overall|result)\s*:\s*\**\s*(phase_gate_passed|pass|passed)\b",
+    )
+    .ok();
+    if explicit_verdict
+        .as_ref()
+        .is_some_and(|pattern| pattern.is_match(full_response))
+    {
+        return true;
+    }
+
+    let phase_gate_line = regex::Regex::new(
+        r"(?im)^\s*phase\s*gate(?:\s+P?\d+)?\s*:\s*\**\s*(phase_gate_passed|pass|passed)\b",
+    )
+    .ok();
+    phase_gate_line
+        .as_ref()
+        .is_some_and(|pattern| pattern.is_match(full_response))
+}
+
+async fn submit_phase_gate_completion_fallback(
+    dispatch_id: &str,
+    pass_verdict: &str,
+    full_response: &str,
+) -> Result<(), String> {
+    let payload = crate::server::routes::dispatches::UpdateDispatchBody {
+        status: Some("completed".to_string()),
+        result: Some(serde_json::json!({
+            "verdict": pass_verdict,
+            "summary": truncate_str(full_response.trim(), 4000),
+            "completion_source": "turn_bridge_phase_gate_pass_fallback",
+        })),
+        allowed_from: Some(
+            ["pending", "dispatched", "failed"]
+                .iter()
+                .map(|status| (*status).to_string())
+                .collect(),
+        ),
+    };
+    match crate::services::discord::internal_api::update_dispatch(dispatch_id, payload).await? {
+        crate::services::discord::internal_api::DispatchUpdateOutcome::Updated(_) => Ok(()),
+        crate::services::discord::internal_api::DispatchUpdateOutcome::Conflict { body } => {
+            Err(format!("phase-gate dispatch already terminal: {body}"))
+        }
+    }
+}
+
 fn decode_pg_completion_hint_field<T>(
     decoded: Result<Option<T>, sqlx::Error>,
     dispatch_id: &str,
@@ -291,7 +358,10 @@ pub(in crate::services::discord) async fn guard_review_dispatch_completion(
 ) -> Option<String> {
     let dispatch_id = dispatch_id?;
     let snapshot = fetch_dispatch_snapshot(api_port, dispatch_id).await?;
-    if snapshot.status != "pending" {
+    if !matches!(
+        snapshot.status.as_str(),
+        "pending" | "dispatched" | "failed"
+    ) {
         return None;
     }
 
@@ -345,6 +415,33 @@ pub(in crate::services::discord) async fn guard_review_dispatch_completion(
                 "⚠️ review-decision dispatch가 아직 pending입니다. `review-decision` API를 호출해야 카드가 다음 단계로 이동합니다."
                     .to_string(),
             )
+        }
+        "phase-gate" => {
+            if extract_phase_gate_pass(full_response) {
+                let pass_verdict = phase_gate_pass_verdict(&snapshot);
+                match submit_phase_gate_completion_fallback(
+                    dispatch_id,
+                    &pass_verdict,
+                    full_response,
+                )
+                .await
+                {
+                    Ok(()) => return None,
+                    Err(err) => {
+                        return Some(format!(
+                            "⚠️ phase-gate PASS 자동 완료 실패: {err}\n`PATCH /api/dispatches/{dispatch_id}`를 다시 호출해야 큐가 진행됩니다."
+                        ));
+                    }
+                }
+            }
+            if matches!(snapshot.status.as_str(), "pending" | "dispatched") {
+                Some(
+                    "⚠️ phase-gate dispatch가 아직 열려 있습니다. `Phase Gate Pn: PASS`와 함께 `PATCH /api/dispatches/{id}`로 완료해야 큐가 진행됩니다."
+                        .to_string(),
+                )
+            } else {
+                None
+            }
         }
         _ => None,
     }
@@ -402,24 +499,14 @@ fn runtime_postgres_reconcile_key(dispatch_id: &str) -> String {
     format!("reconcile_dispatch:{dispatch_id}")
 }
 
-fn is_noop_runtime_completion_result(result: &serde_json::Value) -> bool {
-    result.get("work_outcome").and_then(|entry| entry.as_str()) == Some("noop")
-        || result
-            .get("completed_without_changes")
-            .and_then(|entry| entry.as_bool())
-            == Some(true)
-}
-
 fn should_sync_runtime_auto_queue_terminal_entry(
     dispatch_type: Option<&str>,
-    result: &serde_json::Value,
+    _result: &serde_json::Value,
     auto_queue_review_disabled: bool,
 ) -> bool {
     match dispatch_type {
         Some("consultation") => false,
-        Some("implementation" | "rework") => {
-            !is_noop_runtime_completion_result(result) || auto_queue_review_disabled
-        }
+        Some("implementation" | "rework") => auto_queue_review_disabled,
         _ => true,
     }
 }
@@ -1858,7 +1945,7 @@ mod runtime_completion_policy_tests {
             "completed_without_changes": true
         });
 
-        assert!(should_sync_runtime_auto_queue_terminal_entry(
+        assert!(!should_sync_runtime_auto_queue_terminal_entry(
             Some("implementation"),
             &normal_result,
             false
@@ -2241,6 +2328,7 @@ mod tests {
             dispatch_type: "implementation".to_string(),
             status: "pending".to_string(),
             kanban_card_id: None,
+            context: None,
         };
 
         assert!(should_complete_work_dispatch(&snapshot));
@@ -2252,6 +2340,7 @@ mod tests {
             dispatch_type: "rework".to_string(),
             status: "dispatched".to_string(),
             kanban_card_id: None,
+            context: None,
         };
 
         assert!(should_complete_work_dispatch(&snapshot));
@@ -2263,11 +2352,13 @@ mod tests {
             dispatch_type: "implementation".to_string(),
             status: "completed".to_string(),
             kanban_card_id: None,
+            context: None,
         };
         let dispatched_review = DispatchSnapshot {
             dispatch_type: "review".to_string(),
             status: "dispatched".to_string(),
             kanban_card_id: None,
+            context: None,
         };
 
         assert!(!should_complete_work_dispatch(&completed_work));

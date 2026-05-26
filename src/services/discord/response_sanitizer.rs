@@ -1,5 +1,10 @@
 //! Outbound response sanitizer for AgentDesk-owned hidden context.
 
+const TUI_IDLE_RESPONSE_CHROME_PREFIXES: &[&str] = &[
+    "No response requested.",
+    "Continue from where you left off.",
+];
+
 const HIDDEN_HEADERS: &[&str] = &[
     "[Authoritative Instructions]",
     "[Tool Policy]",
@@ -78,6 +83,41 @@ pub(crate) fn sanitize_hidden_context(input: &str) -> String {
     trim_blank_edges(out)
 }
 
+/// Remove leading Claude/Codex TUI housekeeping text that can be emitted by
+/// resume/meta prompts before the real assistant body. Preserve legitimate
+/// prose like "No response requested. But ..." where the phrase is part of
+/// the answer rather than a standalone chrome chunk.
+pub(crate) fn strip_leading_tui_response_chrome(input: &str) -> String {
+    let mut stripped = input;
+    let mut changed = false;
+    loop {
+        let trimmed = stripped.trim_start();
+        if let Some(prefix) = TUI_IDLE_RESPONSE_CHROME_PREFIXES
+            .iter()
+            .find(|prefix| leading_tui_chrome_prefix_matches(trimmed, prefix))
+        {
+            changed = true;
+            stripped = &trimmed[prefix.len()..];
+            continue;
+        }
+        return if changed {
+            trimmed.to_string()
+        } else {
+            input.to_string()
+        };
+    }
+}
+
+fn leading_tui_chrome_prefix_matches(trimmed: &str, prefix: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix(prefix) else {
+        return false;
+    };
+    rest.is_empty()
+        || rest.starts_with('\n')
+        || rest.starts_with('\r')
+        || rest.chars().next().is_some_and(|ch| !ch.is_whitespace())
+}
+
 fn is_hidden_header(trimmed: &str) -> bool {
     HIDDEN_HEADERS
         .iter()
@@ -122,7 +162,7 @@ fn trim_blank_edges(lines: Vec<String>) -> String {
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
-    use super::sanitize_hidden_context;
+    use super::{sanitize_hidden_context, strip_leading_tui_response_chrome};
 
     #[test]
     fn removes_hidden_blocks_and_keeps_answer() {
@@ -188,5 +228,45 @@ Discord formatting rules:
 
 Visible answer.";
         assert_eq!(sanitize_hidden_context(input), "Visible answer.");
+    }
+
+    #[test]
+    fn strips_standalone_tui_no_response_chrome_before_body() {
+        assert_eq!(
+            strip_leading_tui_response_chrome("No response requested.\n\nfinal answer"),
+            "final answer"
+        );
+        assert_eq!(
+            strip_leading_tui_response_chrome("No response requested.fix2_3"),
+            "fix2_3"
+        );
+        assert_eq!(
+            strip_leading_tui_response_chrome(
+                "Continue from where you left off.\nNo response requested.\nfinal answer"
+            ),
+            "final answer"
+        );
+    }
+
+    #[test]
+    fn keeps_legitimate_tui_no_response_sentence() {
+        assert_eq!(
+            strip_leading_tui_response_chrome(
+                "No response requested. But here is the explanation."
+            ),
+            "No response requested. But here is the explanation."
+        );
+        assert_eq!(
+            strip_leading_tui_response_chrome("Hello\nNo response requested. trailing"),
+            "Hello\nNo response requested. trailing"
+        );
+    }
+
+    #[test]
+    fn standalone_tui_no_response_chrome_becomes_empty() {
+        assert_eq!(
+            strip_leading_tui_response_chrome("No response requested."),
+            ""
+        );
     }
 }

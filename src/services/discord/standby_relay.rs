@@ -47,6 +47,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1800);
 const MAX_FILE_BYTES_PER_TICK: u64 = 1_048_576; // 1 MiB safety cap
 const INFLIGHT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const COMPLETED_SIGNAL_DRAIN_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug)]
 pub(in crate::services::discord) struct StandbyRelayTurnBinding {
@@ -97,11 +98,13 @@ pub(super) async fn run_standby_relay(
     let deadline = Instant::now() + timeout;
     let mut current_offset = start_offset;
     let mut last_inflight_heartbeat = Instant::now();
-    // Buffer for incomplete trailing line across reads.
-    let mut tail_buf = String::new();
+    // Buffer raw bytes for incomplete trailing lines across reads. Decoding
+    // only complete JSONL lines avoids replacing split UTF-8 scalars.
+    let mut tail_buf: Vec<u8> = Vec::new();
     let mut tail_start_offset = start_offset;
     let mut pending_result_text: Option<String> = None;
     let mut pending_result_retry_offset: Option<u64> = None;
+    let mut completed_signal_drain_until: Option<Instant> = None;
     // #2448: subscribe BEFORE the first poll tick so a `Completed` broadcast
     // emitted while we are setting up is queued instead of lost. Lag is
     // expected on heavy load — `RecvError::Lagged` is treated as "you may
@@ -136,26 +139,46 @@ pub(super) async fn run_standby_relay(
             );
             return;
         }
+        if standby_completed_drain_expired(
+            pending_result_text.as_deref(),
+            completed_signal_drain_until,
+            Instant::now(),
+        ) {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 👁 standby_relay exit after Completed drain grace for channel {} (offset={})",
+                channel_id.get(),
+                current_offset
+            );
+            return;
+        }
         // #2448: drain the broadcast queue NON-blocking before each poll
-        // tick. If we observe `Completed { channel_id: self }` here, the
-        // primary turn_bridge has dropped its `CompletionGuard` and any
-        // residual JSONL `result` event was either consumed by the bridge
-        // (leader path) or will land on the next file-poll tick. Either
-        // way the relay can exit promptly.
+        // tick. If we observe `Completed { channel_id: self }` before this
+        // task has parsed a result, keep polling for a short grace period.
+        // The result line may already be on disk but not yet consumed by this
+        // relay; exiting immediately leaves the placeholder without a final
+        // response.
         loop {
             use tokio::sync::broadcast::error::TryRecvError;
             match inflight_signals.try_recv() {
                 Ok(InflightSignal::Completed { channel_id: c })
                     if c == channel_id.get()
-                        && standby_completed_signal_exits(pending_result_text.as_deref()) =>
+                        && standby_completed_signal_starts_drain(
+                            pending_result_text.as_deref(),
+                        ) =>
                 {
+                    if completed_signal_drain_until.is_none() {
+                        completed_signal_drain_until =
+                            Some(Instant::now() + COMPLETED_SIGNAL_DRAIN_GRACE);
+                    }
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
-                        "  [{ts}] 👁 standby_relay exit on InflightSignal::Completed for channel {} (offset={})",
+                        "  [{ts}] 👁 standby_relay observed InflightSignal::Completed for channel {}; draining JSONL for {:?} before exit (offset={})",
                         channel_id.get(),
+                        COMPLETED_SIGNAL_DRAIN_GRACE,
                         current_offset
                     );
-                    return;
+                    break;
                 }
                 Ok(InflightSignal::Completed { channel_id: c }) if c == channel_id.get() => {
                     continue;
@@ -256,53 +279,38 @@ pub(super) async fn run_standby_relay(
         };
         current_offset = read_to;
 
-        // Stitch any prior incomplete tail with the new chunk and process
-        // line-by-line. Keep the trailing partial line (no '\n') for next tick.
-        let stitched_start_offset = if tail_buf.is_empty() {
-            read_from
-        } else {
-            tail_start_offset
-        };
-        let stitched = if tail_buf.is_empty() {
-            new_chunk
-        } else {
-            let mut s = std::mem::take(&mut tail_buf);
-            s.push_str(&new_chunk);
-            s
-        };
-        let mut last_complete_end = 0usize;
-        let bytes = stitched.as_bytes();
         let mut found_result_text = None;
-        for (idx, b) in bytes.iter().enumerate() {
-            if *b == b'\n' {
-                let line_start = last_complete_end;
-                let line = &stitched[line_start..idx];
-                last_complete_end = idx + 1;
-                if line.trim().is_empty() {
-                    continue;
-                }
-                if let Some(result_text) = extract_result_text(line) {
-                    pending_result_retry_offset =
-                        Some(stitched_start_offset.saturating_add(line_start as u64));
-                    found_result_text = Some(result_text);
-                    break;
-                }
+        let decoded_lines = standby_complete_lines_from_chunk(
+            &mut tail_buf,
+            &mut tail_start_offset,
+            read_from,
+            new_chunk,
+        );
+        for (line_start, line) in decoded_lines.lines {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Some(result_text) = extract_result_text(&line) {
+                pending_result_retry_offset = Some(
+                    decoded_lines
+                        .stitched_start_offset
+                        .saturating_add(line_start as u64),
+                );
+                found_result_text = Some(result_text);
+                break;
             }
         }
         if let Some(result_text) = found_result_text {
             pending_result_text = Some(result_text);
+            completed_signal_drain_until = None;
             continue;
-        }
-        if last_complete_end < stitched.len() {
-            tail_buf = stitched[last_complete_end..].to_string();
-            tail_start_offset = stitched_start_offset.saturating_add(last_complete_end as u64);
         }
 
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
 
-fn read_file_range(path: &str, start: u64, end: u64) -> std::io::Result<String> {
+fn read_file_range(path: &str, start: u64, end: u64) -> std::io::Result<Vec<u8>> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(path)?;
     file.seek(SeekFrom::Start(start))?;
@@ -310,7 +318,60 @@ fn read_file_range(path: &str, start: u64, end: u64) -> std::io::Result<String> 
     let mut buf = vec![0u8; len];
     let read = file.read(&mut buf)?;
     buf.truncate(read);
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+    Ok(buf)
+}
+
+#[derive(Debug)]
+struct StandbyDecodedLines {
+    stitched_start_offset: u64,
+    lines: Vec<(usize, String)>,
+}
+
+fn standby_complete_lines_from_chunk(
+    tail_buf: &mut Vec<u8>,
+    tail_start_offset: &mut u64,
+    read_from: u64,
+    new_chunk: Vec<u8>,
+) -> StandbyDecodedLines {
+    let stitched_start_offset = if tail_buf.is_empty() {
+        read_from
+    } else {
+        *tail_start_offset
+    };
+    let stitched = if tail_buf.is_empty() {
+        new_chunk
+    } else {
+        let mut s = std::mem::take(tail_buf);
+        s.extend_from_slice(&new_chunk);
+        s
+    };
+
+    let mut lines = Vec::new();
+    let mut last_complete_end = 0usize;
+    for (idx, b) in stitched.iter().enumerate() {
+        if *b == b'\n' {
+            let line_start = last_complete_end;
+            let line_bytes = &stitched[line_start..idx];
+            let line = match std::str::from_utf8(line_bytes) {
+                Ok(line) => line.to_string(),
+                Err(_) => String::from_utf8_lossy(line_bytes).into_owned(),
+            };
+            lines.push((line_start, line));
+            last_complete_end = idx + 1;
+        }
+    }
+    if last_complete_end < stitched.len() {
+        tail_buf.extend_from_slice(&stitched[last_complete_end..]);
+        *tail_start_offset = stitched_start_offset.saturating_add(last_complete_end as u64);
+    } else {
+        tail_buf.clear();
+        *tail_start_offset = stitched_start_offset.saturating_add(last_complete_end as u64);
+    }
+
+    StandbyDecodedLines {
+        stitched_start_offset,
+        lines,
+    }
 }
 
 fn extract_result_text(line: &str) -> Option<String> {
@@ -319,11 +380,11 @@ fn extract_result_text(line: &str) -> Option<String> {
         return None;
     }
     let result_text = parsed.get("result").and_then(Value::as_str)?;
-    let trimmed = result_text.trim();
-    if trimmed.is_empty() {
+    let cleaned = super::response_sanitizer::strip_leading_tui_response_chrome(result_text);
+    if cleaned.trim().is_empty() {
         return None;
     }
-    Some(result_text.to_string())
+    Some(cleaned)
 }
 
 fn standby_inflight_matches(
@@ -341,8 +402,16 @@ fn standby_inflight_matches(
     }
 }
 
-fn standby_completed_signal_exits(pending_result_text: Option<&str>) -> bool {
+fn standby_completed_signal_starts_drain(pending_result_text: Option<&str>) -> bool {
     pending_result_text.is_none()
+}
+
+fn standby_completed_drain_expired(
+    pending_result_text: Option<&str>,
+    drain_until: Option<Instant>,
+    now: Instant,
+) -> bool {
+    pending_result_text.is_none() && drain_until.is_some_and(|until| now >= until)
 }
 
 fn standby_heartbeat_offset(
@@ -550,30 +619,28 @@ async fn deliver_response(
             .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
             match outcome {
-                Ok(ReplaceLongMessageOutcome::EditedOriginal)
-                | Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. }) => {
-                    // `Manage Messages` lives on the announce bot in this
-                    // deployment; route the unpin there to avoid 403.
-                    let unpin_http = super::gateway::manage_messages_http(shared, http).await;
-                    match channel_id.unpin(unpin_http.as_ref(), msg_id).await {
-                        Ok(()) => shared
-                            .placeholder_controller
-                            .forget_placeholder_pin(provider, channel_id, msg_id),
-                        Err(error) => {
-                            tracing::warn!(
-                                provider = provider.as_str(),
-                                channel_id = channel_id.get(),
-                                message_id = msg_id.get(),
-                                error = %error,
-                                "[standby_relay] placeholder unpin failed after terminal delivery; tracked cleanup will retry"
-                            );
-                        }
-                    }
+                Ok(ReplaceLongMessageOutcome::EditedOriginal) => {
                     tracing::info!(
                         "  [{ts}] 👁 standby_relay ✓ delivered terminal response (edit) channel {} msg {} ({} chars)",
                         channel_id.get(),
                         msg_id.get(),
                         chars
+                    );
+                    true
+                }
+                Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error }) => {
+                    // Mirror session_relay_sink #2757: never delete the
+                    // original msg_id after fallback delivery. By the time
+                    // the edit fails, msg_id can already be a live response
+                    // card rather than a disposable placeholder; deleting it
+                    // makes the prior Discord turn vanish after the fallback
+                    // copy appears.
+                    tracing::warn!(
+                        "  [{ts}] 👁 standby_relay ✓ delivered terminal response via fallback; preserving original msg {} in channel {} ({} chars, edit_error={})",
+                        msg_id.get(),
+                        channel_id.get(),
+                        chars,
+                        edit_error
                     );
                     true
                 }
@@ -650,6 +717,14 @@ mod tests {
     }
 
     #[test]
+    fn extract_result_text_strips_tui_no_response_chrome() {
+        let line = "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"No response requested.\\n\\nhello\"}";
+        assert_eq!(extract_result_text(line).as_deref(), Some("hello"));
+        let empty = r#"{"type":"result","subtype":"success","result":"No response requested."}"#;
+        assert!(extract_result_text(empty).is_none());
+    }
+
+    #[test]
     fn extract_result_text_skips_empty_result() {
         let line = r#"{"type":"result","subtype":"success","result":"   "}"#;
         assert!(extract_result_text(line).is_none());
@@ -719,9 +794,61 @@ mod tests {
     }
 
     #[test]
-    fn completed_signal_does_not_exit_while_result_delivery_is_pending() {
-        assert!(standby_completed_signal_exits(None));
-        assert!(!standby_completed_signal_exits(Some("final response")));
+    fn completed_signal_starts_drain_before_exit_when_result_not_seen() {
+        let now = Instant::now();
+        assert!(standby_completed_signal_starts_drain(None));
+        assert!(!standby_completed_signal_starts_drain(Some(
+            "final response"
+        )));
+        assert!(!standby_completed_drain_expired(None, None, now));
+        assert!(!standby_completed_drain_expired(
+            Some("final response"),
+            Some(now),
+            now
+        ));
+        assert!(!standby_completed_drain_expired(
+            None,
+            Some(now + Duration::from_millis(1)),
+            now
+        ));
+        assert!(standby_completed_drain_expired(None, Some(now), now));
+    }
+
+    #[test]
+    fn standby_line_decoder_preserves_utf8_split_across_chunks() {
+        let marker = "가나다😀";
+        let line = format!(r#"{{"type":"result","result":"{marker}"}}"#);
+        let bytes = format!("{line}\n").into_bytes();
+        let split = bytes
+            .windows("😀".len())
+            .position(|window| window == "😀".as_bytes())
+            .expect("emoji bytes present")
+            + 1;
+        let mut tail = Vec::new();
+        let mut tail_start = 100;
+
+        let first = standby_complete_lines_from_chunk(
+            &mut tail,
+            &mut tail_start,
+            100,
+            bytes[..split].to_vec(),
+        );
+        assert!(first.lines.is_empty());
+        assert!(!tail.is_empty());
+
+        let second = standby_complete_lines_from_chunk(
+            &mut tail,
+            &mut tail_start,
+            100 + split as u64,
+            bytes[split..].to_vec(),
+        );
+        assert_eq!(second.stitched_start_offset, 100);
+        assert_eq!(second.lines.len(), 1);
+        assert_eq!(
+            extract_result_text(&second.lines[0].1).as_deref(),
+            Some(marker)
+        );
+        assert!(tail.is_empty());
     }
 
     #[test]

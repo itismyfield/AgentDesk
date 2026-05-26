@@ -506,7 +506,7 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
     // sleep-based release so the public surface stays compatible for
     // callers that don't care about prompt release.
     let ch_id = channel_id.get();
-    tokio::spawn(async move {
+    super::super::task_supervisor::spawn_observed("auto_retry_pending_release", async move {
         // Capped at 30s for back-compat — callers wanting prompt release
         // should use the `_with_completion` variant.
         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;

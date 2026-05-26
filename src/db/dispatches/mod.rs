@@ -55,6 +55,13 @@ fn context_slot_index(dispatch_context: Option<&serde_json::Value>) -> Option<i6
         .and_then(|value| value.as_i64())
 }
 
+fn context_entry_id(dispatch_context: Option<&serde_json::Value>) -> Option<&str> {
+    dispatch_context
+        .and_then(|ctx| ctx.get("entry_id"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+}
+
 fn thread_id_from_slot_map(thread_id_map: Option<&str>, channel_id: u64) -> Option<String> {
     thread_id_map
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
@@ -294,19 +301,25 @@ async fn slot_has_active_dispatch_excluding_pg_tx(
     agent_id: &str,
     slot_index: i64,
     exclude_dispatch_id: Option<&str>,
+    exclude_entry_id: Option<&str>,
 ) -> Result<bool, String> {
     let exclude_id = exclude_dispatch_id.unwrap_or("");
+    let exclude_entry_id = exclude_entry_id.unwrap_or("");
     let auto_queue_active: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)
-         FROM auto_queue_entries
-         WHERE agent_id = $1
-           AND slot_index = $2
-           AND status = 'dispatched'
-           AND COALESCE(dispatch_id, '') != $3",
+         FROM auto_queue_entries e
+         LEFT JOIN auto_queue_runs r ON r.id = e.run_id
+         WHERE e.agent_id = $1
+           AND e.slot_index = $2
+           AND e.status = 'dispatched'
+           AND COALESCE(e.dispatch_id, '') != $3
+           AND e.id != $4
+           AND COALESCE(r.status, 'active') NOT IN ('paused', 'cancelled')",
     )
     .bind(agent_id)
     .bind(slot_index)
     .bind(exclude_id)
+    .bind(exclude_entry_id)
     .fetch_one(&mut **tx)
     .await
     .map_err(|error| {
@@ -511,6 +524,7 @@ pub(crate) async fn allocate_manual_slot_binding_pg(
             agent_id,
             slot_index,
             Some(dispatch_id),
+            None,
         )
         .await?
         {
@@ -540,6 +554,47 @@ pub(crate) async fn resolve_slot_thread_binding_pg(
     max_slots: i64,
 ) -> Result<Option<SlotThreadBinding>, String> {
     if let Some(slot_index) = context_slot_index(dispatch_context) {
+        if independent_slot_thread {
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|error| format!("begin postgres context slot check: {error}"))?;
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+                .bind(format!("agentdesk:slot:{agent_id}:{slot_index}"))
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| {
+                    format!("lock postgres context slot for {agent_id}:{slot_index}: {error}")
+                })?;
+            let slot_busy = slot_has_active_dispatch_excluding_pg_tx(
+                &mut tx,
+                agent_id,
+                slot_index,
+                Some(dispatch_id),
+                None,
+            )
+            .await?;
+            tx.commit()
+                .await
+                .map_err(|error| format!("commit postgres context slot check: {error}"))?;
+            if slot_busy {
+                let binding = allocate_manual_slot_binding_pg(
+                    pool,
+                    agent_id,
+                    dispatch_id,
+                    channel_id,
+                    max_slots,
+                )
+                .await?;
+                if binding.is_none() {
+                    return Err(format!(
+                        "no free slot available for independent {dispatch_type:?} dispatch {dispatch_id}"
+                    ));
+                }
+                return Ok(binding);
+            }
+            persist_dispatch_slot_index_pg(pool, dispatch_id, slot_index).await?;
+        }
         return read_slot_thread_binding_pg(pool, agent_id, slot_index, channel_id).await;
     }
 
@@ -559,6 +614,47 @@ pub(crate) async fn resolve_slot_thread_binding_pg(
     .flatten();
 
     if let Some(slot_index) = auto_queue_slot {
+        if independent_slot_thread {
+            let entry_id = context_entry_id(dispatch_context);
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|error| format!("begin postgres auto-queue slot check: {error}"))?;
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+                .bind(format!("agentdesk:slot:{agent_id}:{slot_index}"))
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| {
+                    format!("lock postgres auto-queue slot for {agent_id}:{slot_index}: {error}")
+                })?;
+            let slot_busy = slot_has_active_dispatch_excluding_pg_tx(
+                &mut tx,
+                agent_id,
+                slot_index,
+                Some(dispatch_id),
+                entry_id,
+            )
+            .await?;
+            tx.commit()
+                .await
+                .map_err(|error| format!("commit postgres auto-queue slot check: {error}"))?;
+            if slot_busy {
+                let binding = allocate_manual_slot_binding_pg(
+                    pool,
+                    agent_id,
+                    dispatch_id,
+                    channel_id,
+                    max_slots,
+                )
+                .await?;
+                if binding.is_none() {
+                    return Err(format!(
+                        "no free slot available for independent {dispatch_type:?} dispatch {dispatch_id}"
+                    ));
+                }
+                return Ok(binding);
+            }
+        }
         let binding = read_slot_thread_binding_pg(pool, agent_id, slot_index, channel_id).await?;
         persist_dispatch_slot_index_pg(pool, dispatch_id, slot_index).await?;
         return Ok(binding);

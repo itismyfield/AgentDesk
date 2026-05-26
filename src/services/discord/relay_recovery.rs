@@ -484,6 +484,32 @@ pub(in crate::services::discord) async fn run_relay_recovery(
     })
 }
 
+fn idle_tmux_repair_ready_for_input(
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_session: &str,
+) -> bool {
+    let structured_ready =
+        super::inflight::load_inflight_state(provider, channel_id).and_then(|state| {
+            let output_path = state
+                .output_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())?;
+            crate::services::tui_turn_state::jsonl_ready_for_input(
+                provider,
+                state.runtime_kind,
+                std::path::Path::new(output_path),
+                Some(state.last_offset),
+            )
+        });
+    structured_ready
+        .map(crate::services::tui_turn_state::TuiReadyState::is_ready)
+        .unwrap_or_else(|| {
+            crate::services::provider::tmux_session_ready_for_input(tmux_session, provider)
+        })
+}
+
 async fn apply_relay_recovery_decision(
     registry: &HealthRegistry,
     shared: &Arc<SharedData>,
@@ -534,7 +560,7 @@ async fn apply_relay_recovery_decision(
         }
         RelayRecoveryActionKind::ReattachWatcher => {
             if let Some(tmux_session) = decision.affected.tmux_session.as_deref()
-                && crate::services::provider::tmux_session_ready_for_input(tmux_session, provider)
+                && idle_tmux_repair_ready_for_input(provider, decision.channel_id, tmux_session)
                 && super::inflight::inflight_state_allows_idle_tmux_repair(
                     provider,
                     decision.channel_id,

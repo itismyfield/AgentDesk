@@ -59,7 +59,7 @@ Each row is a (vector × action × job) tuple. If a vector is not in this table,
 | PG `task_dispatches`                      | 90 days                                     | Monthly aggregate insert, then `DELETE`                      | `storage.db_retention`            | Weekly   |
 | PG `prompt_manifest_layers`               | 30 days                                     | `UPDATE full_content = NULL, is_truncated = TRUE` (preserves hashes) | `storage.prompt_manifest_retention`| Daily    |
 | PG `kanban_cards`                         | **Forever**                                 | None — intentional permanent history                         | —                                 | —        |
-| `dcserver.stdout.log` / `dcserver.stderr.log` | TBD                                     | Deferred to a follow-up PR (requires `tracing-appender::rolling`) | *(not yet registered)*            | —        |
+| `dcserver.stdout.log`                         | 100 MB × 10 files by default            | Internal dcserver tracing writer rotates before append; launchd stdout/stderr are bootstrap-only | Built into `logging.rs` startup    | Continuous |
 
 Job source locations under `src/services/maintenance/jobs/`:
 `target_sweep.rs`, `worktree_orphan_sweep.rs`, `hang_dump_cleanup.rs`,
@@ -312,9 +312,9 @@ Expected on a fresh DB. If persisting beyond a week:
 
 Something is writing **outside** the four tracked vectors. Candidates:
 
-- `dcserver.stdout.log` / `dcserver.stderr.log` — log rotation is an explicit
-  deferred item (see row 10 in §2). Until that lands, rotate manually:
-  `> dcserver.stdout.log` while the server is restarted.
+- `dcserver.stdout.log` — dcserver rotates its internal tracing log at
+  100 MB × 10 files by default. Override with
+  `AGENTDESK_DCSERVER_LOG_MAX_BYTES` and `AGENTDESK_DCSERVER_LOG_MAX_FILES`.
 - MCP server caches (memento, codex-helper) — check `~/.cache/` and
   `~/Library/Caches/`.
 - Cargo registry under `~/.cargo/registry/` — bounded but can reach several GB;

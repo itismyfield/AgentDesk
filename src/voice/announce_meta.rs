@@ -1007,6 +1007,9 @@ mod tests {
             started_at: Some("2026-05-16T10:00:00+09:00".to_string()),
             completed_at: Some("2026-05-16T10:00:01+09:00".to_string()),
             samples_written: Some(48_000),
+            control_channel_id: None,
+            stt_mode: None,
+            stt_latency_ms: None,
         }
     }
 

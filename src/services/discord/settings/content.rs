@@ -1,20 +1,60 @@
 use super::*;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+#[derive(Clone, Debug)]
+struct RolePromptCacheEntry {
+    modified: Option<SystemTime>,
+    len: u64,
+    content: String,
+}
+
+static ROLE_PROMPT_CACHE: OnceLock<Mutex<HashMap<PathBuf, RolePromptCacheEntry>>> = OnceLock::new();
 
 pub(in crate::services::discord) fn load_role_prompt(binding: &RoleBinding) -> Option<String> {
     let prompt_path = Path::new(&binding.prompt_file);
-    let raw = fs::read_to_string(prompt_path)
-        .or_else(|_| {
-            legacy_prompt_fallback_path(prompt_path)
-                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
-                .and_then(fs::read_to_string)
-        })
-        .ok()?;
-    const MAX_CHARS: usize = 12_000;
-    if raw.chars().count() <= MAX_CHARS {
-        return Some(raw);
+    let (resolved_path, metadata) = resolve_role_prompt_path(prompt_path)?;
+    let modified = metadata.modified().ok();
+    let len = metadata.len();
+
+    let cache = ROLE_PROMPT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock()
+        && let Some(entry) = guard.get(&resolved_path)
+        && entry.modified == modified
+        && entry.len == len
+    {
+        return Some(entry.content.clone());
     }
-    let truncated: String = raw.chars().take(MAX_CHARS).collect();
-    Some(truncated)
+
+    let raw = fs::read_to_string(&resolved_path).ok()?;
+    const MAX_CHARS: usize = 12_000;
+    let content = if raw.chars().count() <= MAX_CHARS {
+        raw
+    } else {
+        raw.chars().take(MAX_CHARS).collect()
+    };
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(
+            resolved_path,
+            RolePromptCacheEntry {
+                modified,
+                len,
+                content: content.clone(),
+            },
+        );
+    }
+    Some(content)
+}
+
+fn resolve_role_prompt_path(prompt_path: &Path) -> Option<(PathBuf, fs::Metadata)> {
+    match fs::metadata(prompt_path) {
+        Ok(metadata) if metadata.is_file() => Some((prompt_path.to_path_buf(), metadata)),
+        _ => {
+            let fallback = legacy_prompt_fallback_path(prompt_path)?;
+            let metadata = fs::metadata(&fallback).ok()?;
+            metadata.is_file().then_some((fallback, metadata))
+        }
+    }
 }
 
 pub(super) fn legacy_prompt_fallback_path(path: &Path) -> Option<PathBuf> {
@@ -32,6 +72,40 @@ pub(super) fn legacy_prompt_fallback_path(path: &Path) -> Option<PathBuf> {
     }
 
     replaced.then_some(rewritten)
+}
+
+#[cfg(test)]
+mod role_prompt_cache_tests {
+    use super::*;
+
+    fn binding(path: &Path) -> RoleBinding {
+        RoleBinding {
+            role_id: "role-cache-test".to_string(),
+            prompt_file: path.display().to_string(),
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            peer_agents_enabled: false,
+            quality_feedback_injection_enabled: false,
+            memory: ResolvedMemorySettings::default(),
+        }
+    }
+
+    #[test]
+    fn role_prompt_cache_invalidates_when_file_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("role.md");
+        fs::write(&path, "v1").unwrap();
+
+        assert_eq!(load_role_prompt(&binding(&path)).as_deref(), Some("v1"));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        fs::write(&path, "v2 with different len").unwrap();
+
+        assert_eq!(
+            load_role_prompt(&binding(&path)).as_deref(),
+            Some("v2 with different len")
+        );
+    }
 }
 
 pub(crate) fn load_longterm_memory_catalog(role_id: &str) -> Option<String> {

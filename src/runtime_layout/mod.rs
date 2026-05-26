@@ -1210,6 +1210,102 @@ agents: []
     }
 
     #[test]
+    fn sync_managed_skills_keeps_structured_global_skills_out_of_workspaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let home = temp.path().join("home");
+        let _home_guard = TestHomeGuard::install(&home, root);
+
+        fs::create_dir_all(root.join("workspaces").join("alpha")).unwrap();
+        write_text(
+            &root.join("skills").join("memory-read").join("SKILL.md"),
+            "# memory-read\nbody",
+        );
+        let stale_workspace_link = root
+            .join("workspaces")
+            .join("alpha")
+            .join(".codex")
+            .join("skills")
+            .join("memory-read");
+        fs::create_dir_all(stale_workspace_link.parent().unwrap()).unwrap();
+        create_symlink_entry(
+            &root.join("skills").join("memory-read"),
+            &stale_workspace_link,
+            true,
+        )
+        .unwrap();
+        write_json(
+            &managed_skills_manifest_path(root),
+            serde_json::json!({
+                "version": 1,
+                "skills": {
+                    "memory-read": {
+                        "providers": ["codex"],
+                        "global": true
+                    }
+                }
+            }),
+        );
+
+        let report = sync_managed_skills(root).unwrap();
+
+        assert!(report.created_links >= 1);
+        assert!(
+            home.join(".codex")
+                .join("skills")
+                .join("memory-read")
+                .exists()
+        );
+        assert!(!stale_workspace_link.exists());
+    }
+
+    #[test]
+    fn sync_managed_skills_deploys_structured_workspace_targets_when_explicit() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let home = temp.path().join("home");
+        let _home_guard = TestHomeGuard::install(&home, root);
+
+        fs::create_dir_all(root.join("workspaces").join("alpha")).unwrap();
+        write_text(
+            &root.join("skills").join("memory-read").join("SKILL.md"),
+            "# memory-read\nbody",
+        );
+        write_json(
+            &managed_skills_manifest_path(root),
+            serde_json::json!({
+                "version": 1,
+                "skills": {
+                    "memory-read": {
+                        "providers": ["codex"],
+                        "global": false,
+                        "workspaces": ["alpha"]
+                    }
+                }
+            }),
+        );
+
+        let report = sync_managed_skills(root).unwrap();
+
+        assert!(report.created_links >= 1);
+        assert!(
+            !home
+                .join(".codex")
+                .join("skills")
+                .join("memory-read")
+                .exists()
+        );
+        assert!(
+            root.join("workspaces")
+                .join("alpha")
+                .join(".codex")
+                .join("skills")
+                .join("memory-read")
+                .exists()
+        );
+    }
+
+    #[test]
     #[cfg(unix)]
     fn sync_managed_skills_accepts_existing_absolute_claude_link_to_same_source() {
         let temp = tempfile::tempdir().unwrap();
@@ -1227,6 +1323,31 @@ agents: []
 
         assert_eq!(report.updated_links, 0);
         assert!(same_canonical_path(&claude_link, &skill_md));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sync_managed_skills_preserves_existing_absolute_codex_link_to_compatible_skill() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let home = temp.path().join("home");
+        let _home_guard = TestHomeGuard::install(&home, root);
+        let managed_skill_md = root
+            .join("skills")
+            .join("agentdesk-restart")
+            .join("SKILL.md");
+        let external_skill_dir = temp.path().join("obsidian").join("agentdesk-restart");
+        let codex_link = home.join(".codex").join("skills").join("agentdesk-restart");
+        write_text(&managed_skill_md, "# managed\nbody");
+        write_text(&external_skill_dir.join("SKILL.md"), "# external\nbody");
+        fs::create_dir_all(codex_link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&external_skill_dir, &codex_link).unwrap();
+        ensure_managed_skills_manifest(root).unwrap();
+
+        let report = sync_managed_skills(root).unwrap();
+
+        assert_eq!(report.updated_links, 0);
+        assert!(same_canonical_path(&codex_link, &external_skill_dir));
     }
 
     #[test]

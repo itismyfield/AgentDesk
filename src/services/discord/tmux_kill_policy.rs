@@ -35,6 +35,7 @@ pub(in crate::services::discord) struct RecentTurnStop {
     pub(in crate::services::discord) channel_id: ChannelId,
     pub(in crate::services::discord) tmux_session_name: Option<String>,
     pub(in crate::services::discord) stop_output_offset: Option<u64>,
+    pub(in crate::services::discord) stop_generation_mtime_ns: Option<i64>,
     pub(in crate::services::discord) reason: String,
     pub(in crate::services::discord) recorded_at: std::time::Instant,
     pg_persistence: Option<std::sync::Arc<CancelTombstonePersistence>>,
@@ -123,12 +124,19 @@ pub(in crate::services::discord) fn tmux_output_offset(tmux_session_name: &str) 
     std::fs::metadata(output_path).ok().map(|meta| meta.len())
 }
 
+fn tmux_generation_mtime_for_stop(tmux_session_name: Option<&str>) -> Option<i64> {
+    tmux_session_name
+        .map(read_generation_file_mtime_ns)
+        .filter(|mtime| *mtime > 0)
+}
+
 pub(in crate::services::discord) async fn record_recent_turn_stop(
     channel_id: ChannelId,
     tmux_session_name: Option<&str>,
     reason: &str,
 ) {
     let stop_output_offset = tmux_session_name.and_then(tmux_output_offset);
+    let stop_generation_mtime_ns = tmux_generation_mtime_for_stop(tmux_session_name);
     // #2549: the in-memory entry is still published immediately so a live
     // watcher can classify the cancel race, but async consumers wait for the
     // PG insert tied to the same UUID before deleting/consuming the row. That
@@ -138,6 +146,7 @@ pub(in crate::services::discord) async fn record_recent_turn_stop(
         channel_id,
         tmux_session_name,
         stop_output_offset,
+        stop_generation_mtime_ns,
         reason,
         crate::db::cancel_tombstones::global_pool(),
     )
@@ -148,6 +157,7 @@ async fn record_recent_turn_stop_with_offset(
     channel_id: ChannelId,
     tmux_session_name: Option<&str>,
     stop_output_offset: Option<u64>,
+    stop_generation_mtime_ns: Option<i64>,
     reason: &str,
     pg_pool: Option<&sqlx::PgPool>,
 ) {
@@ -173,6 +183,7 @@ async fn record_recent_turn_stop_with_offset(
             channel_id,
             tmux_session_name: tmux_session_name.map(str::to_string),
             stop_output_offset,
+            stop_generation_mtime_ns,
             reason: reason.to_string(),
             recorded_at: now,
             pg_persistence: pg_persistence.clone(),
@@ -439,6 +450,12 @@ fn recent_turn_stop_matches_watcher_range(
     if let (Some(entry_tmux), Some(stop_offset)) =
         (entry.tmux_session_name.as_deref(), entry.stop_output_offset)
     {
+        if let Some(stop_generation_mtime_ns) = entry.stop_generation_mtime_ns {
+            let current_generation_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
+            if current_generation_mtime_ns != stop_generation_mtime_ns {
+                return false;
+            }
+        }
         // Exact EOF equality means the next watcher range starts after a clean
         // cancel boundary. Only ranges that began before the stop EOF belong to
         // the canceled turn.
@@ -480,6 +497,7 @@ pub(in crate::services::discord) fn record_recent_turn_stop_with_offset_for_test
         channel_id,
         tmux_session_name: Some(tmux_session_name.to_string()),
         stop_output_offset: Some(stop_output_offset),
+        stop_generation_mtime_ns: None,
         reason: reason.to_string(),
         recorded_at: now,
         pg_persistence: None,
@@ -500,6 +518,7 @@ pub(in crate::services::discord) fn record_recent_turn_stop_for_tests(
         channel_id,
         tmux_session_name: tmux_session_name.map(str::to_string),
         stop_output_offset,
+        stop_generation_mtime_ns: None,
         reason: reason.to_string(),
         recorded_at,
         pg_persistence: None,
@@ -516,6 +535,28 @@ mod tests {
         admin_url: String,
         database_name: String,
         _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
+    }
+
+    #[test]
+    fn recent_turn_stop_generation_mismatch_does_not_match_reused_tmux_name() {
+        let now = std::time::Instant::now();
+        let channel = ChannelId::new(987_2549_010);
+        let tmux_name = "AgentDesk-codex-generation-mismatch";
+        let entry = RecentTurnStop {
+            id: uuid::Uuid::new_v4(),
+            channel_id: channel,
+            tmux_session_name: Some(tmux_name.to_string()),
+            stop_output_offset: Some(571_162),
+            stop_generation_mtime_ns: Some(123_456),
+            reason: "user-cancel".to_string(),
+            recorded_at: now,
+            pg_persistence: None,
+        };
+
+        assert!(
+            !recent_turn_stop_matches_watcher_range(&entry, channel, tmux_name, 681, now),
+            "a cancel tombstone from an older wrapper generation must not suppress the new session"
+        );
     }
 
     impl TestPg {
@@ -619,6 +660,7 @@ mod tests {
                 channel,
                 Some(tmux_name),
                 Some(128),
+                None,
                 "user-cancel",
                 Some(&record_pool),
             )

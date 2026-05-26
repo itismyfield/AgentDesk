@@ -94,16 +94,7 @@ fn compute_fully_recovered(
     degraded_reasons.is_empty() && status.is_http_ready()
 }
 
-/// #2049 Finding 11 — constant-time bearer comparison.
-/// `str` PartialEq short-circuits on the first byte mismatch, exposing the
-/// token length and prefix to remote timing observation when the server is
-/// reachable from non-loopback hosts. Use `subtle::ConstantTimeEq` so every
-/// matched-length comparison takes the same wall-clock regardless of where
-/// the bytes differ. Length itself is not secret in our threat model so the
-/// length check happens outside the constant-time path.
 fn bearer_token_matches(config: &crate::config::Config, headers: &HeaderMap) -> bool {
-    use subtle::ConstantTimeEq;
-
     let Some(expected_token) = config.server.auth_token.as_deref() else {
         return false;
     };
@@ -119,10 +110,7 @@ fn bearer_token_matches(config: &crate::config::Config, headers: &HeaderMap) -> 
         return false;
     };
 
-    if supplied.len() != expected_token.len() {
-        return false;
-    }
-    supplied.as_bytes().ct_eq(expected_token.as_bytes()).into()
+    crate::utils::auth::constant_time_token_eq(expected_token, supplied)
 }
 
 fn discord_control_endpoints_allowed(
@@ -916,11 +904,7 @@ pub async fn stale_mailbox_repair_handler(
                     } else {
                         true
                     };
-                    let tmux_ready = crate::services::provider::tmux_session_ready_for_input(
-                        tmux_session,
-                        &provider,
-                    );
-                    if inflight_safe && tmux_ready {
+                    if inflight_safe {
                         health::clear_idle_tmux_stale_turn(
                             registry,
                             provider.as_str(),

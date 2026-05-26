@@ -166,7 +166,7 @@ pub(crate) fn schedule_render_channel(
     health_registry: Option<Arc<health::HealthRegistry>>,
     channel_id: ChannelId,
 ) {
-    tokio::spawn(async move {
+    super::task_supervisor::spawn_observed("monitoring_status_render_channel", async move {
         let version = {
             let mut store = monitoring.lock().await;
             store.next_render_version(channel_id.get())
@@ -208,7 +208,7 @@ pub(crate) fn spawn_expiry_sweeper(
         return;
     }
 
-    tokio::spawn(async move {
+    super::task_supervisor::spawn_observed("monitoring_status_expiry_sweeper", async move {
         let mut interval = tokio::time::interval(SWEEP_INTERVAL);
         loop {
             interval.tick().await;

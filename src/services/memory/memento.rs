@@ -27,6 +27,10 @@ const MEMENTO_PROTOCOL_VERSION: &str = "2025-11-25";
 const MAX_WORKING_MEMORY_LINES: usize = 6;
 const MAX_MEMORY_LINES: usize = 6;
 const MAX_SKIP_LINES: usize = 4;
+const MEMENTO_CONTEXT_FULL_TOKEN_BUDGET: u64 = 1_000;
+const MEMENTO_CONTEXT_IDENTITY_TOKEN_BUDGET: u64 = 450;
+const MEMENTO_CONTEXT_FULL_TYPES: &[&str] = &["preference", "error", "procedure", "decision"];
+const MEMENTO_CONTEXT_IDENTITY_TYPES: &[&str] = &["preference", "procedure"];
 const MAX_CAPTURE_TURN_CHARS: usize = 2_000;
 const MEMENTO_MODEL_OUTPUT_MAX_BYTES: usize = 16 * 1024;
 
@@ -407,6 +411,18 @@ impl MementoBackend {
         args.insert("agentId".to_string(), json!(agent_id));
         args.insert("sessionId".to_string(), json!(request.session_id));
         args.insert("structured".to_string(), json!(true));
+        let (token_budget, types) = match request.mode {
+            RecallMode::Full => (
+                MEMENTO_CONTEXT_FULL_TOKEN_BUDGET,
+                MEMENTO_CONTEXT_FULL_TYPES,
+            ),
+            RecallMode::IdentityOnly => (
+                MEMENTO_CONTEXT_IDENTITY_TOKEN_BUDGET,
+                MEMENTO_CONTEXT_IDENTITY_TYPES,
+            ),
+        };
+        args.insert("tokenBudget".to_string(), json!(token_budget));
+        args.insert("types".to_string(), json!(types));
         if !workspace.trim().is_empty() {
             args.insert("workspace".to_string(), json!(workspace));
         }
@@ -2245,6 +2261,10 @@ mod tests {
         assert!(requests[1].contains("\"agentId\":\"project-agentdesk\""));
         assert!(requests[1].contains("\"sessionId\":\"session-1\""));
         assert!(requests[1].contains("\"structured\":true"));
+        assert!(requests[1].contains("\"tokenBudget\":1000"));
+        assert!(
+            requests[1].contains("\"types\":[\"preference\",\"error\",\"procedure\",\"decision\"]")
+        );
         let external_recall = recall.external_recall.unwrap_or_default();
         assert!(external_recall.contains("Finish #344"));
         assert!(external_recall.contains("Replace placeholder Memento backend"));

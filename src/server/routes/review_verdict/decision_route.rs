@@ -120,17 +120,26 @@ pub(crate) fn clear_test_worktree_commit_override() {
     }
 }
 
-async fn current_issue_worktree_commit(
+#[derive(Debug, Clone)]
+struct IssueWorktreeTarget {
+    worktree_path: String,
+    commit: String,
+}
+
+async fn current_issue_worktree_target(
     pg_pool: Option<&sqlx::PgPool>,
     card_id: &str,
     issue_num: i64,
     context: Option<&serde_json::Value>,
-) -> Option<String> {
+) -> Option<IssueWorktreeTarget> {
     #[cfg(all(test, feature = "legacy-sqlite-tests"))]
     {
         if let Ok(slot) = test_worktree_commit_override_slot().lock() {
             if let Some(override_commit) = slot.clone() {
-                return override_commit;
+                return override_commit.map(|commit| IssueWorktreeTarget {
+                    worktree_path: String::new(),
+                    commit,
+                });
             }
         }
     }
@@ -145,7 +154,10 @@ async fn current_issue_worktree_commit(
     };
 
     match crate::dispatch::resolve_card_worktree(pool, card_id, context).await {
-        Ok(Some((_worktree_path, _branch, commit))) => Some(commit),
+        Ok(Some((worktree_path, _branch, commit))) => Some(IssueWorktreeTarget {
+            worktree_path,
+            commit,
+        }),
         Ok(None) => None,
         Err(err) => {
             tracing::warn!(
@@ -157,6 +169,56 @@ async fn current_issue_worktree_commit(
             None
         }
     }
+}
+
+fn context_repo_dir(context: Option<&serde_json::Value>) -> Option<String> {
+    context
+        .and_then(|value| {
+            value
+                .get("target_repo")
+                .and_then(|entry| entry.as_str())
+                .or_else(|| value.get("worktree_path").and_then(|entry| entry.as_str()))
+                .or_else(|| {
+                    value
+                        .get("completed_worktree_path")
+                        .and_then(|entry| entry.as_str())
+                })
+        })
+        .and_then(|target| {
+            crate::services::platform::shell::resolve_repo_dir_for_target(Some(target))
+                .ok()
+                .flatten()
+        })
+}
+
+fn commit_is_on_remote_mainline(repo_dir: &str, commit: &str) -> Option<bool> {
+    if repo_dir.trim().is_empty() || commit.trim().is_empty() {
+        return None;
+    }
+    let refs = ["origin/main", "origin/master"];
+    let mut saw_ref = false;
+    for remote_ref in refs {
+        let exists = crate::services::git::GitCommand::new()
+            .repo(repo_dir)
+            .args(["rev-parse", "--verify", remote_ref])
+            .run_output()
+            .ok()
+            .is_some_and(|output| output.status.success());
+        if !exists {
+            continue;
+        }
+        saw_ref = true;
+        let merged = crate::services::git::GitCommand::new()
+            .repo(repo_dir)
+            .args(["merge-base", "--is-ancestor", commit, remote_ref])
+            .run_output()
+            .ok()
+            .is_some_and(|output| output.status.success());
+        if merged {
+            return Some(true);
+        }
+    }
+    saw_ref.then_some(false)
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -228,6 +290,51 @@ async fn active_accept_followups_pg_first(
     }
 
     ActiveAcceptFollowups::default()
+}
+
+async fn restamp_latest_active_review_target_pg_first(
+    state: &AppState,
+    card_id: &str,
+    reviewed_commit: &str,
+    target_repo: Option<&str>,
+) -> Result<bool, String> {
+    let Some(pool) = state.pg_pool_ref() else {
+        return Ok(false);
+    };
+    let mut context_patch = json!({
+        "reviewed_commit": reviewed_commit,
+        "direct_review_target_source": "review_decision_accept",
+    });
+    if let Some(target_repo) = target_repo
+        && !target_repo.trim().is_empty()
+    {
+        context_patch["target_repo"] = json!(target_repo);
+    }
+    let rows = sqlx::query(
+        "WITH latest AS (
+             SELECT id
+             FROM task_dispatches
+             WHERE kanban_card_id = $1
+               AND dispatch_type = 'review'
+               AND status IN ('pending', 'dispatched')
+             ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+             LIMIT 1
+         )
+         UPDATE task_dispatches td
+         SET context = COALESCE(NULLIF(td.context, ''), '{}')::jsonb || $2::jsonb,
+             updated_at = NOW()
+         FROM latest
+         WHERE td.id = latest.id",
+    )
+    .bind(card_id)
+    .bind(context_patch.to_string())
+    .execute(pool)
+    .await
+    .map_err(|error| {
+        format!("restamp active review target for card {card_id} commit {reviewed_commit}: {error}")
+    })?
+    .rows_affected();
+    Ok(rows > 0)
 }
 
 async fn current_card_status_pg_first(state: &AppState, card_id: &str) -> Option<String> {
@@ -2152,6 +2259,8 @@ pub(crate) struct SkipReworkDiagnostics {
     pub(crate) last_reviewed_commit: Option<String>,
     pub(crate) current_commit: Option<String>,
     pub(crate) current_commit_source: Option<&'static str>,
+    pub(crate) current_commit_remote_visible: Option<bool>,
+    pub(crate) current_commit_repo: Option<String>,
     pub(crate) issue_number: Option<i64>,
     pub(crate) reason: &'static str,
 }
@@ -2163,6 +2272,8 @@ impl SkipReworkDiagnostics {
             "last_reviewed_commit": self.last_reviewed_commit.as_deref(),
             "current_commit": self.current_commit.as_deref(),
             "current_commit_source": self.current_commit_source,
+            "current_commit_remote_visible": self.current_commit_remote_visible,
+            "current_commit_repo": self.current_commit_repo.as_deref(),
             "issue_number": self.issue_number,
             "reason": self.reason,
         })
@@ -2202,26 +2313,33 @@ pub(crate) async fn evaluate_accept_skip_rework(
 
     let issue_number = card_issue_number_pg_first(state, card_id).await;
 
+    let mut current_commit_repo = context_repo_dir(last_review_context.as_ref());
     let (current_commit, current_commit_source) = if let Some(submitted_commit) = submitted_commit {
         (Some(submitted_commit.to_string()), Some("request"))
     } else if last_reviewed_commit.is_some() {
         if let Some(issue_num) = issue_number {
-            (
-                current_issue_worktree_commit(
-                    state.engine.pg_pool(),
-                    card_id,
-                    issue_num,
-                    last_review_context.as_ref(),
-                )
-                .await,
-                Some("worktree"),
+            let target = current_issue_worktree_target(
+                state.engine.pg_pool(),
+                card_id,
+                issue_num,
+                last_review_context.as_ref(),
             )
+            .await;
+            if current_commit_repo.is_none() {
+                current_commit_repo = target.as_ref().map(|target| target.worktree_path.clone());
+            }
+            (target.map(|target| target.commit), Some("worktree"))
         } else {
             (None, None)
         }
     } else {
         (None, None)
     };
+    let current_commit_remote_visible = current_commit.as_deref().and_then(|commit| {
+        current_commit_repo
+            .as_deref()
+            .and_then(|repo| commit_is_on_remote_mainline(repo, commit))
+    });
 
     let (skip_rework, reason) = match (&last_reviewed_commit, &current_commit) {
         (Some(previous), Some(current)) if commit_sha_differs(current, previous) => {
@@ -2240,6 +2358,8 @@ pub(crate) async fn evaluate_accept_skip_rework(
         last_reviewed_commit,
         current_commit,
         current_commit_source,
+        current_commit_remote_visible,
+        current_commit_repo,
         issue_number,
         reason,
     };
@@ -2250,6 +2370,7 @@ pub(crate) async fn evaluate_accept_skip_rework(
         last_reviewed_commit = diagnostics.last_reviewed_commit.as_deref().unwrap_or(""),
         current_commit = diagnostics.current_commit.as_deref().unwrap_or(""),
         current_commit_source = diagnostics.current_commit_source.unwrap_or(""),
+        current_commit_remote_visible = ?diagnostics.current_commit_remote_visible,
         issue_number = ?diagnostics.issue_number,
         reason = diagnostics.reason,
         "[review-decision] #1977 evaluated accept skip_rework"
@@ -3339,9 +3460,18 @@ pub async fn submit_review_decision(
             let skip_rework_diagnostics =
                 evaluate_accept_skip_rework(&state, &body.card_id, submitted_commit.as_deref())
                     .await;
-            let skip_rework = skip_rework_diagnostics.skip_rework;
+            let remote_visibility_block = skip_rework_diagnostics.skip_rework
+                && skip_rework_diagnostics.current_commit_remote_visible == Some(false);
+            let skip_rework = skip_rework_diagnostics.skip_rework && !remote_visibility_block;
 
             let mut accept_failures = Vec::new();
+            if remote_visibility_block {
+                accept_failures.push(format!(
+                    "direct review suppressed: accepted commit {} is not visible on origin mainline from {}",
+                    skip_rework_diagnostics.current_commit.as_deref().unwrap_or("(unknown)"),
+                    skip_rework_diagnostics.current_commit_repo.as_deref().unwrap_or("(unknown repo)")
+                ));
+            }
             let mut direct_review_auto_approved = false;
 
             // #246: If agent already committed new work, skip rework and re-enter
@@ -3595,6 +3725,27 @@ pub async fn submit_review_decision(
 
             let followups = active_accept_followups_pg_first(&state, &body.card_id).await;
             direct_review_created = followups.review > 0;
+            if direct_review_created
+                && skip_rework
+                && let Some(current_commit) = skip_rework_diagnostics.current_commit.as_deref()
+                && let Err(error) = restamp_latest_active_review_target_pg_first(
+                    &state,
+                    &body.card_id,
+                    current_commit,
+                    skip_rework_diagnostics.current_commit_repo.as_deref(),
+                )
+                .await
+            {
+                accept_failures.push(format!(
+                    "direct review target restamp failed for {current_commit}: {error}"
+                ));
+                tracing::warn!(
+                    card_id = %body.card_id,
+                    current_commit,
+                    %error,
+                    "[review-decision] failed to restamp direct review target after accept"
+                );
+            }
             let rework_dispatch_created = followups.rework > 0;
             let terminal_auto_approved = direct_review_attempted
                 && (direct_review_auto_approved

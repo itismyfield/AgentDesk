@@ -1388,7 +1388,9 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 // Populate known slash command names for router fallback logic
                 let cmd_names: std::collections::HashSet<String> =
                     commands.iter().map(|c| c.name.clone()).collect();
-                let _ = shared_for_migrate.known_slash_commands.set(cmd_names);
+                let _ = shared_for_migrate
+                    .known_slash_commands
+                    .set(cmd_names.clone());
                 for guild in &_ready.guilds {
                     if let Err(e) =
                         poise::builtins::register_in_guild(ctx, commands, guild.id).await
@@ -1399,6 +1401,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                         );
                     }
                 }
+                audit_or_prune_global_slash_commands(ctx, cmd_names.clone()).await;
                 tracing::info!(
                     "  ✓ Bot connected — Registered commands in {} guild(s)",
                     _ready.guilds.len()
@@ -1424,18 +1427,59 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 tokio::spawn(async move {
                     loop {
                         tokio::time::sleep(DEFERRED_RESTART_POLL_INTERVAL).await;
-                        // Detect restart_pending marker and set the in-memory flag
-                        // so the router queues new messages instead of starting turns.
-                        if !shared_for_deferred.restart_pending.load(Ordering::Relaxed) {
-                            if let Some(root) = crate::agentdesk_runtime_root() {
-                                if root.join("restart_pending").exists() {
-                                    shared_for_deferred
-                                        .restart_pending
-                                        .store(true, Ordering::SeqCst);
-                                    let ts = chrono::Local::now().format("%H:%M:%S");
-                                    tracing::info!(
-                                        "  [{ts}] ⏸ DRAIN: restart_pending detected, entering drain mode — new turns blocked"
+                        // Quick-exit restart (#2713): dcserver no longer waits
+                        // for all active turns to drain. The marker is a deploy
+                        // request to persist cheap local state and exit; managed
+                        // TUI/tmux sessions survive and the next process
+                        // rehydrates transcript tailing from runtime state.
+                        if let Some(root) = crate::agentdesk_runtime_root() {
+                            let marker = root.join("restart_pending");
+                            if marker.exists() {
+                                shared_for_deferred
+                                    .restart_pending
+                                    .store(true, Ordering::SeqCst);
+                                shared_for_deferred
+                                    .shutting_down
+                                    .store(true, Ordering::SeqCst);
+                                if shared_for_deferred
+                                    .shutdown_counted
+                                    .compare_exchange(
+                                        false,
+                                        true,
+                                        Ordering::AcqRel,
+                                        Ordering::Relaxed,
+                                    )
+                                    .is_err()
+                                {
+                                    continue;
+                                }
+                                let queue_count = mailbox_restart_drain_all(
+                                    &shared_for_deferred,
+                                    &provider_for_deferred,
+                                )
+                                .await;
+                                let ids: std::collections::HashMap<u64, u64> = shared_for_deferred
+                                    .last_message_ids
+                                    .iter()
+                                    .map(|entry| (entry.key().get(), *entry.value()))
+                                    .collect();
+                                if !ids.is_empty() {
+                                    runtime_store::save_all_last_message_ids(
+                                        provider_for_deferred.as_str(),
+                                        &ids,
                                     );
+                                }
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                tracing::info!(
+                                    "  [{ts}] 🔄 restart_pending detected — quick exit after persisting {queue_count} queued item(s)"
+                                );
+                                if shared_for_deferred
+                                        .shutdown_remaining
+                                        .fetch_sub(1, Ordering::AcqRel)
+                                        == 1
+                                {
+                                    let _ = std::fs::remove_file(&marker);
+                                    std::process::exit(0);
                                 }
                             }
                         }
@@ -1617,14 +1661,16 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                         }
                         if !restored_queues.is_empty() {
                             let mut added = 0usize;
-                            let mut skipped = 0usize;
+                            let mut skipped_unowned = 0usize;
+                            let mut skipped_sender = 0usize;
+                            let mut skipped_duplicate = 0usize;
                             for (channel_id, items) in restored_queues {
                                 if !matches!(
                                     resolve_runtime_channel_binding_status(&http_for_tmux, channel_id)
                                         .await,
                                     RuntimeChannelBindingStatus::Owned
                                 ) {
-                                    skipped += items.len();
+                                    skipped_unowned += items.len();
                                     continue;
                                 }
                                 let snapshot = mailbox_snapshot(&shared_for_tmux2, channel_id).await;
@@ -1635,10 +1681,10 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                                         &allowed_bot_ids_for_restore,
                                         announce_bot_id_for_restore,
                                         item.author_id.get(),
-                                        true,
+                                        item.author_is_bot,
                                         &item.text,
                                     ) {
-                                        skipped += 1;
+                                        skipped_sender += 1;
                                         continue;
                                     }
                                     if enqueue_restored_intervention(
@@ -1648,7 +1694,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                                     ) {
                                         added += 1;
                                     } else {
-                                        skipped += 1;
+                                        skipped_duplicate += 1;
                                     }
                                 }
                                 mailbox_replace_queue(
@@ -1659,9 +1705,10 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                                 )
                                 .await;
                             }
+                            let skipped = skipped_unowned + skipped_sender + skipped_duplicate;
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::info!(
-                                "  [{ts}] 📋 FLUSH: restored {added} pending queue item(s) from disk (skipped {skipped} duplicates)"
+                                "  [{ts}] 📋 FLUSH: restored {added} pending queue item(s) from disk (skipped {skipped}: unowned={skipped_unowned}, sender={skipped_sender}, duplicate={skipped_duplicate})"
                             );
                         }
 
@@ -2236,8 +2283,38 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         }
     });
 
-    if let Err(e) = client.start().await {
-        tracing::warn!("  ✗ {} bot error: {e}", provider_for_error.display_name());
+    let gateway_backend_task = tokio::spawn(async move { client.start().await });
+    let gateway_backend_failed = match gateway_backend_task.await {
+        Ok(Ok(())) => {
+            tracing::warn!(
+                "  ✗ {} gateway backend exited without error",
+                provider_for_error.display_name()
+            );
+            true
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                "  ✗ {} bot error: {error}",
+                provider_for_error.display_name()
+            );
+            true
+        }
+        Err(join_error) if join_error.is_panic() => {
+            tracing::error!(
+                "  ✗ {} gateway backend task panicked: {join_error}",
+                provider_for_error.display_name()
+            );
+            true
+        }
+        Err(join_error) => {
+            tracing::warn!(
+                "  ✗ {} gateway backend task ended unexpectedly: {join_error}",
+                provider_for_error.display_name()
+            );
+            true
+        }
+    };
+    if gateway_backend_failed {
         run_startup_diagnostic_after_reconcile_barrier(
             startup_reconcile_remaining_for_client_start,
             startup_doctor_started_for_client_start,
@@ -2250,6 +2327,61 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     if let Some(handle) = gateway_lease_task {
         handle.abort();
         let _ = handle.await;
+    }
+}
+
+async fn audit_or_prune_global_slash_commands(
+    ctx: &serenity::Context,
+    current_guild_command_names: std::collections::HashSet<String>,
+) {
+    let globals = match serenity::Command::get_global_commands(ctx).await {
+        Ok(commands) => commands,
+        Err(error) => {
+            tracing::warn!("failed to list global slash commands for pruning: {error}");
+            return;
+        }
+    };
+
+    if globals.is_empty() {
+        return;
+    }
+
+    let prune_enabled = std::env::var("AGENTDESK_PRUNE_GLOBAL_SLASH_COMMANDS")
+        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
+
+    for command in globals {
+        let command_name = command.name.clone();
+        if current_guild_command_names.contains(&command_name) {
+            tracing::info!(
+                command = %command_name,
+                command_id = command.id.get(),
+                "global slash command duplicates a guild command"
+            );
+            continue;
+        }
+        if !prune_enabled {
+            tracing::warn!(
+                command = %command_name,
+                command_id = command.id.get(),
+                "stale global slash command detected; set AGENTDESK_PRUNE_GLOBAL_SLASH_COMMANDS=1 to delete"
+            );
+            continue;
+        }
+        if let Err(error) = serenity::Command::delete_global_command(ctx, command.id).await {
+            tracing::warn!(
+                command = %command_name,
+                command_id = command.id.get(),
+                error = %error,
+                "failed to delete stale global slash command"
+            );
+        } else {
+            tracing::info!(
+                command = %command_name,
+                command_id = command.id.get(),
+                "deleted stale global slash command; guild commands remain authoritative"
+            );
+        }
     }
 }
 
@@ -2638,6 +2770,7 @@ mod tests {
 
         let intervention = Intervention {
             author_id: UserId::new(2024),
+            author_is_bot: false,
             message_id: head_msg,
             // Merged interventions accumulate every source id, including
             // the head. Only the head reaches the dispatch hand-off, so the
@@ -3082,6 +3215,7 @@ mod tests {
     fn make_intervention(message_id: u64, source_message_ids: &[u64], text: &str) -> Intervention {
         Intervention {
             author_id: UserId::new(42),
+            author_is_bot: false,
             message_id: MessageId::new(message_id),
             source_message_ids: source_message_ids
                 .iter()

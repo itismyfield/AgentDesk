@@ -1066,6 +1066,7 @@ mod tests {
     ) -> Intervention {
         Intervention {
             author_id: UserId::new(1),
+            author_is_bot: false,
             message_id: MessageId::new(message_id),
             source_message_ids: vec![MessageId::new(message_id)],
             text: text.to_string(),

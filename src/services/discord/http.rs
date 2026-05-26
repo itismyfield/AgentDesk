@@ -1,13 +1,26 @@
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, CreateActionRow, CreateMessage, EditMessage, Message, MessageId};
 
+const DISCORD_EMPTY_MESSAGE_SENTINEL: &str = "\u{200b}";
+
+fn discord_content_or_zwsp(content: &str) -> &str {
+    if content.is_empty() {
+        DISCORD_EMPTY_MESSAGE_SENTINEL
+    } else {
+        content
+    }
+}
+
 pub(in crate::services::discord) async fn send_channel_message(
     http: &serenity::Http,
     channel_id: ChannelId,
     content: &str,
 ) -> serenity::Result<Message> {
     channel_id
-        .send_message(http, CreateMessage::new().content(content))
+        .send_message(
+            http,
+            CreateMessage::new().content(discord_content_or_zwsp(content)),
+        )
         .await
 }
 
@@ -23,7 +36,7 @@ pub(in crate::services::discord) async fn send_channel_message_with_reference(
             http,
             CreateMessage::new()
                 .reference_message((reference_channel_id, reference_message_id))
-                .content(content),
+                .content(discord_content_or_zwsp(content)),
         )
         .await
 }
@@ -41,7 +54,9 @@ pub(in crate::services::discord) async fn send_channel_message_with_components(
     channel_id
         .send_message(
             http,
-            CreateMessage::new().content(content).components(components),
+            CreateMessage::new()
+                .content(discord_content_or_zwsp(content))
+                .components(components),
         )
         .await
 }
@@ -58,7 +73,9 @@ pub(in crate::services::discord) async fn edit_channel_message_with_components(
         .edit_message(
             http,
             message_id,
-            EditMessage::new().content(content).components(components),
+            EditMessage::new()
+                .content(discord_content_or_zwsp(content))
+                .components(components),
         )
         .await
 }
@@ -70,7 +87,11 @@ pub(in crate::services::discord) async fn edit_channel_message(
     content: &str,
 ) -> serenity::Result<Message> {
     channel_id
-        .edit_message(http, message_id, EditMessage::new().content(content))
+        .edit_message(
+            http,
+            message_id,
+            EditMessage::new().content(discord_content_or_zwsp(content)),
+        )
         .await
 }
 
@@ -83,4 +104,15 @@ pub(in crate::services::discord) async fn delete_channel_message(
     message_id: MessageId,
 ) -> serenity::Result<()> {
     channel_id.delete_message(http, message_id).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DISCORD_EMPTY_MESSAGE_SENTINEL, discord_content_or_zwsp};
+
+    #[test]
+    fn discord_content_or_zwsp_replaces_empty_content() {
+        assert_eq!(discord_content_or_zwsp(""), DISCORD_EMPTY_MESSAGE_SENTINEL);
+        assert_eq!(discord_content_or_zwsp("hello"), "hello");
+    }
 }

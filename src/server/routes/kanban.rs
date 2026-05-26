@@ -1878,7 +1878,10 @@ pub(crate) fn require_explicit_bearer_token(
             let provided = trimmed_header_value(headers, "authorization")
                 .and_then(|value| value.strip_prefix("Bearer "))
                 .map(str::trim);
-            if provided != Some(expected_token) {
+            if !provided
+                .map(|token| crate::utils::auth::constant_time_token_eq(expected_token, token))
+                .unwrap_or(false)
+            {
                 return Err((
                     StatusCode::UNAUTHORIZED,
                     Json(json!({"error": format!("{operation} requires explicit Bearer token")})),

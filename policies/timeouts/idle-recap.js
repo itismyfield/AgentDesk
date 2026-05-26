@@ -45,6 +45,8 @@ module.exports = function attachIdleRecap(timeouts, helpers) {
         "AND provider IN ('claude', 'codex', 'qwen') " +
         "AND active_dispatch_id IS NULL " +
         mainChannelSqlGuard +
+        "AND (NULLIF(BTRIM(COALESCE(claude_session_id, '')), '') IS NOT NULL " +
+        "     OR NULLIF(BTRIM(COALESCE(raw_provider_session_id, '')), '') IS NOT NULL) " +
         "AND COALESCE(last_heartbeat, created_at) <= NOW() - INTERVAL '5 minutes' " +
         // Re-arm only after the user has been active since the last recap.
         // last_heartbeat advances on every dispatch (see dispatch_cancel /

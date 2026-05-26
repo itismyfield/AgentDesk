@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::AppState;
 use crate::server::dto::agents::{
-    AgentCronResponse, AgentDispatchedSessionsResponse, AgentOfficesResponse, AgentSkillsResponse,
+    AgentDispatchedSessionsResponse, AgentOfficesResponse, AgentSkillsResponse,
     AgentTimelineResponse, AgentTranscriptsResponse,
 };
 use crate::services::agents::query::{
@@ -353,38 +353,6 @@ pub async fn agent_offices(
             Json(json!({"error": format!("query: {e}")})),
         ),
     }
-}
-
-/// GET /api/agents/:id/cron
-#[allow(dead_code)]
-pub async fn agent_cron(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return pg_required_response();
-    };
-    match agent_exists_pg(pool, &id).await {
-        Ok(true) => {}
-        Ok(false) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "agent not found"})),
-            );
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("query: {e}")})),
-            );
-        }
-    }
-
-    // Stub: no cron table yet
-    (
-        StatusCode::OK,
-        Json(json!(AgentCronResponse { jobs: Vec::new() })),
-    )
 }
 
 /// GET /api/agents/:id/skills

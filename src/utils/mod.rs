@@ -1,7 +1,9 @@
 pub mod api;
 pub mod async_bridge;
+pub mod auth;
 pub mod discord;
 pub mod format;
 pub mod github_links;
 pub mod loopback_url;
+pub mod redact;
 pub mod wip_detect;

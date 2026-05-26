@@ -28,6 +28,8 @@ use super::transport::{
     OutboundDeduper,
 };
 
+const DISCORD_EMPTY_CONTENT_PLACEHOLDER: &str = "\u{200B}";
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DeliveryTransportOverrides {
     pub(crate) target_channel: Option<String>,
@@ -484,6 +486,7 @@ where
             "outbound delivery cancelled".into(),
         ));
     }
+    let content = discord_safe_content(content);
     match message.operation {
         OutboundOperation::Edit { message_id } => {
             let edit_message_id = overrides
@@ -492,7 +495,7 @@ where
                 .map(Cow::Borrowed)
                 .unwrap_or_else(|| Cow::Owned(message_id.get().to_string()));
             client
-                .edit_message(target_channel, edit_message_id.as_ref(), content)
+                .edit_message(target_channel, edit_message_id.as_ref(), content.as_ref())
                 .await
         }
         OutboundOperation::Send => {
@@ -500,15 +503,23 @@ where
                 client
                     .post_message_with_reference(
                         target_channel,
-                        content,
+                        content.as_ref(),
                         &reference.channel_id,
                         &reference.message_id,
                     )
                     .await
             } else {
-                client.post_message(target_channel, content).await
+                client.post_message(target_channel, content.as_ref()).await
             }
         }
+    }
+}
+
+fn discord_safe_content(content: &str) -> Cow<'_, str> {
+    if content.trim().is_empty() {
+        Cow::Borrowed(DISCORD_EMPTY_CONTENT_PLACEHOLDER)
+    } else {
+        Cow::Borrowed(content)
     }
 }
 
@@ -646,16 +657,28 @@ pub(crate) fn truncate_with_marker(content: &str, max_chars: usize) -> (String, 
     if content.chars().count() <= max_chars {
         return (content.to_string(), false);
     }
+    if max_chars == 0 {
+        return (String::new(), true);
+    }
+    const MARKER: &str = "\n\n[… truncated]";
+    let marker_chars = MARKER.chars().count();
+    if marker_chars >= max_chars {
+        return (MARKER.chars().take(max_chars).collect(), true);
+    }
+    let content_budget = max_chars - marker_chars;
     let boundary: usize = content
         .char_indices()
-        .nth(max_chars)
+        .nth(content_budget)
         .map(|(i, _)| i)
         .unwrap_or(content.len());
     let cut = content[..boundary].rfind('\n').unwrap_or(boundary);
-    (format!("{}\n\n[… truncated]", &content[..cut]), true)
+    (format!("{}{}", &content[..cut], MARKER), true)
 }
 
 fn split_content(content: &str, chunk_limit: usize) -> Vec<String> {
+    if content.trim().is_empty() {
+        return vec![DISCORD_EMPTY_CONTENT_PLACEHOLDER.to_string()];
+    }
     let chunk_limit = chunk_limit.max(1);
     let mut chunks = Vec::new();
     let mut current = String::new();
@@ -797,6 +820,49 @@ mod tests {
                 ("123".to_string(), "minimal fallback message".to_string()),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn dispatch_v3_empty_content_posts_zero_width_placeholder() {
+        let client = MockClient::default();
+        let dedup = OutboundDeduper::new();
+        let message = DiscordOutboundMessage::new(
+            "dispatch:empty",
+            "dispatch:empty:notify",
+            " \n\t ".to_string(),
+            OutboundTarget::Channel(ChannelId::new(123)),
+            DiscordOutboundPolicy::dispatch_outbox(),
+        );
+
+        let result = deliver_outbound(&client, &dedup, message, None).await;
+
+        assert!(matches!(result, DeliveryResult::Sent { .. }));
+        assert_eq!(
+            client.posts(),
+            vec![(
+                "123".to_string(),
+                DISCORD_EMPTY_CONTENT_PLACEHOLDER.to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn truncate_with_marker_respects_limit_with_multibyte_content() {
+        let content = format!("{}{}", "가".repeat(20), "🙂".repeat(20));
+        let (truncated, did_truncate) = truncate_with_marker(&content, 24);
+
+        assert!(did_truncate);
+        assert!(truncated.ends_with("[… truncated]"));
+        assert!(truncated.chars().count() <= 24);
+        assert!(!truncated.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn truncate_with_marker_respects_tiny_limit() {
+        let (truncated, did_truncate) = truncate_with_marker("abcdef", 3);
+
+        assert!(did_truncate);
+        assert_eq!(truncated.chars().count(), 3);
     }
 
     #[tokio::test]

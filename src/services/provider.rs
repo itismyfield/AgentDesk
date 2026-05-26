@@ -1,7 +1,8 @@
 use crate::services::platform::BinaryResolution;
 use crate::utils::format::safe_prefix;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
 /// Tmux session name prefix — always "AgentDesk".
 pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";
@@ -1433,13 +1434,82 @@ impl CancelToken {
 }
 
 pub fn cancel_requested(token: Option<&CancelToken>) -> bool {
-    token.is_some_and(|token| token.cancelled.load(Ordering::Relaxed))
+    token.is_some_and(|token| {
+        enforce_watchdog_deadline(token, current_unix_millis());
+        token.cancelled.load(Ordering::Relaxed)
+    })
+}
+
+fn current_unix_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
+
+fn enforce_watchdog_deadline(token: &CancelToken, now_ms: i64) -> bool {
+    let deadline_ms = token.watchdog_deadline_ms.load(Ordering::Relaxed);
+    if deadline_ms > 0 && now_ms >= deadline_ms {
+        token.set_cancel_source_kind(CancelSource::WatchdogTimeout);
+        token.cancelled.store(true, Ordering::Relaxed);
+        return true;
+    }
+    false
 }
 
 pub fn register_child_pid(token: Option<&CancelToken>, child_pid: u32) {
     if let Some(token) = token {
         *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(child_pid);
     }
+}
+
+pub struct CancelWatchdog {
+    done: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl CancelWatchdog {
+    fn new(done: Arc<AtomicBool>, handle: JoinHandle<()>) -> Self {
+        Self {
+            done,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for CancelWatchdog {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+pub fn spawn_cancel_watchdog(
+    token: Option<Arc<CancelToken>>,
+    child_pid: u32,
+    label: &'static str,
+) -> Option<CancelWatchdog> {
+    let token = token?;
+    let done = Arc::new(AtomicBool::new(false));
+    let done_for_thread = done.clone();
+    let handle = std::thread::spawn(move || {
+        while !done_for_thread.load(Ordering::Relaxed) {
+            enforce_watchdog_deadline(&token, current_unix_millis());
+            if token.cancelled.load(Ordering::Relaxed) {
+                tracing::warn!(
+                    provider_cancel_watchdog = label,
+                    child_pid,
+                    "cancel watchdog killing provider process tree"
+                );
+                crate::services::process::kill_pid_tree(child_pid);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    });
+    Some(CancelWatchdog::new(done, handle))
 }
 
 /// Result from reading a provider session output stream until completion or session death.
@@ -1529,8 +1599,43 @@ impl SessionProbe {
         )
     }
 
+    #[cfg(unix)]
+    pub fn tmux_with_structured_output(
+        session_name: String,
+        provider: ProviderKind,
+        runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+        output_path: String,
+    ) -> Self {
+        let name_alive = session_name.clone();
+        let name_ready = session_name;
+        let provider_ready = provider;
+        Self::new(
+            move || tmux_session_alive(&name_alive),
+            move || {
+                crate::services::tui_turn_state::jsonl_ready_for_input(
+                    &provider_ready,
+                    runtime_kind,
+                    std::path::Path::new(&output_path),
+                    None,
+                )
+                .map(crate::services::tui_turn_state::TuiReadyState::is_ready)
+                .unwrap_or_else(|| tmux_session_ready_for_input(&name_ready, &provider_ready))
+            },
+        )
+    }
+
     #[cfg(not(unix))]
     pub fn tmux(_session_name: String, _provider: ProviderKind) -> Self {
+        Self::new(|| false, || false)
+    }
+
+    #[cfg(not(unix))]
+    pub fn tmux_with_structured_output(
+        _session_name: String,
+        _provider: ProviderKind,
+        _runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+        _output_path: String,
+    ) -> Self {
         Self::new(|| false, || false)
     }
 
@@ -2048,7 +2153,11 @@ fn codex_model_context_window(model: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod cancel_token_tests {
-    use super::{CancelSource, CancelToken, cancel_requested, register_child_pid};
+    use super::{
+        CancelSource, CancelToken, cancel_requested, current_unix_millis,
+        enforce_watchdog_deadline, register_child_pid,
+    };
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn cancel_token_helpers_register_source_and_state() {
@@ -2138,6 +2247,26 @@ mod cancel_token_tests {
             token.cancel_source().as_deref(),
             Some("voice_barge_in_live_cut")
         );
+    }
+
+    #[test]
+    fn watchdog_deadline_enforcement_marks_cancelled_timeout() {
+        let token = CancelToken::new();
+        let now = current_unix_millis();
+        token
+            .watchdog_deadline_ms
+            .store(now + 1_000, Ordering::Relaxed);
+
+        assert!(!enforce_watchdog_deadline(&token, now + 999));
+        assert!(!token.cancelled.load(Ordering::Relaxed));
+
+        assert!(enforce_watchdog_deadline(&token, now + 1_000));
+        assert!(cancel_requested(Some(&token)));
+        assert_eq!(
+            token.cancel_source_kind(),
+            Some(CancelSource::WatchdogTimeout)
+        );
+        assert_eq!(token.cancel_source().as_deref(), Some("watchdog_timeout"));
     }
 }
 

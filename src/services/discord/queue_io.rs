@@ -77,6 +77,24 @@ struct DeferredHookBacklogGuard {
     shared: Arc<SharedData>,
 }
 
+const DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY: std::time::Duration =
+    std::time::Duration::from_secs(2);
+const DEFERRED_IDLE_QUEUE_KICKOFF_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_secs(2);
+// Keep retrying long enough to cover dcserver/gateway restart windows. A
+// queued user reply should not wait for the next external Discord event just
+// because cached ctx/token arrived slightly after the first post-turn kickoff.
+const DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS: usize = 150;
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn should_retry_deferred_idle_queue_kickoff(attempt: usize) -> bool {
+    attempt < DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
+}
+
+fn should_retry_zero_start_deferred_idle_queue(reason: &'static str) -> bool {
+    reason == "hosted_tui_busy_pre_submit_pending"
+}
+
 impl Drop for DeferredHookBacklogGuard {
     fn drop(&mut self) {
         self.shared
@@ -94,29 +112,63 @@ pub(super) fn schedule_deferred_idle_queue_kickoff(
     shared
         .deferred_hook_backlog
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    tokio::spawn(async move {
+    super::task_supervisor::spawn_observed("deferred_idle_queue_kickoff", async move {
         // #2044 F3: bind the decrement to a Drop guard so it fires on
         // panic-unwind as well as on normal return.
         let _backlog_guard = DeferredHookBacklogGuard {
             shared: shared.clone(),
         };
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        if let (Some(ctx), Some(tok)) = (
-            shared.cached_serenity_ctx.get(),
-            shared.cached_bot_token.get(),
-        ) {
+        tokio::time::sleep(DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY).await;
+        for attempt in 1..=DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS {
+            if let (Some(ctx), Some(tok)) = (
+                shared.cached_serenity_ctx.get(),
+                shared.cached_bot_token.get(),
+            ) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 🚀 Deferred drain: kicking off idle queues for channel {} ({reason}, attempt {attempt}/{})",
+                    channel_id,
+                    DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
+                );
+                let started = super::kickoff_idle_queues(ctx, &shared, tok, &provider).await;
+                let target_still_pending = if should_retry_zero_start_deferred_idle_queue(reason) {
+                    !super::mailbox_snapshot(shared.as_ref(), channel_id)
+                        .await
+                        .intervention_queue
+                        .is_empty()
+                } else {
+                    false
+                };
+                if started == 0
+                    && target_still_pending
+                    && should_retry_deferred_idle_queue_kickoff(attempt)
+                {
+                    tracing::info!(
+                        "  [{ts}] ⏳ Deferred drain: channel {} still queued after zero-start drain ({reason}, attempt {attempt}/{}); retrying",
+                        channel_id,
+                        DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
+                    );
+                    tokio::time::sleep(DEFERRED_IDLE_QUEUE_KICKOFF_RETRY_DELAY).await;
+                    continue;
+                }
+                return;
+            }
+
             let ts = chrono::Local::now().format("%H:%M:%S");
+            if !should_retry_deferred_idle_queue_kickoff(attempt) {
+                tracing::warn!(
+                    "  [{ts}] ⚠ Deferred drain: missing cached context for channel {} after {} attempts ({reason}); queued items remain persisted for next kickoff",
+                    channel_id,
+                    DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
+                );
+                break;
+            }
             tracing::info!(
-                "  [{ts}] 🚀 Deferred drain: kicking off idle queues for channel {} ({reason})",
-                channel_id
+                "  [{ts}] ⚠ Deferred drain: missing cached context for channel {} ({reason}, attempt {attempt}/{}); retrying",
+                channel_id,
+                DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
             );
-            super::kickoff_idle_queues(ctx, &shared, tok, &provider).await;
-        } else {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ⚠ Deferred drain: missing cached context for channel {} ({reason})",
-                channel_id
-            );
+            tokio::time::sleep(DEFERRED_IDLE_QUEUE_KICKOFF_RETRY_DELAY).await;
         }
         // Drop guard at end of scope decrements the backlog counter.
     });
@@ -139,6 +191,7 @@ mod tests {
     fn make_intervention(text: &str) -> Intervention {
         Intervention {
             author_id: UserId::new(1),
+            author_is_bot: false,
             message_id: MessageId::new(100),
             source_message_ids: vec![MessageId::new(100)],
             text: text.to_string(),
@@ -158,6 +211,16 @@ mod tests {
     }
 
     #[test]
+    fn zero_start_deferred_retry_is_limited_to_hosted_tui_busy_queue() {
+        assert!(should_retry_zero_start_deferred_idle_queue(
+            "hosted_tui_busy_pre_submit_pending"
+        ));
+        assert!(!should_retry_zero_start_deferred_idle_queue(
+            "race-loss enqueue idle drain"
+        ));
+    }
+
+    #[test]
     fn channel_has_pending_soft_queue_detects_live_backlog() {
         let channel_id = ChannelId::new(12345);
         let created_at = Instant::now();
@@ -166,6 +229,7 @@ mod tests {
             channel_id,
             vec![Intervention {
                 author_id: UserId::new(42),
+                author_is_bot: false,
                 message_id: MessageId::new(7),
                 source_message_ids: vec![MessageId::new(7)],
                 text: "pending".to_string(),
@@ -195,6 +259,7 @@ mod tests {
             channel_id,
             vec![Intervention {
                 author_id: UserId::new(42),
+                author_is_bot: false,
                 message_id: MessageId::new(7),
                 source_message_ids: vec![MessageId::new(7)],
                 text: "stale".to_string(),
@@ -223,6 +288,7 @@ mod tests {
             channel_id,
             vec![Intervention {
                 author_id: UserId::new(42),
+                author_is_bot: false,
                 message_id: MessageId::new(7),
                 source_message_ids: vec![MessageId::new(7)],
                 text: "pending".to_string(),
@@ -244,6 +310,17 @@ mod tests {
             true,
             &mut queues,
             channel_id
+        ));
+    }
+
+    #[test]
+    fn deferred_idle_queue_kickoff_retries_until_final_attempt() {
+        assert!(should_retry_deferred_idle_queue_kickoff(1));
+        assert!(should_retry_deferred_idle_queue_kickoff(
+            DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS - 1
+        ));
+        assert!(!should_retry_deferred_idle_queue_kickoff(
+            DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
         ));
     }
 
@@ -432,6 +509,7 @@ mod tests {
         let items: Vec<PendingQueueItem> = serde_json::from_str(old_json).unwrap();
         assert_eq!(items[0].text, "hello");
         assert!(items[0].source_message_ids.is_empty());
+        assert!(!items[0].author_is_bot);
         assert!(items[0].reply_context.is_none());
         assert!(!items[0].has_reply_boundary);
         assert!(!items[0].merge_consecutive);
@@ -441,6 +519,7 @@ mod tests {
 
         let new_item = PendingQueueItem {
             author_id: 1,
+            author_is_bot: false,
             message_id: 100,
             source_message_ids: vec![100, 101],
             text: "hello".to_string(),
@@ -571,6 +650,7 @@ mod tests {
         let legacy_file = legacy_dir.join(format!("{}.json", ch.get()));
         let item = PendingQueueItem {
             author_id: 1,
+            author_is_bot: false,
             message_id: 100,
             source_message_ids: vec![100],
             text: "legacy msg".to_string(),

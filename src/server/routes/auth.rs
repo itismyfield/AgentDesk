@@ -106,7 +106,7 @@ pub async fn auth_middleware(
             return next.run(req).await;
         }
         if let Some(token) = extract_bearer(&headers) {
-            if token == expected_token {
+            if crate::utils::auth::constant_time_token_eq(expected_token, token) {
                 return next.run(req).await;
             }
         }
@@ -130,7 +130,7 @@ pub async fn auth_middleware(
 
     // Check Authorization header
     if let Some(token) = extract_bearer(&headers) {
-        if token == expected_token {
+        if crate::utils::auth::constant_time_token_eq(expected_token, token) {
             return next.run(req).await;
         }
     }
@@ -144,7 +144,7 @@ pub async fn auth_middleware(
         if let Some(query) = req.uri().query() {
             for pair in query.split('&') {
                 if let Some(token) = pair.strip_prefix("token=") {
-                    if token == expected_token {
+                    if crate::utils::auth::constant_time_token_eq(expected_token, token) {
                         return next.run(req).await;
                     }
                 }

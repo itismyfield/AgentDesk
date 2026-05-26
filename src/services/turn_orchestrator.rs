@@ -25,6 +25,7 @@ pub(crate) enum InterventionMode {
 #[derive(Clone, Debug)]
 pub(crate) struct Intervention {
     pub(crate) author_id: UserId,
+    pub(crate) author_is_bot: bool,
     pub(crate) message_id: MessageId,
     pub(crate) source_message_ids: Vec<MessageId>,
     pub(crate) text: String,
@@ -141,6 +142,7 @@ pub(crate) fn enqueue_intervention(
         return EnqueueInterventionResult {
             enqueued: false,
             merged: false,
+            refusal_reason: Some(EnqueueRefusalReason::SourceIdAlreadyQueued),
             queue_exit_events,
         };
     }
@@ -155,6 +157,7 @@ pub(crate) fn enqueue_intervention(
             return EnqueueInterventionResult {
                 enqueued: false,
                 merged: false,
+                refusal_reason: Some(EnqueueRefusalReason::LastItemDedup),
                 queue_exit_events,
             };
         }
@@ -181,6 +184,7 @@ pub(crate) fn enqueue_intervention(
             return EnqueueInterventionResult {
                 enqueued: true,
                 merged: true,
+                refusal_reason: None,
                 queue_exit_events,
             };
         }
@@ -198,6 +202,7 @@ pub(crate) fn enqueue_intervention(
     EnqueueInterventionResult {
         enqueued: true,
         merged: false,
+        refusal_reason: None,
         queue_exit_events,
     }
 }
@@ -278,6 +283,8 @@ pub(crate) fn requeue_intervention_front(
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct PendingQueueItem {
     pub(crate) author_id: u64,
+    #[serde(default)]
+    pub(crate) author_is_bot: bool,
     pub(crate) message_id: u64,
     #[serde(default)]
     pub(crate) source_message_ids: Vec<u64>,
@@ -519,6 +526,7 @@ pub(crate) fn save_channel_queue(
         .iter()
         .map(|i| PendingQueueItem {
             author_id: i.author_id.get(),
+            author_is_bot: i.author_is_bot,
             message_id: i.message_id.get(),
             source_message_ids: if i.source_message_ids.is_empty() {
                 vec![i.message_id.get()]
@@ -556,6 +564,7 @@ fn pending_queue_item_to_intervention(item: PendingQueueItem, now: Instant) -> I
     }
     Intervention {
         author_id: UserId::new(item.author_id),
+        author_is_bot: item.author_is_bot,
         message_id: MessageId::new(item.message_id),
         source_message_ids,
         text: item.text,
@@ -613,6 +622,7 @@ pub(crate) fn save_pending_queues(
             .iter()
             .map(|i| PendingQueueItem {
                 author_id: i.author_id.get(),
+                author_is_bot: i.author_is_bot,
                 message_id: i.message_id.get(),
                 source_message_ids: if i.source_message_ids.is_empty() {
                     vec![i.message_id.get()]
@@ -884,6 +894,35 @@ pub(crate) struct RestartDrainResult {
     pub(crate) queued_count: usize,
 }
 
+/// #2728: identifies which guard in `enqueue_intervention` produced an
+/// `enqueued = false` outcome. Callers surface this through the producer-exit
+/// diagnostic JSON so the next adk-cc-style incident is one log line away from
+/// path A / B / C classification instead of code-only inference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EnqueueRefusalReason {
+    /// The incoming `message_id` is already present in some queued entry's
+    /// `source_message_ids` — duplicate insert from a re-entry or rehydrated
+    /// queue.
+    SourceIdAlreadyQueued,
+    /// The queue's last entry matches the incoming intervention on
+    /// `(author_id, text, reply_context, has_reply_boundary)` within
+    /// `INTERVENTION_DEDUP_WINDOW` — rapid-resend dedup.
+    LastItemDedup,
+    /// The `ChannelMailboxHandle` could not reach the mailbox actor (mpsc
+    /// closed or oneshot dropped). Surfaced only at the handle layer.
+    ActorUnreachable,
+}
+
+impl EnqueueRefusalReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            EnqueueRefusalReason::SourceIdAlreadyQueued => "source_id_already_queued",
+            EnqueueRefusalReason::LastItemDedup => "last_item_dedup",
+            EnqueueRefusalReason::ActorUnreachable => "actor_unreachable",
+        }
+    }
+}
+
 pub(crate) struct EnqueueInterventionResult {
     pub(crate) enqueued: bool,
     /// True when the incoming intervention was folded into the previous queue
@@ -891,6 +930,10 @@ pub(crate) struct EnqueueInterventionResult {
     /// accumulated). Callers use this to surface a different reaction emoji
     /// for merged messages so users can tell merged from standalone entries.
     pub(crate) merged: bool,
+    /// #2728: present iff `enqueued == false`. Identifies which guard in
+    /// `enqueue_intervention` (or the handle-layer actor fallback) produced
+    /// the refusal.
+    pub(crate) refusal_reason: Option<EnqueueRefusalReason>,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
 }
 
@@ -1139,6 +1182,7 @@ impl ChannelMailboxHandle {
             EnqueueInterventionResult {
                 enqueued: false,
                 merged: false,
+                refusal_reason: Some(EnqueueRefusalReason::ActorUnreachable),
                 queue_exit_events: Vec::new(),
             },
         )
@@ -2403,6 +2447,7 @@ mod actor_hydrate_regression_tests {
     fn make_intervention(message_id: u64, text: &str, created_at: Instant) -> Intervention {
         Intervention {
             author_id: UserId::new(1),
+            author_is_bot: false,
             message_id: MessageId::new(message_id),
             source_message_ids: vec![MessageId::new(message_id)],
             text: text.to_string(),
@@ -2850,6 +2895,315 @@ mod actor_hydrate_regression_tests {
     }
 }
 
+// #2728 — verify the refusal_reason field correctly tags each of the
+// three false-return paths in `enqueue_intervention` / the handle layer.
+// Without this signal callers could only infer the path from code
+// archaeology (cf. the adk-cc 07:27 KST 2026-05-20 incident).
+#[cfg(test)]
+mod enqueue_refusal_reason_tests {
+    use super::*;
+
+    fn intervention(message_id: u64, text: &str, created_at: Instant) -> Intervention {
+        Intervention {
+            author_id: UserId::new(1),
+            author_is_bot: false,
+            message_id: MessageId::new(message_id),
+            source_message_ids: vec![MessageId::new(message_id)],
+            text: text.to_string(),
+            mode: InterventionMode::Soft,
+            created_at,
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            voice_announcement: None,
+        }
+    }
+
+    #[test]
+    fn source_id_already_queued_is_tagged() {
+        let now = Instant::now();
+        let mut queue = vec![intervention(1, "hello", now)];
+        let incoming = intervention(1, "hello again", now);
+        let result = enqueue_intervention(&mut queue, incoming);
+        assert!(!result.enqueued);
+        assert_eq!(
+            result.refusal_reason,
+            Some(EnqueueRefusalReason::SourceIdAlreadyQueued),
+        );
+    }
+
+    #[test]
+    fn last_item_dedup_is_tagged() {
+        let now = Instant::now();
+        let mut queue = vec![intervention(1, "same text", now)];
+        let incoming = intervention(2, "same text", now);
+        let result = enqueue_intervention(&mut queue, incoming);
+        assert!(!result.enqueued);
+        assert_eq!(
+            result.refusal_reason,
+            Some(EnqueueRefusalReason::LastItemDedup),
+        );
+    }
+
+    #[test]
+    fn refusal_reason_absent_on_success() {
+        let now = Instant::now();
+        let mut queue: Vec<Intervention> = Vec::new();
+        let incoming = intervention(1, "first", now);
+        let result = enqueue_intervention(&mut queue, incoming);
+        assert!(result.enqueued);
+        assert_eq!(result.refusal_reason, None);
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+    static TEST_ENV_LOCK: LazyLock<std::sync::Mutex<()>> =
+        LazyLock::new(|| std::sync::Mutex::new(()));
+
+    struct EnvGuard {
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set_root(root: &Path) -> Self {
+            let previous = std::env::var(AGENTDESK_ROOT_DIR_ENV).ok();
+            unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, root.to_str().unwrap()) };
+            Self { previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, previous) };
+            } else {
+                unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+            }
+        }
+    }
+
+    fn queue_file_path(
+        root: &Path,
+        provider: &ProviderKind,
+        token_hash: &str,
+        channel_id: ChannelId,
+    ) -> PathBuf {
+        root.join("runtime")
+            .join("discord_pending_queue")
+            .join(provider.as_str())
+            .join(token_hash)
+            .join(format!("{}.json", channel_id.get()))
+    }
+
+    fn read_saved_items(
+        root: &Path,
+        provider: &ProviderKind,
+        token_hash: &str,
+        channel_id: ChannelId,
+    ) -> Vec<PendingQueueItem> {
+        let path = queue_file_path(root, provider, token_hash, channel_id);
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn voice_announcement(
+        transcript: &str,
+        utterance_id: &str,
+    ) -> crate::voice::prompt::VoiceTranscriptAnnouncement {
+        crate::voice::prompt::VoiceTranscriptAnnouncement {
+            transcript: transcript.to_string(),
+            user_id: "42".to_string(),
+            utterance_id: utterance_id.to_string(),
+            language: "ko-KR".to_string(),
+            verbose_progress: true,
+            started_at: Some("2026-05-24T21:00:00+09:00".to_string()),
+            completed_at: Some("2026-05-24T21:00:01+09:00".to_string()),
+            samples_written: Some(48_000),
+            control_channel_id: Some(300),
+            stt_mode: Some("file".to_string()),
+            stt_latency_ms: Some(120),
+        }
+    }
+
+    fn make_intervention(
+        message_id: u64,
+        text: &str,
+        voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+    ) -> Intervention {
+        Intervention {
+            author_id: UserId::new(100),
+            author_is_bot: voice_announcement.is_some(),
+            message_id: MessageId::new(message_id),
+            source_message_ids: vec![MessageId::new(message_id)],
+            text: text.to_string(),
+            mode: InterventionMode::Soft,
+            created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            voice_announcement,
+        }
+    }
+
+    #[test]
+    fn pending_queue_roundtrip_preserves_author_is_bot() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        let provider = ProviderKind::Codex;
+        let token_hash = "author_bot_roundtrip";
+        let channel_id = ChannelId::new(4242);
+        let message_id = MessageId::new(9001);
+        let intervention = Intervention {
+            author_id: UserId::new(100),
+            author_is_bot: true,
+            message_id,
+            source_message_ids: vec![message_id],
+            text: "DISPATCH: restore me".to_string(),
+            mode: InterventionMode::Soft,
+            created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            voice_announcement: None,
+        };
+
+        save_channel_queue(&provider, token_hash, channel_id, &[intervention], None);
+
+        let path = tmp
+            .path()
+            .join("runtime")
+            .join("discord_pending_queue")
+            .join(provider.as_str())
+            .join(token_hash)
+            .join(format!("{}.json", channel_id.get()));
+        let saved: Vec<PendingQueueItem> =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert!(saved[0].author_is_bot);
+
+        let (loaded, _) = load_pending_queues(&provider, token_hash);
+        assert!(loaded[&channel_id][0].author_is_bot);
+    }
+
+    #[test]
+    fn pending_queue_roundtrip_preserves_voice_announcement_payload() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        let provider = ProviderKind::Codex;
+        let token_hash = "voice_announcement_roundtrip";
+        let channel_id = ChannelId::new(2_777_001);
+        let announcement =
+            voice_announcement("큐에 들어간 음성 요청 처리해줘", "issue-2777-roundtrip");
+        let intervention = make_intervention(
+            2_777_002,
+            "ADK_VOICE_TRANSCRIPT v1\n큐에 들어간 음성 요청 처리해줘",
+            Some(announcement.clone()),
+        );
+
+        save_channel_queue(
+            &provider,
+            token_hash,
+            channel_id,
+            std::slice::from_ref(&intervention),
+            None,
+        );
+
+        let saved = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
+        assert_eq!(saved[0].voice_announcement.as_ref(), Some(&announcement));
+
+        let (loaded, _) = load_pending_queues(&provider, token_hash);
+        assert_eq!(
+            loaded[&channel_id][0].voice_announcement.as_ref(),
+            Some(&announcement),
+            "post-restart disk load must not depend on the in-memory announcement TTL"
+        );
+    }
+
+    #[tokio::test]
+    async fn actor_hydrate_from_disk_preserves_voice_announcement_payload() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        let provider = ProviderKind::Claude;
+        let token_hash = "voice_announcement_actor_hydrate";
+        let channel_id = ChannelId::new(2_777_011);
+        let announcement = voice_announcement(
+            "재시작 후 hydrate 된 음성 요청 처리해줘",
+            "issue-2777-hydrate",
+        );
+        let intervention = make_intervention(
+            2_777_012,
+            "ADK_VOICE_TRANSCRIPT v1\n재시작 후 hydrate 된 음성 요청 처리해줘",
+            Some(announcement.clone()),
+        );
+        save_channel_queue(
+            &provider,
+            token_hash,
+            channel_id,
+            std::slice::from_ref(&intervention),
+            None,
+        );
+
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(channel_id);
+        let result = handle
+            .hydrate_pending_queue_from_disk(QueuePersistenceContext::new(
+                &provider, token_hash, None,
+            ))
+            .await;
+
+        assert_eq!(result.absorbed, 1);
+        assert_eq!(result.queue_len_after, 1);
+        let snapshot = handle.snapshot().await;
+        assert_eq!(
+            snapshot.intervention_queue[0].voice_announcement.as_ref(),
+            Some(&announcement)
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_drain_persists_voice_announcement_payload() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        let provider = ProviderKind::Claude;
+        let token_hash = "voice_announcement_restart_drain";
+        let channel_id = ChannelId::new(2_777_021);
+        let announcement = voice_announcement(
+            "restart drain 중인 음성 요청 처리해줘",
+            "issue-2777-restart-drain",
+        );
+        let intervention = make_intervention(
+            2_777_022,
+            "ADK_VOICE_TRANSCRIPT v1\nrestart drain 중인 음성 요청 처리해줘",
+            Some(announcement.clone()),
+        );
+        let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(channel_id);
+        handle
+            .replace_queue(vec![intervention], persistence.clone())
+            .await;
+
+        let path = queue_file_path(tmp.path(), &provider, token_hash, channel_id);
+        std::fs::remove_file(&path).unwrap();
+        let result = handle.restart_drain(persistence).await;
+
+        assert_eq!(result.queued_count, 1);
+        let saved = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
+        assert_eq!(saved[0].voice_announcement.as_ref(), Some(&announcement));
+    }
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
     use super::*;
@@ -2884,6 +3238,7 @@ mod tests {
     fn make_intervention(message_id: u64, text: &str, created_at: Instant) -> Intervention {
         Intervention {
             author_id: UserId::new(1),
+            author_is_bot: false,
             message_id: MessageId::new(message_id),
             source_message_ids: vec![MessageId::new(message_id)],
             text: text.to_string(),
@@ -3597,6 +3952,7 @@ mod purge_queue_tests {
     fn make_intervention(message_id: u64, text: &str, created_at: Instant) -> Intervention {
         Intervention {
             author_id: UserId::new(1),
+            author_is_bot: false,
             message_id: MessageId::new(message_id),
             source_message_ids: vec![MessageId::new(message_id)],
             text: text.to_string(),

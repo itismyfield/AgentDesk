@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::discord::InflightTurnState;
 
 /// #2441 (H1) — race a fixed sleep against a `notify`-backed wake-up
 /// from `JsonlWatcher`. Returns as soon as EITHER the sleep elapses or
@@ -32,6 +33,250 @@ fn should_probe_tmux_liveness(
     dead_marker_present: bool,
 ) -> bool {
     dead_marker_present || elapsed_since_last_probe >= TMUX_LIVENESS_PROBE_INTERVAL
+}
+
+fn build_watcher_streaming_edit_text(
+    status_panel_v2_enabled: bool,
+    current_portion: &str,
+    status_block: &str,
+    provider: &ProviderKind,
+) -> String {
+    if status_panel_v2_enabled {
+        crate::services::discord::formatting::build_status_panel_streaming_edit_text(
+            current_portion,
+            status_block,
+            provider,
+        )
+    } else {
+        build_streaming_placeholder_text(current_portion, status_block)
+    }
+}
+
+fn watcher_should_suppress_streaming_after_bridge_delivery(
+    bridge_delivered_turn: bool,
+    has_assistant_response: bool,
+) -> bool {
+    bridge_delivered_turn && has_assistant_response
+}
+
+#[cfg(test)]
+fn watcher_terminal_edit_consumes_placeholder(outcome: &ReplaceLongMessageOutcome) -> bool {
+    matches!(outcome, ReplaceLongMessageOutcome::EditedOriginal)
+}
+
+fn watcher_should_delete_suppressed_placeholder(placeholder_from_restored_inflight: bool) -> bool {
+    !placeholder_from_restored_inflight
+}
+
+fn watcher_fallback_edit_failure_can_delete_original_placeholder(
+    _response_sent_offset: usize,
+    _last_edit_text: &str,
+) -> bool {
+    // #2757 parity with session_relay_sink: after a terminal fallback send,
+    // the original message id may already contain partial assistant content.
+    // Without a Discord probe proving it is a pure placeholder, preserve it.
+    false
+}
+
+fn watcher_should_defer_delegated_fresh_idle(
+    delegated_finalize_owed: bool,
+    full_response: &str,
+) -> bool {
+    delegated_finalize_owed && full_response.trim().is_empty()
+}
+
+fn watcher_should_clear_stale_terminal_message_ids(
+    inflight_present: bool,
+    has_assistant_response: bool,
+    placeholder_msg_id: Option<serenity::MessageId>,
+) -> bool {
+    has_assistant_response && !inflight_present && placeholder_msg_id.is_some()
+}
+
+fn discard_restored_response_seed_before_no_inflight_terminal_relay(
+    full_response: &mut String,
+    response_sent_offset: &mut usize,
+    last_edit_text: &mut String,
+    restored_response_seed: &str,
+    inflight_present: bool,
+    _fresh_assistant_text_seen: bool,
+) -> bool {
+    if inflight_present || restored_response_seed.trim().is_empty() {
+        return false;
+    }
+    if !full_response.starts_with(restored_response_seed) {
+        return false;
+    }
+    let seed_len = restored_response_seed.len();
+    full_response.replace_range(..seed_len, "");
+    *response_sent_offset = response_sent_offset.saturating_sub(seed_len);
+    while *response_sent_offset > 0 && !full_response.is_char_boundary(*response_sent_offset) {
+        *response_sent_offset -= 1;
+    }
+    last_edit_text.clear();
+    true
+}
+
+fn adopt_watcher_terminal_message_ids_from_inflight(
+    placeholder_msg_id: &mut Option<serenity::MessageId>,
+    placeholder_from_restored_inflight: &mut bool,
+    status_panel_msg_id: &mut Option<serenity::MessageId>,
+    inflight: &InflightTurnState,
+    tmux_session_name: &str,
+) {
+    if inflight.rebind_origin {
+        return;
+    }
+    let matches_current_watcher_session = inflight
+        .tmux_session_name
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|name| !name.is_empty() && name == tmux_session_name);
+    if !matches_current_watcher_session {
+        return;
+    }
+    let placeholderless_discord_turn = inflight.user_msg_id != 0
+        && inflight.current_msg_id != 0
+        && inflight.current_msg_id == inflight.user_msg_id;
+    if placeholderless_discord_turn {
+        return;
+    }
+    if placeholder_msg_id.is_none() && inflight.current_msg_id != 0 {
+        *placeholder_msg_id = Some(serenity::MessageId::new(inflight.current_msg_id));
+        *placeholder_from_restored_inflight = true;
+    }
+    if status_panel_msg_id.is_none() {
+        *status_panel_msg_id = inflight.status_message_id.map(serenity::MessageId::new);
+    }
+}
+
+fn watcher_inflight_represents_external_input(inflight: Option<&InflightTurnState>) -> bool {
+    inflight.is_some_and(|inflight| {
+        matches!(
+            inflight.turn_source,
+            crate::services::discord::inflight::TurnSource::ExternalInput
+                | crate::services::discord::inflight::TurnSource::ExternalAdopted
+        )
+    })
+}
+
+fn watcher_direct_terminal_should_commit_session_idle(
+    direct_send_delivered: bool,
+    inflight_present: bool,
+    _external_input_lease_consumed_by_relay: bool,
+    _prompt_anchor_present_before_relay: bool,
+    _external_input_lease_before_relay: bool,
+    _ssh_direct_pending: bool,
+) -> bool {
+    direct_send_delivered && !inflight_present
+}
+
+fn watcher_terminal_token_update_status(
+    watcher_direct_terminal_idle_committed: bool,
+) -> &'static str {
+    if watcher_direct_terminal_idle_committed {
+        crate::db::session_status::IDLE
+    } else {
+        crate::db::session_status::TURN_ACTIVE
+    }
+}
+
+#[cfg(unix)]
+async fn commit_watcher_direct_terminal_session_idle(
+    shared: &std::sync::Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    tmux_session_name: &str,
+    terminal_kind: Option<WatcherTerminalKind>,
+    data_start_offset: u64,
+    current_offset: u64,
+) -> bool {
+    if shared.mailbox(channel_id).cancel_token().await.is_some() {
+        tracing::debug!(
+            channel_id = channel_id.get(),
+            tmux_session_name = %tmux_session_name,
+            provider = %provider.as_str(),
+            "skipping watcher-direct terminal session-idle commit; mailbox turn is active"
+        );
+        return false;
+    }
+
+    if crate::services::discord::inflight::load_inflight_state(provider, channel_id.get()).is_some()
+    {
+        tracing::debug!(
+            channel_id = channel_id.get(),
+            tmux_session_name = %tmux_session_name,
+            provider = %provider.as_str(),
+            "skipping watcher-direct terminal session-idle commit; inflight state is active"
+        );
+        return false;
+    }
+
+    let session_key = crate::services::discord::adk_session::build_namespaced_session_key(
+        &shared.token_hash,
+        provider,
+        tmux_session_name,
+    );
+    let channel_name = {
+        let data = shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .and_then(|session| session.channel_name.clone())
+    };
+    let agent_id =
+        crate::services::discord::resolve_channel_role_binding(channel_id, channel_name.as_deref())
+            .map(|binding| binding.role_id);
+    let terminal_committed_at = chrono::Utc::now();
+
+    match crate::services::discord::internal_api::mark_session_idle_if_not_newer_live(
+        &session_key,
+        provider.as_str(),
+        agent_id.as_deref(),
+        terminal_committed_at,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::debug!(
+                channel_id = channel_id.get(),
+                tmux_session_name = %tmux_session_name,
+                provider = %provider.as_str(),
+                session_key = %session_key,
+                data_start_offset,
+                current_offset,
+                terminal_kind = terminal_kind.map(WatcherTerminalKind::as_str).unwrap_or("unknown"),
+                "skipping watcher-direct terminal session-idle commit; session row is absent or newer live"
+            );
+            return false;
+        }
+        Err(error) => {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                tmux_session_name = %tmux_session_name,
+                provider = %provider.as_str(),
+                session_key = %session_key,
+                data_start_offset,
+                current_offset,
+                terminal_kind = terminal_kind.map(WatcherTerminalKind::as_str).unwrap_or("unknown"),
+                error = %error,
+                "failed to commit watcher-direct terminal session idle"
+            );
+            return false;
+        }
+    }
+
+    tracing::info!(
+        channel_id = channel_id.get(),
+        tmux_session_name = %tmux_session_name,
+        provider = %provider.as_str(),
+        session_key = %session_key,
+        data_start_offset,
+        current_offset,
+        terminal_kind = terminal_kind.map(WatcherTerminalKind::as_str).unwrap_or("unknown"),
+        "watcher-direct terminal response committed session idle"
+    );
+    true
 }
 
 /// #2442 (H3) — fast-path check for the wrapper's `ready_for_input` JSONL
@@ -69,6 +314,37 @@ fn jsonl_tail_contains_ready_for_input_sentinel(output_path: &str) -> bool {
     String::from_utf8_lossy(&buf).contains(&needle)
 }
 
+fn watcher_jsonl_turn_state_ready_for_input(
+    provider: &crate::services::provider::ProviderKind,
+    runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+    output_path: &str,
+    current_offset: u64,
+) -> Option<bool> {
+    let path = std::path::Path::new(output_path);
+    crate::services::tui_turn_state::jsonl_ready_for_input(
+        provider,
+        runtime_kind,
+        path,
+        Some(current_offset),
+    )
+    .map(crate::services::tui_turn_state::TuiReadyState::is_ready)
+}
+
+fn watcher_session_ready_for_input(
+    tmux_session_name: &str,
+    provider: &crate::services::provider::ProviderKind,
+    output_path: &str,
+    current_offset: u64,
+) -> bool {
+    let runtime_kind =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name)
+            .map(|binding| binding.runtime_kind);
+    watcher_jsonl_turn_state_ready_for_input(provider, runtime_kind, output_path, current_offset)
+        .unwrap_or_else(|| {
+            crate::services::provider::tmux_session_ready_for_input(tmux_session_name, provider)
+        })
+}
+
 fn observe_qwen_user_prompts_in_buffer(
     buffer: &str,
     provider: &crate::services::provider::ProviderKind,
@@ -80,6 +356,94 @@ fn observe_qwen_user_prompts_in_buffer(
     for line in buffer.lines() {
         let _ = crate::services::qwen::observe_qwen_user_prompt_line(line, Some(tmux_session_name));
     }
+}
+
+fn watcher_batch_contains_relayable_response(data: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(data);
+    text.contains("\"type\":\"assistant\"")
+        || text.contains("\"type\": \"assistant\"")
+        || text.contains("\"type\":\"result\"")
+        || text.contains("\"type\": \"result\"")
+}
+
+fn legacy_wrapper_prompt_candidates_from_pane(pane: &str) -> Vec<String> {
+    let mut collecting = false;
+    let mut current_block: Vec<String> = Vec::new();
+    let mut last_submitted_block: Vec<String> = Vec::new();
+
+    for raw_line in pane.lines() {
+        let line = raw_line.trim_matches('\r').trim();
+        if line.contains("Ready for input") {
+            collecting = true;
+            current_block.clear();
+            continue;
+        }
+        if line == "[sending...]" {
+            if collecting && !current_block.is_empty() {
+                last_submitted_block = current_block.clone();
+            }
+            collecting = false;
+            current_block.clear();
+            continue;
+        }
+        if collecting && !line.is_empty() {
+            current_block.push(line.to_string());
+        }
+    }
+
+    if last_submitted_block.is_empty() {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+    for candidate in [
+        last_submitted_block.join(""),
+        last_submitted_block.join(" "),
+        last_submitted_block.join("\n"),
+    ] {
+        let candidate = candidate.trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        if !candidates.iter().any(|existing: &String| {
+            crate::services::tui_prompt_dedupe::prompts_match(existing, candidate)
+        }) {
+            candidates.push(candidate.to_string());
+        }
+    }
+    candidates
+}
+
+fn observe_legacy_wrapper_direct_prompt_from_pane(
+    provider: &crate::services::provider::ProviderKind,
+    tmux_session_name: &str,
+    channel_id: serenity::ChannelId,
+    data_start_offset: u64,
+    current_offset: u64,
+) -> crate::services::tui_prompt_dedupe::PromptObservation {
+    let Some(pane) = crate::services::platform::tmux::capture_pane(tmux_session_name, -160) else {
+        return crate::services::tui_prompt_dedupe::PromptObservation::Ignored;
+    };
+    let candidates = legacy_wrapper_prompt_candidates_from_pane(&pane);
+    if candidates.is_empty() {
+        return crate::services::tui_prompt_dedupe::PromptObservation::Ignored;
+    }
+    let observation =
+        crate::services::tui_prompt_dedupe::observe_prompt_candidates_by_tmux_for_relay_lease(
+            provider.as_str(),
+            tmux_session_name,
+            &candidates,
+        );
+    tracing::info!(
+        provider = %provider.as_str(),
+        channel = channel_id.get(),
+        tmux_session = %tmux_session_name,
+        data_start_offset,
+        current_offset,
+        observation = ?observation,
+        "watcher: observed legacy wrapper pane prompt before post-terminal suppression"
+    );
+    observation
 }
 
 /// #2427 D/A wires — emit an explicit-signal inflight cleanup attempt.
@@ -351,9 +715,94 @@ impl SupervisorRelayForward {
     }
 }
 
+fn discard_watcher_pending_buffer_after_suppressed_turn(
+    all_data: &mut String,
+    all_data_start_offset: &mut u64,
+    all_data_fully_mirrored_to_session_relay: &mut bool,
+    all_data_session_bound_relay_ack: &mut Option<SessionBoundRelayAckTarget>,
+    current_offset: u64,
+) {
+    all_data.clear();
+    *all_data_start_offset = current_offset;
+    *all_data_fully_mirrored_to_session_relay = true;
+    *all_data_session_bound_relay_ack = None;
+}
+
+#[derive(Debug, Default)]
+struct Utf8ChunkDecoder {
+    pending: Vec<u8>,
+    pending_start_offset: Option<u64>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DecodedUtf8Chunk {
+    start_offset: Option<u64>,
+    text: String,
+}
+
+impl Utf8ChunkDecoder {
+    fn decode(&mut self, chunk: &[u8], chunk_start_offset: u64) -> DecodedUtf8Chunk {
+        if chunk.is_empty() {
+            return DecodedUtf8Chunk {
+                start_offset: None,
+                text: String::new(),
+            };
+        }
+        if self.pending.is_empty() {
+            self.pending_start_offset = Some(chunk_start_offset);
+        }
+        self.pending.extend_from_slice(chunk);
+
+        let start_offset = self.pending_start_offset.unwrap_or(chunk_start_offset);
+        match std::str::from_utf8(&self.pending) {
+            Ok(text) => {
+                let text = text.to_string();
+                self.pending.clear();
+                self.pending_start_offset = None;
+                DecodedUtf8Chunk {
+                    start_offset: Some(start_offset),
+                    text,
+                }
+            }
+            Err(err) if err.error_len().is_none() => {
+                let valid_up_to = err.valid_up_to();
+                if valid_up_to == 0 {
+                    return DecodedUtf8Chunk {
+                        start_offset: None,
+                        text: String::new(),
+                    };
+                }
+                let text = std::str::from_utf8(&self.pending[..valid_up_to])
+                    .expect("valid UTF-8 prefix")
+                    .to_string();
+                self.pending.drain(..valid_up_to);
+                self.pending_start_offset = Some(start_offset.saturating_add(valid_up_to as u64));
+                DecodedUtf8Chunk {
+                    start_offset: Some(start_offset),
+                    text,
+                }
+            }
+            Err(_) => {
+                let text = String::from_utf8_lossy(&self.pending).into_owned();
+                self.pending.clear();
+                self.pending_start_offset = None;
+                DecodedUtf8Chunk {
+                    start_offset: Some(start_offset),
+                    text,
+                }
+            }
+        }
+    }
+
+    fn clear_pending(&mut self) {
+        self.pending.clear();
+        self.pending_start_offset = None;
+    }
+}
+
 fn forward_chunk_to_supervisor_relay(
     tmux_session_name: &str,
-    chunk: &[u8],
+    chunk: &str,
     registry: &std::sync::Arc<
         crate::services::cluster::relay_producer_registry::RelayProducerRegistry,
     >,
@@ -368,12 +817,11 @@ fn forward_chunk_to_supervisor_relay(
     let Some(producer) = cached_producer.as_ref() else {
         return SupervisorRelayForward::not_mirrored();
     };
-    // The relay treats each `try_send_frame` call as one frame. We pass the
-    // chunk verbatim (UTF-8 lossy) rather than re-splitting on newlines so
-    // partial JSONL lines that split across reads stay together; the
-    // session-bound Discord sink and the local watcher both maintain their
-    // own newline buffers.
-    let payload = String::from_utf8_lossy(chunk).into_owned();
+    // The relay treats each `try_send_frame` call as one frame. The caller
+    // decodes only complete UTF-8 prefixes, so a multibyte scalar split across
+    // file reads is forwarded after the next read completes it instead of being
+    // replaced with U+FFFD.
+    let payload = chunk.to_string();
     let outcome = producer.try_send_frame_with_sequence(payload);
     if !outcome.is_alive() {
         // Relay was torn down between our registry read and the send —
@@ -395,6 +843,7 @@ fn forward_chunk_to_supervisor_relay(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionBoundRelayAckOutcome {
     Delivered,
+    TerminalSkipped,
     Dropped,
     SinkError,
     TimedOut,
@@ -410,8 +859,11 @@ fn session_bound_relay_ack_snapshot_outcome(
 ) -> Option<SessionBoundRelayAckOutcome> {
     let target = target?;
     let snapshot = target.metrics.snapshot();
-    if sequence_reached(snapshot.last_delivered_sequence, target.sequence) {
+    if sequence_reached(snapshot.last_terminal_committed_sequence, target.sequence) {
         return Some(SessionBoundRelayAckOutcome::Delivered);
+    }
+    if sequence_reached(snapshot.last_terminal_skipped_sequence, target.sequence) {
+        return Some(SessionBoundRelayAckOutcome::TerminalSkipped);
     }
     if sequence_reached(snapshot.last_sink_error_sequence, target.sequence) {
         return Some(SessionBoundRelayAckOutcome::SinkError);
@@ -420,6 +872,21 @@ fn session_bound_relay_ack_snapshot_outcome(
         return Some(SessionBoundRelayAckOutcome::Dropped);
     }
     None
+}
+
+fn session_bound_relay_frame_ack_reached(target: Option<&SessionBoundRelayAckTarget>) -> bool {
+    let Some(target) = target else {
+        return false;
+    };
+    let snapshot = target.metrics.snapshot();
+    sequence_reached(snapshot.last_delivered_sequence, target.sequence)
+}
+
+fn watcher_should_direct_send_after_session_bound_ack(
+    should_direct_send: bool,
+    ack_outcome: SessionBoundRelayAckOutcome,
+) -> bool {
+    should_direct_send && !matches!(ack_outcome, SessionBoundRelayAckOutcome::Delivered)
 }
 
 async fn wait_for_session_bound_relay_delivery_ack(
@@ -566,6 +1033,7 @@ async fn complete_watcher_status_panel_v2(
 pub(in crate::services::discord) enum TuiCompletionGateOutcome {
     NotGated,
     ConfirmedIdle,
+    SkippedDead,
     TimedOut,
 }
 
@@ -577,7 +1045,7 @@ impl TuiCompletionGateOutcome {
     /// sweeper / next-turn intake reconciles the still-Active panel later.
     pub(in crate::services::discord) fn should_emit_completion(self) -> bool {
         match self {
-            Self::NotGated | Self::ConfirmedIdle => true,
+            Self::NotGated | Self::ConfirmedIdle | Self::SkippedDead => true,
             Self::TimedOut => false,
         }
     }
@@ -609,6 +1077,28 @@ fn matched_session_jsonl_turn_state(
     Some(crate::services::tui_turn_state::observe_provider_jsonl_turn_state(provider, path))
 }
 
+fn matched_session_structured_ready_for_input(
+    provider: &ProviderKind,
+    inflight: Option<&crate::services::discord::inflight::InflightTurnState>,
+    tmux_session_name: &str,
+) -> Option<crate::services::tui_turn_state::TuiReadyState> {
+    let state = inflight?;
+    if state.tmux_session_name.as_deref() != Some(tmux_session_name) {
+        return None;
+    }
+    let output_path = state
+        .output_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())?;
+    crate::services::tui_turn_state::jsonl_ready_for_input(
+        provider,
+        state.runtime_kind,
+        std::path::Path::new(output_path),
+        None,
+    )
+}
+
 fn jsonl_terminal_can_confirm_completion(
     inflight: Option<&crate::services::discord::inflight::InflightTurnState>,
 ) -> bool {
@@ -629,6 +1119,19 @@ fn jsonl_terminal_can_confirm_completion(
             state.effective_relay_owner_kind(),
             crate::services::discord::inflight::RelayOwnerKind::Watcher
         ) && !state.rebind_origin;
+        let managed_terminal_runtime_turn = matches!(
+            state.runtime_kind,
+            Some(
+                crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
+                    | crate::services::agent_protocol::RuntimeHandoffKind::ProcessBackend,
+            )
+        ) && !state.rebind_origin
+            && state.user_msg_id != 0
+            && state.current_msg_id != 0
+            && state
+                .turn_start_offset
+                .map(|start| state.last_offset > start)
+                .unwrap_or(false);
         let legacy_terminal_shortcut = if state.rebind_origin {
             adopted_session_turn
         } else {
@@ -637,7 +1140,8 @@ fn jsonl_terminal_can_confirm_completion(
 
         has_session_binding
             && ((state.status_message_id.is_none() && legacy_terminal_shortcut)
-                || watcher_owned_session_bound_turn)
+                || watcher_owned_session_bound_turn
+                || managed_terminal_runtime_turn)
     })
 }
 
@@ -797,33 +1301,94 @@ mod matched_session_jsonl_gate_tests {
     }
 
     #[test]
-    fn jsonl_terminal_completion_keeps_bridge_owned_placeholder_on_legacy_path() {
+    fn jsonl_terminal_completion_accepts_managed_claude_tui_bridge_owned_placeholder() {
         let mut state = state_for_matched_session(
             ProviderKind::Claude,
             "AgentDesk-claude-bridge-owned",
             "/tmp/bridge-owned.jsonl",
         );
+        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
         state.current_msg_id = state.user_msg_id + 1;
         state.status_message_id = Some(state.current_msg_id + 1);
+        state.turn_start_offset = Some(10);
+        state.last_offset = 42;
 
         assert!(
-            !jsonl_terminal_can_confirm_completion(Some(&state)),
-            "bridge-owned placeholder inflights must still rely on the legacy pane/timer gate"
+            jsonl_terminal_can_confirm_completion(Some(&state)),
+            "matched ClaudeTui terminal JSONL should release bridge-owned placeholders instead of waiting forever on pane prompt detection"
         );
 
         state
             .set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::StandbyRelay);
         assert!(
-            !jsonl_terminal_can_confirm_completion(Some(&state)),
-            "standby relay ownership is not the watcher-owned completion shortcut"
+            jsonl_terminal_can_confirm_completion(Some(&state)),
+            "managed ClaudeTui terminal JSONL remains authoritative even if a relay-owner label is stale"
         );
 
         state.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::None);
-        state.current_msg_id = state.user_msg_id;
+        state.turn_start_offset = Some(42);
+        state.last_offset = 42;
         assert!(
             !jsonl_terminal_can_confirm_completion(Some(&state)),
-            "bridge-owned status-panel rows keep the existing status-panel restriction"
+            "a stale prior terminal envelope must not unlock a fresh turn that has not advanced the output offset"
         );
+
+        state.turn_start_offset = None;
+        state.last_offset = 99;
+        state.full_response = "prior response".to_string();
+        assert!(
+            !jsonl_terminal_can_confirm_completion(Some(&state)),
+            "without a current turn_start_offset anchor, non-empty full_response is not enough to unlock cleanup"
+        );
+    }
+
+    #[test]
+    fn jsonl_terminal_completion_accepts_managed_process_backend_bridge_owned_placeholder() {
+        let mut state = state_for_matched_session(
+            ProviderKind::Codex,
+            "AgentDesk-codex-process-backend",
+            "/tmp/process-backend.jsonl",
+        );
+        state.runtime_kind =
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::ProcessBackend);
+        state.current_msg_id = state.user_msg_id + 1;
+        state.status_message_id = Some(state.current_msg_id + 1);
+        state.turn_start_offset = Some(100);
+        state.last_offset = 150;
+
+        assert!(
+            jsonl_terminal_can_confirm_completion(Some(&state)),
+            "process backend terminal JSONL should also release bridge-owned live placeholders"
+        );
+    }
+
+    #[test]
+    fn jsonl_terminal_completion_rejects_unanchored_managed_runtime_shapes() {
+        let mut state = state_for_matched_session(
+            ProviderKind::Claude,
+            "AgentDesk-claude-guarded",
+            "/tmp/guarded.jsonl",
+        );
+        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        state.current_msg_id = state.user_msg_id + 1;
+        state.turn_start_offset = Some(1);
+        state.last_offset = 2;
+        assert!(jsonl_terminal_can_confirm_completion(Some(&state)));
+
+        state.runtime_kind = None;
+        assert!(!jsonl_terminal_can_confirm_completion(Some(&state)));
+
+        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        state.user_msg_id = 0;
+        assert!(!jsonl_terminal_can_confirm_completion(Some(&state)));
+
+        state.user_msg_id = 9001;
+        state.current_msg_id = 0;
+        assert!(!jsonl_terminal_can_confirm_completion(Some(&state)));
+
+        state.current_msg_id = 9002;
+        state.rebind_origin = true;
+        assert!(!jsonl_terminal_can_confirm_completion(Some(&state)));
     }
 
     #[test]
@@ -975,6 +1540,18 @@ mod matched_session_jsonl_gate_tests {
             Some(SessionBoundRelayAckOutcome::Dropped)
         );
 
+        let skipped_metrics =
+            std::sync::Arc::new(crate::services::cluster::stream_relay::RelayMetrics::default());
+        let skipped_target = SessionBoundRelayAckTarget {
+            metrics: skipped_metrics.clone(),
+            sequence: 11,
+        };
+        skipped_metrics.record_terminal_skipped_sequence_for_test(11);
+        assert_eq!(
+            session_bound_relay_ack_snapshot_outcome(Some(&skipped_target)),
+            Some(SessionBoundRelayAckOutcome::TerminalSkipped)
+        );
+
         let delivered_metrics =
             std::sync::Arc::new(crate::services::cluster::stream_relay::RelayMetrics::default());
         let delivered_target = SessionBoundRelayAckTarget {
@@ -982,6 +1559,16 @@ mod matched_session_jsonl_gate_tests {
             sequence: 3,
         };
         delivered_metrics.record_delivered_sequence_for_test(3);
+        assert_eq!(
+            wait_for_session_bound_relay_delivery_ack(
+                Some(&delivered_target),
+                std::time::Duration::from_millis(1),
+            )
+            .await,
+            SessionBoundRelayAckOutcome::TimedOut,
+            "frame delivery ack alone must not count as terminal Discord commit"
+        );
+        delivered_metrics.record_terminal_committed_sequence_for_test(3);
         delivered_metrics.record_sink_error_sequence_for_test(4);
         assert_eq!(
             wait_for_session_bound_relay_delivery_ack(
@@ -996,6 +1583,50 @@ mod matched_session_jsonl_gate_tests {
                 .await,
             SessionBoundRelayAckOutcome::MissingTarget
         );
+    }
+
+    #[test]
+    fn frame_accepted_without_terminal_commit_uses_watcher_direct_fallback() {
+        assert!(watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::TimedOut
+        ));
+        assert!(watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::TerminalSkipped
+        ));
+        assert!(watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::MissingTarget
+        ));
+        assert!(!watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::Delivered
+        ));
+        assert!(!watcher_should_direct_send_after_session_bound_ack(
+            false,
+            SessionBoundRelayAckOutcome::TimedOut
+        ));
+    }
+
+    #[test]
+    fn session_sink_route_skip_uses_watcher_direct_fallback() {
+        assert!(watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::SinkError
+        ));
+        assert!(watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::TerminalSkipped
+        ));
+        assert!(watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::Dropped
+        ));
+        assert!(!watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::Delivered
+        ));
     }
 
     #[test]
@@ -1024,8 +1655,46 @@ mod matched_session_jsonl_gate_tests {
     }
 }
 
-fn watcher_commit_should_advance_runtime_binding(terminal_output_committed: bool) -> bool {
-    terminal_output_committed
+fn watcher_commit_should_advance_runtime_binding(
+    terminal_output_committed: bool,
+    gate_outcome: TuiCompletionGateOutcome,
+) -> bool {
+    terminal_output_committed && !matches!(gate_outcome, TuiCompletionGateOutcome::TimedOut)
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WatcherTerminalCommitSideEffects {
+    advance_runtime_binding: bool,
+    advance_confirmed_end: bool,
+    clear_inflight: bool,
+    finish_restored_turn: bool,
+    late_output_retry_possible: bool,
+}
+
+#[cfg(test)]
+fn watcher_terminal_commit_side_effects_for_test(
+    terminal_output_committed: bool,
+    gate_outcome: TuiCompletionGateOutcome,
+) -> WatcherTerminalCommitSideEffects {
+    let lifecycle_allowed =
+        terminal_output_committed && !matches!(gate_outcome, TuiCompletionGateOutcome::TimedOut);
+    WatcherTerminalCommitSideEffects {
+        advance_runtime_binding: watcher_commit_should_advance_runtime_binding(
+            terminal_output_committed,
+            gate_outcome,
+        ),
+        advance_confirmed_end: lifecycle_allowed,
+        clear_inflight: lifecycle_allowed,
+        finish_restored_turn: lifecycle_allowed,
+        late_output_retry_possible: terminal_output_committed && !lifecycle_allowed,
+    }
+}
+
+fn watcher_terminal_kind_requires_tui_completion_gate(
+    terminal_kind: Option<WatcherTerminalKind>,
+) -> bool {
+    !matches!(terminal_kind, Some(WatcherTerminalKind::SoftUserBoundary))
 }
 
 fn missing_inflight_after_session_bound_delivery(
@@ -1041,12 +1710,62 @@ mod runtime_binding_offset_tests {
 
     #[test]
     fn committed_watcher_output_advances_runtime_binding_even_without_inflight() {
-        assert!(watcher_commit_should_advance_runtime_binding(true));
+        assert!(watcher_commit_should_advance_runtime_binding(
+            true,
+            TuiCompletionGateOutcome::ConfirmedIdle
+        ));
     }
 
     #[test]
     fn uncommitted_watcher_output_does_not_advance_runtime_binding() {
-        assert!(!watcher_commit_should_advance_runtime_binding(false));
+        assert!(!watcher_commit_should_advance_runtime_binding(
+            false,
+            TuiCompletionGateOutcome::ConfirmedIdle
+        ));
+    }
+
+    #[test]
+    fn tui_gate_timeout_keeps_runtime_binding_at_previous_committed_offset() {
+        assert!(!watcher_commit_should_advance_runtime_binding(
+            true,
+            TuiCompletionGateOutcome::TimedOut
+        ));
+    }
+
+    #[test]
+    fn tui_completion_gate_timeout_preserves_offsets_inflight_and_late_output_retry() {
+        let side_effects =
+            watcher_terminal_commit_side_effects_for_test(true, TuiCompletionGateOutcome::TimedOut);
+
+        assert!(!side_effects.advance_runtime_binding);
+        assert!(!side_effects.advance_confirmed_end);
+        assert!(!side_effects.clear_inflight);
+        assert!(!side_effects.finish_restored_turn);
+        assert!(side_effects.late_output_retry_possible);
+
+        let confirmed = watcher_terminal_commit_side_effects_for_test(
+            true,
+            TuiCompletionGateOutcome::ConfirmedIdle,
+        );
+        assert!(confirmed.advance_runtime_binding);
+        assert!(confirmed.advance_confirmed_end);
+        assert!(confirmed.clear_inflight);
+        assert!(confirmed.finish_restored_turn);
+        assert!(!confirmed.late_output_retry_possible);
+    }
+
+    #[test]
+    fn soft_user_boundary_terminal_skips_tui_completion_gate() {
+        assert!(!watcher_terminal_kind_requires_tui_completion_gate(Some(
+            WatcherTerminalKind::SoftUserBoundary
+        )));
+        assert!(watcher_terminal_kind_requires_tui_completion_gate(Some(
+            WatcherTerminalKind::SoftStopHookSummary
+        )));
+        assert!(watcher_terminal_kind_requires_tui_completion_gate(Some(
+            WatcherTerminalKind::HardResult
+        )));
+        assert!(watcher_terminal_kind_requires_tui_completion_gate(None));
     }
 
     #[test]
@@ -1090,18 +1809,44 @@ pub(in crate::services::discord) async fn run_tui_completion_gate(
     ) {
         return TuiCompletionGateOutcome::NotGated;
     }
+    let tmux_session_for_liveness = tmux_session_name.to_string();
+    let pane_alive = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::task::spawn_blocking(move || {
+            crate::services::tmux_diagnostics::tmux_session_has_live_pane(
+                &tmux_session_for_liveness,
+            )
+        }),
+    )
+    .await
+    .unwrap_or(Ok(false))
+    .unwrap_or(false);
+    if !pane_alive {
+        tracing::info!(
+            provider = %provider.as_str(),
+            channel = channel_id.get(),
+            tmux_session = %tmux_session_name,
+            "TUI completion gate skipped because tmux pane is no longer live"
+        );
+        return TuiCompletionGateOutcome::SkippedDead;
+    }
 
     let started_at = tokio::time::Instant::now();
     loop {
-        let session_name = tmux_session_name.to_string();
-        let provider_for_probe = provider.clone();
         let ready = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            tokio::task::spawn_blocking(move || {
-                crate::services::provider::tmux_session_ready_for_input(
-                    &session_name,
-                    &provider_for_probe,
-                )
+            tokio::task::spawn_blocking({
+                let provider = provider.clone();
+                let tmux_session_name = tmux_session_name.to_string();
+                let inflight = inflight.clone();
+                move || {
+                    matched_session_structured_ready_for_input(
+                        &provider,
+                        inflight.as_ref(),
+                        &tmux_session_name,
+                    )
+                    .is_some_and(crate::services::tui_turn_state::TuiReadyState::is_ready)
+                }
             }),
         )
         .await
@@ -1119,7 +1864,7 @@ pub(in crate::services::discord) async fn run_tui_completion_gate(
                 channel = channel_id.get(),
                 tmux_session = %tmux_session_name,
                 gate = "tui_completion_quiescence",
-                "[{ts}] \u{26a0} TUI pane was not yet idle after {:?} — suppressing turn-complete status to avoid premature completion (#2161); placeholder sweeper / next-turn intake will reconcile",
+                "[{ts}] \u{26a0} TUI structured turn state was not idle after {:?} — suppressing turn-complete status to avoid premature completion (#2161); placeholder sweeper / next-turn intake will reconcile",
                 crate::services::discord::tmux::TUI_COMPLETION_QUIESCENCE_TIMEOUT,
             );
             return TuiCompletionGateOutcome::TimedOut;
@@ -1232,6 +1977,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     let mut all_data_start_offset = current_offset;
     let mut all_data_fully_mirrored_to_session_relay = true;
     let mut all_data_session_bound_relay_ack: Option<SessionBoundRelayAckTarget> = None;
+    let mut utf8_decoder = Utf8ChunkDecoder::default();
     let mut prompt_too_long_killed = false;
     let mut turn_result_relayed = false;
     let mut last_activity_heartbeat_at: Option<std::time::Instant> = None;
@@ -1240,6 +1986,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     // G2/G3/G4 on 2026-04-22T23:34:13Z) showed multi-second continuation
     // bursts; logging every chunk would spam the timeline.
     let mut post_terminal_continuation_logged = false;
+    let mut last_post_terminal_suppressed_range: Option<(u64, u64)> = None;
     let mut restored_turn = restored_turn;
     // Guard against duplicate relay: track the offset from which the last relay was sent.
     // If the outer loop circles back and current_offset hasn't advanced past this point,
@@ -1323,10 +2070,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // the watcher from using a stale current_offset after unpausing.
         if let Some(new_offset) = resume_offset.lock().ok().and_then(|mut g| g.take()) {
             current_offset = new_offset;
+            let bridge_delivered_turn = turn_delivered.load(Ordering::Relaxed);
             // If the bridge already delivered the previous turn, treat this resume
             // point as already consumed once so the watcher doesn't re-relay the
             // same batch after unpausing.
-            last_relayed_offset = if turn_delivered.load(Ordering::Relaxed) {
+            last_relayed_offset = if bridge_delivered_turn {
                 Some(new_offset)
             } else {
                 None
@@ -1489,27 +2237,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         )
         .await;
 
-        let (data, new_offset, data_mirrored_to_session_relay) = match read_result {
-            Ok(Ok(Ok((data, off)))) => {
-                // E5 (#2412): mirror the freshly-read chunk into the
-                // supervisor-owned StreamRelay if one exists for this
-                // session. This is the *producer* side of the supervisor
-                // pipeline — without this call, `try_send_frame` is never
-                // invoked in production. The Discord sink consumes these
-                // frames directly for eligible session-bound inflight shapes;
-                // this watcher remains the fallback for bridge-owned/no-
-                // inflight envelopes.
-                let data_forwarded_to_session_relay = forward_chunk_to_supervisor_relay(
-                    &tmux_session_name,
-                    &data,
-                    &producer_registry,
-                    &mut cached_relay_producer,
-                );
-                if let Some(ack_target) = data_forwarded_to_session_relay.ack_target.clone() {
-                    all_data_session_bound_relay_ack = Some(ack_target);
-                }
-                (data, off, data_forwarded_to_session_relay.mirrored)
-            }
+        let (data, new_offset) = match read_result {
+            Ok(Ok(Ok((data, off)))) => (data, off),
             _ => {
                 match tmux_liveness_decision(
                     cancel.load(Ordering::Relaxed),
@@ -1615,6 +2344,100 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 "  [{ts}] 👁 post-terminal-success continuation: new output arrived for {tmux_session_name} after terminal success (offset {data_start_offset} -> {new_offset}); watcher staying alive"
             );
         }
+        // Compute the SSH-direct bypass signal lazily — the dedupe state
+        // lookup grabs a global Mutex and walks the purge maps, so we only
+        // pay that cost when the cheap (terminal + no-inflight) prefix is
+        // already true and we are about to suppress.
+        let post_terminal_inflight_missing =
+            crate::services::discord::inflight::load_inflight_state(
+                &watcher_provider,
+                channel_id.get(),
+            )
+            .is_none();
+        let runtime_kind_marker = if turn_result_relayed && post_terminal_inflight_missing {
+            crate::services::tmux_common::resolve_tmux_runtime_kind_marker(&tmux_session_name)
+        } else {
+            None
+        };
+        if matches!(
+            runtime_kind_marker,
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::LegacyTmuxWrapper)
+        ) && watcher_batch_contains_relayable_response(&data)
+        {
+            let _ = observe_legacy_wrapper_direct_prompt_from_pane(
+                &watcher_provider,
+                &tmux_session_name,
+                channel_id,
+                data_start_offset,
+                current_offset,
+            );
+        }
+        let ssh_direct_prompt_pending = if turn_result_relayed && post_terminal_inflight_missing {
+            crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
+                watcher_provider.as_str(),
+                &tmux_session_name,
+                channel_id.get(),
+            )
+            .is_some()
+                || crate::services::tui_prompt_dedupe::is_ssh_direct_observation_pending(
+                    watcher_provider.as_str(),
+                    &tmux_session_name,
+                )
+        } else {
+            false
+        };
+        let external_input_lease_present = if turn_result_relayed && post_terminal_inflight_missing
+        {
+            crate::services::tui_prompt_dedupe::external_input_relay_lease_present(
+                watcher_provider.as_str(),
+                &tmux_session_name,
+                channel_id.get(),
+            )
+        } else {
+            false
+        };
+        let post_terminal_no_inflight_should_suppress =
+            should_suppress_post_terminal_output_without_inflight(
+                turn_result_relayed,
+                post_terminal_inflight_missing,
+                ssh_direct_prompt_pending,
+                external_input_lease_present,
+            );
+        if post_terminal_no_inflight_should_suppress {
+            let suppressed_range = (data_start_offset, current_offset);
+            if last_post_terminal_suppressed_range != Some(suppressed_range) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] 🛑 watcher: suppressed post-terminal output without inflight for channel {} (tmux={}, range {}..{})",
+                    channel_id.get(),
+                    tmux_session_name,
+                    data_start_offset,
+                    current_offset
+                );
+                last_post_terminal_suppressed_range = Some(suppressed_range);
+            } else {
+                tracing::debug!(
+                    channel_id = channel_id.get(),
+                    tmux_session = %tmux_session_name,
+                    range_start = data_start_offset,
+                    range_end = current_offset,
+                    "watcher: repeated post-terminal suppress for same range"
+                );
+            }
+            last_relayed_offset = Some(current_offset);
+            last_observed_generation_mtime_ns =
+                Some(read_generation_file_mtime_ns(&tmux_session_name));
+            advance_watcher_confirmed_end(
+                &shared,
+                &watcher_provider,
+                channel_id,
+                &tmux_session_name,
+                current_offset,
+                "src/services/discord/tmux.rs:post_terminal_no_inflight_suppressed_output",
+            );
+            utf8_decoder.clear_pending();
+            continue;
+        }
         maybe_refresh_watcher_activity_heartbeat(
             None::<&crate::db::Db>,
             shared.pg_pool.as_ref(),
@@ -1629,13 +2452,37 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // #1216: append to the outer-scope `all_data` so any leftover from a
         // previous iteration (multi-turn buffer split at the first `result`)
         // is processed before the new disk read.
-        if all_data.is_empty() {
-            all_data_start_offset = data_start_offset;
-            all_data_fully_mirrored_to_session_relay = data_mirrored_to_session_relay;
+        let decoded_data = utf8_decoder.decode(&data, data_start_offset);
+        let data_mirrored_to_session_relay = if decoded_data.text.is_empty() {
+            SupervisorRelayForward::mirrored_without_ack()
         } else {
-            all_data_fully_mirrored_to_session_relay &= data_mirrored_to_session_relay;
+            // E5 (#2412): mirror the freshly-read chunk into the
+            // supervisor-owned StreamRelay if one exists for this session.
+            // This is the *producer* side of the supervisor pipeline —
+            // without this call, `try_send_frame` is never invoked in
+            // production. The Discord sink consumes these frames directly for
+            // eligible session-bound inflight shapes; this watcher remains the
+            // fallback for bridge-owned/no-inflight envelopes.
+            forward_chunk_to_supervisor_relay(
+                &tmux_session_name,
+                &decoded_data.text,
+                &producer_registry,
+                &mut cached_relay_producer,
+            )
+        };
+        if let Some(ack_target) = data_mirrored_to_session_relay.ack_target.clone() {
+            all_data_session_bound_relay_ack = Some(ack_target);
         }
-        all_data.push_str(&String::from_utf8_lossy(&data));
+        if all_data.is_empty() {
+            all_data_start_offset = decoded_data.start_offset.unwrap_or(data_start_offset);
+            all_data_fully_mirrored_to_session_relay = data_mirrored_to_session_relay.mirrored;
+        } else {
+            all_data_fully_mirrored_to_session_relay &= data_mirrored_to_session_relay.mirrored;
+        }
+        if decoded_data.text.is_empty() && all_data.is_empty() {
+            continue;
+        }
+        all_data.push_str(&decoded_data.text);
         let turn_data_start_offset = all_data_start_offset;
         let mut session_bound_relay_turn_fully_mirrored = all_data_fully_mirrored_to_session_relay;
         let mut state = StreamLineState::new();
@@ -1662,7 +2509,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         } else {
             restored_turn_seed
         });
-        let restored_assistant_text_seen = !stream_seed.full_response.trim().is_empty();
+        let restored_response_seed = stream_seed.full_response.clone();
+        let restored_assistant_text_seen = !restored_response_seed.trim().is_empty();
         if restored_assistant_text_seen {
             // The restored response prefix came from watcher state, not from
             // chunks mirrored into the session-bound StreamRelay parser. Keep
@@ -1677,7 +2525,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let mut spin_idx: usize = 0;
         let mut placeholder_msg_id: Option<serenity::MessageId> = stream_seed.placeholder_msg_id;
-        let status_panel_msg_id: Option<serenity::MessageId> = stream_seed.status_panel_msg_id;
+        let mut placeholder_from_restored_inflight = placeholder_msg_id.is_some();
+        let mut status_panel_msg_id: Option<serenity::MessageId> = stream_seed.status_panel_msg_id;
         let mut last_status_panel_text = String::new();
         let status_panel_started_at = chrono::Utc::now().timestamp();
         let mut last_edit_text = stream_seed.last_edit_text;
@@ -1703,6 +2552,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             advance_buffer_start_offset(turn_data_start_offset, initial_buffer_len, all_data.len());
         let live_events_dirty = flush_placeholder_live_events(&shared, channel_id, &mut tool_state);
         let mut found_result = initial_outcome.found_result;
+        let mut terminal_kind = initial_outcome.terminal_kind;
+        let mut soft_terminal_seen_at = if initial_outcome.soft_terminal_candidate {
+            Some(tokio::time::Instant::now())
+        } else {
+            None
+        };
         let mut is_prompt_too_long = initial_outcome.is_prompt_too_long;
         let mut is_auth_error = initial_outcome.is_auth_error;
         let mut auth_error_message = initial_outcome.auth_error_message;
@@ -1713,6 +2568,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let mut task_notification_kind = stream_seed.task_notification_kind;
         let mut assistant_text_seen =
             restored_assistant_text_seen || initial_outcome.assistant_text_seen;
+        let mut fresh_assistant_text_seen = initial_outcome.assistant_text_seen;
         if let Some(kind) = initial_outcome.task_notification_kind {
             task_notification_kind = merge_task_notification_kind(task_notification_kind, kind);
         }
@@ -1798,6 +2654,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             let turn_start = tokio::time::Instant::now();
             let turn_timeout = crate::services::discord::turn_watchdog_timeout();
             let mut last_status_update = tokio::time::Instant::now();
+            let mut last_output_at = tokio::time::Instant::now();
             if live_events_dirty {
                 force_next_watcher_status_update(&mut last_status_update);
             }
@@ -1809,8 +2666,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             let mut ready_for_input_failure_notice: Option<String> = None;
             let mut ready_for_input_stall_dispatch_id: Option<String> = None;
             let mut streaming_suppressed_by_recent_stop = false;
+            let mut streaming_suppressed_by_missing_inflight = false;
+            let mut fresh_ready_for_input_idle = false;
 
             while !found_result && turn_start.elapsed() < turn_timeout {
+                // The inner loop can wait for minutes while a long tool/test
+                // produces no provider JSONL result. Keep the registry
+                // heartbeat fresh so the heartbeat sweeper does not mistake a
+                // healthy streaming watcher for a dead task and cancel relay.
+                last_heartbeat_ts_ms.store(
+                    crate::services::discord::tmux_watcher_now_ms(),
+                    std::sync::atomic::Ordering::Release,
+                );
                 if cancel.load(Ordering::Relaxed) || shared.shutting_down.load(Ordering::Relaxed) {
                     break;
                 }
@@ -1841,24 +2708,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 match read_more {
                     Ok(Ok(Ok((chunk, off)))) if !chunk.is_empty() => {
                         current_offset = off;
-                        // E5 (#2412): producer-side wiring for the
-                        // supervisor-owned StreamRelay. Same rationale as
-                        // the outer read site (~25 lines up in this fn) —
-                        // every chunk read off the tmux output file is also
-                        // pushed into the relay's MPSC so the session-bound
-                        // Discord sink receives frames in production.
-                        let chunk_forwarded_to_session_relay = forward_chunk_to_supervisor_relay(
-                            &tmux_session_name,
-                            &chunk,
-                            &producer_registry,
-                            &mut cached_relay_producer,
-                        );
-                        if let Some(ack_target) = chunk_forwarded_to_session_relay.ack_target {
-                            all_data_session_bound_relay_ack = Some(ack_target);
-                        }
-                        let chunk_mirrored_to_session_relay =
-                            chunk_forwarded_to_session_relay.mirrored;
-                        session_bound_relay_turn_fully_mirrored &= chunk_mirrored_to_session_relay;
                         maybe_refresh_watcher_activity_heartbeat(
                             None::<&crate::db::Db>,
                             shared.pg_pool.as_ref(),
@@ -1869,16 +2718,44 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             &mut last_activity_heartbeat_at,
                         );
                         ready_for_input_tracker.record_output();
+                        let chunk_start_offset = current_offset.saturating_sub(chunk.len() as u64);
+                        let decoded_chunk = utf8_decoder.decode(&chunk, chunk_start_offset);
+                        let chunk_forwarded_to_session_relay = if decoded_chunk.text.is_empty() {
+                            SupervisorRelayForward::mirrored_without_ack()
+                        } else {
+                            // E5 (#2412): producer-side wiring for the
+                            // supervisor-owned StreamRelay. Same rationale as
+                            // the outer read site in this fn — every decoded
+                            // chunk read off the tmux output file is also
+                            // pushed into the relay's MPSC so the
+                            // session-bound Discord sink receives frames in
+                            // production.
+                            forward_chunk_to_supervisor_relay(
+                                &tmux_session_name,
+                                &decoded_chunk.text,
+                                &producer_registry,
+                                &mut cached_relay_producer,
+                            )
+                        };
+                        if let Some(ack_target) = chunk_forwarded_to_session_relay.ack_target {
+                            all_data_session_bound_relay_ack = Some(ack_target);
+                        }
+                        let chunk_mirrored_to_session_relay =
+                            chunk_forwarded_to_session_relay.mirrored;
+                        session_bound_relay_turn_fully_mirrored &= chunk_mirrored_to_session_relay;
                         if all_data.is_empty() {
                             all_data_start_offset =
-                                current_offset.saturating_sub(chunk.len() as u64);
+                                decoded_chunk.start_offset.unwrap_or(chunk_start_offset);
                             all_data_fully_mirrored_to_session_relay =
                                 chunk_mirrored_to_session_relay;
                         } else {
                             all_data_fully_mirrored_to_session_relay &=
                                 chunk_mirrored_to_session_relay;
                         }
-                        all_data.push_str(&String::from_utf8_lossy(&chunk));
+                        if decoded_chunk.text.is_empty() && all_data.is_empty() {
+                            continue;
+                        }
+                        all_data.push_str(&decoded_chunk.text);
                         let chunk_buffer_start_offset = all_data_start_offset;
                         let chunk_buffer_len = all_data.len();
                         observe_qwen_user_prompts_in_buffer(
@@ -1892,6 +2769,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             &mut full_response,
                             &mut tool_state,
                         );
+                        last_output_at = tokio::time::Instant::now();
                         all_data_start_offset = advance_buffer_start_offset(
                             chunk_buffer_start_offset,
                             chunk_buffer_len,
@@ -1901,6 +2779,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             force_next_watcher_status_update(&mut last_status_update);
                         }
                         found_result = found_result || outcome.found_result;
+                        if outcome.found_result {
+                            terminal_kind = outcome.terminal_kind.or(terminal_kind);
+                        }
+                        if outcome.soft_terminal_candidate && soft_terminal_seen_at.is_none() {
+                            soft_terminal_seen_at = Some(tokio::time::Instant::now());
+                            terminal_kind = outcome
+                                .terminal_kind
+                                .or(terminal_kind)
+                                .or(Some(WatcherTerminalKind::SoftStopHookSummary));
+                        }
                         is_prompt_too_long = is_prompt_too_long || outcome.is_prompt_too_long;
                         is_auth_error = is_auth_error || outcome.is_auth_error;
                         if auth_error_message.is_none() {
@@ -1915,6 +2803,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 merge_task_notification_kind(task_notification_kind, kind);
                         }
                         assistant_text_seen |= outcome.assistant_text_seen;
+                        fresh_assistant_text_seen |= outcome.assistant_text_seen;
                         if matches!(
                             task_notification_kind,
                             Some(TaskNotificationKind::MonitorAutoTurn)
@@ -2015,8 +2904,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         // and short-circuit the 2s probe cadence. The
                         // legacy `should_probe_ready` cadence stays as a
                         // fallback for the SIGKILL / sentinel-lost case.
+                        //
+                        // Claude TUI is transcript-backed: its visible
+                        // composer can stay on-screen during active work, so
+                        // watcher completion must use the JSONL turn state,
+                        // not pane chrome.
                         let sentinel_ready =
-                            jsonl_tail_contains_ready_for_input_sentinel(&output_path);
+                            !matches!(
+                                watcher_provider,
+                                crate::services::provider::ProviderKind::Claude
+                            ) && jsonl_tail_contains_ready_for_input_sentinel(&output_path);
                         let should_probe_ready = sentinel_ready
                             || last_ready_probe_at
                                 .map(|last| {
@@ -2033,9 +2930,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                     tokio::task::spawn_blocking({
                                         let name = tmux_session_name.clone();
                                         let provider = watcher_provider.clone();
+                                        let path = output_path.clone();
+                                        let offset = current_offset;
                                         move || {
-                                            crate::services::provider::tmux_session_ready_for_input(
-                                                &name, &provider,
+                                            watcher_session_ready_for_input(
+                                                &name, &provider, &path, offset,
                                             )
                                         }
                                     }),
@@ -2044,6 +2943,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 .unwrap_or(Ok(false))
                                 .unwrap_or(false)
                             };
+                            if soft_terminal_seen_at.is_some()
+                                && ready_for_input
+                                && !full_response.trim().is_empty()
+                            {
+                                terminal_kind
+                                    .get_or_insert(WatcherTerminalKind::SoftStopHookSummary);
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                tracing::info!(
+                                    "  [{ts}] 👁 watcher committed soft stop_hook_summary after ready-for-input for {tmux_session_name} at offset {current_offset}"
+                                );
+                                break;
+                            }
                             let post_work_observed = watcher_has_post_work_ready_evidence(
                                 &full_response,
                                 &tool_state,
@@ -2063,6 +2974,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                     tracing::info!(
                                         "  [{ts}] 👁 watcher observed fresh ready-for-input idle for {tmux_session_name} at offset {current_offset}; leaving session untouched"
                                     );
+                                    fresh_ready_for_input_idle = true;
+                                    break;
                                 }
                                 crate::services::provider::ReadyForInputIdleState::PostWorkIdleTimeout => {
                                     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -2090,9 +3003,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                         );
                                     }
                                     full_response.clear();
-                                    found_result = true;
+                                    break;
                                 }
                             }
+                        }
+                        if soft_terminal_seen_at.is_some()
+                            && !full_response.trim().is_empty()
+                            && last_output_at.elapsed() >= SOFT_TERMINAL_DEBOUNCE
+                        {
+                            terminal_kind.get_or_insert(WatcherTerminalKind::SoftStopHookSummary);
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::info!(
+                                "  [{ts}] 👁 watcher committed soft stop_hook_summary after debounce for {tmux_session_name} at offset {current_offset}"
+                            );
+                            break;
                         }
                     }
                     _ => {
@@ -2170,6 +3094,52 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     }
 
                     let has_assistant_response_for_streaming = !full_response.trim().is_empty();
+                    if watcher_should_suppress_streaming_after_bridge_delivery(
+                        turn_delivered.load(Ordering::Relaxed),
+                        has_assistant_response_for_streaming,
+                    ) {
+                        if let Some(msg_id) = placeholder_msg_id {
+                            if watcher_should_delete_suppressed_placeholder(
+                                placeholder_from_restored_inflight,
+                            ) {
+                                let outcome = delete_nonterminal_placeholder(
+                                    &http,
+                                    channel_id,
+                                    &shared,
+                                    &watcher_provider,
+                                    &tmux_session_name,
+                                    msg_id,
+                                    "watcher_streaming_bridge_delivered_cleanup",
+                                )
+                                .await;
+                                if outcome.is_committed() {
+                                    placeholder_msg_id = None;
+                                    placeholder_from_restored_inflight = false;
+                                    last_edit_text.clear();
+                                }
+                            } else {
+                                // This placeholder id came from the active inflight row.
+                                // In status-panel-v2 bridge-owned delivery, the bridge
+                                // edits that exact message into the final response. The
+                                // watcher must drop local ownership without deleting it.
+                                placeholder_msg_id = None;
+                                placeholder_from_restored_inflight = false;
+                                last_edit_text.clear();
+                            }
+                        }
+                        if !streaming_suppressed_by_recent_stop {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::warn!(
+                                "  [{ts}] 🛑 watcher: suppressed streaming placeholder output for channel {} after bridge delivered turn (tmux={}, range {}..{})",
+                                channel_id.get(),
+                                tmux_session_name,
+                                data_start_offset,
+                                current_offset
+                            );
+                            streaming_suppressed_by_recent_stop = true;
+                        }
+                        continue;
+                    }
                     let recent_stop_for_streaming = if has_assistant_response_for_streaming {
                         recent_turn_stop_for_watcher_range(
                             channel_id,
@@ -2185,24 +3155,49 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             channel_id.get(),
                         )
                         .is_none();
+                    if should_skip_streaming_placeholder_without_inflight(
+                        inflight_missing_for_streaming,
+                    ) {
+                        if !streaming_suppressed_by_missing_inflight {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::warn!(
+                                "  [{ts}] 🛑 watcher: suppressed streaming placeholder edit for channel {} because inflight state is missing (tmux={}, range {}..{})",
+                                channel_id.get(),
+                                tmux_session_name,
+                                data_start_offset,
+                                current_offset
+                            );
+                            streaming_suppressed_by_missing_inflight = true;
+                        }
+                        continue;
+                    }
                     if should_suppress_streaming_placeholder_after_recent_stop(
                         has_assistant_response_for_streaming,
                         inflight_missing_for_streaming,
                         recent_stop_for_streaming.is_some(),
                     ) {
                         if let Some(msg_id) = placeholder_msg_id {
-                            let outcome = delete_nonterminal_placeholder(
-                                &http,
-                                channel_id,
-                                &shared,
-                                &watcher_provider,
-                                &tmux_session_name,
-                                msg_id,
-                                "watcher_streaming_recent_stop_cleanup",
-                            )
-                            .await;
-                            if outcome.is_committed() {
+                            if watcher_should_delete_suppressed_placeholder(
+                                placeholder_from_restored_inflight,
+                            ) {
+                                let outcome = delete_nonterminal_placeholder(
+                                    &http,
+                                    channel_id,
+                                    &shared,
+                                    &watcher_provider,
+                                    &tmux_session_name,
+                                    msg_id,
+                                    "watcher_streaming_recent_stop_cleanup",
+                                )
+                                .await;
+                                if outcome.is_committed() {
+                                    placeholder_msg_id = None;
+                                    placeholder_from_restored_inflight = false;
+                                    last_edit_text.clear();
+                                }
+                            } else {
                                 placeholder_msg_id = None;
+                                placeholder_from_restored_inflight = false;
                                 last_edit_text.clear();
                             }
                         }
@@ -2267,6 +3262,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 {
                                     Ok(message) => {
                                         placeholder_msg_id = Some(message.id);
+                                        placeholder_from_restored_inflight = false;
                                         response_sent_offset += plan.split_at;
                                         last_edit_text = status_block;
                                         persist_watcher_stream_progress(
@@ -2325,8 +3321,21 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         status_panel_msg_id,
                     );
                     let current_portion = full_response.get(response_sent_offset..).unwrap_or("");
-                    let display_text =
-                        build_streaming_placeholder_text(current_portion, &status_block);
+                    if current_portion.trim().is_empty()
+                        && !watcher_should_render_status_only_placeholder(
+                            placeholder_msg_id.is_some(),
+                            tool_state.current_tool_line.as_deref(),
+                            task_notification_kind,
+                        )
+                    {
+                        continue;
+                    }
+                    let display_text = build_watcher_streaming_edit_text(
+                        shared.status_panel_v2_enabled,
+                        current_portion,
+                        &status_block,
+                        &watcher_provider,
+                    );
 
                     if display_text != last_edit_text {
                         match placeholder_msg_id {
@@ -2352,6 +3361,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                     .await
                                 {
                                     placeholder_msg_id = Some(msg.id);
+                                    placeholder_from_restored_inflight = false;
                                 }
                             }
                         }
@@ -2369,6 +3379,131 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         );
                     }
                 }
+            }
+
+            if fresh_ready_for_input_idle {
+                let delegated_finalize_owed_pending =
+                    mailbox_finalize_owed.load(std::sync::atomic::Ordering::Acquire);
+                if watcher_should_defer_delegated_fresh_idle(
+                    delegated_finalize_owed_pending,
+                    &full_response,
+                ) {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] 👁 watcher observed fresh ready-for-input idle for {tmux_session_name} at offset {current_offset}, but bridge-delegated turn has no terminal assistant text yet; preserving inflight and waiting for terminal commit"
+                    );
+                    all_data.clear();
+                    all_data_start_offset = current_offset;
+                    all_data_fully_mirrored_to_session_relay = true;
+                    all_data_session_bound_relay_ack = None;
+                    last_observed_generation_mtime_ns =
+                        Some(read_generation_file_mtime_ns(&tmux_session_name));
+                    finish_monitor_auto_turn_if_claimed(
+                        &shared,
+                        &watcher_provider,
+                        channel_id,
+                        &mut monitor_auto_turn_claimed,
+                        &mut monitor_auto_turn_finished,
+                    )
+                    .await;
+                    continue;
+                }
+                let cleanup_committed = if let Some(msg_id) = placeholder_msg_id {
+                    if watcher_should_delete_suppressed_placeholder(
+                        placeholder_from_restored_inflight,
+                    ) {
+                        let outcome = delete_nonterminal_placeholder(
+                            &http,
+                            channel_id,
+                            &shared,
+                            &watcher_provider,
+                            &tmux_session_name,
+                            msg_id,
+                            "watcher_fresh_ready_for_input_idle_cleanup",
+                        )
+                        .await;
+                        if outcome.is_committed() {
+                            let _ = placeholder_msg_id.take();
+                            placeholder_from_restored_inflight = false;
+                            last_edit_text.clear();
+                            true
+                        } else {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::warn!(
+                                "  [{ts}] ⚠ watcher: fresh ready-for-input cleanup did not commit for channel {} msg {}; preserving inflight for retry",
+                                channel_id.get(),
+                                msg_id.get()
+                            );
+                            false
+                        }
+                    } else {
+                        let _ = placeholder_msg_id.take();
+                        placeholder_from_restored_inflight = false;
+                        last_edit_text.clear();
+                        true
+                    }
+                } else {
+                    true
+                };
+                if !cleanup_committed {
+                    continue;
+                }
+                let owed = mailbox_finalize_owed.swap(false, std::sync::atomic::Ordering::AcqRel);
+                let should_finish_mailbox = finish_mailbox_on_completion || owed;
+                if should_finish_mailbox {
+                    crate::services::discord::inflight::clear_inflight_state(
+                        &watcher_provider,
+                        channel_id.get(),
+                    );
+                    crate::services::observability::emit_inflight_lifecycle_event(
+                        watcher_provider.as_str(),
+                        channel_id.get(),
+                        None,
+                        None,
+                        None,
+                        "cleared_by_watcher_fresh_idle",
+                        serde_json::json!({
+                            "owed_finalize": owed,
+                            "finish_mailbox_on_completion": finish_mailbox_on_completion,
+                            "tmux_session": tmux_session_name.as_str(),
+                            "offset": current_offset,
+                        }),
+                    );
+                    finish_restored_watcher_active_turn(
+                        &shared,
+                        &watcher_provider,
+                        channel_id,
+                        finish_mailbox_on_completion,
+                        owed,
+                        true,
+                        "watcher fresh ready-for-input idle with queued backlog",
+                    )
+                    .await;
+                }
+                all_data.clear();
+                all_data_start_offset = current_offset;
+                all_data_fully_mirrored_to_session_relay = true;
+                all_data_session_bound_relay_ack = None;
+                last_relayed_offset = Some(current_offset);
+                last_observed_generation_mtime_ns =
+                    Some(read_generation_file_mtime_ns(&tmux_session_name));
+                advance_watcher_confirmed_end(
+                    &shared,
+                    &watcher_provider,
+                    channel_id,
+                    &tmux_session_name,
+                    current_offset,
+                    "src/services/discord/tmux.rs:ready_for_input_fresh_idle",
+                );
+                finish_monitor_auto_turn_if_claimed(
+                    &shared,
+                    &watcher_provider,
+                    channel_id,
+                    &mut monitor_auto_turn_claimed,
+                    &mut monitor_auto_turn_finished,
+                )
+                .await;
+                continue;
             }
 
             if tmux_death_observed {
@@ -2525,14 +3660,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         if (was_paused || paused_now || epoch_changed_now) && !deferred_monitor_ready {
             // Clean up placeholder if we created one
             if let Some(msg_id) = placeholder_msg_id {
-                if let Err(error) = channel_id.delete_message(&http, msg_id).await {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
-                        "  [{ts}] ⚠ watcher pause/epoch placeholder cleanup failed for channel {} msg {}: {}",
-                        channel_id.get(),
-                        msg_id.get(),
-                        error
-                    );
+                if watcher_should_delete_suppressed_placeholder(placeholder_from_restored_inflight)
+                {
+                    if let Err(error) = channel_id.delete_message(&http, msg_id).await {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::warn!(
+                            "  [{ts}] ⚠ watcher pause/epoch placeholder cleanup failed for channel {} msg {}: {}",
+                            channel_id.get(),
+                            msg_id.get(),
+                            error
+                        );
+                    }
+                } else {
+                    placeholder_from_restored_inflight = false;
+                    last_edit_text.clear();
                 }
             }
             finish_monitor_auto_turn_if_claimed(
@@ -2972,6 +4113,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &mut monitor_auto_turn_finished,
             )
             .await;
+            discard_watcher_pending_buffer_after_suppressed_turn(
+                &mut all_data,
+                &mut all_data_start_offset,
+                &mut all_data_fully_mirrored_to_session_relay,
+                &mut all_data_session_bound_relay_ack,
+                current_offset,
+            );
             continue;
         }
 
@@ -3031,6 +4179,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &mut monitor_auto_turn_finished,
             )
             .await;
+            discard_watcher_pending_buffer_after_suppressed_turn(
+                &mut all_data,
+                &mut all_data_start_offset,
+                &mut all_data_fully_mirrored_to_session_relay,
+                &mut all_data_session_bound_relay_ack,
+                current_offset,
+            );
             continue;
         }
 
@@ -3084,6 +4239,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     &mut monitor_auto_turn_finished,
                 )
                 .await;
+                discard_watcher_pending_buffer_after_suppressed_turn(
+                    &mut all_data,
+                    &mut all_data_start_offset,
+                    &mut all_data_fully_mirrored_to_session_relay,
+                    &mut all_data_session_bound_relay_ack,
+                    current_offset,
+                );
                 continue;
             }
         }
@@ -3195,21 +4357,84 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             full_response = String::new();
         }
 
+        let prompt_anchor_present_before_relay =
+            crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
+                watcher_provider.as_str(),
+                &tmux_session_name,
+                channel_id.get(),
+            )
+            .is_some();
+        let external_input_lease_before_relay =
+            crate::services::tui_prompt_dedupe::external_input_relay_lease_present(
+                watcher_provider.as_str(),
+                &tmux_session_name,
+                channel_id.get(),
+            );
+        let inflight_before_relay = crate::services::discord::inflight::load_inflight_state(
+            &watcher_provider,
+            channel_id.get(),
+        );
+        let should_adopt_inflight_terminal_message_ids = !external_input_lease_before_relay
+            || watcher_inflight_represents_external_input(inflight_before_relay.as_ref());
+        if should_adopt_inflight_terminal_message_ids
+            && let Some(inflight) = inflight_before_relay.as_ref()
+        {
+            adopt_watcher_terminal_message_ids_from_inflight(
+                &mut placeholder_msg_id,
+                &mut placeholder_from_restored_inflight,
+                &mut status_panel_msg_id,
+                inflight,
+                &tmux_session_name,
+            );
+        }
+        if discard_restored_response_seed_before_no_inflight_terminal_relay(
+            &mut full_response,
+            &mut response_sent_offset,
+            &mut last_edit_text,
+            &restored_response_seed,
+            inflight_before_relay.is_some(),
+            fresh_assistant_text_seen,
+        ) {
+            tracing::info!(
+                provider = %watcher_provider.as_str(),
+                channel = channel_id.get(),
+                tmux_session = %tmux_session_name,
+                restored_response_seed_len = restored_response_seed.len(),
+                fresh_response_len = full_response.len(),
+                "watcher: discarded restored response seed before no-inflight terminal relay"
+            );
+        }
         let has_assistant_response = !full_response.trim().is_empty();
         let current_response = full_response.get(response_sent_offset..).unwrap_or("");
         let has_current_response = !current_response.trim().is_empty();
 
         let recent_stop_for_output =
             recent_turn_stop_for_watcher_range(channel_id, &tmux_session_name, data_start_offset);
-        let inflight_before_relay = crate::services::discord::inflight::load_inflight_state(
-            &watcher_provider,
-            channel_id.get(),
-        );
         let inflight_missing_before_relay = inflight_before_relay.is_none();
         let inflight_silent_turn = inflight_before_relay
             .as_ref()
             .map(|state| state.silent_turn)
             .unwrap_or(false);
+        if watcher_should_clear_stale_terminal_message_ids(
+            inflight_before_relay.is_some(),
+            has_assistant_response,
+            placeholder_msg_id,
+        ) {
+            if let Some(stale_msg_id) = placeholder_msg_id {
+                tracing::info!(
+                    provider = %watcher_provider.as_str(),
+                    channel = channel_id.get(),
+                    tmux_session = %tmux_session_name,
+                    stale_placeholder_msg_id = stale_msg_id.get(),
+                    status_panel_msg_id = status_panel_msg_id.map(|id| id.get()).unwrap_or(0),
+                    "watcher: clearing stale terminal message ids before no-inflight terminal relay"
+                );
+            }
+            placeholder_msg_id = None;
+            status_panel_msg_id = None;
+            placeholder_from_restored_inflight = false;
+            last_edit_text.clear();
+        }
         if inflight_silent_turn && has_assistant_response {
             // Headless silent trigger (metadata.silent=true) — suppress assistant
             // text relay to the channel entirely, but keep the watcher state
@@ -3268,17 +4493,29 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         ) {
             let stop = recent_stop_for_output.expect("recent stop checked above");
             let cleanup_committed = if let Some(msg_id) = placeholder_msg_id {
-                delete_nonterminal_placeholder(
-                    &http,
-                    channel_id,
-                    &shared,
-                    &watcher_provider,
-                    &tmux_session_name,
-                    msg_id,
-                    "watcher_terminal_recent_stop_cleanup",
-                )
-                .await
-                .is_committed()
+                if watcher_should_delete_suppressed_placeholder(placeholder_from_restored_inflight)
+                {
+                    let committed = delete_nonterminal_placeholder(
+                        &http,
+                        channel_id,
+                        &shared,
+                        &watcher_provider,
+                        &tmux_session_name,
+                        msg_id,
+                        "watcher_terminal_recent_stop_cleanup",
+                    )
+                    .await
+                    .is_committed();
+                    if committed {
+                        placeholder_from_restored_inflight = false;
+                        last_edit_text.clear();
+                    }
+                    committed
+                } else {
+                    placeholder_from_restored_inflight = false;
+                    last_edit_text.clear();
+                    true
+                }
             } else {
                 true
             };
@@ -3394,6 +4631,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let relay_producer_session_name = cached_relay_producer
             .as_ref()
             .map(|producer| producer.session_name());
+        let mut session_bound_ack_outcome = SessionBoundRelayAckOutcome::MissingTarget;
         let session_bound_relay_owns_terminal_delivery =
             if session_bound_relay_should_own_terminal_delivery(
                 relay_decision.should_direct_send,
@@ -3408,6 +4646,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     std::time::Duration::from_secs(10),
                 )
                 .await;
+                session_bound_ack_outcome = ack_outcome;
                 let delivered = matches!(ack_outcome, SessionBoundRelayAckOutcome::Delivered);
                 if !delivered {
                     tracing::warn!(
@@ -3422,6 +4661,61 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             } else {
                 false
             };
+        let prompt_anchor_present = prompt_anchor_present_before_relay;
+        let ssh_direct_pending = prompt_anchor_present
+            || crate::services::tui_prompt_dedupe::is_ssh_direct_observation_pending(
+                watcher_provider.as_str(),
+                &tmux_session_name,
+            );
+        let external_input_lease_present = external_input_lease_before_relay;
+        let recent_stop_reason =
+            recent_turn_stop_for_watcher_range(channel_id, &tmux_session_name, data_start_offset)
+                .map(|stop| stop.reason);
+        let watcher_direct_fallback_after_session_bound_ack =
+            watcher_should_direct_send_after_session_bound_ack(
+                relay_decision.should_direct_send,
+                session_bound_ack_outcome,
+            );
+        tracing::info!(
+            target: "agentdesk::relay_flight_recorder",
+            provider = watcher_provider.as_str(),
+            channel = channel_id.get(),
+            tmux_session = %tmux_session_name,
+            data_start_offset,
+            current_offset,
+            terminal_kind = terminal_kind.map(WatcherTerminalKind::as_str).unwrap_or("unknown"),
+            full_response_len = current_response.len(),
+            assistant_text_seen,
+            any_tool_used = tool_state.any_tool_used,
+            has_post_tool_text = tool_state.has_post_tool_text,
+            inflight_present = inflight_before_relay.is_some(),
+            relay_owner_kind = inflight_before_relay
+                .as_ref()
+                .map(|state| state.effective_relay_owner_kind().as_str())
+                .unwrap_or("none"),
+            session_bound_enabled = session_bound_discord_delivery_enabled,
+            fully_mirrored = session_bound_relay_turn_fully_mirrored,
+            frame_ack = session_bound_relay_frame_ack_reached(all_data_session_bound_relay_ack.as_ref()),
+            terminal_commit_ack = session_bound_relay_owns_terminal_delivery,
+            route = if session_bound_relay_owns_terminal_delivery {
+                "session_bound"
+            } else if watcher_direct_fallback_after_session_bound_ack {
+                "watcher_direct"
+            } else if relay_decision.suppressed {
+                "suppressed"
+            } else {
+                "none"
+            },
+            prompt_anchor_present,
+            ssh_direct_pending,
+            external_input_lease_present,
+            recent_stop_reason = recent_stop_reason.as_deref().unwrap_or("none"),
+            placeholder_msg_id = placeholder_msg_id.map(|id| id.get()).unwrap_or(0),
+            status_panel_msg_id = status_panel_msg_id.map(|id| id.get()).unwrap_or(0),
+            frame_ack_outcome = ?session_bound_ack_outcome,
+            "relay flight recorder"
+        );
+        let mut watcher_direct_terminal_idle_committed = false;
         let relay_ok = if session_bound_relay_owns_terminal_delivery {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -3456,7 +4750,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
             clear_provider_overload_retry_state(channel_id);
             true
-        } else if relay_decision.should_direct_send {
+        } else if watcher_direct_fallback_after_session_bound_ack {
             let formatted = if shared.status_panel_v2_enabled {
                 crate::services::discord::formatting::format_for_discord_with_status_panel(
                     current_response,
@@ -3485,6 +4779,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             let mut retry_terminal_delivery_from_offset = false;
             let mut relay_ok = true;
             let mut direct_send_delivered = false;
+            let mut external_input_lease_consumed_by_relay = false;
             match placeholder_msg_id {
                 Some(msg_id) => {
                     if has_current_response {
@@ -3499,6 +4794,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         {
                             Ok(ReplaceLongMessageOutcome::EditedOriginal) => {
                                 direct_send_delivered = true;
+                                external_input_lease_consumed_by_relay =
+                                    watcher_inflight_represents_external_input(
+                                        inflight_before_relay.as_ref(),
+                                    );
+                                placeholder_msg_id = None;
+                                placeholder_from_restored_inflight = false;
+                                last_edit_text.clear();
                                 let ts = chrono::Local::now().format("%H:%M:%S");
                                 tracing::info!(
                                     "  [{ts}] 👁 ✓ relayed terminal response (edit) channel {} msg {} ({} chars)",
@@ -3521,6 +4823,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 edit_error,
                             }) => {
                                 direct_send_delivered = true;
+                                external_input_lease_consumed_by_relay =
+                                    watcher_inflight_represents_external_input(
+                                        inflight_before_relay.as_ref(),
+                                    );
                                 let ts = chrono::Local::now().format("%H:%M:%S");
                                 tracing::info!(
                                     "  [{ts}] 👁 ✓ relayed terminal response (fallback send after edit failure) channel {} msg {} ({} chars, edit_error={edit_error})",
@@ -3538,27 +4844,46 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                     PlaceholderCleanupOutcome::failed(edit_error),
                                     "watcher_terminal_relay",
                                 );
-                                let cleanup = delete_terminal_placeholder(
-                                    &http,
-                                    channel_id,
-                                    &shared,
-                                    &watcher_provider,
-                                    &tmux_session_name,
-                                    msg_id,
-                                    "watcher_terminal_relay_fallback_cleanup",
-                                )
-                                .await;
-                                match fallback_placeholder_cleanup_decision(&cleanup) {
-                                    FallbackPlaceholderCleanupDecision::RelayCommitted => {}
-                                    FallbackPlaceholderCleanupDecision::PreserveInflightForCleanupRetry => {
-                                        relay_ok = false;
-                                        let ts = chrono::Local::now().format("%H:%M:%S");
-                                        tracing::warn!(
-                                            "  [{ts}] ⚠ watcher: terminal response was delivered via fallback send, but stale placeholder cleanup did not commit for channel {} msg {}",
-                                            channel_id.get(),
-                                            msg_id.get()
-                                        );
+                                if watcher_fallback_edit_failure_can_delete_original_placeholder(
+                                    response_sent_offset,
+                                    &last_edit_text,
+                                ) {
+                                    let cleanup = delete_terminal_placeholder(
+                                        &http,
+                                        channel_id,
+                                        &shared,
+                                        &watcher_provider,
+                                        &tmux_session_name,
+                                        msg_id,
+                                        "watcher_terminal_relay_fallback_cleanup",
+                                    )
+                                    .await;
+                                    match fallback_placeholder_cleanup_decision(&cleanup) {
+                                        FallbackPlaceholderCleanupDecision::RelayCommitted => {
+                                            placeholder_msg_id = None;
+                                            placeholder_from_restored_inflight = false;
+                                            last_edit_text.clear();
+                                        }
+                                        FallbackPlaceholderCleanupDecision::PreserveInflightForCleanupRetry => {
+                                            relay_ok = false;
+                                            let ts = chrono::Local::now().format("%H:%M:%S");
+                                            tracing::warn!(
+                                                "  [{ts}] ⚠ watcher: terminal response was delivered via fallback send, but stale placeholder cleanup did not commit for channel {} msg {}",
+                                                channel_id.get(),
+                                                msg_id.get()
+                                            );
+                                        }
                                     }
+                                } else {
+                                    placeholder_msg_id = None;
+                                    placeholder_from_restored_inflight = false;
+                                    last_edit_text.clear();
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    tracing::warn!(
+                                        "  [{ts}] ⚠ watcher: terminal response delivered via fallback send; preserving original msg {} in channel {} because it may contain streamed response content (#2757)",
+                                        msg_id.get(),
+                                        channel_id.get()
+                                    );
                                 }
                             }
                             Ok(ReplaceLongMessageOutcome::PartialContinuationFailure {
@@ -3617,6 +4942,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         .await;
                         if !outcome.is_committed() {
                             relay_ok = false;
+                        } else {
+                            placeholder_msg_id = None;
+                            placeholder_from_restored_inflight = false;
+                            last_edit_text.clear();
                         }
                     }
                 }
@@ -3644,6 +4973,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         .await
                         {
                             Ok(_) => {
+                                external_input_lease_consumed_by_relay =
+                                    external_input_lease_before_relay || prompt_anchor.is_some();
                                 if let Some(prompt_anchor) = prompt_anchor {
                                     crate::services::tui_prompt_dedupe::clear_prompt_anchor_for_response(
                                         watcher_provider.as_str(),
@@ -3671,6 +5002,35 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
             if relay_ok {
                 if direct_send_delivered || !has_current_response {
+                    if direct_send_delivered {
+                        if external_input_lease_consumed_by_relay {
+                            crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
+                                watcher_provider.as_str(),
+                                &tmux_session_name,
+                                channel_id.get(),
+                            );
+                        }
+                        if watcher_direct_terminal_should_commit_session_idle(
+                            direct_send_delivered,
+                            inflight_before_relay.is_some(),
+                            external_input_lease_consumed_by_relay,
+                            prompt_anchor_present_before_relay,
+                            external_input_lease_before_relay,
+                            ssh_direct_pending,
+                        ) {
+                            watcher_direct_terminal_idle_committed =
+                                commit_watcher_direct_terminal_session_idle(
+                                    &shared,
+                                    &watcher_provider,
+                                    channel_id,
+                                    &tmux_session_name,
+                                    terminal_kind,
+                                    data_start_offset,
+                                    current_offset,
+                                )
+                                .await;
+                        }
+                    }
                     last_relayed_offset = Some(turn_data_start_offset);
                     // #1270 codex P2: snapshot the current `.generation` mtime
                     // on every successful relay so the local regression check
@@ -3841,18 +5201,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         };
         let relay_suppressed = relay_decision.suppressed;
         let terminal_output_committed = relay_ok || relay_suppressed;
-        if watcher_commit_should_advance_runtime_binding(terminal_output_committed) {
-            // Keep the SSH-direct replay watermark in lockstep with bytes the
-            // watcher already emitted or intentionally suppressed. This must
-            // happen before completion-gate/status awaits and before releasing
-            // the relay slot, otherwise a prompt observed immediately after a
-            // pane-bound relay can synthesize an inflight from the stale offset.
-            crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
-                &tmux_session_name,
-                &output_path,
-                terminal_event_consumed_offset(current_offset, &all_data),
-            );
-        }
+        let runtime_binding_candidate_offset = terminal_output_committed
+            .then(|| terminal_event_consumed_offset(current_offset, &all_data));
 
         // #2161 TUI completion gate: ClaudeTui sessions can land a
         // `result` JSONL event before the interactive pane is actually
@@ -3869,7 +5219,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // Codex round-2 H1: the gate outcome is now also threaded into the
         // dispatch finalization step below so a still-busy ClaudeTui pane
         // does not drain queued turns into a busy-followup notice.
-        let watcher_tui_gate_outcome = if terminal_output_committed {
+        let watcher_tui_gate_outcome = if terminal_output_committed
+            && watcher_terminal_kind_requires_tui_completion_gate(terminal_kind)
+        {
             run_tui_completion_gate(
                 &watcher_provider,
                 channel_id,
@@ -3880,6 +5232,21 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         } else {
             TuiCompletionGateOutcome::NotGated
         };
+        if let Some(candidate_offset) = runtime_binding_candidate_offset {
+            if watcher_commit_should_advance_runtime_binding(
+                terminal_output_committed,
+                watcher_tui_gate_outcome,
+            ) {
+                // Keep the SSH-direct replay watermark in lockstep with bytes the
+                // watcher actually committed. TimedOut gates keep this as a
+                // candidate only so the next pass can still see tail output.
+                crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
+                    &tmux_session_name,
+                    &output_path,
+                    candidate_offset,
+                );
+            }
+        }
         // #2293 H2 — single boolean threaded through every terminal side
         // effect below. On `TimedOut` the pane is still busy past the bounded
         // wait, so we must SKIP:
@@ -3949,13 +5316,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // slice; advancing here would let `tmux_tail_offset` equal
         // `confirmed_end` on the retry, falsely claiming there's nothing
         // new to relay.
+        let terminal_committed_offset = runtime_binding_candidate_offset.unwrap_or(current_offset);
         if terminal_output_committed && !lifecycle_stage_paused {
             advance_watcher_confirmed_end(
                 &shared,
                 &watcher_provider,
                 channel_id,
                 &tmux_session_name,
-                current_offset,
+                terminal_committed_offset,
                 "src/services/discord/tmux.rs:tmux_output_watcher_confirmed_end",
             );
         }
@@ -4246,34 +5614,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             //     that survives into the next turn will not accidentally clear
             //     that turn's freshly registered cancel_token.
             let owed = mailbox_finalize_owed.swap(false, std::sync::atomic::Ordering::AcqRel);
-            if let Some(state) = inflight_state.as_ref().filter(|state| {
-                !state.rebind_origin && state.channel_id != 0 && state.current_msg_id != 0
-            }) {
-                let message_id = serenity::MessageId::new(state.current_msg_id);
-                // `Manage Messages` lives on the announce bot in this deployment;
-                // route the unpin there to avoid a 403 storm. See
-                // `crate::services::discord::gateway::manage_messages_http`.
-                let unpin_http =
-                    crate::services::discord::gateway::manage_messages_http(&shared, &http).await;
-                match channel_id.unpin(unpin_http.as_ref(), message_id).await {
-                    Ok(()) => {
-                        shared.placeholder_controller.forget_placeholder_pin(
-                            &provider_kind,
-                            channel_id,
-                            message_id,
-                        );
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            provider = provider_kind.as_str(),
-                            channel_id = channel_id.get(),
-                            message_id = message_id.get(),
-                            error = %error,
-                            "[tmux_watcher] placeholder unpin failed after terminal relay; tracked cleanup will retry"
-                        );
-                    }
-                }
-            }
             crate::services::discord::inflight::clear_inflight_state(
                 &provider_kind,
                 channel_id.get(),
@@ -4320,6 +5660,19 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 "restored watcher completed with queued backlog",
             )
             .await;
+            if !watcher_direct_terminal_idle_committed {
+                watcher_direct_terminal_idle_committed =
+                    commit_watcher_direct_terminal_session_idle(
+                        &shared,
+                        &provider_kind,
+                        channel_id,
+                        &tmux_session_name,
+                        terminal_kind,
+                        data_start_offset,
+                        current_offset,
+                    )
+                    .await;
+            }
             let delegated_finalize_owed = owed;
             let mailbox = shared.mailbox(channel_id);
             let has_active_turn = mailbox.has_active_turn().await;
@@ -4490,7 +5843,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 session_key.as_deref(),
                 channel_name.as_deref(),
                 None,
-                "idle",
+                watcher_terminal_token_update_status(watcher_direct_terminal_idle_committed),
                 &provider,
                 None,
                 Some(tokens),
@@ -4780,7 +6133,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         }
     }
 
-    if cleanup_plan.report_idle_status {
+    let defer_idle_status_to_bridge =
+        crate::services::discord::inflight::load_inflight_state(&provider, channel_id.get())
+            .as_ref()
+            .is_some_and(|state| {
+                state.tmux_session_name.as_deref() == Some(tmux_session_name.as_str())
+            });
+
+    if cleanup_plan.report_idle_status && !defer_idle_status_to_bridge {
         // Report idle status to DB so the dashboard doesn't show stale "working" state.
         // Always report idle when the watcher exits, even if dispatch protection
         // keeps the dead tmux session around for the active-dispatch safety path.
@@ -4805,6 +6165,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             api_port,
         )
         .await;
+    } else if cleanup_plan.report_idle_status {
+        tracing::debug!(
+            provider = %provider.as_str(),
+            channel = channel_id.get(),
+            tmux_session = %tmux_session_name,
+            "watcher deferred idle status because bridge-owned inflight still needs terminal Discord finalization"
+        );
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -4813,12 +6180,424 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 
 #[cfg(test)]
 mod tests {
-    use super::{should_probe_tmux_liveness, terminal_event_consumed_offset};
+    use super::{
+        Utf8ChunkDecoder, adopt_watcher_terminal_message_ids_from_inflight,
+        build_watcher_streaming_edit_text,
+        discard_restored_response_seed_before_no_inflight_terminal_relay,
+        discard_watcher_pending_buffer_after_suppressed_turn,
+        legacy_wrapper_prompt_candidates_from_pane, should_probe_tmux_liveness,
+        terminal_event_consumed_offset, watcher_batch_contains_relayable_response,
+        watcher_direct_terminal_should_commit_session_idle,
+        watcher_fallback_edit_failure_can_delete_original_placeholder,
+        watcher_inflight_represents_external_input, watcher_jsonl_turn_state_ready_for_input,
+        watcher_should_clear_stale_terminal_message_ids, watcher_should_defer_delegated_fresh_idle,
+        watcher_should_delete_suppressed_placeholder,
+        watcher_should_suppress_streaming_after_bridge_delivery,
+        watcher_terminal_edit_consumes_placeholder, watcher_terminal_token_update_status,
+    };
+    use crate::services::discord::InflightTurnState;
+    use crate::services::discord::formatting::ReplaceLongMessageOutcome;
+    use crate::services::provider::ProviderKind;
+    use serenity::all::MessageId;
 
     #[test]
     fn terminal_event_consumed_offset_excludes_buffered_tail() {
         assert_eq!(terminal_event_consumed_offset(128, "next-turn\n"), 118);
         assert_eq!(terminal_event_consumed_offset(8, "longer-than-offset"), 0);
+    }
+
+    #[test]
+    fn bridge_suppressed_turn_discards_pending_buffer_before_direct_input() {
+        let mut all_data = "{\"type\":\"assistant\",\"message\":\"old\"}\n".to_string();
+        let mut all_data_start_offset = 10;
+        let mut all_data_fully_mirrored_to_session_relay = false;
+        let mut all_data_session_bound_relay_ack = None;
+
+        discard_watcher_pending_buffer_after_suppressed_turn(
+            &mut all_data,
+            &mut all_data_start_offset,
+            &mut all_data_fully_mirrored_to_session_relay,
+            &mut all_data_session_bound_relay_ack,
+            42,
+        );
+
+        assert!(all_data.is_empty());
+        assert_eq!(all_data_start_offset, 42);
+        assert!(all_data_fully_mirrored_to_session_relay);
+        assert!(all_data_session_bound_relay_ack.is_none());
+    }
+
+    #[test]
+    fn delegated_fresh_idle_without_response_is_not_terminal_commit() {
+        assert!(watcher_should_defer_delegated_fresh_idle(true, ""));
+        assert!(!watcher_should_defer_delegated_fresh_idle(false, "   "));
+        assert!(!watcher_should_defer_delegated_fresh_idle(
+            true,
+            "assistant text"
+        ));
+    }
+
+    #[test]
+    fn terminal_relay_adopts_late_saved_inflight_message_ids() {
+        let mut inflight = InflightTurnState::new(
+            ProviderKind::Claude,
+            123,
+            Some("adk-cc".to_string()),
+            42,
+            1001,
+            2002,
+            "prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            0,
+        );
+        inflight.status_message_id = Some(3003);
+
+        let mut placeholder_msg_id = None;
+        let mut placeholder_from_restored_inflight = false;
+        let mut status_panel_msg_id = None;
+
+        adopt_watcher_terminal_message_ids_from_inflight(
+            &mut placeholder_msg_id,
+            &mut placeholder_from_restored_inflight,
+            &mut status_panel_msg_id,
+            &inflight,
+            "AgentDesk-claude-adk-cc",
+        );
+
+        assert_eq!(placeholder_msg_id, Some(MessageId::new(2002)));
+        assert!(placeholder_from_restored_inflight);
+        assert_eq!(status_panel_msg_id, Some(MessageId::new(3003)));
+    }
+
+    #[test]
+    fn terminal_relay_does_not_adopt_inflight_for_other_tmux_session() {
+        let mut inflight = InflightTurnState::new(
+            ProviderKind::Claude,
+            123,
+            Some("adk-cc".to_string()),
+            42,
+            1001,
+            2002,
+            "prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-claude-other".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            0,
+        );
+        inflight.status_message_id = Some(3003);
+
+        let mut placeholder_msg_id = None;
+        let mut placeholder_from_restored_inflight = false;
+        let mut status_panel_msg_id = None;
+
+        adopt_watcher_terminal_message_ids_from_inflight(
+            &mut placeholder_msg_id,
+            &mut placeholder_from_restored_inflight,
+            &mut status_panel_msg_id,
+            &inflight,
+            "AgentDesk-claude-adk-cc",
+        );
+
+        assert_eq!(placeholder_msg_id, None);
+        assert!(!placeholder_from_restored_inflight);
+        assert_eq!(status_panel_msg_id, None);
+    }
+
+    #[test]
+    fn terminal_relay_does_not_adopt_placeholderless_user_message() {
+        let inflight = InflightTurnState::new(
+            ProviderKind::Claude,
+            123,
+            Some("adk-cc".to_string()),
+            42,
+            1001,
+            1001,
+            "prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            0,
+        );
+
+        let mut placeholder_msg_id = None;
+        let mut placeholder_from_restored_inflight = false;
+        let mut status_panel_msg_id = None;
+
+        adopt_watcher_terminal_message_ids_from_inflight(
+            &mut placeholder_msg_id,
+            &mut placeholder_from_restored_inflight,
+            &mut status_panel_msg_id,
+            &inflight,
+            "AgentDesk-claude-adk-cc",
+        );
+
+        assert_eq!(placeholder_msg_id, None);
+        assert!(!placeholder_from_restored_inflight);
+        assert_eq!(status_panel_msg_id, None);
+    }
+
+    #[test]
+    fn external_input_lease_is_consumed_only_by_external_input_inflight() {
+        let mut managed = InflightTurnState::new(
+            ProviderKind::Claude,
+            123,
+            Some("adk-cc".to_string()),
+            42,
+            1001,
+            2002,
+            "prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            0,
+        );
+        assert!(!watcher_inflight_represents_external_input(Some(&managed)));
+
+        managed.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
+        assert!(watcher_inflight_represents_external_input(Some(&managed)));
+
+        managed.turn_source = crate::services::discord::inflight::TurnSource::ExternalAdopted;
+        assert!(watcher_inflight_represents_external_input(Some(&managed)));
+    }
+
+    #[test]
+    fn watcher_direct_terminal_idle_commit_requires_delivery_without_inflight() {
+        assert!(watcher_direct_terminal_should_commit_session_idle(
+            true, false, true, false, false, false
+        ));
+        assert!(watcher_direct_terminal_should_commit_session_idle(
+            true, false, false, true, false, false
+        ));
+        assert!(watcher_direct_terminal_should_commit_session_idle(
+            true, false, false, false, true, false
+        ));
+        assert!(watcher_direct_terminal_should_commit_session_idle(
+            true, false, false, false, false, true
+        ));
+        assert!(!watcher_direct_terminal_should_commit_session_idle(
+            false, false, true, true, true, true
+        ));
+        assert!(!watcher_direct_terminal_should_commit_session_idle(
+            true, true, true, true, true, true
+        ));
+        assert!(watcher_direct_terminal_should_commit_session_idle(
+            true, false, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn watcher_direct_terminal_idle_commit_keeps_later_token_update_idle() {
+        assert_eq!(watcher_terminal_token_update_status(true), "idle");
+        assert_eq!(
+            watcher_terminal_token_update_status(false),
+            crate::db::session_status::TURN_ACTIVE
+        );
+    }
+
+    #[test]
+    fn legacy_wrapper_pane_prompt_candidates_reconstruct_wrapped_direct_input() {
+        let pane = "\
+▶ Ready for input (type message + Enter)
+TUI-E2E-marker 한 줄로 marker를 그대로 응답하고, 'ssh
+-direct' 단어도 포함해줘.
+[sending...]
+[session: abc]
+TUI-E2E-marker ssh-direct
+
+▶ Ready for input (type message + Enter)
+";
+
+        let candidates = legacy_wrapper_prompt_candidates_from_pane(pane);
+
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.contains("'ssh-direct'")),
+            "wrapped terminal prompt should have a compact candidate for pending-prompt matching"
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.contains("'ssh -direct'")),
+            "wrapped terminal prompt should keep a spaced candidate for readable direct observation"
+        );
+    }
+
+    #[test]
+    fn legacy_wrapper_prompt_observation_requires_response_batch() {
+        assert!(!watcher_batch_contains_relayable_response(
+            br#"{"provider":"codex","type":"ready_for_input"}"#
+        ));
+        assert!(watcher_batch_contains_relayable_response(
+            br#"{"type":"assistant","message":{"content":[{"text":"ok"}]}}"#
+        ));
+        assert!(watcher_batch_contains_relayable_response(
+            br#"{"type":"result","result":"ok"}"#
+        ));
+    }
+
+    #[test]
+    fn claude_watcher_ready_uses_transcript_turn_state_not_pane_prompt() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            concat!(
+                r#"{"type":"user","message":{"content":"review"}}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            watcher_jsonl_turn_state_ready_for_input(
+                &crate::services::provider::ProviderKind::Claude,
+                Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
+                file.path().to_str().unwrap(),
+                len,
+            ),
+            Some(false)
+        );
+
+        std::fs::write(
+            file.path(),
+            concat!(
+                r#"{"type":"user","message":{"content":"review"}}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#,
+                "\n",
+                r#"{"type":"system","subtype":"turn_duration","sessionId":"s"}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            watcher_jsonl_turn_state_ready_for_input(
+                &crate::services::provider::ProviderKind::Claude,
+                Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
+                file.path().to_str().unwrap(),
+                len,
+            ),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn claude_watcher_ready_waits_for_unread_transcript_bytes() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"{"type":"system","subtype":"turn_duration","sessionId":"s"}"#,
+        )
+        .unwrap();
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            watcher_jsonl_turn_state_ready_for_input(
+                &crate::services::provider::ProviderKind::Claude,
+                Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
+                file.path().to_str().unwrap(),
+                len.saturating_sub(1),
+            ),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn no_inflight_terminal_response_does_not_reuse_previous_placeholder() {
+        assert!(watcher_should_clear_stale_terminal_message_ids(
+            false,
+            true,
+            Some(MessageId::new(42))
+        ));
+        assert!(!watcher_should_clear_stale_terminal_message_ids(
+            true,
+            true,
+            Some(MessageId::new(42))
+        ));
+        assert!(!watcher_should_clear_stale_terminal_message_ids(
+            false,
+            false,
+            Some(MessageId::new(42))
+        ));
+        assert!(!watcher_should_clear_stale_terminal_message_ids(
+            false, true, None
+        ));
+    }
+
+    #[test]
+    fn no_inflight_terminal_response_drops_restored_response_seed() {
+        let restored = "previous turn";
+        let mut full_response = "previous turnfresh turn".to_string();
+        let mut response_sent_offset = 0;
+        let mut last_edit_text = "previous turn".to_string();
+
+        assert!(
+            discard_restored_response_seed_before_no_inflight_terminal_relay(
+                &mut full_response,
+                &mut response_sent_offset,
+                &mut last_edit_text,
+                restored,
+                false,
+                true,
+            )
+        );
+        assert_eq!(full_response, "fresh turn");
+        assert_eq!(response_sent_offset, 0);
+        assert!(last_edit_text.is_empty());
+    }
+
+    #[test]
+    fn restored_response_seed_is_kept_for_managed_inflight() {
+        let restored = "previous turn";
+        let mut full_response = "previous turnfresh turn".to_string();
+        let mut response_sent_offset = restored.len();
+        let mut last_edit_text = "previous turn".to_string();
+
+        assert!(
+            !discard_restored_response_seed_before_no_inflight_terminal_relay(
+                &mut full_response,
+                &mut response_sent_offset,
+                &mut last_edit_text,
+                restored,
+                true,
+                true,
+            )
+        );
+        assert_eq!(full_response, "previous turnfresh turn");
+        assert_eq!(response_sent_offset, restored.len());
+    }
+
+    #[test]
+    fn no_inflight_user_boundary_without_fresh_text_drops_restored_response_seed() {
+        let restored = "previous turn";
+        let mut full_response = "previous turn".to_string();
+        let mut response_sent_offset = restored.len();
+        let mut last_edit_text = "previous turn".to_string();
+
+        assert!(
+            discard_restored_response_seed_before_no_inflight_terminal_relay(
+                &mut full_response,
+                &mut response_sent_offset,
+                &mut last_edit_text,
+                restored,
+                false,
+                false,
+            )
+        );
+        assert_eq!(full_response, "");
+        assert_eq!(response_sent_offset, 0);
+        assert!(last_edit_text.is_empty());
     }
 
     #[test]
@@ -4831,5 +6610,107 @@ mod tests {
             std::time::Duration::from_millis(1),
             false,
         ));
+    }
+
+    #[test]
+    fn status_panel_v2_watcher_streaming_edit_moves_processing_footer_to_response_message() {
+        let rendered = build_watcher_streaming_edit_text(
+            true,
+            "PIPE-E2E-CODEX OK",
+            "⠙ 계속 처리 중",
+            &ProviderKind::Codex,
+        );
+
+        assert_eq!(rendered, "PIPE-E2E-CODEX OK\n\n⠙ 계속 처리 중");
+    }
+
+    #[test]
+    fn legacy_watcher_streaming_edit_keeps_processing_footer() {
+        let rendered = build_watcher_streaming_edit_text(
+            false,
+            "Partial answer",
+            "⠙ 계속 처리 중",
+            &ProviderKind::Codex,
+        );
+
+        assert_eq!(rendered, "Partial answer\n\n⠙ 계속 처리 중");
+    }
+
+    #[test]
+    fn watcher_streaming_suppresses_after_bridge_delivery_only_for_response() {
+        assert!(watcher_should_suppress_streaming_after_bridge_delivery(
+            true, true
+        ));
+        assert!(!watcher_should_suppress_streaming_after_bridge_delivery(
+            true, false
+        ));
+        assert!(!watcher_should_suppress_streaming_after_bridge_delivery(
+            false, true
+        ));
+    }
+
+    #[test]
+    fn watcher_terminal_edit_detaches_placeholder_from_later_cleanup() {
+        assert!(watcher_terminal_edit_consumes_placeholder(
+            &ReplaceLongMessageOutcome::EditedOriginal
+        ));
+        assert!(!watcher_terminal_edit_consumes_placeholder(
+            &ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+                edit_error: "edit failed".to_string()
+            }
+        ));
+    }
+
+    #[test]
+    fn watcher_bridge_delivery_preserves_restored_inflight_placeholder() {
+        assert!(!watcher_should_delete_suppressed_placeholder(true));
+        assert!(watcher_should_delete_suppressed_placeholder(false));
+    }
+
+    #[test]
+    fn fallback_edit_failure_never_deletes_original_without_placeholder_probe() {
+        assert!(
+            !watcher_fallback_edit_failure_can_delete_original_placeholder(12, "partial answer")
+        );
+        assert!(
+            !watcher_fallback_edit_failure_can_delete_original_placeholder(0, "partial answer")
+        );
+        assert!(
+            !watcher_fallback_edit_failure_can_delete_original_placeholder(0, "⠙ Processing...")
+        );
+    }
+
+    #[test]
+    fn utf8_decoder_buffers_split_multibyte_scalar_at_chunk_start() {
+        let mut decoder = Utf8ChunkDecoder::default();
+        let payload = "안녕\n";
+        let bytes = payload.as_bytes();
+
+        let first = decoder.decode(&bytes[..1], 20);
+        assert_eq!(first.start_offset, None);
+        assert!(first.text.is_empty());
+
+        let second = decoder.decode(&bytes[1..], 21);
+        assert_eq!(second.start_offset, Some(20));
+        assert_eq!(second.text, payload);
+        assert!(!second.text.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn utf8_decoder_preserves_jsonl_when_multibyte_scalar_splits_after_prefix() {
+        let mut decoder = Utf8ChunkDecoder::default();
+        let payload = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"안녕하세요 😀\"}]}}\n";
+        let korean_start = payload.find('안').expect("fixture contains korean text");
+        let split = korean_start + 1;
+        let bytes = payload.as_bytes();
+
+        let first = decoder.decode(&bytes[..split], 100);
+        let second = decoder.decode(&bytes[split..], 100 + split as u64);
+
+        assert_eq!(first.start_offset, Some(100));
+        assert_eq!(second.start_offset, Some(100 + korean_start as u64));
+        assert_eq!(format!("{}{}", first.text, second.text), payload);
+        assert!(!first.text.contains('\u{FFFD}'));
+        assert!(!second.text.contains('\u{FFFD}'));
     }
 }

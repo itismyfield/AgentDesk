@@ -1,6 +1,6 @@
 use super::completion_guard::{
     build_verdict_payload, extract_explicit_review_verdict, extract_explicit_work_outcome,
-    extract_review_decision, extract_review_decision_commit_sha,
+    extract_phase_gate_pass, extract_review_decision, extract_review_decision_commit_sha,
     extract_review_decision_out_of_scope,
 };
 use super::context_window::{
@@ -26,9 +26,10 @@ use super::stale_resume::{
     result_event_has_stale_resume_error, stream_error_requires_terminal_session_reset,
 };
 use super::{
-    advance_tmux_relay_confirmed_end, merge_task_notification_kind, monitor_handoff_tool_context,
-    release_task_notification_kind, should_delegate_bridge_relay_to_watcher,
-    task_notification_closes_background_child, turn_bridge_replace_outcome_committed,
+    advance_tmux_relay_confirmed_end, bridge_should_reclaim_relay_from_missing_watcher,
+    merge_task_notification_kind, monitor_handoff_tool_context, release_task_notification_kind,
+    should_delegate_bridge_relay_to_watcher, task_notification_closes_background_child,
+    terminal_delivery_response_after_offset, turn_bridge_replace_outcome_committed,
 };
 use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::{
@@ -61,6 +62,26 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 type TestGatewayFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+#[test]
+fn terminal_delivery_response_strips_tui_no_response_chrome() {
+    assert_eq!(
+        terminal_delivery_response_after_offset(
+            "No response requested.\n\nreal answer",
+            0,
+            Some("(No response)")
+        ),
+        "real answer"
+    );
+    assert_eq!(
+        terminal_delivery_response_after_offset("No response requested.", 0, Some("(No response)")),
+        ""
+    );
+    assert_eq!(
+        terminal_delivery_response_after_offset("", 0, Some("(No response)")),
+        "(No response)"
+    );
+}
 
 struct CleanupFallbackQueueGateway {
     dispatch_count: Arc<AtomicUsize>,
@@ -252,9 +273,21 @@ impl TurnGateway for CleanupFallbackQueueGateway {
 }
 
 fn test_watcher_handle(tmux_session_name: &str, paused: bool) -> super::super::TmuxWatcherHandle {
+    test_watcher_handle_with_output_path(
+        tmux_session_name,
+        paused,
+        format!("/tmp/{tmux_session_name}.jsonl"),
+    )
+}
+
+fn test_watcher_handle_with_output_path(
+    tmux_session_name: &str,
+    paused: bool,
+    output_path: impl Into<String>,
+) -> super::super::TmuxWatcherHandle {
     super::super::TmuxWatcherHandle {
         tmux_session_name: tmux_session_name.to_string(),
-        output_path: format!("/tmp/{tmux_session_name}.jsonl"),
+        output_path: output_path.into(),
         paused: Arc::new(AtomicBool::new(paused)),
         resume_offset: Arc::new(std::sync::Mutex::new(None)),
         cancel: Arc::new(AtomicBool::new(false)),
@@ -484,6 +517,7 @@ async fn replace_fallback_preserves_cleanup_inflight_and_defers_queued_dispatch(
         channel_id,
         super::super::Intervention {
             author_id: owner_id,
+            author_is_bot: false,
             message_id: queued_msg_id,
             source_message_ids: vec![queued_msg_id],
             text: "queued follow-up".to_string(),
@@ -612,7 +646,7 @@ async fn live_tmux_watcher_owner_suppresses_bridge_assistant_delivery() {
     assert!(super::super::tmux::try_claim_watcher(
         &shared.tmux_watchers,
         channel_id,
-        test_watcher_handle(&tmux_name, true),
+        test_watcher_handle_with_output_path(&tmux_name, true, "/tmp/agentdesk-1222-output.jsonl"),
     ));
 
     let gateway = Arc::new(CountingGateway::default());
@@ -735,7 +769,7 @@ async fn late_tmux_ready_after_done_still_claims_watcher_relay() {
     assert!(super::super::tmux::try_claim_watcher(
         &shared.tmux_watchers,
         channel_id,
-        test_watcher_handle(&tmux_name, true),
+        test_watcher_handle_with_output_path(&tmux_name, true, "/tmp/agentdesk-2113-output.jsonl"),
     ));
 
     let gateway = Arc::new(CountingGateway::default());
@@ -837,7 +871,7 @@ async fn claude_tui_runtime_ready_claims_watcher_without_fifo() {
     assert!(super::super::tmux::try_claim_watcher(
         &shared.tmux_watchers,
         channel_id,
-        test_watcher_handle(&tmux_name, true),
+        test_watcher_handle_with_output_path(&tmux_name, true, "/tmp/claude-tui-transcript.jsonl"),
     ));
 
     let gateway = Arc::new(CountingGateway::default());
@@ -930,6 +964,113 @@ async fn claude_tui_runtime_ready_claims_watcher_without_fifo() {
         Some(expected_fifo.as_str())
     );
     assert_eq!(saved.last_offset, 128);
+
+    crate::services::discord::clear_inflight_state(&provider, channel_id.get());
+    shared.tmux_watchers.remove(&channel_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn codex_tui_runtime_ready_claims_watcher_without_fifo() {
+    let shared = make_shared_data_for_tests();
+    let provider = ProviderKind::Codex;
+    let channel_id = ChannelId::new(1504255405898077401);
+    let channel_name = format!("adk-cdx-t{}", channel_id.get());
+    let tmux_name = provider.build_tmux_session_name(&channel_name);
+    let user_msg_id = MessageId::new(1504255405898077410);
+    let current_msg_id = MessageId::new(1504255405898077411);
+    let rollout_path = "/tmp/codex-tui-rollout.jsonl";
+
+    assert!(super::super::tmux::try_claim_watcher(
+        &shared.tmux_watchers,
+        channel_id,
+        test_watcher_handle_with_output_path(&tmux_name, true, rollout_path),
+    ));
+
+    let gateway = Arc::new(CountingGateway::default());
+    let (stream_tx, stream_rx) = std::sync::mpsc::channel();
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let inflight_state = InflightTurnState::new(
+        provider.clone(),
+        channel_id.get(),
+        Some(channel_name.clone()),
+        343742347365974026,
+        user_msg_id.get(),
+        current_msg_id.get(),
+        "codex tui".to_string(),
+        None,
+        Some(tmux_name.clone()),
+        Some(rollout_path.to_string()),
+        None,
+        0,
+    );
+
+    super::spawn_turn_bridge(
+        shared.clone(),
+        Arc::new(CancelToken::new()),
+        stream_rx,
+        super::TurnBridgeContext {
+            provider: provider.clone(),
+            gateway: gateway.clone(),
+            channel_id,
+            user_msg_id,
+            user_text_owned: "codex tui".to_string(),
+            request_owner_name: "tester".to_string(),
+            role_binding: None,
+            adk_session_key: None,
+            adk_session_name: Some(channel_name),
+            adk_session_info: None,
+            adk_cwd: None,
+            dispatch_id: None,
+            dispatch_kind: None,
+            memory_recall_usage: TokenUsage::default(),
+            context_window_tokens: provider.default_context_window(),
+            context_compact_percent: 100,
+            current_msg_id,
+            response_sent_offset: 0,
+            full_response: String::new(),
+            tmux_last_offset: Some(0),
+            new_session_id: None,
+            defer_watcher_resume: false,
+            reuse_status_panel_message: false,
+            completion_tx: Some(completion_tx),
+            inflight_state,
+        },
+    );
+
+    stream_tx
+        .send(StreamMessage::Done {
+            result: String::new(),
+            session_id: None,
+        })
+        .expect("send terminal done");
+    stream_tx
+        .send(StreamMessage::RuntimeReady {
+            handoff: RuntimeHandoff::CodexTui {
+                rollout_path: rollout_path.to_string(),
+                thread_id: Some("codex-thread-1".to_string()),
+                tmux_session_name: tmux_name.clone(),
+                last_offset: 256,
+            },
+        })
+        .expect("send runtime ready");
+    drop(stream_tx);
+
+    tokio::time::timeout(Duration::from_secs(5), completion_rx)
+        .await
+        .expect("turn bridge should finish")
+        .expect("completion sender should complete");
+
+    assert_eq!(gateway.edit_count.load(Ordering::Relaxed), 0);
+    assert_eq!(gateway.replace_count.load(Ordering::Relaxed), 0);
+    assert_eq!(gateway.remove_reaction_count.load(Ordering::Relaxed), 0);
+
+    let saved = super::super::inflight::load_inflight_state(&provider, channel_id.get())
+        .expect("Codex TUI RuntimeReady should preserve inflight for watcher-owned relay");
+    assert!(saved.watcher_owns_live_relay);
+    assert_eq!(saved.runtime_kind, Some(RuntimeHandoffKind::CodexTui));
+    assert_eq!(saved.input_fifo_path.as_deref(), None);
+    assert_eq!(saved.session_id.as_deref(), Some("codex-thread-1"));
+    assert_eq!(saved.last_offset, 256);
 
     crate::services::discord::clear_inflight_state(&provider, channel_id.get());
     shared.tmux_watchers.remove(&channel_id);
@@ -2789,6 +2930,17 @@ fn explicit_review_verdict_parser_ignores_unstructured_text() {
 }
 
 #[test]
+fn phase_gate_pass_parser_accepts_structured_marker() {
+    assert!(extract_phase_gate_pass(
+        "Phase Gate P2: PASS\nReady to continue."
+    ));
+    assert!(extract_phase_gate_pass(
+        "result: phase_gate_passed\nAll checks green."
+    ));
+    assert!(!extract_phase_gate_pass("Phase Gate P2: FAIL\nNeeds work."));
+}
+
+#[test]
 fn review_decision_parser_accepts_explicit_marker() {
     assert_eq!(
         extract_review_decision("DECISION: accept\n리뷰 반영하겠습니다."),
@@ -2993,6 +3145,22 @@ fn bridge_relay_delegation_stays_disabled_for_terminal_error_paths() {
             recovery_retry,
         ));
     }
+}
+
+#[test]
+fn bridge_reclaims_relay_when_watcher_owner_disappears() {
+    assert!(bridge_should_reclaim_relay_from_missing_watcher(
+        true, false, false
+    ));
+    assert!(!bridge_should_reclaim_relay_from_missing_watcher(
+        true, false, true
+    ));
+    assert!(!bridge_should_reclaim_relay_from_missing_watcher(
+        false, false, false
+    ));
+    assert!(!bridge_should_reclaim_relay_from_missing_watcher(
+        true, true, false
+    ));
 }
 
 // ========== resolve_done_response tests ==========
@@ -3572,6 +3740,7 @@ async fn watcher_does_not_kickoff_queue_when_dispatch_failed() {
         channel_id,
         super::super::Intervention {
             author_id: UserId::new(7),
+            author_is_bot: false,
             message_id: MessageId::new(1500042670918336517),
             source_message_ids: vec![MessageId::new(1500042670918336517)],
             text: "queued behind failing dispatch".to_string(),

@@ -30,6 +30,32 @@ static CLAUDE_IDLE_TRANSCRIPT_RELAY_STARTED: AtomicBool = AtomicBool::new(false)
 static CLAUDE_IDLE_RESPONSE_TAILS: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
+struct ClaudeIdleTailGuard {
+    tmux_session_name: String,
+}
+
+impl Drop for ClaudeIdleTailGuard {
+    fn drop(&mut self) {
+        CLAUDE_IDLE_RESPONSE_TAILS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.tmux_session_name);
+    }
+}
+
+struct CodexIdleTailDoneGuard {
+    tmux_session_name: Option<String>,
+    done_tx: tokio::sync::mpsc::UnboundedSender<String>,
+}
+
+impl Drop for CodexIdleTailDoneGuard {
+    fn drop(&mut self) {
+        if let Some(tmux_session_name) = self.tmux_session_name.take() {
+            let _ = self.done_tx.send(tmux_session_name);
+        }
+    }
+}
+
 pub(super) fn spawn_tui_prompt_relay(shared: Arc<SharedData>, provider: ProviderKind) {
     #[cfg(unix)]
     if matches!(provider, ProviderKind::Codex) {
@@ -40,7 +66,7 @@ pub(super) fn spawn_tui_prompt_relay(shared: Arc<SharedData>, provider: Provider
         spawn_claude_idle_transcript_relay(shared.clone());
     }
 
-    tokio::spawn(async move {
+    super::task_supervisor::spawn_observed("tui_prompt_relay_observer", async move {
         let mut hook_rx = subscribe_hook_events();
         let mut observed_rx = subscribe_observed_prompts();
         let provider_name = provider.as_str().to_string();
@@ -106,6 +132,11 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         );
         return;
     };
+    crate::services::tui_prompt_dedupe::record_external_input_relay_lease(
+        &prompt.provider,
+        &prompt.tmux_session_name,
+        Some(channel_id.get()),
+    );
     let Some(registry) = shared.health_registry() else {
         tracing::warn!(
             provider = %prompt.provider,
@@ -226,7 +257,10 @@ fn spawn_claude_idle_response_tail_once(
         }
     }
 
-    tokio::spawn(async move {
+    super::task_supervisor::spawn_observed("claude_idle_response_tail", async move {
+        let _tail_guard = ClaudeIdleTailGuard {
+            tmux_session_name: tmux_session_name.clone(),
+        };
         run_claude_idle_response_tail(
             shared,
             tmux_session_name.clone(),
@@ -235,10 +269,6 @@ fn spawn_claude_idle_response_tail_once(
             start_offset,
         )
         .await;
-        CLAUDE_IDLE_RESPONSE_TAILS
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(&tmux_session_name);
     });
     true
 }
@@ -248,7 +278,7 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
     if CLAUDE_IDLE_TRANSCRIPT_RELAY_STARTED.swap(true, Ordering::AcqRel) {
         return;
     }
-    tokio::spawn(async move {
+    super::task_supervisor::spawn_observed("claude_idle_transcript_relay", async move {
         let relay_started_at = SystemTime::now();
         let mut next_rehydrate = tokio::time::Instant::now();
         loop {
@@ -913,7 +943,7 @@ fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
     if CODEX_IDLE_ROLLOUT_RELAY_STARTED.swap(true, Ordering::AcqRel) {
         return;
     }
-    tokio::spawn(async move {
+    super::task_supervisor::spawn_observed("codex_idle_rollout_relay", async move {
         let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let mut active_tails: HashSet<String> = HashSet::new();
 
@@ -998,17 +1028,23 @@ fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                         active_tails.insert(tmux_session_name.clone());
                         let shared_for_tail = shared.clone();
                         let done_tx_for_tail = done_tx.clone();
-                        tokio::spawn(async move {
-                            run_codex_idle_response_tail(
-                                shared_for_tail,
-                                tmux_session_name.clone(),
-                                channel_id,
-                                rollout_path,
-                                line_end_offset,
-                            )
-                            .await;
-                            let _ = done_tx_for_tail.send(tmux_session_name);
-                        });
+                        super::task_supervisor::spawn_observed(
+                            "codex_idle_response_tail",
+                            async move {
+                                let _done_guard = CodexIdleTailDoneGuard {
+                                    tmux_session_name: Some(tmux_session_name.clone()),
+                                    done_tx: done_tx_for_tail,
+                                };
+                                run_codex_idle_response_tail(
+                                    shared_for_tail,
+                                    tmux_session_name.clone(),
+                                    channel_id,
+                                    rollout_path,
+                                    line_end_offset,
+                                )
+                                .await;
+                            },
+                        );
                     }
                 }
             }
@@ -1021,18 +1057,26 @@ fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
 fn codex_idle_prompt_observation_should_tail_response(
     observation: crate::services::tui_prompt_dedupe::PromptObservation,
 ) -> bool {
-    !matches!(
+    // The turn bridge owns Discord-originated Codex prompts. The idle rollout
+    // relay is only for text typed directly into the Codex TUI; tailing
+    // suppressed Discord/recent duplicates can replay stale prior-turn output
+    // after a newer Discord message has already started.
+    matches!(
         observation,
-        crate::services::tui_prompt_dedupe::PromptObservation::Ignored
+        crate::services::tui_prompt_dedupe::PromptObservation::PublishedSshDirect
     )
 }
 
 fn claude_idle_prompt_observation_should_tail_response(
     observation: crate::services::tui_prompt_dedupe::PromptObservation,
 ) -> bool {
-    !matches!(
+    // The turn bridge owns Discord-originated prompts. Claude's idle tail is
+    // only a recovery path for operator text typed directly into the TUI; if
+    // we tail suppressed Discord/recent duplicates here, the bridge-delivered
+    // answer is posted a second time after inflight clears.
+    matches!(
         observation,
-        crate::services::tui_prompt_dedupe::PromptObservation::Ignored
+        crate::services::tui_prompt_dedupe::PromptObservation::PublishedSshDirect
     )
 }
 
@@ -1182,6 +1226,7 @@ async fn run_codex_idle_response_tail(
     rollout_path: PathBuf,
     start_offset: u64,
 ) {
+    let tail_started_at = chrono::Utc::now();
     let tmux_for_tail = tmux_session_name.clone();
     let rollout_for_tail = rollout_path.clone();
     let tail_result = tokio::task::spawn_blocking(move || {
@@ -1211,24 +1256,31 @@ async fn run_codex_idle_response_tail(
         }
     };
 
-    crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
-        &tmux_session_name,
-        rollout_path.to_str().unwrap_or_default(),
-        final_offset,
-    );
-
     let response = response.trim();
     if response.is_empty() {
+        crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
+            &tmux_session_name,
+            rollout_path.to_str().unwrap_or_default(),
+            final_offset,
+        );
         return;
     }
-    deliver_tui_idle_response(
+    let delivery_result = deliver_tui_idle_response(
         &shared,
         ProviderKind::Codex,
         channel_id,
         &tmux_session_name,
         response,
+        tail_started_at,
     )
     .await;
+    if tui_idle_tail_should_commit_runtime_binding_offset(response, delivery_result.is_ok()) {
+        crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
+            &tmux_session_name,
+            rollout_path.to_str().unwrap_or_default(),
+            final_offset,
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -1293,6 +1345,7 @@ async fn run_claude_idle_response_tail(
     transcript_path: PathBuf,
     start_offset: u64,
 ) {
+    let tail_started_at = chrono::Utc::now();
     let tmux_for_tail = tmux_session_name.clone();
     let transcript_for_tail = transcript_path.clone();
     let tail_result = tokio::task::spawn_blocking(move || {
@@ -1322,25 +1375,33 @@ async fn run_claude_idle_response_tail(
         }
     };
 
-    advance_claude_tmux_runtime_binding_offset(
-        &tmux_session_name,
-        &transcript_path,
-        final_offset,
-        true,
-    );
-
     let response = response.trim();
     if response.is_empty() {
+        advance_claude_tmux_runtime_binding_offset(
+            &tmux_session_name,
+            &transcript_path,
+            final_offset,
+            true,
+        );
         return;
     }
-    deliver_tui_idle_response(
+    let delivery_result = deliver_tui_idle_response(
         &shared,
         ProviderKind::Claude,
         channel_id,
         &tmux_session_name,
         response,
+        tail_started_at,
     )
     .await;
+    if tui_idle_tail_should_commit_runtime_binding_offset(response, delivery_result.is_ok()) {
+        advance_claude_tmux_runtime_binding_offset(
+            &tmux_session_name,
+            &transcript_path,
+            final_offset,
+            true,
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -1411,6 +1472,7 @@ fn compose_tui_idle_response(
         .or(error_result)
         .filter(|text| !text.trim().is_empty())
         .unwrap_or(streamed);
+    let body = super::response_sanitizer::strip_leading_tui_response_chrome(&body);
     let sideband = sideband
         .into_iter()
         .filter(|line| !line.trim().is_empty())
@@ -1431,7 +1493,8 @@ async fn deliver_tui_idle_response(
     channel_id: ChannelId,
     tmux_session_name: &str,
     response: &str,
-) {
+    tail_started_at: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
     let Some(http) = shared.serenity_http_or_token_fallback() else {
         tracing::warn!(
             channel_id = channel_id.get(),
@@ -1439,7 +1502,10 @@ async fn deliver_tui_idle_response(
             provider = %provider.as_str(),
             "skipping TUI idle response relay; Discord HTTP unavailable"
         );
-        return;
+        return Err(format!(
+            "discord http unavailable for provider {}",
+            provider.as_str()
+        ));
     };
     let formatted = if shared.status_panel_v2_enabled {
         super::formatting::format_for_discord_with_status_panel(response, &provider)
@@ -1471,6 +1537,19 @@ async fn deliver_tui_idle_response(
                     anchor,
                 );
             }
+            crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
+                provider.as_str(),
+                tmux_session_name,
+                channel_id.get(),
+            );
+            post_tui_idle_response_session_idle(
+                shared,
+                &provider,
+                channel_id,
+                tmux_session_name,
+                tail_started_at,
+            )
+            .await;
             tracing::info!(
                 channel_id = channel_id.get(),
                 tmux_session_name = %tmux_session_name,
@@ -1479,6 +1558,7 @@ async fn deliver_tui_idle_response(
                 prompt_anchor_message_id = reference.map(|(_, message_id)| message_id.get()),
                 "TUI idle response relayed"
             );
+            Ok(())
         }
         Err(error) => {
             tracing::warn!(
@@ -1488,8 +1568,100 @@ async fn deliver_tui_idle_response(
                 error = %error,
                 "failed to relay TUI idle response"
             );
+            Err(error.to_string())
         }
     }
+}
+
+#[cfg(unix)]
+fn tui_idle_tail_should_commit_runtime_binding_offset(
+    response: &str,
+    discord_delivery_succeeded: bool,
+) -> bool {
+    response.trim().is_empty() || discord_delivery_succeeded
+}
+
+#[cfg(unix)]
+async fn post_tui_idle_response_session_idle(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    tail_started_at: chrono::DateTime<chrono::Utc>,
+) {
+    if shared.mailbox(channel_id).cancel_token().await.is_some() {
+        tracing::debug!(
+            channel_id = channel_id.get(),
+            tmux_session_name = %tmux_session_name,
+            provider = %provider.as_str(),
+            "skipping TUI idle response session-idle commit; mailbox turn is active"
+        );
+        return;
+    }
+
+    if super::inflight::load_inflight_state(provider, channel_id.get()).is_some() {
+        tracing::debug!(
+            channel_id = channel_id.get(),
+            tmux_session_name = %tmux_session_name,
+            provider = %provider.as_str(),
+            "skipping TUI idle response session-idle commit; inflight state is active"
+        );
+        return;
+    }
+
+    let session_key = super::adk_session::build_namespaced_session_key(
+        &shared.token_hash,
+        provider,
+        tmux_session_name,
+    );
+    let channel_name = {
+        let data = shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .and_then(|session| session.channel_name.clone())
+    };
+    let agent_id = super::resolve_channel_role_binding(channel_id, channel_name.as_deref())
+        .map(|binding| binding.role_id);
+
+    match super::internal_api::mark_session_idle_if_not_newer_live(
+        &session_key,
+        provider.as_str(),
+        agent_id.as_deref(),
+        tail_started_at,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::debug!(
+                channel_id = channel_id.get(),
+                tmux_session_name = %tmux_session_name,
+                provider = %provider.as_str(),
+                session_key = %session_key,
+                "skipping TUI idle response session-idle commit; session row is absent or newer live"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                tmux_session_name = %tmux_session_name,
+                provider = %provider.as_str(),
+                session_key = %session_key,
+                error = %error,
+                "failed to commit TUI idle response session idle"
+            );
+            return;
+        }
+    }
+
+    tracing::info!(
+        channel_id = channel_id.get(),
+        tmux_session_name = %tmux_session_name,
+        provider = %provider.as_str(),
+        session_key = %session_key,
+        "TUI idle response committed session idle"
+    );
 }
 
 #[cfg(unix)]
@@ -2060,14 +2232,14 @@ agents:
     }
 
     #[test]
-    fn codex_idle_prompt_recent_duplicate_still_tails_response() {
+    fn codex_idle_prompt_tails_only_new_ssh_direct_prompt() {
         assert!(codex_idle_prompt_observation_should_tail_response(
             crate::services::tui_prompt_dedupe::PromptObservation::PublishedSshDirect
         ));
-        assert!(codex_idle_prompt_observation_should_tail_response(
+        assert!(!codex_idle_prompt_observation_should_tail_response(
             crate::services::tui_prompt_dedupe::PromptObservation::SuppressedDiscordDuplicate
         ));
-        assert!(codex_idle_prompt_observation_should_tail_response(
+        assert!(!codex_idle_prompt_observation_should_tail_response(
             crate::services::tui_prompt_dedupe::PromptObservation::SuppressedRecentDuplicate
         ));
         assert!(!codex_idle_prompt_observation_should_tail_response(
@@ -2076,14 +2248,14 @@ agents:
     }
 
     #[test]
-    fn claude_idle_prompt_recent_duplicate_still_tails_response() {
+    fn claude_idle_prompt_tails_only_new_ssh_direct_prompt() {
         assert!(claude_idle_prompt_observation_should_tail_response(
             crate::services::tui_prompt_dedupe::PromptObservation::PublishedSshDirect
         ));
-        assert!(claude_idle_prompt_observation_should_tail_response(
+        assert!(!claude_idle_prompt_observation_should_tail_response(
             crate::services::tui_prompt_dedupe::PromptObservation::SuppressedDiscordDuplicate
         ));
-        assert!(claude_idle_prompt_observation_should_tail_response(
+        assert!(!claude_idle_prompt_observation_should_tail_response(
             crate::services::tui_prompt_dedupe::PromptObservation::SuppressedRecentDuplicate
         ));
         assert!(!claude_idle_prompt_observation_should_tail_response(
@@ -2121,6 +2293,26 @@ agents:
     }
 
     #[test]
+    fn claude_idle_transcript_scan_ignores_meta_user_prompt() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transcript = dir.path().join("transcript.jsonl");
+        let meta = "{\"type\":\"user\",\"isMeta\":true,\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"_\"}]},\"sessionId\":\"s1\"}\n";
+        let synthetic = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"No response requested.\"}]},\"sessionId\":\"s1\"}\n";
+        let prompt = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"real prompt\"}]},\"sessionId\":\"s1\"}\n";
+        std::fs::write(&transcript, format!("{meta}{synthetic}{prompt}"))
+            .expect("write transcript");
+
+        assert_eq!(
+            scan_claude_idle_transcript_for_prompt(&transcript, 0).expect("scan"),
+            ClaudeIdleTranscriptScan::Prompt {
+                prompt: "real prompt".to_string(),
+                prompt_start_offset: (meta.len() + synthetic.len()) as u64,
+                line_end_offset: (meta.len() + synthetic.len() + prompt.len()) as u64,
+            }
+        );
+    }
+
+    #[test]
     fn claude_idle_transcript_scan_preserves_partial_trailing_jsonl() {
         let dir = tempfile::tempdir().expect("temp dir");
         let transcript = dir.path().join("transcript.jsonl");
@@ -2153,5 +2345,105 @@ agents:
             output,
             "[started] subagent launched\n[completed] monitor finished\n\nfinal answer"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_idle_response_strips_leading_resume_prompt_chrome() {
+        let output = compose_tui_idle_response(
+            Some("No response requested.fix2_3".to_string()),
+            None,
+            String::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(output, "fix2_3");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_idle_response_preserves_legitimate_no_response_sentence() {
+        let output = compose_tui_idle_response(
+            Some("No response requested. But here is the explanation.".to_string()),
+            None,
+            String::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            output,
+            "No response requested. But here is the explanation."
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_idle_response_preserves_middle_resume_prompt_chrome_text() {
+        let output = compose_tui_idle_response(
+            Some("Hello\nNo response requested. trailing".to_string()),
+            None,
+            String::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(output, "Hello\nNo response requested. trailing");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_idle_response_returns_empty_when_body_is_only_resume_prompt_chrome() {
+        let output = compose_tui_idle_response(
+            Some("No response requested.".to_string()),
+            None,
+            String::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(output, "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_idle_response_strips_multiple_leading_resume_prompt_chrome_chunks() {
+        let output = compose_tui_idle_response(
+            Some(
+                "Continue from where you left off.\nNo response requested.\nfinal answer"
+                    .to_string(),
+            ),
+            None,
+            String::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(output, "final answer");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_idle_response_does_not_trim_when_no_resume_prompt_chrome() {
+        let output = compose_tui_idle_response(
+            Some("  intentional leading spaces".to_string()),
+            None,
+            String::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(output, "  intentional leading spaces");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_response_tail_discord_send_failure_does_not_advance_runtime_binding_offset() {
+        assert!(!tui_idle_tail_should_commit_runtime_binding_offset(
+            "final answer",
+            false
+        ));
+        assert!(tui_idle_tail_should_commit_runtime_binding_offset(
+            "final answer",
+            true
+        ));
+        assert!(tui_idle_tail_should_commit_runtime_binding_offset(
+            "", false
+        ));
     }
 }

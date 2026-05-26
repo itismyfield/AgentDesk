@@ -229,6 +229,7 @@ async fn claim_voice_transcript_announcement_for_queue(
 
 fn build_soft_intervention(
     author_id: serenity::UserId,
+    author_is_bot: bool,
     message_id: serenity::MessageId,
     text: &str,
     reply_context: Option<String>,
@@ -246,6 +247,7 @@ fn build_soft_intervention(
 ) -> Intervention {
     Intervention {
         author_id,
+        author_is_bot,
         message_id,
         source_message_ids: vec![message_id],
         text: text.to_string(),
@@ -262,6 +264,7 @@ async fn enqueue_soft_intervention(
     data: &Data,
     channel_id: serenity::ChannelId,
     author_id: serenity::UserId,
+    author_is_bot: bool,
     message_id: serenity::MessageId,
     text: &str,
     reply_context: Option<String>,
@@ -277,6 +280,7 @@ async fn enqueue_soft_intervention(
         channel_id,
         build_soft_intervention(
             author_id,
+            author_is_bot,
             message_id,
             text,
             reply_context,
@@ -300,7 +304,7 @@ pub(super) async fn enqueue_soft_intervention_for_test(
         shared,
         &ProviderKind::Codex,
         channel_id,
-        build_soft_intervention(author_id, message_id, text, None, false, false, None),
+        build_soft_intervention(author_id, false, message_id, text, None, false, false, None),
     )
     .await
     .enqueued
@@ -578,7 +582,12 @@ async fn build_reply_context(
     let ref_author = &ref_msg.author.name;
     let ref_content = ref_msg.content.trim();
     let ref_text = if ref_content.is_empty() {
-        format!("[Reply to {}'s message (no text content)]", ref_author)
+        let attachments = ref_msg
+            .attachments
+            .iter()
+            .map(AttachmentReplyItem::from)
+            .collect::<Vec<_>>();
+        format_attachment_reply_context(ref_author, ref_msg.id.get(), &attachments)
     } else {
         let truncated = truncate_str(ref_content, 500);
         format!(
@@ -629,6 +638,58 @@ async fn build_reply_context(
             preceding_ctx, ref_text
         ))
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AttachmentReplyItem {
+    filename: String,
+    size: u32,
+    description: Option<String>,
+}
+
+impl From<&serenity::Attachment> for AttachmentReplyItem {
+    fn from(attachment: &serenity::Attachment) -> Self {
+        Self {
+            filename: attachment.filename.clone(),
+            size: attachment.size,
+            description: attachment.description.clone(),
+        }
+    }
+}
+
+fn format_attachment_reply_context(
+    ref_author: &str,
+    ref_message_id: u64,
+    attachments: &[AttachmentReplyItem],
+) -> String {
+    if attachments.is_empty() {
+        return format!("[Reply to {}'s message (no text content)]", ref_author);
+    }
+
+    let mut lines = vec![
+        "[Reply context]".to_string(),
+        format!("Author: {ref_author}"),
+        format!("Canonical Discord message id: {ref_message_id}"),
+        "Content: [message has attachments but no text]".to_string(),
+        "Attachments:".to_string(),
+    ];
+    for (index, attachment) in attachments.iter().take(10).enumerate() {
+        let description = attachment.description.as_deref().unwrap_or("").trim();
+        let mut line = format!(
+            "{}. {} ({} bytes)",
+            index + 1,
+            attachment.filename,
+            attachment.size
+        );
+        if !description.is_empty() {
+            line.push_str(&format!(" — {}", truncate_str(description, 160)));
+        }
+        lines.push(line);
+    }
+    if attachments.len() > 10 {
+        lines.push(format!("... {} more attachment(s)", attachments.len() - 10));
+    }
+    lines.join("\n")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1053,6 +1114,36 @@ pub(super) fn is_model_picker_component_custom_id(
     super::super::commands::parse_model_picker_custom_id(custom_id, fallback_channel_id).is_some()
 }
 
+fn spawn_clear_idle_recap_for_channel(
+    http: std::sync::Arc<serenity::Http>,
+    pool: sqlx::PgPool,
+    channel_id: u64,
+) {
+    tokio::spawn(async move {
+        match crate::services::discord::idle_recap::lookup_active_recap_for_channel(
+            &pool, channel_id,
+        )
+        .await
+        {
+            Ok(Some((session_key, chan, msg))) => {
+                crate::services::discord::idle_recap::delete_previous_card(&http, chan, msg).await;
+                let _ = crate::services::discord::idle_recap::clear_recap_pointer(
+                    &pool,
+                    &session_key,
+                    msg,
+                )
+                .await;
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(
+                error = %e,
+                channel_id = channel_id,
+                "idle_recap clear lookup failed"
+            ),
+        }
+    });
+}
+
 pub(in crate::services::discord) async fn handle_event(
     ctx: &serenity::Context,
     event: &serenity::FullEvent,
@@ -1099,51 +1190,6 @@ pub(in crate::services::discord) async fn handle_event(
             handle_reaction_remove(ctx, removed_reaction, data).await?;
         }
         serenity::FullEvent::Message { new_message } => {
-            // PR #3b: clear any active idle-recap card for this channel —
-            // the user is back, the notification has served its purpose.
-            // Spawned so it never blocks turn dispatch; lookup is keyed by
-            // channel_id, so bot messages and irrelevant channels are a
-            // cheap no-op (one indexed SELECT that returns zero rows).
-            if !new_message.author.bot
-                && let Some(pool) = data.shared.pg_pool.as_ref().cloned()
-            {
-                let http_for_clear = ctx.http.clone();
-                let channel_id_for_clear = new_message.channel_id.get();
-                tokio::spawn(async move {
-                    match crate::services::discord::idle_recap::lookup_active_recap_for_channel(
-                        &pool,
-                        channel_id_for_clear,
-                    )
-                    .await
-                    {
-                        Ok(Some((session_key, chan, msg))) => {
-                            crate::services::discord::idle_recap::delete_previous_card(
-                                &http_for_clear,
-                                chan,
-                                msg,
-                            )
-                            .await;
-                            // Compare-and-clear: only nullify the pointer
-                            // when the row still references the message we
-                            // just deleted. Guards against a stale wake-up
-                            // racing the next 5-min cycle's fresh card.
-                            let _ = crate::services::discord::idle_recap::clear_recap_pointer(
-                                &pool,
-                                &session_key,
-                                msg,
-                            )
-                            .await;
-                        }
-                        Ok(None) => {}
-                        Err(e) => tracing::warn!(
-                            error = %e,
-                            channel_id = channel_id_for_clear,
-                            "idle_recap clear lookup failed"
-                        ),
-                    }
-                });
-            }
-
             // ── Universal message-ID dedup ─────────────────────────────
             // Guards against the same Discord message being processed twice,
             // which can happen when thread messages are delivered as both a
@@ -1499,6 +1545,40 @@ pub(in crate::services::discord) async fn handle_event(
             if !is_allowed_bot && !check_auth(user_id, user_name, &data.shared, &data.token).await {
                 return Ok(());
             }
+            if let Some(stale) =
+                super::super::stale_dispatch_turn_for_text(data.shared.pg_pool.as_ref(), text).await
+            {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⏭ DISPATCH-GUARD: skipped terminal dispatch message {} in channel {} (dispatch={}, status={})",
+                    new_message.id,
+                    channel_id,
+                    stale.dispatch_id,
+                    stale.status
+                );
+                super::super::advance_last_message_checkpoint(
+                    &data.shared,
+                    &data.provider,
+                    channel_id,
+                    new_message.id,
+                );
+                add_reaction(
+                    &ctx.http,
+                    channel_id,
+                    new_message.id,
+                    super::super::queue_exit_feedback_emoji(stale.queue_exit_kind),
+                )
+                .await;
+                return Ok(());
+            }
+            // PR #3b: clear any active idle-recap card once a message is
+            // accepted as a real turn. This intentionally includes
+            // trigger-capable announce/allowed-bot messages used by
+            // `send-to-agent`; clearing only human messages left stale
+            // `📦 idle` cards under valid bot-origin E2E turns.
+            if let Some(pool) = data.shared.pg_pool.as_ref().cloned() {
+                spawn_clear_idle_recap_for_channel(ctx.http.clone(), pool, channel_id.get());
+            }
 
             // #189: Generic DM reply tracking — consume pending entry if present.
             // Keep this after auth so unauthorized DM senders cannot inject
@@ -1738,6 +1818,7 @@ pub(in crate::services::discord) async fn handle_event(
                                 data,
                                 channel_id,
                                 user_id,
+                                new_message.author.bot,
                                 new_message.id,
                                 text,
                                 None,
@@ -1795,6 +1876,7 @@ pub(in crate::services::discord) async fn handle_event(
                         data,
                         channel_id,
                         user_id,
+                        new_message.author.bot,
                         new_message.id,
                         text,
                         None,
@@ -1853,6 +1935,7 @@ pub(in crate::services::discord) async fn handle_event(
                     data,
                     channel_id,
                     user_id,
+                    new_message.author.bot,
                     new_message.id,
                     text,
                     reply_context.clone(),
@@ -1932,6 +2015,7 @@ pub(in crate::services::discord) async fn handle_event(
                     data,
                     channel_id,
                     user_id,
+                    new_message.author.bot,
                     new_message.id,
                     text,
                     reply_context.clone(),
@@ -1981,6 +2065,7 @@ pub(in crate::services::discord) async fn handle_event(
                     data,
                     channel_id,
                     user_id,
+                    new_message.author.bot,
                     new_message.id,
                     text,
                     reply_context.clone(),
@@ -2067,6 +2152,7 @@ pub(in crate::services::discord) async fn handle_event(
                             data,
                             channel_id,
                             user_id,
+                            new_message.author.bot,
                             new_message.id,
                             text,
                             reply_context.clone(),
@@ -2824,6 +2910,30 @@ mod thread_guard_stale_tests {
             ),
             "missing inflight state must NOT be classified as stale"
         );
+    }
+}
+
+#[cfg(test)]
+mod reply_context_tests {
+    use super::{AttachmentReplyItem, format_attachment_reply_context};
+
+    #[test]
+    fn attachment_reply_context_keeps_canonical_message_id_and_all_files() {
+        let attachments = (1..=5)
+            .map(|index| AttachmentReplyItem {
+                filename: format!("photo-{index}.png"),
+                size: 1024 * index,
+                description: (index == 3).then_some("middle attachment".to_string()),
+            })
+            .collect::<Vec<_>>();
+
+        let context = format_attachment_reply_context("사용자", 1500, &attachments);
+
+        assert!(context.contains("Canonical Discord message id: 1500"));
+        assert!(context.contains("photo-1.png"));
+        assert!(context.contains("photo-3.png"));
+        assert!(context.contains("middle attachment"));
+        assert!(context.contains("photo-5.png"));
     }
 }
 

@@ -21,11 +21,8 @@ pub(super) fn parse_dispatch_id(text: &str) -> Option<String> {
     for line in text.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("DISPATCH:") {
-            let id = if let Some(idx) = rest.find(" - ") {
-                rest[..idx].trim()
-            } else {
-                rest.trim()
-            };
+            let rest = rest.trim();
+            let id = rest.split_whitespace().next().unwrap_or(rest).trim();
             if !id.is_empty() {
                 return Some(id.to_string());
             }
@@ -184,7 +181,10 @@ pub(super) async fn post_adk_session_status(
         provider: Some(provider.as_str().to_string()),
         session_info: session_info.map(str::to_string),
         name: name.and_then(clean_nonempty).map(str::to_string),
-        model: model.and_then(clean_nonempty).map(str::to_string),
+        model: model
+            .and_then(clean_nonempty)
+            .filter(|value| !value.eq_ignore_ascii_case(provider.as_str()))
+            .map(str::to_string),
         tokens,
         cwd: cwd.and_then(clean_nonempty).map(str::to_string),
         dispatch_id: dispatch_id.and_then(clean_nonempty).map(str::to_string),
@@ -659,6 +659,22 @@ fn clean_nonempty(value: &str) -> Option<&str> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
+#[cfg(test)]
+mod parse_dispatch_id_tests {
+    use super::parse_dispatch_id;
+
+    #[test]
+    fn parse_dispatch_id_strips_profile_label() {
+        let result = parse_dispatch_id(
+            "DISPATCH:550e8400-e29b-41d4-a716-446655440000 [review] - #2762 Review",
+        );
+        assert_eq!(
+            result,
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string())
+        );
+    }
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
     use super::{
@@ -707,6 +723,18 @@ mod tests {
         use super::parse_dispatch_id;
         let result =
             parse_dispatch_id("DISPATCH:550e8400-e29b-41d4-a716-446655440000 - Fix login bug");
+        assert_eq!(
+            result,
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_dispatch_id_with_profile_label() {
+        use super::parse_dispatch_id;
+        let result = parse_dispatch_id(
+            "DISPATCH:550e8400-e29b-41d4-a716-446655440000 [🔍 리뷰] - #2762 Review",
+        );
         assert_eq!(
             result,
             Some("550e8400-e29b-41d4-a716-446655440000".to_string())

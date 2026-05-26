@@ -54,6 +54,32 @@ async fn shared_for_provider(
         .await
 }
 
+fn idle_tmux_repair_ready_for_input(
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_session: &str,
+) -> bool {
+    let structured_ready = super::super::inflight::load_inflight_state(provider, channel_id)
+        .and_then(|state| {
+            let output_path = state
+                .output_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())?;
+            crate::services::tui_turn_state::jsonl_ready_for_input(
+                provider,
+                state.runtime_kind,
+                std::path::Path::new(output_path),
+                Some(state.last_offset),
+            )
+        });
+    structured_ready
+        .map(crate::services::tui_turn_state::TuiReadyState::is_ready)
+        .unwrap_or_else(|| {
+            crate::services::provider::tmux_session_ready_for_input(tmux_session, provider)
+        })
+}
+
 async fn wait_for_turn_end(
     shared: &SharedData,
     channel_id: ChannelId,
@@ -558,7 +584,7 @@ pub async fn clear_idle_tmux_stale_turn(
     stop_source: &'static str,
 ) -> Option<IdleTmuxStaleTurnRepairResult> {
     let provider = ProviderKind::from_str(provider_name)?;
-    if !crate::services::provider::tmux_session_ready_for_input(tmux_session, &provider) {
+    if !idle_tmux_repair_ready_for_input(&provider, channel_id, tmux_session) {
         return None;
     }
 

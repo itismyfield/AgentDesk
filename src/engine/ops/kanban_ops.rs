@@ -317,6 +317,7 @@ fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool
         // `has_active_dispatch` gate. Now: when force=false and the gate is
         // violated, return `Err` so the JS bridge surfaces a real failure;
         // force=true callers keep the bypass-but-warn behaviour.
+        let is_review_enter = enters_review_state(&effective, &new_status);
         let mut active_dispatch_warning: Option<&'static str> = None;
         if let Some(t) = transition_rule {
             let needs_active_dispatch = t.gates.iter().any(|g| {
@@ -330,9 +331,20 @@ fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool
                     "SELECT COUNT(*)
                      FROM task_dispatches
                      WHERE kanban_card_id = $1
-                       AND status IN ('pending', 'dispatched')",
+                       AND (
+                            status IN ('pending', 'dispatched')
+                            OR (
+                                $2::text IS NOT NULL
+                                AND id = $2::text
+                                AND status = 'completed'
+                                AND dispatch_type IN ('implementation', 'rework')
+                                AND $3::boolean
+                            )
+                       )",
                 )
                 .bind(&card_id)
+                .bind(latest_dispatch_id.as_deref())
+                .bind(is_review_enter)
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(|error| format!("load active dispatch count for {card_id}: {error}"))?
@@ -350,7 +362,6 @@ fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool
             }
         }
 
-        let is_review_enter = enters_review_state(&effective, &new_status);
         if !force
             && is_review_enter
             && auto_queue_review_disabled_for_card_on_pg(&mut tx, &card_id).await?

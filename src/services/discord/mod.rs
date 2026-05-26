@@ -64,6 +64,7 @@ pub(crate) mod settings;
 pub(crate) mod shared_memory;
 mod stall_recovery;
 pub(in crate::services::discord) mod streaming_finalizer;
+pub(in crate::services::discord) mod task_supervisor;
 #[cfg(unix)]
 mod tmux;
 #[cfg(unix)]
@@ -244,6 +245,125 @@ pub(super) fn session_retry_context_key(channel_id: ChannelId) -> String {
 pub(super) fn should_process_allowed_bot_turn_text(text: &str) -> bool {
     let (sanitized, has_monitor_origin) = strip_monitor_auto_turn_origin(text);
     has_monitor_origin || sanitized.trim_start().starts_with("DISPATCH:")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) struct StaleDispatchTurn {
+    pub(in crate::services::discord) dispatch_id: String,
+    pub(in crate::services::discord) status: String,
+    pub(in crate::services::discord) queue_exit_kind: QueueExitKind,
+}
+
+fn dispatch_status_allows_turn(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "pending" | "dispatched" | "in_progress"
+    )
+}
+
+fn stale_dispatch_queue_exit_kind(
+    status: Option<&str>,
+    result: Option<&str>,
+) -> Option<QueueExitKind> {
+    let Some(status) = status.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Some(QueueExitKind::Superseded);
+    };
+    if dispatch_status_allows_turn(status) {
+        return None;
+    }
+    let normalized_status = status.to_ascii_lowercase();
+    let result_says_superseded = result
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|value| value.contains("superseded"));
+    if normalized_status == "superseded" || result_says_superseded {
+        Some(QueueExitKind::Superseded)
+    } else {
+        Some(QueueExitKind::Cancelled)
+    }
+}
+
+pub(in crate::services::discord) async fn stale_dispatch_turn_for_text(
+    pg_pool: Option<&sqlx::PgPool>,
+    text: &str,
+) -> Option<StaleDispatchTurn> {
+    let dispatch_id = parse_dispatch_id(text)?;
+    let Some(pool) = pg_pool else {
+        return None;
+    };
+    let row = match sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT status, result::TEXT AS result
+           FROM task_dispatches
+          WHERE id = $1",
+    )
+    .bind(&dispatch_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::warn!(
+                dispatch_id = %dispatch_id,
+                error = %error,
+                "failed to validate dispatch turn status; allowing message to proceed"
+            );
+            return None;
+        }
+    };
+    match row {
+        Some((status, result)) => stale_dispatch_queue_exit_kind(Some(&status), result.as_deref())
+            .map(|queue_exit_kind| StaleDispatchTurn {
+                dispatch_id,
+                status,
+                queue_exit_kind,
+            }),
+        None => Some(StaleDispatchTurn {
+            dispatch_id,
+            status: "missing".to_string(),
+            queue_exit_kind: QueueExitKind::Superseded,
+        }),
+    }
+}
+
+#[cfg(test)]
+mod dispatch_turn_gate_tests {
+    use super::{QueueExitKind, dispatch_status_allows_turn, stale_dispatch_queue_exit_kind};
+
+    #[test]
+    fn dispatch_turn_status_allows_only_live_statuses() {
+        for status in ["pending", "dispatched", "in_progress", " DISPATCHED "] {
+            assert!(dispatch_status_allows_turn(status));
+        }
+        for status in [
+            "cancelled",
+            "completed",
+            "failed",
+            "superseded",
+            "",
+            "missing",
+        ] {
+            assert!(!dispatch_status_allows_turn(status));
+        }
+    }
+
+    #[test]
+    fn stale_dispatch_queue_exit_kind_classifies_terminal_statuses() {
+        assert_eq!(stale_dispatch_queue_exit_kind(Some("pending"), None), None);
+        assert_eq!(
+            stale_dispatch_queue_exit_kind(
+                Some("cancelled"),
+                Some("Cancelled: superseded by rereview")
+            ),
+            Some(QueueExitKind::Superseded)
+        );
+        assert_eq!(
+            stale_dispatch_queue_exit_kind(Some("failed"), Some("tmux session died")),
+            Some(QueueExitKind::Cancelled)
+        );
+        assert_eq!(
+            stale_dispatch_queue_exit_kind(None, None),
+            Some(QueueExitKind::Superseded)
+        );
+    }
 }
 
 pub(in crate::services::discord) async fn resolve_announce_bot_user_id(
@@ -729,24 +849,13 @@ mod thread_archive_guard_tests {
     }
 }
 
-/// Check if a deferred restart has been requested and no active or finalizing turns remain
-/// **across all providers**.
+/// Consume a legacy deferred-restart signal.
 ///
-/// `global_active` / `global_finalizing` are process-wide counters shared by every provider.
-/// A single provider draining to zero is NOT sufficient — we must wait for every provider.
-/// `shutdown_remaining` ensures all providers finish saving before any calls `exit(0)`.
-/// `shutdown_counted` (per-provider) prevents double-decrement when both deferred restart
-/// and SIGTERM paths run for the same provider.
+/// #2713 changed restart semantics to quick-exit + rehydrate: provider TUI/tmux
+/// sessions survive process restart, so this helper no longer waits for
+/// `global_active` / `global_finalizing` to drain. Callers must persist cheap
+/// queue/checkpoint state before invoking it.
 pub(super) fn check_deferred_restart(shared: &SharedData) {
-    let g_active = shared
-        .global_active
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let g_finalizing = shared
-        .global_finalizing
-        .load(std::sync::atomic::Ordering::Relaxed);
-    if g_active > 0 || g_finalizing > 0 {
-        return;
-    }
     if !shared
         .restart_pending
         .load(std::sync::atomic::Ordering::Relaxed)
@@ -766,25 +875,25 @@ pub(super) fn check_deferred_restart(shared: &SharedData) {
     {
         return;
     }
-    // Only the last provider to finish calls exit(0)
     if shared
         .shutdown_remaining
         .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
-        == 1
+        != 1
     {
-        let Some(root) = crate::agentdesk_runtime_root() else {
-            return;
-        };
-        let marker = root.join("restart_pending");
-        let version = fs::read_to_string(&marker).unwrap_or_default();
-        let version = version.trim();
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] 🔄 Deferred restart: all turns complete, restarting for v{version}..."
-        );
-        let _ = fs::remove_file(&marker);
-        std::process::exit(0);
+        return;
     }
+    let version = crate::agentdesk_runtime_root()
+        .map(|root| root.join("restart_pending"))
+        .and_then(|marker| {
+            let version = fs::read_to_string(&marker).unwrap_or_default();
+            let _ = fs::remove_file(&marker);
+            Some(version)
+        })
+        .unwrap_or_default();
+    let version = version.trim();
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!("  [{ts}] 🔄 Deferred restart quick-exit requested for v{version}");
+    std::process::exit(0);
 }
 
 use session_runtime::{
@@ -1060,6 +1169,22 @@ impl TmuxWatcherRegistry {
         self.by_tmux_session
             .remove(tmux_session_name)
             .map(|(_, handle)| (owner_channel_id, handle))
+    }
+
+    pub(super) fn remove_tmux_session_if_current(
+        &self,
+        tmux_session_name: &str,
+        expected_cancel: &Arc<std::sync::atomic::AtomicBool>,
+    ) -> Option<(ChannelId, TmuxWatcherHandle)> {
+        let guard = lock_tmux_watcher_registry();
+        let is_current = self
+            .by_tmux_session
+            .get(tmux_session_name)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.cancel, expected_cancel));
+        if !is_current {
+            return None;
+        }
+        self.remove_tmux_session_locked(&guard, tmux_session_name)
     }
 
     pub(super) fn iter(&self) -> dashmap::iter::Iter<'_, String, TmuxWatcherHandle> {
@@ -2409,8 +2534,106 @@ fn idle_queue_snapshot_has_kickable_backlog(
     snapshot: &ChannelMailboxSnapshot,
 ) -> bool {
     snapshot.cancel_token.is_none()
+        && snapshot.active_request_owner.is_none()
+        && snapshot.active_user_message_id.is_none()
+        && snapshot.recovery_started_at.is_none()
         && !snapshot.intervention_queue.is_empty()
         && !cleanup_retry_inflight_blocks_idle_kickoff(shared, provider, channel_id)
+}
+
+#[cfg(unix)]
+fn hosted_tui_ready_state_blocks_idle_queue(
+    ready_state: Option<crate::services::tui_turn_state::TuiReadyState>,
+) -> bool {
+    matches!(
+        ready_state,
+        Some(crate::services::tui_turn_state::TuiReadyState::Busy)
+    )
+}
+
+#[cfg(unix)]
+async fn idle_queue_blocked_by_hosted_tui_busy_pane(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> bool {
+    if !matches!(provider, ProviderKind::Claude | ProviderKind::Codex)
+        || !provider.uses_managed_tmux_backend()
+        || !claude::is_tmux_available()
+    {
+        return false;
+    }
+
+    let selection =
+        crate::services::provider_hosting::resolve_provider_session_selection_with_channel(
+            provider,
+            true,
+            Some(channel_id.get()),
+        );
+    if selection.driver != crate::services::provider_hosting::ProviderSessionDriver::TuiHosting {
+        return false;
+    }
+
+    if matches!(provider, ProviderKind::Claude)
+        && crate::services::claude_tui::hook_server::current_hook_endpoint().is_none()
+    {
+        return false;
+    }
+
+    let tmux_session_name = {
+        let data = shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .and_then(|session| session.channel_name.clone())
+            .map(|name| provider.build_tmux_session_name(&name))
+    };
+    let Some(tmux_session_name) = tmux_session_name else {
+        return false;
+    };
+    if !crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_session_name) {
+        return false;
+    }
+
+    let ready_state =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&tmux_session_name)
+            .and_then(|binding| {
+                crate::services::tui_turn_state::runtime_binding_ready_for_input(
+                    provider, &binding, true,
+                )
+            });
+
+    let blocked = hosted_tui_ready_state_blocks_idle_queue(ready_state);
+    if blocked {
+        tracing::info!(
+            channel_id = channel_id.get(),
+            provider = provider.as_str(),
+            tmux_session_name = %tmux_session_name,
+            ready_state = ready_state
+                .map(crate::services::tui_turn_state::TuiReadyState::as_str)
+                .unwrap_or("unavailable"),
+            "idle queue kickoff deferred while hosted TUI structured turn state is busy"
+        );
+    }
+    blocked
+}
+
+#[cfg(not(unix))]
+async fn idle_queue_blocked_by_hosted_tui_busy_pane(
+    _shared: &SharedData,
+    _provider: &ProviderKind,
+    _channel_id: ChannelId,
+) -> bool {
+    false
+}
+
+async fn idle_queue_channel_has_kickable_backlog(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    snapshot: &ChannelMailboxSnapshot,
+) -> bool {
+    idle_queue_snapshot_has_kickable_backlog(shared, provider, channel_id, snapshot)
+        && !idle_queue_blocked_by_hosted_tui_busy_pane(shared, provider, channel_id).await
 }
 
 async fn mailbox_try_start_turn(
@@ -2526,6 +2749,10 @@ async fn mailbox_clear_recovery_marker(shared: &SharedData, channel_id: ChannelI
 pub(super) struct MailboxEnqueueOutcome {
     pub(super) enqueued: bool,
     pub(super) merged: bool,
+    /// #2728: present iff `enqueued == false`. Identifies which guard
+    /// (source-id dedup / last-item dedup / actor unreachable) produced the
+    /// refusal so callers can surface it in producer-exit diagnostics.
+    pub(super) refusal_reason: Option<crate::services::turn_orchestrator::EnqueueRefusalReason>,
 }
 
 async fn mailbox_enqueue_intervention(
@@ -2545,10 +2772,11 @@ async fn mailbox_enqueue_intervention(
     MailboxEnqueueOutcome {
         enqueued: result.enqueued,
         merged: result.merged,
+        refusal_reason: result.refusal_reason,
     }
 }
 
-fn queue_exit_feedback_emoji(kind: QueueExitKind) -> char {
+pub(in crate::services::discord) fn queue_exit_feedback_emoji(kind: QueueExitKind) -> char {
     match kind {
         QueueExitKind::Cancelled => '🚫',
         QueueExitKind::Expired => '⌛',
@@ -2830,6 +3058,7 @@ async fn enqueue_internal_followup(
         channel_id,
         Intervention {
             author_id: UserId::new(1),
+            author_is_bot: false,
             message_id: reply_message_id,
             source_message_ids: vec![reply_message_id],
             text: text.into(),
@@ -2889,7 +3118,7 @@ fn maybe_schedule_catch_up_retry_after_queue_drain(
 
     let shared = Arc::clone(shared);
     let provider = provider.clone();
-    tokio::spawn(async move {
+    task_supervisor::spawn_observed("catch_up_retry_after_queue_drain", async move {
         let retry_checkpoints = HashMap::from([(channel_id, retry_checkpoint)]);
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
@@ -2913,16 +3142,43 @@ async fn mailbox_take_next_soft_intervention(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> Option<(Intervention, bool)> {
-    let result: TakeNextSoftResult = shared
-        .mailbox(channel_id)
-        .take_next_soft(queue_persistence_context(shared, provider, channel_id))
-        .await;
-    let queue_len_after = result.queue_len_after;
-    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
-    maybe_schedule_catch_up_retry_after_queue_drain(shared, provider, channel_id, queue_len_after);
-    result
-        .intervention
-        .map(|intervention| (intervention, result.has_more))
+    loop {
+        let result: TakeNextSoftResult = shared
+            .mailbox(channel_id)
+            .take_next_soft(queue_persistence_context(shared, provider, channel_id))
+            .await;
+        let queue_len_after = result.queue_len_after;
+        apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+        maybe_schedule_catch_up_retry_after_queue_drain(
+            shared,
+            provider,
+            channel_id,
+            queue_len_after,
+        );
+        let Some(intervention) = result.intervention else {
+            return None;
+        };
+
+        if let Some(stale) =
+            stale_dispatch_turn_for_text(shared.pg_pool.as_ref(), &intervention.text).await
+        {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⏭ DISPATCH-GUARD: dropped queued terminal dispatch {} in channel {} (status={})",
+                stale.dispatch_id,
+                channel_id,
+                stale.status
+            );
+            let queue_exit_events = [QueueExitEvent {
+                intervention,
+                kind: stale.queue_exit_kind,
+            }];
+            apply_queue_exit_feedback(shared, channel_id, &queue_exit_events).await;
+            continue;
+        }
+
+        return Some((intervention, result.has_more));
+    }
 }
 
 async fn idle_queue_take_next_soft_if_ready(
@@ -2932,6 +3188,7 @@ async fn idle_queue_take_next_soft_if_ready(
 ) -> Option<(Intervention, bool)> {
     if mailbox_has_active_turn(shared, channel_id).await
         || cleanup_retry_inflight_blocks_idle_kickoff(shared, provider, channel_id)
+        || idle_queue_blocked_by_hosted_tui_busy_pane(shared, provider, channel_id).await
     {
         return None;
     }
@@ -3424,6 +3681,7 @@ async fn catch_up_missed_messages_inner(
                 channel_id,
                 Intervention {
                     author_id: msg.author.id,
+                    author_is_bot: msg.author.bot,
                     message_id: msg.id,
                     source_message_ids: vec![msg.id],
                     text: text.clone(),
@@ -3620,6 +3878,7 @@ async fn catch_up_missed_messages_inner(
                 channel_id,
                 Intervention {
                     author_id: msg.author.id,
+                    author_is_bot: msg.author.bot,
                     message_id: msg.id,
                     source_message_ids: vec![msg.id],
                     text: text.to_string(),
@@ -3668,23 +3927,19 @@ pub(super) async fn kickoff_idle_queues(
     shared: &Arc<SharedData>,
     token: &str,
     provider: &ProviderKind,
-) {
+) -> usize {
     // Collect channels with queued items that are idle (no active turn). Dequeue only
     // after the routing guard passes so a rejected channel stays preserved on disk/in memory.
     let mailbox_snapshots = shared.mailboxes.snapshot_all().await;
-    let channels_to_kick: Vec<ChannelId> = mailbox_snapshots
-        .into_iter()
-        .filter_map(|(channel_id, snapshot)| {
-            if idle_queue_snapshot_has_kickable_backlog(shared, provider, channel_id, &snapshot) {
-                Some(channel_id)
-            } else {
-                None
-            }
-        })
-        .collect();
+    let mut channels_to_kick: Vec<ChannelId> = Vec::new();
+    for (channel_id, snapshot) in mailbox_snapshots {
+        if idle_queue_channel_has_kickable_backlog(shared, provider, channel_id, &snapshot).await {
+            channels_to_kick.push(channel_id);
+        }
+    }
 
     if channels_to_kick.is_empty() {
-        return;
+        return 0;
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -3693,6 +3948,7 @@ pub(super) async fn kickoff_idle_queues(
         channels_to_kick.len()
     );
 
+    let mut started_count = 0usize;
     for channel_id in channels_to_kick {
         let settings_snapshot = shared.settings.read().await.clone();
         if let Err(reason) =
@@ -3707,11 +3963,24 @@ pub(super) async fn kickoff_idle_queues(
             continue;
         }
 
+        let fresh_snapshot = mailbox_snapshot(shared, channel_id).await;
+        if !idle_queue_channel_has_kickable_backlog(shared, provider, channel_id, &fresh_snapshot)
+            .await
+        {
+            tracing::info!(
+                channel_id = channel_id.get(),
+                provider = provider.as_str(),
+                "KICKOFF: skipped queued turn after fresh mailbox/TUI guard"
+            );
+            continue;
+        }
+
         let Some((intervention, has_more)) =
             idle_queue_take_next_soft_if_ready(shared, provider, channel_id).await
         else {
             continue;
         };
+        started_count += 1;
 
         let owner_name = if intervention.author_id.get() <= 1 {
             "system".to_string()
@@ -3803,6 +4072,7 @@ pub(super) async fn kickoff_idle_queues(
             mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await;
         }
     }
+    started_count
 }
 
 /// Scan for provider-specific skills available to this bot.
@@ -4749,6 +5019,7 @@ mod tests {
             active_user_message_id: Some(MessageId::new(200)),
             intervention_queue: vec![Intervention {
                 author_id: UserId::new(42),
+                author_is_bot: false,
                 message_id: MessageId::new(100),
                 source_message_ids: vec![MessageId::new(90), MessageId::new(100)],
                 text: "queued".to_string(),
@@ -4837,6 +5108,7 @@ mod tests {
                 channel_id,
                 Intervention {
                     author_id,
+                    author_is_bot: false,
                     message_id,
                     source_message_ids: vec![message_id],
                     text: format!("queued {offset}"),
@@ -5044,6 +5316,7 @@ mod tests {
             active_user_message_id: Some(MessageId::new(200)),
             intervention_queue: vec![Intervention {
                 author_id: UserId::new(42),
+                author_is_bot: false,
                 message_id: MessageId::new(100),
                 source_message_ids: vec![MessageId::new(90), MessageId::new(100)],
                 text: "queued".to_string(),
@@ -5061,6 +5334,67 @@ mod tests {
         assert!(existing.contains(&90));
         assert!(existing.contains(&100));
         assert!(!existing.contains(&200));
+    }
+
+    #[test]
+    fn idle_queue_kickoff_rejects_starting_mailbox_metadata() {
+        let shared = super::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(1486333430516947291);
+        let queued = Intervention {
+            author_id: UserId::new(42),
+            author_is_bot: false,
+            message_id: MessageId::new(100),
+            source_message_ids: vec![MessageId::new(100)],
+            text: "queued".to_string(),
+            mode: InterventionMode::Soft,
+            created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            voice_announcement: None,
+        };
+
+        let idle = super::ChannelMailboxSnapshot {
+            intervention_queue: vec![queued.clone()],
+            ..Default::default()
+        };
+        assert!(super::idle_queue_snapshot_has_kickable_backlog(
+            shared.as_ref(),
+            &provider,
+            channel_id,
+            &idle
+        ));
+
+        let starting = super::ChannelMailboxSnapshot {
+            active_request_owner: Some(UserId::new(42)),
+            active_user_message_id: Some(MessageId::new(200)),
+            intervention_queue: vec![queued],
+            ..Default::default()
+        };
+        assert!(!super::idle_queue_snapshot_has_kickable_backlog(
+            shared.as_ref(),
+            &provider,
+            channel_id,
+            &starting
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hosted_tui_busy_state_blocks_idle_queue_until_structured_ready() {
+        use crate::services::tui_turn_state::TuiReadyState;
+
+        assert!(super::hosted_tui_ready_state_blocks_idle_queue(Some(
+            TuiReadyState::Busy
+        )));
+        assert!(!super::hosted_tui_ready_state_blocks_idle_queue(Some(
+            TuiReadyState::Ready
+        )));
+        assert!(!super::hosted_tui_ready_state_blocks_idle_queue(Some(
+            TuiReadyState::Unknown
+        )));
+        assert!(!super::hosted_tui_ready_state_blocks_idle_queue(None));
     }
 
     #[tokio::test]
@@ -5085,6 +5419,7 @@ mod tests {
             channel_id,
             Intervention {
                 author_id: owner_id,
+                author_is_bot: false,
                 message_id: queued_msg_id,
                 source_message_ids: vec![queued_msg_id],
                 text: "queued turn".to_string(),
@@ -5489,6 +5824,7 @@ mod tests {
         let event = QueueExitEvent {
             intervention: Intervention {
                 author_id: UserId::new(42),
+                author_is_bot: false,
                 message_id: user_msg_id,
                 source_message_ids: vec![user_msg_id],
                 text: "ignored".to_string(),
@@ -5556,6 +5892,7 @@ mod tests {
         let mk_event = |msg_id: MessageId, kind: QueueExitKind| QueueExitEvent {
             intervention: Intervention {
                 author_id: UserId::new(99),
+                author_is_bot: false,
                 message_id: msg_id,
                 source_message_ids: vec![msg_id],
                 text: "ignored".to_string(),
@@ -5652,6 +5989,7 @@ mod tests {
         let event = QueueExitEvent {
             intervention: Intervention {
                 author_id: UserId::new(50),
+                author_is_bot: false,
                 message_id: head_msg,
                 source_message_ids: vec![merged_msg_a, merged_msg_b, head_msg],
                 text: "merged".to_string(),
@@ -5738,6 +6076,7 @@ mod tests {
         let event = QueueExitEvent {
             intervention: Intervention {
                 author_id: UserId::new(50),
+                author_is_bot: false,
                 message_id: head_msg,
                 source_message_ids: vec![head_msg, merged_msg],
                 text: "merged".to_string(),

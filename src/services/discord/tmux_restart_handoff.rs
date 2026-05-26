@@ -81,6 +81,25 @@ pub(super) fn resolve_restart_handoff_scope(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestartHandoffNoticeTarget {
+    Edit(u64),
+    SkipRebindOrigin,
+    MissingCurrentMessage,
+}
+
+fn restart_handoff_notice_target(
+    state: &super::inflight::InflightTurnState,
+) -> RestartHandoffNoticeTarget {
+    if state.rebind_origin {
+        return RestartHandoffNoticeTarget::SkipRebindOrigin;
+    }
+    if state.current_msg_id == 0 {
+        return RestartHandoffNoticeTarget::MissingCurrentMessage;
+    }
+    RestartHandoffNoticeTarget::Edit(state.current_msg_id)
+}
+
 fn resolve_dispatched_thread_dispatch(
     sqlite: &crate::db::Db,
     thread_channel_id: u64,
@@ -266,21 +285,39 @@ pub(super) async fn start_restart_handoff_from_state(
     best_response: &str,
 ) -> bool {
     let stale_text = super::turn_bridge::stale_inflight_message(best_response);
-    let relay_ok = super::formatting::replace_long_message_raw(
-        http,
-        channel_id,
-        serenity::MessageId::new(state.current_msg_id),
-        &stale_text,
-        shared,
-    )
-    .await
-    .is_ok();
-    if !relay_ok {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⚠ watcher death recovery: handoff notice failed before dispatch failure — preserving inflight for retry"
-        );
-        return false;
+    match restart_handoff_notice_target(&state) {
+        RestartHandoffNoticeTarget::Edit(current_msg_id) => {
+            let relay_ok = super::formatting::replace_long_message_raw(
+                http,
+                channel_id,
+                serenity::MessageId::new(current_msg_id),
+                &stale_text,
+                shared,
+            )
+            .await
+            .is_ok();
+            if !relay_ok {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⚠ watcher death recovery: handoff notice failed before dispatch failure — preserving inflight for retry"
+                );
+                return false;
+            }
+        }
+        RestartHandoffNoticeTarget::SkipRebindOrigin => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ↻ watcher death recovery: rebind-origin inflight has no Discord handoff message for channel {}, continuing cleanup without notice",
+                channel_id.get()
+            );
+        }
+        RestartHandoffNoticeTarget::MissingCurrentMessage => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ watcher death recovery: inflight current_msg_id=0 for channel {}, continuing cleanup without handoff notice",
+                channel_id.get()
+            );
+        }
     }
 
     clear_restart_handoff_provider_session(channel_id, shared, provider_kind, &state).await;
@@ -382,6 +419,60 @@ pub(super) async fn resume_aborted_restart_turn(
         &best_response,
     )
     .await
+}
+
+#[cfg(test)]
+mod notice_target_tests {
+    use super::{RestartHandoffNoticeTarget, restart_handoff_notice_target};
+    use crate::services::discord::inflight::InflightTurnState;
+    use crate::services::provider::ProviderKind;
+
+    fn sample_inflight_state() -> InflightTurnState {
+        InflightTurnState::new(
+            ProviderKind::Codex,
+            1_479_671_301_387_059_200,
+            Some("adk-cdx".to_string()),
+            1,
+            10,
+            11,
+            "restart me".to_string(),
+            Some("session-123".to_string()),
+            Some("AgentDesk-codex-adk-cdx".to_string()),
+            Some("/tmp/adk-cdx.jsonl".to_string()),
+            None,
+            0,
+        )
+    }
+
+    #[test]
+    fn restart_handoff_notice_targets_existing_message() {
+        let state = sample_inflight_state();
+
+        let target = restart_handoff_notice_target(&state);
+
+        assert_eq!(target, RestartHandoffNoticeTarget::Edit(11));
+    }
+
+    #[test]
+    fn restart_handoff_notice_skips_rebind_origin() {
+        let mut state = sample_inflight_state();
+        state.rebind_origin = true;
+        state.current_msg_id = 0;
+
+        let target = restart_handoff_notice_target(&state);
+
+        assert_eq!(target, RestartHandoffNoticeTarget::SkipRebindOrigin);
+    }
+
+    #[test]
+    fn restart_handoff_notice_skips_missing_current_message() {
+        let mut state = sample_inflight_state();
+        state.current_msg_id = 0;
+
+        let target = restart_handoff_notice_target(&state);
+
+        assert_eq!(target, RestartHandoffNoticeTarget::MissingCurrentMessage);
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]

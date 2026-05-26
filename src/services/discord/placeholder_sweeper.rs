@@ -27,6 +27,7 @@ use poise::serenity_prelude as serenity;
 use super::SharedData;
 use super::formatting::{
     MonitorHandoffReason, MonitorHandoffStatus, build_monitor_handoff_placeholder,
+    build_monitor_handoff_placeholder_with_context,
 };
 use super::gateway::edit_outbound_message;
 use super::inflight::{
@@ -106,16 +107,17 @@ fn build_stalled_placeholder(state: &InflightTurnState) -> String {
         // uses persisted started_at so the stalled content stays stable.
         chrono::Utc::now().timestamp()
     });
-    let mut text = build_monitor_handoff_placeholder(
-        MonitorHandoffStatus::Active,
+    build_monitor_handoff_placeholder_with_context(
+        MonitorHandoffStatus::Stalled,
         MonitorHandoffReason::AsyncDispatch,
         started_at_unix,
         state.current_tool_line.as_deref(),
         None,
-    );
-    text.push('\n');
-    text.push_str("⚠ stalled — no stream progress");
-    text
+        Some("stalled — no stream progress"),
+        None,
+        None,
+        None,
+    )
 }
 
 fn build_abandoned_placeholder(state: &InflightTurnState) -> String {
@@ -145,72 +147,6 @@ async fn edit_placeholder_safe(
     edit_outbound_message(http.clone(), shared.clone(), channel, message, content)
         .await
         .is_ok()
-}
-
-async fn unpin_placeholder_safe(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: u64,
-    message_id: u64,
-    reason: &'static str,
-) -> bool {
-    if channel_id == 0 || message_id == 0 {
-        return false;
-    }
-    let channel = serenity::ChannelId::new(channel_id);
-    let message = serenity::MessageId::new(message_id);
-    // `Manage Messages` lives on the announce bot in this deployment;
-    // route the unpin there to avoid a 403 storm.
-    let unpin_http = super::gateway::manage_messages_http(shared, http).await;
-    match channel.unpin(unpin_http.as_ref(), message).await {
-        Ok(()) => {
-            shared
-                .placeholder_controller
-                .forget_placeholder_pin(provider, channel, message);
-            true
-        }
-        Err(error) => {
-            tracing::warn!(
-                provider = provider.as_str(),
-                channel_id,
-                message_id,
-                reason,
-                error = %error,
-                "[placeholder_sweeper] placeholder unpin failed"
-            );
-            false
-        }
-    }
-}
-
-async fn sweep_stale_tracked_placeholder_pins(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    states: &[(InflightTurnState, u64)],
-) {
-    let active: HashSet<(u64, u64)> = states
-        .iter()
-        .filter(|(state, _)| !state.rebind_origin && state.restart_mode.is_none())
-        .filter(|(state, _)| state.channel_id != 0 && state.current_msg_id != 0)
-        .map(|(state, _)| (state.channel_id, state.current_msg_id))
-        .collect();
-    for pin in super::placeholder_controller::load_tracked_placeholder_pins(provider) {
-        let key = (pin.channel_id.get(), pin.message_id.get());
-        if active.contains(&key) {
-            continue;
-        }
-        let _ = unpin_placeholder_safe(
-            http,
-            shared,
-            provider,
-            pin.channel_id.get(),
-            pin.message_id.get(),
-            "tracked_stale_placeholder_pin",
-        )
-        .await;
-    }
 }
 
 /// Outcome of pre-flight checking whether the placeholder message on Discord
@@ -341,6 +277,8 @@ pub(super) fn is_message_still_placeholder(content: &str) -> bool {
         "📬 **메시지 대기 중**",
         "🔄 **백그라운드 처리 중**",
         "🔄 **응답 처리 중**",
+        "⚠ **백그라운드 정체**",
+        "⚠ **응답 정체**",
         "✅ **백그라운드 완료**",
         "✅ **응답 완료**",
         "⏱ **백그라운드 타임아웃**",
@@ -394,7 +332,6 @@ async fn run_placeholder_sweep_pass(
     let mut report = SweepPassReport::default();
     let states = load_inflight_states_for_sweep(provider);
     report.scanned = states.len();
-    sweep_stale_tracked_placeholder_pins(http, shared, provider, &states).await;
     stalled_tracker.retain_live(provider, &states);
     for (state, age_secs) in states {
         if state.rebind_origin {
@@ -539,15 +476,6 @@ async fn run_placeholder_sweep_pass(
                         // process lifetime.
                         if inflight_state_still_same_turn(provider, &state, age_secs) {
                             finalize_abandoned_mailbox(shared, provider, &state).await;
-                            let _ = unpin_placeholder_safe(
-                                http,
-                                shared,
-                                provider,
-                                state.channel_id,
-                                state.current_msg_id,
-                                "abandoned_already_delivered",
-                            )
-                            .await;
                             let _ = delete_inflight_state_file(provider, state.channel_id);
                             if let (Some(provider_kind), msg_id) = (
                                 ProviderKind::from_str(&state.provider),
@@ -577,11 +505,6 @@ async fn run_placeholder_sweep_pass(
                         // anyway; drop the inflight row.
                         if inflight_state_still_same_turn(provider, &state, age_secs) {
                             finalize_abandoned_mailbox(shared, provider, &state).await;
-                            shared.placeholder_controller.forget_placeholder_pin(
-                                provider,
-                                serenity::ChannelId::new(state.channel_id),
-                                serenity::MessageId::new(state.current_msg_id),
-                            );
                             let _ = delete_inflight_state_file(provider, state.channel_id);
                         }
                         continue;
@@ -635,15 +558,6 @@ async fn run_placeholder_sweep_pass(
                 // success covers (1).
                 if edited && inflight_state_still_same_turn(provider, &state, age_secs) {
                     finalize_abandoned_mailbox(shared, provider, &state).await;
-                    let _ = unpin_placeholder_safe(
-                        http,
-                        shared,
-                        provider,
-                        state.channel_id,
-                        state.current_msg_id,
-                        "abandoned_placeholder",
-                    )
-                    .await;
                     if delete_inflight_state_file(provider, state.channel_id) {
                         report.abandoned += 1;
                     }
@@ -911,6 +825,8 @@ mod is_message_still_placeholder_tests {
     fn handoff_card_headers_are_placeholder() {
         assert!(is_message_still_placeholder("🔄 **응답 처리 중**\nfooter"));
         assert!(is_message_still_placeholder("🔄 **백그라운드 처리 중**"));
+        assert!(is_message_still_placeholder("⚠ **응답 정체**"));
+        assert!(is_message_still_placeholder("⚠ **백그라운드 정체**"));
         assert!(is_message_still_placeholder("📬 **메시지 대기 중**"));
         assert!(is_message_still_placeholder("⏱ **응답 타임아웃**"));
         assert!(is_message_still_placeholder("❌ **응답 실패**: foo"));
@@ -1131,8 +1047,9 @@ mod tests {
     fn build_stalled_placeholder_uses_stable_badge() {
         let state = make_state(1234, 5678);
         let text = build_stalled_placeholder(&state);
-        assert!(text.starts_with("🔄 **응답 처리 중**"));
-        assert!(text.contains("⚠ stalled — no stream progress"));
+        assert!(text.starts_with("⚠ **응답 정체**"));
+        assert!(text.contains("stalled — no stream progress"));
+        assert!(!text.contains("계속 처리 중"));
         assert!(!text.contains("90s"));
     }
 

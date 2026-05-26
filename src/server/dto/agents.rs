@@ -7,11 +7,6 @@ pub struct AgentOfficesResponse {
 }
 
 #[derive(Debug, Serialize)]
-pub struct AgentCronResponse {
-    pub jobs: Vec<Value>,
-}
-
-#[derive(Debug, Serialize)]
 pub struct AgentSkillsResponse {
     pub skills: Vec<Value>,
     #[serde(rename = "sharedSkills")]

@@ -156,6 +156,42 @@ pub(super) async fn hook_session(
     request_body(Method::POST, "/api/dispatched-sessions/webhook", &body).await
 }
 
+pub(super) async fn mark_session_idle_if_not_newer_live(
+    session_key: &str,
+    provider: &str,
+    agent_id: Option<&str>,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, String> {
+    let ctx = load_context()?;
+    let Some(pool) = ctx.pg_pool else {
+        return Err("postgres pool unavailable".to_string());
+    };
+
+    let row = sqlx::query(
+        "UPDATE sessions
+            SET status = 'idle',
+                provider = $2,
+                agent_id = COALESCE(NULLIF(BTRIM($3::TEXT), ''), agent_id),
+                last_heartbeat = NOW()
+          WHERE session_key = $1
+            AND NOT (
+                lower(COALESCE(status, '')) IN ('turn_active', 'working')
+                AND last_heartbeat IS NOT NULL
+                AND last_heartbeat > $4
+            )
+          RETURNING session_key",
+    )
+    .bind(session_key)
+    .bind(provider)
+    .bind(agent_id)
+    .bind(cutoff)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|error| format!("mark session idle for {session_key}: {error}"))?;
+
+    Ok(row.is_some())
+}
+
 pub(super) async fn delete_session(session_key: &str) -> Result<Value, String> {
     request_query(
         Method::DELETE,

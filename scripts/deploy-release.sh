@@ -17,6 +17,13 @@ set -euo pipefail
 #                               Takes precedence over OBSIDIAN_VAULT_ROOT when set.
 # Additional AGENTDESK_* env vars (codesign, lock, peers, freshness, …) are
 # defined inline below — search for "${AGENTDESK_" to enumerate them.
+# Source safety overrides:
+#   AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1  allow deploying a HEAD that is not
+#                                      exactly origin/main.
+#   AGENTDESK_DEPLOY_ALLOW_DIRTY=1     allow deploying with local changes.
+#   AGENTDESK_DEPLOY_SKIP_FRESHNESS=1  skip both source-identity and remote
+#                                      freshness gates for an intentional
+#                                      offline/emergency deploy.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=_defaults.sh
@@ -440,6 +447,58 @@ _check_repo_remote_freshness() {
     fi
 }
 
+_check_repo_source_identity() {
+    [ "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}" != "1" ] || return 0
+    [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] || return 0
+    git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+
+    local branch head_sha head_short main_sha main_short dirty_status dirty_flag
+    branch="$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
+    head_sha="$(git -C "$REPO" rev-parse HEAD)"
+    head_short="$(git -C "$REPO" rev-parse --short=12 HEAD)"
+    dirty_status="$(git -C "$REPO" status --porcelain)"
+    if [ -n "$dirty_status" ]; then
+        dirty_flag=true
+    else
+        dirty_flag=false
+    fi
+
+    if [ "${AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS:-0}" != "1" ]; then
+        if ! git -C "$REPO" fetch --quiet origin main; then
+            echo "✗ Could not refresh origin/main; refusing release deploy from unverifiable source"
+            echo "  Set AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS=1 only for an intentional offline deploy."
+            exit 1
+        fi
+    fi
+    main_sha="$(git -C "$REPO" rev-parse origin/main 2>/dev/null || true)"
+    main_short=""
+    if [ -n "$main_sha" ]; then
+        main_short="$(git -C "$REPO" rev-parse --short=12 origin/main 2>/dev/null || true)"
+    fi
+
+    echo "▸ Build source: branch=${branch} head=${head_short} origin/main=${main_short:-unknown} dirty=${dirty_flag}"
+
+    if [ "${AGENTDESK_DEPLOY_ALLOW_NON_MAIN:-0}" != "1" ]; then
+        if [ "$branch" != "main" ]; then
+            echo "✗ Refusing release deploy from non-main branch: ${branch}"
+            echo "  Switch to main and fast-forward, or set AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1 for an intentional branch deploy."
+            exit 1
+        fi
+        if [ -n "$main_sha" ] && [ "$head_sha" != "$main_sha" ]; then
+            echo "✗ Refusing release deploy: HEAD (${head_short}) does not match origin/main (${main_short})"
+            echo "  Fast-forward to origin/main, or set AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1 for an intentional local-source deploy."
+            exit 1
+        fi
+    fi
+
+    if [ "$dirty_flag" = true ] && [ "${AGENTDESK_DEPLOY_ALLOW_DIRTY:-0}" != "1" ]; then
+        echo "✗ Refusing release deploy from a dirty worktree:"
+        printf '%s\n' "$dirty_status" | sed 's/^/  /'
+        echo "  Commit/stash local changes, or set AGENTDESK_DEPLOY_ALLOW_DIRTY=1 for an intentional dirty deploy."
+        exit 1
+    fi
+}
+
 _assert_release_binary_runtime_surface() {
     # If this source tree contains durable routines, the staged binary must expose
     # the matching worker/API surface. This catches deploying an older binary that
@@ -722,6 +781,8 @@ export AGENTDESK_CODESIGN_KEYCHAIN_NAME=$(printf '%q' "${AGENTDESK_CODESIGN_KEYC
 export AGENTDESK_DEPLOY_BINARY=$(printf '%q' "${AGENTDESK_DEPLOY_BINARY:-}")
 export AGENTDESK_DEPLOY_SKIP_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}")
 export AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS:-0}")
+export AGENTDESK_DEPLOY_ALLOW_NON_MAIN=$(printf '%q' "${AGENTDESK_DEPLOY_ALLOW_NON_MAIN:-0}")
+export AGENTDESK_DEPLOY_ALLOW_DIRTY=$(printf '%q' "${AGENTDESK_DEPLOY_ALLOW_DIRTY:-0}")
 export AGENTDESK_DEPLOY_LOCK_FILE=$(printf '%q' "$DEPLOY_LOCK_FILE")
 export AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS=$(printf '%q' "$DEPLOY_LOCK_TIMEOUT_SECS")
 export AGENTDESK_DEPLOY_ALL_NODES=$(printf '%q' "${AGENTDESK_DEPLOY_ALL_NODES:-0}")
@@ -805,6 +866,8 @@ if [ ! -d "$REPO/policies" ]; then
     echo "  expected: $REPO/policies"
     exit 1
 fi
+
+_check_repo_source_identity
 
 if [ "$DEPLOY_TEST_MODE" = "1" ]; then
     echo "▸ TEST MODE: skipping release bootout/copy/bootstrap"

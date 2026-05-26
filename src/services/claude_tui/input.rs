@@ -21,6 +21,9 @@ const FOLLOWUP_PROMPT_READY_EVENT_BUDGET: Duration = Duration::from_secs(5);
 /// Brief settle delay between hook arrival and the post-event snapshot check
 /// so the TUI has time to redraw the prompt marker after Stop.
 const PROMPT_READY_POST_EVENT_SETTLE: Duration = Duration::from_millis(50);
+const PROMPT_SUBMIT_INITIAL_SETTLE: Duration = Duration::from_millis(120);
+const PROMPT_SUBMIT_RETRY_SETTLE: Duration = Duration::from_millis(350);
+const PROMPT_SUBMIT_CONFIRM_RETRIES: usize = 2;
 const PROMPT_READY_TIMEOUT_ERROR_PREFIX: &str = "timeout waiting for claude tui";
 pub const PROMPT_READY_CANCELLED_ERROR: &str = "claude tui prompt readiness wait cancelled";
 
@@ -90,6 +93,17 @@ pub enum TuiInputAction {
     PasteBuffer(String),
     Enter,
     Escape,
+    Backspace(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptSubmitConfirmationDecision {
+    Submitted,
+    RetrySnapshot,
+    RetryEnter,
+    FailedSessionDead,
+    FailedCaptureUnavailable,
+    FailedDraftStuck,
 }
 
 pub fn plan_prompt_submit(prompt: &str) -> Result<Vec<TuiInputAction>, String> {
@@ -197,7 +211,7 @@ fn send_prompt_with_readiness(
         session_name,
         prompt,
     );
-    match run_actions(session_name, &actions, cancel_token) {
+    match run_actions_with_submission_confirmation(session_name, &actions, cancel_token) {
         Ok(()) => Ok(()),
         Err(error) => {
             crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
@@ -260,10 +274,147 @@ fn run_actions(
             TuiInputAction::Escape => {
                 crate::services::platform::tmux::send_keys(session_name, &["Escape"])?
             }
+            TuiInputAction::Backspace(count) => {
+                let mut remaining = *count;
+                while remaining > 0 {
+                    let batch = remaining.min(32);
+                    let keys = vec!["BSpace"; batch];
+                    let output = crate::services::platform::tmux::send_keys(session_name, &keys)?;
+                    ensure_tmux_success(output, action)?;
+                    remaining -= batch;
+                }
+                continue;
+            }
         };
         ensure_tmux_success(output, action)?;
     }
     Ok(())
+}
+
+fn run_actions_with_submission_confirmation(
+    session_name: &str,
+    actions: &[TuiInputAction],
+    cancel_token: Option<&CancelToken>,
+) -> Result<(), String> {
+    run_actions(session_name, actions, cancel_token)?;
+    confirm_prompt_submission_left_editor(session_name, cancel_token)
+}
+
+fn confirm_prompt_submission_left_editor(
+    session_name: &str,
+    cancel_token: Option<&CancelToken>,
+) -> Result<(), String> {
+    let mut attempt = 0usize;
+    loop {
+        std::thread::sleep(prompt_submit_settle_for_attempt(attempt));
+        check_prompt_cancel(cancel_token)?;
+        let snapshot = prompt_readiness_snapshot(session_name);
+        check_prompt_cancel(cancel_token)?;
+
+        match prompt_submit_confirmation_decision(&snapshot, attempt, PROMPT_SUBMIT_CONFIRM_RETRIES)
+        {
+            PromptSubmitConfirmationDecision::Submitted => return Ok(()),
+            PromptSubmitConfirmationDecision::FailedSessionDead => {
+                return Err("claude tui session died after prompt submit".to_string());
+            }
+            PromptSubmitConfirmationDecision::FailedCaptureUnavailable => {
+                log_prompt_submit_capture_unavailable(session_name, attempt, &snapshot);
+                return Err(format!(
+                    "claude tui prompt submit confirmation unavailable after {} retries; capture_available=false",
+                    PROMPT_SUBMIT_CONFIRM_RETRIES
+                ));
+            }
+            PromptSubmitConfirmationDecision::FailedDraftStuck => {
+                log_prompt_submit_left_draft(session_name, &snapshot);
+                clear_prompt_draft_before_error(session_name, cancel_token);
+                return Err(format!(
+                    "claude tui prompt submit left draft after {} enter retries; prompt_marker_detected={}; prompt_draft_detected={}; capture_available={}",
+                    PROMPT_SUBMIT_CONFIRM_RETRIES,
+                    snapshot.prompt_marker_detected,
+                    snapshot.prompt_draft_detected,
+                    snapshot.capture_available
+                ));
+            }
+            PromptSubmitConfirmationDecision::RetrySnapshot => {
+                log_prompt_submit_capture_unavailable(session_name, attempt, &snapshot);
+                attempt += 1;
+            }
+            PromptSubmitConfirmationDecision::RetryEnter => {
+                tracing::warn!(
+                    tmux_session_name = session_name,
+                    retry = attempt + 1,
+                    max_retries = PROMPT_SUBMIT_CONFIRM_RETRIES,
+                    "claude_tui prompt submit left a draft after Enter; retrying Enter"
+                );
+                run_actions(session_name, &[TuiInputAction::Enter], cancel_token)?;
+                attempt += 1;
+            }
+        }
+    }
+}
+
+fn prompt_submit_needs_enter_retry(snapshot: &PromptReadinessSnapshot) -> bool {
+    snapshot.tmux_pane_alive && snapshot.prompt_marker_detected && snapshot.prompt_draft_detected
+}
+
+fn prompt_submit_confirmation_decision(
+    snapshot: &PromptReadinessSnapshot,
+    attempt: usize,
+    max_retries: usize,
+) -> PromptSubmitConfirmationDecision {
+    if !snapshot.tmux_pane_alive {
+        return PromptSubmitConfirmationDecision::FailedSessionDead;
+    }
+    if !snapshot.capture_available {
+        return if attempt >= max_retries {
+            PromptSubmitConfirmationDecision::FailedCaptureUnavailable
+        } else {
+            PromptSubmitConfirmationDecision::RetrySnapshot
+        };
+    }
+    if prompt_submit_needs_enter_retry(snapshot) {
+        return if attempt >= max_retries {
+            PromptSubmitConfirmationDecision::FailedDraftStuck
+        } else {
+            PromptSubmitConfirmationDecision::RetryEnter
+        };
+    }
+    PromptSubmitConfirmationDecision::Submitted
+}
+
+fn prompt_submit_settle_for_attempt(attempt: usize) -> Duration {
+    if attempt == 0 {
+        PROMPT_SUBMIT_INITIAL_SETTLE
+    } else {
+        PROMPT_SUBMIT_RETRY_SETTLE
+    }
+}
+
+fn clear_prompt_draft_before_error(session_name: &str, cancel_token: Option<&CancelToken>) {
+    let snapshot = prompt_readiness_snapshot(session_name);
+    let mut actions = vec![TuiInputAction::Escape];
+    if let Some(count) = claude_prompt_draft_backspace_budget_from_tail(&snapshot.pane_tail) {
+        actions.push(TuiInputAction::Backspace(count));
+    }
+    if let Err(error) = run_actions(session_name, &actions, cancel_token) {
+        tracing::warn!(
+            tmux_session_name = session_name,
+            error = %error,
+            "failed to clear Claude TUI draft after prompt submit retries"
+        );
+    }
+}
+
+pub(crate) fn claude_prompt_draft_backspace_budget_from_tail(pane_tail: &str) -> Option<usize> {
+    crate::services::tmux_common::tmux_capture_claude_tui_prompt_draft_backspace_budget(pane_tail)
+}
+
+pub(crate) fn claude_prompt_draft_is_idle_suggestion_tail(pane_tail: &str) -> bool {
+    crate::services::tmux_common::tmux_capture_indicates_claude_tui_idle_suggestion(pane_tail)
+}
+
+pub(crate) fn claude_prompt_draft_backspace_budget_from_line(line: &str) -> Option<usize> {
+    crate::services::tmux_common::claude_tui_prompt_draft_backspace_budget_from_line(line)
 }
 
 fn check_prompt_cancel(cancel_token: Option<&CancelToken>) -> Result<(), String> {
@@ -284,6 +435,7 @@ fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), St
         TuiInputAction::PasteBuffer(_) => "paste-buffer",
         TuiInputAction::Enter => "enter",
         TuiInputAction::Escape => "escape",
+        TuiInputAction::Backspace(_) => "backspace",
     };
     if stderr.is_empty() {
         Err(format!("tmux send {action_name} failed: {}", output.status))
@@ -327,7 +479,7 @@ pub fn send_followup_prompt_or_idle_transcript(
         session_name,
         prompt,
     );
-    match run_actions(session_name, &actions, cancel_token) {
+    match run_actions_with_submission_confirmation(session_name, &actions, cancel_token) {
         Ok(()) => Ok(()),
         Err(error) => {
             crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
@@ -659,7 +811,12 @@ fn transcript_idle_confirms_prompt_ready(
     snapshot: &PromptReadinessSnapshot,
     transcript_path: Option<&std::path::Path>,
 ) -> bool {
-    if !snapshot.tmux_pane_alive || snapshot.prompt_draft_detected {
+    if !snapshot.tmux_pane_alive {
+        return false;
+    }
+    if snapshot.prompt_draft_detected
+        && !claude_prompt_draft_is_idle_suggestion_tail(&snapshot.pane_tail)
+    {
         return false;
     }
     transcript_path.is_some_and(|path| {
@@ -700,6 +857,44 @@ fn log_prompt_ready_timeout(
             snapshot.capture_available,
             snapshot.pane_tail
         ),
+    );
+}
+
+fn log_prompt_submit_left_draft(session_name: &str, snapshot: &PromptReadinessSnapshot) {
+    tracing::warn!(
+        tmux_session_name = session_name,
+        prompt_marker_detected = snapshot.prompt_marker_detected,
+        prompt_draft_detected = snapshot.prompt_draft_detected,
+        tmux_pane_alive = snapshot.tmux_pane_alive,
+        capture_available = snapshot.capture_available,
+        pane_tail = %snapshot.pane_tail,
+        "claude_tui prompt submit still has a draft after Enter retries"
+    );
+    crate::services::claude::debug_log_to(
+        "claude_tui.log",
+        &format!(
+            "prompt submit left draft session={} prompt_marker_detected={} prompt_draft_detected={} tmux_pane_alive={} capture_available={} pane_tail:\n{}",
+            session_name,
+            snapshot.prompt_marker_detected,
+            snapshot.prompt_draft_detected,
+            snapshot.tmux_pane_alive,
+            snapshot.capture_available,
+            snapshot.pane_tail
+        ),
+    );
+}
+
+fn log_prompt_submit_capture_unavailable(
+    session_name: &str,
+    attempt: usize,
+    snapshot: &PromptReadinessSnapshot,
+) {
+    tracing::warn!(
+        tmux_session_name = session_name,
+        attempt,
+        tmux_pane_alive = snapshot.tmux_pane_alive,
+        capture_available = snapshot.capture_available,
+        "claude_tui post-submit capture unavailable; cannot confirm Enter took effect"
     );
 }
 
@@ -801,6 +996,31 @@ mod tests {
     }
 
     #[test]
+    fn claude_prompt_draft_backspace_budget_ignores_submitted_discord_prompt_history() {
+        assert_eq!(
+            claude_prompt_draft_backspace_budget_from_line("❯ [User: 명령봇 (ID: 1)] hello"),
+            None
+        );
+    }
+
+    #[test]
+    fn claude_prompt_draft_backspace_budget_handles_nbsp_prompt_line() {
+        let budget = claude_prompt_draft_backspace_budget_from_line("❯\u{00a0}commit this");
+
+        assert_eq!(budget, Some("commit this".chars().count() + 4));
+    }
+
+    #[test]
+    fn claude_prompt_draft_backspace_budget_ignores_completed_history_tail() {
+        let tail = "\
+❯ write a plan
+계획만 적고 보류 — 1개
+  CLAUDE.md: 1, MCP: 2 │ Tools: 5 done";
+
+        assert_eq!(claude_prompt_draft_backspace_budget_from_tail(tail), None);
+    }
+
+    #[test]
     fn pane_ready_detection_matches_claude_prompt_marker() {
         let pane = "Claude Code v2.1.141\n\n\u{276f} \nstatus";
 
@@ -818,6 +1038,121 @@ mod tests {
         };
 
         assert!(!prompt_marker_confirms_prompt_ready(&snapshot));
+    }
+
+    #[test]
+    fn prompt_submit_retries_only_when_live_pane_still_has_draft() {
+        let draft_snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: true,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "\u{276f} draft".to_string(),
+        };
+        assert!(prompt_submit_needs_enter_retry(&draft_snapshot));
+
+        let active_snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "✳ Architecting...".to_string(),
+        };
+        assert!(!prompt_submit_needs_enter_retry(&active_snapshot));
+
+        let inconsistent_snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "stale draft heuristic without prompt marker".to_string(),
+        };
+        assert!(!prompt_submit_needs_enter_retry(&inconsistent_snapshot));
+
+        let dead_snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: true,
+            tmux_pane_alive: false,
+            capture_available: true,
+            pane_tail: "stale draft".to_string(),
+        };
+        assert!(!prompt_submit_needs_enter_retry(&dead_snapshot));
+    }
+
+    #[test]
+    fn prompt_submit_confirmation_decision_retries_enter_then_fails_stuck_draft() {
+        let snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: true,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "\u{276f} draft".to_string(),
+        };
+
+        assert_eq!(
+            prompt_submit_confirmation_decision(&snapshot, 0, 2),
+            PromptSubmitConfirmationDecision::RetryEnter
+        );
+        assert_eq!(
+            prompt_submit_confirmation_decision(&snapshot, 2, 2),
+            PromptSubmitConfirmationDecision::FailedDraftStuck
+        );
+    }
+
+    #[test]
+    fn prompt_submit_confirmation_decision_retries_capture_without_enter() {
+        let snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: false,
+            pane_tail: "<capture unavailable>".to_string(),
+        };
+
+        assert_eq!(
+            prompt_submit_confirmation_decision(&snapshot, 0, 2),
+            PromptSubmitConfirmationDecision::RetrySnapshot
+        );
+        assert_eq!(
+            prompt_submit_confirmation_decision(&snapshot, 2, 2),
+            PromptSubmitConfirmationDecision::FailedCaptureUnavailable
+        );
+    }
+
+    #[test]
+    fn prompt_submit_confirmation_decision_handles_submitted_and_dead_pane() {
+        let submitted = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "✳ Architecting...".to_string(),
+        };
+        assert_eq!(
+            prompt_submit_confirmation_decision(&submitted, 0, 2),
+            PromptSubmitConfirmationDecision::Submitted
+        );
+
+        let dead = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: false,
+            tmux_pane_alive: false,
+            capture_available: false,
+            pane_tail: "<capture unavailable>".to_string(),
+        };
+        assert_eq!(
+            prompt_submit_confirmation_decision(&dead, 0, 2),
+            PromptSubmitConfirmationDecision::FailedSessionDead
+        );
+    }
+
+    #[test]
+    fn prompt_submit_settle_uses_short_initial_and_long_retry_delay() {
+        assert!(prompt_submit_settle_for_attempt(0) < prompt_submit_settle_for_attempt(1));
+        assert_eq!(
+            prompt_submit_settle_for_attempt(1),
+            PROMPT_SUBMIT_RETRY_SETTLE
+        );
     }
 
     #[test]
@@ -895,6 +1230,38 @@ line 13";
         };
 
         assert!(!transcript_idle_confirms_prompt_ready(
+            &snapshot,
+            Some(file.path())
+        ));
+    }
+
+    #[test]
+    fn idle_transcript_accepts_claude_suggestion_prompt_chrome() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"{"type":"system","subtype":"turn_duration","sessionId":"s"}"#,
+        )
+        .unwrap();
+        let snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "\
+✻ Worked for 2s
+────────────────────────────────────────────────────────────────────────────
+❯\u{00a0}좋아, 잘 동작하네
+────────────────────────────────────────────────────────────────────────────
+  CLAUDE.md: 1, MCP: 2 │ Tools: 0 done
+  ⏵⏵ bypass permissions on"
+                .to_string(),
+        };
+
+        assert!(claude_prompt_draft_is_idle_suggestion_tail(
+            &snapshot.pane_tail
+        ));
+        assert!(transcript_idle_confirms_prompt_ready(
             &snapshot,
             Some(file.path())
         ));

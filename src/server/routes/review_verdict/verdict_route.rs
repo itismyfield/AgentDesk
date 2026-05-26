@@ -50,6 +50,27 @@ fn normalize_review_notes(text: &str) -> String {
         .to_lowercase()
 }
 
+fn review_dispatch_allows_late_failed_verdict(dispatch: &serde_json::Value) -> bool {
+    if dispatch.get("status").and_then(|value| value.as_str()) != Some("failed") {
+        return false;
+    }
+    if dispatch
+        .get("dispatch_type")
+        .and_then(|value| value.as_str())
+        != Some("review")
+    {
+        return false;
+    }
+
+    let Some(result) = dispatch.get("result") else {
+        return false;
+    };
+    matches!(
+        result.get("failure_kind").and_then(|value| value.as_str()),
+        Some("stuck_at_ready" | "tmux_session_died")
+    )
+}
+
 fn review_state_sync_pg_first(state: &AppState, payload: &serde_json::Value) -> String {
     crate::engine::ops::review_state_sync_with_backends(
         review_verdict_db(state),
@@ -390,6 +411,14 @@ pub async fn submit_verdict(
     // #143: Mark dispatch completed via shared helper (DB-only, no OnDispatchCompleted).
     // Review verdict fires OnReviewVerdict — specialized hook, not the generic completion hook.
     // Cancelled dispatches must NOT be promoted to completed (review loop guard #80).
+    // #2765: A watcher can mark a review dispatch failed as stuck_at_ready
+    // seconds before the agent submits the final verdict. Accept that narrow
+    // failed state so the late verdict is not orphaned.
+    let allowed_from = if review_dispatch_allows_late_failed_verdict(&dispatch) {
+        &["pending", "dispatched", "failed"][..]
+    } else {
+        &["pending", "dispatched"][..]
+    };
     let updated = match crate::dispatch::set_dispatch_status_with_backends(
         review_verdict_db(&state),
         state.pg_pool_ref(),
@@ -397,7 +426,7 @@ pub async fn submit_verdict(
         "completed",
         Some(&result_json),
         "mark_dispatch_completed",
-        Some(&["pending", "dispatched"]),
+        Some(allowed_from),
         true,
     ) {
         Ok(n) => n,
@@ -426,6 +455,7 @@ pub async fn submit_verdict(
         let msg = match current_status.as_deref() {
             Some("cancelled") => "dispatch was cancelled (card may have been dismissed)",
             Some("completed") => "dispatch already completed",
+            Some("failed") => "dispatch already failed",
             _ => "dispatch not found",
         };
         return (StatusCode::CONFLICT, Json(json!({"error": msg})));

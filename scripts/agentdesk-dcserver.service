@@ -9,8 +9,8 @@ ExecStart=%h/.adk/release/bin/agentdesk dcserver
 WorkingDirectory=%h/.adk/release
 Restart=on-failure
 RestartSec=5
-StandardOutput=append:%h/.adk/release/logs/dcserver.stdout.log
-StandardError=append:%h/.adk/release/logs/dcserver.stderr.log
+StandardOutput=append:%h/.adk/release/logs/dcserver.launchd.stdout.log
+StandardError=append:%h/.adk/release/logs/dcserver.launchd.stderr.log
 
 [Install]
 WantedBy=default.target

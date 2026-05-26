@@ -3,6 +3,7 @@ pub(crate) mod barge_in;
 pub(crate) mod cancel_tombstone;
 pub(crate) mod commands;
 pub(crate) mod config;
+pub(crate) mod flight;
 pub(crate) mod metrics;
 pub(crate) mod progress;
 pub(crate) mod prompt;

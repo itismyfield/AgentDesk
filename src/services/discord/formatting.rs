@@ -1215,7 +1215,7 @@ mod tests {
 
     #[test]
     fn test_build_processing_status_block_uses_spinner_processing() {
-        assert_eq!(build_processing_status_block("⠋"), "⠋ Processing...");
+        assert_eq!(build_processing_status_block("⠋"), "⠋ 계속 처리 중");
     }
 
     #[test]
@@ -1322,7 +1322,8 @@ mod tests {
             "🔄 **응답 처리 중**\n",
             "> **도구**: ⚙ Bash: cargo build · **사유**: 응답 스트리밍 중\n",
             "> **시작**: <t:1700000000:R>\n",
-            "완료 시 이 채널로 결과를 이어서 표시합니다.",
+            "완료 시 이 채널로 결과를 이어서 표시합니다.\n",
+            "⠋ 계속 처리 중 · 시작 <t:1700000000:R>",
         );
         assert_eq!(text, expected);
     }
@@ -1340,6 +1341,7 @@ mod tests {
         assert!(text.contains("**도구**: Bash · **사유**: 백그라운드 도구 실행 중"));
         assert!(text.contains("**명령**: `cargo test --package agentdesk -- --nocapture`"));
         assert!(text.contains("<t:1700000000:R>"));
+        assert!(text.ends_with("⠋ 계속 처리 중 · 시작 <t:1700000000:R>"));
     }
 
     #[test]
@@ -1354,6 +1356,7 @@ mod tests {
         assert!(completed.starts_with("✅ **응답 완료**\n"));
         assert!(completed.contains("**도구**: —"));
         assert!(completed.contains("결과가 위에 도착했습니다."));
+        assert!(!completed.contains("계속 처리 중"));
 
         let failed = build_monitor_handoff_placeholder(
             MonitorHandoffStatus::Failed {
@@ -2078,7 +2081,9 @@ pub(super) fn format_for_discord_with_provider(
     s: &str,
     provider: &crate::services::provider::ProviderKind,
 ) -> String {
-    let sanitized = super::response_sanitizer::sanitize_hidden_context(s);
+    let sanitized = super::response_sanitizer::strip_leading_tui_response_chrome(
+        &super::response_sanitizer::sanitize_hidden_context(s),
+    );
     let filtered;
     let input = if matches!(provider, crate::services::provider::ProviderKind::Codex) {
         filtered = filter_codex_tool_logs(&sanitized);
@@ -2095,7 +2100,9 @@ pub(super) fn format_for_discord_with_status_panel(
     s: &str,
     provider: &crate::services::provider::ProviderKind,
 ) -> String {
-    let sanitized = super::response_sanitizer::sanitize_hidden_context(s);
+    let sanitized = super::response_sanitizer::strip_leading_tui_response_chrome(
+        &super::response_sanitizer::sanitize_hidden_context(s),
+    );
     let filtered;
     let input = if matches!(provider, crate::services::provider::ProviderKind::Codex) {
         filtered = strip_codex_tool_log_lines(&sanitized);
@@ -2109,8 +2116,45 @@ pub(super) fn format_for_discord_with_status_panel(
 
 #[cfg(test)]
 mod status_panel_v2_formatter_tests {
-    use super::{format_for_discord, format_for_discord_with_provider};
+    use super::{
+        MonitorHandoffReason, MonitorHandoffStatus, build_monitor_handoff_placeholder,
+        build_monitor_handoff_placeholder_with_live_events, format_for_discord,
+        format_for_discord_with_provider,
+    };
     use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn monitor_handoff_active_keeps_processing_tail_last() {
+        let text = build_monitor_handoff_placeholder_with_live_events(
+            MonitorHandoffStatus::Active,
+            MonitorHandoffReason::AsyncDispatch,
+            1_700_000_000,
+            Some("⚙ Bash: cargo build"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("```text\n[Bash] cargo build\n```"),
+        );
+
+        assert!(text.contains("```text\n[Bash] cargo build\n```"));
+        assert!(text.ends_with("⠋ 계속 처리 중 · 시작 <t:1700000000:R>"));
+    }
+
+    #[test]
+    fn monitor_handoff_terminal_states_drop_processing_tail() {
+        let text = build_monitor_handoff_placeholder(
+            MonitorHandoffStatus::Completed,
+            MonitorHandoffReason::AsyncDispatch,
+            1_700_000_000,
+            None,
+            None,
+        );
+
+        assert!(text.starts_with("✅ **응답 완료**\n"));
+        assert!(!text.contains("계속 처리 중"));
+    }
 
     #[test]
     fn status_panel_disabled_codex_formatter_keeps_legacy_tool_markers() {
@@ -2142,24 +2186,161 @@ mod status_panel_v2_formatter_tests {
         let output = format_for_discord(input);
         assert_eq!(output, "first paragraph\n\nsecond paragraph");
     }
+
+    #[test]
+    fn format_for_discord_removes_trailing_streaming_status_footer() {
+        let input = "Final answer\n\n⠋ Processing...";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, "Final answer");
+    }
+
+    #[test]
+    fn format_for_discord_removes_trailing_korean_processing_footer() {
+        let input = "Final answer\n\n⠋ 계속 처리 중";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, "Final answer");
+    }
+
+    #[test]
+    fn format_for_discord_removes_leading_tui_no_response_chrome() {
+        let input = "No response requested.\n\nFinal answer";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, "Final answer");
+    }
+
+    #[test]
+    fn format_for_discord_preserves_legitimate_no_response_sentence() {
+        let input = "No response requested. But here is the explanation.";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn format_for_discord_keeps_non_trailing_spinner_text() {
+        let input = "⠋ Processing...\nFinal answer";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn format_for_discord_removes_stacked_streaming_status_footers() {
+        let input = "Final answer\n\n⠋ Processing...\n⠙ Working...";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, "Final answer");
+    }
+
+    #[test]
+    fn format_for_discord_removes_placeholder_waiting_before_streaming_footer() {
+        let input = "Final answer\n⏳ 대기 중...\n\n⠋ Processing...";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, "Final answer");
+    }
+
+    #[test]
+    fn format_for_discord_keeps_trailing_spinner_without_known_status_shape() {
+        let input = "Final answer\n\n⠋ note";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn format_for_discord_removes_ascii_spinner_status_footer() {
+        let input = "Final answer\n\n| Processing...";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, "Final answer");
+    }
+
+    #[test]
+    fn format_for_discord_keeps_trailing_ascii_bullet_status_text() {
+        let input = "Final answer\n- Working on the backend now";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn format_for_discord_keeps_trailing_ascii_table_row() {
+        let input = "Final answer\n| Processing fee | 3% |";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn format_for_discord_preserves_trailing_blank_without_footer() {
+        let input = "Final answer\n\n";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, "Final answer");
+    }
 }
 
 /// Remove ephemeral placeholder lines (e.g. "⏳ 대기 중...") from the final
 /// delivered response.  These lines are useful during streaming but should not
 /// persist in the channel.
 fn strip_placeholder_lines(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    let mut lines = Vec::new();
     for line in s.lines() {
         let t = line.trim();
         if t.starts_with("⏳") && t.contains("대기") {
             continue;
         }
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(line);
+        lines.push(line);
     }
-    out
+    strip_trailing_streaming_status_footer(&mut lines);
+    lines.join("\n")
+}
+
+fn strip_trailing_streaming_status_footer(lines: &mut Vec<&str>) {
+    loop {
+        let Some(last_nonblank) = lines.iter().rposition(|line| !line.trim().is_empty()) else {
+            break;
+        };
+        if !is_streaming_placeholder_status_line(lines[last_nonblank].trim()) {
+            break;
+        }
+        lines.truncate(last_nonblank);
+    }
+}
+
+pub(super) fn is_streaming_placeholder_status_line(line: &str) -> bool {
+    const SPINNER_FRAMES: &[char] = &[
+        '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏', '|', '/', '-', '\\', '◐', '◓', '◑', '◒',
+        '⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷',
+    ];
+    let mut chars = line.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let braille_spinner = ('\u{2800}'..='\u{28ff}').contains(&first);
+    if !(SPINNER_FRAMES.contains(&first) || braille_spinner)
+        || !chars.next().is_some_and(char::is_whitespace)
+    {
+        return false;
+    }
+    let status = chars.as_str().trim();
+    let ascii_spinner = matches!(first, '|' | '/' | '-' | '\\');
+    if ascii_spinner {
+        return matches!(
+            status,
+            "Processing..."
+                | "Processing…"
+                | "Thinking..."
+                | "Thinking…"
+                | "Generating..."
+                | "Generating…"
+                | "Working..."
+                | "Working…"
+        );
+    }
+    status.starts_with("Processing")
+        || status.starts_with("Thinking")
+        || status.starts_with("Generating")
+        || status.starts_with("Working")
+        || status.starts_with("계속 처리 중")
+        || status.starts_with("응답")
+        || status.starts_with("처리")
+        || status.starts_with('⚙')
+        || status.starts_with('⚠')
+        || status.starts_with('⏱')
+        || status.starts_with('💭')
 }
 
 /// Mechanical formatting for Discord readability.
@@ -3510,6 +3691,7 @@ impl MonitorHandoffReason {
 pub(super) enum MonitorHandoffStatus<'a> {
     Queued,
     Active,
+    Stalled,
     Completed,
     Failed { reason: &'a str },
     TimedOut,
@@ -3533,6 +3715,8 @@ fn monitor_handoff_header(
         MonitorHandoffStatus::Queued => "📬 **메시지 대기 중**".to_string(),
         MonitorHandoffStatus::Active if background_label => "🔄 **백그라운드 처리 중**".to_string(),
         MonitorHandoffStatus::Active => "🔄 **응답 처리 중**".to_string(),
+        MonitorHandoffStatus::Stalled if background_label => "⚠ **백그라운드 정체**".to_string(),
+        MonitorHandoffStatus::Stalled => "⚠ **응답 정체**".to_string(),
         MonitorHandoffStatus::Completed if background_label => "✅ **백그라운드 완료**".to_string(),
         MonitorHandoffStatus::Completed => "✅ **응답 완료**".to_string(),
         MonitorHandoffStatus::Failed { reason } => {
@@ -3571,11 +3755,16 @@ fn monitor_handoff_footer(
             "완료 시 이 채널로 결과 이어서 보냅니다."
         }
         MonitorHandoffStatus::Active => "완료 시 이 채널로 결과를 이어서 표시합니다.",
+        MonitorHandoffStatus::Stalled => "스트림 진행이 멈춰 복구 상태를 확인 중입니다.",
         MonitorHandoffStatus::Completed => "결과가 위에 도착했습니다.",
         MonitorHandoffStatus::Failed { .. } => "자세한 사유는 다음 응답을 확인해 주세요.",
         MonitorHandoffStatus::TimedOut => "타임아웃 임계를 넘어 종료되었습니다.",
         MonitorHandoffStatus::Aborted => "브릿지 또는 세션이 종료되었습니다.",
     }
+}
+
+fn monitor_handoff_active_tail(started_at_unix: i64) -> String {
+    format!("⠋ 계속 처리 중 · 시작 <t:{started_at_unix}:R>")
 }
 
 /// Build the placeholder content shown when a turn hands off to the tmux
@@ -3765,6 +3954,9 @@ pub(super) fn build_monitor_handoff_placeholder_with_live_events(
     {
         lines.push(block.to_string());
     }
+    if matches!(status, MonitorHandoffStatus::Active) {
+        lines.push(monitor_handoff_active_tail(started_at_unix));
+    }
 
     lines.join("\n")
 }
@@ -3863,7 +4055,19 @@ pub(super) fn build_placeholder_status_block(
 }
 
 pub(super) fn build_processing_status_block(indicator: &str) -> String {
-    build_placeholder_status_block(indicator, None, None, "")
+    format!("{indicator} 계속 처리 중")
+}
+
+pub(super) fn build_status_panel_streaming_edit_text(
+    current_portion: &str,
+    status_block: &str,
+    provider: &crate::services::provider::ProviderKind,
+) -> String {
+    if current_portion.is_empty() {
+        return status_block.to_string();
+    }
+    let formatted = format_for_discord_with_status_panel(current_portion, provider);
+    build_streaming_placeholder_text(&formatted, status_block)
 }
 
 fn truncate_for_status_bytes(s: &str, max_bytes: usize) -> String {

@@ -170,6 +170,11 @@
   - `src/services/discord/{commands/text_commands.rs, commands/diagnostics.rs,
     discord_config_audit.rs, router/intake_gate.rs, model_catalog.rs,
     qwen_tmux_wrapper.rs, agentdesk_config.rs, inflight.rs}` (all 1000+ lines).
+  - `src/services/tmux_common.rs` (1233 lines; shared tmux pane scan + Claude
+    TUI ready/draft heuristics surface — bugfix only outside a split plan).
+  - `src/services/discord/standby_relay.rs` (1095 lines; cluster-standby
+    JSONL→Discord relay loop from #2011 phase 5.3, bugfix only outside an
+    extraction plan).
 - active_callsite_coverage: n/a.
 - invariants: watcher single-owner per #1222; placeholder lifecycle invariants
   per #1112; `/api/inflight/rebind` is the only path that synthesises an
@@ -316,6 +321,10 @@
     + `reconcile_phase_gate_for_terminal_dispatch_on_pg_tx`. Split the test
     module out into a sibling `phase_gates_tests.rs` before adding new
     feature logic).
+  - `src/db/dispatches/mod.rs` (1087 lines; dispatch slot/thread binding and
+    outbox-adjacent PG helpers, pushed over the giant-file threshold by
+    #2778/#2783 slot-isolation recovery. Split slot allocation helpers before
+    adding new feature logic).
   - `src/db/schema.rs` (3194 lines).
   - `src/db/kanban_cards/` (1932 total lines; kanban card persistence and
     GitHub sync lookup surface).

@@ -26,6 +26,7 @@ use context_panel::{ContextPanelSnapshot, render_context_panel_line};
 use recent_events::render_events;
 use session_panel::{SessionPanelSnapshot, render_session_panel_line};
 use status_events::{is_schedule_wakeup_tool, parse_eta_secs};
+pub(in crate::services::discord) use task_panel::TaskPanelInfo;
 use task_panel::{TaskPanelSnapshot, clean_task_panel_value, render_task_panel_line};
 
 pub(in crate::services::discord) use recent_events::RecentPlaceholderEvent;
@@ -41,6 +42,13 @@ pub(in crate::services::discord) use status_events::status_events_from_json;
 pub(in crate::services::discord) struct PlaceholderLiveEvents {
     by_channel: dashmap::DashMap<ChannelId, Mutex<VecDeque<RecentPlaceholderEvent>>>,
     status_by_channel: dashmap::DashMap<ChannelId, Mutex<StatusPanelState>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) struct LiveContextPanelSnapshot {
+    pub(in crate::services::discord) provider_session_id: Option<String>,
+    pub(in crate::services::discord) used_tokens: u64,
+    pub(in crate::services::discord) context_window_tokens: u64,
 }
 
 impl PlaceholderLiveEvents {
@@ -87,6 +95,25 @@ impl PlaceholderLiveEvents {
         render_events(guard.iter())
     }
 
+    pub(in crate::services::discord) fn context_panel_snapshot(
+        &self,
+        channel_id: ChannelId,
+    ) -> Option<LiveContextPanelSnapshot> {
+        let entry = self.status_by_channel.get(&channel_id)?;
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let context = guard.context.as_ref()?;
+        Some(LiveContextPanelSnapshot {
+            provider_session_id: context.provider_session_id.clone(),
+            used_tokens: context
+                .input_tokens
+                .saturating_add(context.cache_create_tokens)
+                .saturating_add(context.cache_read_tokens),
+            context_window_tokens: context.context_window_tokens,
+        })
+    }
+
     pub(in crate::services::discord) fn push_status_event(
         &self,
         channel_id: ChannelId,
@@ -124,6 +151,10 @@ impl PlaceholderLiveEvents {
         self.set_session_panel_snapshot(channel_id, snapshot)
     }
 
+    pub(in crate::services::discord) fn clear_session_panel(&self, channel_id: ChannelId) -> bool {
+        self.set_session_panel_snapshot(channel_id, None)
+    }
+
     fn set_session_panel_snapshot(
         &self,
         channel_id: ChannelId,
@@ -146,12 +177,9 @@ impl PlaceholderLiveEvents {
     pub(in crate::services::discord) fn set_task_panel_info(
         &self,
         channel_id: ChannelId,
-        dispatch_id: &str,
-        card_id: Option<&str>,
-        dispatch_type: Option<&str>,
-        owner_instance_id: Option<&str>,
+        info: TaskPanelInfo<'_>,
     ) -> bool {
-        let dispatch_id = clean_task_panel_value(dispatch_id);
+        let dispatch_id = clean_task_panel_value(info.dispatch_id);
         if dispatch_id.is_empty() {
             return self.set_task_panel_snapshot(channel_id, None);
         }
@@ -164,9 +192,12 @@ impl PlaceholderLiveEvents {
             channel_id,
             Some(TaskPanelSnapshot {
                 dispatch_id,
-                card_id: clean_optional(card_id),
-                dispatch_type: clean_optional(dispatch_type),
-                owner_instance_id: clean_optional(owner_instance_id),
+                card_id: clean_optional(info.card_id),
+                dispatch_type: clean_optional(info.dispatch_type),
+                owner_instance_id: clean_optional(info.owner_instance_id),
+                card_title: clean_optional(info.card_title),
+                dispatch_title: clean_optional(info.dispatch_title),
+                github_issue_number: info.github_issue_number.filter(|n| *n > 0),
             }),
         )
     }
@@ -193,6 +224,7 @@ impl PlaceholderLiveEvents {
     pub(in crate::services::discord) fn set_context_panel_usage(
         &self,
         channel_id: ChannelId,
+        provider_session_id: Option<&str>,
         input_tokens: u64,
         cache_create_tokens: u64,
         cache_read_tokens: u64,
@@ -205,6 +237,10 @@ impl PlaceholderLiveEvents {
         self.set_context_panel_snapshot(
             channel_id,
             Some(ContextPanelSnapshot {
+                provider_session_id: provider_session_id
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
                 input_tokens,
                 cache_create_tokens,
                 cache_read_tokens,
@@ -239,6 +275,21 @@ impl PlaceholderLiveEvents {
         provider: &ProviderKind,
         started_at_unix: i64,
     ) -> String {
+        self.render_status_panel_with_heartbeat(
+            channel_id,
+            provider,
+            started_at_unix,
+            chrono::Utc::now().timestamp(),
+        )
+    }
+
+    fn render_status_panel_with_heartbeat(
+        &self,
+        channel_id: ChannelId,
+        provider: &ProviderKind,
+        started_at_unix: i64,
+        heartbeat_at_unix: i64,
+    ) -> String {
         let snapshot = self
             .status_by_channel
             .get(&channel_id)
@@ -254,6 +305,7 @@ impl PlaceholderLiveEvents {
             self.render_block(channel_id),
             provider,
             started_at_unix,
+            heartbeat_at_unix,
         )
     }
 }
@@ -407,6 +459,7 @@ fn render_status_panel(
     live_block: Option<String>,
     provider: &ProviderKind,
     started_at_unix: i64,
+    _heartbeat_at_unix: i64,
 ) -> String {
     let header_status = if matches!(provider, ProviderKind::Codex)
         && matches!(snapshot.status, DerivedStatus::SubagentRunning { .. })
@@ -473,20 +526,35 @@ fn render_status_panel(
         cluster_enabled,
         local_instance_id.as_deref(),
     );
-    let recent_section = live_block
-        .filter(|block| !block.trim().is_empty())
-        .map(|block| format!("{recent_header}\n{block}"));
-
+    let recent_section = if matches!(header_status, DerivedStatus::Completed { .. }) {
+        None
+    } else {
+        live_block
+            .filter(|block| !block.trim().is_empty())
+            .map(|block| format!("{recent_header}\n{block}"))
+    };
     if let Some(recent) = recent_section.as_ref() {
         let mut with_recent = sections.clone();
         with_recent.push(recent.clone());
-        let joined = with_recent.join("\n\n");
+        let joined = join_status_panel_sections(&with_recent);
         if joined.chars().count() <= STATUS_PANEL_MAX_CHARS {
             return joined;
         }
     }
 
-    truncate_chars(&sections.join("\n\n"), STATUS_PANEL_MAX_CHARS)
+    truncate_status_panel_sections(sections)
+}
+
+fn join_status_panel_sections(sections: &[String]) -> String {
+    sections.join("\n\n")
+}
+
+fn truncate_status_panel_sections(sections: Vec<String>) -> String {
+    let joined = join_status_panel_sections(&sections);
+    if joined.chars().count() <= STATUS_PANEL_MAX_CHARS {
+        return joined;
+    }
+    truncate_chars(&joined, STATUS_PANEL_MAX_CHARS)
 }
 
 fn render_recent_section_header(

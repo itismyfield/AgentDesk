@@ -56,24 +56,11 @@ pub(super) fn clear_watchdog_deadline_override(channel_id: u64) {
         map.remove(&channel_id);
     }
 }
-/// Check if a deferred restart has been requested and no active or finalizing turns remain
-/// **across all providers**.
-///
-/// `global_active` / `global_finalizing` are process-wide counters shared by every provider.
-/// A single provider draining to zero is NOT sufficient — we must wait for every provider.
-/// `shutdown_remaining` ensures all providers finish saving before any calls `exit(0)`.
-/// `shutdown_counted` (per-provider) prevents double-decrement when both deferred restart
-/// and SIGTERM paths run for the same provider.
+/// Legacy restart helper retained for source compatibility. #2713 changed
+/// restart semantics to quick-exit + rehydrate, so callers must persist
+/// queue/checkpoint state before invoking this and must not wait for turns
+/// to drain here.
 pub(super) fn check_deferred_restart(shared: &SharedData) {
-    let g_active = shared
-        .global_active
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let g_finalizing = shared
-        .global_finalizing
-        .load(std::sync::atomic::Ordering::Relaxed);
-    if g_active > 0 || g_finalizing > 0 {
-        return;
-    }
     if !shared
         .restart_pending
         .load(std::sync::atomic::Ordering::Relaxed)
@@ -93,21 +80,23 @@ pub(super) fn check_deferred_restart(shared: &SharedData) {
     {
         return;
     }
-    // Only the last provider to finish calls exit(0)
     if shared
         .shutdown_remaining
         .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
-        == 1
+        != 1
     {
-        let Some(root) = crate::agentdesk_runtime_root() else {
-            return;
-        };
-        let marker = root.join("restart_pending");
-        let version = fs::read_to_string(&marker).unwrap_or_default();
-        let version = version.trim();
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!("  [{ts}] 🔄 Deferred restart: all turns complete, restarting for v{version}...");
-        let _ = fs::remove_file(&marker);
-        std::process::exit(0);
+        return;
     }
+    let version = crate::agentdesk_runtime_root()
+        .map(|root| root.join("restart_pending"))
+        .and_then(|marker| {
+            let version = fs::read_to_string(&marker).unwrap_or_default();
+            let _ = fs::remove_file(&marker);
+            Some(version)
+        })
+        .unwrap_or_default();
+    let version = version.trim();
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!("  [{ts}] 🔄 Deferred restart quick-exit requested for v{version}");
+    std::process::exit(0);
 }

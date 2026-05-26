@@ -255,6 +255,138 @@ async fn submit_verdict_pass_pg_marks_done_and_clears_review_status() {
 }
 
 #[tokio::test]
+async fn submit_verdict_pass_pg_accepts_late_stuck_ready_failed_review_dispatch() {
+    let pg_db = ReviewVerdictPgDatabase::create().await;
+    let pool = pg_db.migrate().await;
+    let db = test_db();
+    seed_review_card_pg(&pool, "dispatch-late-stuck").await;
+    sqlx::query(
+        "UPDATE task_dispatches
+         SET status = 'failed',
+             result = $1::jsonb,
+             updated_at = NOW()
+         WHERE id = 'dispatch-late-stuck'",
+    )
+    .bind(
+        serde_json::json!({
+            "failure_kind": "stuck_at_ready",
+            "reason": "agent ended at Ready for input without commit/push"
+        })
+        .to_string(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let state =
+        AppState::test_state_with_pg(db.clone(), test_engine_with_pg(pool.clone()), pool.clone());
+
+    let (status, _) = submit_verdict(
+        State(state),
+        Json(SubmitVerdictBody {
+            dispatch_id: "dispatch-late-stuck".to_string(),
+            overall: "pass".to_string(),
+            items: None,
+            notes: None,
+            feedback: None,
+            commit: None,
+            provider: None,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (card_status, review_status): (String, Option<String>) =
+        sqlx::query_as("SELECT status, review_status FROM kanban_cards WHERE id = 'card-1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let (dispatch_status, verdict): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, result::jsonb ->> 'verdict'
+         FROM task_dispatches
+         WHERE id = 'dispatch-late-stuck'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(dispatch_status, "completed");
+    assert_eq!(verdict.as_deref(), Some("pass"));
+    assert_eq!(card_status, "done");
+    assert_eq!(review_status, None);
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn submit_verdict_pass_pg_accepts_late_tmux_died_failed_review_dispatch() {
+    let pg_db = ReviewVerdictPgDatabase::create().await;
+    let pool = pg_db.migrate().await;
+    let db = test_db();
+    seed_review_card_pg(&pool, "dispatch-late-tmux-died").await;
+    sqlx::query(
+        "UPDATE task_dispatches
+         SET status = 'failed',
+             result = $1::jsonb,
+             updated_at = NOW()
+         WHERE id = 'dispatch-late-tmux-died'",
+    )
+    .bind(
+        serde_json::json!({
+            "failure_kind": "tmux_session_died",
+            "reason": "tmux session ended before watcher processed the verdict"
+        })
+        .to_string(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let state =
+        AppState::test_state_with_pg(db.clone(), test_engine_with_pg(pool.clone()), pool.clone());
+
+    let (status, _) = submit_verdict(
+        State(state),
+        Json(SubmitVerdictBody {
+            dispatch_id: "dispatch-late-tmux-died".to_string(),
+            overall: "pass".to_string(),
+            items: None,
+            notes: None,
+            feedback: None,
+            commit: None,
+            provider: None,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (card_status, review_status): (String, Option<String>) =
+        sqlx::query_as("SELECT status, review_status FROM kanban_cards WHERE id = 'card-1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let (dispatch_status, verdict): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, result::jsonb ->> 'verdict'
+         FROM task_dispatches
+         WHERE id = 'dispatch-late-tmux-died'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(dispatch_status, "completed");
+    assert_eq!(verdict.as_deref(), Some("pass"));
+    assert_eq!(card_status, "done");
+    assert_eq!(review_status, None);
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
 async fn consume_review_decision_pg_cas_rejects_status_changed_after_lookup() {
     let pg_db = ReviewVerdictPgDatabase::create().await;
     let pool = pg_db.migrate().await;
