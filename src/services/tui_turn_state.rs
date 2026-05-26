@@ -120,12 +120,58 @@ pub(crate) fn jsonl_ready_for_input(
     if !metadata.is_file() || metadata.len() == 0 {
         return Some(TuiReadyState::Unknown);
     }
-    if consumed_offset.is_some_and(|offset| metadata.len() > offset) {
-        return Some(TuiReadyState::Busy);
+    let offset_behind = consumed_offset.is_some_and(|offset| metadata.len() > offset);
+    // When the relay has not yet consumed the full transcript we keep the
+    // session marked Busy by default — a partially-relayed assistant stream
+    // must not be mistaken for an idle turn. The exception is a fully
+    // written terminator envelope (`result`, `turn.completed`, or
+    // `system/turn_duration|stop_hook_summary|init`): the turn is over and
+    // the remaining bytes are just trailing terminator metadata the relay
+    // will deliver shortly. Holding Busy in that case strands the idle-queue
+    // drain even though the next input can safely be sent (#2790 /
+    // quick-exit + #2789 regression).
+    //
+    // The override must inspect the **latest complete JSON line only**. The
+    // standard classifier `observe_provider_jsonl_turn_state` falls back
+    // through partial trailing fragments (e.g. an early `{"ty` slice of a
+    // new `user` envelope) to the previous complete line — so it would
+    // misreport a turn that has *just been re-started* as still Idle. The
+    // strict check below refuses to fall through partial lines and so
+    // protects against the in-progress-new-turn race.
+    //
+    // When `offset_behind` is true we trust the strict predicate as the sole
+    // source of truth and skip the regular observer pass; running observer
+    // again would re-read the file and could fall through a partial line
+    // written between the two reads, undoing the guarantee we just made.
+    if offset_behind {
+        return if jsonl_strict_terminator_idle(provider, path) {
+            Some(TuiReadyState::Ready)
+        } else {
+            Some(TuiReadyState::Busy)
+        };
     }
     Some(TuiReadyState::from_turn_state(
         observe_provider_jsonl_turn_state(provider, path),
     ))
+}
+
+fn jsonl_strict_terminator_idle(provider: &ProviderKind, path: &Path) -> bool {
+    let Ok(lines) = read_recent_jsonl_lines(path) else {
+        return false;
+    };
+    let Some(latest) = lines.iter().rev().find(|l| !l.trim().is_empty()) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<Value>(latest.trim()) else {
+        // Partial trailing fragment — cannot prove the turn has ended.
+        return false;
+    };
+    let classified = match provider {
+        ProviderKind::Claude => claude_envelope_turn_state(&json),
+        ProviderKind::Codex => codex_envelope_turn_state(&json),
+        _ => return false,
+    };
+    matches!(classified, Some(TuiTurnState::Idle))
 }
 
 pub(crate) fn runtime_binding_ready_for_input(
@@ -640,8 +686,17 @@ mod tests {
         );
     }
 
+    // The relay's consumed offset gates input readiness: when the relay has
+    // not finished consuming the transcript, we cannot assume the next prompt
+    // marker has been delivered. But a confirmed terminator envelope
+    // (`system/turn_duration`, `result`, `turn.completed`) means the turn is
+    // over regardless of the offset — the remaining bytes are just trailing
+    // terminator metadata. Holding Busy in that window strands the idle-queue
+    // drain (`hosted TUI structured turn state is busy` loop after #2789
+    // preserved inflight across quick-exit restarts but left the relay's
+    // last_offset frozen behind the trailing `result` envelope).
     #[test]
-    fn structured_jsonl_ready_requires_consumed_offset() {
+    fn structured_jsonl_ready_idle_terminator_overrides_offset_behind() {
         let file =
             write_jsonl(&[r#"{"type":"system","subtype":"turn_duration","session_id":"s"}"#]);
         let len = std::fs::metadata(file.path()).unwrap().len();
@@ -653,7 +708,9 @@ mod tests {
                 file.path(),
                 Some(len.saturating_sub(1)),
             ),
-            Some(TuiReadyState::Busy)
+            Some(TuiReadyState::Ready),
+            "trailing turn_duration envelope must report Ready even when the \
+             relay's consumed offset lags the transcript file size"
         );
         assert_eq!(
             jsonl_ready_for_input(
@@ -661,6 +718,128 @@ mod tests {
                 Some(RuntimeHandoffKind::ClaudeTui),
                 file.path(),
                 Some(len),
+            ),
+            Some(TuiReadyState::Ready)
+        );
+    }
+
+    // Defense-in-depth: when the trailing envelope is still streaming
+    // assistant content (no terminator yet) and the relay has not consumed
+    // the full file, the session is genuinely mid-turn — must report Busy
+    // so we do not send the next input on top of an in-progress response.
+    #[test]
+    fn structured_jsonl_ready_streaming_with_offset_behind_stays_busy() {
+        let file = write_jsonl(&[
+            r#"{"type":"user","message":{"content":"hi"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#,
+        ]);
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            jsonl_ready_for_input(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                file.path(),
+                Some(len.saturating_sub(1)),
+            ),
+            Some(TuiReadyState::Busy)
+        );
+    }
+
+    // Quick-exit restart regression (#2789 follow-up): inflight binding's
+    // `last_offset` is preserved at the pre-restart value while the Claude
+    // TUI continues writing the turn's terminal `result` envelope. The new
+    // bytes past `last_offset` must not make us miss the Idle classification.
+    #[test]
+    fn structured_jsonl_ready_result_envelope_after_quick_exit_offset_is_ready() {
+        let file = write_jsonl(&[
+            r#"{"type":"user","message":{"content":"hi"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#,
+            r#"{"type":"result","result":"done","session_id":"s"}"#,
+        ]);
+        let len = std::fs::metadata(file.path()).unwrap().len();
+        // Simulate quick-exit restart that froze the binding offset before
+        // the `result` envelope was written.
+        let stale_offset = len / 2;
+
+        assert_eq!(
+            jsonl_ready_for_input(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                file.path(),
+                Some(stale_offset),
+            ),
+            Some(TuiReadyState::Ready)
+        );
+    }
+
+    // Race guard: a `result` envelope is complete on disk, but the *next*
+    // turn has begun and a partial `{"ty` fragment of the new `user`
+    // envelope was just appended. The standard tail walker falls back
+    // through the partial to the prior `result` — that would let the
+    // strict-classifier mistakenly mark this as Ready and dispatch a
+    // racing input onto a session that already has a new user prompt
+    // in-flight. The strict terminator predicate must refuse to fall
+    // through and keep the state Busy until the new envelope completes.
+    #[test]
+    fn structured_jsonl_ready_partial_new_user_after_result_stays_busy() {
+        let file = write_jsonl(&[
+            r#"{"type":"result","result":"done","session_id":"s"}"#,
+            r#"{"ty"#,
+        ]);
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            jsonl_ready_for_input(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                file.path(),
+                Some(len.saturating_sub(5)),
+            ),
+            Some(TuiReadyState::Busy),
+            "partial trailing fragment after a result envelope must not be \
+             treated as a turn terminator"
+        );
+    }
+
+    // Codex parity for the same race: partial fragment after `turn.completed`
+    // must keep state Busy.
+    #[test]
+    fn structured_jsonl_ready_codex_partial_after_turn_completed_stays_busy() {
+        let file = write_jsonl(&[
+            r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#,
+            r#"{"ty"#,
+        ]);
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            jsonl_ready_for_input(
+                &ProviderKind::Codex,
+                Some(RuntimeHandoffKind::CodexTui),
+                file.path(),
+                Some(len.saturating_sub(5)),
+            ),
+            Some(TuiReadyState::Busy)
+        );
+    }
+
+    // Codex parity: `turn.completed` is Codex's terminator and must follow
+    // the same override semantics.
+    #[test]
+    fn structured_jsonl_ready_codex_turn_completed_overrides_offset_behind() {
+        let file = write_jsonl(&[
+            r#"{"type":"session_meta","payload":{"id":"s","cwd":"/repo"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}"#,
+            r#"{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":3}}"#,
+        ]);
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            jsonl_ready_for_input(
+                &ProviderKind::Codex,
+                Some(RuntimeHandoffKind::CodexTui),
+                file.path(),
+                Some(len.saturating_sub(1)),
             ),
             Some(TuiReadyState::Ready)
         );
