@@ -1311,14 +1311,14 @@ pub(crate) fn sweep_stale_inflight_files_at(root: &std::path::Path, max_age: Dur
             // Only remove when restart_mode is absent. A file with a restart_mode
             // set is owned by a planned lifecycle (drain/hot-swap); the existing
             // inflight retention helpers cover those.
+            #[derive(serde::Deserialize)]
+            struct RestartModeExt {
+                restart_mode: Option<serde_json::Value>,
+            }
             let restart_mode_present = fs::read_to_string(&fpath)
                 .ok()
-                .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
-                .and_then(|v| {
-                    v.get("restart_mode")
-                        .filter(|rm| !rm.is_null())
-                        .map(|_| true)
-                })
+                .and_then(|body| serde_json::from_str::<RestartModeExt>(&body).ok())
+                .and_then(|v| v.restart_mode.filter(|rm| !rm.is_null()).map(|_| true))
                 .unwrap_or(false);
             if restart_mode_present {
                 continue;
