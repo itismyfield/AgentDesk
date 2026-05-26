@@ -495,7 +495,7 @@
 | `services::discord::tmux_reattach_offsets` | `src/services/discord/tmux_reattach_offsets.rs` | 83 |  |
 | `services::discord::tmux_restart_handoff` | `src/services/discord/tmux_restart_handoff.rs` | 688 |  |
 | `services::discord::tmux_session_files` | `src/services/discord/tmux_session_files.rs` | 329 |  |
-| `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 6716 | giant-file |
+| `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 6756 | giant-file |
 | `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 2449 | giant-file |
 | `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 8409 | giant-file |
 | `services::discord::turn_bridge::completion_guard` | `src/services/discord/turn_bridge/completion_guard.rs` | 2540 | giant-file |
@@ -628,7 +628,7 @@
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 727 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 237 |  |
 | `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 1676 | giant-file |
-| `services::tui_turn_state` | `src/services/tui_turn_state.rs` | 774 |  |
+| `services::tui_turn_state` | `src/services/tui_turn_state.rs` | 953 |  |
 | `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 469 |  |
 | `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 768 |  |
 | `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 4082 | giant-file |
