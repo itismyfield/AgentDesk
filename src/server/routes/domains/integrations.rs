@@ -1,10 +1,10 @@
 use axum::{
     Router,
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
 };
 
 use super::super::{
-    ApiRouter, AppState, discord, dm_reply, github, github_dashboard, meetings, pr_summary,
+    ApiRouter, AppState, discord, dm_reply, github, github_dashboard, hooks, meetings, pr_summary,
     protected_api_domain,
 };
 
@@ -38,6 +38,12 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             )
             .route("/discord/channels/{id}", get(discord::channel_info))
             .route("/dm-reply/register", post(dm_reply::register_handler))
+            .route("/hook/reset-status", post(hooks::reset_status))
+            .route("/hook/skill-usage", post(hooks::skill_usage))
+            .route(
+                "/hook/session/{sessionKey}",
+                delete(hooks::disconnect_session),
+            )
             .route(
                 "/round-table-meetings",
                 get(meetings::list_meetings).post(meetings::upsert_meeting),

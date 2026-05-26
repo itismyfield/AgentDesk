@@ -234,10 +234,10 @@
 | `server::routes::domains::access` | `src/server/routes/domains/access.rs` | 13 |  |
 | `server::routes::domains::admin` | `src/server/routes/domains/admin.rs` | 89 |  |
 | `server::routes::domains::agents` | `src/server/routes/domains/agents.rs` | 58 |  |
-| `server::routes::domains::integrations` | `src/server/routes/domains/integrations.rs` | 72 |  |
+| `server::routes::domains::integrations` | `src/server/routes/domains/integrations.rs` | 78 |  |
 | `server::routes::domains::kanban` | `src/server/routes/domains/kanban.rs` | 87 |  |
 | `server::routes::domains::onboarding` | `src/server/routes/domains/onboarding.rs` | 39 |  |
-| `server::routes::domains::ops` | `src/server/routes/domains/ops.rs` | 337 |  |
+| `server::routes::domains::ops` | `src/server/routes/domains/ops.rs` | 331 |  |
 | `server::routes::domains::reviews` | `src/server/routes/domains/reviews.rs` | 33 |  |
 | `server::routes::escalation` | `src/server/routes/escalation.rs` | 2391 | giant-file |
 | `server::routes::github` | `src/server/routes/github.rs` | 737 |  |
