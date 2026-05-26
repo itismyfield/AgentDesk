@@ -411,7 +411,7 @@
 | `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 712 |  |
 | `services::discord::idle_recap` | `src/services/discord/idle_recap.rs` | 951 |  |
 | `services::discord::idle_recap_interaction` | `src/services/discord/idle_recap_interaction.rs` | 192 |  |
-| `services::discord::inflight` | `src/services/discord/inflight.rs` | 3196 | giant-file |
+| `services::discord::inflight` | `src/services/discord/inflight.rs` | 3321 | giant-file |
 | `services::discord::inflight_heartbeat_sweeper` | `src/services/discord/inflight_heartbeat_sweeper.rs` | 292 |  |
 | `services::discord::internal_api` | `src/services/discord/internal_api.rs` | 844 |  |
 | `services::discord::jsonl_watcher` | `src/services/discord/jsonl_watcher.rs` | 276 |  |
@@ -469,7 +469,7 @@
 | `services::discord::router::response_format` | `src/services/discord/router/response_format.rs` | 355 |  |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 124 |  |
 | `services::discord::router::turn_start` | `src/services/discord/router/turn_start.rs` | 429 |  |
-| `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 3424 | giant-file |
+| `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 3448 | giant-file |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 375 |  |
 | `services::discord::session_identity` | `src/services/discord/session_identity.rs` | 185 |  |
 | `services::discord::session_relay_sink` | `src/services/discord/session_relay_sink.rs` | 834 |  |

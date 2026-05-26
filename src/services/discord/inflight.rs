@@ -2685,9 +2685,7 @@ mod stall_recovery_tests {
         let _guard = stale_override_test_mutex()
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        super::set_test_tmux_alive_override(Some(&[
-            "AgentDesk-codex-adk-cdx-stale-alive-77",
-        ]));
+        super::set_test_tmux_alive_override(Some(&["AgentDesk-codex-adk-cdx-stale-alive-77"]));
 
         let mut state = InflightTurnState::new(
             ProviderKind::Codex,
