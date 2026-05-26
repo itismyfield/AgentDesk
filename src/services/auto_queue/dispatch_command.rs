@@ -510,14 +510,14 @@ pub(super) fn compact_path_label(path: &str) -> String {
 }
 
 pub(super) fn group_path_labels(members: &[usize], paths: &[HashSet<String>]) -> Vec<String> {
-    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut counts: HashMap<&str, usize> = HashMap::new();
     for &member in members {
         for path in &paths[member] {
-            *counts.entry(path.clone()).or_insert(0) += 1;
+            *counts.entry(path.as_str()).or_insert(0) += 1;
         }
     }
 
-    let mut ranked: Vec<(String, usize)> = counts
+    let mut ranked: Vec<(&str, usize)> = counts
         .into_iter()
         .filter(|(_, count)| *count >= 2)
         .collect();
@@ -525,7 +525,7 @@ pub(super) fn group_path_labels(members: &[usize], paths: &[HashSet<String>]) ->
     ranked
         .into_iter()
         .take(3)
-        .map(|(path, _)| compact_path_label(&path))
+        .map(|(path, _)| compact_path_label(path))
         .collect()
 }
 
