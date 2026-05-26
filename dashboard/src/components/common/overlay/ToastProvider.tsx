@@ -10,6 +10,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
+import { useI18n } from "../../../i18n";
 
 export type ToastVariant = "info" | "success" | "warning" | "error";
 
@@ -109,6 +110,7 @@ interface ToastViewportProps {
 }
 
 function ToastViewport({ toasts, onDismiss }: ToastViewportProps) {
+  const { t } = useI18n();
   if (typeof document === "undefined") return null;
   const visible = toasts.slice(-MAX_VISIBLE);
   if (visible.length === 0) return null;
@@ -117,7 +119,7 @@ function ToastViewport({ toasts, onDismiss }: ToastViewportProps) {
     <div
       className="pointer-events-none fixed right-3 z-[100] flex max-w-sm flex-col gap-2 bottom-[calc(4.5rem+env(safe-area-inset-bottom))] sm:bottom-4 sm:right-4"
       role="region"
-      aria-label="Notifications"
+      aria-label={t({ ko: "알림", en: "Notifications" })}
       aria-live="polite"
     >
       {visible.map((toast) => {
@@ -147,7 +149,7 @@ function ToastViewport({ toasts, onDismiss }: ToastViewportProps) {
                 background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)",
                 borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
               }}
-              aria-label="Dismiss"
+              aria-label={t({ ko: "닫기", en: "Dismiss" })}
             >
               <X size={12} />
             </button>
