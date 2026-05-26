@@ -393,7 +393,7 @@
 | `services::discord::commands::receipt` | `src/services/discord/commands/receipt.rs` | 160 |  |
 | `services::discord::commands::recovery_ops` | `src/services/discord/commands/recovery_ops.rs` | 502 |  |
 | `services::discord::commands::restart` | `src/services/discord/commands/restart.rs` | 347 |  |
-| `services::discord::commands::session` | `src/services/discord/commands/session.rs` | 263 |  |
+| `services::discord::commands::session` | `src/services/discord/commands/session.rs` | 255 |  |
 | `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 394 |  |
 | `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1463 | giant-file |
 | `services::discord::commands::voice` | `src/services/discord/commands/voice.rs` | 959 |  |

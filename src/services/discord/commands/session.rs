@@ -68,17 +68,9 @@ pub(in crate::services::discord) async fn cmd_start(
         }
     } else {
         // Local + path specified: expand ~ and validate locally
-        let expanded = if path_str.starts_with("~/") || path_str == "~" {
-            if let Some(home) = dirs::home_dir() {
-                home.join(path_str.strip_prefix("~/").unwrap_or(""))
-                    .display()
-                    .to_string()
-            } else {
-                path_str.to_string()
-            }
-        } else {
-            path_str.to_string()
-        };
+        let expanded = crate::runtime_layout::expand_user_path(path_str)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| path_str.to_string());
         let p = Path::new(&expanded);
         if !p.exists() || !p.is_dir() {
             ctx.say(format!("Error: '{}' is not a valid directory.", expanded))
