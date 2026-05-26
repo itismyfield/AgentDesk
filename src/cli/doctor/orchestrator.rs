@@ -2929,9 +2929,9 @@ fn check_mailbox_consistency(snapshot: &HealthSnapshot) -> Vec<Check> {
                 "Turn Mailbox Consistency",
                 finding.detail,
                 if finding.live_work_present {
-                    "live work evidence가 있으므로 자동 정리를 건너뛰고 operator 확인이 필요합니다."
+                    "operator verification is required because live work evidence exists, skipping auto-cleanup."
                 } else {
-                    "live work evidence가 없으면 protected stale-mailbox repair를 적용할 수 있습니다."
+                    "protected stale-mailbox repair can be applied since no live work evidence is present."
                 },
             )
             .with_subsystem("provider_runtime")
