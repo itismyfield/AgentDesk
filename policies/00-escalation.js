@@ -34,12 +34,8 @@ function manualInterventionFingerprint(status, reviewStatus, blockedReason) {
 }
 
 function loadManualInterventionState(cardId) {
-  var cards = agentdesk.db.query(
-    "SELECT status, review_status, blocked_reason FROM kanban_cards WHERE id = ?",
-    [cardId]
-  );
-  if (cards.length === 0) return null;
-  var card = cards[0];
+  var card = agentdesk.cards.get(cardId);
+  if (!card) return null;
   var cfg = agentdesk.pipeline.getConfig();
   if (agentdesk.pipeline.isTerminal(card.status, cfg)) {
     return {
@@ -128,6 +124,7 @@ function loopGuardNowMs() {
 
 function loadLoopGuardJson(raw) {
   if (!raw) return null;
+  if (typeof raw === "object") return raw;
   try {
     var parsed = JSON.parse(raw);
     return parsed && typeof parsed === "object" ? parsed : null;
@@ -137,12 +134,9 @@ function loadLoopGuardJson(raw) {
 }
 
 function loadCardMetadata(cardId) {
-  var rows = agentdesk.db.query(
-    "SELECT metadata FROM kanban_cards WHERE id = ?",
-    [cardId]
-  );
-  if (rows.length === 0 || !rows[0].metadata) return {};
-  return loadLoopGuardJson(rows[0].metadata) || {};
+  var card = agentdesk.cards.get(cardId);
+  if (!card || !card.metadata) return {};
+  return loadLoopGuardJson(card.metadata) || {};
 }
 
 function writeCardMetadata(cardId, metadata) {
@@ -238,13 +232,10 @@ function escalationApiUrl(path) {
 }
 
 function escalationCardTitle(cardId) {
-  var cards = agentdesk.db.query(
-    "SELECT github_issue_number FROM kanban_cards WHERE id = ?",
-    [cardId]
-  );
-  if (cards.length === 0) return cardId;
-  if (cards[0].github_issue_number) {
-    return "#" + cards[0].github_issue_number + " (" + cardId + ")";
+  var card = agentdesk.cards.get(cardId);
+  if (!card) return cardId;
+  if (card.github_issue_number) {
+    return "#" + card.github_issue_number + " (" + cardId + ")";
   }
   return cardId;
 }
