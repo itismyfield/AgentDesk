@@ -4,10 +4,16 @@ use serde::Serialize;
 use serde_json::{Map, Number, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::engine::loader::compute_policy_version;
+
+#[inline]
+fn recover_poisoned_lock<T>(e: PoisonError<T>) -> T {
+    tracing::warn!("RoutineScriptLoader lock was poisoned, recovering");
+    e.into_inner()
+}
 
 #[derive(Debug)]
 pub struct LoadedRoutineScript {
@@ -139,7 +145,7 @@ impl RoutineScriptLoader {
         let script_ref = script.script_ref.clone();
         self.scripts
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(recover_poisoned_lock)
             .insert(script_ref.clone(), script);
         Ok(script_ref)
     }
@@ -157,7 +163,7 @@ impl RoutineScriptLoader {
         let existing_scripts: HashMap<String, LoadedRoutineScript> = self
             .scripts
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(recover_poisoned_lock)
             .clone();
 
         for (root_index, root) in roots.iter().enumerate() {
@@ -271,7 +277,7 @@ impl RoutineScriptLoader {
     }
 
     pub fn get_script(&self, script_ref: &str) -> Result<Option<LoadedRoutineScript>> {
-        let scripts = self.scripts.lock().unwrap_or_else(|e| e.into_inner());
+        let scripts = self.scripts.lock().unwrap_or_else(recover_poisoned_lock);
         if let Some(script) = scripts.get(script_ref).cloned() {
             return Ok(Some(script));
         }
@@ -300,7 +306,7 @@ impl RoutineScriptLoader {
         Ok(self
             .scripts
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(recover_poisoned_lock)
             .contains_key(script_ref))
     }
 
@@ -308,7 +314,7 @@ impl RoutineScriptLoader {
         let mut refs: Vec<String> = self
             .scripts
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(recover_poisoned_lock)
             .keys()
             .cloned()
             .collect();
@@ -321,7 +327,7 @@ impl RoutineScriptLoader {
         loaded_scripts: Vec<LoadedRoutineScript>,
         seen_refs: &HashSet<String>,
     ) -> Result<usize> {
-        let mut scripts = self.scripts.lock().unwrap_or_else(|e| e.into_inner());
+        let mut scripts = self.scripts.lock().unwrap_or_else(recover_poisoned_lock);
         for script in loaded_scripts {
             scripts.insert(script.script_ref.clone(), script);
         }
@@ -333,7 +339,7 @@ impl RoutineScriptLoader {
 
 impl Drop for RoutineScriptLoader {
     fn drop(&mut self) {
-        let mut scripts = self.scripts.lock().unwrap_or_else(|e| e.into_inner());
+        let mut scripts = self.scripts.lock().unwrap_or_else(recover_poisoned_lock);
         scripts.clear();
     }
 }
@@ -638,6 +644,7 @@ fn collect_routine_script_paths(root: &Path, out: &mut Vec<PathBuf>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
 
     #[test]
     fn loads_registered_routine_script() {
@@ -1447,12 +1454,10 @@ mod tests {
                         .and_then(Value::as_str)
                         .is_some_and(|summary| summary.starts_with("성공 요약:"))
                 );
-                assert!(
-                    result
-                        .get("suppression_summary")
-                        .and_then(Value::as_str)
-                        .is_some_and(|summary| summary.contains("자동화 인벤토리 상태=implemented"))
-                );
+                assert!(result
+                    .get("suppression_summary")
+                    .and_then(Value::as_str)
+                    .is_some_and(|summary| summary.contains("자동화 인벤토리 상태=implemented")));
                 assert_eq!(
                     result.get("scoring_summary").and_then(Value::as_str),
                     Some(
@@ -2129,5 +2134,21 @@ mod tests {
             }
             other => panic!("unexpected action: {other:?}"),
         }
+    }
+
+    #[test]
+    fn loader_recovers_after_lock_poisoning() {
+        let loader = Arc::new(RoutineScriptLoader::new().unwrap());
+
+        let loader_clone = Arc::clone(&loader);
+        let result = thread::spawn(move || {
+            let _lock = loader_clone.scripts.lock().unwrap();
+            panic!("intentional panic to poison the lock");
+        })
+        .join();
+        assert!(result.is_err(), "thread should have panicked");
+
+        let refs = loader.script_refs();
+        assert!(refs.is_ok(), "should recover from poison and not panic");
     }
 }

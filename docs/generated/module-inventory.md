@@ -611,7 +611,7 @@
 | `services::routines::action` | `src/services/routines/action.rs` | 284 |  |
 | `services::routines::agent_executor` | `src/services/routines/agent_executor.rs` | 727 |  |
 | `services::routines::discord_log` | `src/services/routines/discord_log.rs` | 1679 | giant-file |
-| `services::routines::loader` | `src/services/routines/loader.rs` | 2133 | giant-file |
+| `services::routines::loader` | `src/services/routines/loader.rs` | 2154 | giant-file |
 | `services::routines::runtime` | `src/services/routines/runtime.rs` | 786 |  |
 | `services::routines::runtime_config` | `src/services/routines/runtime_config.rs` | 108 |  |
 | `services::routines::session_control` | `src/services/routines/session_control.rs` | 419 |  |
