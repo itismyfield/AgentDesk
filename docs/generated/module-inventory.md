@@ -282,7 +282,7 @@
 | `server::state` | `src/server/state.rs` | 235 |  |
 | `server::task_dispatch_claims` | `src/server/task_dispatch_claims.rs` | 1039 | giant-file |
 | `server::test_phase_runs` | `src/server/test_phase_runs.rs` | 426 |  |
-| `server::worker_registry` | `src/server/worker_registry.rs` | 1092 | giant-file |
+| `server::worker_registry` | `src/server/worker_registry.rs` | 1097 | giant-file |
 | `server::ws` | `src/server/ws.rs` | 277 |  |
 | `services` | `src/services/mod.rs` | 79 |  |
 | `services::agent_protocol` | `src/services/agent_protocol.rs` | 370 |  |
