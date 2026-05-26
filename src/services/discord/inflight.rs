@@ -1640,6 +1640,35 @@ fn planned_restart_retention_secs(restart_mode: InflightRestartMode) -> u64 {
     }
 }
 
+/// Thread-local test seam for `tmux_pane_alive_for_stale_check`. Production
+/// always calls `tmux_diagnostics::tmux_session_has_live_pane`; tests inject a
+/// known-alive name set via `set_test_tmux_alive_override` so the override
+/// behaviour can be exercised without spawning real tmux.
+#[cfg(test)]
+static TEST_TMUX_ALIVE_OVERRIDE: std::sync::OnceLock<
+    std::sync::Mutex<Option<std::collections::HashSet<String>>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(super) fn set_test_tmux_alive_override(names: Option<&[&str]>) {
+    let lock = TEST_TMUX_ALIVE_OVERRIDE.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = lock.lock().expect("tmux alive override lock poisoned");
+    *guard = names.map(|slice| slice.iter().map(|s| (*s).to_string()).collect());
+}
+
+fn tmux_pane_alive_for_stale_check(name: &str) -> bool {
+    #[cfg(test)]
+    {
+        if let Some(lock) = TEST_TMUX_ALIVE_OVERRIDE.get()
+            && let Ok(guard) = lock.lock()
+            && let Some(set) = guard.as_ref()
+        {
+            return set.contains(name);
+        }
+    }
+    crate::services::tmux_diagnostics::tmux_session_has_live_pane(name)
+}
+
 fn stale_removal_reason(
     state: &InflightTurnState,
     age_secs: u64,
@@ -1657,6 +1686,23 @@ fn stale_removal_reason(
             }
             let max_age = planned_restart_retention_secs(restart_mode);
             if age_secs > max_age {
+                // Defense-in-depth: when DrainRestart inflight ages past the
+                // 30-min retention window, refuse to wipe if the inflight's
+                // tmux pane is still alive. Wiping the row strands the live
+                // CLI's eventual response — see the 2026-05-26 incident where
+                // repeated quick-exits left a codex turn pane alive but its
+                // inflight anchor was removed at the 10th boot. Only one
+                // probe per stale row, gated by all the cheaper checks above.
+                if matches!(restart_mode, InflightRestartMode::DrainRestart)
+                    && let Some(name) = state.tmux_session_name.as_deref()
+                    && tmux_pane_alive_for_stale_check(name)
+                {
+                    tracing::warn!(
+                        "  ⚠ inflight stale-age ({age_secs}s > {max_age}s) overridden — tmux pane '{name}' still alive (channel {})",
+                        state.channel_id
+                    );
+                    return None;
+                }
                 return Some(format!(
                     "removing stale {} inflight state file ({age_secs}s old > {max_age}s)",
                     restart_mode.label()
@@ -2620,6 +2666,85 @@ mod stall_recovery_tests {
         assert_eq!(
             load_inflight_states_from_root(temp.path(), &ProviderKind::Codex).len(),
             1
+        );
+    }
+
+    /// Process-wide mutex so the two halves of the alive/dead override
+    /// regression do not race against each other when cargo test runs them
+    /// in parallel (the override is global state).
+    fn stale_override_test_mutex() -> &'static std::sync::Mutex<()> {
+        static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        M.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// 2026-05-26 adk-cdx incident regression: a DrainRestart inflight whose
+    /// file mtime aged past 1800s but whose tmux pane is still alive must
+    /// NOT be removed. Wiping it strands the live CLI's eventual response.
+    #[test]
+    fn stale_drain_restart_preserved_when_tmux_pane_alive() {
+        let _guard = stale_override_test_mutex()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        super::set_test_tmux_alive_override(Some(&["AgentDesk-codex-adk-cdx-stale-alive-77"]));
+
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            77,
+            Some("adk-cdx".to_string()),
+            7,
+            42,
+            43,
+            "hello".to_string(),
+            Some("session-77".to_string()),
+            Some("AgentDesk-codex-adk-cdx-stale-alive-77".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+        state.restart_mode = Some(InflightRestartMode::DrainRestart);
+        state.restart_generation = Some(7);
+
+        let result = super::stale_removal_reason(&state, 2000, 7);
+        super::set_test_tmux_alive_override(None);
+        assert!(
+            result.is_none(),
+            "alive tmux pane must override stale-age removal; got {:?}",
+            result
+        );
+    }
+
+    /// Mirror of the above: when the same aged DrainRestart row has NO live
+    /// tmux pane, the existing stale-removal still fires.
+    #[test]
+    fn stale_drain_restart_removed_when_tmux_pane_dead() {
+        let _guard = stale_override_test_mutex()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        super::set_test_tmux_alive_override(Some(&[])); // empty override = nothing alive
+
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            78,
+            Some("adk-cdx".to_string()),
+            7,
+            42,
+            43,
+            "hello".to_string(),
+            Some("session-78".to_string()),
+            Some("AgentDesk-codex-adk-cdx-stale-dead-78".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+        state.restart_mode = Some(InflightRestartMode::DrainRestart);
+        state.restart_generation = Some(7);
+
+        let result = super::stale_removal_reason(&state, 2000, 7);
+        super::set_test_tmux_alive_override(None);
+        let reason = result.expect("dead-pane DrainRestart past 1800s must be removed");
+        assert!(
+            reason.contains("removing stale drain_restart"),
+            "unexpected removal reason: {reason}"
         );
     }
 }
