@@ -129,7 +129,7 @@
 | `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 6370 | giant-file |
 | `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 3785 | giant-file |
 | `dispatch::dispatch_query` | `src/dispatch/dispatch_query.rs` | 176 |  |
-| `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 2234 | giant-file |
+| `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 2220 | giant-file |
 | `dispatch::dispatch_summary` | `src/dispatch/dispatch_summary.rs` | 326 |  |
 | `dispatch::test_support` | `src/dispatch/test_support.rs` | 401 |  |
 | `dispatch::types` | `src/dispatch/types.rs` | 32 |  |
