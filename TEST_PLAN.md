@@ -2,8 +2,8 @@
 
 ## Queue Hygiene & Merge-Readiness
 - **Duplicate Checks:** Before starting work, check open PRs for duplicates. If your generated inventory refresh or PR overlaps with existing open PRs, stop and report a no-change overlap.
-- **Strict No-Change Verification:** A "no-change" report MUST have exactly zero changed files. Verify using `gh pr view --json files`. If a PR claims "no change" but modifies files (e.g. migrations, routines), it is unsafe.
-- **Stale Branch Cleanup:** Treat low-signal or stale broad branches as queue debt. Recommend closing them rather than trying to salvage them in place. A no-change result should NOT become a PR unless it explicitly changes a queue-hygiene artifact.
+- **Strict No-Change Verification:** A "no-change" report MUST have exactly zero changed files. Verify using `gh pr view --json files`. If a PR claims "no change" but modifies files (e.g. migrations, routines), it is unsafe. If an empty no-change PR is unavoidably created, its body must explicitly list the exact overlapping PR numbers and branches.
+- **Stale Branch Cleanup:** Treat low-signal or stale broad branches as queue debt. Explicitly close or recommend closing stale broad branches rather than attempting to salvage them in place. A no-change result should NOT become a PR unless it explicitly changes a queue-hygiene artifact.
 
 ## PR Body Requirements
 Every PR must include:
