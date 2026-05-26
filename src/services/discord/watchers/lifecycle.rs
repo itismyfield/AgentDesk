@@ -16,6 +16,30 @@ pub(super) enum LivenessProbeOutcome {
     MarkerHonoredDead,
 }
 
+/// #2795 — for codex_tui sessions whose AgentDesk-side relay JSONL does not
+/// exist on disk, look up the actual codex rollout transcript by the
+/// inflight `session_id`. Returns `None` when the inflight is absent, is not
+/// a codex_tui handoff, lacks a session_id, or no rollout matches.
+fn codex_tui_rollout_fallback_for_session(
+    provider: &crate::services::provider::ProviderKind,
+    channel_id: serenity::model::id::ChannelId,
+) -> Option<String> {
+    if *provider != crate::services::provider::ProviderKind::Codex {
+        return None;
+    }
+    let state = super::super::inflight::load_inflight_state(provider, channel_id.get())?;
+    if !matches!(
+        state.runtime_kind,
+        Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui)
+    ) {
+        return None;
+    }
+    let session_id = state.session_id.as_deref()?;
+    let rollout =
+        crate::services::codex_tui::rollout_tail::find_rollout_by_session_id(session_id)?;
+    Some(rollout.display().to_string())
+}
+
 pub(super) fn evaluate_liveness_probe(
     marker_present: bool,
     pane_alive: bool,
@@ -1673,15 +1697,42 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         // location — older wrappers still write to /tmp, and a dcserver
         // restart that lost /tmp files should not falsely flag a live
         // session as "no output file". See issue #892.
-        let Some(output_path) =
-            crate::services::tmux_common::resolve_session_temp_path(session_name, "jsonl")
-        else {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ⏭ watcher skip for {} — no output file",
-                session_name
-            );
-            continue;
+        //
+        // #2795: codex_tui writes its rollout transcript directly to
+        // `~/.codex/sessions/...` and never lands a JSONL at the AgentDesk
+        // resolve path. When a dcserver restart happens mid-turn (agent ran
+        // deploy from inside its own turn), the inflight row is preserved
+        // but the AgentDesk relay JSONL is absent. Fall back to the actual
+        // codex rollout looked up by the inflight `session_id` so the
+        // restore loop can still attach a watcher and keep the live pane
+        // relayed.
+        let output_path = match crate::services::tmux_common::resolve_session_temp_path(
+            session_name,
+            "jsonl",
+        ) {
+            Some(path) => path,
+            None => {
+                let codex_fallback = codex_tui_rollout_fallback_for_session(&provider, *channel_id);
+                match codex_fallback {
+                    Some(path) => {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] ↻ watcher restore for {} — codex rollout fallback {}",
+                            session_name,
+                            path
+                        );
+                        path
+                    }
+                    None => {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] ⏭ watcher skip for {} — no output file",
+                            session_name
+                        );
+                        continue;
+                    }
+                }
+            }
         };
 
         if let Some((owner_channel_id, cancelled, existing_output_path)) =

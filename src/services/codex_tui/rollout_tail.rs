@@ -685,6 +685,49 @@ pub fn latest_rollout_for_cwd_since(
     best.map(|(_, path)| path)
 }
 
+/// Find a codex rollout transcript by its session UUID alone, scanning the
+/// configured codex sessions directory. Used by recovery / restore paths after
+/// a dcserver restart: the inflight row carries `session_id` but its stored
+/// `output_path` may point at the AgentDesk-side relay JSONL that does not
+/// exist for codex_tui (codex writes directly to `~/.codex/sessions/...`).
+/// Returns the first matching `rollout-*-<session_id>.jsonl` whose filename
+/// ends with the session UUID — codex assigns one rollout per session id.
+pub fn find_rollout_by_session_id(session_id: &str) -> Option<PathBuf> {
+    let sessions_dir = default_codex_sessions_dir()?;
+    find_rollout_by_session_id_under(&sessions_dir, session_id)
+}
+
+pub(crate) fn find_rollout_by_session_id_under(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> Option<PathBuf> {
+    let trimmed = session_id.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let suffix = format!("-{trimmed}.jsonl");
+    let mut best: Option<(SystemTime, PathBuf)> = None;
+    for path in rollout_files_under(sessions_dir) {
+        let matches = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.ends_with(&suffix));
+        if !matches {
+            continue;
+        }
+        let modified = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        if best
+            .as_ref()
+            .is_none_or(|(best_modified, _)| modified >= *best_modified)
+        {
+            best = Some((modified, path));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
 fn latest_rollout_for_cwd_and_session_since(
     cwd: &Path,
     session_id: &str,
@@ -1657,6 +1700,51 @@ mod tests {
         replay_rollout_file(file.path(), start_offset, &tx).unwrap();
         drop(tx);
         rx.iter().collect()
+    }
+
+    // #2795 — `find_rollout_by_session_id_under` must match codex rollout
+    // filenames by their trailing `-<session_id>.jsonl` suffix so dcserver
+    // recovery can re-attach to the live codex pane after a mid-turn restart
+    // when the AgentDesk-side relay JSONL is missing.
+    #[test]
+    fn find_rollout_by_session_id_matches_uuid_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("2026").join("05").join("27");
+        std::fs::create_dir_all(&sub).unwrap();
+        let target = sub.join(
+            "rollout-2026-05-27T05-50-07-019e660d-4859-7522-9cee-8ba7c4e7c743.jsonl",
+        );
+        std::fs::write(&target, "{}\n").unwrap();
+        let unrelated = sub.join("rollout-2026-05-27T05-50-07-deadbeef-0000-0000-0000-000000000000.jsonl");
+        std::fs::write(&unrelated, "{}\n").unwrap();
+
+        let resolved = find_rollout_by_session_id_under(
+            dir.path(),
+            "019e660d-4859-7522-9cee-8ba7c4e7c743",
+        );
+        assert_eq!(resolved.as_deref(), Some(target.as_path()));
+    }
+
+    #[test]
+    fn find_rollout_by_session_id_returns_none_for_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolved =
+            find_rollout_by_session_id_under(dir.path(), "00000000-0000-0000-0000-000000000000");
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn find_rollout_by_session_id_rejects_empty_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("2026").join("05").join("27");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            sub.join("rollout-2026-05-27T05-50-07-019e660d-4859-7522-9cee-8ba7c4e7c743.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+        assert!(find_rollout_by_session_id_under(dir.path(), "").is_none());
+        assert!(find_rollout_by_session_id_under(dir.path(), "   ").is_none());
     }
 
     // U-8 tool_call_message must drop entries with no usable `name` field
