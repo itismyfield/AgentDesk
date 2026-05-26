@@ -404,7 +404,10 @@ fn require_phase_gate_repair_operator_auth(
         let provided = trimmed_repair_header_value(headers, "authorization")
             .and_then(|value| value.strip_prefix("Bearer "))
             .map(str::trim);
-        if provided != Some(expected_token) {
+        if !provided
+            .map(|token| crate::utils::auth::constant_time_token_eq(expected_token, token))
+            .unwrap_or(false)
+        {
             return Err((
                 StatusCode::UNAUTHORIZED,
                 Json(json!({"error": "phase-gate repair requires explicit Bearer token"})),

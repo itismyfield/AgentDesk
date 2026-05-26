@@ -318,7 +318,7 @@
 | `services::auto_queue::activate_route` | `src/services/auto_queue/activate_route.rs` | 19 |  |
 | `services::auto_queue::cancel_run` | `src/services/auto_queue/cancel_run.rs` | 1032 | giant-file |
 | `services::auto_queue::command` | `src/services/auto_queue/command.rs` | 808 |  |
-| `services::auto_queue::control_routes` | `src/services/auto_queue/control_routes.rs` | 826 |  |
+| `services::auto_queue::control_routes` | `src/services/auto_queue/control_routes.rs` | 829 |  |
 | `services::auto_queue::dispatch_assignment_command` | `src/services/auto_queue/dispatch_assignment_command.rs` | 101 |  |
 | `services::auto_queue::dispatch_command` | `src/services/auto_queue/dispatch_command.rs` | 927 |  |
 | `services::auto_queue::dispatch_query` | `src/services/auto_queue/dispatch_query.rs` | 126 |  |
