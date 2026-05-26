@@ -1463,6 +1463,30 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                                         &ids,
                                     );
                                 }
+                                // Quick-exit must preserve inflight state with
+                                // bumped mtime + DrainRestart marker. Without
+                                // this, repeated quick-exits (e.g. destructive
+                                // E2E scenarios that restart release multiple
+                                // times) leave file mtime frozen at first save,
+                                // and stale-removal trips after 1800s even
+                                // while the tmux pane is still alive. Mirrors
+                                // the graceful-shutdown preserve block below.
+                                let inflight_states_qe =
+                                    inflight::load_inflight_states(&provider_for_deferred);
+                                if !inflight_states_qe.is_empty() {
+                                    let ts2 = chrono::Local::now().format("%H:%M:%S");
+                                    tracing::info!(
+                                        "  [{ts2}] 👁 preserving {} inflight turn(s) for restart recovery",
+                                        inflight_states_qe.len()
+                                    );
+                                    let marked_qe = inflight::mark_all_inflight_states_restart_mode(
+                                        &provider_for_deferred,
+                                        crate::services::discord::InflightRestartMode::DrainRestart,
+                                    );
+                                    tracing::info!(
+                                        "  [{ts2}] 🔖 marked {marked_qe} inflight turn(s) as drain_restart"
+                                    );
+                                }
                                 let ts = chrono::Local::now().format("%H:%M:%S");
                                 tracing::info!(
                                     "  [{ts}] 🔄 restart_pending detected — quick exit after persisting {queue_count} queued item(s)"
