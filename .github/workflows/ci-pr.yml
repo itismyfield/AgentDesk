@@ -349,6 +349,26 @@ jobs:
         if: ${{ needs.changes.outputs.ci_relax_safe == 'true' }}
         run: echo "PR PostgreSQL CI temporarily relaxed for TUI relay stabilization; run targeted checks locally."
 
+  dashboard_required_context:
+    name: Dashboard required context (ubuntu-latest)
+    needs:
+      - changes
+      - dashboard
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mirror dashboard result for branch protection
+        if: ${{ needs.changes.outputs.ci_relax_safe != 'true' }}
+        env:
+          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
+          FILTER_NAME: dashboard
+          FILTER_OUTPUT: ${{ needs.changes.outputs.dashboard }}
+          UPSTREAM_JOB_NAME: dashboard
+          UPSTREAM_RESULT: ${{ needs.dashboard.result }}
+        run: ./scripts/required-check-mirror.sh
+
   test_fast:
     name: PostgreSQL tests (ubuntu-postgres)
     needs: changes
@@ -469,6 +489,26 @@ jobs:
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true
+
+  high_risk_recovery_required_context:
+    name: High-risk recovery required context (ubuntu-latest)
+    needs:
+      - changes
+      - high-risk-recovery
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mirror high-risk recovery result for branch protection
+        if: ${{ needs.changes.outputs.ci_relax_safe != 'true' }}
+        env:
+          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
+          FILTER_NAME: high_risk_recovery
+          FILTER_OUTPUT: ${{ needs.changes.outputs.high_risk_recovery }}
+          UPSTREAM_JOB_NAME: high-risk-recovery
+          UPSTREAM_RESULT: ${{ needs.high-risk-recovery.result }}
+        run: ./scripts/required-check-mirror.sh
 
   lint:
     name: Lint
