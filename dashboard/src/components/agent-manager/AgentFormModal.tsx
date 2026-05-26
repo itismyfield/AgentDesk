@@ -201,11 +201,12 @@ export default function AgentFormModal({
               <div className="flex-1 min-w-0">
                 <span
                   className="text-xs font-mono px-1.5 py-0.5 rounded"
-                  aria-live="polite"
                   style={{
                     color: "var(--th-text-muted)",
                     background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
                   }}
+                  aria-live="polite"
+                  aria-atomic="true"
                 >
                   #{spriteNum || "—"}
                 </span>

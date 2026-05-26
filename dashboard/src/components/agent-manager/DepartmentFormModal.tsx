@@ -318,6 +318,11 @@ export default function DepartmentFormModal({
                   <EmojiPicker
                     value={form.icon}
                     onChange={(emoji) => setValue("icon", emoji, { shouldDirty: true, shouldValidate: true })}
+                    ariaLabel={
+                      form.icon
+                        ? t({ ko: `아이콘 변경 (현재: ${form.icon})`, en: `Change icon (current: ${form.icon})` })
+                        : t({ ko: "아이콘 선택기 열기", en: "Open icon picker" })
+                    }
                   />
                 </div>
                 <div className="flex-1">
