@@ -91,10 +91,6 @@ fn should_retry_deferred_idle_queue_kickoff(attempt: usize) -> bool {
     attempt < DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
 }
 
-fn should_retry_zero_start_deferred_idle_queue(reason: &'static str) -> bool {
-    reason == "hosted_tui_busy_pre_submit_pending"
-}
-
 impl Drop for DeferredHookBacklogGuard {
     fn drop(&mut self) {
         self.shared
@@ -131,14 +127,24 @@ pub(super) fn schedule_deferred_idle_queue_kickoff(
                     DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
                 );
                 let started = super::kickoff_idle_queues(ctx, &shared, tok, &provider).await;
-                let target_still_pending = if should_retry_zero_start_deferred_idle_queue(reason) {
-                    !super::mailbox_snapshot(shared.as_ref(), channel_id)
-                        .await
-                        .intervention_queue
-                        .is_empty()
-                } else {
-                    false
-                };
+                // Always re-check the queue on a zero-start drain regardless
+                // of `reason`. The earlier `should_retry_zero_start_*` reason
+                // allowlist gated retry on a single hard-coded reason
+                // (`hosted_tui_busy_pre_submit_pending`) so every other
+                // caller (monitor turn completion, placeholder_sweeper,
+                // catch-up retry, tmux stop, …) silently abandoned the
+                // queue when kickoff returned 0 — usually because the
+                // hosted TUI was still `Busy` for the few seconds after a
+                // turn finished. The blocker is the TUI ready state, not
+                // the reason string, so any reason can hit the same
+                // transient window. Retry whenever the queue is still
+                // non-empty within the bounded attempt budget; the
+                // hosted-TUI gate inside `kickoff_idle_queues` is what
+                // keeps us from racing a still-busy pane.
+                let target_still_pending = !super::mailbox_snapshot(shared.as_ref(), channel_id)
+                    .await
+                    .intervention_queue
+                    .is_empty();
                 if started == 0
                     && target_still_pending
                     && should_retry_deferred_idle_queue_kickoff(attempt)
@@ -210,13 +216,26 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Regression guard: zero-start retry must NOT depend on a `reason`
+    /// allowlist. Earlier code limited retry to the single
+    /// `hosted_tui_busy_pre_submit_pending` reason, so every other caller
+    /// (monitor turn completion, placeholder_sweeper, catch-up retry, tmux
+    /// stop, …) silently abandoned the queue when the hosted TUI was
+    /// transiently `Busy` at drain time — the recurring "no active turn
+    /// but queue stays full" symptom. The retry decision is now driven by
+    /// the live queue snapshot and the bounded attempt budget; any future
+    /// regression that re-introduces reason-based gating should fail
+    /// here.
     #[test]
-    fn zero_start_deferred_retry_is_limited_to_hosted_tui_busy_queue() {
-        assert!(should_retry_zero_start_deferred_idle_queue(
-            "hosted_tui_busy_pre_submit_pending"
-        ));
-        assert!(!should_retry_zero_start_deferred_idle_queue(
-            "race-loss enqueue idle drain"
+    fn zero_start_deferred_retry_is_not_gated_by_reason() {
+        // The reason-allowlist helper has been deleted on purpose. If a
+        // future change re-introduces a per-reason zero-start gate the
+        // commit must also re-explain why the cross-caller orphan-queue
+        // failure mode is acceptable; this test will need to be updated
+        // alongside.
+        assert!(should_retry_deferred_idle_queue_kickoff(1));
+        assert!(!should_retry_deferred_idle_queue_kickoff(
+            DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
         ));
     }
 
