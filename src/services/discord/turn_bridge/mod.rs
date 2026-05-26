@@ -6104,19 +6104,18 @@ pub(super) fn spawn_turn_bridge(
         shared_owned
             .global_finalizing
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // #2293 — hoist the TUI completion gate BEFORE the mailbox /
-        // active-turn cleanup so the cleanup can short-circuit on TimedOut and
-        // avoid releasing the channel mailbox while the pane is still busy
-        // (which would let intake admit a new turn into a non-quiescent
-        // pane). The value is `None` on the non-unix gate-disabled build, on
-        // paths that do not finalize via terminal delivery (cancelled /
-        // prompt_too_long / transport_error / recovery_retry), and when
-        // there is no tmux session bound to the inflight. Consumers below
-        // treat `None` as "no gate ran — proceed with legacy behaviour".
+        // #2293/#2780 — hoist the TUI completion gate BEFORE the visible
+        // completion/status cleanup so we can still suppress `응답 완료` when
+        // the pane has not quiesced. Do NOT use this gate as a mailbox
+        // correctness primitive: the bounded 3s probe is best-effort
+        // observability, and blocking `mailbox_finish_turn` here strands
+        // later user messages behind a stale active turn. The hosted-TUI
+        // pre-submit guard below is the correctness barrier that prevents
+        // follow-up input from being injected into a still-busy pane.
         #[cfg(unix)]
-        let bridge_early_gate_blocks_mailbox_release;
+        let bridge_early_gate_timed_out;
         #[cfg(not(unix))]
-        let bridge_early_gate_blocks_mailbox_release = false;
+        let bridge_early_gate_timed_out = false;
         #[cfg(unix)]
         #[allow(unused_assignments, unused_mut)]
         let mut bridge_tui_gate_outcome_early: Option<super::tmux::TuiCompletionGateOutcome> = None;
@@ -6147,13 +6146,11 @@ pub(super) fn spawn_turn_bridge(
                         provider = %provider.as_str(),
                         channel = channel_id.get(),
                         tmux_session = %tmux_session_name,
-                        "[{ts}] ⚠ #2293: bridge TUI quiescence gate timed out BEFORE mailbox release — deferring mailbox_finish_turn / stop_active_turn so a busy pane cannot admit a new turn"
+                        "[{ts}] ⚠ #2293/#2780: bridge TUI quiescence gate timed out before visible completion; mailbox release will continue and hosted-TUI pre-submit will guard follow-up injection"
                     );
                 }
             }
-            // Convenience: short-circuit the mailbox / active-turn cleanup
-            // sites below when the early gate timed out.
-            bridge_early_gate_blocks_mailbox_release = matches!(
+            bridge_early_gate_timed_out = matches!(
                 bridge_tui_gate_outcome_early,
                 Some(super::tmux::TuiCompletionGateOutcome::TimedOut)
             );
@@ -6197,20 +6194,13 @@ pub(super) fn spawn_turn_bridge(
             );
             if handoff_recorded {
                 false
-            } else if bridge_early_gate_blocks_mailbox_release {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    provider = %provider.as_str(),
-                    channel = channel_id.get(),
-                    "  [{ts}] ⚠ bridge watcher handoff missing finalizer, but TUI gate timed out; leaving mailbox for sweeper/watchdog reconciliation"
-                );
-                false
             } else {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
                     provider = %provider.as_str(),
                     channel = channel_id.get(),
                     watcher_owner_channel = watcher_owner_channel_id.get(),
+                    tui_gate_timed_out = bridge_early_gate_timed_out,
                     "  [{ts}] ⚠ bridge watcher handoff missing finalizer; bridge is releasing mailbox to avoid stranded queued turns"
                 );
                 let finish =
@@ -6309,21 +6299,15 @@ pub(super) fn spawn_turn_bridge(
                     .voice_barge_in
                     .drain_deferred_after_turn(&shared_owned, &provider, channel_id)
                     .await
-            } else if bridge_early_gate_blocks_mailbox_release {
-                // #2293 — TUI completion gate timed out above. Releasing the
-                // channel mailbox here would let intake admit a new turn into
-                // a still-busy pane, racing the placeholder sweeper /
-                // next-turn watcher reconcile that closes the lingering
-                // Active panel. Skip the release; the next watcher pass
-                // observes idle and finishes the mailbox on its own.
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    provider = %provider.as_str(),
-                    channel = channel_id.get(),
-                    "  [{ts}] ⚠ #2293: bridge mailbox_finish_turn deferred — TUI quiescence gate timed out; placeholder sweeper / next watcher pass will reconcile"
-                );
-                false
             } else {
+                if bridge_early_gate_timed_out {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        provider = %provider.as_str(),
+                        channel = channel_id.get(),
+                        "  [{ts}] ⚠ #2293/#2780: bridge releasing mailbox despite TUI quiescence timeout; follow-up pre-submit gate will requeue if pane is still busy"
+                    );
+                }
                 let finish =
                     super::mailbox_finish_turn(&shared_owned, &provider, channel_id).await;
                 record_turn_bridge_invariant(
