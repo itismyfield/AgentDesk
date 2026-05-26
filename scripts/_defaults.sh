@@ -498,12 +498,72 @@ _restart_pending_acknowledged() {
   printf '%s' "$detail_json" | grep -q '"restart_pending":true'
 }
 
+_foreign_active_turns_or_empty() {
+  # Prints one session_key per line for sessions whose status is
+  # turn_active/turn_busy/active AND whose channel_id is NOT in the
+  # exempt list. Used to block restart_pending from triggering a
+  # dcserver bounce that would wipe an unrelated channel's inflight
+  # anchor (2026-05-26 adk-cdx incident). Best-effort: returns empty on
+  # API failure so this is purely an additive guard, never blocks a
+  # legitimate restart when the API is unreachable.
+  local port="$1"
+  local exempt_csv="$2"
+  local origin
+  origin="$(_health_origin_header)"
+  curl -fsS --max-time 5 -H "$origin" "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/sessions" 2>/dev/null \
+    | python3 -c '
+import json, os, sys
+try:
+    data = json.loads(sys.stdin.read())
+except Exception:
+    sys.exit(0)
+items = data.get("sessions") if isinstance(data, dict) else data
+exempt = {c.strip() for c in os.environ.get("EXEMPT_CSV", "").split(",") if c.strip()}
+for s in items or []:
+    status = str(s.get("status", "")).lower()
+    if status not in {"turn_active", "turn_busy", "active"}:
+        continue
+    key = str(s.get("session_key") or "")
+    chan = str(s.get("channel_id") or s.get("channelId") or "")
+    if chan in exempt:
+        continue
+    if any(cid and cid in key for cid in exempt):
+        continue
+    print(key or chan or "<unknown>")
+' 2>/dev/null \
+    || true
+}
+
+guard_no_foreign_active_turns_or_warn() {
+  # Returns 0 (allow restart) when no foreign live turns are detected OR
+  # when AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS=1 is set. Returns 1 (refuse)
+  # only when foreign live turns exist AND the operator did not opt-in to
+  # override. Logs the busy sessions to stderr in either case so the
+  # incident is observable in deploy logs.
+  local port="$1"
+  local exempt_csv="${2:-}"
+  local busy
+  busy="$(EXEMPT_CSV="$exempt_csv" _foreign_active_turns_or_empty "$port" "$exempt_csv")"
+  if [ -z "$busy" ]; then
+    return 0
+  fi
+  echo "⚠ [gate] live turn(s) outside exempt channels (exempt=[${exempt_csv:-none}]):" >&2
+  printf '    - %s\n' $busy >&2
+  if [ "${AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS:-0}" = "1" ]; then
+    echo "▸ [gate] AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS=1 set — proceeding anyway" >&2
+    return 0
+  fi
+  echo "✗ [gate] refusing restart_pending — set AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS=1 to override" >&2
+  return 1
+}
+
 request_restart_drain_mode_or_fail() {
   local scope="$1"
   local label="$2"
   local port="$3"
   local runtime_root="$4"
   local source="${5:-agentdesk-restart}"
+  local exempt_csv="${6:-${AGENTDESK_RESTART_EXEMPT_CHANNELS:-}}"
   local ack_wait="${AGENTDESK_RESTART_DRAIN_ACK_WAIT:-20}"
   local waited=0
   local marker
@@ -512,6 +572,16 @@ request_restart_drain_mode_or_fail() {
 
   if [ -z "$runtime_root" ]; then
     echo "✗ [gate] ${scope} runtime root is required for restart drain mode" >&2
+    return 1
+  fi
+
+  # 2026-05-26 adk-cdx incident: block restart_pending when any non-exempt
+  # channel has a live turn. Without this, destructive E2E that restart
+  # release dcserver from a bot-driven channel orphans the bot's own
+  # in-flight response. Callers (e.g. e2e wrappers) pass their E2E
+  # channels via `exempt_csv` or AGENTDESK_RESTART_EXEMPT_CHANNELS so the
+  # E2E scenarios themselves still work.
+  if ! guard_no_foreign_active_turns_or_warn "$port" "$exempt_csv"; then
     return 1
   fi
 
