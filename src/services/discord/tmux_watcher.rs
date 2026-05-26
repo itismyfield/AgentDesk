@@ -6492,8 +6492,18 @@ TUI-E2E-marker ssh-direct
         );
     }
 
+    // The transcript holds a fully written terminator envelope
+    // (`system/turn_duration`) and the watcher's `current_offset` lags the
+    // file size by one byte. Pre-fix the watcher would return Busy and the
+    // idle-queue drain would loop indefinitely (the production 9× recurrence
+    // observed on 2026-05-26: `hosted TUI structured turn state is busy`
+    // every 2s after #2789 froze the binding offset across quick-exit
+    // restarts). The strict-terminator override in `jsonl_ready_for_input`
+    // now classifies a fully-parsed terminator envelope as Ready regardless
+    // of the relay's last_offset; partial trailing fragments are still
+    // refused, so this is safe.
     #[test]
-    fn claude_watcher_ready_waits_for_unread_transcript_bytes() {
+    fn claude_watcher_ready_treats_complete_terminator_envelope_as_ready() {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             file.path(),
@@ -6508,6 +6518,36 @@ TUI-E2E-marker ssh-direct
                 Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
                 file.path().to_str().unwrap(),
                 len.saturating_sub(1),
+            ),
+            Some(true)
+        );
+    }
+
+    // Race guard at the watcher boundary: a complete terminator envelope is
+    // followed by a partial `{"ty` fragment of the next turn's user line and
+    // the watcher's offset still lags. The strict-terminator predicate must
+    // refuse to fall through the partial line, keeping the watcher non-ready
+    // so we do not race a new turn that has just begun.
+    #[test]
+    fn claude_watcher_ready_keeps_busy_when_partial_user_follows_terminator() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            concat!(
+                r#"{"type":"system","subtype":"turn_duration","sessionId":"s"}"#,
+                "\n",
+                r#"{"ty"#,
+            ),
+        )
+        .unwrap();
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            watcher_jsonl_turn_state_ready_for_input(
+                &crate::services::provider::ProviderKind::Claude,
+                Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
+                file.path().to_str().unwrap(),
+                len.saturating_sub(5),
             ),
             Some(false)
         );
