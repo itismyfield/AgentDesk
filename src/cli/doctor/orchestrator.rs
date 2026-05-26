@@ -1114,7 +1114,7 @@ fn check_dispatch_outbox(snapshot: &HealthSnapshot) -> Check {
             "health payload unavailable",
             "dispatch outbox health를 읽을 수 없습니다.",
         )
-        .with_subsystem("health")
+        .with_subsystem("dispatch_outbox")
         .with_fix_safety(FixSafety::NotFixable);
     };
     let stats = body.get("dispatch_outbox");
@@ -4027,20 +4027,25 @@ pub(crate) fn run_doctor_report(options: DoctorOptions) -> Result<DoctorReport, 
     let snapshot = fetch_health_snapshot(&options);
     let mut checks = build_all_checks(&cfg, &snapshot);
     if let Some(profile) = options.profile {
-        checks.retain(|check| match profile {
-            DoctorProfile::Quick => {
-                matches!(check.subsystem, "server" | "health" | "provider_runtime")
-            }
-            DoctorProfile::Deep => true,
-            DoctorProfile::Security => {
-                matches!(
-                    check.subsystem,
-                    "security" | "config_audit" | "health" | "provider_runtime"
-                ) || !matches!(check.security_exposure, SecurityExposure::None)
-            }
-        });
+        checks.retain(|check| doctor_profile_includes_check(profile, check));
     }
     Ok(build_json_report(&options, &checks, &actions))
+}
+
+fn doctor_profile_includes_check(profile: DoctorProfile, check: &Check) -> bool {
+    match profile {
+        DoctorProfile::Quick => matches!(
+            check.subsystem,
+            "server" | "health" | "provider_runtime" | "dispatch_outbox"
+        ),
+        DoctorProfile::Deep => true,
+        DoctorProfile::Security => {
+            matches!(
+                check.subsystem,
+                "security" | "config_audit" | "health" | "provider_runtime"
+            ) || !matches!(check.security_exposure, SecurityExposure::None)
+        }
+    }
 }
 
 pub fn cmd_doctor(options: DoctorOptions) -> Result<(), String> {
@@ -4163,6 +4168,39 @@ pub fn cmd_doctor(options: DoctorOptions) -> Result<(), String> {
         ))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod profile_filter_tests {
+    use super::{Check, CheckGroup, doctor_profile_includes_check};
+    use crate::cli::doctor::contract::DoctorProfile;
+
+    #[test]
+    fn quick_profile_keeps_dispatch_outbox_checks() {
+        let dispatch_outbox = Check::ok(
+            "dispatch_outbox",
+            CheckGroup::Core,
+            "Dispatch Outbox",
+            "dispatch outbox is healthy",
+        )
+        .with_subsystem("dispatch_outbox");
+        let config_audit = Check::ok(
+            "config_paths",
+            CheckGroup::Core,
+            "Config Paths",
+            "config paths are healthy",
+        )
+        .with_subsystem("config_audit");
+
+        assert!(doctor_profile_includes_check(
+            DoctorProfile::Quick,
+            &dispatch_outbox
+        ));
+        assert!(!doctor_profile_includes_check(
+            DoctorProfile::Quick,
+            &config_audit
+        ));
     }
 }
 

@@ -55,7 +55,7 @@
 | `cli::doctor::contract` | `src/cli/doctor/contract.rs` | 100 |  |
 | `cli::doctor::health` | `src/cli/doctor/health.rs` | 200 |  |
 | `cli::doctor::mailbox` | `src/cli/doctor/mailbox.rs` | 256 |  |
-| `cli::doctor::orchestrator` | `src/cli/doctor/orchestrator.rs` | 5047 | giant-file |
+| `cli::doctor::orchestrator` | `src/cli/doctor/orchestrator.rs` | 5085 | giant-file |
 | `cli::doctor::startup` | `src/cli/doctor/startup.rs` | 515 |  |
 | `cli::init` | `src/cli/init.rs` | 1673 | giant-file |
 | `cli::migrate` | `src/cli/migrate.rs` | 348 |  |
