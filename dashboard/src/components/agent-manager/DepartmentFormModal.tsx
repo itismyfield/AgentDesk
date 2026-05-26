@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import type { Department } from "../../types";
@@ -97,6 +97,7 @@ export default function DepartmentFormModal({
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const overlayRef = useRef<HTMLDivElement>(null);
+  const colorButtonRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   // sort_order 기반 다음 순번 계산
   const nextSortOrder = (() => {
@@ -229,6 +230,37 @@ export default function DepartmentFormModal({
     borderColor: "var(--th-input-border)",
     color: "var(--th-text-primary)",
   };
+  const selectedColorIndex = Math.max(0, DEPT_COLORS.indexOf(form.color));
+  const selectColor = (color: string) => {
+    setValue("color", color, { shouldDirty: true, shouldValidate: true });
+  };
+  const moveColorFocus = (index: number) => {
+    const nextIndex = (index + DEPT_COLORS.length) % DEPT_COLORS.length;
+    selectColor(DEPT_COLORS[nextIndex]);
+    colorButtonRefs.current[nextIndex]?.focus();
+  };
+  const handleColorKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, index: number) => {
+    switch (event.key) {
+      case "ArrowRight":
+      case "ArrowDown":
+        event.preventDefault();
+        moveColorFocus(index + 1);
+        break;
+      case "ArrowLeft":
+      case "ArrowUp":
+        event.preventDefault();
+        moveColorFocus(index - 1);
+        break;
+      case "Home":
+        event.preventDefault();
+        moveColorFocus(0);
+        break;
+      case "End":
+        event.preventDefault();
+        moveColorFocus(DEPT_COLORS.length - 1);
+        break;
+    }
+  };
 
   return (
     <div
@@ -314,18 +346,24 @@ export default function DepartmentFormModal({
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
+              <div role="radiogroup" aria-labelledby="dept-theme-color-label">
+                <label id="dept-theme-color-label" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
                   {tr("테마 색상", "Theme Color")}
                 </label>
                 <div className="flex gap-2 flex-wrap">
-                  {DEPT_COLORS.map((c) => (
+                  {DEPT_COLORS.map((c, index) => (
                     <button
                       key={c}
+                      ref={(node) => {
+                        colorButtonRefs.current[index] = node;
+                      }}
                       type="button"
+                      role="radio"
                       aria-label={t({ ko: `색상 ${c}`, en: `Color ${c}` })}
-                      aria-pressed={form.color === c}
-                      onClick={() => setValue("color", c, { shouldDirty: true, shouldValidate: true })}
+                      aria-checked={form.color === c}
+                      tabIndex={index === selectedColorIndex ? 0 : -1}
+                      onKeyDown={(event) => handleColorKeyDown(event, index)}
+                      onClick={() => selectColor(c)}
                       className="w-11 h-11 rounded-full transition-all hover:scale-110"
                       style={{
                         background: c,

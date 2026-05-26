@@ -139,7 +139,7 @@ export default function AgentFormModal({
           >
             <div className="space-y-4">
             {/* ── 스프라이트 얼굴 미리보기 + 위/아래 변경 ── */}
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3" role="group" aria-label={tr("스프라이트 선택기", "Sprite Selector")}>
               <div className="flex flex-col items-center gap-1">
                 <button
                   type="button"
@@ -164,7 +164,7 @@ export default function AgentFormModal({
                   {spriteNum > 0 ? (
                     <img
                       src={`/sprites/${spriteNum}-D-1.png`}
-                      alt={t({ ko: `스프라이트 ${spriteNum}`, en: `Sprite ${spriteNum}` })}
+                      alt={t({ ko: `선택된 스프라이트 미리보기: ${spriteNum}`, en: `Selected sprite preview: ${spriteNum}` })}
                       className="w-full h-full object-cover"
                       style={{ imageRendering: "pixelated" }}
                     />
@@ -201,6 +201,7 @@ export default function AgentFormModal({
               <div className="flex-1 min-w-0">
                 <span
                   className="text-xs font-mono px-1.5 py-0.5 rounded"
+                  aria-live="polite"
                   style={{
                     color: "var(--th-text-muted)",
                     background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
