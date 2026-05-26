@@ -5,7 +5,7 @@
 
 - Production Rust modules: `623`
 - Giant-file threshold: `>= 1000` lines
-- Giant files: `124`
+- Giant files: `125`
 
 ## Namespace Summary
 
@@ -582,7 +582,7 @@
 | `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 1368 | giant-file |
 | `services::platform::dump_tool` | `src/services/platform/dump_tool.rs` | 111 |  |
 | `services::platform::shell` | `src/services/platform/shell.rs` | 129 |  |
-| `services::platform::tmux` | `src/services/platform/tmux.rs` | 959 |  |
+| `services::platform::tmux` | `src/services/platform/tmux.rs` | 1016 | giant-file |
 | `services::pr_summary` | `src/services/pr_summary.rs` | 542 |  |
 | `services::process` | `src/services/process.rs` | 1407 | giant-file |
 | `services::provider` | `src/services/provider.rs` | 3481 | giant-file |
