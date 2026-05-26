@@ -73,6 +73,12 @@ def parse_args() -> argparse.Namespace:
         "each channel before every scenario. Avoids cross-scenario bleed.",
     )
     parser.add_argument(
+        "--no-reset-before-each",
+        dest="reset_before_each",
+        action="store_false",
+        help="Do not call the cancel/reset API before scenarios.",
+    )
+    parser.add_argument(
         "--queue-runtime-root",
         default=str(Path.home() / ".adk" / "release" / "runtime"),
         help="ADK runtime root used to truncate on-disk relay queues during reset.",
@@ -83,6 +89,13 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Skip the cdx half of a 'both' scenario if no codex tmux session is "
         "ready, instead of failing the whole scenario.",
+    )
+    parser.add_argument(
+        "--require-cdx",
+        dest="skip_cdx_if_unavailable",
+        action="store_false",
+        help="Require cdx scenarios even when the codex tmux session is absent; "
+        "send-to-agent should auto-spawn it.",
     )
     parser.add_argument(
         "--hard-reset-session-each",
@@ -102,6 +115,20 @@ def parse_args() -> argparse.Namespace:
         "--handoff-from-agent",
         default="adk-dashboard",
         help="Source agent id stamped in the send-to-agent envelope.",
+    )
+    parser.add_argument(
+        "--restart-script",
+        default=os.environ.get("AGENTDESK_E2E_RESTART_SCRIPT"),
+        help="Safe dcserver restart wrapper to use for restart_dcserver steps. "
+        "Called as '<script> <dev|release>'. Falls back to launchctl kickstart "
+        "only when unset.",
+    )
+    parser.add_argument(
+        "--restart-target-override",
+        choices=("dev", "release"),
+        default=os.environ.get("AGENTDESK_E2E_RESTART_TARGET"),
+        help="Override restart_dcserver target from scenarios. Useful when "
+        "running the same scenario set against release.",
     )
     return parser.parse_args()
 
@@ -347,7 +374,7 @@ def run_scenario(
             return result
         channel_targets = filtered
 
-    if args.reset_before_each:
+    if args.reset_before_each and not args.dry_run:
         runtime_root = Path(args.queue_runtime_root)
         result["resets"] = []
         for kind, channel_id in channel_targets:
@@ -523,14 +550,10 @@ def run_one_channel(
                     f"timeout waiting for Discord text {needle!r}"
                 )
         elif "restart_dcserver" in step:
-            target = (step["restart_dcserver"] or {}).get("target", "release")
-            label = "com.agentdesk." + ("release" if target == "release" else "dev")
-            subprocess.run(
-                ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"],
-                check=False,
-                capture_output=True,
+            target = args.restart_target_override or (step["restart_dcserver"] or {}).get(
+                "target", "release"
             )
-            wait_for_health(client.base_url, timeout_s=60)
+            restart_dcserver_for_e2e(target=target, args=args, base_url=client.base_url)
         elif "kill_pane" in step:
             reverify = (step["kill_pane"] or {}).get("reverify_session_name_substring") or ""
             session_name = scenario_session_name(scenario, channel_kind)
@@ -589,6 +612,100 @@ def wait_for_health(base_url: str, *, timeout_s: float = 60.0, poll_interval_s: 
             pass
         time.sleep(poll_interval_s)
     raise assertions.AssertionError(f"dcserver did not become healthy within {timeout_s}s")
+
+
+def _guard_no_foreign_active_turns(base_url: str, args: argparse.Namespace) -> None:
+    """Refuse restart when a turn is active on a non-E2E channel.
+
+    The destructive E2E flow restarts release dcserver; if another channel
+    has a live turn (typical case: the bot itself was driven from a
+    non-E2E channel to *invoke* this test), the cascading restarts wipe
+    that turn's inflight anchor and lose its response relay (2026-05-26
+    adk-cdx incident). Inflight-state lookup is the most precise signal —
+    fall back to /api/sessions when the inflight endpoint is unavailable.
+    """
+
+    e2e_channel_ids = {
+        str(getattr(args, "channel_id_cc", "") or ""),
+        str(getattr(args, "channel_id_cdx", "") or ""),
+    }
+    e2e_channel_ids.discard("")
+    if not e2e_channel_ids:
+        return
+
+    try:
+        with urllib.request.urlopen(f"{base_url}/api/sessions", timeout=5) as response:
+            payload = json.loads(response.read())
+    except Exception:  # noqa: BLE001 — network / API gone, leave to wait_for_health
+        return
+
+    sessions = payload.get("sessions") or payload if isinstance(payload, list) else payload.get("sessions", [])
+    busy: list[str] = []
+    for session in sessions or []:
+        status = str(session.get("status", "")).lower()
+        if status not in {"turn_active", "turn_busy", "active"}:
+            continue
+        session_key = str(session.get("session_key") or "")
+        channel_id = str(session.get("channel_id") or session.get("channelId") or "")
+        # Match either explicit channel_id field or substring-in-session_key
+        # (session_key embeds the channel-bound tmux name).
+        if channel_id in e2e_channel_ids:
+            continue
+        if any(cid and cid in session_key for cid in e2e_channel_ids):
+            continue
+        busy.append(session_key or channel_id or "<unknown>")
+
+    if busy:
+        raise assertions.AssertionError(
+            "refusing to restart dcserver: live turn(s) outside E2E channels "
+            f"(E2E={sorted(e2e_channel_ids)}). Active: {busy}. "
+            "Stop or wait for those turns before running destructive E2E."
+        )
+
+
+def restart_dcserver_for_e2e(
+    *,
+    target: str,
+    args: argparse.Namespace,
+    base_url: str,
+) -> None:
+    """Restart dcserver for destructive E2E scenarios.
+
+    Production runs should pass the AgentDesk restart skill wrapper so drain
+    mode protects live turns. The launchctl path remains as a CI/dev fallback
+    for environments that do not install the wrapper.
+    """
+
+    if target not in ("dev", "release"):
+        raise assertions.AssertionError(f"unsupported restart target: {target!r}")
+
+    _guard_no_foreign_active_turns(base_url, args)
+
+    if args.restart_script:
+        script = Path(args.restart_script).expanduser()
+        if not script.exists():
+            raise assertions.AssertionError(f"restart script not found: {script}")
+        proc = subprocess.run(
+            [str(script), target],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        if proc.returncode != 0:
+            raise assertions.AssertionError(
+                f"restart script failed for {target} with exit {proc.returncode}\n"
+                f"stdout:\n{proc.stdout[-4000:]}\n"
+                f"stderr:\n{proc.stderr[-4000:]}"
+            )
+    else:
+        label = "com.agentdesk." + ("release" if target == "release" else "dev")
+        subprocess.run(
+            ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"],
+            check=False,
+            capture_output=True,
+        )
+    wait_for_health(base_url, timeout_s=90)
 
 
 def scenario_session_name(scenario: dict[str, Any], channel_kind: str) -> str:
