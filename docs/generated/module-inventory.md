@@ -53,7 +53,7 @@
 | `cli::discord` | `src/cli/discord.rs` | 123 |  |
 | `cli::doctor` | `src/cli/doctor.rs` | 9 |  |
 | `cli::doctor::contract` | `src/cli/doctor/contract.rs` | 100 |  |
-| `cli::doctor::health` | `src/cli/doctor/health.rs` | 164 |  |
+| `cli::doctor::health` | `src/cli/doctor/health.rs` | 200 |  |
 | `cli::doctor::mailbox` | `src/cli/doctor/mailbox.rs` | 256 |  |
 | `cli::doctor::orchestrator` | `src/cli/doctor/orchestrator.rs` | 5047 | giant-file |
 | `cli::doctor::startup` | `src/cli/doctor/startup.rs` | 515 |  |
