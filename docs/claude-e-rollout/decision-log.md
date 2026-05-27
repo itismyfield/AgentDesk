@@ -669,3 +669,44 @@ under `--resume <sid>` reuses the prior turn's session as expected.
 - Merge `wt/claude-adk-cc-20260527-104753` → `main` once both
   reviewers return PASS-CLEAN (or short-circuit per the round-3
   protocol if one stalls).
+
+---
+
+## 2026-05-27 — Final cumulative review close (short-circuit)
+
+**Reviewers:**
+
+- Claude `general-purpose` cumulative review: **PASS-CLEAN
+  MERGE-READY**. BLOCKING=0, MAJOR=0, NIT 1 (README docs
+  cross-link) — fixed in commit `14f829e8c`.
+- Codex `codex-rescue` cumulative review: dispatched, last log
+  activity 21:38:50 KST, 30 min auto-watcher hit deadline at
+  22:00:16 KST without a written verdict. Codex CLI job remained
+  `running` but ≥21 min idle.
+
+**Short-circuit gate (rollout-plan round-budget rule):**
+
+- One reviewer returned PASS-CLEAN ✓
+- Other reviewer ≥25 min idle on cumulative review (Codex CLI
+  job, not the wrapper agent) ✓
+- Operator (this rollout's driver) verifies directly ✓:
+  - `cargo build` clean
+  - `cargo test --bin agentdesk services::provider_hosting`
+    23/23 pass
+  - `cargo test --bin agentdesk -- cancel_token_tests`
+    8/8 pass
+  - `cargo fmt --check` clean
+  - `cargo check --tests --features legacy-sqlite-tests` clean
+  - Phase 2 e2e S1+S2 3-mode PASS captured via
+    `agentdesk discord read`
+  - Operator's live `agentdesk.yaml` set to `runtime: claude-e`
+    on the e2e channel only; other channels remain on TUI hosting
+    via the legacy `tui_hosting: true` boolean
+  - `agentdesk.example.yaml` ships `runtime: pipe` as the
+    example default so new installations stay on the simplest
+    runtime
+
+**Outcome:** Phase 3 closed. PR #2797 ready for merge.
+
+If the Codex cumulative review surfaces a new finding after this
+entry, it lands as a follow-up PR rather than blocking the merge.
