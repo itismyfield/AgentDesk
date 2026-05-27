@@ -5,9 +5,9 @@ per channel and per provider; the resolver picks one at dispatch time.
 
 | Mode | Selector | What it runs | When to pick |
 |---|---|---|---|
-| `claude-e` | `runtime: claude-e` (default in `agentdesk.example.yaml`) | Per-turn `claude-e` PTY-backed wrapper around `claude` | Default. Clean per-turn lifecycle, no long-running tmux state to babysit. |
+| `pipe` | `runtime: pipe` (**default** in `agentdesk.example.yaml`) *(also implicit when `tui_hosting: false` and no `runtime` set)* | `claude -p` invocation wrapped by AgentDesk's tmux session supervisor | Default. Simplest path, lowest moving parts. |
 | `tui` | `runtime: tui` *(or legacy `tui_hosting: true` with no `runtime` set)* | Long-running interactive Claude TUI inside a tmux pane, keystroke-relayed | When you want `tmux attach` observability or follow-up turns to share an in-process state cache (warm MCP, project knowledge). |
-| `pipe` | `runtime: pipe` *(or `tui_hosting: false` with no `runtime` set)* | `claude -p` invocation wrapped by AgentDesk's tmux session supervisor | Diagnostic fallback when the other two paths are misbehaving and you want the legacy print-mode dispatch. |
+| `claude-e` | `runtime: claude-e` *(opt-in only — requires `npm install -g claude-e` on the host)* | Per-turn `claude-e` PTY-backed wrapper around `claude` | When you want clean per-turn process boundaries (cancel / recovery / lifecycle become process exit codes). Operator must opt in explicitly. |
 
 The `tui_hosting` boolean is preserved for back-compat: configs that
 predate the `runtime` field continue to resolve exactly as before.

@@ -613,37 +613,41 @@ under `--resume <sid>` reuses the prior turn's session as expected.
   cancel cascade unit tests in `cancel_token_tests` cover the
   semantics directly.
 
-**Phase 3 default runtime decision:** `claude-e`.
+**Phase 3 default runtime decision:** `pipe` (operator-set 2026-05-27).
+`claude-e` is opt-in only — operators must explicitly set
+`runtime: claude-e` per provider or per channel to activate it.
 
-**Why `claude-e` becomes the default:**
+**Why `pipe` is the default and `claude-e` is opt-in:**
 
-- Original rollout driver: the TUI relay was a workaround for the
-  Anthropic `claude -p` quota policy and has been an ongoing
-  stability burden (every recent commit on `main` from May 24–27
-  fixed a different TUI mailbox / quiescence / recovery edge case).
-- claude-e gives per-turn process boundaries → cancellation, recovery,
-  and lifecycle become process exit codes instead of structural turn
-  inferences. The bulk of the "is the TUI done?" plumbing is bypassed.
-- Probes 1-5 + S1/S2 demonstrated coherent end-to-end behaviour: spawn
-  → JSONL stream → session resume → tool use → completion-meta →
-  silent cleanup cancel under `completion_cleanup` flag.
-- TUI hosting stays selectable via `runtime: tui` (or by leaving the
-  legacy `tui_hosting: true` alone — back-compat preserved). No code
-  is deleted.
+- Operator constraint (set 2026-05-27 after Phase 2 PASS): the
+  default Claude runtime stays on `claude -p` for the simplest
+  failure surface. claude-e is a new path with known gaps
+  (`cache_ttl_minutes` forwarding, `rate_limit_event` surfacing,
+  cost/duration telemetry) and an external dependency
+  (`npm install -g claude-e`); requiring an explicit opt-in keeps
+  new installations from picking it up without an informed
+  operator decision.
+- Phase 2 evidence (probes 1-5 + S1/S2 PASS) demonstrates that
+  claude-e *works* — it just doesn't become the auto-default.
+  Operators who already have `claude-e` installed flip a single
+  YAML line to use it.
+- TUI hosting remains the recommended runtime for operators who
+  value `tmux attach` observability, but it is also no longer the
+  example default; only `tui_hosting: true` (legacy) keeps a
+  channel on TUI when no `runtime` field is present.
 
 **What changes in Phase 3:**
 
-- `default_provider_tui_hosting("claude")` keeps returning `true`
-  for back-compat with operator configs that do not explicitly set
-  `runtime`, **but** `agentdesk.example.yaml` now ships
-  `runtime: claude-e` enabled on `providers.claude` so new
-  installations default to claude-e dispatch.
-- A new doc, `docs/claude-e-rollout/operator-guide.md`, explains how
-  to flip a channel back to `tui` or `pipe`, how to monitor
+- `agentdesk.example.yaml` ships `providers.claude.runtime: pipe`
+  as the example default. `tui_hosting: true` is preserved alongside
+  for the back-compat shim (without an explicit `runtime`, the
+  derivation continues to honour the boolean).
+- A new doc, `docs/claude-e-rollout/operator-guide.md`, explains
+  how to flip a channel to `tui` or `claude-e`, how to monitor
   per-runtime metrics, and the rollback contract from the rollout
   plan's matrix.
 - The operator's live `~/.adk/release/config/agentdesk.yaml` is
-  left untouched by this change — `runtime` resolution is a runtime
+  left untouched by this change — runtime resolution is a runtime
   decision per provider/channel and the operator decides when to
   promote claude-e in production.
 

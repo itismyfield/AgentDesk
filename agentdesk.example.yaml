@@ -39,15 +39,20 @@ discord:
 
 providers:
   claude:
-    # Phase 3 default for new AgentDesk installations: `claude-e` runs
-    # each Claude turn as a per-turn PTY-backed `claude-e` adapter
-    # spawn. To revert to the long-running tmux Claude TUI, set
-    # `runtime: tui` (the `tui_hosting: true` line below stays as a
-    # back-compat hint and is honoured when `runtime` is absent). To
-    # use the legacy `claude -p` tmux wrapper, set `runtime: pipe`.
-    # See `docs/claude-e-rollout/operator-guide.md` for the toggle
-    # mechanics and the rollback contract.
-    runtime: claude-e
+    # Default Claude runtime for AgentDesk: `pipe` — the legacy
+    # `claude -p` tmux-wrapper path. Operators must explicitly opt
+    # into the alternative runtimes:
+    #   - `runtime: tui`      → long-running interactive Claude TUI
+    #                           inside a tmux pane (keystroke relay).
+    #                           Also enabled implicitly when only
+    #                           `tui_hosting: true` is set and no
+    #                           `runtime` field is present (back-compat).
+    #   - `runtime: claude-e` → per-turn `claude-e` PTY adapter.
+    #                           Requires `npm install -g claude-e`
+    #                           on the host.
+    # See `docs/claude-e-rollout/operator-guide.md` for toggle
+    # mechanics and rollback contract.
+    runtime: pipe
     tui_hosting: true
     #
     # NOTE: `providers.claude.runtime` is unrelated to the top-level
