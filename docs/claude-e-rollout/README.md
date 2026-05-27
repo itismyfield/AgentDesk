@@ -20,4 +20,12 @@ All three modes must remain reachable via config — no mode is deleted.
 
 - [`decision-log.md`](decision-log.md) — chronological record of architecture
   decisions, alternatives considered, and rationale.
-- [`rollout-plan.md`](rollout-plan.md) — phased delivery plan and gate conditions.
+- [`rollout-plan.md`](rollout-plan.md) — phased delivery plan, rollback matrix,
+  and counter-review protocol.
+- [`phase-1-e2e-plan.md`](phase-1-e2e-plan.md) — Phase 1 Discord e2e deploy /
+  flip / smoke / rollback runbook.
+- [`phase-2-e2e-plan.md`](phase-2-e2e-plan.md) — Phase 2 three-mode parallel
+  e2e stabilisation plan (scenario battery, gate criteria, observability).
+- [`operator-guide.md`](operator-guide.md) — operator-facing guide: live
+  toggle, per-runtime observability, rollback contract, Phase 1 known
+  gaps under `runtime: claude-e`.
