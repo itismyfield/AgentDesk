@@ -229,6 +229,32 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
                 before.as_deref(),
                 after.as_deref(),
             )),
+            super::args::DiscordAction::CategoryCreate { name, guild_id } => {
+                super::direct::run_async(super::direct::cmd_discord_category_create(
+                    &name,
+                    guild_id.as_deref(),
+                ))
+            }
+            super::args::DiscordAction::ChannelCreate {
+                name,
+                category_id,
+                topic,
+                guild_id,
+            } => super::direct::run_async(super::direct::cmd_discord_channel_create(
+                &name,
+                category_id.as_deref(),
+                topic.as_deref(),
+                guild_id.as_deref(),
+            )),
+            super::args::DiscordAction::ThreadCreate {
+                parent_channel_id,
+                name,
+                auto_archive_minutes,
+            } => super::direct::run_async(super::direct::cmd_discord_thread_create(
+                &parent_channel_id,
+                &name,
+                auto_archive_minutes,
+            )),
         }),
         Commands::Card { action } => exit_for_cli(match action {
             CardAction::Create {

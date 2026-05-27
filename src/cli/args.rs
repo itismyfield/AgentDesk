@@ -740,6 +740,44 @@ pub(crate) enum DiscordAction {
         #[arg(long)]
         after: Option<String>,
     },
+    /// Create a guild category. Idempotent: returns the existing category when
+    /// one with the same name is already present.
+    CategoryCreate {
+        /// Category display name
+        #[arg(long)]
+        name: String,
+        /// Override the configured guild id
+        #[arg(long)]
+        guild_id: Option<String>,
+    },
+    /// Create a text channel under an optional category. Idempotent by name.
+    ChannelCreate {
+        /// Channel display name
+        #[arg(long)]
+        name: String,
+        /// Parent category channel id
+        #[arg(long)]
+        category_id: Option<String>,
+        /// Optional channel topic
+        #[arg(long)]
+        topic: Option<String>,
+        /// Override the configured guild id
+        #[arg(long)]
+        guild_id: Option<String>,
+    },
+    /// Create a public thread under a parent text channel. Idempotent by name
+    /// within the parent channel.
+    ThreadCreate {
+        /// Parent text channel id
+        #[arg(long)]
+        parent_channel_id: String,
+        /// Thread name
+        #[arg(long)]
+        name: String,
+        /// Auto-archive duration in minutes (60, 1440, 4320, 10080)
+        #[arg(long, default_value_t = 1440)]
+        auto_archive_minutes: u16,
+    },
 }
 
 #[derive(Subcommand)]
