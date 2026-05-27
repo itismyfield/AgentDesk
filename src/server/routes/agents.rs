@@ -5,7 +5,7 @@ use axum::{
 };
 use chrono::Utc;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::AppState;
 use crate::server::dto::agents::{
@@ -204,17 +204,13 @@ pub async fn agent_diag(
     };
 
     let now = Utc::now();
-    let visual = derive_visual_status(
-        session.status.as_deref(),
-        session.last_tool_at,
-        session.active_children,
-        now,
-    );
     let last_tool_elapsed_secs = session
         .last_tool_at
         .map(|last| now.signed_duration_since(last).num_seconds().max(0));
 
     let tmux_name = extract_tmux_name(&session.session_key);
+    let tui_prompt_readiness =
+        tui_prompt_readiness_json(session.provider.as_deref(), tmux_name.as_deref());
     let inflight = load_inflight_snapshot(session.provider.as_deref(), tmux_name.as_deref());
     let recent_output = tmux_name
         .as_deref()
@@ -225,6 +221,14 @@ pub async fn agent_diag(
     let child_inventory = load_child_inventory_by_parent_key_pg(pool, &session.session_key)
         .await
         .unwrap_or_default();
+    let effective_active_children =
+        child_inventory.effective_active_children(session.active_children);
+    let visual = derive_visual_status(
+        session.status.as_deref(),
+        session.last_tool_at,
+        effective_active_children,
+        now,
+    );
     let oldest_child_spawned_at = child_inventory
         .alive
         .iter()
@@ -299,9 +303,11 @@ pub async fn agent_diag(
             "created_at": session.created_at.map(|value| value.to_rfc3339()),
             "last_tool_at": session.last_tool_at.map(|value| value.to_rfc3339()),
             "last_tool_elapsed_secs": last_tool_elapsed_secs,
-            "active_children": session.active_children,
+            "active_children": effective_active_children,
+            "recorded_active_children": session.active_children,
             "oldest_child_spawned_at": oldest_child_spawned_at,
             "children": child_inventory,
+            "tui_prompt_readiness": tui_prompt_readiness,
             "last_tool": last_tool.map(|event| json!({
                 "tool_name": event.tool_name,
                 "summary": event.summary,
@@ -317,6 +323,52 @@ pub async fn agent_diag(
             "task_notification_kind": task_notification_kind,
         })),
     )
+}
+
+#[cfg(unix)]
+fn tui_prompt_readiness_json(provider: Option<&str>, tmux_name: Option<&str>) -> Option<Value> {
+    let tmux_name = tmux_name.map(str::trim).filter(|value| !value.is_empty())?;
+    match provider
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "claude" => {
+            let snapshot = crate::services::claude_tui::input::prompt_readiness_snapshot(tmux_name);
+            Some(json!({
+                "kind": "claude-tui",
+                "ready_for_input": snapshot.tmux_pane_alive
+                    && snapshot.prompt_marker_detected
+                    && !snapshot.prompt_draft_detected,
+                "prompt_marker_detected": snapshot.prompt_marker_detected,
+                "prompt_draft_detected": snapshot.prompt_draft_detected,
+                "tmux_pane_alive": snapshot.tmux_pane_alive,
+                "capture_available": snapshot.capture_available,
+                "pane_tail": snapshot.pane_tail,
+            }))
+        }
+        "codex" => {
+            let snapshot = crate::services::codex_tui::input::prompt_readiness_snapshot(tmux_name);
+            Some(json!({
+                "kind": "codex-tui",
+                "ready_for_input": snapshot.tmux_pane_alive
+                    && snapshot.composer_marker_detected
+                    && !snapshot.prompt_draft_detected,
+                "prompt_marker_detected": snapshot.composer_marker_detected,
+                "prompt_draft_detected": snapshot.prompt_draft_detected,
+                "tmux_pane_alive": snapshot.tmux_pane_alive,
+                "capture_available": snapshot.capture_available,
+                "pane_tail": snapshot.pane_tail,
+            }))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(unix))]
+fn tui_prompt_readiness_json(_provider: Option<&str>, _tmux_name: Option<&str>) -> Option<Value> {
+    None
 }
 
 /// GET /api/agents/:id/offices

@@ -68,6 +68,33 @@ diag_status() {
     | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status","unknown"))'
 }
 
+assert_tui_prompt_ready() {
+  local channel="$1"
+  "$AGENTDESK_BIN" diag "$channel" --json | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+readiness = doc.get("tui_prompt_readiness")
+if not isinstance(readiness, dict):
+    raise SystemExit(
+        f"channel {doc.get('target')} diag has no tui_prompt_readiness; "
+        "this TUI relay smoke is not exercising a tmux-hosted TUI path"
+    )
+if not readiness.get("ready_for_input"):
+    tail = (readiness.get("pane_tail") or "").replace("\n", " | ")
+    if len(tail) > 700:
+        tail = tail[:700] + "..."
+    raise SystemExit(
+        "TUI prompt is not ready for follow-up input after idle: "
+        f"kind={readiness.get('kind')} "
+        f"prompt_marker_detected={readiness.get('prompt_marker_detected')} "
+        f"prompt_draft_detected={readiness.get('prompt_draft_detected')} "
+        f"tmux_pane_alive={readiness.get('tmux_pane_alive')} "
+        f"capture_available={readiness.get('capture_available')} "
+        f"pane_tail={tail}"
+    )
+'
+}
+
 wait_channel_idle() {
   local channel="$1"
   local deadline=$((SECONDS + 90))
@@ -83,12 +110,14 @@ wait_channel_idle() {
 assert_channel_stable_idle() {
   local channel="$1"
   wait_channel_idle "$channel"
+  assert_tui_prompt_ready "$channel"
   sleep 10
   if [ "$(diag_status "$channel")" != "idle" ]; then
     echo "channel $channel re-entered non-idle state after relay settle window" >&2
     "$AGENTDESK_BIN" diag "$channel" --json >&2 || true
     return 1
   fi
+  assert_tui_prompt_ready "$channel"
 }
 
 message_probe() {
@@ -270,6 +299,7 @@ clear_channel_session() {
   if tmux has-session -t "$session" 2>/dev/null; then
     prepare_tmux_input "$session"
   fi
+  assert_tui_prompt_ready "$channel"
 }
 
 assert_no_processing_tail() {
@@ -304,6 +334,7 @@ run_turn_scenario() {
   marker="$(send_turn "$channel" "$label" "$instruction")"
   wait_tmux_contains "$session" "$marker"
   wait_relay_evidence "$channel" "$marker" "$before" "$sent_prompt" "$expected_extra" "$require_persistent_processing"
+  assert_tui_prompt_ready "$channel"
   printf '%s\n' "$marker"
 }
 
@@ -339,6 +370,7 @@ run_direct_turn_scenario() {
   tmux send-keys -t "$session" Enter
   wait_tmux_contains "$session" "$marker"
   wait_relay_evidence "$channel" "$marker" "$before" "$sent_prompt" ""
+  assert_tui_prompt_ready "$channel"
   printf '%s\n' "$marker"
 }
 

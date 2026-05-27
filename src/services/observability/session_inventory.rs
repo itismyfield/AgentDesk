@@ -8,6 +8,7 @@ use crate::db::session_status::{
 
 pub const ACTIVE_TOOL_WINDOW_SECS: i64 = 5;
 pub const STUCK_TOOL_WINDOW_SECS: i64 = 5 * 60;
+pub const STALE_CHILD_WINDOW_SECS: i64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChildInventoryItem {
@@ -21,7 +22,17 @@ pub struct ChildInventoryItem {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ChildInventorySummary {
     pub alive: Vec<ChildInventoryItem>,
+    pub stale_alive: Vec<ChildInventoryItem>,
     pub closed_count: usize,
+}
+
+impl ChildInventorySummary {
+    pub fn effective_active_children(&self, recorded_active_children: i32) -> i32 {
+        if self.alive.is_empty() && self.stale_alive.is_empty() && self.closed_count == 0 {
+            return recorded_active_children.max(0);
+        }
+        i32::try_from(self.alive.len()).unwrap_or(i32::MAX)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -143,12 +154,24 @@ pub async fn load_child_inventory_by_parent_key_pg(
         };
         if item.closed_at.is_some() {
             summary.closed_count += 1;
+        } else if child_item_is_stale_alive(&item, Utc::now()) {
+            summary.stale_alive.push(item);
         } else {
             summary.alive.push(item);
         }
     }
 
     Ok(summary)
+}
+
+fn child_item_is_stale_alive(item: &ChildInventoryItem, now: DateTime<Utc>) -> bool {
+    item.closed_at.is_none()
+        && item
+            .spawned_at
+            .map(|spawned| {
+                now.signed_duration_since(spawned).num_seconds() >= STALE_CHILD_WINDOW_SECS
+            })
+            .unwrap_or(false)
 }
 
 pub fn format_child_inventory_progress(
@@ -273,9 +296,11 @@ mod tests {
         let now = Utc::now();
         let summary = ChildInventorySummary {
             alive: Vec::new(),
+            stale_alive: Vec::new(),
             closed_count: 3,
         };
         assert_eq!(format_child_inventory_progress(&summary, now), None);
+        assert_eq!(summary.effective_active_children(2), 0);
     }
 
     #[test]
@@ -298,11 +323,33 @@ mod tests {
                     closed_at: None,
                 },
             ],
+            stale_alive: Vec::new(),
             closed_count: 1,
         };
         assert_eq!(
             format_child_inventory_progress(&summary, now).as_deref(),
             Some("2 alive (#A 4m12s, #B 1m05s) / 1 closed")
         );
+        assert_eq!(summary.effective_active_children(5), 2);
+    }
+
+    #[test]
+    fn stale_child_inventory_does_not_count_as_effective_active() {
+        let now = Utc::now();
+        let stale = ChildInventoryItem {
+            id: 42,
+            session_key: "child-stale".to_string(),
+            purpose: None,
+            spawned_at: Some(now - Duration::seconds(STALE_CHILD_WINDOW_SECS + 1)),
+            closed_at: None,
+        };
+        assert!(child_item_is_stale_alive(&stale, now));
+
+        let summary = ChildInventorySummary {
+            alive: Vec::new(),
+            stale_alive: vec![stale],
+            closed_count: 0,
+        };
+        assert_eq!(summary.effective_active_children(1), 0);
     }
 }
