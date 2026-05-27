@@ -9,8 +9,8 @@ use super::AppState;
 pub use crate::db::dispatched_sessions::gc_stale_fixed_working_sessions_db_pg;
 pub(crate) use crate::services::dispatched_sessions::force_kill_session_impl_with_reason;
 pub use crate::services::dispatched_sessions::{
-    DeleteSessionQuery, ForceKillOptions, HookSessionBody, ListDispatchedSessionsQuery,
-    TmuxOutputQuery, UpdateDispatchedSessionBody,
+    DeleteSessionQuery, ForceKillOptions, HookSessionBody, KillTmuxOptions,
+    ListDispatchedSessionsQuery, TmuxOutputQuery, UpdateDispatchedSessionBody,
 };
 
 /// GET /api/dispatched-sessions
@@ -114,6 +114,22 @@ pub async fn force_kill_session(
     Json(body): Json<ForceKillOptions>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     crate::services::dispatched_sessions::force_kill_session(
+        State(state),
+        headers,
+        Path(session_key),
+        Json(body),
+    )
+    .await
+}
+
+/// POST /api/sessions/{session_key}/kill-tmux
+pub async fn kill_tmux_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_key): Path<String>,
+    Json(body): Json<KillTmuxOptions>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    crate::services::dispatched_sessions::kill_tmux_session(
         State(state),
         headers,
         Path(session_key),

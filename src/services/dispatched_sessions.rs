@@ -1132,6 +1132,154 @@ pub async fn force_kill_session(
     .await
 }
 
+#[derive(Deserialize)]
+pub struct KillTmuxOptions {
+    /// Human-readable reason for the kill (e.g. "idle 15시간 초과").
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// POST /api/sessions/{session_key}/kill-tmux
+///
+/// Tmux-only kill: terminates the tmux session but leaves the DB session row
+/// intact (status preserved, `claude_session_id`/`raw_provider_session_id`
+/// untouched, `active_dispatch_id` untouched). Designed for idle cleanup paths
+/// that want the next user turn to be able to resume the provider session via
+/// recap rather than start a fresh conversation.
+///
+/// Caveat vs. force-kill: this does NOT mark any active dispatch failed and does
+/// NOT clear inflight state. It is only safe to call on sessions whose
+/// `active_dispatch_id IS NULL` (i.e. nothing in flight); the idle-kill policy
+/// already enforces that for its `idleSessions` query.
+pub async fn kill_tmux_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_key): Path<String>,
+    Json(body): Json<KillTmuxOptions>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let reason = body.reason.as_deref().unwrap_or("kill-tmux API invoked");
+    kill_tmux_session_impl(&state, &headers, &session_key, reason).await
+}
+
+async fn kill_tmux_session_impl(
+    state: &AppState,
+    headers: &HeaderMap,
+    session_key: &str,
+    reason: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let tmux_name = match session_key.split_once(':') {
+        Some((_, name)) => name.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "invalid session_key format — expected hostname:tmux_name"})),
+            );
+        }
+    };
+
+    let provider_info =
+        crate::services::provider::parse_provider_and_channel_from_tmux_name(&tmux_name);
+    let provider_name = provider_info
+        .as_ref()
+        .map(|(provider, _)| provider.as_str());
+
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
+    };
+    let (active_dispatch_id, _agent_id, _runtime_channel_id, _session_provider, owner_instance_id) =
+        match dispatched_sessions_db::load_force_kill_session_pg(pool, session_key, provider_name)
+            .await
+        {
+            Ok(Some(tuple)) => tuple,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "session not found"})),
+                );
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                );
+            }
+        };
+
+    if !crate::services::session_forwarding::is_forwarded_request(headers) {
+        match crate::services::session_forwarding::resolve_forward_target(
+            state,
+            owner_instance_id.as_deref(),
+            pool,
+        )
+        .await
+        {
+            crate::services::session_forwarding::ForwardResolution::Local => {}
+            crate::services::session_forwarding::ForwardResolution::Forward(target) => {
+                return crate::services::session_forwarding::forward_kill_tmux(
+                    state,
+                    &target,
+                    session_key,
+                    reason,
+                )
+                .await;
+            }
+            crate::services::session_forwarding::ForwardResolution::Unavailable {
+                status,
+                body,
+            } => {
+                return (status, Json(body));
+            }
+        }
+    }
+
+    let tmux_was_alive = crate::services::platform::tmux::has_session(&tmux_name);
+    let tmux_killed = if tmux_was_alive {
+        crate::services::platform::tmux::kill_session(&tmux_name, reason)
+    } else {
+        false
+    };
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!(
+        "  [{ts}] ✂ kill-tmux: session={}, tmux_killed={}, tmux_was_alive={}, active_dispatch_id={:?} (DB row preserved for resume)",
+        session_key,
+        tmux_killed,
+        tmux_was_alive,
+        active_dispatch_id
+    );
+
+    if tmux_killed {
+        let termination_reason_code = classify_session_termination_reason(reason);
+        crate::services::termination_audit::record_termination_with_handles(
+            None,
+            state.pg_pool_ref(),
+            session_key,
+            active_dispatch_id.as_deref(),
+            "kill_tmux_api",
+            termination_reason_code,
+            Some(reason),
+            None,
+            None,
+            Some(false),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "tmux_killed": tmux_killed,
+            "tmux_was_alive": tmux_was_alive,
+            "tmux_session_name": tmux_name,
+            "session_row_preserved": true,
+            "active_dispatch_id": active_dispatch_id,
+        })),
+    )
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
     use super::*;

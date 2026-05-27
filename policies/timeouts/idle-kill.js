@@ -29,7 +29,7 @@ module.exports = function attachIdleKill(timeouts, helpers) {
   timeouts._section_O = function() {
       var apiPort = agentdesk.config.get("server_port");
       if (!apiPort) {
-        agentdesk.log.error("[idle-kill] server_port missing — cannot call force-kill API");
+        agentdesk.log.error("[idle-kill] server_port missing — cannot call kill-tmux API");
         return;
       }
       var agents = loadAgentDirectory();
@@ -37,9 +37,14 @@ module.exports = function attachIdleKill(timeouts, helpers) {
 
       // Sessions table is PostgreSQL (SQLite path retired in #1239 series).
       // Threshold raised from 60min → 6h: shorter values churn through
-      // user-active sessions during natural away periods (lunch / meeting),
-      // and the provider session ID is preserved on tmux cleanup so resume
-      // is still possible after the kill.
+      // user-active sessions during natural away periods (lunch / meeting).
+      //
+      // Cleanup mode: kill-tmux only (not force-kill). force-kill atomically
+      // disconnects the session row and clears retry metadata, which was
+      // wiping `claude_session_id` selector context that the next user turn
+      // could otherwise resume via recap. kill-tmux leaves the DB row intact
+      // (status='idle', selector preserved) so the next message can rehydrate
+      // the provider session through the recap path.
       //
       // Scope: main channels only. Thread-suffixed sessions are filtered both
       // server-side (`thread_channel_id IS NULL` + session_key regex guard)
@@ -96,7 +101,7 @@ module.exports = function attachIdleKill(timeouts, helpers) {
       var now = Date.now();
       var processed = {};
 
-      function forceKillIdleSessions(sessions, minimumIdleMinutes, reasonLabel, maxKills) {
+      function killTmuxIdleSessions(sessions, minimumIdleMinutes, reasonLabel, maxKills) {
         var killedCount = 0;
         for (var i = 0; i < sessions.length; i++) {
           if (killedCount >= maxKills) {
@@ -113,30 +118,30 @@ module.exports = function attachIdleKill(timeouts, helpers) {
             ? minimumIdleMinutes
             : Math.max(minimumIdleMinutes, Math.round((now - lastSeenMs) / 60000));
 
-          var forceKillResp = null;
+          var killResp = null;
           try {
-            var forceKillUrl = "http://127.0.0.1:" + apiPort +
-              "/api/sessions/" + encodeURIComponent(s.session_key) + "/force-kill";
-            forceKillResp = agentdesk.http.post(forceKillUrl, { retry: false, reason: "idle " + formatIdleDuration(idleMin) + " 초과 — 자동 정리" });
+            var killUrl = "http://127.0.0.1:" + apiPort +
+              "/api/sessions/" + encodeURIComponent(s.session_key) + "/kill-tmux";
+            killResp = agentdesk.http.post(killUrl, { reason: "idle " + formatIdleDuration(idleMin) + " 초과 — 자동 정리" });
           } catch (e) {
-            agentdesk.log.error("[idle-kill] force-kill API exception for " + s.session_key + ": " + e);
+            agentdesk.log.error("[idle-kill] kill-tmux API exception for " + s.session_key + ": " + e);
             continue;
           }
 
-          if (!forceKillResp || !forceKillResp.ok) {
-            agentdesk.log.error("[idle-kill] force-kill API failed for " + s.session_key + ": " + JSON.stringify(forceKillResp));
+          if (!killResp || !killResp.ok) {
+            agentdesk.log.error("[idle-kill] kill-tmux API failed for " + s.session_key + ": " + JSON.stringify(killResp));
             continue;
           }
 
           killedCount++;
 
-          if (!forceKillResp.tmux_killed) {
-            agentdesk.log.warn("[idle-kill] force-kill API succeeded but tmux was already gone for " + s.session_key);
+          if (!killResp.tmux_killed) {
+            agentdesk.log.warn("[idle-kill] kill-tmux API succeeded but tmux was already gone for " + s.session_key);
             continue;
           }
 
           agentdesk.log.info(
-            "[idle-kill] Killed idle session after " + idleMin + "min (" + reasonLabel + "): " + s.session_key
+            "[idle-kill] Killed idle tmux after " + idleMin + "min (" + reasonLabel + "): " + s.session_key
           );
 
           var agentContext = resolveSessionAgentContext(s, agents);
@@ -144,7 +149,7 @@ module.exports = function attachIdleKill(timeouts, helpers) {
         }
       }
 
-      forceKillIdleSessions(safetySessions, 1440, "idle 24시간 경과 (safety TTL)", 2);
-      forceKillIdleSessions(idleSessions, 360, "idle 6시간 경과 (active_dispatch_id 없음)", 3);
+      killTmuxIdleSessions(safetySessions, 1440, "idle 24시간 경과 (safety TTL)", 2);
+      killTmuxIdleSessions(idleSessions, 360, "idle 6시간 경과 (active_dispatch_id 없음)", 3);
     };
 };

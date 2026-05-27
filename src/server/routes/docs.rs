@@ -467,7 +467,7 @@ fn category_description(category: &str) -> &'static str {
         }
         "reviews" => "Review verdict submission, decisions, and tuning aggregation.",
         "routines" => "Durable script-backed routines, run history, and manual routine controls.",
-        "sessions" => "Sessions, force-kill, and termination events.",
+        "sessions" => "Sessions, tmux cleanup, force-kill, and termination events.",
         "settings" => "Settings surfaces, live overrides, precedence, and onboarding contracts.",
         "skills" => "Skill catalog and usage ranking.",
         "stats" => "Aggregate system counters.",
@@ -3505,6 +3505,42 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "/api/sessions/{session_key}/force-kill",
             "sessions",
             "Force-kill session and optionally retry // TODO: example",
+        ),
+        ep(
+            "POST",
+            "/api/sessions/{session_key}/kill-tmux",
+            "sessions",
+            "Kill only the tmux process for an idle session while preserving the session row and provider resume metadata.",
+        )
+        .with_params([
+            ("session_key", path_param("Session key in host:tmux_name form")),
+            (
+                "reason",
+                body_param(
+                    "string",
+                    false,
+                    "Human-readable reason recorded in termination audit.",
+                ),
+            ),
+        ])
+        .with_example(
+            json!({
+                "path": {"session_key": "provider:AgentDesk-claude-adk-cc"},
+                "body": {"reason": "idle 6시간 초과 — 자동 정리"}
+            }),
+            json!({
+                "ok": true,
+                "tmux_killed": true,
+                "tmux_was_alive": true,
+                "tmux_session_name": "AgentDesk-claude-adk-cc",
+                "session_row_preserved": true,
+                "active_dispatch_id": null
+            }),
+        )
+        .with_error_example(
+            404,
+            json!({"path": {"session_key": "provider:missing"}}),
+            json!({"error": "session not found"}),
         ),
         ep(
             "GET",

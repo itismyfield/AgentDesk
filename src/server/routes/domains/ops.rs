@@ -187,6 +187,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 post(dispatched_sessions::force_kill_session),
             )
             .route(
+                "/sessions/{session_key}/kill-tmux",
+                post(dispatched_sessions::kill_tmux_session),
+            )
+            .route(
                 "/sessions/{session_key}/idle-recap",
                 post(idle_recap::post_idle_recap),
             )

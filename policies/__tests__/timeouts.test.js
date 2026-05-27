@@ -585,7 +585,7 @@ test("timeouts workspace branch guard module recovers wt branches", () => {
   assert.equal(state.deadlockAlerts.length, 1);
 });
 
-test("timeouts idle-kill module calls force-kill API for expired idle sessions", () => {
+test("timeouts idle-kill module calls kill-tmux API for expired idle sessions", () => {
   const { policy, state } = loadPolicy("policies/timeouts.js", {
     config: { server_port: 8791 },
     dbQuery: createSqlRouter([
@@ -641,8 +641,8 @@ test("timeouts idle-kill module calls force-kill API for expired idle sessions",
   policy._section_O();
 
   assert.equal(state.httpPosts.length, 1);
-  assert.match(state.httpPosts[0].url, /\/api\/sessions\/provider%3AAgentDesk-codex-project-agentdesk\/force-kill$/);
-  assert.equal(state.httpPosts[0].body.retry, false);
+  assert.match(state.httpPosts[0].url, /\/api\/sessions\/provider%3AAgentDesk-codex-project-agentdesk\/kill-tmux$/);
+  assert.equal(state.httpPosts[0].body.retry, undefined);
   assert.match(state.logs.info.join("\n"), /idle kill: agent-idle-1/);
 });
 
@@ -788,7 +788,7 @@ test("timeouts idle-kill module keeps main and drops thread rows in a mixed batc
   assert.equal(state.httpPosts.length, 1);
   assert.match(
     state.httpPosts[0].url,
-    /\/api\/sessions\/.*AgentDesk-claude-adk-cc\/force-kill$/
+    /\/api\/sessions\/.*AgentDesk-claude-adk-cc\/kill-tmux$/
   );
   // Reason text uses the new human-readable formatter (hours, not minutes).
   assert.match(state.httpPosts[0].body.reason, /idle \d+(시간|일) 초과/);

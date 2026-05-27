@@ -209,6 +209,25 @@ pub(crate) async fn forward_force_kill(
     forward_json_response(request, "force-kill", target).await
 }
 
+pub(crate) async fn forward_kill_tmux(
+    state: &AppState,
+    target: &ForwardTarget,
+    session_key: &str,
+    reason: &str,
+) -> (StatusCode, Json<Value>) {
+    let url = format!(
+        "{}/api/sessions/{}/kill-tmux",
+        target.base_url,
+        encode_path_segment(session_key)
+    );
+    let request = apply_node_headers(
+        state,
+        target,
+        client().post(url).json(&json!({ "reason": reason })),
+    );
+    forward_json_response(request, "kill-tmux", target).await
+}
+
 fn apply_node_headers(
     state: &AppState,
     target: &ForwardTarget,
