@@ -415,6 +415,8 @@ The remaining giant-file modules under `src/services/` not covered above:
 - `src/services/platform/shell.rs` (1507) — split owned by #1281
   (GitClient extraction).
 - `src/services/platform/binary_resolver.rs` (1377).
+- `src/services/platform/tmux.rs` (1016) — tmux session lifecycle / wrapper
+  smoke harness. Split before adding non-bugfix behavior.
 - `src/services/mcp_config.rs` (1072).
 - `src/services/process.rs` (1158) — process lifecycle / PID-tree identity
   surface. Split before adding non-bugfix behavior.
