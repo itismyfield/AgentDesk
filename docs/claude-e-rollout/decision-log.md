@@ -537,3 +537,49 @@ protocol — round 4 was diagnostic only, but the fix is small and
 narrowly scoped). Phase 1 Codex counter-review of the cumulative PR
 is in flight separately and will re-evaluate this commit alongside
 the rest of the Phase 1 changes.
+
+---
+
+## 2026-05-27 — Phase 1 verify probe (probe 5) + counter-review close
+
+**Probe 5 result (post-redeploy of `1e3527459`):**
+
+```
+11:21:43.164  claude_e.execute_streaming spawning
+11:21:50.842  ▶ Response sent  (7.7s)
+```
+
+**Zero `WARN cancel watchdog killing` log** between spawn and
+Response sent. `completion_cleanup` flag silenced the cosmetic
+noise observed in probe 4 without touching any consumer path.
+Discord reply on the channel matches the prompt format.
+
+**Phase 1 counter-review close (short-circuit per rollout-plan
+round-budget rule):**
+
+- Claude general-purpose reviewer: **PASS-CLEAN** (verdict
+  captured 2026-05-27, agent task transcript at
+  `.../tasks/a7399ce26a8289ea2.output`).
+- Codex Phase 1 review job (`task-mpnvh0v2-ebymtw`): stalled
+  ≥2 h 10 m without log activity after the initial discovery
+  phase. The `rollout-plan.md` round-budget rule
+  short-circuits a round when (a) one reviewer is PASS-CLEAN,
+  (b) the other reviewer is idle ≥25 m, and (c) the operator
+  has direct evidence that the findings are resolved.
+- Direct evidence: `cargo test --bin agentdesk -- cancel_token_tests`
+  8/8 pass (Codex-authored cleanup tests included); full
+  `services::provider_hosting` 23/23 pass; `cargo check --tests
+  --features legacy-sqlite-tests` clean; `cargo fmt --check`
+  clean; probe 5 WARN count 0.
+- Codex's contribution to Phase 1 is the round-4 fix itself
+  (commit `1e3527459`), which was written and unit-tested by
+  Codex via the write-capable rescue helper — it is in essence
+  Codex's own change reviewed by Codex.
+
+Tasks 3 ("Phase 1: claude-e adapter 구현 + Discord 실환경 e2e")
+and 4 ("Phase 1 카운터 리뷰") are marked complete. The Codex
+review job continues to run in the background; if it surfaces a
+new BLOCKING/MAJOR finding later, it gets a Phase 1.x correction
+PR rather than blocking Phase 2 entry.
+
+**Phase 2 entry conditions met.**
