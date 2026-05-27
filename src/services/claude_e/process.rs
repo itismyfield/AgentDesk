@@ -20,7 +20,8 @@ use crate::services::provider::{
     CancelToken, ProviderKind, cancel_requested, register_child_pid, spawn_cancel_watchdog,
 };
 use crate::services::session_backend::{
-    StreamLineState, observe_stream_context, parse_stream_message_with_state,
+    StreamLineState, observe_stream_context, parse_assistant_extra_tool_uses,
+    parse_stream_message_with_state,
 };
 
 /// Phase 1 entry point. The signature matches the subset of
@@ -149,6 +150,12 @@ pub fn execute_streaming(
     let mut cumulative_output_tokens: u64 = 0;
     let mut saw_per_message_usage = false;
     let mut final_result: Option<String> = None;
+    // Phase 1 counter-review MINOR-1: claude-e emits both
+    // `system stop_hook_summary` (parser → Done with empty `result`)
+    // and `result` (parser → Done with real content). Suppress the
+    // empty Done; if no real Done arrives, surface the empty one at
+    // end-of-stream as a fallback.
+    let mut suppressed_empty_done: Option<StreamMessage> = None;
     let mut stream_state = StreamLineState::new();
     let mut line_count = 0u64;
 
@@ -271,10 +278,19 @@ pub fn execute_streaming(
                 last_session_id = Some(session_id.clone());
             }
             StreamMessage::Done { result, session_id } => {
-                final_result = Some(result.clone());
                 if let Some(sid) = session_id {
                     last_session_id = Some(sid.clone());
                 }
+                if result.is_empty() && final_result.is_none() {
+                    // Phase 1 counter-review MINOR-1 fix: buffer the
+                    // empty Done synthesized from `stop_hook_summary`
+                    // until we know whether a real `result` Done is
+                    // coming. Emitted at end-of-stream only if no
+                    // non-empty Done shows up.
+                    suppressed_empty_done = Some(msg.clone());
+                    continue;
+                }
+                final_result = Some(result.clone());
             }
             _ => {}
         }
@@ -282,6 +298,19 @@ pub fn execute_streaming(
             // Consumer hung up — kill child and stop.
             kill_child_tree(&mut child);
             return Ok(());
+        }
+        // Phase 1 counter-review MAJOR-1 fix: an assistant content
+        // array can carry `[text, tool_use_a, tool_use_b, ...]`, but
+        // `parse_stream_message_with_state` returns only the first
+        // record. `claude::execute_command_streaming` follows up with
+        // `parse_assistant_extra_tool_uses` for the remaining
+        // tool_use entries; claude-e dispatch must mirror that or
+        // multi-tool turns lose tool_use trace events.
+        for extra in parse_assistant_extra_tool_uses(&json) {
+            if sender.send(extra).is_err() {
+                kill_child_tree(&mut child);
+                return Ok(());
+            }
         }
     }
 
@@ -303,16 +332,24 @@ pub fn execute_streaming(
         });
     }
 
-    // Phase 1: if claude-e ends without emitting an explicit `Done`,
-    // synthesize one so the turn bridge can finalise. `final_result`
-    // is populated when `parse_stream_message_with_state` produced a
-    // `Done`; otherwise we emit an empty result and rely on Text
-    // chunks already streamed.
-    if final_result.is_none() && exit_status.success() {
-        let _ = sender.send(StreamMessage::Done {
-            result: String::new(),
-            session_id: last_session_id.clone(),
-        });
+    // Phase 1: end-of-stream Done handling.
+    //   1. A non-empty Done already flowed through `sender` → nothing more
+    //      to do (final_result is Some).
+    //   2. Only the empty `stop_hook_summary`-derived Done arrived
+    //      (suppressed_empty_done is Some) → emit it now so the turn
+    //      bridge can finalise even without a `result` record.
+    //   3. No Done at all (claude-e crashed before either record) →
+    //      synthesize an empty Done if the child exited cleanly so the
+    //      turn bridge does not stall.
+    if final_result.is_none() {
+        if let Some(empty_done) = suppressed_empty_done.take() {
+            let _ = sender.send(empty_done);
+        } else if exit_status.success() {
+            let _ = sender.send(StreamMessage::Done {
+                result: String::new(),
+                session_id: last_session_id.clone(),
+            });
+        }
     }
 
     let _ = report_channel_id;
