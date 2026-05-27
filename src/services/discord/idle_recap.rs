@@ -6,8 +6,8 @@
 //!      `POST /api/sessions/{key}/idle-recap` every 5 minutes for each
 //!      eligible main-channel session.
 //!   2. `post_recap` (here) captures the tail of the tmux scrollback, asks
-//!      opencode for a short Korean summary (graceful fallback to the raw
-//!      tail if opencode is unavailable), and posts a single-line notify-bot
+//!      Claude Haiku for a short Korean summary (graceful fallback to the raw
+//!      tail if the model call is unavailable), and posts a single-line notify-bot
 //!      message of the form
 //!         📦 {used}/{window} tokens ({pct}%) · idle {dur} · {summary}
 //!   3. The previous recap card (if any) for the same channel is deleted
@@ -29,16 +29,21 @@ use crate::services::provider::{CancelToken, ProviderKind};
 const FALLBACK_CONTEXT_WINDOW_TOKENS: u64 = 128_000;
 const SESSION_TOKEN_FRESHNESS_MAX_SECS: i64 = 30 * 60;
 
-/// Lines of tmux scrollback captured for the opencode recap summary. Earlier
-/// 500-line snapshots routinely overran the 20s OPENCODE_SUMMARY_TIMEOUT when
-/// the configured opencode model is the local Gemma 27B build. Empirical
-/// timing on that model (2026-05-14): 500 → ~20s+ (timeout fires),
-/// 200 → ~29s (still over), 100 → ~8s, 50 → ~5s. 100 is the smallest cap
-/// that still covers a turn pair (user + assistant) plus the surrounding
-/// chrome, so it is the chosen balance between context coverage and headroom
-/// under the 20s timeout for the slowest-supported local model.
+/// Lines of tmux scrollback captured for the recap summary. Inherited from
+/// the previous opencode-backed implementation that used a local Gemma 27B
+/// build: empirical timing on that model (2026-05-14) showed 500 → 20s+
+/// timeout, 100 → ~8s, 50 → ~5s. 100 was the smallest cap that still
+/// covered a user+assistant turn pair with surrounding chrome. Keeping the
+/// same cap for the Claude Haiku 4.5 summarizer (#2802 follow-up) — the
+/// remote API is fast enough that input size is no longer the bottleneck,
+/// but 100 lines remains a sensible content budget for a 1-2 sentence
+/// summary and bounds API token cost.
 const TMUX_SCROLLBACK_LINES: i64 = 100;
-const OPENCODE_SUMMARY_TIMEOUT: Duration = Duration::from_secs(20);
+const RECAP_SUMMARY_TIMEOUT: Duration = Duration::from_secs(20);
+/// Cheap, fast model for the idle-recap summary. Local mac-book runs out of
+/// RAM when we keep `opencode serve` (Gemma 27B) resident, so we route the
+/// 1-2 sentence summary to the remote Claude Haiku API instead.
+const RECAP_SUMMARY_MODEL: &str = "claude-haiku-4-5-20251001";
 
 /// Custom-id prefix for the `[새 세션 시작]` button on a recap card. The
 /// numeric suffix is the Discord message id of the card; the interaction
@@ -360,7 +365,7 @@ pub(crate) async fn capture_tmux_scrollback(session_name: &str) -> Option<String
 /// long-lived tmux session. Reads the Claude transcript JSONL at
 /// `~/.claude/projects/<encoded-cwd>/<session_id>.jsonl`, parses each line,
 /// and emits the last ~`TMUX_SCROLLBACK_LINES` user/assistant text turns in
-/// a `[role] text` shape that the opencode summarizer can consume the same
+/// a `[role] text` shape that the recap summarizer can consume the same
 /// way it consumes tmux scrollback.
 ///
 /// Returns `None` when the transcript is missing, unreadable, contains no
@@ -411,7 +416,7 @@ fn extract_transcript_tail_text(transcript_path: &std::path::Path) -> Option<Str
 
 /// Extract a `[role] text` line from a single Claude transcript JSONL row.
 /// Returns `None` for rows without human-readable content (init/done/status,
-/// tool uses, tool results, attachments, etc.) so the opencode summarizer
+/// tool uses, tool results, attachments, etc.) so the recap summarizer
 /// only sees signal.
 fn parse_transcript_line_text(line: &str) -> Option<String> {
     let trimmed = line.trim();
@@ -451,18 +456,23 @@ fn parse_transcript_line_text(line: &str) -> Option<String> {
     Some(format!("[{role}] {text}"))
 }
 
-/// Ask opencode for a 1-2 sentence Korean recap. Time-bounded; returns
+/// Ask Claude Haiku for a 1-2 sentence Korean recap. Time-bounded; returns
 /// `None` on any failure so the caller can fall back to a header-only card.
 ///
-/// The opencode call is wrapped in `spawn_blocking`. A `tokio::time::timeout`
+/// Previously this routed to a local `opencode serve` (Gemma 27B) build,
+/// but resident memory on the mac-book host was the bottleneck. Haiku 4.5
+/// is cheap enough per call (a few cents per million tokens) and fast
+/// enough on remote API that it comfortably fits inside the 20s budget
+/// without holding any RAM on the host.
+///
+/// The Claude call is wrapped in `spawn_blocking`. A `tokio::time::timeout`
 /// alone would only cancel the *await* on the JoinHandle and leave the
-/// blocking thread running with a live `opencode serve` subprocess — `Drop`
-/// on `OpenCodeServerProcess` would not fire until the closure returned
-/// naturally. So we also pass a `CancelToken` into opencode and *signal it*
-/// from the timeout watchdog. The opencode driver polls `cancel_requested`
-/// at each SSE read tick and exits as soon as it sees the flag, at which
-/// point `OpenCodeServerProcess::Drop` reaps the child.
-pub(crate) async fn summarize_with_opencode(scrollback: &str) -> Option<String> {
+/// blocking thread running with a live `claude` subprocess. So we also
+/// pass a `CancelToken` into the Claude wrapper and *signal it* from the
+/// timeout watchdog. The Claude simple-cancel watcher polls
+/// `cancel_requested` and tears down the child process tree as soon as it
+/// sees the flag.
+pub(crate) async fn summarize_with_haiku(scrollback: &str) -> Option<String> {
     if scrollback.is_empty() {
         return None;
     }
@@ -478,13 +488,14 @@ pub(crate) async fn summarize_with_opencode(scrollback: &str) -> Option<String> 
     let cancel = std::sync::Arc::new(CancelToken::new());
     let cancel_for_blocking = cancel.clone();
     let join = task::spawn_blocking(move || {
-        crate::services::opencode::execute_command_simple_cancellable(
+        crate::services::claude::execute_command_simple_cancellable_with_model(
             &prompt,
-            Some(cancel_for_blocking.as_ref()),
+            Some(RECAP_SUMMARY_MODEL),
+            Some(cancel_for_blocking),
         )
     });
 
-    let result = match tokio::time::timeout(OPENCODE_SUMMARY_TIMEOUT, join).await {
+    let result = match tokio::time::timeout(RECAP_SUMMARY_TIMEOUT, join).await {
         Ok(join_result) => match join_result {
             Ok(Ok(text)) => text,
             Ok(Err(_)) => return None,
@@ -492,8 +503,8 @@ pub(crate) async fn summarize_with_opencode(scrollback: &str) -> Option<String> 
         },
         Err(_) => {
             // Timeout fired. Signal the cancel token so the blocking
-            // closure exits at the next opencode poll; Drop on
-            // `OpenCodeServerProcess` then reaps the spawned child.
+            // closure exits at the next Claude wrapper poll and the
+            // spawned child tree is reaped.
             cancel.cancel_with_tmux_cleanup();
             return None;
         }
