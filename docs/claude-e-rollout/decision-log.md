@@ -364,3 +364,69 @@ to `LegacyPrompt` with `fallback_reason="claude_e_binary_missing"`.
 
 **Discord e2e is the next step**, gated by the counter-review of this
 commit.
+
+---
+
+## 2026-05-27 — Phase 1 e2e round 1 + Codex-agreed Option C (async-managed CancelToken)
+
+**Observation (e2e probes):**
+
+- Probes 1 (05:14) and 2 (05:24): `claude_e.execute_streaming` spawned
+  cleanly, but `cancel watchdog killing` fired ~6 s later. Probe 1 also
+  tripped the `inflight_tmux_one_to_one` invariant — fixed by setting
+  `tmux_session_name=None` in the `RuntimeHandoff::ClaudeEAdapter` arm
+  of `turn_bridge`.
+- Probe 3 (05:52, after the invariant fix + dcserver restart): 17 s
+  turn completed with no `cancel watchdog killing` log and a
+  `▶ Response sent`. The `claude-e` happy path therefore works
+  end-to-end already.
+
+**Diagnostic divergence + Codex round-2 finding:**
+
+Codex round 1 fingered `provider.rs::enforce_watchdog_deadline` as the
+cancel source. Direct verification showed `turn_watchdog_timeout()`
+defaults to **3600 s** — too long to fire at 6 s — so the sync deadline
+poll is not the literal trigger for the probe-1/2 cancellations. The
+probe-3 success without code changes corroborates that.
+
+Codex round 2, after reading the production setup paths, agreed but
+recommended **Option C** as preventive coverage: the synchronous
+`enforce_watchdog_deadline` poll inside `spawn_cancel_watchdog` still
+exists for every direct-stream provider (Claude / Codex / Gemini /
+claude-e) and shares a single `watchdog_deadline_ms` field with the
+async Discord watchdog (30 s cadence). Any future short-deadline write
+to the field would race the async path and kill the per-turn child
+prematurely. Option C closes that class of bug without disabling the
+deadline contract for non-Discord callers.
+
+**Decision (consensus with Codex round 3):**
+
+Option C, exact spec:
+
+- Add `CancelToken::async_managed: AtomicBool`, defaulting to `false`.
+- Public methods `mark_async_managed()` / `is_async_managed()`.
+- Guard `enforce_watchdog_deadline` with `&& !token.is_async_managed()`
+  so Discord-managed tokens never fire the sync deadline path; explicit
+  `cancelled=true` cancel sources are untouched.
+- The text and headless turn watchdog setups in
+  `discord/router/message_handler.rs` call `mark_async_managed()`
+  immediately before storing `watchdog_deadline_ms`.
+- Three tests cover the matrix: legacy default fires, async-managed
+  token suppresses the fire, async-managed token still cancels on
+  explicit `cancelled=true`.
+
+**Alternatives discarded:**
+
+1. Removing the sync poll globally (Codex round-1 Option A). Drops the
+   unit-tested CancelToken deadline contract for every caller, makes
+   all deadline expiry depend on the 30 s async path.
+2. Disabling enforcement only for `claude-e` (Claude round-1 Option B).
+   Leaves Claude / Codex / Gemini direct-stream paths with the same
+   latent race and only patches one symptom.
+
+**Follow-up gate:** if Option C lands and the 6-s cancellations
+re-emerge on e2e probes 4+, then probe the `cancel_active_token` /
+`stop_active_turn` chain from stale-recovery callsites
+(`recovery_engine`, `health/recovery`, `tui_prompt_relay`,
+`turn_bridge/tmux_runtime`) for stale-state cancellations that ignore
+the new `runtime: claude-e` selector.

@@ -5395,18 +5395,23 @@ pub(super) fn spawn_turn_bridge(
                                 session_name,
                                 last_offset,
                             } => {
-                                // Phase 0 of the claude-e rollout (see
-                                // `docs/claude-e-rollout/`). The adapter is
-                                // never selected at runtime in this phase, so
-                                // this arm is unreachable in practice but is
-                                // required for exhaustive matching. Phase 1
-                                // replaces this body with the real handoff
-                                // wiring (mirrors ProcessBackend's shape:
-                                // single output stream, no tmux/FIFO).
+                                // Phase 1 of the claude-e rollout (see
+                                // `docs/claude-e-rollout/`). The adapter
+                                // is a per-turn PTY spawn — no tmux pane
+                                // backs it, so `tmux_session_name` must
+                                // stay `None` to satisfy the
+                                // `inflight_tmux_one_to_one` invariant
+                                // when a channel switches between TUI
+                                // and claude-e. `session_name` is the
+                                // logical adapter id (Claude session uuid
+                                // or `claude-e-{pid}`); it does not map
+                                // to a tmux pane and is intentionally
+                                // not stamped here.
+                                let _ = session_name;
                                 tmux_last_offset = Some(last_offset);
                                 inflight_state.runtime_kind =
                                     Some(RuntimeHandoffKind::ClaudeEAdapter);
-                                inflight_state.tmux_session_name = Some(session_name);
+                                inflight_state.tmux_session_name = None;
                                 inflight_state.output_path = Some(output_path);
                                 inflight_state.input_fifo_path = None;
                                 inflight_state.last_offset = last_offset;

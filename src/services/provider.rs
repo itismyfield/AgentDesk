@@ -1320,6 +1320,14 @@ pub struct CancelToken {
     pub watchdog_deadline_ms: AtomicI64,
     /// The current ceiling for watchdog_deadline_ms. Operator extensions may move this forward.
     pub watchdog_max_deadline_ms: AtomicI64,
+    /// claude-e rollout Phase 1 (counter-review round 3 with Codex). When
+    /// `true`, the synchronous `enforce_watchdog_deadline` poll inside
+    /// `spawn_cancel_watchdog` becomes a no-op for this token; the async
+    /// Discord watchdog at 30s cadence is the only deadline enforcer.
+    /// Set by the headless / text turn watchdog setup paths before they
+    /// store the deadline. Direct callers that need the legacy sub-30s
+    /// enforcement leave this `false`.
+    pub async_managed: AtomicBool,
     /// Lifecycle-aware restart/handoff mode for inflight preservation.
     pub restart_mode: AtomicU8,
 }
@@ -1335,8 +1343,30 @@ impl CancelToken {
             tmux_session: Mutex::new(None),
             watchdog_deadline_ms: AtomicI64::new(0),
             watchdog_max_deadline_ms: AtomicI64::new(0),
+            async_managed: AtomicBool::new(false),
             restart_mode: AtomicU8::new(0),
         }
+    }
+
+    /// claude-e rollout Phase 1: opt this token out of synchronous
+    /// `enforce_watchdog_deadline` enforcement. The async Discord
+    /// watchdog still polls `watchdog_deadline_ms` at 30s and cancels
+    /// when the deadline expires; the per-provider sync poll inside
+    /// `spawn_cancel_watchdog` stops short-circuiting on it.
+    ///
+    /// Call this from the Discord turn-watchdog setup paths immediately
+    /// before storing `watchdog_deadline_ms`. Non-Discord callers leave
+    /// this flag at its `false` default and keep the historical
+    /// behaviour.
+    pub fn mark_async_managed(&self) {
+        self.async_managed.store(true, Ordering::Relaxed);
+    }
+
+    /// claude-e rollout Phase 1: read counterpart to
+    /// `mark_async_managed`. `enforce_watchdog_deadline` calls this to
+    /// decide whether to honour the sync deadline poll.
+    pub fn is_async_managed(&self) -> bool {
+        self.async_managed.load(Ordering::Relaxed)
     }
 
     /// Cancel and clean up any associated tmux session.
@@ -1449,7 +1479,15 @@ fn current_unix_millis() -> i64 {
 
 fn enforce_watchdog_deadline(token: &CancelToken, now_ms: i64) -> bool {
     let deadline_ms = token.watchdog_deadline_ms.load(Ordering::Relaxed);
-    if deadline_ms > 0 && now_ms >= deadline_ms {
+    // claude-e rollout Phase 1 (counter-review round 3 with Codex):
+    // Discord-managed tokens are watched by the async 30s reconcile
+    // loop. Skipping the synchronous fire here avoids a class of
+    // mid-stream cancellations seen during claude-e e2e (provider
+    // sync watchdog killed the per-turn child before the async path
+    // had a chance to extend the deadline). Non-Discord callers leave
+    // `async_managed=false` and keep the historical sub-30s
+    // enforcement.
+    if deadline_ms > 0 && now_ms >= deadline_ms && !token.is_async_managed() {
         token.set_cancel_source_kind(CancelSource::WatchdogTimeout);
         token.cancelled.store(true, Ordering::Relaxed);
         return true;
@@ -2267,6 +2305,53 @@ mod cancel_token_tests {
             Some(CancelSource::WatchdogTimeout)
         );
         assert_eq!(token.cancel_source().as_deref(), Some("watchdog_timeout"));
+    }
+
+    /// claude-e rollout Phase 1 (counter-review round 3 with Codex): when
+    /// a Discord turn watchdog marks the token as async-managed, the
+    /// per-provider sync poll inside `spawn_cancel_watchdog` must NOT fire
+    /// on an expired deadline — the async 30s reconcile loop owns it.
+    /// Non-Discord callers (legacy default) keep the original behaviour.
+    #[test]
+    fn watchdog_deadline_enforcement_skips_async_managed_token() {
+        let token = CancelToken::new();
+        let now = current_unix_millis();
+        token.mark_async_managed();
+        token
+            .watchdog_deadline_ms
+            .store(now + 1_000, Ordering::Relaxed);
+
+        // Deadline has expired, but `async_managed` suppresses the sync
+        // fire: enforce returns false, cancelled stays false, source kind
+        // stays None, and the public `cancel_requested` reports no cancel.
+        assert!(!enforce_watchdog_deadline(&token, now + 5_000));
+        assert!(!token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(token.cancel_source_kind(), None);
+        assert!(!cancel_requested(Some(&token)));
+
+        // Explicit cancel still works — the gate is deadline-only.
+        token.cancelled.store(true, Ordering::Relaxed);
+        assert!(cancel_requested(Some(&token)));
+    }
+
+    #[test]
+    fn watchdog_deadline_enforcement_default_token_still_fires() {
+        // Companion to the async-managed test above: ensure the default
+        // (non-Discord) token path is unchanged. This guards against an
+        // accidental flip of the default in `CancelToken::new`.
+        let token = CancelToken::new();
+        let now = current_unix_millis();
+        assert!(!token.is_async_managed());
+        token
+            .watchdog_deadline_ms
+            .store(now + 1_000, Ordering::Relaxed);
+
+        assert!(enforce_watchdog_deadline(&token, now + 5_000));
+        assert!(cancel_requested(Some(&token)));
+        assert_eq!(
+            token.cancel_source_kind(),
+            Some(CancelSource::WatchdogTimeout)
+        );
     }
 }
 
