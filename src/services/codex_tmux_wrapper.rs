@@ -1,4 +1,5 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -11,6 +12,7 @@ use crate::services::tmux_common::RotatingJsonlWriter;
 use crate::services::tmux_wrapper::{InputMode, render_for_terminal};
 
 const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
+const TMUX_PROMPT_B64_CHUNK_PREFIX: &str = "__AGENTDESK_B64_CHUNK__:";
 const DEFAULT_CODEX_FIRST_EVENT_TIMEOUT_SECS: u64 = 120;
 
 pub fn run(
@@ -80,6 +82,7 @@ pub fn run(
         let prompt_tx = prompt_tx.clone();
         let input_fifo = input_fifo.to_string();
         std::thread::spawn(move || {
+            let mut decoder = ExternalPromptDecoder::default();
             let reader: BufReader<Box<dyn std::io::Read + Send>> = match input_mode {
                 InputMode::Fifo => {
                     let fifo = match std::fs::OpenOptions::new()
@@ -106,12 +109,13 @@ pub fn run(
                     continue;
                 }
                 eprintln!("\x1b[90m[external message received]\x1b[0m");
-                match decode_external_prompt(&line) {
-                    Ok(prompt) => {
+                match decoder.decode_line(&line) {
+                    Ok(Some(prompt)) => {
                         if !prompt.trim().is_empty() {
                             let _ = prompt_tx.send(prompt);
                         }
                     }
+                    Ok(None) => {}
                     Err(err) => {
                         eprintln!("\x1b[90m[input decode error: {}]\x1b[0m", err);
                     }
@@ -235,12 +239,98 @@ fn normalize_resume_session_id(resume_session_id: Option<&str>) -> Option<String
         .map(str::to_string)
 }
 
+#[derive(Default)]
+struct ExternalPromptDecoder {
+    chunked: HashMap<String, ChunkedPrompt>,
+}
+
+struct ChunkedPrompt {
+    chunks: Vec<Option<String>>,
+    received: usize,
+}
+
+impl ExternalPromptDecoder {
+    fn decode_line(&mut self, line: &str) -> Result<Option<String>, String> {
+        if let Some(encoded) = line.strip_prefix(TMUX_PROMPT_B64_PREFIX) {
+            return decode_base64_prompt(encoded).map(Some);
+        }
+
+        if let Some(chunk) = line.strip_prefix(TMUX_PROMPT_B64_CHUNK_PREFIX) {
+            return self.decode_chunk(chunk);
+        }
+
+        Ok(Some(line.to_string()))
+    }
+
+    fn decode_chunk(&mut self, line: &str) -> Result<Option<String>, String> {
+        let mut parts = line.splitn(4, ':');
+        let message_id = parts
+            .next()
+            .filter(|value| !value.is_empty())
+            .ok_or("missing chunk message id")?;
+        let index = parts
+            .next()
+            .ok_or("missing chunk index")?
+            .parse::<usize>()
+            .map_err(|_| "invalid chunk index".to_string())?;
+        let total = parts
+            .next()
+            .ok_or("missing chunk total")?
+            .parse::<usize>()
+            .map_err(|_| "invalid chunk total".to_string())?;
+        let chunk = parts.next().ok_or("missing chunk payload")?;
+
+        if total == 0 || total > 10_000 {
+            return Err("invalid chunk total".to_string());
+        }
+        if index >= total {
+            return Err("chunk index out of range".to_string());
+        }
+
+        let entry = self
+            .chunked
+            .entry(message_id.to_string())
+            .or_insert_with(|| ChunkedPrompt {
+                chunks: vec![None; total],
+                received: 0,
+            });
+        if entry.chunks.len() != total {
+            self.chunked.remove(message_id);
+            return Err("chunk total changed for message id".to_string());
+        }
+        if entry.chunks[index].is_some() {
+            self.chunked.remove(message_id);
+            return Err("duplicate chunk index".to_string());
+        }
+
+        entry.chunks[index] = Some(chunk.to_string());
+        entry.received += 1;
+        if entry.received != total {
+            return Ok(None);
+        }
+
+        let entry = self
+            .chunked
+            .remove(message_id)
+            .ok_or("completed chunk state missing")?;
+        let mut encoded = String::new();
+        for chunk in entry.chunks {
+            encoded.push_str(&chunk.ok_or("missing completed chunk")?);
+        }
+        decode_base64_prompt(&encoded).map(Some)
+    }
+}
+
+fn decode_base64_prompt(encoded: &str) -> Result<String, String> {
+    let bytes = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|e| format!("invalid base64 payload: {}", e))?;
+    String::from_utf8(bytes).map_err(|e| format!("invalid utf-8 payload: {}", e))
+}
+
 fn decode_external_prompt(line: &str) -> Result<String, String> {
     if let Some(encoded) = line.strip_prefix(TMUX_PROMPT_B64_PREFIX) {
-        let bytes = BASE64_STANDARD
-            .decode(encoded)
-            .map_err(|e| format!("invalid base64 payload: {}", e))?;
-        return String::from_utf8(bytes).map_err(|e| format!("invalid utf-8 payload: {}", e));
+        return decode_base64_prompt(encoded);
     }
     Ok(line.to_string())
 }
@@ -528,8 +618,9 @@ fn run_turn(
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
     use super::{
-        TerminalInputLoopOutcome, decode_external_prompt, emit_json_line, handle_background_event,
-        handle_item_completed, normalize_resume_session_id, read_codex_terminal_input_lines,
+        ExternalPromptDecoder, TerminalInputLoopOutcome, decode_external_prompt, emit_json_line,
+        handle_background_event, handle_item_completed, normalize_resume_session_id,
+        read_codex_terminal_input_lines,
     };
     use crate::services::codex::{
         CODEX_BACKGROUND_TASK_NOTIFICATION_ID, CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
@@ -546,6 +637,35 @@ mod tests {
     fn test_decode_external_prompt_decodes_base64_payload() {
         let line = "__AGENTDESK_B64__:bGluZTEKbGluZTI=";
         assert_eq!(decode_external_prompt(line).unwrap(), "line1\nline2");
+    }
+
+    #[test]
+    fn chunked_external_prompt_decoder_reassembles_base64_payload() {
+        let mut decoder = ExternalPromptDecoder::default();
+
+        assert_eq!(
+            decoder
+                .decode_line("__AGENTDESK_B64_CHUNK__:msg-1:0:2:bGluZTEK")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            decoder
+                .decode_line("__AGENTDESK_B64_CHUNK__:msg-1:1:2:bGluZTI=")
+                .unwrap(),
+            Some("line1\nline2".to_string())
+        );
+    }
+
+    #[test]
+    fn chunked_external_prompt_decoder_drops_malformed_chunks() {
+        let mut decoder = ExternalPromptDecoder::default();
+
+        assert!(
+            decoder
+                .decode_line("__AGENTDESK_B64_CHUNK__:msg-1:2:2:abc")
+                .is_err()
+        );
     }
 
     #[test]

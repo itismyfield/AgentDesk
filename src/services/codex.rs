@@ -1,6 +1,6 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
@@ -29,11 +29,12 @@ use crate::services::session_backend::{
 };
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{
-    record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
-    tmux_session_exists, tmux_session_has_live_pane,
+    record_tmux_exit_reason, tmux_session_exists, tmux_session_has_live_pane,
 };
 
 const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
+const TMUX_PROMPT_B64_CHUNK_PREFIX: &str = "__AGENTDESK_B64_CHUNK__:";
+const TMUX_PROMPT_B64_CHUNK_SIZE: usize = 700;
 pub(crate) const CODEX_BACKGROUND_TASK_NOTIFICATION_ID: &str = "codex-background-event";
 pub(crate) const CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS: &str = "completed";
 
@@ -273,7 +274,8 @@ fn render_codex_wrapper_tmux_script(
         --output-file {output} \\\n  \
         --input-fifo {input_fifo} \\\n  \
         --prompt-file {prompt} \\\n  \
-        --cwd {wd}{wrapper_args}\n",
+        --cwd {wd} \\\n  \
+        --input-mode pipe{wrapper_args}\n",
         env = env_lines,
         exe = shell_escape(exe),
         output = shell_escape(output_path),
@@ -2005,18 +2007,7 @@ fn execute_streaming_local_tmux(
         .cleanup_best_effort();
 
     std::fs::write(&output_path, "").map_err(|e| format!("Failed to create output file: {}", e))?;
-
-    let mkfifo = Command::new("mkfifo")
-        .arg(&input_fifo_path)
-        .output()
-        .map_err(|e| format!("Failed to create input FIFO: {}", e))?;
-    if !mkfifo.status.success() {
-        let _ = std::fs::remove_file(&output_path);
-        return Err(format!(
-            "mkfifo failed: {}",
-            String::from_utf8_lossy(&mkfifo.stderr)
-        ));
-    }
+    let _ = std::fs::remove_file(&input_fifo_path);
 
     std::fs::write(&prompt_path, prompt)
         .map_err(|e| format!("Failed to write prompt file: {}", e))?;
@@ -2071,7 +2062,6 @@ fn execute_streaming_local_tmux(
     if !tmux_result.status.success() {
         let stderr = String::from_utf8_lossy(&tmux_result.stderr);
         let _ = std::fs::remove_file(&output_path);
-        let _ = std::fs::remove_file(&input_fifo_path);
         let _ = std::fs::remove_file(&prompt_path);
         let _ = std::fs::remove_file(&owner_path);
         let _ = std::fs::remove_file(&script_path);
@@ -2130,6 +2120,90 @@ fn execute_streaming_local_tmux(
 }
 
 #[cfg(unix)]
+fn codex_pipe_prompt_line(prompt: &str) -> String {
+    format!(
+        "{}{}",
+        TMUX_PROMPT_B64_PREFIX,
+        BASE64_STANDARD.encode(prompt.as_bytes())
+    )
+}
+
+#[cfg(unix)]
+fn codex_pipe_prompt_lines_with_id(prompt: &str, message_id: &str) -> Vec<String> {
+    let encoded = BASE64_STANDARD.encode(prompt.as_bytes());
+    if encoded.len() <= TMUX_PROMPT_B64_CHUNK_SIZE {
+        return vec![format!("{}{}", TMUX_PROMPT_B64_PREFIX, encoded)];
+    }
+
+    let chunks: Vec<&str> = encoded
+        .as_bytes()
+        .chunks(TMUX_PROMPT_B64_CHUNK_SIZE)
+        .map(|chunk| std::str::from_utf8(chunk).expect("base64 chunks are ascii"))
+        .collect();
+    let total = chunks.len();
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            format!(
+                "{}{}:{}:{}:{}",
+                TMUX_PROMPT_B64_CHUNK_PREFIX, message_id, index, total, chunk
+            )
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn codex_pipe_prompt_lines(prompt: &str) -> Vec<String> {
+    let message_id = uuid::Uuid::new_v4().simple().to_string();
+    codex_pipe_prompt_lines_with_id(prompt, &message_id)
+}
+
+#[cfg(unix)]
+fn send_codex_pipe_prompt_to_tmux(tmux_session_name: &str, prompt: &str) -> Result<(), String> {
+    let encoded = codex_pipe_prompt_lines(prompt).join("\n");
+    let buffer_name = format!("agentdesk-codex-pipe-input-{}", uuid::Uuid::new_v4());
+    let load_output = crate::services::platform::tmux::load_buffer(&buffer_name, &encoded)?;
+    if !load_output.status.success() {
+        let stderr = String::from_utf8_lossy(&load_output.stderr)
+            .trim()
+            .to_string();
+        let detail = if stderr.is_empty() {
+            load_output.status.to_string()
+        } else {
+            stderr
+        };
+        return Err(format!("tmux load-buffer failed: {detail}"));
+    }
+    let paste_output =
+        crate::services::platform::tmux::paste_buffer_raw(tmux_session_name, &buffer_name, true)?;
+    if !paste_output.status.success() {
+        let stderr = String::from_utf8_lossy(&paste_output.stderr)
+            .trim()
+            .to_string();
+        let detail = if stderr.is_empty() {
+            paste_output.status.to_string()
+        } else {
+            stderr
+        };
+        return Err(format!("tmux paste-buffer failed: {detail}"));
+    }
+    let enter_output = crate::services::platform::tmux::send_keys(tmux_session_name, &["Enter"])?;
+    if !enter_output.status.success() {
+        let stderr = String::from_utf8_lossy(&enter_output.stderr)
+            .trim()
+            .to_string();
+        let detail = if stderr.is_empty() {
+            enter_output.status.to_string()
+        } else {
+            stderr
+        };
+        return Err(format!("tmux send Enter failed: {detail}"));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn send_followup_to_tmux(
     prompt: &str,
     output_path: &str,
@@ -2140,30 +2214,8 @@ fn send_followup_to_tmux(
 ) -> Result<FollowupResult, String> {
     let start_offset = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
 
-    // Write to input FIFO — if the pipe is broken or missing, request recreation
-    let write_result = std::fs::OpenOptions::new()
-        .write(true)
-        .open(input_fifo_path)
-        .map_err(|e| format!("Failed to open input FIFO: {}", e))
-        .and_then(|mut fifo| {
-            let encoded = format!(
-                "{}{}",
-                TMUX_PROMPT_B64_PREFIX,
-                BASE64_STANDARD.encode(prompt.as_bytes())
-            );
-            writeln!(fifo, "{}", encoded)
-                .map_err(|e| format!("Failed to write to input FIFO: {}", e))?;
-            fifo.flush()
-                .map_err(|e| format!("Failed to flush input FIFO: {}", e))?;
-            Ok(())
-        });
-
-    if let Err(e) = write_result {
-        if should_recreate_session_after_followup_fifo_error(&e) {
-            return Ok(FollowupResult::RecreateSession { error: e });
-        }
-        return Err(e);
-    }
+    send_codex_pipe_prompt_to_tmux(tmux_session_name, prompt)
+        .map_err(|e| format!("Failed to send Codex pipe prompt to tmux: {e}"))?;
 
     if let Some(ref token) = cancel_token {
         *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -2178,7 +2230,7 @@ fn send_followup_to_tmux(
         SessionProbe::tmux_with_structured_output(
             tmux_session_name.to_string(),
             ProviderKind::Codex,
-            Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui),
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::LegacyTmuxWrapper),
             output_path.to_string(),
         ),
     ) {
@@ -2186,7 +2238,9 @@ fn send_followup_to_tmux(
         Err(failure) => {
             let output_exists = std::fs::metadata(output_path).is_ok();
             let current_file_len = std::fs::metadata(output_path).ok().map(|meta| meta.len());
-            let input_exists = std::path::Path::new(input_fifo_path).exists();
+            // Codex legacy wrapper now runs in tmux pipe mode. There is no
+            // FIFO file to stat; the live tmux pane is the input transport.
+            let input_exists = true;
             let session_alive = tmux_session_has_live_pane(tmux_session_name);
             let ready_for_input = session_alive
                 && crate::services::tui_turn_state::jsonl_ready_for_input(
@@ -3016,6 +3070,8 @@ mod tui_hosting_tests {
         assert!(script.contains("'developer rules'"));
         assert!(script.contains("'--compact-token-limit'"));
         assert!(script.contains("'120000'"));
+        assert!(script.contains("--input-mode pipe"));
+        assert!(!script.contains("mkfifo"));
         assert!(!script.contains("exec '/opt/bin/codex' "));
     }
 
@@ -3496,39 +3552,36 @@ mod tests {
         ]));
     }
 
-    // ========== FollowupResult tests ==========
+    // ========== Follow-up transport tests ==========
 
     #[cfg(unix)]
     #[test]
-    fn test_codex_followup_fifo_not_found_returns_recreate() {
-        use super::send_followup_to_tmux;
-        use crate::services::provider::FollowupResult;
+    fn codex_pipe_prompt_line_wraps_base64_payload() {
+        let line = super::codex_pipe_prompt_line("line 1\nline 2");
+        let lines = super::codex_pipe_prompt_lines_with_id("line 1\nline 2", "msg-1");
 
-        let (sender, _receiver) = mpsc::channel();
-        let dir = std::env::temp_dir();
-        let output_path = dir.join(format!(
-            "agentdesk-test-codex-followup-{}.jsonl",
-            std::process::id()
-        ));
-        let _ = std::fs::write(&output_path, "");
-
-        let result = send_followup_to_tmux(
-            "test prompt",
-            output_path.to_str().unwrap(),
-            "/tmp/agentdesk-test-codex-nonexistent-fifo",
-            sender,
-            None,
-            "test-codex-followup",
+        assert!(line.starts_with(super::TMUX_PROMPT_B64_PREFIX));
+        assert_eq!(
+            &line[super::TMUX_PROMPT_B64_PREFIX.len()..],
+            "bGluZSAxCmxpbmUgMg=="
         );
+        assert_eq!(lines, vec![line]);
+    }
 
-        let _ = std::fs::remove_file(&output_path);
+    #[cfg(unix)]
+    #[test]
+    fn codex_pipe_prompt_lines_chunk_large_payload() {
+        let prompt = "x".repeat(2048);
+        let lines = super::codex_pipe_prompt_lines_with_id(&prompt, "msg-1");
 
-        match result {
-            Ok(FollowupResult::RecreateSession { error }) => {
-                assert!(error.contains("Failed to open input FIFO"));
-            }
-            other => panic!("Expected Ok(RecreateSession), got {:?}", other),
-        }
+        assert!(lines.len() > 1);
+        assert!(lines.iter().all(|line| line.len() < 900));
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.starts_with(super::TMUX_PROMPT_B64_CHUNK_PREFIX))
+        );
+        assert!(lines[0].contains("msg-1:0:"));
     }
 
     /// Regression test for #2249: on timeout, the spawned Codex child
