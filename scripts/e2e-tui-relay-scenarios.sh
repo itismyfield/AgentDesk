@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# DEPRECATED (2026-05-28): targets the legacy adk-dashboard-e2e cc/cdx pair.
+# The cell-based replacement ships in PR 5 of the multi-provider-e2e migration;
+# once the adk-{cell}-e2e channels exist, invoke
+# `scripts/e2e/run_tui_relay.py --cell <cell> --channel-id <id>` per cell.
+# Kept here only for the adk-dashboard-e2e archive window.
+
 # Live Discord/TUI relay smoke suite for the dedicated E2E channels.
 # It intentionally uses the shipped AgentDesk CLI and runtime tmux sessions
 # instead of DB internals so the check follows the operator path.

@@ -1,6 +1,6 @@
 id: E-6
 title: /compact 후 memory recap이 사용자 메시지로 오인되지 않음 (#2702 + 3.3)
-channel: cc
+cells: [claude-pipe, claude-tui, claude-e]  # /compact memory recap is claude-only
 isolation: required
 steps:
   - send_prompt: "응답에 정확히 한 줄로 [E2E:E6:BEFORE] 만 출력해줘."

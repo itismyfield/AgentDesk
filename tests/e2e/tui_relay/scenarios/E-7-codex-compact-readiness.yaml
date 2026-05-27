@@ -1,6 +1,6 @@
 id: E-7
 title: Codex /compact 직후 새 입력 readiness (#2695)
-channel: cdx
+cells: [codex-pipe, codex-tui]  # Codex /compact readiness is codex-only
 isolation: required
 steps:
   - send_prompt: "before-compact (E-7)"

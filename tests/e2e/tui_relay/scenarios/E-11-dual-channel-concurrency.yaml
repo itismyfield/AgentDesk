@@ -1,6 +1,6 @@
 id: E-11
 title: cc · cdx 동시 진행, 채널 격리 (#2691 + 7.2)
-channel: both
+cells: []  # cross-cell scenario, handled at orchestrator layer in PR 4
 isolation: required
 notes: |
   Driver runs cc and cdx sequentially in the current implementation; true

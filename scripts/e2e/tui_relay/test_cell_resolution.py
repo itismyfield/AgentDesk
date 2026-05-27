@@ -1,0 +1,115 @@
+"""Unit tests for cell helpers and scenario filtering.
+
+Run with: python3 -m pytest scripts/e2e/tui_relay/test_cell_resolution.py
+Or:       python3 scripts/e2e/tui_relay/test_cell_resolution.py
+"""
+
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "scripts" / "e2e"))
+
+import run_tui_relay as driver  # noqa: E402
+
+
+class CellHelpers(unittest.TestCase):
+    def test_supported_cells_cover_provider_runtime_matrix(self):
+        self.assertEqual(
+            set(driver.SUPPORTED_CELLS),
+            {"claude-pipe", "claude-tui", "claude-e", "codex-pipe", "codex-tui"},
+        )
+
+    def test_cell_provider(self):
+        self.assertEqual(driver.cell_provider("claude-pipe"), "claude")
+        self.assertEqual(driver.cell_provider("claude-tui"), "claude")
+        self.assertEqual(driver.cell_provider("claude-e"), "claude")
+        self.assertEqual(driver.cell_provider("codex-pipe"), "codex")
+        self.assertEqual(driver.cell_provider("codex-tui"), "codex")
+
+    def test_cell_runtime(self):
+        self.assertEqual(driver.cell_runtime("claude-pipe"), "pipe")
+        self.assertEqual(driver.cell_runtime("claude-tui"), "tui")
+        self.assertEqual(driver.cell_runtime("claude-e"), "e")
+        self.assertEqual(driver.cell_runtime("codex-pipe"), "pipe")
+        self.assertEqual(driver.cell_runtime("codex-tui"), "tui")
+
+    def test_session_name_uses_cell_workspace(self):
+        self.assertEqual(
+            driver.cell_session_name("claude-pipe"),
+            "AgentDesk-claude-adk-claude-pipe-e2e",
+        )
+        self.assertEqual(
+            driver.cell_session_name("codex-tui"),
+            "AgentDesk-codex-adk-codex-tui-e2e",
+        )
+
+    def test_default_agent_id(self):
+        self.assertEqual(driver.cell_default_agent("claude-pipe"), "adk-claude-pipe-e2e")
+        self.assertEqual(driver.cell_default_agent("codex-tui"), "adk-codex-tui-e2e")
+
+    def test_workspace_substring_safety(self):
+        for cell in driver.SUPPORTED_CELLS:
+            sub = driver.cell_workspace_substring(cell)
+            self.assertTrue(sub.startswith("adk-"))
+            self.assertIn("e2e", sub)
+            # legacy adk-dash workspaces must never match a new cell substring.
+            self.assertNotIn("dash", sub)
+
+
+class ScenarioFilter(unittest.TestCase):
+    def setUp(self):
+        self.scenarios_dir = ROOT / "tests" / "e2e" / "tui_relay" / "scenarios"
+
+    def test_claude_pipe_scenarios(self):
+        scenarios = driver.load_scenarios(self.scenarios_dir, cell="claude-pipe")
+        ids = {str(s.get("id")) for s in scenarios}
+        # claude-pipe gets the basic + compact + restart scenarios but NOT
+        # TUI-keystroke ones (E-4, E-10, E-12).
+        self.assertIn("E-1", ids)
+        self.assertIn("E-6", ids)
+        self.assertIn("E-8", ids)
+        self.assertNotIn("E-4", ids)
+        self.assertNotIn("E-10", ids)
+        self.assertNotIn("E-12", ids)
+        # codex-only scenario excluded
+        self.assertNotIn("E-7", ids)
+
+    def test_claude_tui_scenarios(self):
+        scenarios = driver.load_scenarios(self.scenarios_dir, cell="claude-tui")
+        ids = {str(s.get("id")) for s in scenarios}
+        self.assertIn("E-1", ids)
+        self.assertIn("E-4", ids)
+        self.assertIn("E-10", ids)
+        self.assertIn("E-12", ids)
+        self.assertNotIn("E-7", ids)
+
+    def test_codex_pipe_scenarios(self):
+        scenarios = driver.load_scenarios(self.scenarios_dir, cell="codex-pipe")
+        ids = {str(s.get("id")) for s in scenarios}
+        self.assertIn("E-7", ids)
+        self.assertNotIn("E-6", ids)
+        self.assertNotIn("E-4", ids)
+
+    def test_codex_tui_scenarios(self):
+        scenarios = driver.load_scenarios(self.scenarios_dir, cell="codex-tui")
+        ids = {str(s.get("id")) for s in scenarios}
+        self.assertIn("E-7", ids)
+        self.assertIn("E-4", ids)
+
+    def test_e11_excluded_everywhere(self):
+        for cell in driver.SUPPORTED_CELLS:
+            scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
+            ids = {str(s.get("id")) for s in scenarios}
+            self.assertNotIn(
+                "E-11",
+                ids,
+                f"E-11 (cross-cell concurrency) should be excluded from cell {cell}",
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

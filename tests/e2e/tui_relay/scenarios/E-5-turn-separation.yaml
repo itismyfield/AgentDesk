@@ -1,6 +1,6 @@
 id: E-5
 title: 응답 직후 새 프롬프트 → 새 턴 헤더 분리 + inflight cleanup 관측 (#2625)
-channel: both
+cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
 isolation: required
 steps:
   - send_prompt: "응답에 정확히 한 줄로 [E2E:E5:TURN-A] 만 출력해줘."
