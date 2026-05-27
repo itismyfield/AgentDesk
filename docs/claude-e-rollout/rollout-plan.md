@@ -64,6 +64,27 @@ input are recorded in `decision-log.md`.
 - Modes other than the default remain selectable; **no code deletion**.
 - Final cross-review (Codex + Claude). After clean: PR(s) merged to main.
 
+## Rollback matrix
+
+Each phase is reversible in three layers, in order of decreasing blast
+radius:
+
+| Layer | Trigger | Action | Recovery time |
+|---|---|---|---|
+| Config-only | A `runtime` value misbehaves on one channel | Remove the `runtime` line (or set it back to `tui` / `pipe`) and reload config | Seconds — `install_provider_hosting_config` rebuilds the mirrors on next config read |
+| Binary, single-commit | A phase regresses behaviour systemically | `git revert <phase-commit>` and redeploy via `scripts/deploy-release.sh` | Minutes — re-deploy + dcserver restart |
+| Binary, full rollback | Multiple phases must be unwound | `git revert` each phase commit in reverse order | Tens of minutes |
+
+Cross-phase invariants that must survive a rollback:
+
+- **Inflight rows** stamp `runtime_kind` strings; the tolerant deserializer
+  drops unknown variants safely, so a newer-binary row never breaks an
+  older binary.
+- **`tui_hosting` semantics** never change: a binary rollback leaves
+  channels routing through whatever `tui_hosting` says.
+- **No code deletion**: all three runtime branches stay reachable
+  regardless of which phase you roll back to.
+
 ## Counter-review protocol
 
 For each phase PR:

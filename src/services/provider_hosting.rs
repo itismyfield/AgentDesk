@@ -51,11 +51,16 @@ impl RuntimeMode {
 
     /// Parse the YAML `runtime` field. Unknown / empty values return `None`
     /// so the legacy `tui_hosting` derivation can run as before.
+    ///
+    /// Accepted aliases are minimal on purpose: the canonical spellings
+    /// (`pipe` / `tui` / `claude-e`) plus the underscored form for each.
+    /// Typos like `claudee` are intentionally rejected so the warn-and-
+    /// fallback path runs instead of silently honouring the intent.
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "pipe" | "legacy" | "legacy_prompt" | "legacy-prompt" => Some(Self::Pipe),
             "tui" | "tui_hosting" | "tui-hosting" => Some(Self::Tui),
-            "claude-e" | "claude_e" | "claudee" => Some(Self::ClaudeE),
+            "claude-e" | "claude_e" => Some(Self::ClaudeE),
             _ => None,
         }
     }
@@ -379,10 +384,11 @@ pub fn resolve_provider_session_selection_with_channel(
                 };
             }
             // Phase 0: the adapter module is a stub. Until Phase 1 lands the
-            // real wiring, mark the driver as `ClaudeE` so telemetry shows
-            // the operator's intent, but fall back to `LegacyPrompt` so the
-            // dispatch path still routes through `claude -p`. Phase 1 flips
-            // this branch to return `ClaudeE` once the adapter is ready.
+            // real wiring, we record operator intent only via
+            // `fallback_reason="claude_e_adapter_unimplemented"` while the
+            // dispatch path keeps routing through `claude -p`. Phase 1
+            // flips this branch to return `ProviderSessionDriver::ClaudeE`
+            // once the adapter is ready.
             ProviderSessionSelection {
                 provider_id,
                 requested_tui_hosting,
@@ -393,32 +399,76 @@ pub fn resolve_provider_session_selection_with_channel(
     }
 }
 
+/// Phase 0 of the claude-e rollout. `runtime: tui` on a provider or channel
+/// counts as a TUI hosting request even when `tui_hosting` is unset, so the
+/// boot path (e.g. `claude_tui::hook_server` publish) does not skip the hook
+/// endpoint for operators who only set the new `runtime` field.
+fn provider_runtime_mode_explicit(config: &Config, provider_id: &str) -> Option<RuntimeMode> {
+    config
+        .providers
+        .get(&provider_id.trim().to_ascii_lowercase())
+        .and_then(|provider_config| provider_config.runtime.as_deref())
+        .and_then(|raw| RuntimeMode::parse(raw.trim()))
+}
+
+fn channel_runtime_mode_explicit(channel: &crate::config::AgentChannel) -> Option<RuntimeMode> {
+    channel
+        .runtime_mode_raw()
+        .as_deref()
+        .and_then(|raw| RuntimeMode::parse(raw.trim()))
+}
+
 pub fn any_requested_tui_hosting_driver_available(config: &Config) -> bool {
-    crate::services::provider::supported_provider_ids()
+    let provider_level_request = crate::services::provider::supported_provider_ids()
         .iter()
-        .filter(|provider_id| config.provider_tui_hosting_enabled(provider_id))
-        .filter_map(|provider_id| ProviderKind::from_str(provider_id))
-        .any(|provider| provider_tui_hosting_driver_available(&provider))
-        || config.agents.iter().any(|agent| {
-            agent
-                .channels
-                .iter()
-                .into_iter()
-                .any(|(channel_kind, channel)| {
-                    let Some(channel) = channel else {
-                        return false;
-                    };
-                    if channel.tui_hosting() != Some(true) {
-                        return false;
-                    }
-                    let provider_id = channel
-                        .provider()
-                        .unwrap_or_else(|| channel_kind.to_string());
-                    ProviderKind::from_str(&provider_id)
-                        .as_ref()
-                        .is_some_and(provider_tui_hosting_driver_available)
-                })
-        })
+        .any(|provider_id| {
+            // Phase 0 (claude-e rollout): an explicit `runtime` field wins
+            // over `tui_hosting`. `runtime: tui` keeps the answer `true`,
+            // `runtime: pipe` / `runtime: claude-e` keeps it `false` even
+            // when the legacy `tui_hosting` boolean is `true`. Without an
+            // explicit runtime, fall back to the legacy derivation.
+            let explicit = provider_runtime_mode_explicit(config, provider_id);
+            let wants_tui = match explicit {
+                Some(RuntimeMode::Tui) => true,
+                Some(RuntimeMode::Pipe) | Some(RuntimeMode::ClaudeE) => false,
+                None => config.provider_tui_hosting_enabled(provider_id),
+            };
+            wants_tui
+                && ProviderKind::from_str(provider_id)
+                    .as_ref()
+                    .is_some_and(provider_tui_hosting_driver_available)
+        });
+
+    if provider_level_request {
+        return true;
+    }
+
+    config.agents.iter().any(|agent| {
+        agent
+            .channels
+            .iter()
+            .into_iter()
+            .any(|(channel_kind, channel)| {
+                let Some(channel) = channel else {
+                    return false;
+                };
+                let explicit = channel_runtime_mode_explicit(channel);
+                let wants_tui = match explicit {
+                    Some(RuntimeMode::Tui) => true,
+                    Some(RuntimeMode::Pipe) | Some(RuntimeMode::ClaudeE) => false,
+                    None => channel.tui_hosting() == Some(true),
+                };
+                if !wants_tui {
+                    return false;
+                }
+                let provider_id = channel
+                    .provider()
+                    .unwrap_or_else(|| channel_kind.to_string());
+                ProviderKind::from_str(&provider_id)
+                    .as_ref()
+                    .is_some_and(provider_tui_hosting_driver_available)
+            })
+    })
 }
 
 pub fn provider_tui_hosting_driver_available(provider: &ProviderKind) -> bool {
@@ -663,10 +713,14 @@ mod tests {
         assert_eq!(RuntimeMode::parse("tui"), Some(RuntimeMode::Tui));
         assert_eq!(RuntimeMode::parse("tui_hosting"), Some(RuntimeMode::Tui));
         assert_eq!(RuntimeMode::parse("claude-e"), Some(RuntimeMode::ClaudeE));
+        assert_eq!(RuntimeMode::parse("Claude-E"), Some(RuntimeMode::ClaudeE));
         assert_eq!(RuntimeMode::parse("claude_e"), Some(RuntimeMode::ClaudeE));
-        assert_eq!(RuntimeMode::parse("ClaudeE"), Some(RuntimeMode::ClaudeE));
         assert_eq!(RuntimeMode::parse(""), None);
         assert_eq!(RuntimeMode::parse("bogus"), None);
+        // Phase 0 counter-review MINOR 4: typo variants must trigger the
+        // warn-and-fallback path, not silent acceptance.
+        assert_eq!(RuntimeMode::parse("claudee"), None);
+        assert_eq!(RuntimeMode::parse("ClaudeE"), None);
     }
 
     #[test]
@@ -803,6 +857,64 @@ mod tests {
             resolve_provider_session_selection_with_channel(&ProviderKind::Claude, true, Some(42));
         assert!(other_channel.requested_tui_hosting);
         assert_eq!(other_channel.driver, ProviderSessionDriver::TuiHosting);
+
+        install_provider_hosting_config(&Config::default());
+    }
+
+    #[test]
+    fn any_requested_tui_hosting_picks_up_explicit_runtime_tui() {
+        // Phase 0 counter-review MAJOR-2: an operator who only sets
+        // `runtime: tui` (without the legacy `tui_hosting` boolean) must
+        // still cause the hook endpoint to be published at boot.
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let mut config = Config::default();
+        // Wipe the Claude default so we are not relying on the per-provider
+        // default returning `true` for Claude.
+        config.providers.insert(
+            "claude".to_string(),
+            ProviderConfig {
+                tui_hosting: Some(false),
+                runtime: Some("tui".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+
+        // `tui_hosting: false` alone would short-circuit to `false`; the new
+        // resolver must observe `runtime: tui` and return `true` regardless.
+        assert!(any_requested_tui_hosting_driver_available(&config));
+
+        install_provider_hosting_config(&Config::default());
+    }
+
+    #[test]
+    fn any_requested_tui_hosting_skips_explicit_runtime_pipe_or_claude_e() {
+        // Phase 0: `runtime: pipe` and `runtime: claude-e` must NOT light up
+        // the hook endpoint even when `tui_hosting: true` is also present
+        // (explicit `runtime` wins).
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+
+        let mut pipe_config = Config::default();
+        pipe_config.providers.insert(
+            "claude".to_string(),
+            ProviderConfig {
+                tui_hosting: Some(true),
+                runtime: Some("pipe".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        // Other providers default to no TUI, so this should be false overall.
+        assert!(!any_requested_tui_hosting_driver_available(&pipe_config));
+
+        let mut claude_e_config = Config::default();
+        claude_e_config.providers.insert(
+            "claude".to_string(),
+            ProviderConfig {
+                tui_hosting: Some(true),
+                runtime: Some("claude-e".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        assert!(!any_requested_tui_hosting_driver_available(&claude_e_config));
 
         install_provider_hosting_config(&Config::default());
     }

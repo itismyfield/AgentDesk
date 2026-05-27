@@ -99,6 +99,10 @@ pub(crate) fn provider_runtime_has_structured_jsonl_turn_state(
     if !provider_has_jsonl {
         return false;
     }
+    // Phase 0 of the claude-e rollout: `ClaudeEAdapter` is grouped with the
+    // non-JSONL runtimes because the adapter is a Phase 0 stub. Phase 1 will
+    // flip this classification once `claude-e --output-format stream-json`
+    // is producing real JSONL output (see `docs/claude-e-rollout/`).
     !matches!(
         runtime_kind,
         Some(
@@ -186,6 +190,9 @@ pub(crate) fn runtime_binding_ready_for_input(
     if !provider_runtime_has_structured_jsonl_turn_state(provider, Some(binding.runtime_kind)) {
         return None;
     }
+    // Phase 0 of the claude-e rollout. Phase 1 will likely route
+    // `ClaudeEAdapter` through `binding.output_path` once the adapter
+    // emits stream-json into a real on-disk file.
     let path = match binding.runtime_kind {
         RuntimeHandoffKind::ClaudeTui => Path::new(binding.relay_output_path()),
         RuntimeHandoffKind::CodexTui => Path::new(&binding.output_path),

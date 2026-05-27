@@ -47,6 +47,12 @@ providers:
     # set, `runtime` wins. Phase 0 still falls back to `pipe` for
     # `claude-e` until the adapter is wired in Phase 1, so a misconfig
     # cannot break dispatch.
+    #
+    # NOTE: `providers.claude.runtime` is unrelated to the top-level
+    # `runtime:` section near the bottom of this file (which controls
+    # turn/stale timeouts). Always refer to this field by its full path
+    # `providers.<provider>.runtime` (or `agents[].channels.<kind>.runtime`
+    # for the per-channel override) to avoid confusion.
     # runtime: claude-e
   codex:
     tui_hosting: true
