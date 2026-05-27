@@ -130,6 +130,21 @@ async fn run_idle_recap_post_job(
         Some(name) => idle_recap::capture_tmux_scrollback(name).await,
         None => None,
     };
+    // Fallback for runtimes without a live tmux pane (notably `claude-e`,
+    // which spawns per-turn and exits). Also rescues recap summaries when a
+    // long-lived tmux session has already been torn down: the transcript
+    // file outlives the pane, so we get a usable scrollback either way.
+    let scrollback = match (
+        scrollback,
+        snapshot.cwd.as_deref(),
+        snapshot.claude_session_id.as_deref(),
+    ) {
+        (Some(text), _, _) => Some(text),
+        (None, Some(cwd), Some(session_id)) if !cwd.is_empty() && !session_id.is_empty() => {
+            idle_recap::capture_transcript_scrollback(std::path::Path::new(cwd), session_id).await
+        }
+        _ => None,
+    };
     let summary = match scrollback.as_deref() {
         Some(text) => idle_recap::summarize_with_opencode(text).await,
         None => None,

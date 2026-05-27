@@ -152,6 +152,9 @@
   - `src/services/discord/runtime_bootstrap.rs` (3235 lines after #2558
     thread-session GC loopback shim cleanup).
   - `src/services/discord/session_runtime.rs` (1887 lines).
+  - `src/services/discord/idle_recap.rs` (1133 lines after #2802 transcript
+    fallback; idle recap snapshot, scrollback capture, summarization, and
+    card composition surface, split before adding non-bugfix behavior).
   - `src/services/discord/voice_barge_in.rs` (1783 lines; voice STT/TTS,
     lobby routing, progress mirroring, and barge-in orchestration surface;
     split before adding non-bugfix behavior).
