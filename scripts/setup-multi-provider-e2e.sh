@@ -64,6 +64,25 @@ if [ ! -x "$AGENTDESK_BIN" ]; then
   exit 2
 fi
 
+# Preflight: PR 2 ships `discord category-create` / `channel-create`. Refuse to
+# run live against an older binary so we never partially provision and then
+# error out mid-way.
+if [ "$DRY_RUN" -ne 1 ]; then
+  if ! "$AGENTDESK_BIN" discord --help 2>/dev/null | grep -q "category-create"; then
+    cat >&2 <<MISSING
+$AGENTDESK_BIN is missing the \`discord category-create\` subcommand.
+This script requires PR #2804 (CLI: discord category/channel/thread create)
+to be merged and deployed to ~/.adk/release/bin/agentdesk.
+
+  - Check release deploy:  $AGENTDESK_BIN --version
+  - Or re-deploy:           scripts/deploy-release.sh
+
+Re-run with --dry-run to preview the CLI invocations without needing PR 2.
+MISSING
+    exit 2
+  fi
+fi
+
 run_cli() {
   if [ "$DRY_RUN" -eq 1 ]; then
     echo "[dry-run] $AGENTDESK_BIN $*" >&2
