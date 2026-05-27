@@ -1,4 +1,11 @@
-# TUI Relay Stabilization E2E
+# TUI Relay Stabilization E2E — SUPERSEDED
+
+> **Superseded** by [`multi-provider-e2e.md`](multi-provider-e2e.md) on
+> 2026-05-28. This document describes the legacy single-pair smoke that
+> targeted the `adk-dashboard-e2e` channel pair. Use the cell-based driver
+> (`scripts/e2e/run_tui_relay.py --cell <cell> --channel-id <id>`) for new
+> work. The legacy harness is kept executable only until
+> `adk-dashboard-e2e` is archived.
 
 Dedicated channels:
 
