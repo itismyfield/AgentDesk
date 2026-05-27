@@ -1328,6 +1328,11 @@ pub struct CancelToken {
     /// store the deadline. Direct callers that need the legacy sub-30s
     /// enforcement leave this `false`.
     pub async_managed: AtomicBool,
+    /// Normal turn-completion cleanup marker. The Discord bridge may flip
+    /// `cancelled` after a terminal frame only to release lingering token
+    /// observers; provider cancel watchdogs must not treat that as a live
+    /// mid-stream cancel that should kill the child process.
+    completion_cleanup: AtomicBool,
     /// Lifecycle-aware restart/handoff mode for inflight preservation.
     pub restart_mode: AtomicU8,
 }
@@ -1344,6 +1349,7 @@ impl CancelToken {
             watchdog_deadline_ms: AtomicI64::new(0),
             watchdog_max_deadline_ms: AtomicI64::new(0),
             async_managed: AtomicBool::new(false),
+            completion_cleanup: AtomicBool::new(false),
             restart_mode: AtomicU8::new(0),
         }
     }
@@ -1367,6 +1373,14 @@ impl CancelToken {
     /// decide whether to honour the sync deadline poll.
     pub fn is_async_managed(&self) -> bool {
         self.async_managed.load(Ordering::Relaxed)
+    }
+
+    pub fn mark_completion_cleanup(&self) {
+        self.completion_cleanup.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_completion_cleanup(&self) -> bool {
+        self.completion_cleanup.load(Ordering::Relaxed)
     }
 
     /// Cancel and clean up any associated tmux session.
@@ -1524,6 +1538,10 @@ impl Drop for CancelWatchdog {
     }
 }
 
+fn cancel_watchdog_should_kill(token: &CancelToken) -> bool {
+    token.cancelled.load(Ordering::Relaxed) && !token.is_completion_cleanup()
+}
+
 pub fn spawn_cancel_watchdog(
     token: Option<Arc<CancelToken>>,
     child_pid: u32,
@@ -1536,6 +1554,14 @@ pub fn spawn_cancel_watchdog(
         while !done_for_thread.load(Ordering::Relaxed) {
             enforce_watchdog_deadline(&token, current_unix_millis());
             if token.cancelled.load(Ordering::Relaxed) {
+                if !cancel_watchdog_should_kill(&token) {
+                    tracing::debug!(
+                        provider_cancel_watchdog = label,
+                        child_pid,
+                        "cancel watchdog exiting after normal completion cleanup"
+                    );
+                    return;
+                }
                 tracing::warn!(
                     provider_cancel_watchdog = label,
                     child_pid,
@@ -2192,8 +2218,8 @@ fn codex_model_context_window(model: &str) -> Option<u64> {
 #[cfg(test)]
 mod cancel_token_tests {
     use super::{
-        CancelSource, CancelToken, cancel_requested, current_unix_millis,
-        enforce_watchdog_deadline, register_child_pid,
+        CancelSource, CancelToken, cancel_requested, cancel_watchdog_should_kill,
+        current_unix_millis, enforce_watchdog_deadline, register_child_pid,
     };
     use std::sync::atomic::Ordering;
 
@@ -2332,6 +2358,27 @@ mod cancel_token_tests {
         // Explicit cancel still works — the gate is deadline-only.
         token.cancelled.store(true, Ordering::Relaxed);
         assert!(cancel_requested(Some(&token)));
+    }
+
+    #[test]
+    fn cancel_watchdog_ignores_normal_completion_cleanup_cancel() {
+        let token = CancelToken::new();
+        token.mark_completion_cleanup();
+        token.cancelled.store(true, Ordering::Relaxed);
+
+        assert!(!cancel_watchdog_should_kill(&token));
+        assert!(
+            cancel_requested(Some(&token)),
+            "cleanup marker only suppresses provider watchdog killing"
+        );
+    }
+
+    #[test]
+    fn cancel_watchdog_still_kills_explicit_cancel() {
+        let token = CancelToken::new();
+        token.cancelled.store(true, Ordering::Relaxed);
+
+        assert!(cancel_watchdog_should_kill(&token));
     }
 
     #[test]

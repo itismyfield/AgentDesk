@@ -6253,6 +6253,9 @@ pub(super) fn spawn_turn_bridge(
                     }),
                 );
                 if let Some(removed_token) = finish.removed_token {
+                    if !cancelled {
+                        removed_token.mark_completion_cleanup();
+                    }
                     removed_token
                         .cancelled
                         .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -6359,6 +6362,9 @@ pub(super) fn spawn_turn_bridge(
                 if let Some(removed_token) = finish.removed_token {
                     // Mark the token as cancelled so any lingering watchdog timer exits cleanly
                     // instead of mistakenly firing on a newer turn's token.
+                    if !cancelled {
+                        removed_token.mark_completion_cleanup();
+                    }
                     removed_token
                         .cancelled
                         .store(true, std::sync::atomic::Ordering::Relaxed);
