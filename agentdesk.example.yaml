@@ -191,6 +191,98 @@ agents:
       - "코드"
     department: engineering
 
+  # ─── Multi-provider Discord E2E cells ────────────────────────────────
+  # Each worker owns one (provider, runtime) cell and one channel under
+  # the `ADK E2E` Discord category. Channel IDs below are placeholders —
+  # `scripts/setup-multi-provider-e2e.sh` provisions the real category +
+  # channels through the announce bot and emits the ids to paste in.
+  # The orchestrator drives fan-out by `send-to-agent` to each worker.
+  - id: adk-claude-pipe-e2e
+    name: "ADK Claude pipe E2E"
+    name_ko: "ADK Claude pipe E2E"
+    provider: claude
+    channels:
+      claude:
+        id: "PLACEHOLDER_ADK_CLAUDE_PIPE_E2E"
+        name: "adk-claude-pipe-e2e"
+        workspace: "~/.adk/release/workspaces/adk-claude-pipe-e2e"
+        prompt_file: "~/.adk/release/config/agents/adk-claude-pipe-e2e.prompt.md"
+        runtime: pipe
+    keywords: ["e2e", "claude", "pipe"]
+    department: devsecops
+
+  - id: adk-claude-tui-e2e
+    name: "ADK Claude tui E2E"
+    name_ko: "ADK Claude tui E2E"
+    provider: claude
+    channels:
+      claude:
+        id: "PLACEHOLDER_ADK_CLAUDE_TUI_E2E"
+        name: "adk-claude-tui-e2e"
+        workspace: "~/.adk/release/workspaces/adk-claude-tui-e2e"
+        prompt_file: "~/.adk/release/config/agents/adk-claude-tui-e2e.prompt.md"
+        runtime: tui
+    keywords: ["e2e", "claude", "tui"]
+    department: devsecops
+
+  - id: adk-claude-e-e2e
+    name: "ADK Claude-e E2E"
+    name_ko: "ADK Claude-e E2E"
+    provider: claude
+    channels:
+      claude:
+        id: "PLACEHOLDER_ADK_CLAUDE_E_E2E"
+        name: "adk-claude-e-e2e"
+        workspace: "~/.adk/release/workspaces/adk-claude-e-e2e"
+        prompt_file: "~/.adk/release/config/agents/adk-claude-e-e2e.prompt.md"
+        runtime: claude-e
+    keywords: ["e2e", "claude", "claude-e"]
+    department: devsecops
+
+  - id: adk-codex-pipe-e2e
+    name: "ADK Codex pipe E2E"
+    name_ko: "ADK Codex pipe E2E"
+    provider: codex
+    channels:
+      codex:
+        id: "PLACEHOLDER_ADK_CODEX_PIPE_E2E"
+        name: "adk-codex-pipe-e2e"
+        workspace: "~/.adk/release/workspaces/adk-codex-pipe-e2e"
+        prompt_file: "~/.adk/release/config/agents/adk-codex-pipe-e2e.prompt.md"
+        runtime: pipe
+    keywords: ["e2e", "codex", "pipe"]
+    department: devsecops
+
+  - id: adk-codex-tui-e2e
+    name: "ADK Codex tui E2E"
+    name_ko: "ADK Codex tui E2E"
+    provider: codex
+    channels:
+      codex:
+        id: "PLACEHOLDER_ADK_CODEX_TUI_E2E"
+        name: "adk-codex-tui-e2e"
+        workspace: "~/.adk/release/workspaces/adk-codex-tui-e2e"
+        prompt_file: "~/.adk/release/config/agents/adk-codex-tui-e2e.prompt.md"
+        runtime: tui
+    keywords: ["e2e", "codex", "tui"]
+    department: devsecops
+
+  - id: adk-e2e-orchestrator
+    name: "ADK E2E Orchestrator"
+    name_ko: "ADK E2E 오케스트레이터"
+    provider: claude
+    channels:
+      claude:
+        id: "PLACEHOLDER_ADK_E2E_ORCHESTRATOR"
+        name: "adk-e2e-orchestrator"
+        workspace: "~/.adk/release/workspaces/adk-e2e-orchestrator"
+        prompt_file: "~/.adk/release/config/agents/adk-e2e-orchestrator.prompt.md"
+        # Orchestrator itself does not exercise a provider runtime — it
+        # only dispatches to workers. Pick pipe so the channel stays light.
+        runtime: pipe
+    keywords: ["e2e", "orchestrator", "전체"]
+    department: devsecops
+
 meeting:
   channel_name: "round-table"
   max_rounds: 3
