@@ -1,7 +1,320 @@
-//! Phase 0 stub. Phase 1 will spawn `claude-e run --output-format stream-json
-//! --resume <sid> ... -- --model ...` with the AgentDesk hook bundle, capture
-//! stdout into the AgentDesk output path, and surface lifecycle events into
-//! the turn bridge.
+//! Phase 1 of the claude-e rollout — PTY-backed `claude -p`-style adapter.
 //!
-//! Intentionally empty so the module tree compiles without changing any
-//! existing dispatch behaviour.
+//! `execute_streaming` mirrors the surface of `services::claude::
+//! execute_command_streaming` for the cases that map cleanly onto a
+//! per-turn `claude-e` spawn: local execution, no tmux, no remote SSH.
+//! TUI hosting and tmux-wrapper runtime branches stay in `services::
+//! claude` and are reached through `ProviderSessionDriver::TuiHosting`
+//! or `ProviderSessionDriver::LegacyPrompt` instead.
+
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::mpsc::Sender;
+
+use serde_json::Value;
+
+use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage, is_valid_session_id};
+use crate::services::process::kill_child_tree;
+use crate::services::provider::{
+    CancelToken, ProviderKind, cancel_requested, register_child_pid, spawn_cancel_watchdog,
+};
+use crate::services::session_backend::{
+    StreamLineState, observe_stream_context, parse_stream_message_with_state,
+};
+
+/// Phase 1 entry point. The signature matches the subset of
+/// `claude::execute_command_streaming` parameters that are meaningful
+/// for a per-turn `claude-e` invocation. TUI / tmux / remote profile
+/// arguments are intentionally absent — those routes do not flow
+/// through this adapter.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_streaming(
+    prompt: &str,
+    session_id: Option<&str>,
+    working_dir: &str,
+    sender: Sender<StreamMessage>,
+    system_prompt: Option<&str>,
+    cancel_token: Option<Arc<CancelToken>>,
+    report_channel_id: Option<u64>,
+    _report_provider: Option<ProviderKind>,
+    model_override: Option<&str>,
+    fast_mode_enabled: Option<bool>,
+    _cache_ttl_minutes: Option<u32>,
+    dispatch_type: Option<&str>,
+) -> Result<(), String> {
+    if let Some(sid) = session_id {
+        if !is_valid_session_id(sid) {
+            return Err("Invalid session ID format".to_string());
+        }
+    }
+
+    let claude_e_bin = which::which("claude-e").map_err(|_| {
+        "claude-e CLI not found. Install with `npm install -g claude-e`.".to_string()
+    })?;
+    let claude_resolution = crate::services::claude::resolve_claude_binary();
+    let claude_bin = claude_resolution
+        .resolved_path
+        .clone()
+        .ok_or_else(|| "Claude CLI not found. Is Claude CLI installed?".to_string())?;
+
+    let mut args: Vec<String> = vec![
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--claude-bin".to_string(),
+        claude_bin.clone(),
+        "--no-session-footer".to_string(),
+    ];
+    crate::services::claude::append_claude_mcp_config_arg(&mut args, dispatch_type);
+    crate::services::claude::append_claude_fast_mode_arg(&mut args, fast_mode_enabled);
+    if let Some(model) = model_override {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
+    if let Some(sp) = system_prompt {
+        if !sp.is_empty() {
+            args.push("--append-system-prompt".to_string());
+            args.push(sp.to_string());
+        }
+    }
+    if let Some(sid) = session_id {
+        args.push("--resume".to_string());
+        args.push(sid.to_string());
+    }
+
+    tracing::info!(
+        binary = %claude_e_bin.display(),
+        claude_bin = %claude_bin,
+        working_dir = working_dir,
+        session_id = session_id,
+        model = model_override,
+        "claude_e.execute_streaming spawning"
+    );
+
+    let mut command = Command::new(&claude_e_bin);
+    crate::services::process::configure_child_process_group(&mut command);
+    command
+        .args(&args)
+        .current_dir(working_dir)
+        .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64000")
+        .env("BASH_DEFAULT_TIMEOUT_MS", "86400000")
+        .env("BASH_MAX_TIMEOUT_MS", "86400000")
+        .env("CLAUDE_E_SKIP_STAR_PROMPT", "1")
+        .env_remove("CLAUDECODE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("Failed to start claude-e: {}", e))?;
+
+    register_child_pid(cancel_token.as_deref(), child.id());
+    let _cancel_watchdog =
+        spawn_cancel_watchdog(cancel_token.clone(), child.id(), "claude-e-stream");
+
+    // Send the RuntimeReady handoff so the turn-bridge stamps the
+    // runtime kind for this dispatch. `output_path` is empty for
+    // claude-e — Phase 1 streams JSONL directly through `sender` and
+    // does not (yet) persist a per-turn transcript file. Phase 1.x can
+    // wire a sidecar capture path here if recovery needs one.
+    let session_name = session_id
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("claude-e-{}", std::process::id()));
+    let _ = sender.send(StreamMessage::RuntimeReady {
+        handoff: RuntimeHandoff::ClaudeEAdapter {
+            output_path: String::new(),
+            session_name,
+            last_offset: 0,
+        },
+    });
+
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(error) = stdin.write_all(prompt.as_bytes()) {
+            tracing::warn!(?error, "claude-e stdin write failed");
+        }
+    }
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to capture claude-e stdout".to_string())?;
+    let reader = BufReader::new(stdout);
+
+    let mut last_session_id: Option<String> = None;
+    let mut last_model: Option<String> = None;
+    let mut last_call_input_tokens: u64 = 0;
+    let mut last_call_cache_create_tokens: u64 = 0;
+    let mut last_call_cache_read_tokens: u64 = 0;
+    let mut cumulative_output_tokens: u64 = 0;
+    let mut saw_per_message_usage = false;
+    let mut final_result: Option<String> = None;
+    let mut stream_state = StreamLineState::new();
+    let mut line_count = 0u64;
+
+    for line in reader.lines() {
+        if cancel_requested(cancel_token.as_deref()) {
+            kill_child_tree(&mut child);
+            tracing::info!(
+                line_count,
+                session_id = last_session_id.as_deref(),
+                "claude-e cancel observed; child killed"
+            );
+            return Ok(());
+        }
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                let _ = sender.send(StreamMessage::Error {
+                    message: format!("Failed to read claude-e output: {}", error),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: None,
+                });
+                break;
+            }
+        };
+        line_count += 1;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(json) = serde_json::from_str::<Value>(&line) else {
+            tracing::debug!(line = %line.chars().take(200).collect::<String>(), "claude-e non-JSON line skipped");
+            continue;
+        };
+
+        // Mirror the per-record token accounting from
+        // `claude::execute_command_streaming` so that StatusUpdate
+        // tokens are derived consistently even though claude-e omits
+        // `result.duration_ms` / `total_cost_usd` / `modelUsage`. The
+        // missing-field handling collapses to `None` automatically via
+        // `serde_json::Value::get`.
+        let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if msg_type == "assistant" {
+            if let Some(msg_obj) = json.get("message") {
+                if let Some(model) = msg_obj.get("model").and_then(|v| v.as_str()) {
+                    last_model = Some(model.to_string());
+                }
+                if let Some(usage) = msg_obj.get("usage") {
+                    saw_per_message_usage = true;
+                    last_call_input_tokens = usage
+                        .get("input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    last_call_cache_read_tokens = usage
+                        .get("cache_read_input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    last_call_cache_create_tokens = usage
+                        .get("cache_creation_input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    if let Some(out) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+                        cumulative_output_tokens = cumulative_output_tokens.saturating_add(out);
+                    }
+                }
+            }
+        }
+        if msg_type == "result" {
+            let cost_usd = json.get("cost_usd").and_then(|v| v.as_f64());
+            let total_cost_usd = json.get("total_cost_usd").and_then(|v| v.as_f64());
+            let duration_ms = json.get("duration_ms").and_then(|v| v.as_u64());
+            let num_turns = json
+                .get("num_turns")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+            if !saw_per_message_usage {
+                if let Some(usage) = json.get("usage") {
+                    last_call_input_tokens = usage
+                        .get("input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    last_call_cache_read_tokens = usage
+                        .get("cache_read_input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    last_call_cache_create_tokens = usage
+                        .get("cache_creation_input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    cumulative_output_tokens = usage
+                        .get("output_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                }
+            }
+            if cost_usd.is_some() || total_cost_usd.is_some() || last_model.is_some() {
+                let _ = sender.send(StreamMessage::StatusUpdate {
+                    model: last_model.clone(),
+                    cost_usd,
+                    total_cost_usd,
+                    duration_ms,
+                    num_turns,
+                    input_tokens: (last_call_input_tokens > 0).then_some(last_call_input_tokens),
+                    cache_create_tokens: (last_call_cache_create_tokens > 0)
+                        .then_some(last_call_cache_create_tokens),
+                    cache_read_tokens: (last_call_cache_read_tokens > 0)
+                        .then_some(last_call_cache_read_tokens),
+                    output_tokens: (cumulative_output_tokens > 0)
+                        .then_some(cumulative_output_tokens),
+                });
+            }
+        }
+
+        observe_stream_context(&json, &mut stream_state);
+
+        let Some(msg) = parse_stream_message_with_state(&json, &stream_state) else {
+            continue;
+        };
+        match &msg {
+            StreamMessage::Init { session_id, .. } => {
+                last_session_id = Some(session_id.clone());
+            }
+            StreamMessage::Done { result, session_id } => {
+                final_result = Some(result.clone());
+                if let Some(sid) = session_id {
+                    last_session_id = Some(sid.clone());
+                }
+            }
+            _ => {}
+        }
+        if sender.send(msg).is_err() {
+            // Consumer hung up — kill child and stop.
+            kill_child_tree(&mut child);
+            return Ok(());
+        }
+    }
+
+    // Stream ended naturally. Wait for child + propagate exit code on error.
+    let exit_status = child
+        .wait()
+        .map_err(|e| format!("claude-e wait failed: {}", e))?;
+    if !exit_status.success() {
+        let mut stderr_buf = String::new();
+        if let Some(mut stderr) = child.stderr.take() {
+            use std::io::Read;
+            let _ = stderr.read_to_string(&mut stderr_buf);
+        }
+        let _ = sender.send(StreamMessage::Error {
+            message: format!("claude-e exited with code {:?}", exit_status.code()),
+            stdout: String::new(),
+            stderr: stderr_buf,
+            exit_code: exit_status.code(),
+        });
+    }
+
+    // Phase 1: if claude-e ends without emitting an explicit `Done`,
+    // synthesize one so the turn bridge can finalise. `final_result`
+    // is populated when `parse_stream_message_with_state` produced a
+    // `Done`; otherwise we emit an empty result and rely on Text
+    // chunks already streamed.
+    if final_result.is_none() && exit_status.success() {
+        let _ = sender.send(StreamMessage::Done {
+            result: String::new(),
+            session_id: last_session_id.clone(),
+        });
+    }
+
+    let _ = report_channel_id;
+    Ok(())
+}

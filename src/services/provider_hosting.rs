@@ -378,17 +378,23 @@ pub fn resolve_provider_session_selection_with_channel(
                     fallback_reason: Some("claude_e_unsupported_for_provider"),
                 };
             }
-            // Phase 0: the adapter module is a stub. Until Phase 1 lands the
-            // real wiring, we record operator intent only via
-            // `fallback_reason="claude_e_adapter_unimplemented"` while the
-            // dispatch path keeps routing through `claude -p`. Phase 1
-            // flips this branch to return `ProviderSessionDriver::ClaudeE`
-            // once the adapter is ready.
+            // Phase 1 of the claude-e rollout: the adapter module is
+            // wired. If the `claude-e` binary is missing on PATH, we
+            // fall back to the legacy `-p` driver with an explicit
+            // reason so a misconfiguration cannot break dispatch.
+            if !crate::services::claude_e::adapter_available() {
+                return ProviderSessionSelection {
+                    provider_id,
+                    requested_tui_hosting,
+                    driver: ProviderSessionDriver::LegacyPrompt,
+                    fallback_reason: Some("claude_e_binary_missing"),
+                };
+            }
             ProviderSessionSelection {
                 provider_id,
                 requested_tui_hosting,
-                driver: ProviderSessionDriver::LegacyPrompt,
-                fallback_reason: Some("claude_e_adapter_unimplemented"),
+                driver: ProviderSessionDriver::ClaudeE,
+                fallback_reason: None,
             }
         }
     }
@@ -780,7 +786,13 @@ mod tests {
     }
 
     #[test]
-    fn provider_runtime_claude_e_on_claude_phase_zero_falls_back_with_unimplemented() {
+    fn provider_runtime_claude_e_on_claude_routes_to_adapter_when_available() {
+        // Phase 1 of the claude-e rollout: when the `claude-e` binary
+        // is on PATH the resolver returns `ProviderSessionDriver::ClaudeE`;
+        // otherwise it falls back to `LegacyPrompt` with
+        // `claude_e_binary_missing` so a misconfiguration cannot break
+        // dispatch. The assertion adapts to whichever environment the
+        // test runs in (developer host vs. clean CI).
         let _guard = TEST_CONFIG_LOCK.lock().unwrap();
         let mut config = Config::default();
         config.providers.insert(
@@ -794,16 +806,14 @@ mod tests {
         install_provider_hosting_config(&config);
 
         let selection = resolve_provider_session_selection(&ProviderKind::Claude);
-
-        // Phase 0: operator intent recorded via fallback_reason, but
-        // dispatch still routes through the legacy pipe path until Phase 1
-        // wires the real adapter.
         assert!(!selection.requested_tui_hosting);
-        assert_eq!(selection.driver, ProviderSessionDriver::LegacyPrompt);
-        assert_eq!(
-            selection.fallback_reason,
-            Some("claude_e_adapter_unimplemented")
-        );
+        if crate::services::claude_e::adapter_available() {
+            assert_eq!(selection.driver, ProviderSessionDriver::ClaudeE);
+            assert_eq!(selection.fallback_reason, None);
+        } else {
+            assert_eq!(selection.driver, ProviderSessionDriver::LegacyPrompt);
+            assert_eq!(selection.fallback_reason, Some("claude_e_binary_missing"));
+        }
 
         install_provider_hosting_config(&Config::default());
     }

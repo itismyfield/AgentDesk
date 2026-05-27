@@ -94,3 +94,29 @@ For each phase PR:
 3. Both must produce a written verdict with severity-tagged findings.
 4. Repeat until both return zero blocking findings.
 5. Findings and resolutions appended to decision log.
+
+### Round budget and parallel work policy
+
+Counter-reviews can run long. To keep the rollout moving without
+abandoning the "review-clean before merge" gate:
+
+- Reviews run **in parallel** with the next phase's preparation work
+  whenever the next-phase prep is read-only or behaviour-inert (e.g.
+  installing the `claude-e` binary, capturing JSONL samples, drafting
+  designs).
+- If a Codex round exceeds **10 minutes** without an interim finding
+  visible in the log, the operator may proceed with the next-phase
+  *preparation* work while the review keeps running. Code edits that
+  affect the current PR's behaviour must still wait for the round to
+  complete.
+- A round is considered **clean** when both reviewers return PASS with
+  zero BLOCKING + zero new MAJOR. Round-N is short-circuitable if (a)
+  one reviewer already returned PASS-CLEAN and (b) the operator has
+  directly verified the other reviewer's previous round-(N-1) findings
+  are fixed (tests, fmt, build proof appended to decision log).
+- Round 3+ defaults to **single Codex pass** unless round 2 surfaced
+  net-new findings beyond round 1; the Claude reviewer rejoins only if
+  Codex flags something.
+
+The decision log records when the short-circuit clause was used and
+why.

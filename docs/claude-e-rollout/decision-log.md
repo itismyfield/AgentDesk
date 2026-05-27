@@ -217,3 +217,150 @@ is now enough to publish the `claude_tui::hook_server` endpoint at boot.
 the first Phase 0 attempt — `runtime: tui` was honoured by the resolver
 but not by the boot path that publishes the hook endpoint, breaking the
 zero-behavior-change guarantee for operators who only use the new field.
+
+---
+
+## 2026-05-27 — Counter-review Phase 0 round 2 MAJOR: Mixed-Scope Hook Probe + round-budget short-circuit
+
+**Decision:** `any_requested_tui_hosting_driver_available` now uses the
+helper `channel_effective_tui_request` so it mirrors
+`resolve_provider_session_selection_with_channel`'s precedence exactly:
+`channel.runtime` > `provider.runtime` > `channel.tui_hosting` >
+`provider.tui_hosting`. Two new tests pin the Mixed-Scope case
+(`provider: pipe` + `channel: tui_hosting=true` ⇒ no hook publish) and
+the standalone channel case (`channel: runtime=tui` alone ⇒ hook
+publishes).
+
+**Why:** Codex round 2 caught the predicate falling back to the legacy
+channel boolean even after the provider had asserted `runtime: pipe`.
+That would idle the `claude_tui::hook_server` listener even though every
+channel routes through `LegacyPrompt`, partially ignoring the operator's
+explicit pipe intent.
+
+**Round-budget short-circuit:** Codex round 3 went idle for 25+ minutes
+after starting the verification commands (last log activity at
+04:07:08 UTC, polled at 04:32). The Claude general-purpose reviewer
+returned PASS-CLEAN for round 3, and the operator (this rollout's
+driver) directly verified the round-2 MAJOR fix:
+- `cargo test --bin agentdesk services::provider_hosting` — 23/23 pass
+- `cargo fmt --check` — clean
+- `cargo check --tests --features legacy-sqlite-tests` — clean
+- Manual logic comparison: helper precedence matches resolver
+  precedence on every (channel.runtime × provider.runtime ×
+  channel.tui_hosting × provider.tui_hosting) combination
+
+Per `rollout-plan.md` round-budget rule, this round was cleared by
+short-circuit. The Codex job was left to run; if it surfaces a new
+BLOCKING/MAJOR later, Phase 1 stops and the finding is appended here.
+
+---
+
+## 2026-05-27 — Phase 1 parser-equivalence experiment
+
+**Finding (not a decision yet):** `claude-e --output-format stream-json`
+and `claude -p --output-format stream-json --verbose` agree on the
+**message-body shape** (`assistant.message.content = [{type, text}]`,
+tool_use/tool_result records, the final `result` envelope) but diverge
+on the **surrounding lifecycle envelope**:
+
+| Record type | `claude -p` | `claude-e` |
+|---|---|---|
+| `system subtype=init` (tools/mcp/model/version/plugins) | Yes | **Missing** |
+| `system subtype=hook_started`/`hook_response` per-hook events | Yes | **Missing** (compressed into `stop_hook_summary`) |
+| `system subtype=stop_hook_summary` (per-turn hook command list) | No | Yes |
+| `system subtype=turn_duration` synthesized record | No | Yes |
+| `user` echo as first record | No | Yes |
+| `rate_limit_event` | Yes | **Missing** |
+| `result.duration_ms` / `num_turns` / `total_cost_usd` / `modelUsage` / `terminal_reason` | Yes | **Missing** |
+
+**Implication for Phase 1:**
+
+1. The text / tool_use / tool_result extraction in
+   `services::claude::collect_stream_messages` can be reused directly
+   (assistant content array shape matches).
+2. The `StatusUpdate` parser that today reads `result.total_cost_usd`,
+   `result.duration_ms`, `result.num_turns`, and per-model token
+   metadata from `claude -p` output will see `None` for several of
+   these fields under claude-e. Phase 1 either (a) accepts partial
+   telemetry and logs the gap, or (b) synthesizes the missing fields
+   from `system turn_duration` + assistant `usage` records.
+3. `rate_limit_event` is not surfaced by claude-e, so the wait-on-rate-
+   limit branch in `services::claude` cannot trigger from a claude-e
+   transcript. Phase 1 must decide whether to (a) accept that 429s
+   become hard errors under `runtime: claude-e`, or (b) extract rate
+   limit signals from the upstream Claude binary stderr that claude-e
+   propagates via `--tool` mode.
+
+**Captures:** `/tmp/claude-e-parity/claude-p.stream-json`,
+`/tmp/claude-e-parity/claude-e.stream-json` (kept locally; not
+committed).
+
+**No decision locked yet** — Phase 1 lands the answer in this log.
+
+---
+
+## 2026-05-27 — Phase 1: adapter wired, parser reused, telemetry partial
+
+**Decision:** `services::claude_e::execute_streaming` is the per-turn
+adapter. It spawns `claude-e --output-format stream-json --claude-bin
+<claude> --no-session-footer …`, reuses
+`session_backend::parse_stream_message_with_state` for record →
+`StreamMessage` conversion, and emits a `RuntimeReady { handoff:
+RuntimeHandoff::ClaudeEAdapter }` before reading stdout. Cancellation
+uses `register_child_pid` + `spawn_cancel_watchdog` + `kill_child_tree`,
+the same primitives used by the legacy `claude -p` direct path.
+
+The Phase 0 fallback (`claude_e_adapter_unimplemented`) is removed.
+`provider_hosting::resolve_provider_session_selection_with_channel`
+now returns `ProviderSessionDriver::ClaudeE` when (a) the operator
+selected `runtime: claude-e`, (b) the provider is Claude, and (c)
+`services::claude_e::adapter_available()` (a `which::which("claude-e")`
+probe) returns true. If the probe fails the resolver still falls back
+to `LegacyPrompt` with `fallback_reason="claude_e_binary_missing"`.
+
+**Alternatives considered:**
+
+1. Extract the spawn/read/parse loop into a shared helper used by
+   both `claude::execute_command_streaming` and
+   `claude_e::execute_streaming`. Rejected for Phase 1: refactor risk
+   too high; clone the loop into the new module, refactor in Phase
+   1.x once both paths are exercised in production.
+2. Run `claude-e` via the explicit `run` subcommand with
+   `--idle-timeout-ms` / `--hard-timeout-ms` / `--jsonl`. Rejected for
+   Phase 1: print mode keeps the args shape close to today's `claude
+   -p` invocation, which lets us reuse the same parser without first
+   adding a `jaw_runtime` envelope handler. Phase 2 can promote to
+   `run` mode if we want timeout classification.
+3. Send the prompt via argv instead of stdin. Rejected: stdin keeps
+   multi-line prompts free of shell quoting hazards.
+
+**Known gaps (acknowledged for Phase 1.x):**
+
+- `cache_ttl_minutes` is plumbed in but not forwarded to claude-e.
+  The Claude CLI accepts `--cache-ttl-minutes` directly, so a future
+  patch adds it to the args list. Phase 1.0 dispatch behaviour is
+  unchanged from defaults.
+- `rate_limit_event` records are not surfaced by claude-e. The
+  wait-on-rate-limit branch in `services::claude` cannot trigger
+  under `runtime: claude-e`. The Phase 1.x decision is to either
+  derive 429 signals from claude-e stderr (`--tool` mode passes
+  upstream stderr through) or accept hard 429 errors and surface them
+  to the operator. No decision locked yet.
+- `result.duration_ms`, `num_turns`, `total_cost_usd`, `modelUsage`
+  are absent in claude-e's `result` record. `StatusUpdate` token
+  fields are still populated from per-message `usage`. Cost / turn
+  count telemetry is `None` under runtime: claude-e in Phase 1.0.
+
+**Test plan executed:**
+
+- `cargo build` — clean
+- `cargo test --bin agentdesk services::provider_hosting` — 23/23 pass
+- `cargo check --tests --features legacy-sqlite-tests` — clean
+- `cargo fmt --check` — clean
+- Manual `claude-e --output-format stream-json` capture against the
+  developer host (`hello world` prompt) — assistant/user/result
+  records parsed via `parse_stream_message_with_state` produce a
+  valid `Text → Done` sequence.
+
+**Discord e2e is the next step**, gated by the counter-review of this
+commit.

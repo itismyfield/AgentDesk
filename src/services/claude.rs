@@ -64,18 +64,18 @@ pub fn resolve_claude_path() -> Option<String> {
     crate::services::platform::resolve_provider_binary("claude").resolved_path
 }
 
-fn resolve_claude_binary() -> crate::services::platform::BinaryResolution {
+pub(crate) fn resolve_claude_binary() -> crate::services::platform::BinaryResolution {
     crate::services::platform::resolve_provider_binary("claude")
 }
 
-fn append_claude_mcp_config_arg(args: &mut Vec<String>, dispatch_type: Option<&str>) {
+pub(crate) fn append_claude_mcp_config_arg(args: &mut Vec<String>, dispatch_type: Option<&str>) {
     if let Some(config_json) = crate::services::mcp_config::claude_mcp_config_arg(dispatch_type) {
         args.push("--mcp-config".to_string());
         args.push(config_json);
     }
 }
 
-fn append_claude_fast_mode_arg(args: &mut Vec<String>, fast_mode_enabled: Option<bool>) {
+pub(crate) fn append_claude_fast_mode_arg(args: &mut Vec<String>, fast_mode_enabled: Option<bool>) {
     let Some(enabled) = fast_mode_enabled else {
         return;
     };
@@ -724,6 +724,29 @@ pub fn execute_command_streaming(
             report_channel_id,
         );
     session_selection.log_start("claude.execute_command_streaming");
+
+    // Phase 1 of the claude-e rollout: route to the per-turn adapter
+    // when the operator picked `runtime: claude-e` and the binary is
+    // present. The adapter ignores tmux/remote — those routes stay on
+    // their existing drivers.
+    if session_selection.driver == crate::services::provider_hosting::ProviderSessionDriver::ClaudeE
+    {
+        debug_log("Routing to claude_e::execute_streaming (runtime=claude-e)");
+        return crate::services::claude_e::execute_streaming(
+            prompt,
+            session_id,
+            working_dir,
+            sender,
+            system_prompt,
+            cancel_token,
+            report_channel_id,
+            report_provider,
+            model_override,
+            fast_mode_enabled,
+            cache_ttl_minutes,
+            dispatch_type,
+        );
+    }
 
     let default_system_prompt = r#"You are a terminal file manager assistant. Be concise. Focus on file operations. Respond in the same language as the user.
 
