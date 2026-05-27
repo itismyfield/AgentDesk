@@ -358,6 +358,12 @@ src/
 │   ├── automation_candidate_materializer/
 │   │   ├── allowed_path_tests.rs
 │   │   └── iteration_result_tests.rs
+│   ├── claude_e/
+│   │   ├── cancellation.rs
+│   │   ├── jsonl_parser.rs
+│   │   ├── mod.rs
+│   │   ├── process.rs
+│   │   └── spawn_queue.rs
 │   ├── claude_tui/
 │   │   ├── hook_bundle.rs
 │   │   ├── hook_relay.rs

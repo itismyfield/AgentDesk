@@ -597,7 +597,12 @@ impl SupervisedWorkerRegistry {
                         if shutdown.load(Ordering::Acquire) {
                             break;
                         }
-                        rt.block_on(tokio::time::sleep(std::time::Duration::from_secs(5)));
+                        // Build the Sleep future inside `block_on` so the Tokio
+                        // reactor handle is in scope. Constructing it outside
+                        // panics with "there is no reactor running".
+                        rt.block_on(async {
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        });
                     }
                 })?;
                 Ok(None)
