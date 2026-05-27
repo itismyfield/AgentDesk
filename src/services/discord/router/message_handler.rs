@@ -706,7 +706,9 @@ fn apply_prelaunch_runtime_kind(
         // recovery uses a FIFO for those backends.
         match kind {
             RuntimeHandoffKind::ClaudeTui | RuntimeHandoffKind::LegacyTmuxWrapper => {}
-            RuntimeHandoffKind::CodexTui | RuntimeHandoffKind::ProcessBackend => {
+            RuntimeHandoffKind::CodexTui
+            | RuntimeHandoffKind::ProcessBackend
+            | RuntimeHandoffKind::ClaudeEAdapter => {
                 state.input_fifo_path = None;
             }
         }

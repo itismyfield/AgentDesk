@@ -8,6 +8,7 @@ use crate::services::provider::ProviderKind;
 pub enum ProviderSessionDriver {
     LegacyPrompt,
     TuiHosting,
+    ClaudeE,
 }
 
 impl ProviderSessionDriver {
@@ -15,6 +16,47 @@ impl ProviderSessionDriver {
         match self {
             Self::LegacyPrompt => "legacy-prompt",
             Self::TuiHosting => "tui-hosting",
+            Self::ClaudeE => "claude-e",
+        }
+    }
+}
+
+/// Phase 0 of the claude-e rollout. `RuntimeMode` is the operator-facing
+/// shape of `providers.{provider}.runtime` / per-channel `runtime`. It maps
+/// onto `ProviderSessionDriver` once driver availability and entrypoint
+/// support are considered:
+///
+/// | RuntimeMode | Resolved driver (when available) |
+/// |-------------|----------------------------------|
+/// | `Pipe`      | `LegacyPrompt`                   |
+/// | `Tui`       | `TuiHosting`                     |
+/// | `ClaudeE`   | `ClaudeE` (Claude provider only) |
+///
+/// See `docs/claude-e-rollout/decision-log.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeMode {
+    Pipe,
+    Tui,
+    ClaudeE,
+}
+
+impl RuntimeMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pipe => "pipe",
+            Self::Tui => "tui",
+            Self::ClaudeE => "claude-e",
+        }
+    }
+
+    /// Parse the YAML `runtime` field. Unknown / empty values return `None`
+    /// so the legacy `tui_hosting` derivation can run as before.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "pipe" | "legacy" | "legacy_prompt" | "legacy-prompt" => Some(Self::Pipe),
+            "tui" | "tui_hosting" | "tui-hosting" => Some(Self::Tui),
+            "claude-e" | "claude_e" | "claudee" => Some(Self::ClaudeE),
+            _ => None,
         }
     }
 }
@@ -55,6 +97,15 @@ static PROVIDER_TUI_HOSTING: LazyLock<RwLock<BTreeMap<String, bool>>> =
 static PROVIDER_TUI_HOSTING_BY_CHANNEL: LazyLock<RwLock<BTreeMap<(String, u64), bool>>> =
     LazyLock::new(|| RwLock::new(BTreeMap::new()));
 
+/// Phase 0 of the claude-e rollout. Mirrors the `runtime` field on
+/// `ProviderConfig` and per-channel config. Wins over `tui_hosting` when
+/// both are set, per `docs/claude-e-rollout/decision-log.md`.
+static PROVIDER_RUNTIME_MODE: LazyLock<RwLock<BTreeMap<String, RuntimeMode>>> =
+    LazyLock::new(|| RwLock::new(BTreeMap::new()));
+static PROVIDER_RUNTIME_MODE_BY_CHANNEL: LazyLock<
+    RwLock<BTreeMap<(String, u64), RuntimeMode>>,
+> = LazyLock::new(|| RwLock::new(BTreeMap::new()));
+
 /// Issue #2193 — runtime mirror of `providers.codex.remote_ssh_enabled`.
 /// Defaults to `false`; the bootstrap step hard-fails before this can be
 /// flipped on without the ADR prerequisites in place.
@@ -76,12 +127,36 @@ pub fn install_provider_hosting_config(config: &Config) {
         }
     }
     let mut channel_values = BTreeMap::new();
+    let mut runtime_mode_values: BTreeMap<String, RuntimeMode> = BTreeMap::new();
+    let mut runtime_mode_channel_values: BTreeMap<(String, u64), RuntimeMode> = BTreeMap::new();
+    // Phase 0: read the new `runtime` field for each provider, normalize the
+    // string, and surface invalid values as a single tracing warning so the
+    // operator can spot typos without breaking startup.
+    for (provider_id, provider_config) in &config.providers {
+        if let Some(raw) = provider_config.runtime.as_deref() {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match RuntimeMode::parse(trimmed) {
+                Some(mode) => {
+                    runtime_mode_values
+                        .insert(provider_id.trim().to_ascii_lowercase(), mode);
+                }
+                None => {
+                    tracing::warn!(
+                        provider = %provider_id,
+                        runtime = trimmed,
+                        "providers.<provider>.runtime not recognised; \
+                         falling back to tui_hosting derivation"
+                    );
+                }
+            }
+        }
+    }
     for agent in &config.agents {
         for (channel_kind, channel) in agent.channels.iter() {
             let Some(channel) = channel else {
-                continue;
-            };
-            let Some(enabled) = channel.tui_hosting() else {
                 continue;
             };
             let Some(channel_id) = channel
@@ -95,7 +170,32 @@ pub fn install_provider_hosting_config(config: &Config) {
                 .unwrap_or_else(|| channel_kind.to_string())
                 .trim()
                 .to_ascii_lowercase();
-            channel_values.insert((provider_id, channel_id), enabled);
+            if let Some(enabled) = channel.tui_hosting() {
+                channel_values.insert((provider_id.clone(), channel_id), enabled);
+            }
+            // Phase 0: per-channel `runtime` override. `runtime` wins over
+            // `tui_hosting` per decision log entry 2026-05-27.
+            if let Some(raw) = channel.runtime_mode_raw() {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                match RuntimeMode::parse(trimmed) {
+                    Some(mode) => {
+                        runtime_mode_channel_values
+                            .insert((provider_id, channel_id), mode);
+                    }
+                    None => {
+                        tracing::warn!(
+                            provider = %provider_id,
+                            channel_id,
+                            runtime = trimmed,
+                            "channel runtime override not recognised; \
+                             falling back to tui_hosting derivation"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -119,6 +219,34 @@ pub fn install_provider_hosting_config(config: &Config) {
     tracing::info!(
         channel_summary,
         "provider per-channel tui_hosting config installed"
+    );
+
+    // Phase 0: install runtime mode mirrors (claude-e rollout).
+    let runtime_mode_summary = runtime_mode_values
+        .iter()
+        .map(|(provider, mode)| format!("{provider}={}", mode.as_str()))
+        .collect::<Vec<_>>()
+        .join(",");
+    *PROVIDER_RUNTIME_MODE
+        .write()
+        .unwrap_or_else(|error| error.into_inner()) = runtime_mode_values;
+    tracing::info!(
+        summary = runtime_mode_summary,
+        "provider runtime_mode config installed"
+    );
+    let runtime_mode_channel_summary = runtime_mode_channel_values
+        .iter()
+        .map(|((provider, channel_id), mode)| {
+            format!("{provider}:{channel_id}={}", mode.as_str())
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    *PROVIDER_RUNTIME_MODE_BY_CHANNEL
+        .write()
+        .unwrap_or_else(|error| error.into_inner()) = runtime_mode_channel_values;
+    tracing::info!(
+        channel_summary = runtime_mode_channel_summary,
+        "provider per-channel runtime_mode config installed"
     );
 
     // Issue #2193 — mirror the codex remote SSH gate into a runtime cell
@@ -168,7 +296,7 @@ pub fn resolve_provider_session_selection_with_channel(
         .get(&provider_id)
         .copied()
         .unwrap_or_else(|| default_provider_tui_hosting(&provider_id));
-    let requested_tui_hosting = channel_id
+    let tui_hosting_from_legacy = channel_id
         .and_then(|channel_id| {
             PROVIDER_TUI_HOSTING_BY_CHANNEL
                 .read()
@@ -178,37 +306,89 @@ pub fn resolve_provider_session_selection_with_channel(
         })
         .unwrap_or(provider_default);
 
-    if !requested_tui_hosting {
-        return ProviderSessionSelection {
+    // Phase 0 of the claude-e rollout: the explicit `runtime` field wins
+    // over the legacy `tui_hosting` boolean when both are set. Channel-level
+    // override takes precedence over provider-level. See
+    // `docs/claude-e-rollout/decision-log.md`.
+    let explicit_runtime_mode = channel_id
+        .and_then(|cid| {
+            PROVIDER_RUNTIME_MODE_BY_CHANNEL
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&(provider_id.clone(), cid))
+                .copied()
+        })
+        .or_else(|| {
+            PROVIDER_RUNTIME_MODE
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&provider_id)
+                .copied()
+        });
+
+    let (effective_mode, requested_tui_hosting) = match explicit_runtime_mode {
+        Some(RuntimeMode::Pipe) => (RuntimeMode::Pipe, false),
+        Some(RuntimeMode::Tui) => (RuntimeMode::Tui, true),
+        Some(RuntimeMode::ClaudeE) => (RuntimeMode::ClaudeE, false),
+        None if tui_hosting_from_legacy => (RuntimeMode::Tui, true),
+        None => (RuntimeMode::Pipe, false),
+    };
+
+    match effective_mode {
+        RuntimeMode::Pipe => ProviderSessionSelection {
             provider_id,
             requested_tui_hosting,
             driver: ProviderSessionDriver::LegacyPrompt,
             fallback_reason: None,
-        };
-    }
-
-    if !provider_tui_hosting_driver_available(provider) {
-        return ProviderSessionSelection {
-            provider_id,
-            requested_tui_hosting,
-            driver: ProviderSessionDriver::LegacyPrompt,
-            fallback_reason: Some("tui_hosting_driver_unavailable"),
-        };
-    }
-
-    if entrypoint_supports_tui_hosting {
-        ProviderSessionSelection {
-            provider_id,
-            requested_tui_hosting,
-            driver: ProviderSessionDriver::TuiHosting,
-            fallback_reason: None,
+        },
+        RuntimeMode::Tui => {
+            if !provider_tui_hosting_driver_available(provider) {
+                return ProviderSessionSelection {
+                    provider_id,
+                    requested_tui_hosting,
+                    driver: ProviderSessionDriver::LegacyPrompt,
+                    fallback_reason: Some("tui_hosting_driver_unavailable"),
+                };
+            }
+            if entrypoint_supports_tui_hosting {
+                ProviderSessionSelection {
+                    provider_id,
+                    requested_tui_hosting,
+                    driver: ProviderSessionDriver::TuiHosting,
+                    fallback_reason: None,
+                }
+            } else {
+                ProviderSessionSelection {
+                    provider_id,
+                    requested_tui_hosting,
+                    driver: ProviderSessionDriver::LegacyPrompt,
+                    fallback_reason: Some("entrypoint_not_tui_hosted"),
+                }
+            }
         }
-    } else {
-        ProviderSessionSelection {
-            provider_id,
-            requested_tui_hosting,
-            driver: ProviderSessionDriver::LegacyPrompt,
-            fallback_reason: Some("entrypoint_not_tui_hosted"),
+        RuntimeMode::ClaudeE => {
+            // Phase 0: only Claude can host `claude-e`. Other providers
+            // requesting it fall back to the legacy pipe driver with an
+            // explicit reason so the operator can correct the config.
+            if !matches!(provider, ProviderKind::Claude) {
+                return ProviderSessionSelection {
+                    provider_id,
+                    requested_tui_hosting,
+                    driver: ProviderSessionDriver::LegacyPrompt,
+                    fallback_reason: Some("claude_e_unsupported_for_provider"),
+                };
+            }
+            // Phase 0: the adapter module is a stub. Until Phase 1 lands the
+            // real wiring, mark the driver as `ClaudeE` so telemetry shows
+            // the operator's intent, but fall back to `LegacyPrompt` so the
+            // dispatch path still routes through `claude -p`. Phase 1 flips
+            // this branch to return `ClaudeE` once the adapter is ready.
+            ProviderSessionSelection {
+                provider_id,
+                requested_tui_hosting,
+                driver: ProviderSessionDriver::LegacyPrompt,
+                fallback_reason: Some("claude_e_adapter_unimplemented"),
+            }
         }
     }
 }
@@ -471,6 +651,212 @@ mod tests {
         // Reset for other tests.
         install_provider_hosting_config(&Config::default());
         assert!(!codex_remote_ssh_enabled());
+    }
+
+    // -------------------- Phase 0: claude-e rollout tests --------------------
+
+    #[test]
+    fn runtime_mode_parse_accepts_canonical_and_aliases() {
+        assert_eq!(RuntimeMode::parse("pipe"), Some(RuntimeMode::Pipe));
+        assert_eq!(RuntimeMode::parse("Pipe"), Some(RuntimeMode::Pipe));
+        assert_eq!(RuntimeMode::parse("legacy"), Some(RuntimeMode::Pipe));
+        assert_eq!(RuntimeMode::parse("tui"), Some(RuntimeMode::Tui));
+        assert_eq!(RuntimeMode::parse("tui_hosting"), Some(RuntimeMode::Tui));
+        assert_eq!(RuntimeMode::parse("claude-e"), Some(RuntimeMode::ClaudeE));
+        assert_eq!(RuntimeMode::parse("claude_e"), Some(RuntimeMode::ClaudeE));
+        assert_eq!(RuntimeMode::parse("ClaudeE"), Some(RuntimeMode::ClaudeE));
+        assert_eq!(RuntimeMode::parse(""), None);
+        assert_eq!(RuntimeMode::parse("bogus"), None);
+    }
+
+    #[test]
+    fn provider_runtime_pipe_overrides_tui_hosting_true() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let mut config = Config::default();
+        config.providers.insert(
+            "claude".to_string(),
+            ProviderConfig {
+                tui_hosting: Some(true),
+                runtime: Some("pipe".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        install_provider_hosting_config(&config);
+
+        let selection = resolve_provider_session_selection(&ProviderKind::Claude);
+
+        assert!(!selection.requested_tui_hosting);
+        assert_eq!(selection.driver, ProviderSessionDriver::LegacyPrompt);
+        assert_eq!(selection.fallback_reason, None);
+
+        install_provider_hosting_config(&Config::default());
+    }
+
+    #[test]
+    fn provider_runtime_tui_overrides_tui_hosting_false() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let mut config = Config::default();
+        config.providers.insert(
+            "claude".to_string(),
+            ProviderConfig {
+                tui_hosting: Some(false),
+                runtime: Some("tui".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        install_provider_hosting_config(&config);
+
+        let selection = resolve_provider_session_selection(&ProviderKind::Claude);
+
+        assert!(selection.requested_tui_hosting);
+        assert_eq!(selection.driver, ProviderSessionDriver::TuiHosting);
+        assert_eq!(selection.fallback_reason, None);
+
+        install_provider_hosting_config(&Config::default());
+    }
+
+    #[test]
+    fn provider_runtime_claude_e_on_claude_phase_zero_falls_back_with_unimplemented() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let mut config = Config::default();
+        config.providers.insert(
+            "claude".to_string(),
+            ProviderConfig {
+                tui_hosting: Some(true),
+                runtime: Some("claude-e".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        install_provider_hosting_config(&config);
+
+        let selection = resolve_provider_session_selection(&ProviderKind::Claude);
+
+        // Phase 0: operator intent recorded via fallback_reason, but
+        // dispatch still routes through the legacy pipe path until Phase 1
+        // wires the real adapter.
+        assert!(!selection.requested_tui_hosting);
+        assert_eq!(selection.driver, ProviderSessionDriver::LegacyPrompt);
+        assert_eq!(
+            selection.fallback_reason,
+            Some("claude_e_adapter_unimplemented")
+        );
+
+        install_provider_hosting_config(&Config::default());
+    }
+
+    #[test]
+    fn provider_runtime_claude_e_on_codex_falls_back_with_unsupported_reason() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let mut config = Config::default();
+        config.providers.insert(
+            "codex".to_string(),
+            ProviderConfig {
+                tui_hosting: Some(true),
+                runtime: Some("claude-e".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        install_provider_hosting_config(&config);
+
+        let selection = resolve_provider_session_selection(&ProviderKind::Codex);
+
+        assert_eq!(selection.driver, ProviderSessionDriver::LegacyPrompt);
+        assert_eq!(
+            selection.fallback_reason,
+            Some("claude_e_unsupported_for_provider")
+        );
+
+        install_provider_hosting_config(&Config::default());
+    }
+
+    #[test]
+    fn channel_runtime_overrides_provider_runtime() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let mut config = Config::default();
+        config.providers.insert(
+            "claude".to_string(),
+            ProviderConfig {
+                tui_hosting: Some(true),
+                runtime: Some("tui".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        config
+            .agents
+            .push(test_agent_with_claude_channel_runtime(
+                "1506295332949196840",
+                Some("pipe"),
+            ));
+        install_provider_hosting_config(&config);
+
+        let selected_channel = resolve_provider_session_selection_with_channel(
+            &ProviderKind::Claude,
+            true,
+            Some(1506295332949196840),
+        );
+        assert!(!selected_channel.requested_tui_hosting);
+        assert_eq!(selected_channel.driver, ProviderSessionDriver::LegacyPrompt);
+        assert_eq!(selected_channel.fallback_reason, None);
+
+        // Without channel override, provider-level `runtime: tui` is honoured.
+        let other_channel =
+            resolve_provider_session_selection_with_channel(&ProviderKind::Claude, true, Some(42));
+        assert!(other_channel.requested_tui_hosting);
+        assert_eq!(other_channel.driver, ProviderSessionDriver::TuiHosting);
+
+        install_provider_hosting_config(&Config::default());
+    }
+
+    #[test]
+    fn unknown_runtime_string_falls_back_to_tui_hosting_derivation() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let mut config = Config::default();
+        config.providers.insert(
+            "claude".to_string(),
+            ProviderConfig {
+                tui_hosting: Some(true),
+                runtime: Some("bogus".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        install_provider_hosting_config(&config);
+
+        let selection = resolve_provider_session_selection(&ProviderKind::Claude);
+
+        // Unknown string is ignored; legacy `tui_hosting: true` is honoured.
+        assert!(selection.requested_tui_hosting);
+        assert_eq!(selection.driver, ProviderSessionDriver::TuiHosting);
+
+        install_provider_hosting_config(&Config::default());
+    }
+
+    fn test_agent_with_claude_channel_runtime(
+        channel_id: &str,
+        runtime: Option<&str>,
+    ) -> AgentDef {
+        AgentDef {
+            id: "adk-dashboard-e2e".to_string(),
+            name: "ADK Dashboard E2E".to_string(),
+            name_ko: None,
+            aliases: Vec::new(),
+            wake_word: None,
+            voice_enabled: true,
+            sensitivity_mode: None,
+            voice: AgentVoiceConfig::default(),
+            provider: "codex".to_string(),
+            channels: AgentChannels {
+                claude: Some(AgentChannel::Detailed(AgentChannelConfig {
+                    id: Some(channel_id.to_string()),
+                    provider: Some("claude".to_string()),
+                    runtime: runtime.map(str::to_string),
+                    ..AgentChannelConfig::default()
+                })),
+                ..AgentChannels::default()
+            },
+            keywords: Vec::new(),
+            department: None,
+            avatar_emoji: None,
+        }
     }
 
     fn test_agent_with_claude_channel(channel_id: &str, tui_hosting: Option<bool>) -> AgentDef {

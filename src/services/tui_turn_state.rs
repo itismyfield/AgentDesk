@@ -101,7 +101,11 @@ pub(crate) fn provider_runtime_has_structured_jsonl_turn_state(
     }
     !matches!(
         runtime_kind,
-        Some(RuntimeHandoffKind::LegacyTmuxWrapper | RuntimeHandoffKind::ProcessBackend)
+        Some(
+            RuntimeHandoffKind::LegacyTmuxWrapper
+                | RuntimeHandoffKind::ProcessBackend
+                | RuntimeHandoffKind::ClaudeEAdapter
+        )
     )
 }
 
@@ -185,7 +189,9 @@ pub(crate) fn runtime_binding_ready_for_input(
     let path = match binding.runtime_kind {
         RuntimeHandoffKind::ClaudeTui => Path::new(binding.relay_output_path()),
         RuntimeHandoffKind::CodexTui => Path::new(&binding.output_path),
-        RuntimeHandoffKind::LegacyTmuxWrapper | RuntimeHandoffKind::ProcessBackend => return None,
+        RuntimeHandoffKind::LegacyTmuxWrapper
+        | RuntimeHandoffKind::ProcessBackend
+        | RuntimeHandoffKind::ClaudeEAdapter => return None,
     };
     jsonl_ready_for_input(
         provider,

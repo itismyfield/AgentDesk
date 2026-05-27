@@ -42,6 +42,12 @@ providers:
     # Requested TUI hosting path for #2110. Until the production driver lands,
     # runtime falls back to the legacy -p path with an explicit log reason.
     tui_hosting: true
+    # claude-e rollout Phase 0 (docs/claude-e-rollout/). Accepted values:
+    # `pipe`, `tui`, `claude-e`. When both `runtime` and `tui_hosting` are
+    # set, `runtime` wins. Phase 0 still falls back to `pipe` for
+    # `claude-e` until the adapter is wired in Phase 1, so a misconfig
+    # cannot break dispatch.
+    # runtime: claude-e
   codex:
     tui_hosting: true
   qwen:

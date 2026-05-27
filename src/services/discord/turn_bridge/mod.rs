@@ -5390,6 +5390,32 @@ pub(super) fn spawn_turn_bridge(
                                     terminal_control_drain_until = None;
                                 }
                                 }
+                            RuntimeHandoff::ClaudeEAdapter {
+                                output_path,
+                                session_name,
+                                last_offset,
+                            } => {
+                                // Phase 0 of the claude-e rollout (see
+                                // `docs/claude-e-rollout/`). The adapter is
+                                // never selected at runtime in this phase, so
+                                // this arm is unreachable in practice but is
+                                // required for exhaustive matching. Phase 1
+                                // replaces this body with the real handoff
+                                // wiring (mirrors ProcessBackend's shape:
+                                // single output stream, no tmux/FIFO).
+                                tmux_last_offset = Some(last_offset);
+                                inflight_state.runtime_kind =
+                                    Some(RuntimeHandoffKind::ClaudeEAdapter);
+                                inflight_state.tmux_session_name = Some(session_name);
+                                inflight_state.output_path = Some(output_path);
+                                inflight_state.input_fifo_path = None;
+                                inflight_state.last_offset = last_offset;
+                                state_dirty = true;
+                                let _ = save_inflight_state(&inflight_state);
+                                if done {
+                                    terminal_control_drain_until = None;
+                                }
+                            }
                             }
                         }
                         StreamMessage::ProcessReady {
