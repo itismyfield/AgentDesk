@@ -107,9 +107,8 @@ static PROVIDER_TUI_HOSTING_BY_CHANNEL: LazyLock<RwLock<BTreeMap<(String, u64), 
 /// both are set, per `docs/claude-e-rollout/decision-log.md`.
 static PROVIDER_RUNTIME_MODE: LazyLock<RwLock<BTreeMap<String, RuntimeMode>>> =
     LazyLock::new(|| RwLock::new(BTreeMap::new()));
-static PROVIDER_RUNTIME_MODE_BY_CHANNEL: LazyLock<
-    RwLock<BTreeMap<(String, u64), RuntimeMode>>,
-> = LazyLock::new(|| RwLock::new(BTreeMap::new()));
+static PROVIDER_RUNTIME_MODE_BY_CHANNEL: LazyLock<RwLock<BTreeMap<(String, u64), RuntimeMode>>> =
+    LazyLock::new(|| RwLock::new(BTreeMap::new()));
 
 /// Issue #2193 — runtime mirror of `providers.codex.remote_ssh_enabled`.
 /// Defaults to `false`; the bootstrap step hard-fails before this can be
@@ -145,8 +144,7 @@ pub fn install_provider_hosting_config(config: &Config) {
             }
             match RuntimeMode::parse(trimmed) {
                 Some(mode) => {
-                    runtime_mode_values
-                        .insert(provider_id.trim().to_ascii_lowercase(), mode);
+                    runtime_mode_values.insert(provider_id.trim().to_ascii_lowercase(), mode);
                 }
                 None => {
                     tracing::warn!(
@@ -187,8 +185,7 @@ pub fn install_provider_hosting_config(config: &Config) {
                 }
                 match RuntimeMode::parse(trimmed) {
                     Some(mode) => {
-                        runtime_mode_channel_values
-                            .insert((provider_id, channel_id), mode);
+                        runtime_mode_channel_values.insert((provider_id, channel_id), mode);
                     }
                     None => {
                         tracing::warn!(
@@ -241,9 +238,7 @@ pub fn install_provider_hosting_config(config: &Config) {
     );
     let runtime_mode_channel_summary = runtime_mode_channel_values
         .iter()
-        .map(|((provider, channel_id), mode)| {
-            format!("{provider}:{channel_id}={}", mode.as_str())
-        })
+        .map(|((provider, channel_id), mode)| format!("{provider}:{channel_id}={}", mode.as_str()))
         .collect::<Vec<_>>()
         .join(",");
     *PROVIDER_RUNTIME_MODE_BY_CHANNEL
@@ -418,22 +413,41 @@ fn channel_runtime_mode_explicit(channel: &crate::config::AgentChannel) -> Optio
         .and_then(|raw| RuntimeMode::parse(raw.trim()))
 }
 
+/// Phase 0 of the claude-e rollout. Match `resolve_provider_session_*`
+/// precedence exactly: channel-level `runtime` wins, then provider-level
+/// `runtime`, then channel-level `tui_hosting`, then provider-level
+/// `tui_hosting`. Keeping this predicate aligned with the resolver
+/// prevents "hook published but no channel routes through TUI" drift
+/// (Phase 0 counter-review round 2 MAJOR).
+fn channel_effective_tui_request(
+    config: &Config,
+    channel: &crate::config::AgentChannel,
+    provider_id: &str,
+) -> bool {
+    if let Some(mode) = channel_runtime_mode_explicit(channel) {
+        return matches!(mode, RuntimeMode::Tui);
+    }
+    if let Some(mode) = provider_runtime_mode_explicit(config, provider_id) {
+        return matches!(mode, RuntimeMode::Tui);
+    }
+    if let Some(legacy) = channel.tui_hosting() {
+        return legacy;
+    }
+    config.provider_tui_hosting_enabled(provider_id)
+}
+
+fn provider_default_effective_tui_request(config: &Config, provider_id: &str) -> bool {
+    if let Some(mode) = provider_runtime_mode_explicit(config, provider_id) {
+        return matches!(mode, RuntimeMode::Tui);
+    }
+    config.provider_tui_hosting_enabled(provider_id)
+}
+
 pub fn any_requested_tui_hosting_driver_available(config: &Config) -> bool {
     let provider_level_request = crate::services::provider::supported_provider_ids()
         .iter()
         .any(|provider_id| {
-            // Phase 0 (claude-e rollout): an explicit `runtime` field wins
-            // over `tui_hosting`. `runtime: tui` keeps the answer `true`,
-            // `runtime: pipe` / `runtime: claude-e` keeps it `false` even
-            // when the legacy `tui_hosting` boolean is `true`. Without an
-            // explicit runtime, fall back to the legacy derivation.
-            let explicit = provider_runtime_mode_explicit(config, provider_id);
-            let wants_tui = match explicit {
-                Some(RuntimeMode::Tui) => true,
-                Some(RuntimeMode::Pipe) | Some(RuntimeMode::ClaudeE) => false,
-                None => config.provider_tui_hosting_enabled(provider_id),
-            };
-            wants_tui
+            provider_default_effective_tui_request(config, provider_id)
                 && ProviderKind::from_str(provider_id)
                     .as_ref()
                     .is_some_and(provider_tui_hosting_driver_available)
@@ -452,18 +466,14 @@ pub fn any_requested_tui_hosting_driver_available(config: &Config) -> bool {
                 let Some(channel) = channel else {
                     return false;
                 };
-                let explicit = channel_runtime_mode_explicit(channel);
-                let wants_tui = match explicit {
-                    Some(RuntimeMode::Tui) => true,
-                    Some(RuntimeMode::Pipe) | Some(RuntimeMode::ClaudeE) => false,
-                    None => channel.tui_hosting() == Some(true),
-                };
-                if !wants_tui {
-                    return false;
-                }
                 let provider_id = channel
                     .provider()
-                    .unwrap_or_else(|| channel_kind.to_string());
+                    .unwrap_or_else(|| channel_kind.to_string())
+                    .trim()
+                    .to_ascii_lowercase();
+                if !channel_effective_tui_request(config, channel, &provider_id) {
+                    return false;
+                }
                 ProviderKind::from_str(&provider_id)
                     .as_ref()
                     .is_some_and(provider_tui_hosting_driver_available)
@@ -835,12 +845,10 @@ mod tests {
                 ..ProviderConfig::default()
             },
         );
-        config
-            .agents
-            .push(test_agent_with_claude_channel_runtime(
-                "1506295332949196840",
-                Some("pipe"),
-            ));
+        config.agents.push(test_agent_with_claude_channel_runtime(
+            "1506295332949196840",
+            Some("pipe"),
+        ));
         install_provider_hosting_config(&config);
 
         let selected_channel = resolve_provider_session_selection_with_channel(
@@ -887,6 +895,61 @@ mod tests {
     }
 
     #[test]
+    fn any_requested_tui_hosting_provider_runtime_pipe_overrides_channel_tui_hosting_legacy() {
+        // Phase 0 counter-review round 2: a provider with explicit
+        // `runtime: pipe` must suppress the hook endpoint even when a
+        // channel has the legacy `tui_hosting: true` boolean set, because
+        // the resolver would route that channel through LegacyPrompt.
+        // Without this fix the hook predicate and the resolver disagree.
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let mut config = Config::default();
+        config.providers.insert(
+            "claude".to_string(),
+            ProviderConfig {
+                tui_hosting: Some(true),
+                runtime: Some("pipe".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        config.agents.push(test_agent_with_claude_channel(
+            "1506295332949196840",
+            Some(true),
+        ));
+
+        // Provider-level `runtime: pipe` wins for every channel that does
+        // not have its own `runtime` set, so no channel will route through
+        // TuiHosting and no hook is required.
+        assert!(!any_requested_tui_hosting_driver_available(&config));
+
+        install_provider_hosting_config(&Config::default());
+    }
+
+    #[test]
+    fn any_requested_tui_hosting_channel_runtime_tui_alone_is_enough() {
+        // Phase 0 counter-review round 2 (non-blocking suggestion):
+        // a single channel with explicit `runtime: tui` must light up the
+        // predicate even when the provider has neither `runtime` nor
+        // `tui_hosting` requesting TUI.
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let mut config = Config::default();
+        config.providers.insert(
+            "claude".to_string(),
+            ProviderConfig {
+                tui_hosting: Some(false),
+                ..ProviderConfig::default()
+            },
+        );
+        config.agents.push(test_agent_with_claude_channel_runtime(
+            "1506295332949196840",
+            Some("tui"),
+        ));
+
+        assert!(any_requested_tui_hosting_driver_available(&config));
+
+        install_provider_hosting_config(&Config::default());
+    }
+
+    #[test]
     fn any_requested_tui_hosting_skips_explicit_runtime_pipe_or_claude_e() {
         // Phase 0: `runtime: pipe` and `runtime: claude-e` must NOT light up
         // the hook endpoint even when `tui_hosting: true` is also present
@@ -914,7 +977,9 @@ mod tests {
                 ..ProviderConfig::default()
             },
         );
-        assert!(!any_requested_tui_hosting_driver_available(&claude_e_config));
+        assert!(!any_requested_tui_hosting_driver_available(
+            &claude_e_config
+        ));
 
         install_provider_hosting_config(&Config::default());
     }
@@ -942,10 +1007,7 @@ mod tests {
         install_provider_hosting_config(&Config::default());
     }
 
-    fn test_agent_with_claude_channel_runtime(
-        channel_id: &str,
-        runtime: Option<&str>,
-    ) -> AgentDef {
+    fn test_agent_with_claude_channel_runtime(channel_id: &str, runtime: Option<&str>) -> AgentDef {
         AgentDef {
             id: "adk-dashboard-e2e".to_string(),
             name: "ADK Dashboard E2E".to_string(),
