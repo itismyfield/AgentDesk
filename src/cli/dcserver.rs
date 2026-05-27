@@ -15,7 +15,7 @@ use super::VERSION;
 pub(crate) const AGENTDESK_DCSERVER_LAUNCHD_LABEL: &str = "com.agentdesk.release";
 pub(crate) const AGENTDESK_DCSERVER_TMUX_FALLBACK_SESSION: &str =
     "AgentDesk-dcserver-release-manual";
-const AGENTDESK_DCSERVER_LABEL_ENV: &str = "AGENTDESK_DCSERVER_LABEL";
+pub(crate) const AGENTDESK_DCSERVER_LABEL_ENV: &str = "AGENTDESK_DCSERVER_LABEL";
 const AGENTDESK_RELEASE_TMUX_SESSION_ENV: &str = "AGENTDESK_RELEASE_TMUX_SESSION";
 const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
 

@@ -65,6 +65,9 @@ if [ "$FAIL" -ne 0 ]; then
   exit "$FAIL"
 fi
 
+echo "=== Install bootstrap portable tests ==="
+python3 -m unittest tests.test_install_bootstrap_portable
+
 echo "=== Generate inventory docs ==="
 python3 scripts/generate_inventory_docs.py
 

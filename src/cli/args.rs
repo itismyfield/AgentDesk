@@ -617,6 +617,9 @@ pub(crate) struct EmitLaunchdPlistArgs {
     /// Runtime flavor to render
     #[arg(long, value_enum)]
     pub(crate) flavor: LaunchdPlistFlavorArg,
+    /// Override the launchd Label in the generated plist
+    #[arg(long)]
+    pub(crate) label: Option<String>,
     /// Override the home directory used in generated paths
     #[arg(long)]
     pub(crate) home: Option<PathBuf>,
