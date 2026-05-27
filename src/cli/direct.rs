@@ -779,22 +779,36 @@ pub(crate) async fn cmd_discord_thread_create(
         }
     };
 
-    // Idempotency: list the guild's active threads and match by parent+name.
-    if let Ok(channel) = parent_id.to_channel(&*http).await {
-        if let Some(guild_channel) = channel.guild() {
-            if let Ok(active) = guild_channel.guild_id.get_active_threads(&*http).await {
-                for thread in active.threads {
-                    if thread.parent_id == Some(parent_id) && thread.name == name {
-                        print_json(&json!({
-                            "id": thread.id.get().to_string(),
-                            "name": thread.name,
-                            "parent_channel_id": parent_id.get().to_string(),
-                            "created": false,
-                        }));
-                        return Ok(());
-                    }
-                }
-            }
+    // Idempotency: resolve the parent's guild, list its active threads, and
+    // match by parent_id + name. Surface lookup errors instead of silently
+    // creating a duplicate when the guild query fails.
+    let channel = parent_id
+        .to_channel(&*http)
+        .await
+        .map_err(|err| format!("resolve parent channel {parent_id}: {err}"))?;
+    let guild_channel = channel
+        .guild()
+        .ok_or_else(|| format!("parent channel {parent_id} is not in a guild"))?;
+    let active = guild_channel
+        .guild_id
+        .get_active_threads(&*http)
+        .await
+        .map_err(|err| {
+            format!(
+                "list active threads in guild {}: {err}",
+                guild_channel.guild_id
+            )
+        })?;
+    for thread in active.threads {
+        if thread.parent_id == Some(parent_id) && thread.name == name {
+            print_json(&json!({
+                "id": thread.id.get().to_string(),
+                "name": thread.name,
+                "kind": "thread",
+                "parent_channel_id": parent_id.get().to_string(),
+                "created": false,
+            }));
+            return Ok(());
         }
     }
 
@@ -808,6 +822,7 @@ pub(crate) async fn cmd_discord_thread_create(
     print_json(&json!({
         "id": thread.id.get().to_string(),
         "name": thread.name,
+        "kind": "thread",
         "parent_channel_id": parent_id.get().to_string(),
         "created": true,
     }));

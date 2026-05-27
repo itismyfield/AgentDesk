@@ -740,8 +740,9 @@ pub(crate) enum DiscordAction {
         #[arg(long)]
         after: Option<String>,
     },
-    /// Create a guild category. Idempotent: returns the existing category when
-    /// one with the same name is already present.
+    /// Create a guild category. Idempotent (list-then-create): returns the
+    /// existing category when one with the same name is already present.
+    /// Not safe under concurrent invocations against the same guild.
     CategoryCreate {
         /// Category display name
         #[arg(long)]
@@ -750,7 +751,9 @@ pub(crate) enum DiscordAction {
         #[arg(long)]
         guild_id: Option<String>,
     },
-    /// Create a text channel under an optional category. Idempotent by name.
+    /// Create a text channel under an optional category. Idempotent by
+    /// (name, parent category) via list-then-create. Not safe under
+    /// concurrent invocations against the same guild.
     ChannelCreate {
         /// Channel display name
         #[arg(long)]
@@ -765,8 +768,9 @@ pub(crate) enum DiscordAction {
         #[arg(long)]
         guild_id: Option<String>,
     },
-    /// Create a public thread under a parent text channel. Idempotent by name
-    /// within the parent channel.
+    /// Create a public thread under a parent text channel. Idempotent by
+    /// (parent, name) via list-then-create against the guild's active
+    /// threads. Not safe under concurrent invocations on the same parent.
     ThreadCreate {
         /// Parent text channel id
         #[arg(long)]
@@ -1191,6 +1195,152 @@ mod tests {
                 assert!(args.dry_run);
                 assert!(args.allow_unsent_messages);
                 assert!(!args.allow_runtime_active);
+            }
+            other => panic!(
+                "unexpected parse result: {:?}",
+                other.map(|_| "other command")
+            ),
+        }
+    }
+
+    #[test]
+    fn discord_category_create_parses_minimal_and_override() {
+        let cli = Cli::try_parse_from([
+            "agentdesk",
+            "discord",
+            "category-create",
+            "--name",
+            "ADK E2E",
+        ])
+        .expect("category-create minimal should parse");
+        match cli.command {
+            Some(Commands::Discord {
+                action:
+                    DiscordAction::CategoryCreate {
+                        name,
+                        guild_id,
+                    },
+            }) => {
+                assert_eq!(name, "ADK E2E");
+                assert!(guild_id.is_none());
+            }
+            other => panic!(
+                "unexpected parse result: {:?}",
+                other.map(|_| "other command")
+            ),
+        }
+
+        let cli = Cli::try_parse_from([
+            "agentdesk",
+            "discord",
+            "category-create",
+            "--name",
+            "ADK E2E",
+            "--guild-id",
+            "1469870512812462284",
+        ])
+        .expect("category-create override should parse");
+        match cli.command {
+            Some(Commands::Discord {
+                action: DiscordAction::CategoryCreate { guild_id, .. },
+            }) => {
+                assert_eq!(guild_id.as_deref(), Some("1469870512812462284"));
+            }
+            other => panic!(
+                "unexpected parse result: {:?}",
+                other.map(|_| "other command")
+            ),
+        }
+    }
+
+    #[test]
+    fn discord_channel_create_parses_with_optional_category_and_topic() {
+        let cli = Cli::try_parse_from([
+            "agentdesk",
+            "discord",
+            "channel-create",
+            "--name",
+            "adk-claude-pipe-e2e",
+            "--category-id",
+            "9999",
+            "--topic",
+            "Claude pipe E2E worker",
+        ])
+        .expect("channel-create with category+topic should parse");
+        match cli.command {
+            Some(Commands::Discord {
+                action:
+                    DiscordAction::ChannelCreate {
+                        name,
+                        category_id,
+                        topic,
+                        guild_id,
+                    },
+            }) => {
+                assert_eq!(name, "adk-claude-pipe-e2e");
+                assert_eq!(category_id.as_deref(), Some("9999"));
+                assert_eq!(topic.as_deref(), Some("Claude pipe E2E worker"));
+                assert!(guild_id.is_none());
+            }
+            other => panic!(
+                "unexpected parse result: {:?}",
+                other.map(|_| "other command")
+            ),
+        }
+    }
+
+    #[test]
+    fn discord_thread_create_parses_with_archive_default_and_override() {
+        let cli = Cli::try_parse_from([
+            "agentdesk",
+            "discord",
+            "thread-create",
+            "--parent-channel-id",
+            "1234567890",
+            "--name",
+            "2026-05-28T22:00(KST)-claude-pipe",
+        ])
+        .expect("thread-create minimal should parse");
+        match cli.command {
+            Some(Commands::Discord {
+                action:
+                    DiscordAction::ThreadCreate {
+                        parent_channel_id,
+                        name,
+                        auto_archive_minutes,
+                    },
+            }) => {
+                assert_eq!(parent_channel_id, "1234567890");
+                assert_eq!(name, "2026-05-28T22:00(KST)-claude-pipe");
+                assert_eq!(auto_archive_minutes, 1440);
+            }
+            other => panic!(
+                "unexpected parse result: {:?}",
+                other.map(|_| "other command")
+            ),
+        }
+
+        let cli = Cli::try_parse_from([
+            "agentdesk",
+            "discord",
+            "thread-create",
+            "--parent-channel-id",
+            "1234567890",
+            "--name",
+            "smoke",
+            "--auto-archive-minutes",
+            "60",
+        ])
+        .expect("thread-create with archive override should parse");
+        match cli.command {
+            Some(Commands::Discord {
+                action:
+                    DiscordAction::ThreadCreate {
+                        auto_archive_minutes,
+                        ..
+                    },
+            }) => {
+                assert_eq!(auto_archive_minutes, 60);
             }
             other => panic!(
                 "unexpected parse result: {:?}",
