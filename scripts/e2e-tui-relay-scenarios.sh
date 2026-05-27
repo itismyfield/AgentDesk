@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Inline python heredocs use single-quoted apostrophes that confuse the
+# quote tracker. The script is deprecated; PR 5 removes it after the
+# adk-dashboard-e2e archive.
+# shellcheck disable=SC1078,SC1079
 set -euo pipefail
 
 # Live Discord/TUI relay smoke suite for the dedicated E2E channels.
