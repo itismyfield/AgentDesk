@@ -1711,17 +1711,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("2026").join("05").join("27");
         std::fs::create_dir_all(&sub).unwrap();
-        let target = sub.join(
-            "rollout-2026-05-27T05-50-07-019e660d-4859-7522-9cee-8ba7c4e7c743.jsonl",
-        );
+        let target =
+            sub.join("rollout-2026-05-27T05-50-07-019e660d-4859-7522-9cee-8ba7c4e7c743.jsonl");
         std::fs::write(&target, "{}\n").unwrap();
-        let unrelated = sub.join("rollout-2026-05-27T05-50-07-deadbeef-0000-0000-0000-000000000000.jsonl");
+        let unrelated =
+            sub.join("rollout-2026-05-27T05-50-07-deadbeef-0000-0000-0000-000000000000.jsonl");
         std::fs::write(&unrelated, "{}\n").unwrap();
 
-        let resolved = find_rollout_by_session_id_under(
-            dir.path(),
-            "019e660d-4859-7522-9cee-8ba7c4e7c743",
-        );
+        let resolved =
+            find_rollout_by_session_id_under(dir.path(), "019e660d-4859-7522-9cee-8ba7c4e7c743");
         assert_eq!(resolved.as_deref(), Some(target.as_path()));
     }
 

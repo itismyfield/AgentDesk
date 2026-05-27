@@ -35,8 +35,7 @@ fn codex_tui_rollout_fallback_for_session(
         return None;
     }
     let session_id = state.session_id.as_deref()?;
-    let rollout =
-        crate::services::codex_tui::rollout_tail::find_rollout_by_session_id(session_id)?;
+    let rollout = crate::services::codex_tui::rollout_tail::find_rollout_by_session_id(session_id)?;
     Some(rollout.display().to_string())
 }
 
@@ -1706,34 +1705,33 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         // codex rollout looked up by the inflight `session_id` so the
         // restore loop can still attach a watcher and keep the live pane
         // relayed.
-        let output_path = match crate::services::tmux_common::resolve_session_temp_path(
-            session_name,
-            "jsonl",
-        ) {
-            Some(path) => path,
-            None => {
-                let codex_fallback = codex_tui_rollout_fallback_for_session(&provider, *channel_id);
-                match codex_fallback {
-                    Some(path) => {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!(
-                            "  [{ts}] ↻ watcher restore for {} — codex rollout fallback {}",
-                            session_name,
+        let output_path =
+            match crate::services::tmux_common::resolve_session_temp_path(session_name, "jsonl") {
+                Some(path) => path,
+                None => {
+                    let codex_fallback =
+                        codex_tui_rollout_fallback_for_session(&provider, *channel_id);
+                    match codex_fallback {
+                        Some(path) => {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::info!(
+                                "  [{ts}] ↻ watcher restore for {} — codex rollout fallback {}",
+                                session_name,
+                                path
+                            );
                             path
-                        );
-                        path
-                    }
-                    None => {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!(
-                            "  [{ts}] ⏭ watcher skip for {} — no output file",
-                            session_name
-                        );
-                        continue;
+                        }
+                        None => {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::info!(
+                                "  [{ts}] ⏭ watcher skip for {} — no output file",
+                                session_name
+                            );
+                            continue;
+                        }
                     }
                 }
-            }
-        };
+            };
 
         if let Some((owner_channel_id, cancelled, existing_output_path)) =
             find_watcher_by_tmux_session(&shared.tmux_watchers, session_name)
