@@ -430,3 +430,53 @@ re-emerge on e2e probes 4+, then probe the `cancel_active_token` /
 (`recovery_engine`, `health/recovery`, `tui_prompt_relay`,
 `turn_bridge/tmux_runtime`) for stale-state cancellations that ignore
 the new `runtime: claude-e` selector.
+
+---
+
+## 2026-05-27 — Phase 1 e2e probe 4 PASS + cancel is benign
+
+**Result:** the first claude-e dispatch through the new adapter completed
+end-to-end with a coherent Discord reply.
+
+- Probe text: "Reply ONLY with the three numbers 11 22 33 separated by
+  single spaces."
+- Bot reply observed via `agentdesk discord read 1506295332949196840`
+  message id `1509077221988372571`: literal `11 22 33`.
+- Follow-up completion-meta message id `1509077217819492455`:
+  `✅ 응답 완료 — claude · 🆕 새 세션 시작 · 📦 38.1k tokens`.
+- Turn timeline:
+  `06:14:06.791 spawning` → `06:14:12.837 onSessionStatusChange (turn
+  responded)` → `06:14:12.947 cancel watchdog killing` (110 ms after the
+  status change) → `06:14:13.747 ▶ Response sent`.
+
+**Cancel watchdog log is benign**, not a regression. The cleanup cancel
+fires after the claude-e child has already exited naturally (Done →
+process exit). `spawn_cancel_watchdog` sees `cancelled=true`, calls
+`kill_pid_tree`, but the PID is already gone, so it is a no-op. The
+Discord reply path completed before the cancel propagated. Confirmed by:
+
+- Reply text matches exactly.
+- Completion-meta message present (only emitted by the normal
+  finalisation path).
+- Token usage telemetry recorded (would be missing on mid-stream kill).
+
+**Phase 1 core gates met:**
+
+- claude-e adapter spawn + JSONL parsing — works.
+- session_id issuance and provider session tracking — works.
+- Token usage StreamMessage flow — works (per-message `usage` path).
+- Done emit + Response sent + completion-meta — works.
+- Cancel cascade leak — none (only the harmless post-finalise kill).
+
+**Cosmetic follow-ups (non-blocking):**
+
+- Investigate why the post-finalise `cancel_active_token` call fires
+  at all on a successfully-completed claude-e turn. Possible source
+  is the `onSessionStatusChange` policy hook or one of the
+  recovery-engine callsites. Goal: silence the WARN log under
+  successful dispatch. Tracked under the round-3 follow-up gate
+  (`recovery_engine` / `health/recovery` / `tui_prompt_relay` /
+  `turn_bridge/tmux_runtime`). Codex round 4 background diagnosis
+  pending.
+- `cache_ttl_minutes` forwarding to claude-e (Phase 1 known gap).
+- `rate_limit_event` handling (Phase 1 known gap).
