@@ -1215,11 +1215,7 @@ mod tests {
         .expect("category-create minimal should parse");
         match cli.command {
             Some(Commands::Discord {
-                action:
-                    DiscordAction::CategoryCreate {
-                        name,
-                        guild_id,
-                    },
+                action: DiscordAction::CategoryCreate { name, guild_id },
             }) => {
                 assert_eq!(name, "ADK E2E");
                 assert!(guild_id.is_none());
