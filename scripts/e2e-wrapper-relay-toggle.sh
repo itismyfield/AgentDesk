@@ -357,7 +357,8 @@ if [ "$include_destructive" -eq 1 ] || [[ ",$FILTER," =~ ,E-(8|9|12), ]]; then
   export AGENTDESK_E2E_ALLOW_DESTRUCTIVE=1
 fi
 
-export PATH="$(dirname "$AGENTDESK_BIN"):$PATH"
+AGENTDESK_BIN_DIR="$(dirname "$AGENTDESK_BIN")"
+export PATH="$AGENTDESK_BIN_DIR:$PATH"
 
 echo "[wrapper-e2e] running scenarios: $FILTER"
 "${runner_args[@]}"
