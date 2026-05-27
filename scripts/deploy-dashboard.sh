@@ -13,7 +13,7 @@ cd "$DASHBOARD_SRC"
 npm run build --silent
 echo "  ✓ Built → $DASHBOARD_SRC/dist/"
 
-ADK_REL="$HOME/.adk/release"
+ADK_REL="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"
 DEST="$ADK_REL/dashboard/dist"
 DEST_TMP="$ADK_REL/dashboard/dist.new"
 DEST_OLD="$ADK_REL/dashboard/dist.old"

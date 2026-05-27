@@ -19,7 +19,7 @@ class InstallBootstrapPortableTests(unittest.TestCase):
         text = self.read_script()
 
         self.assertIn('REPO="${AGENTDESK_INSTALL_REPO:-itismyfield/AgentDesk}"', text)
-        self.assertIn('DEFAULT_INSTALL_DIR="$HOME/.adk/release"', text)
+        self.assertIn('DEFAULT_INSTALL_DIR="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"', text)
         self.assertIn('INSTALL_DIR="${AGENTDESK_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"', text)
         self.assertIn('LAUNCHD_LABEL="${AGENTDESK_LAUNCHD_LABEL:-}"', text)
         self.assertIn('INSTALL_PORT="${AGENTDESK_INSTALL_PORT:-}"', text)
@@ -27,6 +27,18 @@ class InstallBootstrapPortableTests(unittest.TestCase):
         self.assertIn("default_install_port()", text)
         self.assertIn("agentdesk_supports_emit_launchd_label()", text)
         self.assertIn('if [ "$LAUNCHD_LABEL" = "com.agentdesk.release" ]; then', text)
+
+    def test_release_scripts_honor_runtime_root_override(self):
+        deploy_release = (ROOT / "scripts" / "deploy-release.sh").read_text(encoding="utf-8")
+        deploy_dashboard = (ROOT / "scripts" / "deploy-dashboard.sh").read_text(encoding="utf-8")
+        cli_wrapper = (ROOT / "scripts" / "ensure-agentdesk-cli.sh").read_text(encoding="utf-8")
+
+        self.assertIn('ADK_REL="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"', deploy_release)
+        self.assertIn("AGENTDESK_ROOT_DIR \\", deploy_release)
+        self.assertIn('remote_root="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"', deploy_release)
+        self.assertIn('ADK_REL="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"', deploy_dashboard)
+        self.assertIn('runtime_root="\\${AGENTDESK_ROOT_DIR:-\\$home_dir/.adk/release}"', cli_wrapper)
+        self.assertIn('"\\$runtime_root/bin/agentdesk"', cli_wrapper)
 
     def test_installer_creates_canonical_config_before_legacy_config(self):
         text = self.read_script()

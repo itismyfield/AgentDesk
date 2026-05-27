@@ -35,7 +35,10 @@ cat >"$TMP_PATH" <<EOF
 set -euo pipefail
 
 home_dir="\${HOME:-$HOME_DIR}"
+runtime_root="\${AGENTDESK_ROOT_DIR:-\$home_dir/.adk/release}"
 candidates=(
+  "\$runtime_root/bin/agentdesk"
+  "\$runtime_root/agentdesk"
   "\$home_dir/.adk/release/bin/agentdesk"
   "\$home_dir/.adk/release/agentdesk"
 )

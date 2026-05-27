@@ -29,7 +29,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=_defaults.sh
 . "$SCRIPT_DIR/_defaults.sh"
 
-ADK_REL="$HOME/.adk/release"
+ADK_REL="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"
 # The Rust dcserver reads AGENTDESK_DCSERVER_LABEL for the plist Label; honor it first
 # so launchd Label and plist filename never diverge when the operator overrides one side.
 PLIST_REL="${AGENTDESK_DCSERVER_LABEL:-${AGENTDESK_PLIST_REL:-com.agentdesk.release}}"
@@ -629,6 +629,8 @@ _deploy_peer_env_prelude() {
         AGENTDESK_BUNDLE_ID \
         AGENTDESK_DCSERVER_LABEL \
         AGENTDESK_PLIST_REL \
+        AGENTDESK_ROOT_DIR \
+        AGENTDESK_REPO_DIR \
         OBSIDIAN_VAULT_ROOT \
         AGENTDESK_OBSIDIAN_AGENTS_SRC
     do
@@ -653,7 +655,7 @@ _deploy_to_one_peer() {
     if [ -n "${AGENTDESK_PEER_REPO_DIR:-}" ]; then
         remote_cd_command="cd $(printf '%q' "$AGENTDESK_PEER_REPO_DIR")"
     else
-        remote_cd_command='cd "$HOME/.adk/release/workspaces/agentdesk"'
+        remote_cd_command='remote_root="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"; cd "${AGENTDESK_REPO_DIR:-$remote_root/workspaces/agentdesk}"'
     fi
     remote_presync_command="set -e
 ${remote_cd_command}

@@ -1955,6 +1955,53 @@ impl Config {
         }
         self
     }
+
+    fn resolve_runtime_relative_paths(mut self, runtime_root: Option<&Path>) -> Self {
+        let Some(root) = runtime_root else {
+            return self;
+        };
+
+        self.policies.dir = resolve_runtime_path(root, &self.policies.dir);
+        self.data.dir = resolve_runtime_path(root, &self.data.dir);
+        self.routines.dir = resolve_runtime_path(root, &self.routines.dir);
+        self.routines.additional_dirs = self
+            .routines
+            .additional_dirs
+            .into_iter()
+            .map(|dir| resolve_runtime_path(root, &dir))
+            .collect();
+        self
+    }
+}
+
+fn resolve_runtime_path(root: &Path, raw: &Path) -> PathBuf {
+    let expanded = crate::runtime_layout::expand_user_path(&raw.to_string_lossy())
+        .unwrap_or_else(|| raw.to_path_buf());
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        root.join(expanded)
+    }
+}
+
+fn runtime_root_for_config_path(path: &Path) -> Option<PathBuf> {
+    if let Ok(override_root) = std::env::var("AGENTDESK_ROOT_DIR") {
+        let trimmed = override_root.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+
+    let file_name = path.file_name()?;
+    if file_name != OsStr::new("agentdesk.yaml") {
+        return None;
+    }
+
+    let parent = path.parent()?;
+    if parent.file_name() == Some(OsStr::new("config")) {
+        return parent.parent().map(Path::to_path_buf);
+    }
+    Some(parent.to_path_buf())
 }
 
 impl Default for Config {
@@ -2007,7 +2054,10 @@ pub fn load() -> Result<Config> {
 
     let config: Config = serde_yaml::from_str(&contents)
         .with_context(|| format!("Failed to parse config: {path_display}"))?;
-    let config = config.apply_runtime_defaults();
+    let runtime_root = runtime_root_for_config_path(&path);
+    let config = config
+        .apply_runtime_defaults()
+        .resolve_runtime_relative_paths(runtime_root.as_deref());
     register_config_secrets(&config);
 
     // Ensure data dir exists
@@ -2022,7 +2072,10 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
         .with_context(|| format!("Failed to read config {}", path.display()))?;
     let config = serde_yaml::from_str::<Config>(&contents)
         .with_context(|| format!("Failed to parse config {}", path.display()))?;
-    let config = config.apply_runtime_defaults();
+    let runtime_root = runtime_root_for_config_path(path);
+    let config = config
+        .apply_runtime_defaults()
+        .resolve_runtime_relative_paths(runtime_root.as_deref());
     register_config_secrets(&config);
     Ok(config)
 }
@@ -2166,7 +2219,11 @@ pub fn load_graceful() -> Config {
 
     let config = match std::fs::read_to_string(&path) {
         Ok(contents) => match serde_yaml::from_str::<Config>(&contents) {
-            Ok(cfg) => cfg.apply_runtime_defaults(),
+            Ok(cfg) => {
+                let runtime_root = runtime_root_for_config_path(&path);
+                cfg.apply_runtime_defaults()
+                    .resolve_runtime_relative_paths(runtime_root.as_deref())
+            }
             Err(e) => {
                 tracing::warn!("  ⚠ Failed to parse {path_display}: {e} — using defaults");
                 Config::default()
@@ -2390,6 +2447,51 @@ mod tests {
             !yaml.contains("routines:"),
             "default routines config must be omitted, got: {yaml}"
         );
+    }
+
+    #[test]
+    fn loaded_config_resolves_runtime_relative_paths_from_config_root() {
+        let _lock = env_lock();
+        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("custom-release");
+        let config_dir = root.join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("agentdesk.yaml");
+        std::fs::write(
+            &config_path,
+            r#"
+server:
+  port: 8791
+policies:
+  dir: ./policies
+data:
+  dir: data
+routines:
+  enabled: true
+  dir: ./routines
+  additional_dirs:
+    - local-routines
+"#,
+        )
+        .unwrap();
+
+        let config = load_from_path(&config_path).unwrap();
+
+        assert_eq!(config.policies.dir, root.join("policies"));
+        assert_eq!(config.data.dir, root.join("data"));
+        assert_eq!(config.routines.dir, root.join("routines"));
+        assert_eq!(
+            config.routines.additional_dirs,
+            vec![root.join("local-routines")]
+        );
+
+        match previous_root {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
     }
 
     #[test]
