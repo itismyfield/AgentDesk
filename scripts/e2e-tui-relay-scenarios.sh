@@ -70,6 +70,11 @@ diag_status() {
 
 assert_tui_prompt_ready() {
   local channel="$1"
+  # shellcheck disable=SC1078,SC1079,SC2026
+  # The single-quoted python3 -c body contains Python f-strings with embedded
+  # single-quoted dict keys (e.g. `readiness.get('kind')`). shellcheck mis-parses
+  # those as bash string boundaries; they are valid Python inside the outer
+  # single-quoted bash string.
   "$AGENTDESK_BIN" diag "$channel" --json | python3 -c '
 import json, sys
 doc = json.load(sys.stdin)
@@ -127,6 +132,8 @@ message_probe() {
   local mode="$4"
   local sent_prompt="$5"
   local expected_extra="${6:-}"
+  # shellcheck disable=SC1078,SC1079,SC2026
+  # Same Python-f-string-in-single-quoted-bash pattern as assert_tui_prompt_ready.
   messages_after "$channel" "$after_id" | AFTER_ID="$after_id" MARKER="$marker" MODE="$mode" SENT_PROMPT="$sent_prompt" EXPECTED_EXTRA="$expected_extra" python3 -c '
 import json, os, re, sys
 marker, mode = os.environ["MARKER"], os.environ["MODE"]
@@ -185,6 +192,8 @@ wait_clear_evidence() {
   local before_id="$2"
   local deadline=$((SECONDS + 60))
   while [ "$SECONDS" -lt "$deadline" ]; do
+    # shellcheck disable=SC1078,SC1079,SC2026
+    # Same Python-f-string-in-single-quoted-bash pattern as assert_tui_prompt_ready.
     if messages_after "$channel" "$before_id" | AFTER_ID="$before_id" python3 -c '
 import json, os, sys
 after_id = int(os.environ.get("AFTER_ID") or "0")
