@@ -65,13 +65,8 @@ if [ "$FAIL" -ne 0 ]; then
   exit "$FAIL"
 fi
 
-echo "=== Generated docs drift ==="
-if python3 scripts/generate_inventory_docs.py --check; then
-  echo "Inventory docs are up to date."
-else
-  echo "ERROR: Inventory docs drift detected. Please run 'python3 scripts/generate_inventory_docs.py' and commit the changes."
-  exit 1
-fi
+echo "=== Generate inventory docs ==="
+python3 scripts/generate_inventory_docs.py
 
 echo "=== Agent maintenance freshness gate (warn, #1432) ==="
 python3 scripts/check_agent_maintenance_docs.py --warning-only

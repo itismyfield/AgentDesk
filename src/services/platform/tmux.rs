@@ -25,10 +25,36 @@ fn exact_target(session_name: &str) -> String {
     format!("={session_name}:")
 }
 
+fn is_blank_session_name(session_name: &str) -> bool {
+    session_name.trim().is_empty()
+}
+
 fn tmux_command() -> Command {
     let mut cmd = Command::new("tmux");
     binary_resolver::apply_runtime_path(&mut cmd);
     cmd
+}
+
+#[cfg(unix)]
+fn failed_output(stderr: &str) -> Output {
+    use std::os::unix::process::ExitStatusExt;
+
+    Output {
+        status: std::process::ExitStatus::from_raw(64 << 8),
+        stdout: Vec::new(),
+        stderr: stderr.as_bytes().to_vec(),
+    }
+}
+
+#[cfg(windows)]
+fn failed_output(stderr: &str) -> Output {
+    use std::os::windows::process::ExitStatusExt;
+
+    Output {
+        status: std::process::ExitStatus::from_raw(64),
+        stdout: Vec::new(),
+        stderr: stderr.as_bytes().to_vec(),
+    }
 }
 
 fn wait_for_tmux_output(
@@ -68,6 +94,9 @@ pub fn version() -> Result<String, String> {
 
 /// Check if a named tmux session exists.
 pub fn has_session(session_name: &str) -> bool {
+    if is_blank_session_name(session_name) {
+        return false;
+    }
     tmux_command()
         .args(["has-session", "-t", &exact_target(session_name)])
         .stdout(Stdio::null())
@@ -256,6 +285,11 @@ fn log_kill_result(session_name: &str, reason: &str, output: &Output) {
 }
 
 fn kill_session_output_internal(session_name: &str, reason: &str) -> std::io::Result<Output> {
+    if is_blank_session_name(session_name) {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!("  [{ts}] ⚠ refusing tmux kill for blank session name reason={reason}");
+        return Ok(failed_output("refusing tmux kill for blank session name\n"));
+    }
     log_kill_request(session_name, reason);
     let output = tmux_command()
         .args(["kill-session", "-t", &exact_target(session_name)])
@@ -277,6 +311,11 @@ fn kill_session_output_internal_with_timeout(
     reason: &str,
     timeout: Duration,
 ) -> Result<Output, String> {
+    if is_blank_session_name(session_name) {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!("  [{ts}] ⚠ refusing tmux kill for blank session name reason={reason}");
+        return Err("refusing tmux kill for blank session name".to_string());
+    }
     log_kill_request(session_name, reason);
     let mut command = tmux_command();
     command.args(["kill-session", "-t", &exact_target(session_name)]);
@@ -727,6 +766,24 @@ mod tests {
         assert_eq!(
             exact_target("AgentDesk-claude-adk-cc"),
             "=AgentDesk-claude-adk-cc:"
+        );
+    }
+}
+
+#[cfg(test)]
+mod target_safety_tests {
+    use super::*;
+
+    #[test]
+    fn blank_session_name_is_not_a_valid_target() {
+        assert!(!has_session(""));
+        assert!(
+            kill_session_output_internal_with_timeout(
+                "",
+                "unit test blank guard",
+                Duration::from_millis(1)
+            )
+            .is_err()
         );
     }
 }

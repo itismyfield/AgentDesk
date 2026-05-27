@@ -15,6 +15,9 @@ agentdesk.yaml
 # Generated/temp files
 agentdesk.db
 data.db
+docs/generated/module-inventory.md
+docs/generated/route-inventory.md
+docs/generated/worker-inventory.md
 .playwright-cli/
 dist/
 output/
@@ -29,6 +32,7 @@ __pycache__/
 # Generated provider skill links in workspace roots
 /.claude/commands/
 /.codex/skills/
+/.codex/agents/
 /.gemini/skills/
 /.qwen/skills/
 

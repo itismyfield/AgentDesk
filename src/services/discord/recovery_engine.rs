@@ -3020,6 +3020,44 @@ pub(super) async fn restore_inflight_turns(
             let finish_mailbox_on_completion =
                 reregister_active_turn_from_inflight(shared, &state).await;
 
+            // #2795 — codex_tui writes its rollout transcript directly to
+            // `~/.codex/sessions/...`; the inflight's stored `output_path` is
+            // the AgentDesk-side relay JSONL which may not exist on disk yet
+            // when dcserver quick-exits mid-turn (e.g. agent ran deploy from
+            // inside its own turn). Without a falling-back lookup the
+            // `metadata` check below silently fails and recovery never spawns
+            // a watcher, leaving the live codex pane permanently un-relayed.
+            // Resolve the actual rollout via the inflight `session_id` and
+            // persist the corrected path so subsequent restarts also find it.
+            let mut output_path = output_path;
+            if std::fs::metadata(&output_path).is_err()
+                && matches!(
+                    state.runtime_kind,
+                    Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui)
+                )
+            {
+                if let Some(session_id) = state.session_id.as_deref() {
+                    if let Some(rollout) =
+                        crate::services::codex_tui::rollout_tail::find_rollout_by_session_id(
+                            session_id,
+                        )
+                    {
+                        let rollout_str = rollout.display().to_string();
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] ↻ recovery: codex rollout fallback for channel {} — {} → {}",
+                            state.channel_id,
+                            output_path,
+                            rollout_str
+                        );
+                        output_path = rollout_str.clone();
+                        let mut patched = state.clone();
+                        patched.output_path = Some(rollout_str);
+                        let _ = inflight::save_inflight_state(&patched);
+                    }
+                }
+            }
+
             // Immediately spawn watcher to avoid race condition.
             if std::fs::metadata(&output_path).is_ok() {
                 let (initial_offset, current_len, truncated) =
