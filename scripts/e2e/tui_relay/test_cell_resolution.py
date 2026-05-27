@@ -110,6 +110,21 @@ class ScenarioFilter(unittest.TestCase):
                 f"E-11 (cross-cell concurrency) should be excluded from cell {cell}",
             )
 
+    def test_no_legacy_adk_dash_residue_in_scenarios(self):
+        """Scenarios must not embed the legacy `adk-dash` reverify substring.
+
+        New session names are AgentDesk-{provider}-adk-{cell}-e2e, so any
+        kill_pane / destructive guard that reverifies against `adk-dash`
+        would fail closed under the cell driver.
+        """
+        for path in sorted(self.scenarios_dir.glob("*.yaml")):
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn(
+                "adk-dash",
+                text,
+                f"{path.name} still references legacy adk-dash workspace",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

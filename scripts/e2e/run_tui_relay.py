@@ -631,6 +631,8 @@ def main() -> int:
         wanted = {tok.strip() for tok in args.filter.split(",") if tok.strip()}
         scenarios = [s for s in scenarios if str(s.get("id")) in wanted]
     print(f"[e2e] {len(scenarios)} scenarios applicable to {cell}")
+    if not scenarios:
+        print(f"[e2e] WARNING: no scenarios matched cell {cell}", file=sys.stderr)
 
     client = discord.DiscordClient(
         base_url=args.base_url,
@@ -647,7 +649,9 @@ def main() -> int:
             print(f"[e2e]   → {result['status']} {result.get('reason') or ''}")
             results.append(result)
 
-    summary_path = output_dir / "report.json"
+    # Always cell-tag the report filename so an orchestrator that passes a
+    # shared --output dir for all 5 cells never overwrites a sibling report.
+    summary_path = output_dir / f"report.{cell}.json"
     summary = {
         "run_id": run_id,
         "cell": cell,

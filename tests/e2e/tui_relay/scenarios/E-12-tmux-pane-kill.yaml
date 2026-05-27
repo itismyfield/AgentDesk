@@ -12,8 +12,7 @@ steps:
       30줄짜리 짧은 시를 작성해줘 (E-12).
   - wait_for_discord_text: "[E2E:E12:OK]"
     timeout_s: 180
-  - kill_pane:
-      reverify_session_name_substring: "adk-dash"
+  - kill_pane: {}  # driver defaults reverify to adk-{cell}-e2e
   - wait_for_discord_text: "session ended"
     timeout_s: 180
 assertions:
