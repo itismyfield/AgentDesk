@@ -144,6 +144,13 @@ pub struct DiscordConfig {
 pub struct ProviderConfig {
     #[serde(default, alias = "tuiHosting", skip_serializing_if = "Option::is_none")]
     pub tui_hosting: Option<bool>,
+    /// Phase 0 of the claude-e rollout. Accepted values: `pipe`, `tui`,
+    /// `claude-e`. When both `runtime` and the legacy `tui_hosting` boolean
+    /// are present, `runtime` wins. Unknown strings are ignored and the
+    /// legacy `tui_hosting` derivation runs as before. See
+    /// `docs/claude-e-rollout/decision-log.md` for rationale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
     /// Issue #2193 — Codex remote SSH runtime gate.
     ///
     /// Defaults to `false`. When `true`, the operator asserts that every
@@ -539,6 +546,17 @@ impl AgentChannel {
         }
     }
 
+    /// Phase 0 of the claude-e rollout. Returns the per-channel `runtime`
+    /// override string (`pipe` / `tui` / `claude-e`) if explicitly set,
+    /// without parsing or back-compat derivation. Callers should use
+    /// `provider_hosting::resolve_runtime_mode` for the resolved value.
+    pub fn runtime_mode_raw(&self) -> Option<String> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Detailed(config) => normalized_channel_value(config.runtime.clone()),
+        }
+    }
+
     pub fn model(&self) -> Option<String> {
         match self {
             Self::Legacy(_) => None,
@@ -654,6 +672,10 @@ pub struct AgentChannelConfig {
     pub provider: Option<String>,
     #[serde(default, alias = "tuiHosting", skip_serializing_if = "Option::is_none")]
     pub tui_hosting: Option<bool>,
+    /// Phase 0 of the claude-e rollout. Per-channel override. Same accepted
+    /// values as `ProviderConfig::runtime`: `pipe`, `tui`, `claude-e`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

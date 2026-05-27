@@ -69,6 +69,7 @@ pub enum RuntimeHandoffKind {
     ClaudeTui,
     CodexTui,
     ProcessBackend,
+    ClaudeEAdapter,
 }
 
 impl RuntimeHandoffKind {
@@ -78,6 +79,7 @@ impl RuntimeHandoffKind {
             Self::ClaudeTui => "claude_tui",
             Self::CodexTui => "codex_tui",
             Self::ProcessBackend => "process_backend",
+            Self::ClaudeEAdapter => "claude_e_adapter",
         }
     }
 
@@ -87,6 +89,7 @@ impl RuntimeHandoffKind {
             "claude_tui" => Some(Self::ClaudeTui),
             "codex_tui" => Some(Self::CodexTui),
             "process_backend" => Some(Self::ProcessBackend),
+            "claude_e_adapter" => Some(Self::ClaudeEAdapter),
             _ => None,
         }
     }
@@ -97,6 +100,7 @@ impl RuntimeHandoffKind {
             Self::ClaudeTui => "Claude TUI",
             Self::CodexTui => "Codex TUI",
             Self::ProcessBackend => "ProcessBackend",
+            Self::ClaudeEAdapter => "claude-e adapter",
         }
     }
 
@@ -129,6 +133,15 @@ pub enum RuntimeHandoff {
         session_name: String,
         last_offset: u64,
     },
+    /// `claude-e` per-turn adapter. Output is a stream-json file written by
+    /// the wrapper for the current turn; `session_name` is the logical
+    /// AgentDesk session label (Discord channel + provider session id).
+    /// `last_offset` is the byte offset into `output_path` consumed so far.
+    ClaudeEAdapter {
+        output_path: String,
+        session_name: String,
+        last_offset: u64,
+    },
 }
 
 impl RuntimeHandoff {
@@ -138,6 +151,7 @@ impl RuntimeHandoff {
             Self::ClaudeTui { .. } => RuntimeHandoffKind::ClaudeTui,
             Self::CodexTui { .. } => RuntimeHandoffKind::CodexTui,
             Self::ProcessBackend { .. } => RuntimeHandoffKind::ProcessBackend,
+            Self::ClaudeEAdapter { .. } => RuntimeHandoffKind::ClaudeEAdapter,
         }
     }
 }

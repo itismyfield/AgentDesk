@@ -1507,6 +1507,7 @@ mod voice_alias_precheck_tests {
             workspace: None,
             provider: Some("codex".to_string()),
             tui_hosting: None,
+            runtime: None,
             model: None,
             reasoning_effort: None,
             peer_agents: None,

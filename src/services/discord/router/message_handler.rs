@@ -706,7 +706,9 @@ fn apply_prelaunch_runtime_kind(
         // recovery uses a FIFO for those backends.
         match kind {
             RuntimeHandoffKind::ClaudeTui | RuntimeHandoffKind::LegacyTmuxWrapper => {}
-            RuntimeHandoffKind::CodexTui | RuntimeHandoffKind::ProcessBackend => {
+            RuntimeHandoffKind::CodexTui
+            | RuntimeHandoffKind::ProcessBackend
+            | RuntimeHandoffKind::ClaudeEAdapter => {
                 state.input_fifo_path = None;
             }
         }
@@ -2512,6 +2514,9 @@ async fn start_reserved_headless_turn_with_owner(
         let turn_started_ms = now_ms;
         let deadline_ms = now_ms + timeout.as_millis() as i64;
         let max_deadline_ms = deadline_ms;
+        // claude-e rollout Phase 1 (counter-review round 3 with Codex):
+        // see the text-watchdog setup above for the rationale.
+        watchdog_token.mark_async_managed();
         watchdog_token
             .watchdog_deadline_ms
             .store(deadline_ms, std::sync::atomic::Ordering::Relaxed);
@@ -5532,6 +5537,12 @@ pub(in crate::services::discord) async fn handle_text_message(
         let turn_started_ms = now_ms;
         let deadline_ms = now_ms + timeout.as_millis() as i64;
         let max_deadline_ms = deadline_ms;
+        // claude-e rollout Phase 1 (counter-review round 3 with Codex):
+        // mark this token as async-managed so the per-provider sync
+        // watchdog (`enforce_watchdog_deadline` in `spawn_cancel_watchdog`)
+        // stops short-circuiting on the deadline. The async loop below
+        // owns deadline expiry at 30s cadence.
+        watchdog_token.mark_async_managed();
         watchdog_token
             .watchdog_deadline_ms
             .store(deadline_ms, std::sync::atomic::Ordering::Relaxed);

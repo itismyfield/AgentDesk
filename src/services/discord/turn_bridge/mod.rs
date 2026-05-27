@@ -5390,6 +5390,37 @@ pub(super) fn spawn_turn_bridge(
                                     terminal_control_drain_until = None;
                                 }
                                 }
+                            RuntimeHandoff::ClaudeEAdapter {
+                                output_path,
+                                session_name,
+                                last_offset,
+                            } => {
+                                // Phase 1 of the claude-e rollout (see
+                                // `docs/claude-e-rollout/`). The adapter
+                                // is a per-turn PTY spawn — no tmux pane
+                                // backs it, so `tmux_session_name` must
+                                // stay `None` to satisfy the
+                                // `inflight_tmux_one_to_one` invariant
+                                // when a channel switches between TUI
+                                // and claude-e. `session_name` is the
+                                // logical adapter id (Claude session uuid
+                                // or `claude-e-{pid}`); it does not map
+                                // to a tmux pane and is intentionally
+                                // not stamped here.
+                                let _ = session_name;
+                                tmux_last_offset = Some(last_offset);
+                                inflight_state.runtime_kind =
+                                    Some(RuntimeHandoffKind::ClaudeEAdapter);
+                                inflight_state.tmux_session_name = None;
+                                inflight_state.output_path = Some(output_path);
+                                inflight_state.input_fifo_path = None;
+                                inflight_state.last_offset = last_offset;
+                                state_dirty = true;
+                                let _ = save_inflight_state(&inflight_state);
+                                if done {
+                                    terminal_control_drain_until = None;
+                                }
+                            }
                             }
                         }
                         StreamMessage::ProcessReady {
@@ -6222,6 +6253,9 @@ pub(super) fn spawn_turn_bridge(
                     }),
                 );
                 if let Some(removed_token) = finish.removed_token {
+                    if !cancelled {
+                        removed_token.mark_completion_cleanup();
+                    }
                     removed_token
                         .cancelled
                         .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -6328,6 +6362,9 @@ pub(super) fn spawn_turn_bridge(
                 if let Some(removed_token) = finish.removed_token {
                     // Mark the token as cancelled so any lingering watchdog timer exits cleanly
                     // instead of mistakenly firing on a newer turn's token.
+                    if !cancelled {
+                        removed_token.mark_completion_cleanup();
+                    }
                     removed_token
                         .cancelled
                         .store(true, std::sync::atomic::Ordering::Relaxed);

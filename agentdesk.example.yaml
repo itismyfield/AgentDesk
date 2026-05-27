@@ -39,9 +39,27 @@ discord:
 
 providers:
   claude:
-    # Requested TUI hosting path for #2110. Until the production driver lands,
-    # runtime falls back to the legacy -p path with an explicit log reason.
+    # Default Claude runtime for AgentDesk: `pipe` — the legacy
+    # `claude -p` tmux-wrapper path. Operators must explicitly opt
+    # into the alternative runtimes:
+    #   - `runtime: tui`      → long-running interactive Claude TUI
+    #                           inside a tmux pane (keystroke relay).
+    #                           Also enabled implicitly when only
+    #                           `tui_hosting: true` is set and no
+    #                           `runtime` field is present (back-compat).
+    #   - `runtime: claude-e` → per-turn `claude-e` PTY adapter.
+    #                           Requires `npm install -g claude-e`
+    #                           on the host.
+    # See `docs/claude-e-rollout/operator-guide.md` for toggle
+    # mechanics and rollback contract.
+    runtime: pipe
     tui_hosting: true
+    #
+    # NOTE: `providers.claude.runtime` is unrelated to the top-level
+    # `runtime:` section near the bottom of this file (which controls
+    # turn/stale timeouts). Always refer to this field by its full path
+    # `providers.<provider>.runtime` (or `agents[].channels.<kind>.runtime`
+    # for the per-channel override) to avoid confusion.
   codex:
     tui_hosting: true
   qwen:

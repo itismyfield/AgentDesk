@@ -375,6 +375,13 @@ The remaining giant-file modules under `src/services/` not covered above:
   `src/services/qwen.rs` (2466), `src/services/codex.rs` (1665),
   `src/services/opencode.rs` (2133), `src/services/provider.rs` (2177) —
   provider adapters.
+- `src/services/provider_hosting.rs` (~1071) — provider runtime selector
+  + `CancelToken` async-managed/completion-cleanup flags. Crossed the
+  1000-LoC giant-file line during the claude-e rollout (3-way runtime
+  selector `pipe`/`tui`/`claude-e` + `RuntimeMode` parse/install/resolve
+  + counter-review-driven safety gates). Treat as giant-file territory;
+  split before adding non-bugfix behaviour beyond the runtime-selection
+  contract.
 - `src/services/codex_tui/rollout_tail.rs` (1031) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
   beyond the #2169 session identity fix.
