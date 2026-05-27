@@ -74,38 +74,42 @@ fn tmux_lines_after_claude_prompt_show_idle_suggestion_chrome(lines: &[&str]) ->
 }
 
 pub(crate) fn tmux_capture_indicates_claude_tui_ready_for_input(capture: &str) -> bool {
-    let recent = capture
+    let non_empty = capture
         .lines()
-        .rev()
         .filter(|l| !l.trim().is_empty())
-        .take(CLAUDE_TUI_ACTIVE_SCAN_LINES)
         .collect::<Vec<_>>();
+    let start = non_empty.len().saturating_sub(CLAUDE_TUI_ACTIVE_SCAN_LINES);
+    let recent_forward = &non_empty[start..];
+    let recent = recent_forward.iter().rev().copied().collect::<Vec<_>>();
 
     if recent.iter().any(|l| l.contains(CLAUDE_TUI_READY_BANNER)) {
         return true;
     }
+    if tmux_recent_lines_show_claude_tui_active_work(&recent) {
+        return false;
+    }
 
-    let prompt_seen = recent
+    if recent
         .iter()
         .take(CLAUDE_TUI_READY_SCAN_LINES)
-        .any(|l| tmux_line_is_claude_tui_ready_prompt(l));
-    prompt_seen && !tmux_recent_lines_show_claude_tui_active_work(&recent)
-}
+        .any(|l| tmux_line_is_claude_tui_ready_prompt(l))
+    {
+        return true;
+    }
 
-fn tmux_recent_lines_show_claude_tui_active_work(lines: &[&str]) -> bool {
-    lines.iter().any(|line| {
-        let line = trim_prompt_line(line);
-        let lower = line.to_ascii_lowercase();
-        line.contains("Actioning")
-            || line.contains("Musing")
-            || lower.contains("esc to interrupt")
-            || lower.contains("current work")
-            || (line.starts_with('⏺')
-                && ((line.contains("Running ") && line.contains("command"))
-                    || line.contains("Searching for ")
-                    || line.contains("Reading ")
-                    || line.contains("Editing ")))
-    })
+    recent_forward
+        .iter()
+        .enumerate()
+        .rev()
+        .take(CLAUDE_TUI_READY_SCAN_LINES)
+        .any(|(index, line)| {
+            if !tmux_line_is_claude_tui_prompt_draft(line) {
+                return false;
+            }
+            let after_prompt = &recent_forward[index + 1..];
+            tmux_lines_after_claude_prompt_show_completed_history(after_prompt)
+                || tmux_lines_after_claude_prompt_show_idle_suggestion_chrome(after_prompt)
+        })
 }
 
 pub(crate) fn tmux_capture_indicates_claude_tui_prompt_draft(capture: &str) -> bool {
@@ -139,6 +143,22 @@ pub(crate) fn tmux_capture_indicates_claude_tui_idle_suggestion(capture: &str) -
             ))
         })
         .unwrap_or(false)
+}
+
+fn tmux_recent_lines_show_claude_tui_active_work(lines: &[&str]) -> bool {
+    lines.iter().any(|line| {
+        let line = trim_prompt_line(line);
+        let lower = line.to_ascii_lowercase();
+        line.contains("Actioning")
+            || line.contains("Musing")
+            || lower.contains("esc to interrupt")
+            || lower.contains("current work")
+            || (line.starts_with('⏺')
+                && ((line.contains("Running ") && line.contains("command"))
+                    || line.contains("Searching for ")
+                    || line.contains("Reading ")
+                    || line.contains("Editing ")))
+    })
 }
 
 pub(crate) fn tmux_capture_claude_tui_prompt_draft_backspace_budget(
@@ -744,6 +764,21 @@ assistant output
   🤖 Opus(H) │ █░░░░░░░░░ │ 7%
   CLAUDE.md: 1, MCP: 2 │ Tools: 17 done
   ⏵⏵ bypass permissions on";
+
+        assert!(!tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert!(tmux_capture_indicates_claude_tui_ready_for_input(capture));
+    }
+
+    #[test]
+    fn claude_ready_prompt_accepts_submitted_prompt_with_idle_footer() {
+        let capture = "\
+✻ Crunched for 32s
+─────────────────────────────────────────────────────────────────────────────
+❯\u{00a0}claude-e 추가 채널 확장 진행해
+─────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ █░░░░░░░░░ │ 5%
+  CLAUDE.md: 1, MCP: 2 │ Tools: 4 done
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents";
 
         assert!(!tmux_capture_indicates_claude_tui_prompt_draft(capture));
         assert!(tmux_capture_indicates_claude_tui_ready_for_input(capture));
