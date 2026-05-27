@@ -39,21 +39,22 @@ discord:
 
 providers:
   claude:
-    # Requested TUI hosting path for #2110. Until the production driver lands,
-    # runtime falls back to the legacy -p path with an explicit log reason.
+    # Phase 3 default for new AgentDesk installations: `claude-e` runs
+    # each Claude turn as a per-turn PTY-backed `claude-e` adapter
+    # spawn. To revert to the long-running tmux Claude TUI, set
+    # `runtime: tui` (the `tui_hosting: true` line below stays as a
+    # back-compat hint and is honoured when `runtime` is absent). To
+    # use the legacy `claude -p` tmux wrapper, set `runtime: pipe`.
+    # See `docs/claude-e-rollout/operator-guide.md` for the toggle
+    # mechanics and the rollback contract.
+    runtime: claude-e
     tui_hosting: true
-    # claude-e rollout Phase 0 (docs/claude-e-rollout/). Accepted values:
-    # `pipe`, `tui`, `claude-e`. When both `runtime` and `tui_hosting` are
-    # set, `runtime` wins. Phase 0 still falls back to `pipe` for
-    # `claude-e` until the adapter is wired in Phase 1, so a misconfig
-    # cannot break dispatch.
     #
     # NOTE: `providers.claude.runtime` is unrelated to the top-level
     # `runtime:` section near the bottom of this file (which controls
     # turn/stale timeouts). Always refer to this field by its full path
     # `providers.<provider>.runtime` (or `agents[].channels.<kind>.runtime`
     # for the per-channel override) to avoid confusion.
-    # runtime: claude-e
   codex:
     tui_hosting: true
   qwen:
