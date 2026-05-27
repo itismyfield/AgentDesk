@@ -470,13 +470,70 @@ Discord reply path completed before the cancel propagated. Confirmed by:
 
 **Cosmetic follow-ups (non-blocking):**
 
-- Investigate why the post-finalise `cancel_active_token` call fires
-  at all on a successfully-completed claude-e turn. Possible source
-  is the `onSessionStatusChange` policy hook or one of the
-  recovery-engine callsites. Goal: silence the WARN log under
-  successful dispatch. Tracked under the round-3 follow-up gate
-  (`recovery_engine` / `health/recovery` / `tui_prompt_relay` /
-  `turn_bridge/tmux_runtime`). Codex round 4 background diagnosis
-  pending.
+- ~~Investigate why the post-finalise `cancel_active_token` call fires
+  at all on a successfully-completed claude-e turn.~~ **Resolved by
+  Codex round 4** (entry below).
 - `cache_ttl_minutes` forwarding to claude-e (Phase 1 known gap).
 - `rate_limit_event` handling (Phase 1 known gap).
+
+---
+
+## 2026-05-27 — Phase 1 cosmetic follow-up: completion-cleanup cancel marker (Codex round 4)
+
+**Diagnosis (Codex round 4, write-capable run):**
+
+`spawn_turn_bridge` flips `removed_token.cancelled = true` at two
+post-terminal-frame sites (`turn_bridge/mod.rs` ~6256 and ~6365) so
+any lingering watchdog observers exit cleanly. Under the legacy
+provider paths (`claude -p`, TUI hosting), this is harmless because
+the child process is already torn down by tmux/EOF. Under
+`claude_e::execute_streaming` the per-turn child has already exited
+naturally (`Done` → process exit) by the same instant, but the
+provider-side `spawn_cancel_watchdog` thread polls `cancelled` every
+100 ms and races to call `kill_pid_tree(child_pid)` on the dead PID
+— a no-op kill that nevertheless emits a `WARN cancel watchdog
+killing provider process tree` line.
+
+**Fix (already applied in commit `1e3527459`):**
+
+- New `completion_cleanup: AtomicBool` flag on `CancelToken` with
+  `mark_completion_cleanup()` / `is_completion_cleanup()`
+  accessors.
+- `turn_bridge` calls `mark_completion_cleanup()` immediately
+  before its two post-terminal `cancelled.store(true, ...)`
+  writes, gated by `if !cancelled` so an explicit user/recovery
+  cancel still produces the legacy WARN-and-kill path.
+- `spawn_cancel_watchdog` consults a new
+  `cancel_watchdog_should_kill(&token)` helper that returns
+  `cancelled && !is_completion_cleanup()`. When the cancel is a
+  cleanup signal, the watchdog logs a `debug!` and returns without
+  calling `kill_pid_tree`.
+
+**Tests (`services::provider::cancel_token_tests`, 8/8 pass):**
+
+- `cancel_watchdog_ignores_normal_completion_cleanup_cancel` — the
+  cleanup marker suppresses the kill path while `cancel_requested`
+  still reports the cancellation upward (consumer threads still
+  exit).
+- `cancel_watchdog_still_kills_explicit_cancel` — regression guard
+  that bare `cancelled=true` without the marker continues to kill
+  and WARN, preserving the existing semantics for user/recovery
+  cancellations.
+
+**Why this is safe:**
+
+- The marker is only flipped at the bridge's well-defined
+  cleanup callsites; nothing else sets it.
+- The watchdog still polls `cancelled` and exits the thread; the
+  only behavioural change is the absence of a no-op
+  `kill_pid_tree` call and the demoted log level.
+- Consumer paths that read `cancel_requested(Some(&token))` (e.g.
+  the `claude_e::execute_streaming` line loop) are unaffected —
+  they still see `true` and exit promptly.
+
+**Counter-review:** Codex applied the change directly via the
+write-capable rescue helper (per the round-3 short-circuit
+protocol — round 4 was diagnostic only, but the fix is small and
+narrowly scoped). Phase 1 Codex counter-review of the cumulative PR
+is in flight separately and will re-evaluate this commit alongside
+the rest of the Phase 1 changes.
