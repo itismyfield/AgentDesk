@@ -13,7 +13,7 @@ use crate::services::agent_protocol::{RuntimeHandoffKind, StreamMessage};
 use crate::services::claude_tui::hook_server::{HookEventKind, subscribe_hook_events};
 use crate::services::provider::{ProviderKind, ReadOutputResult};
 use crate::services::tui_prompt_dedupe::{
-    ObservedTuiPrompt, extract_prompt_from_hook_payload, observe_prompt_by_provider_session,
+    ObservedTuiPrompt, extract_prompt_from_hook_payload, observe_prompt_by_provider_session_at,
     subscribe_observed_prompts,
 };
 
@@ -75,10 +75,11 @@ pub(super) fn spawn_tui_prompt_relay(shared: Arc<SharedData>, provider: Provider
                             && event.kind == HookEventKind::UserPromptSubmit =>
                         {
                             if let Some(prompt) = extract_prompt_from_hook_payload(&event.payload) {
-                                let observation = observe_prompt_by_provider_session(
+                                let observation = observe_prompt_by_provider_session_at(
                                     &event.provider,
                                     &event.session_id,
                                     &prompt,
+                                    event.received_at,
                                 );
                                 tracing::debug!(
                                     provider = %event.provider,
@@ -226,13 +227,51 @@ async fn maybe_spawn_claude_idle_response_tail(
         return;
     }
 
+    let transcript_path = PathBuf::from(&binding.output_path);
+    let start_offset = claude_idle_response_start_offset_after_timestamp(
+        &transcript_path,
+        prompt.observed_at,
+        binding.last_offset,
+    );
     spawn_claude_idle_response_tail_once(
         shared,
         prompt.tmux_session_name.clone(),
         channel_id,
-        PathBuf::from(&binding.output_path),
-        binding.last_offset,
+        transcript_path,
+        start_offset,
     );
+}
+
+#[cfg(unix)]
+fn claude_idle_response_start_offset_after_timestamp(
+    transcript_path: &Path,
+    turn_started_at: chrono::DateTime<chrono::Utc>,
+    fallback_offset: u64,
+) -> u64 {
+    match crate::services::claude_tui::transcript_tail::claude_transcript_timestamp_at_or_after(
+        transcript_path,
+        turn_started_at,
+    ) {
+        Ok(Some(offset)) => offset,
+        Ok(None) => normalize_transcript_fallback_offset(transcript_path, fallback_offset),
+        Err(error) => {
+            tracing::debug!(
+                transcript_path = %transcript_path.display(),
+                error = %error,
+                fallback_offset,
+                "Claude idle transcript timestamp scan failed; using fallback offset"
+            );
+            normalize_transcript_fallback_offset(transcript_path, fallback_offset)
+        }
+    }
+}
+
+#[cfg(unix)]
+fn normalize_transcript_fallback_offset(transcript_path: &Path, fallback_offset: u64) -> u64 {
+    match std::fs::metadata(transcript_path).map(|metadata| metadata.len()) {
+        Ok(file_len) if fallback_offset > file_len => 0,
+        _ => fallback_offset,
+    }
 }
 
 #[cfg(unix)]
@@ -1736,6 +1775,40 @@ agents:
             }
             other => panic!("expected Prompt, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_idle_response_start_offset_prefers_timestamp_boundary() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transcript = dir.path().join("transcript.jsonl");
+        let first = r#"{"timestamp":"2026-05-28T00:00:00Z","type":"assistant"}"#;
+        let second = r#"{"timestamp":"2026-05-28T00:00:10Z","type":"assistant"}"#;
+        std::fs::write(&transcript, format!("{first}\n{second}\n")).expect("write transcript");
+        let turn_started_at = chrono::DateTime::parse_from_rfc3339("2026-05-28T00:00:10Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let offset =
+            claude_idle_response_start_offset_after_timestamp(&transcript, turn_started_at, 0);
+
+        assert_eq!(offset, first.len() as u64 + 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_idle_response_start_offset_resets_stale_fallback_after_shrink() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transcript = dir.path().join("transcript.jsonl");
+        std::fs::write(&transcript, "{}\n").expect("write transcript");
+        let turn_started_at = chrono::DateTime::parse_from_rfc3339("2026-05-28T00:00:10Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let offset =
+            claude_idle_response_start_offset_after_timestamp(&transcript, turn_started_at, 99_999);
+
+        assert_eq!(offset, 0);
     }
 
     #[test]

@@ -4,6 +4,7 @@ use std::sync::mpsc::Sender;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::session_backend::{StreamLineState, process_stream_line};
+use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscriptReplayOutcome {
@@ -119,6 +120,54 @@ pub fn replay_transcript_file(
     })
 }
 
+pub(crate) fn claude_transcript_timestamp_at_or_after(
+    transcript_path: &Path,
+    turn_started_at: DateTime<Utc>,
+) -> Result<Option<u64>, String> {
+    let file = std::fs::File::open(transcript_path).map_err(|error| {
+        format!(
+            "read transcript {}: {error}",
+            transcript_path.to_string_lossy()
+        )
+    })?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    let mut offset = 0u64;
+    loop {
+        line.clear();
+        let line_start_offset = offset;
+        let read = reader
+            .read_line(&mut line)
+            .map_err(|error| format!("read transcript line: {error}"))?;
+        if read == 0 {
+            return Ok(None);
+        }
+        offset = offset.saturating_add(read as u64);
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            if !line.ends_with('\n') {
+                return Ok(None);
+            }
+            continue;
+        };
+        if let Some(timestamp) = claude_transcript_line_timestamp(&json)
+            && timestamp >= turn_started_at
+        {
+            return Ok(Some(line_start_offset));
+        }
+    }
+}
+
+fn claude_transcript_line_timestamp(value: &serde_json::Value) -> Option<DateTime<Utc>> {
+    let raw = value.get("timestamp")?.as_str()?;
+    DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+}
+
 pub(crate) fn observe_transcript_turn_state(
     transcript_path: &Path,
 ) -> crate::services::tui_turn_state::TuiTurnState {
@@ -145,6 +194,7 @@ fn default_claude_home() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use std::sync::mpsc;
 
     #[test]
@@ -208,6 +258,56 @@ mod tests {
         assert!(matches!(messages[0], StreamMessage::Init { .. }));
         assert!(matches!(&messages[1], StreamMessage::Text { content } if content == "hello"));
         assert!(matches!(messages[2], StreamMessage::Done { .. }));
+    }
+
+    #[test]
+    fn claude_transcript_timestamp_at_or_after_returns_first_matching_line_offset() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let first = r#"{"timestamp":"2026-05-28T00:00:00Z","type":"assistant","message":{"content":[{"type":"text","text":"first"}]}}"#;
+        let second = r#"{"timestamp":"2026-05-28T00:00:01Z","type":"user","message":{"content":[{"type":"text","text":"second"}]}}"#;
+        std::fs::write(file.path(), format!("{first}\n{second}\n")).unwrap();
+
+        let offset = claude_transcript_timestamp_at_or_after(
+            file.path(),
+            Utc.with_ymd_and_hms(2026, 5, 28, 0, 0, 1).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(offset, Some(first.len() as u64 + 1));
+    }
+
+    #[test]
+    fn claude_transcript_timestamp_at_or_after_is_inclusive() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let line = r#"{"timestamp":"2026-05-28T00:00:00.123Z","type":"assistant"}"#;
+        std::fs::write(file.path(), format!("{line}\n")).unwrap();
+        let turn_started_at = DateTime::parse_from_rfc3339("2026-05-28T00:00:00.123Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let offset = claude_transcript_timestamp_at_or_after(file.path(), turn_started_at).unwrap();
+
+        assert_eq!(offset, Some(0));
+    }
+
+    #[test]
+    fn claude_transcript_timestamp_at_or_after_skips_unusable_lines() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let matching = r#"{"timestamp":"2026-05-28T00:00:05Z","type":"assistant"}"#;
+        let transcript = format!(
+            "{}\n{}\n{}\n",
+            r#"{"type":"assistant"}"#, "not-json", matching
+        );
+        std::fs::write(file.path(), &transcript).unwrap();
+
+        let offset = claude_transcript_timestamp_at_or_after(
+            file.path(),
+            Utc.with_ymd_and_hms(2026, 5, 28, 0, 0, 1).unwrap(),
+        )
+        .unwrap();
+
+        let expected = r#"{"type":"assistant"}"#.len() + 1 + "not-json".len() + 1;
+        assert_eq!(offset, Some(expected as u64));
     }
 
     #[test]

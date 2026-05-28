@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 use crate::services::agent_protocol::RuntimeHandoffKind;
+use chrono::{DateTime, Utc};
 
 const PENDING_PROMPT_TTL: Duration = Duration::from_secs(10);
 const RECENT_OBSERVED_TTL: Duration = Duration::from_secs(30);
@@ -27,6 +28,7 @@ pub struct ObservedTuiPrompt {
     pub provider: String,
     pub tmux_session_name: String,
     pub prompt: String,
+    pub observed_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -421,9 +423,18 @@ pub fn observe_prompt_by_provider_session(
     provider_session_id: &str,
     prompt: &str,
 ) -> PromptObservation {
+    observe_prompt_by_provider_session_at(provider, provider_session_id, prompt, Utc::now())
+}
+
+pub fn observe_prompt_by_provider_session_at(
+    provider: &str,
+    provider_session_id: &str,
+    prompt: &str,
+    observed_at: DateTime<Utc>,
+) -> PromptObservation {
     let tmux_session_name = resolve_tmux_session_name(provider, provider_session_id)
         .unwrap_or_else(|| provider_session_id.trim().to_string());
-    observe_prompt_by_tmux(provider, &tmux_session_name, prompt)
+    observe_prompt_by_tmux_at(provider, &tmux_session_name, prompt, observed_at)
 }
 
 pub fn observe_prompt_by_tmux(
@@ -431,11 +442,21 @@ pub fn observe_prompt_by_tmux(
     tmux_session_name: &str,
     prompt: &str,
 ) -> PromptObservation {
+    observe_prompt_by_tmux_at(provider, tmux_session_name, prompt, Utc::now())
+}
+
+pub fn observe_prompt_by_tmux_at(
+    provider: &str,
+    tmux_session_name: &str,
+    prompt: &str,
+    observed_at: DateTime<Utc>,
+) -> PromptObservation {
     observe_prompt_candidates_by_tmux_inner(
         provider,
         tmux_session_name,
         &[prompt.to_string()],
         PromptObservationEffect::NotifyAndLease,
+        observed_at,
     )
 }
 
@@ -449,6 +470,7 @@ pub fn observe_prompt_candidates_by_tmux(
         tmux_session_name,
         prompts,
         PromptObservationEffect::NotifyAndLease,
+        Utc::now(),
     )
 }
 
@@ -462,6 +484,7 @@ pub(crate) fn observe_prompt_candidates_by_tmux_for_relay_lease(
         tmux_session_name,
         prompts,
         PromptObservationEffect::RelayLeaseOnly,
+        Utc::now(),
     )
 }
 
@@ -476,6 +499,7 @@ fn observe_prompt_candidates_by_tmux_inner(
     tmux_session_name: &str,
     prompts: &[String],
     effect: PromptObservationEffect,
+    observed_at: DateTime<Utc>,
 ) -> PromptObservation {
     let provider = normalize_provider(provider);
     let tmux_session_name = tmux_session_name.trim();
@@ -518,6 +542,7 @@ fn observe_prompt_candidates_by_tmux_inner(
         provider,
         tmux_session_name: tmux_session_name.to_string(),
         prompt,
+        observed_at,
     };
     let _ = OBSERVED_PROMPTS.send(event);
     PromptObservation::PublishedSshDirect
