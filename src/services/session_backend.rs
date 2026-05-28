@@ -919,6 +919,69 @@ pub fn read_output_file_until_result_tracked(
     }
 }
 
+#[cfg(test)]
+mod stream_tail_guard_tests {
+    use super::*;
+    use crate::services::agent_protocol::StreamMessage;
+    use crate::services::provider::{ReadOutputResult, SessionProbe};
+    use std::io::Write;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn read_output_file_until_result_buffers_split_jsonl_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("stream.jsonl");
+        let assistant_line =
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello world"}]}}"#;
+        let split_at = assistant_line.find("lo world").unwrap();
+        let first_chunk = &assistant_line[..split_at];
+        let second_chunk = format!(
+            "{}\n{}\n",
+            &assistant_line[split_at..],
+            r#"{"type":"result","subtype":"success","result":"done","session_id":"sess-1"}"#
+        );
+        std::fs::write(&output_path, first_chunk).unwrap();
+
+        let (sender, receiver) = mpsc::channel();
+        let reader_path = output_path.to_string_lossy().into_owned();
+        let reader = thread::spawn(move || {
+            read_output_file_until_result(
+                &reader_path,
+                0,
+                sender,
+                None,
+                SessionProbe::process(|| true),
+            )
+        });
+
+        thread::sleep(Duration::from_millis(50));
+        assert!(receiver.try_recv().is_err());
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&output_path)
+            .unwrap()
+            .write_all(second_chunk.as_bytes())
+            .unwrap();
+
+        let result = reader.join().unwrap().unwrap();
+        assert_eq!(
+            result,
+            ReadOutputResult::Completed {
+                offset: (first_chunk.len() + second_chunk.len()) as u64
+            }
+        );
+        let messages = receiver.try_iter().collect::<Vec<_>>();
+        assert!(messages.iter().any(
+            |message| matches!(message, StreamMessage::Text { content } if content == "hello world")
+        ));
+        assert!(messages.iter().any(
+            |message| matches!(message, StreamMessage::Done { result, .. } if result == "done")
+        ));
+    }
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
     use super::*;

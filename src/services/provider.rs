@@ -2039,7 +2039,8 @@ where
         .map_err(|e| format!("Failed to seek output file: {}", e))?;
 
     let mut current_offset = start_offset;
-    let mut partial_line = String::new();
+    let mut committed_offset = start_offset;
+    let mut partial_line = Vec::new();
     let mut buf = [0u8; 8192];
     let mut no_data_count: u32 = 0;
     let mut ready_for_input_tracker = ReadyForInputIdleTracker::default();
@@ -2047,7 +2048,7 @@ where
     loop {
         if cancel_requested(cancel_token.as_deref()) {
             return Ok(ReadOutputResult::Cancelled {
-                offset: current_offset,
+                offset: committed_offset,
             });
         }
 
@@ -2080,11 +2081,11 @@ where
                     {
                         if !emit_synthetic_done(state) {
                             return Ok(ReadOutputResult::Cancelled {
-                                offset: current_offset,
+                                offset: committed_offset,
                             });
                         }
                         return Ok(ReadOutputResult::Completed {
-                            offset: current_offset,
+                            offset: committed_offset,
                         });
                     } else if has_new_bytes {
                         ready_for_input_tracker.record_output();
@@ -2104,11 +2105,15 @@ where
                 no_data_count = 0;
                 ready_for_input_tracker.record_output();
                 current_offset += n as u64;
-                emit_output_offset(current_offset);
-                partial_line.push_str(&String::from_utf8_lossy(&buf[..n]));
+                partial_line.extend_from_slice(&buf[..n]);
+                if let Some(pos) = partial_line.iter().rposition(|byte| *byte == b'\n') {
+                    emit_output_offset(committed_offset.saturating_add((pos + 1) as u64));
+                }
 
-                while let Some(pos) = partial_line.find('\n') {
-                    let line: String = partial_line.drain(..=pos).collect();
+                while let Some(pos) = partial_line.iter().position(|byte| *byte == b'\n') {
+                    let line: Vec<u8> = partial_line.drain(..=pos).collect();
+                    committed_offset = committed_offset.saturating_add(line.len() as u64);
+                    let line = String::from_utf8_lossy(&line);
                     let trimmed = line.trim();
                     if trimmed.is_empty() {
                         continue;
@@ -2116,13 +2121,13 @@ where
 
                     if !process_line(trimmed, state) {
                         return Ok(ReadOutputResult::Cancelled {
-                            offset: current_offset,
+                            offset: committed_offset,
                         });
                     }
 
                     if has_final(state) {
                         return Ok(ReadOutputResult::Completed {
-                            offset: current_offset,
+                            offset: committed_offset,
                         });
                     }
                 }
@@ -2133,7 +2138,7 @@ where
 
     emit_deferred_error(state);
     Ok(ReadOutputResult::SessionDied {
-        offset: current_offset,
+        offset: committed_offset,
     })
 }
 
@@ -2404,7 +2409,9 @@ mod cancel_token_tests {
 
 #[cfg(test)]
 mod poll_output_file_tests {
-    use super::{ReadOutputResult, poll_output_file_until_result};
+    use super::{CancelToken, ReadOutputResult, poll_output_file_until_result};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn missing_output_file_reports_session_died_when_process_already_exited() {
@@ -2469,6 +2476,52 @@ mod poll_output_file_tests {
         assert_eq!(result, ReadOutputResult::Completed { offset: file_len });
         assert_eq!(state.lines, vec!["DONE".to_string()]);
         assert_eq!(offsets, vec![start_offset, file_len]);
+    }
+
+    #[test]
+    fn unterminated_tail_bytes_do_not_advance_committed_offset() {
+        #[derive(Default)]
+        struct TestState {
+            lines: Vec<String>,
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("stream.jsonl");
+        let complete = "complete\n";
+        std::fs::write(&output_path, format!("{complete}unterminated")).unwrap();
+        let safe_offset = complete.len() as u64;
+        let cancel_token = Arc::new(CancelToken::new());
+        let cancel_from_line = cancel_token.clone();
+
+        let mut state = TestState::default();
+        let mut offsets = Vec::new();
+        let result = poll_output_file_until_result(
+            output_path.to_str().unwrap(),
+            0,
+            Some(cancel_token),
+            &mut state,
+            || true,
+            || false,
+            |offset| offsets.push(offset),
+            |line: &str, state| {
+                state.lines.push(line.to_string());
+                cancel_from_line.cancelled.store(true, Ordering::Relaxed);
+                true
+            },
+            |_| false,
+            |_| true,
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(
+            result,
+            ReadOutputResult::Cancelled {
+                offset: safe_offset
+            }
+        );
+        assert_eq!(state.lines, vec!["complete".to_string()]);
+        assert_eq!(offsets, vec![safe_offset]);
     }
 }
 
