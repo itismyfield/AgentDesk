@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::Row;
-use std::collections::HashSet;
+use std::{collections::HashSet, path::PathBuf};
 
 use super::action::RoutineAction;
 use super::agent_executor::RoutineAgentExecutor;
@@ -12,7 +12,9 @@ use super::loader::{
     MAX_OBSERVATION_PAYLOAD_BYTES, MAX_OBSERVATIONS_PER_TICK, ObservationLimits,
     RoutineScriptLoader, RoutineTickAgent, RoutineTickContext, RoutineTickRoutine, RoutineTickRun,
 };
+use super::migrated::{is_migrated_launchd_script_ref, validate_migrated_launchd_activation};
 use super::store::{ClaimedRoutineRun, RoutineStore};
+use crate::error::{AppError, AppResult, ErrorCode};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RoutineRunOutcome {
@@ -29,6 +31,7 @@ pub struct RoutineRunOutcome {
 pub async fn run_due_tick(
     store: &RoutineStore,
     loader: &RoutineScriptLoader,
+    routine_dirs: &[PathBuf],
     agent_executor: Option<&RoutineAgentExecutor>,
     discord_logger: Option<&RoutineDiscordLogger>,
     max_due_per_tick: u32,
@@ -38,6 +41,45 @@ pub async fn run_due_tick(
     for run in claimed {
         if let Some(logger) = discord_logger {
             logger.log_run_started(store, &run).await;
+        }
+        if let Err(error) = validate_claimed_migrated_launchd_run(loader, &run, routine_dirs) {
+            let message = error.to_string();
+            tracing::warn!(
+                routine_id = %run.routine_id,
+                routine_script = %run.script_ref,
+                error = %message,
+                "routine due run blocked by migrated launchd validation"
+            );
+            let result_json = Some(json!({
+                "error": message.as_str(),
+                "script_ref": run.script_ref.as_str(),
+                "blocked_by": "migrated_launchd_validation",
+            }));
+            let closed = store
+                .fail_run_and_pause_routine(&run.run_id, &message, result_json.clone())
+                .await?;
+            if closed {
+                let outcome = RoutineRunOutcome {
+                    run_id: run.run_id.clone(),
+                    routine_id: run.routine_id.clone(),
+                    script_ref: run.script_ref.clone(),
+                    action: "error".to_string(),
+                    status: "failed".to_string(),
+                    result_json,
+                    error: Some(message),
+                    fresh_context_guaranteed: false,
+                };
+                if let Some(logger) = discord_logger {
+                    logger.log_run_outcome(store, &outcome).await;
+                }
+                outcomes.push(outcome);
+            } else {
+                tracing::warn!(
+                    routine_run_id = %run.run_id,
+                    "routine due run validation failure could not close claimed run"
+                );
+            }
+            continue;
         }
         match execute_claimed_script_run(store, loader, agent_executor, discord_logger, run).await {
             Ok(Some(outcome)) => {
@@ -55,6 +97,34 @@ pub async fn run_due_tick(
         }
     }
     Ok(outcomes)
+}
+
+fn validate_claimed_migrated_launchd_run(
+    loader: &RoutineScriptLoader,
+    claimed: &ClaimedRoutineRun,
+    routine_dirs: &[PathBuf],
+) -> AppResult<()> {
+    if !is_migrated_launchd_script_ref(&claimed.script_ref) {
+        return Ok(());
+    }
+    let script = loader
+        .get_script(&claimed.script_ref)
+        .map_err(|error| {
+            AppError::internal(format!("routine script lookup failed: {error}"))
+                .with_code(ErrorCode::Config)
+        })?
+        .ok_or_else(|| {
+            AppError::conflict(format!(
+                "migrated routine {} is invalid: routine script not loaded",
+                claimed.script_ref
+            ))
+        })?;
+    validate_migrated_launchd_activation(
+        &claimed.script_ref,
+        claimed.checkpoint.as_ref(),
+        Some(&script.metadata),
+        routine_dirs,
+    )
 }
 
 pub async fn poll_agent_turns(
@@ -664,10 +734,14 @@ async fn close_action(
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use serde_json::json;
 
-    use super::{action_detail, merge_loaded_script_automation_inventory};
-    use crate::services::routines::RoutineAction;
+    use super::{
+        action_detail, merge_loaded_script_automation_inventory,
+        validate_claimed_migrated_launchd_run,
+    };
+    use crate::services::routines::{RoutineAction, RoutineScriptLoader, store::ClaimedRoutineRun};
 
     #[test]
     fn loaded_script_refs_extend_automation_inventory_as_implemented_prefixes() {
@@ -716,6 +790,52 @@ mod tests {
             added.get("source_ref").and_then(|value| value.as_str()),
             Some("routine-script:monitoring/working-watchdog.js")
         );
+    }
+
+    #[test]
+    fn claimed_migrated_due_run_reuses_activation_validation() {
+        let temp = tempfile::tempdir().unwrap();
+        let routines_dir = temp.path().join("routines");
+        let script_dir = routines_dir.join("migrated-launchd");
+        std::fs::create_dir_all(&script_dir).unwrap();
+        let script_path = script_dir.join("missing-entrypoint.js");
+        std::fs::write(
+            &script_path,
+            r#"
+            agentdesk.routines.register({
+              name: "Missing entrypoint",
+              metadata: {
+                migrated_launchd: {
+                  entrypoint: "scripts/launchd-migrated/missing-entrypoint.sh"
+                }
+              },
+              tick(ctx) {
+                return { action: "complete", result: { ok: true } };
+              }
+            });
+            "#,
+        )
+        .unwrap();
+
+        let loader = RoutineScriptLoader::new().unwrap();
+        let script_ref = loader.load_script(&routines_dir, &script_path).unwrap();
+        let claimed = ClaimedRoutineRun {
+            run_id: "run-1".to_string(),
+            routine_id: "routine-1".to_string(),
+            agent_id: None,
+            script_ref,
+            name: "Missing entrypoint".to_string(),
+            execution_strategy: "script".to_string(),
+            checkpoint: None,
+            discord_thread_id: None,
+            timeout_secs: None,
+            lease_expires_at: Utc::now(),
+        };
+
+        let error = validate_claimed_migrated_launchd_run(&loader, &claimed, &[routines_dir])
+            .expect_err("missing migrated entrypoint must block scheduled execution");
+
+        assert!(error.to_string().contains("shell entrypoint not found"));
     }
 
     #[test]

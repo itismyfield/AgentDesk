@@ -12,12 +12,15 @@ use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::routines::{
     NewRoutine, RoutineAgentExecutor, RoutineDiscordLogger, RoutineLifecycleEvent, RoutinePatch,
     RoutineScriptLoader, RoutineSessionCommand, RoutineSessionController, RoutineStore,
-    execute_claimed_script_run, is_resume_routine_requires_next_due_at,
+    execute_claimed_script_run, is_migrated_launchd_script_ref,
+    is_resume_routine_requires_next_due_at, validate_migrated_launchd_activation,
     validate_routine_runtime_config, validate_routine_schedule,
 };
 use crate::utils::api::clamp_api_limit;
 
 use super::AppState;
+
+const PARALLEL_SAFE_MIGRATED_LAUNCHD_SCRIPT_REF: &str = "migrated-launchd/queue-stability-batch.js";
 
 #[derive(Debug, Deserialize)]
 pub struct ListRoutinesQuery {
@@ -257,11 +260,13 @@ pub async fn attach_routine(
     validate_execution_strategy_request(&execution_strategy)?;
     validate_schedule_request(body.schedule.as_deref())?;
     validate_timeout_request(body.timeout_secs)?;
+    let initial_status = initial_attach_status(&script_ref).to_string();
     let routine = store
         .attach_routine(NewRoutine {
             agent_id: body.agent_id,
             script_ref,
             name,
+            status: Some(initial_status),
             execution_strategy,
             schedule: body.schedule,
             next_due_at: body.next_due_at,
@@ -336,6 +341,24 @@ pub async fn resume_routine(
     Json(body): Json<ResumeRoutineBody>,
 ) -> AppResult<Json<Value>> {
     let store = routine_store(&state)?;
+    let Some(routine) = store.get_routine(&routine_id).await.map_err(store_error)? else {
+        return Err(AppError::not_found(format!(
+            "paused routine {routine_id} not found"
+        )));
+    };
+    if routine.status != "paused" {
+        return Err(AppError::not_found(format!(
+            "paused routine {routine_id} not found"
+        )));
+    }
+    let metadata = migrated_launchd_metadata_for_state(&state, &routine.script_ref)?;
+    let routine_script_dirs = state.config.routines.script_dirs();
+    validate_migrated_launchd_activation(
+        &routine.script_ref,
+        routine.checkpoint.as_ref(),
+        metadata.as_ref(),
+        &routine_script_dirs,
+    )?;
     let changed = store
         .resume_routine(&routine_id, body.next_due_at_update())
         .await
@@ -382,16 +405,11 @@ pub async fn run_routine_now(
     ensure_routine_runtime_runnable(&state.config.routines)?;
 
     let store = routine_store(&state)?;
-    if store
-        .get_routine(&routine_id)
-        .await
-        .map_err(store_error)?
-        .is_none()
-    {
+    let Some(routine) = store.get_routine(&routine_id).await.map_err(store_error)? else {
         return Err(AppError::not_found(format!(
             "routine {routine_id} not found"
         )));
-    }
+    };
 
     let loader = RoutineScriptLoader::new().map_err(|error| {
         AppError::internal(format!("routine script loader init failed: {error}"))
@@ -402,6 +420,27 @@ pub async fn run_routine_now(
         AppError::internal(format!("routine script registry load failed: {error}"))
             .with_code(ErrorCode::Config)
     })?;
+    let metadata = if is_migrated_launchd_script_ref(&routine.script_ref) {
+        let Some(script) = loader.get_script(&routine.script_ref).map_err(|error| {
+            AppError::internal(format!("routine script lookup failed: {error}"))
+                .with_code(ErrorCode::Config)
+        })?
+        else {
+            return Err(AppError::conflict(format!(
+                "migrated routine {} is invalid: routine script not loaded",
+                routine.script_ref
+            )));
+        };
+        Some(script.metadata)
+    } else {
+        None
+    };
+    validate_migrated_launchd_activation(
+        &routine.script_ref,
+        routine.checkpoint.as_ref(),
+        metadata.as_ref(),
+        &routine_script_dirs,
+    )?;
 
     let Some(claimed) = store
         .claim_run_now(&routine_id)
@@ -453,6 +492,34 @@ fn ensure_routine_runtime_runnable(config: &crate::config::RoutinesConfig) -> Ap
         ));
     }
     Ok(())
+}
+
+fn migrated_launchd_metadata_for_state(
+    state: &AppState,
+    script_ref: &str,
+) -> AppResult<Option<Value>> {
+    if !is_migrated_launchd_script_ref(script_ref) {
+        return Ok(None);
+    }
+    let loader = RoutineScriptLoader::new().map_err(|error| {
+        AppError::internal(format!("routine script loader init failed: {error}"))
+            .with_code(ErrorCode::Internal)
+    })?;
+    let routine_script_dirs = state.config.routines.script_dirs();
+    loader.load_dirs(&routine_script_dirs).map_err(|error| {
+        AppError::internal(format!("routine script registry load failed: {error}"))
+            .with_code(ErrorCode::Config)
+    })?;
+    let Some(script) = loader.get_script(script_ref).map_err(|error| {
+        AppError::internal(format!("routine script lookup failed: {error}"))
+            .with_code(ErrorCode::Config)
+    })?
+    else {
+        return Err(AppError::conflict(format!(
+            "migrated routine {script_ref} is invalid: routine script not loaded"
+        )));
+    };
+    Ok(Some(script.metadata))
 }
 
 pub async fn reset_routine_session(
@@ -606,6 +673,16 @@ fn fallback_name(script_ref: &str) -> String {
         .to_string()
 }
 
+fn initial_attach_status(script_ref: &str) -> &'static str {
+    if script_ref == PARALLEL_SAFE_MIGRATED_LAUNCHD_SCRIPT_REF {
+        "enabled"
+    } else if is_migrated_launchd_script_ref(script_ref) {
+        "paused"
+    } else {
+        "enabled"
+    }
+}
+
 fn normalize_script_ref(script_ref: &str) -> AppResult<String> {
     let normalized = script_ref.trim().replace('\\', "/");
     if normalized.is_empty() {
@@ -686,8 +763,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        PatchRoutineBody, ResumeRoutineBody, ensure_routine_runtime_runnable, normalize_script_ref,
-        store_error,
+        PARALLEL_SAFE_MIGRATED_LAUNCHD_SCRIPT_REF, PatchRoutineBody, ResumeRoutineBody,
+        ensure_routine_runtime_runnable, initial_attach_status, normalize_script_ref, store_error,
     };
     use crate::config::RoutinesConfig;
     use crate::error::ErrorCode;
@@ -835,5 +912,21 @@ mod tests {
         let err = normalize_script_ref(" \t ").expect_err("empty refs must be rejected");
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
         assert_eq!(err.message(), "script_ref is required");
+    }
+
+    #[test]
+    fn migrated_launchd_attach_defaults_to_paused() {
+        assert_eq!(
+            initial_attach_status("migrated-launchd/memory-merge.js"),
+            "paused"
+        );
+        assert_eq!(
+            initial_attach_status(PARALLEL_SAFE_MIGRATED_LAUNCHD_SCRIPT_REF),
+            "enabled"
+        );
+        assert_eq!(
+            initial_attach_status("monitoring/automation-candidate-detector.js"),
+            "enabled"
+        );
     }
 }

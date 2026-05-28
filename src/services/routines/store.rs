@@ -412,6 +412,7 @@ pub struct NewRoutine {
     pub agent_id: Option<String>,
     pub script_ref: String,
     pub name: String,
+    pub status: Option<String>,
     pub execution_strategy: String,
     pub schedule: Option<String>,
     pub next_due_at: Option<DateTime<Utc>>,
@@ -1553,6 +1554,7 @@ impl RoutineStore {
 
     pub async fn attach_routine(&self, new_routine: NewRoutine) -> Result<RoutineRecord> {
         validate_execution_strategy(&new_routine.execution_strategy)?;
+        let status = normalize_new_routine_status(new_routine.status.as_deref())?;
         let schedule = normalize_schedule(new_routine.schedule)?;
         validate_timeout_secs(new_routine.timeout_secs)?;
         let discord_thread_id = normalize_optional_text(new_routine.discord_thread_id);
@@ -1570,7 +1572,7 @@ impl RoutineStore {
                 id, agent_id, script_ref, name, status, execution_strategy,
                 schedule, next_due_at, checkpoint, discord_thread_id, timeout_secs
             )
-            VALUES ($1, $2, $3, $4, 'enabled', $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING id, agent_id, script_ref, name, status, execution_strategy,
                       schedule, next_due_at, last_run_at, last_result, checkpoint,
                       discord_thread_id, timeout_secs, in_flight_run_id,
@@ -1581,6 +1583,7 @@ impl RoutineStore {
         .bind(new_routine.agent_id)
         .bind(new_routine.script_ref)
         .bind(new_routine.name)
+        .bind(status)
         .bind(new_routine.execution_strategy)
         .bind(schedule)
         .bind(next_due_at)
@@ -1788,6 +1791,28 @@ impl RoutineStore {
         .await
     }
 
+    pub async fn fail_run_and_pause_routine(
+        &self,
+        run_id: &str,
+        error: &str,
+        result_json: Option<Value>,
+    ) -> Result<bool> {
+        self.close_run(
+            run_id,
+            CloseRun {
+                run_status: "failed",
+                action: None,
+                result_json,
+                error: Some(error),
+                checkpoint: None,
+                last_result: Some(error),
+                next_due_at: NextDueAtUpdate::Clear,
+                pause_routine: true,
+            },
+        )
+        .await
+    }
+
     pub async fn mark_agent_turn_started(
         &self,
         run_id: &str,
@@ -1864,7 +1889,9 @@ impl RoutineStore {
         .await
     }
 
-    /// Pause an enabled routine.
+    /// Pause an enabled routine; already-paused rows are treated as an
+    /// idempotent success so migrated launchd cutover scripts can safely call
+    /// pause after attaching rows that default to paused.
     ///
     /// `next_due_at` is preserved on purpose (#2395). Clearing it here makes
     /// the resume PATCH-semantics meaningless for routines that only have an
@@ -1880,7 +1907,7 @@ impl RoutineStore {
             SET status = 'paused',
                 updated_at = NOW()
             WHERE id = $1
-              AND status = 'enabled'
+              AND status IN ('enabled', 'paused')
             "#,
         )
         .bind(routine_id)
@@ -2546,6 +2573,16 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn normalize_new_routine_status(status: Option<&str>) -> Result<&'static str> {
+    match status.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("enabled") => Ok("enabled"),
+        Some("paused") => Ok("paused"),
+        Some(other) => Err(anyhow!(
+            "routine initial status must be enabled or paused, got {other}"
+        )),
+    }
 }
 
 fn validate_timeout_secs(timeout_secs: Option<i32>) -> Result<()> {

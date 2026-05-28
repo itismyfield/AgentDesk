@@ -637,6 +637,7 @@ src/
 │   │   ├── agent_executor.rs
 │   │   ├── discord_log.rs
 │   │   ├── loader.rs
+│   │   ├── migrated.rs
 │   │   ├── mod.rs
 │   │   ├── runtime.rs
 │   │   ├── runtime_config.rs
@@ -668,6 +669,7 @@ src/
 │   ├── message_outbox.rs
 │   ├── mod.rs
 │   ├── opencode.rs
+│   ├── operator_connectors.rs
 │   ├── pipeline_override.rs
 │   ├── pipeline_routes.rs
 │   ├── pr_summary.rs

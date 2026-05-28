@@ -49,6 +49,11 @@ hour shift is possible between launchd and the routine scheduler.
 
 ## Operator: attach routines (once dcserver is up + release is deployed)
 
+This section is for the legacy operator cutover from the original
+`com.itismyfield.*` launchd labels. New installs should leave migrated
+launchd routines unattached until each optional connector is configured
+and validated.
+
 Run on whichever node is the cluster leader. The workspace containing
 `routines/migrated-launchd/` must be deployed before the script loader
 will see the new files, and `scripts/launchd-migrated/` must be deployed
@@ -246,6 +251,73 @@ keep mac-book down or out of the cluster). The release-deployed
 entrypoint directory is the supported source of truth for routine
 execution.
 
+## Enable-time validation for migrated routines
+
+`POST /api/routines/<id>/resume` now validates migrated launchd routines
+before flipping the row from `paused` to `enabled`. Validation failure
+returns `409 Conflict`, leaves that routine paused, and does not affect
+core daemon health or other routines.
+
+The built-in checks verify the release-deployed shell entrypoint exists.
+By default the entrypoint is
+`scripts/launchd-migrated/<routine-stem>.sh`, but routine metadata can
+declare a repo-relative override for jobs such as
+`queue-stability-batch`:
+
+```js
+agentdesk.routines.register({
+  name: "queue-stability-batch",
+  metadata: {
+    migrated_launchd: {
+      entrypoint: "scripts/queue-stability-batch.sh"
+    }
+  },
+  tick(ctx) {
+    // ...
+  }
+});
+```
+
+Memory-state jobs also require the resolved
+`AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR` directory, and `memory-merge`
+requires `AGENTDESK_MEMORY_MERGE_SKILL` or the default
+`$AGENTDESK_ROOT_DIR/skills/memory-merge/SKILL.md` file.
+
+If a migrated routine depends on an operator-specific vault, prompt,
+connector, or workdir, declare the stable contract in routine metadata
+or record an operator override in the routine checkpoint before resume:
+
+```bash
+curl -sf "$API/api/routines/<id>" -X PATCH \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "checkpoint": {
+      "migrated_launchd": {
+        "required_connectors": ["obsidian_skill_root"],
+        "required_paths": [
+          {
+            "label": "operator vault",
+            "path": "$OBSIDIAN_VAULT_ROOT",
+            "kind": "dir"
+          }
+        ]
+      }
+    }
+  }'
+```
+
+`required_connectors` accepts connector IDs or objects with
+`id`/`connector`/`capability`, optional `label`, and
+`"required": false`. Current connector IDs include
+`obsidian_agent_prompts` and `obsidian_skill_root`. A required connector
+must be `ready`; `skipped` and `invalid` produce a `409 Conflict` with
+the same setup actions shown by doctor and dashboard settings.
+
+`required_paths` accepts either strings or objects. Object `kind` may be
+`path`, `file`, or `dir`; set `"required": false` for documented optional
+legacy paths. Environment prefixes like `$OBSIDIAN_VAULT_ROOT/foo` and
+`${AGENTDESK_ROOT_DIR}/foo` are expanded without invoking a shell.
+
 ## Verification window (≥24 hours)
 
 Because jobs 1, 2, 5, 6, 7, 11 send Discord messages, the operator
@@ -255,14 +327,11 @@ protocol instead:
 
 ### Stage-paused → cutover protocol (jobs with Discord side effects: 1, 2, 5, 6, 7, 11)
 
-`POST /api/routines` always inserts the row as `status='enabled'` with a
-computed `next_due_at`; there is no create-as-paused flag. Calling pause
-in a second request opens a race: if the attach lands within one minute
-of the cron's fire time, `routine-runtime` can claim the lease and send
-the message before the pause arrives, producing a duplicate Discord
-fire alongside the still-loaded launchd plist. To eliminate that race,
-**attach without a schedule first**, then pause, then PATCH the schedule
-in:
+`POST /api/routines` inserts migrated launchd rows as `status='paused'`.
+Older releases inserted every row as `status='enabled'`, which created a
+claim race if attach landed near the cron fire time. The current cutover
+protocol still attaches without a schedule first, then verifies the paused
+row, then PATCHes the schedule in:
 
 **Critical ordering:** PATCH the schedule **before** booting out
 launchd, so the routine's `next_due_at` is computed and verifiable
@@ -287,8 +356,8 @@ re-runs at dcserver boot).
    ```
    Note `schedule` is omitted — the routine has no `next_due_at`, so it
    cannot fire.
-2. Pause the routine (belt-and-suspenders against any background
-   resume that wrote a `next_due_at`):
+2. Verify the row is paused. Calling pause again is idempotent but no
+   longer required for migrated launchd routines:
    ```bash
    curl -sf "$API/api/routines/<id>/pause" -X POST
    ```

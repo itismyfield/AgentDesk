@@ -4059,6 +4059,7 @@ async fn routine_runtime_loop(
         match run_due_tick(
             &store,
             &script_loader,
+            &routine_script_dirs,
             Some(&agent_executor),
             Some(&discord_logger),
             routines_config.max_due_per_tick,
