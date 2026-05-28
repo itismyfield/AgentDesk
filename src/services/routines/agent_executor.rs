@@ -5,8 +5,8 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::services::discord::health::{
-    HealthRegistry, reserve_headless_agent_turn, resolve_bot_http,
-    start_reserved_headless_agent_turn,
+    HealthRegistry, reserve_headless_agent_turn, reserve_headless_agent_turn_in_dm,
+    resolve_bot_http, start_reserved_headless_agent_turn, start_reserved_headless_agent_turn_in_dm,
 };
 
 use super::runtime::RoutineRunOutcome;
@@ -46,12 +46,20 @@ impl RoutineAgentExecutor {
         store: &RoutineStore,
         claimed: ClaimedRoutineRun,
         prompt: String,
+        dm_user_id: Option<String>,
         checkpoint: Option<Value>,
         next_due_at: Option<DateTime<Utc>>,
     ) -> Result<RoutineRunOutcome> {
         let action = "agent".to_string();
         let result = self
-            .start_turn(store, &claimed, &prompt, &checkpoint, next_due_at)
+            .start_turn(
+                store,
+                &claimed,
+                &prompt,
+                dm_user_id.as_deref(),
+                &checkpoint,
+                next_due_at,
+            )
             .await;
         match result {
             Ok(started) if started.started => Ok(RoutineRunOutcome {
@@ -204,6 +212,7 @@ impl RoutineAgentExecutor {
         store: &RoutineStore,
         claimed: &ClaimedRoutineRun,
         prompt: &str,
+        dm_user_id: Option<&str>,
         checkpoint: &Option<Value>,
         next_due_at: Option<DateTime<Utc>>,
     ) -> Result<StartedAgentTurn> {
@@ -237,37 +246,68 @@ impl RoutineAgentExecutor {
             ));
         };
         let channel_id = poise::serenity_prelude::ChannelId::new(channel_id_num);
-        let routine_channel = self
-            .resolve_or_create_routine_thread(
-                store,
-                registry,
-                claimed,
-                agent_id,
-                provider.as_str(),
-                channel_id,
-            )
-            .await;
-        let (turn_channel_id, discord_thread_id, delivery_bot) = match routine_channel {
-            Ok(target) => (
-                target.channel_id,
-                target.discord_thread_id,
-                target.delivery_bot,
-            ),
-            Err(error) => {
-                let warning = error.to_string();
-                let _ = store
-                    .record_discord_log_result(&claimed.run_id, "failed", Some(&warning))
-                    .await;
-                tracing::warn!(
-                    routine_id = claimed.routine_id,
-                    run_id = claimed.run_id,
-                    error = %warning,
-                    "routine thread setup failed; falling back to agent primary channel"
-                );
-                (channel_id, None, "notify".to_string())
-            }
+        let dm_user_id_num = match dm_user_id {
+            Some(value) => Some(value.parse::<u64>().map_err(|error| {
+                anyhow!("RoutineAction.agent.dmUserId must be a Discord snowflake string: {error}")
+            })?),
+            None => None,
         };
-        let reservation = reserve_headless_agent_turn(turn_channel_id);
+
+        let (turn_channel_id, discord_thread_id, delivery_bot, reservation) = if let Some(
+            dm_user_id_num,
+        ) = dm_user_id_num
+        {
+            let (dm_channel_id, reservation) = reserve_headless_agent_turn_in_dm(
+                    registry,
+                    channel_id,
+                    dm_user_id_num,
+                    &provider,
+                )
+                .await
+                .map_err(|error| {
+                    anyhow!(
+                        "reserve routine agent DM turn for {agent_id} and user {dm_user_id_num}: {error}"
+                    )
+                })?;
+            (dm_channel_id, None, "dm".to_string(), reservation)
+        } else {
+            let routine_channel = self
+                .resolve_or_create_routine_thread(
+                    store,
+                    registry,
+                    claimed,
+                    agent_id,
+                    provider.as_str(),
+                    channel_id,
+                )
+                .await;
+            let (turn_channel_id, discord_thread_id, delivery_bot) = match routine_channel {
+                Ok(target) => (
+                    target.channel_id,
+                    target.discord_thread_id,
+                    target.delivery_bot,
+                ),
+                Err(error) => {
+                    let warning = error.to_string();
+                    let _ = store
+                        .record_discord_log_result(&claimed.run_id, "failed", Some(&warning))
+                        .await;
+                    tracing::warn!(
+                        routine_id = claimed.routine_id,
+                        run_id = claimed.run_id,
+                        error = %warning,
+                        "routine thread setup failed; falling back to agent primary channel"
+                    );
+                    (channel_id, None, "notify".to_string())
+                }
+            };
+            (
+                turn_channel_id,
+                discord_thread_id,
+                delivery_bot,
+                reserve_headless_agent_turn(turn_channel_id),
+            )
+        };
         let turn_id = reservation.turn_id().to_string();
 
         let mut result_json = json!({
@@ -278,6 +318,8 @@ impl RoutineAgentExecutor {
             "channel_id": turn_channel_id.get().to_string(),
             "parent_channel_id": channel_id_num.to_string(),
             "discord_thread_id": discord_thread_id,
+            "dm_user_id": dm_user_id,
+            "is_dm": dm_user_id.is_some(),
             "routine_id": claimed.routine_id,
             "run_id": claimed.run_id,
             "script_ref": claimed.script_ref,
@@ -307,23 +349,40 @@ impl RoutineAgentExecutor {
             "turn_id": turn_id.clone(),
             "parent_channel_id": channel_id_num.to_string(),
             "discord_thread_id": discord_thread_id,
+            "dm_user_id": dm_user_id,
+            "is_dm": dm_user_id.is_some(),
         }));
-        let channel_name_hint = primary_channel
-            .chars()
-            .all(|ch| ch.is_ascii_digit())
-            .then_some(None)
-            .unwrap_or_else(|| Some(primary_channel.clone()));
-        let outcome = start_reserved_headless_agent_turn(
-            registry,
-            turn_channel_id,
-            provider.clone(),
-            prompt.to_string(),
-            Some("routine".to_string()),
-            metadata,
-            channel_name_hint,
-            reservation,
-        )
-        .await
+        let outcome = if let Some(dm_user_id_num) = dm_user_id_num {
+            start_reserved_headless_agent_turn_in_dm(
+                registry,
+                channel_id,
+                turn_channel_id,
+                dm_user_id_num,
+                provider.clone(),
+                prompt.to_string(),
+                Some("routine".to_string()),
+                metadata,
+                reservation,
+            )
+            .await
+        } else {
+            let channel_name_hint = primary_channel
+                .chars()
+                .all(|ch| ch.is_ascii_digit())
+                .then_some(None)
+                .unwrap_or_else(|| Some(primary_channel.clone()));
+            start_reserved_headless_agent_turn(
+                registry,
+                turn_channel_id,
+                provider.clone(),
+                prompt.to_string(),
+                Some("routine".to_string()),
+                metadata,
+                channel_name_hint,
+                reservation,
+            )
+            .await
+        }
         .map_err(|error| anyhow!("start routine agent turn for {agent_id}: {error}"))?;
 
         if outcome.turn_id != turn_id {

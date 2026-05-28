@@ -25,6 +25,7 @@ pub enum RoutineAction {
     },
     Agent {
         prompt: String,
+        dm_user_id: Option<String>,
         checkpoint: Option<Value>,
         next_due_at: Option<DateTime<Utc>>,
     },
@@ -127,6 +128,8 @@ pub fn validate_routine_action(value: Value) -> Result<RoutineAction> {
                     "action",
                     "kind",
                     "prompt",
+                    "dmUserId",
+                    "dm_user_id",
                     "checkpoint",
                     "nextDueAt",
                     "next_due_at",
@@ -138,6 +141,7 @@ pub fn validate_routine_action(value: Value) -> Result<RoutineAction> {
             }
             Ok(RoutineAction::Agent {
                 prompt,
+                dm_user_id: optional_discord_snowflake_alias(obj, "dmUserId", "dm_user_id")?,
                 checkpoint: optional_value(obj, "checkpoint"),
                 next_due_at: optional_datetime_alias(obj, "nextDueAt", "next_due_at")?,
             })
@@ -181,6 +185,22 @@ fn optional_string_alias(
         Some(value) => Ok(Some(value)),
         None => optional_string(obj, alias),
     }
+}
+
+fn optional_discord_snowflake_alias(
+    obj: &Map<String, Value>,
+    primary: &str,
+    alias: &str,
+) -> Result<Option<String>> {
+    let value = optional_string_alias(obj, primary, alias)?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() || !trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        bail!("RoutineAction.{primary} must be a Discord snowflake string");
+    }
+    Ok(Some(trimmed.to_string()))
 }
 
 fn optional_string(obj: &Map<String, Value>, key: &str) -> Result<Option<String>> {
@@ -268,10 +288,12 @@ mod tests {
         match action {
             RoutineAction::Agent {
                 prompt,
+                dm_user_id,
                 checkpoint,
                 next_due_at,
             } => {
                 assert_eq!(prompt, "summarize current queue");
+                assert_eq!(dm_user_id, None);
                 assert_eq!(checkpoint, Some(json!({"cursor": 3})));
                 assert!(next_due_at.is_some());
             }
@@ -280,5 +302,29 @@ mod tests {
 
         let err = RoutineAction::validate(json!({"action": "agent", "prompt": "   "})).unwrap_err();
         assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn validates_agent_dm_user_id_aliases() {
+        let action = RoutineAction::validate(json!({
+            "action": "agent",
+            "prompt": "ask in DM",
+            "dmUserId": "343742347365974026"
+        }))
+        .unwrap();
+        match action {
+            RoutineAction::Agent { dm_user_id, .. } => {
+                assert_eq!(dm_user_id.as_deref(), Some("343742347365974026"));
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+
+        let err = RoutineAction::validate(json!({
+            "action": "agent",
+            "prompt": "ask in DM",
+            "dm_user_id": "not-a-snowflake"
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("Discord snowflake"));
     }
 }

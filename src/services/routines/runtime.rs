@@ -344,7 +344,10 @@ fn action_detail(action: &RoutineAction) -> Option<String> {
             .or_else(|| reason.clone())
             .or_else(|| result_json_summary(result_json.as_ref())),
         RoutineAction::Agent {
-            prompt, checkpoint, ..
+            prompt,
+            dm_user_id,
+            checkpoint,
+            ..
         } => {
             let char_count = prompt.chars().count();
             let preview: String = prompt.chars().take(300).collect();
@@ -352,6 +355,9 @@ fn action_detail(action: &RoutineAction) -> Option<String> {
             let mut parts = Vec::new();
             if let Some(summary) = latest_recommendation_summary(checkpoint.as_ref()) {
                 parts.push(summary);
+            }
+            if let Some(dm_user_id) = dm_user_id.as_deref() {
+                parts.push(format!("dm_user_id={dm_user_id}"));
             }
             parts.push(format!(
                 "agent prompt generated ({char_count}자): {preview}{suffix}"
@@ -698,6 +704,7 @@ async fn close_action(
         }
         RoutineAction::Agent {
             prompt,
+            dm_user_id,
             checkpoint,
             next_due_at,
         } => {
@@ -725,7 +732,7 @@ async fn close_action(
                 }));
             };
             agent_executor
-                .start_agent_run(store, claimed, prompt, checkpoint, next_due_at)
+                .start_agent_run(store, claimed, prompt, dm_user_id, checkpoint, next_due_at)
                 .await
                 .map(Some)
         }
@@ -885,6 +892,7 @@ mod tests {
     fn agent_action_detail_includes_checkpoint_decision_summary() {
         let action = RoutineAction::Agent {
             prompt: "# 자동화 후보 추천\n패턴: api-friction".to_string(),
+            dm_user_id: None,
             checkpoint: Some(json!({
                 "recommendations": [{
                     "decision_summary": "선택 이유: api-friction 후보가 기준을 충족했습니다.",
