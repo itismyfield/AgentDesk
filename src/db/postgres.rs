@@ -473,6 +473,7 @@ async fn clear_agent_fk_references_pg(pool: &PgPool, agent_id: &str) -> Result<(
         "UPDATE kanban_cards SET assigned_agent_id = NULL WHERE assigned_agent_id = $1",
         "UPDATE kanban_cards SET owner_agent_id = NULL WHERE owner_agent_id = $1",
         "UPDATE kanban_cards SET requester_agent_id = NULL WHERE requester_agent_id = $1",
+        "UPDATE sessions SET agent_id = NULL WHERE agent_id = $1",
     ] {
         sqlx::query(sql)
             .bind(agent_id)
@@ -1756,6 +1757,73 @@ mod tests {
         assert_eq!(github_default.as_deref(), Some("openclaw-maker"));
 
         close_test_pool(pool, "db::postgres configured legacy reseed test pool")
+            .await
+            .expect("close postgres pool");
+        test_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_startup_reseed_clears_session_fk_for_removed_agent() {
+        // Regression: a stale agent left in postgres with a sessions row referencing it
+        // used to break startup with
+        //   `delete postgres agent <id>: ... foreign key constraint "sessions_agent_id_fkey"`
+        // because clear_agent_fk_references_pg() forgot to NULL out sessions.agent_id.
+        let test_db = TestDatabase::create().await;
+        let config = postgres_test_config(&test_db);
+
+        let pool = connect_test_pool_and_migrate_config(
+            &config,
+            "db::postgres stale agent session fk test pool",
+        )
+        .await
+        .expect("connect and migrate postgres")
+        .expect("postgres pool");
+
+        sqlx::query(
+            "INSERT INTO agents (
+                id, name, provider, status, xp, sprite_number, description, system_prompt, pipeline_config
+             ) VALUES ($1, 'Stale E2E', 'codex', 'idle', 0, 1, '', '', '{}')",
+        )
+        .bind("adk-dashboard-e2e")
+        .execute(&pool)
+        .await
+        .expect("insert stale agent");
+
+        sqlx::query("INSERT INTO sessions (session_key, agent_id, status) VALUES ($1, $2, $3)")
+            .bind("stale-sess-1")
+            .bind("adk-dashboard-e2e")
+            .bind("disconnected")
+            .execute(&pool)
+            .await
+            .expect("insert session referencing stale agent");
+
+        startup_reseed(&pool, &config)
+            .await
+            .expect("startup reseed must succeed even when sessions reference the removed agent");
+
+        let stale_agent_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM agents WHERE id = $1")
+                .bind("adk-dashboard-e2e")
+                .fetch_one(&pool)
+                .await
+                .expect("count stale agents");
+        assert_eq!(
+            stale_agent_count, 0,
+            "stale agent must be deleted by reseed"
+        );
+
+        let session_agent: Option<String> =
+            sqlx::query_scalar("SELECT agent_id FROM sessions WHERE session_key = $1")
+                .bind("stale-sess-1")
+                .fetch_one(&pool)
+                .await
+                .expect("load session agent after reseed");
+        assert!(
+            session_agent.is_none(),
+            "sessions.agent_id must be nulled when the referenced agent is removed"
+        );
+
+        close_test_pool(pool, "db::postgres stale agent session fk test pool")
             .await
             .expect("close postgres pool");
         test_db.drop().await;
