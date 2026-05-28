@@ -9,7 +9,7 @@
 //!      agent's bindings (claude → `discord_channel_cc`,
 //!      codex → `discord_channel_cdx`, fallback → `discord_channel_id`).
 //!   3. Capture the last ~100 lines of the tmux scrollback (best effort).
-//!   4. Ask opencode for a 1-2 sentence Korean summary (best effort,
+//!   4. Ask Claude Haiku for a 1-2 sentence Korean summary (best effort,
 //!      20 s timeout; fall back to a header-only card if it fails).
 //!   5. Delete the previous recap card for this channel (best effort), post
 //!      the new one via the notify bot, and persist its message id.
@@ -123,7 +123,7 @@ async fn run_idle_recap_post_job(
     http: Arc<serenity::Http>,
 ) -> Result<(), String> {
     // PR #3c: capture the live tmux scrollback (best-effort) and ask
-    // opencode for a 1-2 sentence Korean summary (also best-effort, 20s
+    // Claude Haiku for a 1-2 sentence Korean summary (also best-effort, 20s
     // timeout). Both legs degrade gracefully to "no summary" — the card
     // still ships its token / idle header in that case.
     let scrollback = match idle_recap::tmux_session_name_from_key(&session_key) {
@@ -146,7 +146,7 @@ async fn run_idle_recap_post_job(
         _ => None,
     };
     let summary = match scrollback.as_deref() {
-        Some(text) => idle_recap::summarize_with_opencode(text).await,
+        Some(text) => idle_recap::summarize_with_haiku(text).await,
         None => None,
     };
     let content = idle_recap::compose_recap_text(&snapshot, summary.as_deref());
