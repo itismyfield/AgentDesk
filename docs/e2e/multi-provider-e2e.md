@@ -140,6 +140,8 @@ the cell-based command shapes and the diagnostics paths to consult first.
 
 ## Legacy
 
-`scripts/e2e-tui-relay-scenarios.sh` and `scripts/e2e-wrapper-relay-toggle.sh`
-are deprecated; they target the soon-to-be-archived `adk-dashboard-e2e`
-channel pair. New work must use the per-cell driver instead.
+The legacy `adk-dashboard-e2e` single-pair smoke was archived alongside this
+rollout. The two shell wrappers it depended on were removed in the
+multi-provider-e2e migration's final PR; consult `git log` if you need the
+historical surface. New work uses the per-cell driver and the orchestrator
+described above.
