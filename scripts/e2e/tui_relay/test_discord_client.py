@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+import urllib.error
+from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
@@ -55,7 +57,7 @@ class DiscordClientSendPrompt(unittest.TestCase):
             captured["url"],
             "http://127.0.0.1:8791/api/agents/adk-codex-pipe-e2e/turn/start",
         )
-        self.assertEqual(captured["timeout"], 12)
+        self.assertEqual(captured["timeout"], 10.0)
         self.assertEqual(captured["body"]["prompt"], "hello")
         self.assertEqual(captured["body"]["source"], "adk-e2e-orchestrator")
         self.assertEqual(captured["body"]["provider"], "codex")
@@ -78,6 +80,41 @@ class DiscordClientSendPrompt(unittest.TestCase):
             client.send_prompt("1509350393350459434", "hello", channel_kind="cc")
 
         self.assertEqual(captured["body"]["provider"], "claude")
+
+    def test_handoff_prompt_retries_busy_mailbox(self):
+        attempts = []
+
+        def busy_error() -> urllib.error.HTTPError:
+            return urllib.error.HTTPError(
+                url="http://127.0.0.1:8791/api/agents/adk-claude-pipe-e2e/turn/start",
+                code=409,
+                msg="Conflict",
+                hdrs={},
+                fp=BytesIO(b'{"error":"agent mailbox is busy for channel 1"}'),
+            )
+
+        def fake_urlopen(_request, timeout):  # noqa: ANN001, ARG001
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise busy_error()
+            return _Response({"ok": True, "turn_id": "turn-2"})
+
+        client = DiscordClient(
+            base_url="http://127.0.0.1:8791",
+            timeout_s=30,
+            handoff_to_agent="adk-claude-pipe-e2e",
+            handoff_from_agent="adk-e2e-orchestrator",
+        )
+
+        with (
+            mock.patch("urllib.request.urlopen", side_effect=fake_urlopen),
+            mock.patch("time.sleep") as sleep,
+        ):
+            response = client.send_prompt("1509350393350459434", "hello", channel_kind="cc")
+
+        self.assertEqual(response["turn_id"], "turn-2")
+        self.assertEqual(len(attempts), 2)
+        sleep.assert_called_once_with(1.0)
 
 
 if __name__ == "__main__":

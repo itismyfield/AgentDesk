@@ -2957,9 +2957,12 @@ async fn enqueue_headless_delivery(
     };
     if let Some(pool) = shared.pg_pool.as_ref() {
         let delivery_cancel_token = cancel_token.filter(|token| !token.is_completion_cleanup());
-        match crate::services::message_outbox::enqueue_outbox_pg_returning_id_with_cancel(
+        // Terminal headless responses are per-turn facts. Identical content in
+        // back-to-back E2E or operator turns must still be delivered.
+        match crate::services::message_outbox::enqueue_outbox_pg_returning_id_with_ttl_and_cancel(
             pool,
             outbox_message,
+            0,
             delivery_cancel_token,
         )
         .await

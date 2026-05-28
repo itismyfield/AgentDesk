@@ -69,20 +69,29 @@ class DiscordClient:
             }
         ).encode("utf-8")
         target = urllib.parse.quote(self.handoff_to_agent, safe="")
-        request = urllib.request.Request(
-            f"{self.base_url}/api/agents/{target}/turn/start",
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
-                payload = response.read().decode("utf-8")
-        except urllib.error.HTTPError as error:
-            raise RuntimeError(
-                f"turn/start HTTP {error.code}: "
-                f"{error.read().decode('utf-8', 'replace')}"
-            ) from error
+        url = f"{self.base_url}/api/agents/{target}/turn/start"
+        deadline = time.monotonic() + self.timeout_s
+        while True:
+            request = urllib.request.Request(
+                url,
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=min(10.0, self.timeout_s)) as response:
+                    payload = response.read().decode("utf-8")
+                break
+            except urllib.error.HTTPError as error:
+                error_body = error.read().decode("utf-8", "replace")
+                if (
+                    error.code == 409
+                    and "mailbox is busy" in error_body
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(1.0)
+                    continue
+                raise RuntimeError(f"turn/start HTTP {error.code}: {error_body}") from error
         if not payload:
             return {}
         return json.loads(payload)
