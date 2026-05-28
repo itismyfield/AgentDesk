@@ -260,10 +260,10 @@ function parseCooldownRecord(raw) {
 function enqueueEscalation(cardId, reason) {
   if (!cardId || !reason) return;
   var pendingKey = "pm_pending:" + cardId;
-  var existing = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [pendingKey]);
+  var existing = agentdesk.kv.get(pendingKey);
   var entry;
-  if (existing.length > 0) {
-    try { entry = JSON.parse(existing[0].value); } catch (e) { entry = null; }
+  if (existing) {
+    try { entry = JSON.parse(existing); } catch (e) { entry = null; }
   }
   if (!entry) {
     entry = { title: escalationCardTitle(cardId), reasons: [] };
@@ -274,10 +274,7 @@ function enqueueEscalation(cardId, reason) {
   if (entry.reasons.indexOf(reason) === -1) {
     entry.reasons.push(reason);
   }
-  agentdesk.db.execute(
-    "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?, ?, datetime('now', '+' || ? || ' seconds'))",
-    [pendingKey, JSON.stringify(entry), String(ESCALATION_PENDING_TTL_SEC)]
-  );
+  agentdesk.kv.set(pendingKey, JSON.stringify(entry), ESCALATION_PENDING_TTL_SEC);
 }
 
 function escalate(cardId, reasons) {
@@ -303,23 +300,25 @@ function flushEscalations() {
     var state = loadManualInterventionState(cardId);
     var cooldownKey = "pm_decision_sent:" + cardId;
     if (!state) {
-      agentdesk.db.execute("DELETE FROM kv_meta WHERE key IN (?1, ?2)", [rows[i].key, cooldownKey]);
+      agentdesk.kv.delete(rows[i].key);
+      agentdesk.kv.delete(cooldownKey);
       continue;
     }
     if (!state.active) {
-      agentdesk.db.execute("DELETE FROM kv_meta WHERE key IN (?1, ?2)", [rows[i].key, cooldownKey]);
+      agentdesk.kv.delete(rows[i].key);
+      agentdesk.kv.delete(cooldownKey);
       continue;
     }
 
     var entry;
     try { entry = JSON.parse(rows[i].value); } catch (e) {
-      agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [rows[i].key]);
+      agentdesk.kv.delete(rows[i].key);
       continue;
     }
 
-    var cooldownRows = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [cooldownKey]);
-    if (cooldownRows.length > 0) {
-      var cooldownRecord = parseCooldownRecord(cooldownRows[0].value);
+    var cooldownVal = agentdesk.kv.get(cooldownKey);
+    if (cooldownVal) {
+      var cooldownRecord = parseCooldownRecord(cooldownVal);
       var sentAt = cooldownRecord ? cooldownRecord.sent_at : 0;
       var now = Math.floor(Date.now() / 1000);
       var sameAlertState = !cooldownRecord || !cooldownRecord.status || cooldownRecord.status === state.fingerprint;
@@ -339,11 +338,12 @@ function flushEscalations() {
     }
 
     var sentAt = Math.floor(Date.now() / 1000);
-    agentdesk.db.execute(
-      "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?, ?, datetime('now', '+' || ? || ' seconds'))",
-      [cooldownKey, JSON.stringify({ sent_at: sentAt, status: state.fingerprint }), String(ESCALATION_COOLDOWN_SEC)]
+    agentdesk.kv.set(
+      cooldownKey,
+      JSON.stringify({ sent_at: sentAt, status: state.fingerprint }),
+      ESCALATION_COOLDOWN_SEC
     );
-    agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [rows[i].key]);
+    agentdesk.kv.delete(rows[i].key);
   }
 }
 
