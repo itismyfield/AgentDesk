@@ -18,12 +18,15 @@ class PortableDocsExamplesTests(unittest.TestCase):
 
         self.assertNotIn("mac-mini-release", text)
         self.assertNotIn("mac-book-release", text)
+        self.assertNotIn("itismyfield", text)
         self.assertNotIn("1469870512812462284", text)
         self.assertIn("example-main-node", text)
         self.assertIn("example-worker-node", text)
         self.assertIn("YOUR_GUILD_ID", text)
         self.assertIn("YOUR_DEV_CATEGORY_ID", text)
         self.assertIn("YOUR_OPERATIONS_CATEGORY_ID", text)
+        self.assertEqual(text.count("shared_prompt:"), 1)
+        self.assertNotIn("/IDENTITY.md", text)
 
     def test_readme_cluster_snippet_uses_starter_node_names(self):
         text = self.read("README.md")

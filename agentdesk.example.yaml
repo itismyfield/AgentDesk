@@ -163,8 +163,6 @@ voice:
 
 shared_prompt: "~/.adk/release/config/agents/_shared.prompt.md"
 
-shared_prompt: "~/.adk/release/config/agents/_shared.prompt.md"
-
 agents:
   - id: ch-td
     name: "TD"
@@ -175,17 +173,17 @@ agents:
         id: "123456789012345678"
         name: "td-cc"
         workspace: "~/.adk/release/workspaces/ch-td"
-        prompt_file: "~/.adk/release/config/agents/ch-td/IDENTITY.md"
+        prompt_file: "~/.adk/release/config/agents/ch-td.prompt.md"
       codex:
         id: "223456789012345678"
         name: "td-cdx"
         workspace: "~/.adk/release/workspaces/ch-td"
-        prompt_file: "~/.adk/release/config/agents/ch-td/IDENTITY.md"
+        prompt_file: "~/.adk/release/config/agents/ch-td.prompt.md"
       opencode:
         id: "323456789012345678"
         name: "td-oc"
         workspace: "~/.adk/release/workspaces/ch-td"
-        prompt_file: "~/.adk/release/config/agents/ch-td/IDENTITY.md"
+        prompt_file: "~/.adk/release/config/agents/ch-td.prompt.md"
     keywords:
       - "아키텍처"
       - "코드"
@@ -361,7 +359,7 @@ automation:
   enabled: false
   strategy: "squash"
   strategy_mode: "direct-first"
-  allowed_authors: "itismyfield,octocat"
+  allowed_authors: "REPLACE_ME,octocat"
 
 # Onboarding wizard / project-agentfactory rules — externalize what was once
 # hardcoded inside the Discord factory prompt. (#1110, Epic #912 Phase P6)
