@@ -15,6 +15,8 @@ agentdesk.yaml
 # Generated/temp files
 agentdesk.db
 data.db
+out/e2e/
+report.*.json
 docs/generated/module-inventory.md
 docs/generated/route-inventory.md
 docs/generated/worker-inventory.md
