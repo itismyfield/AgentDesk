@@ -77,6 +77,10 @@ pub(crate) struct RecapSnapshot {
     pub(crate) discord_channel_cc: Option<String>,
     pub(crate) discord_channel_cdx: Option<String>,
     pub(crate) discord_channel_alt: Option<String>,
+    /// Working directory of the provider session, persisted on `sessions.cwd`.
+    /// Used as the fallback source for transcript-based scrollback when no
+    /// live tmux pane exists (e.g. the `claude-e` per-turn spawn runtime).
+    pub(crate) cwd: Option<String>,
 }
 
 impl RecapSnapshot {
@@ -107,6 +111,7 @@ pub(crate) async fn load_recap_snapshot(
                 s.last_heartbeat,
                 s.claude_session_id,
                 s.raw_provider_session_id,
+                s.cwd,
                 s.idle_recap_message_id,
                 s.idle_recap_channel_id,
                 a.discord_channel_id,
@@ -166,6 +171,7 @@ struct RecapSnapshotRow {
     last_heartbeat: Option<DateTime<Utc>>,
     claude_session_id: Option<String>,
     raw_provider_session_id: Option<String>,
+    cwd: Option<String>,
     idle_recap_message_id: Option<i64>,
     idle_recap_channel_id: Option<i64>,
     discord_channel_id: Option<String>,
@@ -206,6 +212,7 @@ impl RecapSnapshotRow {
             discord_channel_cc: self.discord_channel_cc,
             discord_channel_cdx: self.discord_channel_cdx,
             discord_channel_alt: self.discord_channel_alt,
+            cwd: self.cwd,
         }
     }
 }
@@ -346,6 +353,102 @@ pub(crate) async fn capture_tmux_scrollback(session_name: &str) -> Option<String
     .ok()
     .flatten()
     .filter(|s| !s.is_empty())
+}
+
+/// Fallback scrollback source for runtimes without a live tmux pane —
+/// notably the `claude-e` per-turn spawn runtime, which never attaches a
+/// long-lived tmux session. Reads the Claude transcript JSONL at
+/// `~/.claude/projects/<encoded-cwd>/<session_id>.jsonl`, parses each line,
+/// and emits the last ~`TMUX_SCROLLBACK_LINES` user/assistant text turns in
+/// a `[role] text` shape that the opencode summarizer can consume the same
+/// way it consumes tmux scrollback.
+///
+/// Returns `None` when the transcript is missing, unreadable, contains no
+/// human-readable turns, or `session_id` is not a valid UUID. The recap
+/// pipeline degrades gracefully to a header-only card in that case.
+///
+/// As a free bonus this also covers stale tmux sessions whose pane has
+/// already been torn down: the transcript file outlives the tmux pane.
+pub(crate) async fn capture_transcript_scrollback(
+    cwd: &std::path::Path,
+    session_id: &str,
+) -> Option<String> {
+    let transcript_path =
+        crate::services::claude_tui::transcript_tail::claude_transcript_path(cwd, session_id, None)
+            .ok()?;
+    let path_for_blocking = transcript_path.clone();
+    task::spawn_blocking(move || extract_transcript_tail_text(&path_for_blocking))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Synchronous worker for `capture_transcript_scrollback`. Splits out so
+/// the parsing logic is unit-testable without an async runtime.
+fn extract_transcript_tail_text(transcript_path: &std::path::Path) -> Option<String> {
+    use std::collections::VecDeque;
+    use std::io::BufRead;
+
+    let file = std::fs::File::open(transcript_path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    let cap = TMUX_SCROLLBACK_LINES as usize;
+    let mut buf: VecDeque<String> = VecDeque::with_capacity(cap);
+    for line in reader.lines().map_while(Result::ok) {
+        let Some(entry) = parse_transcript_line_text(&line) else {
+            continue;
+        };
+        if buf.len() == cap {
+            buf.pop_front();
+        }
+        buf.push_back(entry);
+    }
+    if buf.is_empty() {
+        None
+    } else {
+        Some(buf.into_iter().collect::<Vec<_>>().join("\n"))
+    }
+}
+
+/// Extract a `[role] text` line from a single Claude transcript JSONL row.
+/// Returns `None` for rows without human-readable content (init/done/status,
+/// tool uses, tool results, attachments, etc.) so the opencode summarizer
+/// only sees signal.
+fn parse_transcript_line_text(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let role = match value.get("type")?.as_str()? {
+        "user" => "user",
+        "assistant" => "assistant",
+        _ => return None,
+    };
+    let content = value.get("message")?.get("content")?;
+    let text = match content {
+        serde_json::Value::String(s) => s.trim().to_string(),
+        serde_json::Value::Array(blocks) => {
+            let mut parts = Vec::new();
+            for block in blocks {
+                if block.get("type").and_then(|t| t.as_str()) != Some("text") {
+                    continue;
+                }
+                if let Some(piece) = block.get("text").and_then(|t| t.as_str()) {
+                    let piece = piece.trim();
+                    if !piece.is_empty() {
+                        parts.push(piece.to_string());
+                    }
+                }
+            }
+            parts.join(" ")
+        }
+        _ => return None,
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(format!("[{role}] {text}"))
 }
 
 /// Ask opencode for a 1-2 sentence Korean recap. Time-bounded; returns
@@ -815,6 +918,7 @@ mod tests {
             discord_channel_cc: None,
             discord_channel_cdx: Some("1506295335096549406".to_string()),
             discord_channel_alt: None,
+            cwd: None,
         }
     }
 
@@ -947,5 +1051,83 @@ mod tests {
                 window: ProviderKind::Codex.default_context_window()
             }
         );
+    }
+
+    #[test]
+    fn parse_transcript_line_text_extracts_user_text_block() {
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"이거 봐줘"}]},"sessionId":"sess"}"#;
+        assert_eq!(
+            parse_transcript_line_text(line),
+            Some("[user] 이거 봐줘".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_transcript_line_text_extracts_assistant_concatenated_text() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"part one"},{"type":"tool_use","input":{}},{"type":"text","text":"part two"}]}}"#;
+        assert_eq!(
+            parse_transcript_line_text(line),
+            Some("[assistant] part one part two".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_transcript_line_text_skips_non_conversational_envelopes() {
+        let cases = [
+            r#"{"type":"system","subtype":"init","sessionId":"sess"}"#,
+            r#"{"type":"result","result":"done","sessionId":"sess"}"#,
+            r#"{"type":"attachment","attachment":{"type":"hook_success"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","input":{}}]}}"#,
+            "",
+            "not even json",
+        ];
+        for case in cases {
+            assert_eq!(parse_transcript_line_text(case), None, "case: {case}");
+        }
+    }
+
+    #[test]
+    fn extract_transcript_tail_text_caps_to_last_tmux_scrollback_lines() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut body = String::new();
+        // 150 user turns; the helper must keep only the last
+        // TMUX_SCROLLBACK_LINES (100).
+        for i in 0..150 {
+            body.push_str(&format!(
+                r#"{{"type":"user","message":{{"content":[{{"type":"text","text":"line-{i}"}}]}}}}"#,
+            ));
+            body.push('\n');
+        }
+        std::fs::write(file.path(), body).unwrap();
+
+        let out = extract_transcript_tail_text(file.path()).expect("tail text");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), TMUX_SCROLLBACK_LINES as usize);
+        assert_eq!(lines.first().copied(), Some("[user] line-50"));
+        assert_eq!(lines.last().copied(), Some("[user] line-149"));
+    }
+
+    #[test]
+    fn extract_transcript_tail_text_returns_none_for_pure_noise_transcripts() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            concat!(
+                r#"{"type":"system","subtype":"init","sessionId":"sess"}"#,
+                "\n",
+                r#"{"type":"attachment","attachment":{"type":"hook_success"}}"#,
+                "\n",
+                r#"{"type":"result","result":"done","sessionId":"sess"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(extract_transcript_tail_text(file.path()), None);
+    }
+
+    #[test]
+    fn extract_transcript_tail_text_returns_none_when_file_missing() {
+        let path = std::path::Path::new("/nonexistent-idle-recap-transcript.jsonl");
+        assert_eq!(extract_transcript_tail_text(path), None);
     }
 }
