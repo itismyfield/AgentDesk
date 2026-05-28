@@ -1103,16 +1103,20 @@ pub(super) fn should_suppress_post_terminal_output_without_inflight(
     inflight_missing: bool,
     ssh_direct_prompt_pending: bool,
     external_input_lease_present: bool,
+    assistant_continuation_present: bool,
 ) -> bool {
     // SSH-direct prompts never create an inflight (they bypass the Discord
     // message path), so the (terminal + no-inflight) shape alone is not enough
     // to call new output "ghost noise" — a pending prompt anchor or
     // ExternalInput relay lease signals a legitimate user turn whose response
     // we must still relay even when notification/anchor creation failed.
+    // Likewise, another assistant event after an early terminal relay means
+    // the provider turn continued with tool calls or final text; do not drop it.
     terminal_success_seen
         && inflight_missing
         && !ssh_direct_prompt_pending
         && !external_input_lease_present
+        && !assistant_continuation_present
 }
 
 #[cfg(test)]
@@ -1125,39 +1129,51 @@ mod post_terminal_output_tests {
     #[test]
     fn post_terminal_output_without_inflight_is_suppressed() {
         assert!(should_suppress_post_terminal_output_without_inflight(
-            true, true, false, false
+            true, true, false, false, false
         ));
         assert!(
-            !should_suppress_post_terminal_output_without_inflight(false, true, false, false),
+            !should_suppress_post_terminal_output_without_inflight(
+                false, true, false, false, false
+            ),
             "pre-terminal output still belongs to the active watcher turn"
         );
         assert!(
-            !should_suppress_post_terminal_output_without_inflight(true, false, false, false),
+            !should_suppress_post_terminal_output_without_inflight(
+                true, false, false, false, false
+            ),
             "a newly active inflight owns subsequent output"
         );
         assert!(
-            !should_suppress_post_terminal_output_without_inflight(true, true, true, false),
+            !should_suppress_post_terminal_output_without_inflight(true, true, true, false, false),
             "SSH-direct prompt anchor present: output is a real direct-input response"
         );
         assert!(
-            !should_suppress_post_terminal_output_without_inflight(true, true, false, true),
+            !should_suppress_post_terminal_output_without_inflight(true, true, false, true, false),
             "ExternalInput lease present: notification failure must not suppress response output"
+        );
+        assert!(
+            !should_suppress_post_terminal_output_without_inflight(true, true, false, false, true),
+            "assistant continuation after early terminal relay still belongs to the provider turn"
         );
     }
 
     #[test]
     fn post_terminal_hard_result_after_committed_turn_requires_direct_input_evidence() {
         assert!(
-            should_suppress_post_terminal_output_without_inflight(true, true, false, false),
+            should_suppress_post_terminal_output_without_inflight(true, true, false, false, false),
             "a late hard_result envelope after a committed Discord turn must not relay again"
         );
         assert!(
-            !should_suppress_post_terminal_output_without_inflight(true, true, true, false),
+            !should_suppress_post_terminal_output_without_inflight(true, true, true, false, false),
             "a pending SSH-direct prompt is explicit evidence of a fresh direct-input turn"
         );
         assert!(
-            !should_suppress_post_terminal_output_without_inflight(true, true, false, true),
+            !should_suppress_post_terminal_output_without_inflight(true, true, false, true, false),
             "an ExternalInput lease is explicit evidence of a fresh direct-input turn"
+        );
+        assert!(
+            should_suppress_post_terminal_output_without_inflight(true, true, false, false, false),
+            "a result-only duplicate without assistant continuation stays suppressed"
         );
     }
 

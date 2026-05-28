@@ -378,6 +378,11 @@ fn watcher_batch_contains_relayable_response(data: &[u8]) -> bool {
         || text.contains("\"type\": \"result\"")
 }
 
+fn watcher_batch_contains_assistant_event(data: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(data);
+    text.contains("\"type\":\"assistant\"") || text.contains("\"type\": \"assistant\"")
+}
+
 fn legacy_wrapper_prompt_candidates_from_pane(pane: &str) -> Vec<String> {
     let mut collecting = false;
     let mut current_block: Vec<String> = Vec::new();
@@ -2465,6 +2470,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 post_terminal_inflight_missing,
                 ssh_direct_prompt_pending,
                 external_input_lease_present,
+                watcher_batch_contains_assistant_event(&data),
             ) && !post_terminal_payload_allows_external_relay;
         if post_terminal_payload_allows_external_relay {
             tracing::info!(
@@ -6258,7 +6264,8 @@ mod tests {
         discard_restored_response_seed_before_no_inflight_terminal_relay,
         discard_watcher_pending_buffer_after_suppressed_turn,
         legacy_wrapper_prompt_candidates_from_pane, should_probe_tmux_liveness,
-        terminal_event_consumed_offset, watcher_batch_contains_relayable_response,
+        terminal_event_consumed_offset, watcher_batch_contains_assistant_event,
+        watcher_batch_contains_relayable_response,
         watcher_direct_terminal_should_commit_session_idle,
         watcher_fallback_edit_failure_can_delete_original_placeholder,
         watcher_inflight_represents_external_input, watcher_jsonl_turn_state_ready_for_input,
@@ -6511,6 +6518,19 @@ TUI-E2E-marker ssh-direct
         ));
         assert!(watcher_batch_contains_relayable_response(
             br#"{"type":"result","result":"ok"}"#
+        ));
+    }
+
+    #[test]
+    fn post_terminal_continuation_probe_ignores_result_only_batches() {
+        assert!(!watcher_batch_contains_assistant_event(
+            br#"{"provider":"codex","type":"ready_for_input"}"#
+        ));
+        assert!(watcher_batch_contains_assistant_event(
+            br#"{"type":"assistant","message":{"content":[{"type":"tool_use"}]}}"#
+        ));
+        assert!(!watcher_batch_contains_assistant_event(
+            br#"{"type":"result","result":"duplicate terminal text"}"#
         ));
     }
 
