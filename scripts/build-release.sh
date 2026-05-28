@@ -188,6 +188,14 @@ if [ -d "scripts/launchd-migrated" ]; then
   fi
 fi
 
+# Root-level shell entrypoints referenced by bundled migrated routines.
+if [ -f "scripts/queue-stability-batch.sh" ]; then
+  mkdir -p "$STAGING/scripts"
+  cp "scripts/_defaults.sh" "$STAGING/scripts/_defaults.sh"
+  cp "scripts/queue-stability-batch.sh" "$STAGING/scripts/queue-stability-batch.sh"
+  chmod +x "$STAGING/scripts/queue-stability-batch.sh"
+fi
+
 # Managed skills
 if [ -d "skills" ]; then
   mkdir -p "$STAGING/skills"

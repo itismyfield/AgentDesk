@@ -5,10 +5,19 @@ NOW_KST="$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S %Z')"
 PROMPT_FILE="$(mktemp)"
 trap 'rm -f "$PROMPT_FILE"' EXIT
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/launchd-migrated/_portable-resolver.sh
+source "$SCRIPT_DIR/_portable-resolver.sh"
+agentdesk_source_portable_resolver
+SKILL_PATH="$(agentdesk_obsidian_skill_path "banchan-day-reminder")"
+MESSAGES_PATH="$AGENTDESK_OBSIDIAN_SKILL_ROOT/banchan-day-reminder/references/messages.md"
+agentdesk_optional_file_or_skip "banchan-day-reminder skill" "$SKILL_PATH"
+agentdesk_optional_file_or_skip "banchan-day-reminder messages" "$MESSAGES_PATH"
+
 cat >"$PROMPT_FILE" <<EOF
 Read and follow these files exactly:
-- /Users/itismyfield/ObsidianVault/RemoteVault/99_Skills/banchan-day-reminder/SKILL.md
-- /Users/itismyfield/ObsidianVault/RemoteVault/99_Skills/banchan-day-reminder/references/messages.md
+- $SKILL_PATH
+- $MESSAGES_PATH
 
 mode: prep
 target channel: 1473922824350601297
@@ -23,7 +32,6 @@ Rules:
 - Do not wrap the final answer in code fences.
 EOF
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec "$SCRIPT_DIR/run-claude-message-job.sh" \
   --source "banchan-day-reminder:prep" \
   --target "channel:1473922824350601297" \

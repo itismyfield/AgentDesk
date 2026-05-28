@@ -27,8 +27,9 @@ agentdesk.routines.register({
       prompt: [
         "Run the migrated launchd job 'token-daily-report' for routine_id=" +
           ctx.routine.id,
-        "Invoke the existing shell pipeline exactly as launchd does:",
-        "  /Users/itismyfield/.adk/release/scripts/launchd-migrated/token-daily-report.sh",
+        "Resolve the release root from AGENTDESK_ROOT_DIR, or ~/.adk/release if unset.",
+        "Invoke this root-relative shell pipeline exactly as launchd does:",
+        "  scripts/launchd-migrated/token-daily-report.sh",
         "Return a one-line status summary (success | NO_REPLY | error: <msg>).",
       ].join("\n"),
     };

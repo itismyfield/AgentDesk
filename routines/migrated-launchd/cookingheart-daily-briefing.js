@@ -21,14 +21,21 @@
 // True parallel-running would duplicate the Discord message.
 agentdesk.routines.register({
   name: "cookingheart-daily-briefing",
+  metadata: {
+    migrated_launchd: {
+      entrypoint: "scripts/launchd-migrated/cookingheart-daily-briefing.sh",
+      required_connectors: ["obsidian_skill_root"],
+    },
+  },
   tick(ctx) {
     return {
       action: "agent",
       prompt: [
         "Run the migrated launchd job 'cookingheart-daily-briefing' for routine_id=" +
           ctx.routine.id,
-        "Invoke the existing shell pipeline exactly as launchd does:",
-        "  /Users/itismyfield/.adk/release/scripts/launchd-migrated/cookingheart-daily-briefing.sh",
+        "Resolve the release root from AGENTDESK_ROOT_DIR, or ~/.adk/release if unset.",
+        "Invoke this root-relative shell pipeline exactly as launchd does:",
+        "  scripts/launchd-migrated/cookingheart-daily-briefing.sh",
         "This preserves the original prompt body, target channel, and skill path.",
         "Return a one-line status summary (success | NO_REPLY | error: <msg>).",
       ].join("\n"),

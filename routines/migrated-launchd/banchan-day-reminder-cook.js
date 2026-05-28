@@ -25,14 +25,21 @@
 // → cutover protocol above to avoid that risk.
 agentdesk.routines.register({
   name: "banchan-day-reminder-cook",
+  metadata: {
+    migrated_launchd: {
+      entrypoint: "scripts/launchd-migrated/banchan-day-reminder-cook.sh",
+      required_connectors: ["obsidian_skill_root"],
+    },
+  },
   tick(ctx) {
     return {
       action: "agent",
       prompt: [
         "Run the migrated launchd job 'banchan-day-reminder.cook' for routine_id=" +
           ctx.routine.id,
-        "Invoke the existing shell pipeline exactly as launchd does:",
-        "  /Users/itismyfield/.adk/release/scripts/launchd-migrated/banchan-day-reminder-cook.sh",
+        "Resolve the release root from AGENTDESK_ROOT_DIR, or ~/.adk/release if unset.",
+        "Invoke this root-relative shell pipeline exactly as launchd does:",
+        "  scripts/launchd-migrated/banchan-day-reminder-cook.sh",
         "The skill performs calendar lookup; NO_REPLY is the correct result on",
         "non-반찬데이 days. Do not second-guess the skill's calendar logic.",
         "Return a one-line status summary (success | NO_REPLY | error: <msg>).",

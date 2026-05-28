@@ -10,7 +10,7 @@ de-duplicates by removing the launchd plist once parity is confirmed.
 All routine scripts live under `routines/migrated-launchd/`. Each routine's
 `tick()` returns `action: "agent"` with a prompt instructing the attached
 agent to invoke the repo-deployed entrypoint under
-`/Users/itismyfield/.adk/release/scripts/launchd-migrated/`. The entrypoints
+`${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}/scripts/launchd-migrated/`. The entrypoints
 were copied from the original `~/.local/bin/*.sh` launchd targets and are
 deployed by `adk-release`, so leadership can move between eligible nodes
 without a manual script rsync.
@@ -52,7 +52,7 @@ hour shift is possible between launchd and the routine scheduler.
 Run on whichever node is the cluster leader. The workspace containing
 `routines/migrated-launchd/` must be deployed before the script loader
 will see the new files, and `scripts/launchd-migrated/` must be deployed
-under `/Users/itismyfield/.adk/release/scripts/launchd-migrated/`.
+under `${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}/scripts/launchd-migrated/`.
 
 The attach commands are split into three groups: Group A
 (parallel-run-safe, attach with schedule), Group B (cutover via
@@ -227,7 +227,7 @@ curl -sf "$API/api/routines/$ID10/pause" -X POST
 ## Cross-leader prerequisite — script availability
 
 Jobs 1–11 now invoke scripts staged by `adk-release` at
-`/Users/itismyfield/.adk/release/scripts/launchd-migrated/*.sh`; the
+`${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}/scripts/launchd-migrated/*.sh`; the
 helper `run-claude-message-job.sh` is staged in the same directory and
 called via the script's own directory. Cross-leader failover therefore
 uses the release artifact instead of host-local `~/.local/bin` state.
@@ -236,7 +236,7 @@ Before attaching any migrated job, deploy the release on every node
 eligible to hold the `routine-runtime` lease and verify the directory:
 
 ```bash
-ls -l /Users/itismyfield/.adk/release/scripts/launchd-migrated/*.sh | sort
+ls -l "${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}/scripts/launchd-migrated/"*.sh | sort
 ```
 
 No supported `preferred-leader` / `execution_scope` knob currently exists

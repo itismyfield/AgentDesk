@@ -1,17 +1,20 @@
 #!/bin/bash
 set -euo pipefail
 
-export HOME=/Users/itismyfield
-export PATH=/Users/itismyfield/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/launchd-migrated/_portable-resolver.sh
+source "$SCRIPT_DIR/_portable-resolver.sh"
+agentdesk_source_portable_resolver
 
 NOW_KST="$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S %Z')"
 TODAY_FROM="$(TZ=Asia/Seoul date '+%Y-%m-%d')T00:00:00+09:00"
 TOMORROW_FROM="$(TZ=Asia/Seoul date -v+1d '+%Y-%m-%d')T00:00:00+09:00"
 
-SCRIPTS_DIR="$HOME/ObsidianVault/RemoteVault/99_Skills/family-morning-briefing/scripts"
+SCRIPTS_DIR="$AGENTDESK_OBSIDIAN_SKILL_ROOT/family-morning-briefing/scripts"
 DATA_DIR="$(mktemp -d)"
 PROMPT_FILE="$(mktemp)"
 trap 'rm -rf "$DATA_DIR" "$PROMPT_FILE"' EXIT
+agentdesk_optional_dir_or_skip "family-morning-briefing scripts" "$SCRIPTS_DIR"
 
 # 1. Weather + AQI
 python3 "$SCRIPTS_DIR/daily_ai_briefing_data.py" \

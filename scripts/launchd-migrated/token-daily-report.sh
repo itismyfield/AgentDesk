@@ -1,18 +1,16 @@
 #!/bin/bash
 set -euo pipefail
-export HOME=/Users/itismyfield
-export PATH=/Users/itismyfield/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH
-export LANG=ko_KR.UTF-8
-export LC_ALL=ko_KR.UTF-8
-# shellcheck source=/dev/null
-[[ -f "$HOME/.zprofile" ]] && source "$HOME/.zprofile"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/launchd-migrated/_portable-resolver.sh
+source "$SCRIPT_DIR/_portable-resolver.sh"
+agentdesk_source_portable_resolver
 
 NOW_KST="$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S %Z')"
 TOKEN_MANAGER_CHANNEL="1481478222439907560"
 OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/token-daily-report-output.XXXXXX")"
 
 # Step 1: Python으로 원시 데이터 수집
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RAW_DATA="$(/usr/bin/python3 "$SCRIPT_DIR/token-daily-report.py" --raw-json)"
 
 PROMPT_FILE="$(mktemp)"
@@ -54,7 +52,7 @@ CRITICAL OUTPUT INSTRUCTION:
 PROMPT
 
 set +e
-cd "$HOME" && claude -p \
+cd "$AGENTDESK_OPERATOR_WORKDIR" && claude -p \
   --model sonnet \
   --permission-mode bypassPermissions \
   --output-format text \

@@ -65,6 +65,7 @@ DASHBOARD_SOURCE=""
 STAGED_BINARY=""
 POLICIES_STAGED=""
 LAUNCHD_MIGRATED_STAGED=""
+RELEASE_ROOT_SCRIPTS_STAGED=""
 DEPLOY_ALL_NODES="${AGENTDESK_DEPLOY_ALL_NODES:-0}"
 DEPLOY_PEERS_OVERRIDE=()
 DEPLOY_PEERS_FILE="${AGENTDESK_DEPLOY_PEERS_FILE:-$ADK_REL/config/deploy-peers.txt}"
@@ -565,6 +566,9 @@ _cleanup_on_exit() {
     if [ -n "${LAUNCHD_MIGRATED_STAGED:-}" ] && [ -d "$LAUNCHD_MIGRATED_STAGED" ]; then
         rm -rf "$LAUNCHD_MIGRATED_STAGED" 2>/dev/null || true
     fi
+    if [ -n "${RELEASE_ROOT_SCRIPTS_STAGED:-}" ] && [ -d "$RELEASE_ROOT_SCRIPTS_STAGED" ]; then
+        rm -rf "$RELEASE_ROOT_SCRIPTS_STAGED" 2>/dev/null || true
+    fi
     if [ -n "${DEPLOY_MKDIR_LOCK_DIR:-}" ] && [ -d "$DEPLOY_MKDIR_LOCK_DIR" ]; then
         rm -rf "$DEPLOY_MKDIR_LOCK_DIR" 2>/dev/null || true
     fi
@@ -932,7 +936,11 @@ cp -r "$DASHBOARD_SOURCE" "$DIST_STAGED"
 # Stage agent prompt files atomically (source-of-truth: Obsidian vault, private).
 # Agent prompts contain operator-specific content and are NOT tracked in this repo.
 # See docs/source-of-truth.md.
-OBSIDIAN_AGENTS_SRC="${AGENTDESK_OBSIDIAN_AGENTS_SRC:-${OBSIDIAN_VAULT_ROOT:-$HOME/ObsidianVault}/RemoteVault/adk-config/agents}"
+OBSIDIAN_DEFAULT_VAULT_ROOT="$HOME/ObsidianVault"
+if [ -d "$ADK_REL/ObsidianVault" ]; then
+    OBSIDIAN_DEFAULT_VAULT_ROOT="$ADK_REL/ObsidianVault"
+fi
+OBSIDIAN_AGENTS_SRC="${AGENTDESK_OBSIDIAN_AGENTS_SRC:-${OBSIDIAN_VAULT_ROOT:-$OBSIDIAN_DEFAULT_VAULT_ROOT}/RemoteVault/adk-config/agents}"
 if [ -d "$OBSIDIAN_AGENTS_SRC" ]; then
     echo "▸ Staging agent prompts from Obsidian vault..."
     PROMPTS_STAGED="$ADK_REL/config/agents.new"
@@ -940,8 +948,14 @@ if [ -d "$OBSIDIAN_AGENTS_SRC" ]; then
     mkdir -p "$PROMPTS_STAGED"
     rsync -a "$OBSIDIAN_AGENTS_SRC/" "$PROMPTS_STAGED/"
 else
-    echo "⚠ Obsidian agent prompt source missing: $OBSIDIAN_AGENTS_SRC"
-    echo "  Skipping prompt staging — existing $ADK_REL/config/agents/ will be retained."
+    if [ -n "${AGENTDESK_OBSIDIAN_AGENTS_SRC:-}" ]; then
+        echo "⚠ Optional connector obsidian_agent_prompts invalid: $OBSIDIAN_AGENTS_SRC"
+        echo "  state=missing_path reason=missing_path; core release deploy will continue."
+    else
+        echo "ℹ Optional connector obsidian_agent_prompts skipped: $OBSIDIAN_AGENTS_SRC"
+        echo "  state=missing_config reason=missing_config; core release deploy will continue."
+    fi
+    echo "  Existing $ADK_REL/config/agents/ will be retained."
 fi
 
 # Stage managed skills before stopping release so skill sync never sees partial content.
@@ -983,6 +997,22 @@ if [ -d "$REPO/scripts/launchd-migrated" ]; then
 else
     echo "⚠ Launchd-migrated entrypoint source missing: $REPO/scripts/launchd-migrated"
     echo "  Skipping launchd-migrated entrypoint staging — existing $ADK_REL/scripts/launchd-migrated/ will be retained."
+fi
+
+# Stage release-owned root shell entrypoints referenced by bundled migrated
+# routines. queue-stability-batch.sh sources _defaults.sh from the same
+# directory, so deploy both files together.
+if [ -f "$REPO/scripts/queue-stability-batch.sh" ]; then
+    echo "▸ Staging release root script entrypoints..."
+    RELEASE_ROOT_SCRIPTS_STAGED="$ADK_REL/scripts.root.new"
+    rm -rf "$RELEASE_ROOT_SCRIPTS_STAGED"
+    mkdir -p "$RELEASE_ROOT_SCRIPTS_STAGED"
+    cp "$REPO/scripts/_defaults.sh" "$RELEASE_ROOT_SCRIPTS_STAGED/_defaults.sh"
+    cp "$REPO/scripts/queue-stability-batch.sh" "$RELEASE_ROOT_SCRIPTS_STAGED/queue-stability-batch.sh"
+    chmod +x "$RELEASE_ROOT_SCRIPTS_STAGED/queue-stability-batch.sh"
+else
+    echo "⚠ Queue stability entrypoint source missing: $REPO/scripts/queue-stability-batch.sh"
+    echo "  Skipping queue stability entrypoint staging — existing $ADK_REL/scripts/queue-stability-batch.sh will be retained."
 fi
 
 # Wait for active turns to finish before stopping the server.
@@ -1188,6 +1218,15 @@ if [ -n "${LAUNCHD_MIGRATED_STAGED:-}" ] && [ -d "$LAUNCHD_MIGRATED_STAGED" ]; t
     mv "$LAUNCHD_MIGRATED_STAGED" "$ADK_REL/scripts/launchd-migrated"
     LAUNCHD_MIGRATED_STAGED=""
     rm -rf "$ADK_REL/scripts/launchd-migrated.old"
+fi
+
+if [ -n "${RELEASE_ROOT_SCRIPTS_STAGED:-}" ] && [ -d "$RELEASE_ROOT_SCRIPTS_STAGED" ]; then
+    mkdir -p "$ADK_REL/scripts"
+    mv -f "$RELEASE_ROOT_SCRIPTS_STAGED/_defaults.sh" "$ADK_REL/scripts/_defaults.sh"
+    mv -f "$RELEASE_ROOT_SCRIPTS_STAGED/queue-stability-batch.sh" "$ADK_REL/scripts/queue-stability-batch.sh"
+    chmod +x "$ADK_REL/scripts/queue-stability-batch.sh"
+    rm -rf "$RELEASE_ROOT_SCRIPTS_STAGED"
+    RELEASE_ROOT_SCRIPTS_STAGED=""
 fi
 
 if [ -n "${PROMPTS_STAGED:-}" ] && [ -d "$PROMPTS_STAGED" ]; then

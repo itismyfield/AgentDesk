@@ -1,7 +1,7 @@
 // Migrated from launchd: com.itismyfield.memento-daily-report
 // Original shell script: ~/.local/bin/memento-daily-report.sh
 // Repo-deployed shell script:
-//   /Users/itismyfield/.adk/release/scripts/launchd-migrated/memento-daily-report.sh
+//   scripts/launchd-migrated/memento-daily-report.sh (below AGENTDESK_ROOT_DIR)
 // Schedule: 0 9 * * * (KST, 09:00 daily)
 // Agent: personal-obiseo
 //
@@ -29,10 +29,10 @@ agentdesk.routines.register({
       prompt: [
         "Run the migrated launchd job 'memento-daily-report' for routine_id=" +
           ctx.routine.id,
-        "Invoke the existing shell pipeline exactly as launchd does:",
-        "  /Users/itismyfield/.adk/release/scripts/launchd-migrated/memento-daily-report.sh",
-        "Working directory matches the original launchd job:",
-        "  /Users/itismyfield/.adk/release/workspaces/agentfactory",
+        "Resolve the release root from AGENTDESK_ROOT_DIR, or ~/.adk/release if unset.",
+        "Invoke this root-relative shell pipeline exactly as launchd does:",
+        "  scripts/launchd-migrated/memento-daily-report.sh",
+        "Use AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR when set; otherwise use AGENTDESK_ROOT_DIR + '/workspaces/agentfactory'.",
         "Return a one-line status summary (success | NO_REPLY | error: <msg>).",
       ].join("\n"),
     };

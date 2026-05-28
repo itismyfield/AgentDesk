@@ -5,7 +5,12 @@ NOW_KST="$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S %Z')"
 PROMPT_FILE="$(mktemp)"
 trap 'rm -f "$PROMPT_FILE"' EXIT
 
-DEFAULT_MANAGED_SKILL="$HOME/.adk/release/skills/memory-merge/SKILL.md"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/launchd-migrated/_portable-resolver.sh
+source "$SCRIPT_DIR/_portable-resolver.sh"
+agentdesk_source_portable_resolver
+
+DEFAULT_MANAGED_SKILL="$AGENTDESK_ROOT_DIR/skills/memory-merge/SKILL.md"
 SKILL_PATH="${AGENTDESK_MEMORY_MERGE_SKILL:-$DEFAULT_MANAGED_SKILL}"
 
 if [[ -n "${AGENTDESK_MEMORY_MERGE_SKILL:-}" && ! -f "$SKILL_PATH" ]]; then
@@ -30,9 +35,8 @@ Rules:
 - Do not wrap the final answer in code fences.
 EOF
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec "$SCRIPT_DIR/run-claude-message-job.sh" \
   --source "memory-merge" \
   --target "channel:1480015244062490774" \
-  --workdir "/Users/itismyfield/.adk/release/workspaces/agentfactory" \
+  --workdir "$AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR" \
   --prompt-file "$PROMPT_FILE"

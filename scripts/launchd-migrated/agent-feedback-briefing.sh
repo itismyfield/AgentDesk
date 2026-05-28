@@ -5,12 +5,18 @@ NOW_KST="$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S %Z')"
 PROMPT_FILE="$(mktemp)"
 trap 'rm -f "$PROMPT_FILE"' EXIT
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/launchd-migrated/_portable-resolver.sh
+source "$SCRIPT_DIR/_portable-resolver.sh"
+agentdesk_source_portable_resolver
+agentdesk_optional_dir_or_skip "agent feedback inbox" "$AGENTDESK_AGENT_FEEDBACK_INBOX"
+
 cat >"$PROMPT_FILE" <<EOF
 에이전트 피드백 브리핑을 실행한다.
 현재 시각: $NOW_KST
 
 절차:
-1. /Users/itismyfield/ObsidianVault/RemoteVault/agents/ch-pmd/inbox/ 디렉토리의 모든 .md 파일을 읽는다
+1. $AGENTDESK_AGENT_FEEDBACK_INBOX 디렉토리의 모든 .md 파일을 읽는다
 2. pending 상태인 항목을 모두 수집한다 (오늘 + 과거 미결)
 3. 접수건이 0건이면 NO_REPLY를 반환한다
 4. 1건 이상이면 아래 포맷으로 브리핑을 작성한다:
@@ -43,7 +49,6 @@ Rules:
 - <@1479017284805722200> is the user mention — always include at the top.
 EOF
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec "$SCRIPT_DIR/run-claude-message-job.sh" \
   --source "agent-feedback-briefing" \
   --target "channel:1478652416533463101" \

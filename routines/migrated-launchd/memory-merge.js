@@ -1,7 +1,7 @@
 // Migrated from launchd: com.itismyfield.memory-merge
 // Original shell script: ~/.local/bin/memory-merge.sh
 // Repo-deployed shell script:
-//   /Users/itismyfield/.adk/release/scripts/launchd-migrated/memory-merge.sh
+//   scripts/launchd-migrated/memory-merge.sh (below AGENTDESK_ROOT_DIR)
 // Schedule: 0 6 * * * (KST, 06:00 daily)
 // Agent: project-agentdesk
 //
@@ -18,7 +18,7 @@
 // Do NOT POST with "schedule" included on attach.
 //
 // The original launchd job sets AGENTDESK_MEMORY_MERGE_SKILL=
-//   /Users/itismyfield/.adk/release/skills/memory-merge/SKILL.md
+//   $AGENTDESK_ROOT_DIR/skills/memory-merge/SKILL.md
 // The shell script must read this env var or fall back to the default skill
 // path. Verify the script handles a missing env var before flipping the
 // routine to status=enabled. If the script requires the env var, set it via
@@ -36,12 +36,12 @@ agentdesk.routines.register({
       prompt: [
         "Run the migrated launchd job 'memory-merge' for routine_id=" +
           ctx.routine.id,
-        "Invoke the existing shell pipeline exactly as launchd does:",
-        "  /Users/itismyfield/.adk/release/scripts/launchd-migrated/memory-merge.sh",
-        "Working directory matches the original launchd job:",
-        "  /Users/itismyfield/.adk/release/workspaces/agentfactory",
+        "Resolve the release root from AGENTDESK_ROOT_DIR, or ~/.adk/release if unset.",
+        "Invoke this root-relative shell pipeline exactly as launchd does:",
+        "  scripts/launchd-migrated/memory-merge.sh",
+        "Use AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR when set; otherwise use AGENTDESK_ROOT_DIR + '/workspaces/agentfactory'.",
         "Ensure env var AGENTDESK_MEMORY_MERGE_SKILL points to the memory-merge",
-        "SKILL.md (default: /Users/itismyfield/.adk/release/skills/memory-merge/SKILL.md).",
+        "SKILL.md if the root-relative default is not correct.",
         "Return a one-line status summary (success | NO_REPLY | error: <msg>).",
       ].join("\n"),
     };

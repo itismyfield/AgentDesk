@@ -4,6 +4,11 @@ set -euo pipefail
 PROMPT_FILE="$(mktemp)"
 trap 'rm -f "$PROMPT_FILE"' EXIT
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/launchd-migrated/_portable-resolver.sh
+source "$SCRIPT_DIR/_portable-resolver.sh"
+agentdesk_source_portable_resolver
+
 cat >"$PROMPT_FILE" <<'PROMPT'
 Memento 위생 관리 작업을 수행한다. 아래 3단계를 순서대로 실행.
 
@@ -84,9 +89,8 @@ Discord 메시지로 아래 포맷의 한국어 요약을 반환:
 내용이 없으면 NO_REPLY를 반환.
 PROMPT
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec "$SCRIPT_DIR/run-claude-message-job.sh" \
   --source "memento-hygiene" \
   --target "channel:1480015244062490774" \
-  --workdir "/Users/itismyfield/.adk/release/workspaces/agentfactory" \
+  --workdir "$AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR" \
   --prompt-file "$PROMPT_FILE"

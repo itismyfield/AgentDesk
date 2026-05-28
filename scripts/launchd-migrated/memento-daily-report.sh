@@ -5,6 +5,11 @@ NOW_KST="$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S %Z')"
 PROMPT_FILE="$(mktemp)"
 trap 'rm -f "$PROMPT_FILE"' EXIT
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/launchd-migrated/_portable-resolver.sh
+source "$SCRIPT_DIR/_portable-resolver.sh"
+agentdesk_source_portable_resolver
+
 cat >"$PROMPT_FILE" <<PROMPT
 Memento 일일 리포트를 생성한다. 현재 시각: $NOW_KST
 
@@ -39,9 +44,8 @@ Memento 일일 리포트를 생성한다. 현재 시각: $NOW_KST
 반드시 위 포맷 그대로 Discord 메시지로 반환. NO_REPLY 금지 — 항상 리포트를 생성한다.
 PROMPT
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec "$SCRIPT_DIR/run-claude-message-job.sh" \
   --source "memento-daily-report" \
   --target "channel:1480015244062490774" \
-  --workdir "/Users/itismyfield/.adk/release/workspaces/agentfactory" \
+  --workdir "$AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR" \
   --prompt-file "$PROMPT_FILE"

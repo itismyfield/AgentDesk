@@ -30,8 +30,9 @@ agentdesk.routines.register({
       prompt: [
         "Run the migrated launchd job 'agent-feedback-briefing' for routine_id=" +
           ctx.routine.id,
-        "Invoke the existing shell pipeline exactly as launchd does:",
-        "  /Users/itismyfield/.adk/release/scripts/launchd-migrated/agent-feedback-briefing.sh",
+        "Resolve the release root from AGENTDESK_ROOT_DIR, or ~/.adk/release if unset.",
+        "Invoke this root-relative shell pipeline exactly as launchd does:",
+        "  scripts/launchd-migrated/agent-feedback-briefing.sh",
         "This preserves the original prompt body, target channel, and skill path.",
         "Return a one-line status summary (success | NO_REPLY | error: <msg>) for the routine result.",
       ].join("\n"),

@@ -23,14 +23,21 @@
 // would deliver two briefings to the recipient every morning.
 agentdesk.routines.register({
   name: "family-morning-briefing-obujang",
+  metadata: {
+    migrated_launchd: {
+      entrypoint: "scripts/launchd-migrated/family-morning-briefing-obujang.sh",
+      required_connectors: ["obsidian_skill_root"],
+    },
+  },
   tick(ctx) {
     return {
       action: "agent",
       prompt: [
         "Run the migrated launchd job 'family-morning-briefing.obujang' for routine_id=" +
           ctx.routine.id,
-        "Invoke the existing shell pipeline exactly as launchd does:",
-        "  /Users/itismyfield/.adk/release/scripts/launchd-migrated/family-morning-briefing-obujang.sh",
+        "Resolve the release root from AGENTDESK_ROOT_DIR, or ~/.adk/release if unset.",
+        "Invoke this root-relative shell pipeline exactly as launchd does:",
+        "  scripts/launchd-migrated/family-morning-briefing-obujang.sh",
         "Preserve the original prompt body, target channel, weather/calendar/reminders",
         "skill path, and Discord destination unchanged.",
         "Return a one-line status summary (success | NO_REPLY | error: <msg>).",

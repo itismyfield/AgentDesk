@@ -1,17 +1,15 @@
 #!/bin/bash
 set -euo pipefail
 
-export HOME=/Users/itismyfield
-export PATH=/Users/itismyfield/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH
-export LANG=ko_KR.UTF-8
-export LC_ALL=ko_KR.UTF-8
-# shellcheck source=/dev/null
-[[ -f "$HOME/.zprofile" ]] && source "$HOME/.zprofile"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/launchd-migrated/_portable-resolver.sh
+source "$SCRIPT_DIR/_portable-resolver.sh"
+agentdesk_source_portable_resolver
 
 TARGET=""
 SOURCE=""
 PROMPT_FILE=""
-WORKDIR="/Users/itismyfield"
+WORKDIR="$AGENTDESK_OPERATOR_WORKDIR"
 DRY_RUN=0
 # Accepted for compatibility with existing launchd entrypoints.
 # shellcheck disable=SC2034

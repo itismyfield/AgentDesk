@@ -22,14 +22,20 @@
 // PARALLEL-RUN SAFETY: launchd plist remains active during verification.
 agentdesk.routines.register({
   name: "queue-stability-batch",
+  metadata: {
+    migrated_launchd: {
+      entrypoint: "scripts/queue-stability-batch.sh",
+    },
+  },
   tick(ctx) {
     return {
       action: "agent",
       prompt: [
         "Run the migrated launchd job 'queue-stability-batch' for routine_id=" +
           ctx.routine.id,
-        "Invoke the existing shell entrypoint exactly as launchd does:",
-        "  /Users/itismyfield/.adk/release/workspaces/agentdesk/scripts/queue-stability-batch.sh",
+        "Resolve the AgentDesk workspace from AGENTDESK_QUEUE_STABILITY_WORKDIR,",
+        "or AGENTDESK_ROOT_DIR + '/workspaces/agentdesk' if unset.",
+        "Invoke scripts/queue-stability-batch.sh from that workspace exactly as launchd does.",
         "The script is idempotent (skips if a run is active/pending/paused);",
         "do not bypass that guard.",
         "Return a one-line status summary (success | skipped: <reason> | error: <msg>).",

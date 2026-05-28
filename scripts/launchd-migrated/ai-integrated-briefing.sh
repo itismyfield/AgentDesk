@@ -5,8 +5,15 @@ NOW_KST="$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S %Z')"
 PROMPT_FILE="$(mktemp)"
 trap 'rm -f "$PROMPT_FILE"' EXIT
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/launchd-migrated/_portable-resolver.sh
+source "$SCRIPT_DIR/_portable-resolver.sh"
+agentdesk_source_portable_resolver
+SKILL_PATH="$(agentdesk_obsidian_skill_path "ai-integrated-briefing")"
+agentdesk_optional_file_or_skip "ai-integrated-briefing skill" "$SKILL_PATH"
+
 cat >"$PROMPT_FILE" <<EOF
-Read and follow /Users/itismyfield/ObsidianVault/RemoteVault/99_Skills/ai-integrated-briefing/SKILL.md exactly.
+Read and follow $SKILL_PATH exactly.
 
 current time: $NOW_KST
 
@@ -21,7 +28,6 @@ Rules:
 - Do not wrap the final answer in code fences.
 EOF
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec "$SCRIPT_DIR/run-claude-message-job.sh" \
   --search \
   --source "ai-integrated-briefing" \
