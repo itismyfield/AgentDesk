@@ -91,6 +91,47 @@ export async function saveRuntimeConfig(
   });
 }
 
+export type OperatorConnectorState =
+  | "ready"
+  | "skipped"
+  | "missing_config"
+  | "missing_path"
+  | "missing_provider"
+  | "invalid_config"
+  | string;
+
+export interface OperatorConnectorStatus {
+  id: string;
+  name: string;
+  state: OperatorConnectorState;
+  optional: boolean;
+  env_var: string;
+  source: string | null;
+  reason: string | null;
+  detail: string;
+  setup_actions: string[];
+  capabilities: string[];
+}
+
+export interface OperatorConnectorsResponse {
+  connectors: OperatorConnectorStatus[];
+  summary: {
+    ready: number;
+    skipped: number;
+    missing_config: number;
+    missing_path: number;
+    missing_provider: number;
+    invalid_config: number;
+    invalid: number;
+    total: number;
+    core_runtime_blocking: boolean;
+  };
+}
+
+export async function getOperatorConnectors(): Promise<OperatorConnectorsResponse> {
+  return request("/api/settings/operator-connectors");
+}
+
 export async function getEscalationSettings(): Promise<EscalationSettingsResponse> {
   return request("/api/settings/escalation");
 }

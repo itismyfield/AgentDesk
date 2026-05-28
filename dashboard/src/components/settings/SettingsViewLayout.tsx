@@ -1,10 +1,11 @@
-import { Check } from "lucide-react";
+import { Check, RefreshCw } from "lucide-react";
 import { Modal } from "../common/overlay/Modal";
 import { SurfaceCard as SettingsCard } from "../common/SurfacePrimitives";
 import { SettingsGeneralPanel } from "./SettingsGeneralPanel";
 import { SettingsNavigation } from "./SettingsNavigation";
 import { SettingsOnboardingOverlay } from "./SettingsOnboardingOverlay";
 import { SettingsOnboardingPanel } from "./SettingsOnboardingPanel";
+import { SettingsOperatorConnectorsPanel } from "./SettingsOperatorConnectorsPanel";
 import { SettingsPipelinePanel } from "./SettingsPipelinePanel";
 import { SettingsRuntimePanel } from "./SettingsRuntimePanel";
 import { SettingsVoicePanel } from "./SettingsVoicePanel";
@@ -34,10 +35,14 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
     inputStyle,
     isKo,
     isRowVisible,
+    loadOperatorConnectors,
     loadVoiceConfig,
     matchingKeysInActivePanel,
     onboardingMetas,
     openOnboarding,
+    operatorConnectors,
+    operatorConnectorsError,
+    operatorConnectorsLoading,
     panelQuery,
     panelQueryNormalized,
     pendingDangerousConfigSave,
@@ -153,6 +158,18 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
             voiceSaving={voiceSaving}
           />
         );
+      case "connectors":
+        return (
+          <SettingsOperatorConnectorsPanel
+            connectors={operatorConnectors}
+            error={operatorConnectorsError}
+            loading={operatorConnectorsLoading}
+            onReload={() => void loadOperatorConnectors()}
+            secondaryActionClass={secondaryActionClass}
+            secondaryActionStyle={secondaryActionStyle}
+            tr={tr}
+          />
+        );
       case "onboarding":
         return (
           <SettingsOnboardingPanel
@@ -244,6 +261,21 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
             {voiceSaving ? tr("저장 중...", "Saving...") : tr("저장", "Save")}
           </button>
         </>
+      );
+    }
+
+    if (activePanel === "connectors") {
+      return (
+        <button
+          type="button"
+          onClick={() => void loadOperatorConnectors()}
+          disabled={operatorConnectorsLoading}
+          className={secondaryActionClass}
+          style={secondaryActionStyle}
+        >
+          <RefreshCw size={12} />
+          {operatorConnectorsLoading ? tr("확인 중...", "Checking...") : tr("다시 확인", "Recheck")}
+        </button>
       );
     }
 

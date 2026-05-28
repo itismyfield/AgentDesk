@@ -53,7 +53,7 @@ export type PendingDangerousConfigSave = {
   edits: Record<string, ConfigEditValue>;
   keys: string[];
 };
-export type SettingsPanel = "general" | "runtime" | "pipeline" | "onboarding" | "voice";
+export type SettingsPanel = "general" | "runtime" | "pipeline" | "connectors" | "onboarding" | "voice";
 export type SettingsNotificationType = "info" | "success" | "warning" | "error";
 
 /**
@@ -84,7 +84,7 @@ export type ValidationState =
   | { ok: true }
   | { ok: false; messageKo: string; messageEn: string };
 
-export type SettingGroupId = "pipeline" | "runtime" | "onboarding" | "general" | "voice";
+export type SettingGroupId = "pipeline" | "runtime" | "connectors" | "onboarding" | "general" | "voice";
 
 /**
  * Canonical metadata that drives every SettingRow rendered in the settings page.
@@ -249,7 +249,7 @@ export const PRIMARY_PIPELINE_CATEGORIES: Array<keyof typeof SYSTEM_CATEGORY_MET
 export const ADVANCED_PIPELINE_CATEGORIES: Array<keyof typeof SYSTEM_CATEGORY_META> = ["context", "system"];
 
 export function isSettingsPanel(value: string | null): value is SettingsPanel {
-  return value === "general" || value === "runtime" || value === "pipeline" || value === "onboarding" || value === "voice";
+  return value === "general" || value === "runtime" || value === "pipeline" || value === "connectors" || value === "onboarding" || value === "voice";
 }
 
 export function isRuntimeCategoryId(value: string | null): value is string {
@@ -526,6 +526,13 @@ export const SETTING_GROUPS: SettingGroupMeta[] = [
     nameEn: "Voice",
     descKo: "음성 채널, 호출 이름, 인식 민감도를 관리합니다.",
     descEn: "Voice channels, call names, and recognition sensitivity.",
+  },
+  {
+    id: "connectors",
+    nameKo: "커넥터",
+    nameEn: "Connectors",
+    descKo: "선택 운영 커넥터와 누락된 설정 작업을 확인합니다.",
+    descEn: "Optional operator connectors and missing setup actions.",
   },
   {
     id: "onboarding",

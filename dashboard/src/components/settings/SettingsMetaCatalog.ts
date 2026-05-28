@@ -440,6 +440,7 @@ export function useSettingsMetaCatalog({
     const counts: Record<string, number> = {
       pipeline: 0,
       runtime: 0,
+      connectors: 0,
       voice: 0,
       onboarding: 0,
       general: 0,

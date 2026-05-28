@@ -6,6 +6,7 @@ import type {
   VoiceGlobalConfig,
 } from "../types";
 import * as api from "../api";
+import type { OperatorConnectorsResponse } from "../api";
 import { STORAGE_KEYS } from "../lib/storageKeys";
 import { writeLocalStorageValue } from "../lib/useLocalStorage";
 import { SurfaceEmptyState as SettingsEmptyState } from "./common/SurfacePrimitives";
@@ -70,6 +71,10 @@ export default function SettingsView({
   const [voiceLoaded, setVoiceLoaded] = useState(false);
   const [voiceSaving, setVoiceSaving] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [operatorConnectors, setOperatorConnectors] = useState<OperatorConnectorsResponse | null>(null);
+  const [operatorConnectorsLoaded, setOperatorConnectorsLoaded] = useState(false);
+  const [operatorConnectorsLoading, setOperatorConnectorsLoading] = useState(false);
+  const [operatorConnectorsError, setOperatorConnectorsError] = useState<string | null>(null);
 
   const [activePanel, setActivePanel] = useState<SettingsPanel>(() => readStoredSettingsPanel());
   const [activeRuntimeCategoryId, setActiveRuntimeCategoryId] = useState<string>(() => readStoredRuntimeCategory());
@@ -117,6 +122,23 @@ export default function SettingsView({
       setVoiceLoaded(true);
       setVoiceError(tr("음성 설정을 불러오지 못했습니다.", "Failed to load voice settings."));
       return null;
+    }
+  }, [tr]);
+
+  const loadOperatorConnectors = useCallback(async () => {
+    setOperatorConnectorsLoading(true);
+    setOperatorConnectorsError(null);
+    try {
+      const data = await api.getOperatorConnectors();
+      setOperatorConnectors(data);
+      setOperatorConnectorsLoaded(true);
+      return data;
+    } catch {
+      setOperatorConnectorsLoaded(true);
+      setOperatorConnectorsError(tr("커넥터 상태를 불러오지 못했습니다.", "Failed to load connector status."));
+      return null;
+    } finally {
+      setOperatorConnectorsLoading(false);
     }
   }, [tr]);
 
@@ -175,6 +197,13 @@ export default function SettingsView({
     }
     void loadVoiceConfig();
   }, [activePanel, loadVoiceConfig, voiceLoaded]);
+
+  useEffect(() => {
+    if (activePanel !== "connectors" || operatorConnectorsLoaded) {
+      return;
+    }
+    void loadOperatorConnectors();
+  }, [activePanel, loadOperatorConnectors, operatorConnectorsLoaded]);
 
   const normalizedCompanyName = companyName.trim();
   const normalizedCeoName = ceoName.trim();
@@ -551,7 +580,8 @@ export default function SettingsView({
         handleConfigSave, handleDangerousConfigConfirm, handlePanelChange,
         handleRcChange, handleRcReset, handleRcSave, handleSave, handleVoiceSave,
         inputStyle, isKo, isRowVisible, loadVoiceConfig, matchingKeysInActivePanel,
-        onboardingMetas, openOnboarding, panelQuery, panelQueryNormalized,
+        loadOperatorConnectors, onboardingMetas, openOnboarding, operatorConnectors,
+        operatorConnectorsError, operatorConnectorsLoading, panelQuery, panelQueryNormalized,
         pendingDangerousConfigSave, pipelineAgents, pipelineMetas, pipelineRepos,
         pipelineSelectorError, pipelineSelectorLoading, primaryActionClass,
         primaryActionStyle, rcDirty, rcLoaded, rcSaving, renderSettingGroupCard,
