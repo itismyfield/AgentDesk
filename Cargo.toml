@@ -5,6 +5,13 @@ edition = "2024"
 description = "AI agent orchestration platform"
 license = "MIT"
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "agentdesk"
+path = "src/main.rs"
+
 [features]
 legacy-sqlite-tests = ["dep:sqlite_test"]
 
