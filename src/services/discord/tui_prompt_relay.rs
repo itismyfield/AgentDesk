@@ -425,14 +425,51 @@ fn rehydrate_existing_claude_tui_bindings() {
         );
         let existing_channel =
             crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(&tmux_session_name);
-        if existing_binding.is_some() && existing_channel.is_some() {
-            continue;
-        }
-        let Some(channel_id) = resolve_rehydrated_claude_tmux_channel_id(&tmux_session_name) else {
-            continue;
+        let fresh_binding = rehydrated_claude_tui_binding_for_tmux_session(&tmux_session_name);
+        let channel_id = match resolve_rehydrated_claude_tmux_channel_id(&tmux_session_name)
+            .or(existing_channel)
+        {
+            Some(channel_id) => channel_id,
+            None => continue,
         };
         if !crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_session_name) {
             continue;
+        }
+        if let (Some(existing), Some(_)) = (&existing_binding, existing_channel) {
+            if existing.runtime_kind == RuntimeHandoffKind::ClaudeTui
+                && Path::new(&existing.output_path).exists()
+                && match fresh_binding.as_ref() {
+                    Some(fresh) => claude_tui_runtime_binding_matches_launch(existing, fresh),
+                    None => true,
+                }
+            {
+                continue;
+            }
+        }
+        if let Some(fresh) = fresh_binding {
+            let should_refresh = match existing_binding.as_ref() {
+                Some(existing) => {
+                    !claude_tui_runtime_binding_matches_launch(existing, &fresh)
+                        || !Path::new(&existing.output_path).exists()
+                }
+                None => true,
+            };
+            if should_refresh {
+                crate::services::tui_prompt_dedupe::register_rehydrated_tmux_runtime_binding(
+                    ProviderKind::Claude.as_str(),
+                    &tmux_session_name,
+                    channel_id,
+                    fresh.clone(),
+                );
+                tracing::info!(
+                    tmux_session_name = %tmux_session_name,
+                    channel_id,
+                    transcript_path = %fresh.output_path,
+                    last_offset = fresh.last_offset,
+                    "rehydrated Claude TUI direct relay binding from launch script"
+                );
+                continue;
+            }
         }
         if let Some(binding) = existing_binding {
             if binding.runtime_kind != RuntimeHandoffKind::ClaudeTui {
@@ -455,26 +492,17 @@ fn rehydrate_existing_claude_tui_bindings() {
             }
             continue;
         }
-
-        let Some(binding) = rehydrated_claude_tui_binding_for_tmux_session(&tmux_session_name)
-        else {
-            continue;
-        };
-
-        crate::services::tui_prompt_dedupe::register_rehydrated_tmux_runtime_binding(
-            ProviderKind::Claude.as_str(),
-            &tmux_session_name,
-            channel_id,
-            binding.clone(),
-        );
-        tracing::info!(
-            tmux_session_name = %tmux_session_name,
-            channel_id,
-            transcript_path = %binding.output_path,
-            last_offset = binding.last_offset,
-            "rehydrated Claude TUI direct relay binding"
-        );
     }
+}
+
+#[cfg(unix)]
+fn claude_tui_runtime_binding_matches_launch(
+    existing: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+    fresh: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+) -> bool {
+    existing.runtime_kind == RuntimeHandoffKind::ClaudeTui
+        && existing.output_path == fresh.output_path
+        && existing.session_id == fresh.session_id
 }
 
 #[cfg(unix)]
@@ -524,22 +552,54 @@ fn resolve_rehydrated_claude_tmux_channel_id(tmux_session_name: &str) -> Option<
         {
             segments.push(fallback_name);
         }
-        if segments.into_iter().any(|segment| {
-            ProviderKind::Claude.build_tmux_session_name(segment) == tmux_session_name
-        }) {
-            if matched.is_some_and(|existing| existing != binding.channel_id) {
+        for segment in segments {
+            let Some(candidate_channel_id) = rehydrated_claude_channel_id_for_segment(
+                tmux_session_name,
+                segment,
+                binding.channel_id,
+            ) else {
+                continue;
+            };
+            if matched.is_some_and(|existing| existing != candidate_channel_id) {
                 tracing::warn!(
                     tmux_session_name,
-                    channel_id = binding.channel_id,
+                    channel_id = candidate_channel_id,
                     existing_channel_id = matched.unwrap_or_default(),
                     "Claude TUI rehydrate skipped ambiguous exact session-name match"
                 );
                 return None;
             }
-            matched = Some(binding.channel_id);
+            matched = Some(candidate_channel_id);
         }
     }
     matched
+}
+
+#[cfg(unix)]
+fn rehydrated_claude_channel_id_for_segment(
+    tmux_session_name: &str,
+    segment: &str,
+    parent_channel_id: u64,
+) -> Option<u64> {
+    let base_session_name = ProviderKind::Claude.build_tmux_session_name(segment);
+    if base_session_name == tmux_session_name {
+        return Some(parent_channel_id);
+    }
+
+    let (provider, session_segment) =
+        crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_session_name)?;
+    if provider != ProviderKind::Claude {
+        return None;
+    }
+    let (_base_provider, base_segment) =
+        crate::services::provider::parse_provider_and_channel_from_tmux_name(&base_session_name)?;
+    let thread_suffix = session_segment
+        .strip_prefix(&base_segment)?
+        .strip_prefix("-t")?;
+    if thread_suffix.is_empty() || !thread_suffix.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    thread_suffix.parse::<u64>().ok()
 }
 
 #[cfg(unix)]
@@ -1558,6 +1618,67 @@ mod tests {
                 session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
             })
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_rehydrate_thread_session_resolves_thread_channel_id() {
+        let parent_channel_id = 1479671298497183835;
+        let thread_id = 1504455726595051591_u64;
+        let tmux_session_name =
+            ProviderKind::Claude.build_tmux_session_name(&format!("adk-cc-t{thread_id}"));
+
+        assert_eq!(
+            rehydrated_claude_channel_id_for_segment(
+                &tmux_session_name,
+                "adk-cc",
+                parent_channel_id
+            ),
+            Some(thread_id)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_rehydrate_thread_session_rejects_non_numeric_suffix() {
+        let tmux_session_name = ProviderKind::Claude.build_tmux_session_name("adk-cc-tthread");
+
+        assert_eq!(
+            rehydrated_claude_channel_id_for_segment(
+                &tmux_session_name,
+                "adk-cc",
+                1479671298497183835
+            ),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_rehydrate_binding_match_requires_current_launch_transcript() {
+        let existing = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: "/tmp/old-transcript.jsonl".to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some("old-session".to_string()),
+            last_offset: 10,
+            relay_last_offset: None,
+        };
+        let fresh = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: "/tmp/current-transcript.jsonl".to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some("current-session".to_string()),
+            last_offset: 20,
+            relay_last_offset: None,
+        };
+
+        assert!(!claude_tui_runtime_binding_matches_launch(
+            &existing, &fresh
+        ));
+        assert!(claude_tui_runtime_binding_matches_launch(&fresh, &fresh));
     }
 
     #[cfg(all(unix, feature = "legacy-sqlite-tests"))]

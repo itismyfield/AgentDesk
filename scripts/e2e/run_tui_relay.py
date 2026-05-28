@@ -71,6 +71,11 @@ def parse_args() -> argparse.Namespace:
         help="Discord channel id bound to the cell's worker agent.",
     )
     parser.add_argument(
+        "--thread-channel-id",
+        default=os.environ.get("AGENTDESK_E2E_THREAD_CHANNEL_ID"),
+        help="Discord thread id for scenarios that exercise parent-channel thread relay.",
+    )
+    parser.add_argument(
         "--scenarios",
         default="tests/e2e/tui_relay/scenarios",
         help="Directory of YAML scenario files.",
@@ -149,9 +154,10 @@ def cell_runtime(cell: str) -> str:
     return cell.split("-", 1)[1]
 
 
-def cell_session_name(cell: str) -> str:
+def cell_session_name(cell: str, *, thread_channel_id: str | None = None) -> str:
     """tmux session name owned by the cell's worker agent."""
-    return f"AgentDesk-{cell_provider(cell)}-adk-{cell}-e2e"
+    suffix = f"-t{thread_channel_id}" if thread_channel_id else ""
+    return f"AgentDesk-{cell_provider(cell)}-adk-{cell}-e2e{suffix}"
 
 
 def cell_default_agent(cell: str) -> str:
@@ -198,10 +204,22 @@ def is_destructive(scenario: dict[str, Any]) -> bool:
     for step in scenario.get("steps") or []:
         if not isinstance(step, dict):
             continue
-        for key in ("restart_dcserver", "kill_pane", "kill_tui_process", "send_keys_no_enter"):
+        for key in (
+            "restart_dcserver",
+            "kill_pane",
+            "kill_tui_process",
+            "send_keys_no_enter",
+            "poison_claude_tui_relay_offset",
+        ):
             if key in step:
                 return True
     return False
+
+
+def scenario_channel_id(scenario: dict[str, Any], args: argparse.Namespace) -> str | None:
+    if scenario.get("requires_thread_channel"):
+        return str(args.thread_channel_id).strip() if args.thread_channel_id else None
+    return str(args.channel_id)
 
 
 def _truncate_queue_file(path: Path) -> None:
@@ -216,9 +234,10 @@ def hard_reset_provider_session(
     cell: str,
     channel_id: str,
     runtime_root: Path,
+    thread_channel_id: str | None = None,
 ) -> dict[str, Any]:
     """Burn the cell's TUI session so the next prompt starts fresh."""
-    session_name = cell_session_name(cell)
+    session_name = cell_session_name(cell, thread_channel_id=thread_channel_id)
     workspace_substring = cell_workspace_substring(cell)
     summary: dict[str, Any] = {
         "cell": cell,
@@ -315,6 +334,36 @@ def reset_channel_state(
     return summary
 
 
+def poison_claude_tui_relay_offset(
+    *,
+    cell: str,
+    channel_id: str,
+    runtime_root: Path,
+) -> dict[str, Any]:
+    """Force a stale Claude TUI offset so restart rehydrate must prefer launch state."""
+    if cell_provider(cell) != "claude" or cell_runtime(cell) != "tui":
+        raise assertions.AssertionError("poison_claude_tui_relay_offset requires claude-tui")
+    session_name = cell_session_name(cell, thread_channel_id=channel_id)
+    sessions_root = runtime_root / "sessions"
+    sessions_root.mkdir(parents=True, exist_ok=True)
+    matches = sorted(sessions_root.glob(f"*{session_name}.claude-tui-relay-offset.json"))
+    offset_path = matches[0] if matches else sessions_root / (
+        f"agentdesk-e2e-{session_name}.claude-tui-relay-offset.json"
+    )
+    stale_path = Path("/tmp") / f"agentdesk-e2e-stale-{session_name}.jsonl"
+    try:
+        stale_path.unlink()
+    except OSError:
+        pass
+    payload = {"last_offset": 999_999_999, "output_path": str(stale_path)}
+    offset_path.write_text(json.dumps(payload), encoding="utf-8")
+    return {
+        "session_name": session_name,
+        "offset_path": str(offset_path),
+        "stale_output_path": str(stale_path),
+    }
+
+
 def run_scenario(
     scenario: dict[str, Any],
     *,
@@ -335,6 +384,12 @@ def run_scenario(
         "assertions": [],
     }
 
+    target_channel_id = scenario_channel_id(scenario, args)
+    if target_channel_id is None:
+        result["reason"] = "requires --thread-channel-id or AGENTDESK_E2E_THREAD_CHANNEL_ID"
+        return result
+    result["channel_id"] = target_channel_id
+
     destructive = is_destructive(scenario)
     if destructive and not (
         args.allow_destructive
@@ -351,7 +406,7 @@ def run_scenario(
         result["resets"] = [
             reset_channel_state(
                 base_url=args.base_url,
-                channel_id=args.channel_id,
+                channel_id=target_channel_id,
                 runtime_root=runtime_root,
                 provider=cell_provider(cell),
             )
@@ -360,8 +415,11 @@ def run_scenario(
             result["hard_resets"] = [
                 hard_reset_provider_session(
                     cell=cell,
-                    channel_id=args.channel_id,
+                    channel_id=target_channel_id,
                     runtime_root=runtime_root,
+                    thread_channel_id=(
+                        target_channel_id if scenario.get("requires_thread_channel") else None
+                    ),
                 )
             ]
         time.sleep(2.0)
@@ -370,7 +428,7 @@ def run_scenario(
         window = run_one_cell(
             scenario=scenario,
             cell=cell,
-            channel_id=args.channel_id,
+            channel_id=target_channel_id,
             client=client,
             run_id=run_id,
             dry_run=args.dry_run,
@@ -494,8 +552,17 @@ def run_one_cell(
             restart_dcserver_for_e2e(
                 target=target, args=args, base_url=client.base_url, cell=cell
             )
+        elif "poison_claude_tui_relay_offset" in step:
+            record.setdefault("poisoned_offsets", []).append(
+                poison_claude_tui_relay_offset(
+                    cell=cell,
+                    channel_id=channel_id,
+                    runtime_root=Path(args.queue_runtime_root),
+                )
+            )
         elif "kill_pane" in step:
-            session_name = cell_session_name(cell)
+            thread_channel_id = channel_id if scenario.get("requires_thread_channel") else None
+            session_name = cell_session_name(cell, thread_channel_id=thread_channel_id)
             workspace_substring = cell_workspace_substring(cell)
             panes = tmux.list_panes(session_name)
             reverify = (step["kill_pane"] or {}).get(
@@ -515,7 +582,11 @@ def run_one_cell(
                 )
             tmux.kill_pane(target_pane.pane_id)
         elif "send_keys_no_enter" in step:
-            tmux.send_keys(cell_session_name(cell), step["send_keys_no_enter"])
+            thread_channel_id = channel_id if scenario.get("requires_thread_channel") else None
+            tmux.send_keys(
+                cell_session_name(cell, thread_channel_id=thread_channel_id),
+                step["send_keys_no_enter"],
+            )
         else:
             raise assertions.AssertionError(f"unknown step shape: {step!r}")
 

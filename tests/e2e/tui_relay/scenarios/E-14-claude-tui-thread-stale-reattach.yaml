@@ -1,0 +1,27 @@
+id: E-14
+title: Claude TUI thread relay survives stale offset rehydrate after restart
+cells: [claude-tui]
+isolation: required
+destructive: true
+requires_thread_channel: true
+notes: |
+  Regression for parent-channel thread sessions named with -t{thread_id}.
+  The harness sends prompts to --thread-channel-id, poisons the persisted
+  Claude TUI relay offset to a missing transcript, restarts dcserver, then
+  verifies the post-restart answer is relayed from the launch-script-derived
+  current transcript instead of the stale offset.
+steps:
+  - send_prompt: "응답에 정확히 한 줄로 [E2E:E14:PRE] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E14:PRE]"
+    timeout_s: 240
+  - poison_claude_tui_relay_offset: {}
+  - restart_dcserver:
+      target: dev
+  - wait_idle_s: 15
+  - send_prompt: "응답에 정확히 한 줄로 [E2E:E14:POST] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E14:POST]"
+    timeout_s: 300
+assertions:
+  - text_present: "[E2E:E14:POST]"
+  - no_duplicate_content: true
+  - no_resume_prompt_chrome: true

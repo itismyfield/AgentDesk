@@ -205,6 +205,32 @@ impl ChannelDirectory {
     }
 }
 
+fn thread_suffix_channel_id(channel_segment: &str) -> Option<(&str, &str)> {
+    let pos = channel_segment.rfind("-t")?;
+    let thread_id = &channel_segment[pos + 2..];
+    if thread_id.is_empty() || !thread_id.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    // Reject values that cannot be represented as a Discord snowflake.
+    thread_id.parse::<u64>().ok()?;
+    Some((&channel_segment[..pos], thread_id))
+}
+
+fn binding_for_session_or_thread<'a>(
+    session_name: &str,
+    channels: &'a ChannelDirectory,
+) -> Option<(&'a ChannelBinding, String)> {
+    if let Some(binding) = channels.binding_for_session_name(session_name) {
+        return Some((binding, binding.channel_id.clone()));
+    }
+
+    let (provider, channel_segment) = parse_provider_and_channel_from_tmux_name(session_name)?;
+    let (parent_segment, thread_id) = thread_suffix_channel_id(&channel_segment)?;
+    let parent_session_name = provider.build_tmux_session_name(parent_segment);
+    let binding = channels.binding_for_session_name(&parent_session_name)?;
+    Some((binding, thread_id.to_string()))
+}
+
 /// Output of a successful match. `expected_session_name` is exactly the input
 /// session name when [`match_session`] returns `Some`; we still echo it back so
 /// downstream supervisor code can rebuild a `MatchedChannel` from a binding
@@ -293,9 +319,9 @@ pub fn match_session_offline(
 ) -> Option<MatchedChannelAudit> {
     // Same name/binding gating as the strict path, but skip the pane probe.
     let _ = parse_provider_and_channel_from_tmux_name(session_name)?;
-    let binding = channels.binding_for_session_name(session_name)?;
+    let (binding, channel_id) = binding_for_session_or_thread(session_name, channels)?;
     Some(MatchedChannelAudit(MatchedChannel {
-        channel_id: binding.channel_id.clone(),
+        channel_id,
         agent_id: binding.agent_id.clone(),
         provider: binding.provider.clone(),
         expected_session_name: session_name.to_string(),
@@ -336,7 +362,7 @@ pub fn match_session_detailed(
         return MatchOutcome::Rejected(MatchRejection::NotAgentDeskNamed);
     };
 
-    let Some(binding) = channels.binding_for_session_name(session_name) else {
+    let Some((binding, channel_id)) = binding_for_session_or_thread(session_name, channels) else {
         return MatchOutcome::Rejected(MatchRejection::NoChannelBinding {
             session_name: session_name.to_string(),
             provider,
@@ -368,7 +394,7 @@ pub fn match_session_detailed(
     }
 
     MatchOutcome::Matched(MatchedChannel {
-        channel_id: binding.channel_id.clone(),
+        channel_id,
         agent_id: binding.agent_id.clone(),
         provider: binding.provider.clone(),
         expected_session_name: session_name.to_string(),
@@ -564,6 +590,57 @@ mod tests {
         let audit = match_session_offline(&session, &directory).expect("audit match");
         assert_eq!(audit.binding().agent_id, "td");
         assert_eq!(audit.binding().provider, ProviderKind::Claude);
+    }
+
+    #[test]
+    fn match_session_thread_suffix_uses_parent_binding_and_thread_channel() {
+        let parent = "adk-cc";
+        let thread_id = "1504455726595051591";
+        let session =
+            ProviderKind::Claude.build_tmux_session_name(&format!("{parent}-t{thread_id}"));
+        let directory = dir_with(vec![ChannelBinding {
+            channel_id: "1479671298497183835".to_string(),
+            agent_id: "project-agentdesk".to_string(),
+            provider: ProviderKind::Claude,
+            tmux_segment: Some(parent.to_string()),
+        }]);
+
+        let matched = match_session(&session, "claude", &directory).expect("thread match");
+
+        assert_eq!(matched.channel_id, thread_id);
+        assert_eq!(matched.agent_id, "project-agentdesk");
+        assert_eq!(matched.provider, ProviderKind::Claude);
+        assert_eq!(matched.expected_session_name, session);
+    }
+
+    #[test]
+    fn match_session_thread_suffix_requires_valid_parent_binding() {
+        let session = ProviderKind::Claude.build_tmux_session_name("adk-cc-t1504455726595051591");
+        let directory = ChannelDirectory::new();
+
+        match match_session_detailed(&session, Some("claude"), &directory) {
+            MatchOutcome::Rejected(MatchRejection::NoChannelBinding {
+                session_name,
+                provider,
+            }) => {
+                assert_eq!(session_name, session);
+                assert_eq!(provider, ProviderKind::Claude);
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn match_session_non_numeric_thread_suffix_does_not_fallback() {
+        let session = ProviderKind::Claude.build_tmux_session_name("adk-cc-tthread");
+        let directory = dir_with(vec![ChannelBinding {
+            channel_id: "1479671298497183835".to_string(),
+            agent_id: "project-agentdesk".to_string(),
+            provider: ProviderKind::Claude,
+            tmux_segment: Some("adk-cc".to_string()),
+        }]);
+
+        assert!(match_session(&session, "claude", &directory).is_none());
     }
 
     #[test]
