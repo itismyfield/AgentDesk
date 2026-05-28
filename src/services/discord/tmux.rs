@@ -73,7 +73,8 @@ use self::watcher_lifecycle::*;
 pub(in crate::services::discord) use self::watcher_lifecycle::{
     claim_or_reuse_watcher, clear_recovery_handled_channels,
     fail_dispatch_for_ready_for_input_stall, refresh_session_heartbeat_from_tmux_output,
-    restore_tmux_watchers, session_belongs_to_current_runtime, store_recovery_handled_channels,
+    restore_tmux_watchers, session_belongs_to_current_runtime, sqlite_runtime_db,
+    store_recovery_handled_channels,
 };
 use super::watcher_lifecycle_decision::*;
 const READY_FOR_INPUT_IDLE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);

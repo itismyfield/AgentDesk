@@ -842,7 +842,9 @@ pub(super) fn recovery_handled_channel_key(channel_id: u64) -> String {
     format!("recovery_handled_channel:{channel_id}")
 }
 
-pub(super) fn sqlite_runtime_db(shared: &SharedData) -> Option<&crate::db::Db> {
+pub(in crate::services::discord) fn sqlite_runtime_db(
+    shared: &SharedData,
+) -> Option<&crate::db::Db> {
     if shared.pg_pool.is_some() {
         None
     } else {
