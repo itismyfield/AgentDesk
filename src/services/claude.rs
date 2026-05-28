@@ -2022,6 +2022,30 @@ fn claude_tui_fresh_turn_start_offset(transcript_path: &std::path::Path) -> u64 
 }
 
 #[cfg(unix)]
+fn claude_tui_turn_start_offset_after_timestamp(
+    transcript_path: &std::path::Path,
+    turn_started_at: chrono::DateTime<chrono::Utc>,
+    fallback_offset: u64,
+) -> u64 {
+    match crate::services::claude_tui::transcript_tail::claude_transcript_timestamp_at_or_after(
+        transcript_path,
+        turn_started_at,
+    ) {
+        Ok(Some(offset)) => offset,
+        Ok(None) => fallback_offset,
+        Err(error) => {
+            debug_log(&format!(
+                "Claude TUI transcript timestamp scan failed for {}: {}; falling back to offset {}",
+                transcript_path.display(),
+                error,
+                fallback_offset
+            ));
+            fallback_offset
+        }
+    }
+}
+
+#[cfg(unix)]
 fn execute_streaming_local_tui_tmux(
     prompt: &str,
     session_id: Option<&str>,
@@ -2392,7 +2416,7 @@ fn execute_streaming_local_tui_tmux(
             // are not replayed as part of this follow-up's output window. This
             // closes a Codex-flagged HIGH (stale offset → duplicate / early-done
             // delivery accounting).
-            let start_offset = std::fs::metadata(&transcript_path)
+            let fallback_start_offset = std::fs::metadata(&transcript_path)
                 .map(|meta| meta.len())
                 .unwrap_or(0);
             // #2416: also honour cancellation that may have flipped during the
@@ -2416,6 +2440,7 @@ fn execute_streaming_local_tui_tmux(
                 );
                 return Ok(());
             }
+            let turn_started_at = chrono::Utc::now();
             if let Err(error) =
                 crate::services::claude_tui::input::send_followup_prompt_or_idle_transcript(
                     tmux_session_name,
@@ -2444,6 +2469,11 @@ fn execute_streaming_local_tui_tmux(
                 return Err(error);
             }
             let hook_events_after = chrono::Utc::now();
+            let start_offset = claude_tui_turn_start_offset_after_timestamp(
+                &transcript_path,
+                turn_started_at,
+                fallback_start_offset,
+            );
             let read_result = read_claude_tui_transcript_until_done(
                 &transcript_path_string,
                 start_offset,
@@ -2707,6 +2737,7 @@ fn run_claude_tui_fresh_turn_with_ready_retry(
 ) -> Result<ReadOutputResult, String> {
     for attempt in 1..=CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS {
         let hook_rx = crate::services::claude_tui::hook_server::subscribe_hook_events();
+        let turn_started_at = chrono::Utc::now();
         match crate::services::claude_tui::input::send_fresh_prompt(
             tmux_session_name,
             prompt,
@@ -2714,9 +2745,14 @@ fn run_claude_tui_fresh_turn_with_ready_retry(
         ) {
             Ok(()) => {
                 let hook_events_after = chrono::Utc::now();
+                let start_offset = claude_tui_turn_start_offset_after_timestamp(
+                    std::path::Path::new(transcript_path_string),
+                    turn_started_at,
+                    fresh_turn_start_offset,
+                );
                 return read_claude_tui_transcript_until_done(
                     transcript_path_string,
-                    fresh_turn_start_offset,
+                    start_offset,
                     sender.clone(),
                     cancel_token.clone(),
                     tmux_session_name,
@@ -4009,6 +4045,69 @@ mod local_tmux_lifecycle_tests {
                 |message| matches!(message, StreamMessage::Done { result, session_id } if result == "fresh done" && session_id.as_deref() == Some("fresh-session"))
             ),
             "new turn result should complete the read: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn claude_tui_timestamp_start_offset_isolates_second_turn_from_stale_offset() {
+        let transcript_path = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            transcript_path.path(),
+            concat!(
+                r#"{"timestamp":"2026-05-28T00:00:00Z","type":"user","message":{"role":"user","content":[{"type":"text","text":"first prompt"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-28T00:00:01Z","type":"assistant","message":{"content":[{"type":"text","text":"first-hidden"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-28T00:00:02Z","type":"result","subtype":"success","result":"first done","session_id":"session-1"}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-28T00:01:00Z","type":"user","message":{"role":"user","content":[{"type":"text","text":"second prompt"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-28T00:01:01Z","type":"assistant","message":{"content":[{"type":"text","text":"second-visible"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-28T00:01:02Z","type":"result","subtype":"success","result":"second done","session_id":"session-2"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let second_turn_started_at = chrono::DateTime::parse_from_rfc3339("2026-05-28T00:01:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let start_offset = claude_tui_turn_start_offset_after_timestamp(
+            transcript_path.path(),
+            second_turn_started_at,
+            0,
+        );
+        assert!(start_offset > 0);
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let result = read_output_file_until_result(
+            transcript_path.path().to_str().unwrap(),
+            start_offset,
+            sender,
+            None,
+            SessionProbe::new(|| true, || false),
+        )
+        .unwrap();
+
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        let messages: Vec<_> = receiver.try_iter().collect();
+        assert!(
+            !messages.iter().any(
+                |message| matches!(message, StreamMessage::Text { content } if content.contains("first-hidden"))
+            ),
+            "first turn content must not leak into second turn: {messages:?}"
+        );
+        assert!(
+            messages.iter().any(
+                |message| matches!(message, StreamMessage::Text { content } if content == "second-visible")
+            ),
+            "second turn text should be delivered: {messages:?}"
+        );
+        assert!(
+            messages.iter().any(
+                |message| matches!(message, StreamMessage::Done { result, session_id } if result == "second done" && session_id.as_deref() == Some("session-2"))
+            ),
+            "second turn result should complete the read: {messages:?}"
         );
     }
 
