@@ -140,6 +140,10 @@ jobs:
           cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
           cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
 
+      - name: Fresh user portable smoke
+        shell: bash
+        run: bash scripts/ci-macos-fresh-user-smoke.sh
+
   macos_self_hosted:
     name: Trusted macOS check (self-hosted)
     needs: resolve_macos_runner
@@ -228,6 +232,10 @@ jobs:
           cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
           cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
           cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
+
+      - name: Fresh user portable smoke
+        shell: bash
+        run: bash scripts/ci-macos-fresh-user-smoke.sh
 
       - name: sccache stats
         if: always()
