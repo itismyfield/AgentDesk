@@ -622,6 +622,213 @@ pub(crate) async fn cmd_github_sync(repo: Option<&str>) -> Result<(), String> {
     }
 }
 
+async fn announce_http_for_cli(
+    state: &AppState,
+) -> Result<Arc<poise::serenity_prelude::Http>, String> {
+    let registry = state
+        .health_registry
+        .as_ref()
+        .ok_or_else(|| "Discord health registry not available".to_string())?;
+    registry
+        .announce_http_clone()
+        .await
+        .ok_or_else(|| "announce bot HTTP not initialized (missing announce token?)".to_string())
+}
+
+fn resolve_guild_id(
+    state: &AppState,
+    override_guild_id: Option<&str>,
+) -> Result<poise::serenity_prelude::GuildId, String> {
+    let raw = if let Some(value) = override_guild_id {
+        value.to_string()
+    } else {
+        state
+            .config
+            .discord
+            .guild_id
+            .clone()
+            .ok_or_else(|| "discord.guild_id not configured; pass --guild-id".to_string())?
+    };
+    raw.parse::<u64>()
+        .map(poise::serenity_prelude::GuildId::new)
+        .map_err(|err| format!("invalid guild id {raw:?}: {err}"))
+}
+
+pub(crate) async fn cmd_discord_category_create(
+    name: &str,
+    guild_id_override: Option<&str>,
+) -> Result<(), String> {
+    use poise::serenity_prelude as serenity;
+    let state = build_app_state(true).await?;
+    let http = announce_http_for_cli(&state).await?;
+    let guild_id = resolve_guild_id(&state, guild_id_override)?;
+
+    let existing = guild_id
+        .channels(&*http)
+        .await
+        .map_err(|err| format!("list channels for guild {guild_id}: {err}"))?;
+    for (id, channel) in existing.iter() {
+        if channel.kind == serenity::ChannelType::Category && channel.name == name {
+            print_json(&json!({
+                "id": id.get().to_string(),
+                "name": channel.name,
+                "kind": "category",
+                "created": false,
+            }));
+            return Ok(());
+        }
+    }
+
+    let builder = serenity::builder::CreateChannel::new(name).kind(serenity::ChannelType::Category);
+    let channel = guild_id
+        .create_channel(&*http, builder)
+        .await
+        .map_err(|err| format!("create category {name:?}: {err}"))?;
+    print_json(&json!({
+        "id": channel.id.get().to_string(),
+        "name": channel.name,
+        "kind": "category",
+        "created": true,
+    }));
+    Ok(())
+}
+
+pub(crate) async fn cmd_discord_channel_create(
+    name: &str,
+    category_id: Option<&str>,
+    topic: Option<&str>,
+    guild_id_override: Option<&str>,
+) -> Result<(), String> {
+    use poise::serenity_prelude as serenity;
+    let state = build_app_state(true).await?;
+    let http = announce_http_for_cli(&state).await?;
+    let guild_id = resolve_guild_id(&state, guild_id_override)?;
+
+    let category = category_id
+        .map(|raw| {
+            raw.parse::<u64>()
+                .map(serenity::ChannelId::new)
+                .map_err(|err| format!("invalid category id {raw:?}: {err}"))
+        })
+        .transpose()?;
+
+    let existing = guild_id
+        .channels(&*http)
+        .await
+        .map_err(|err| format!("list channels for guild {guild_id}: {err}"))?;
+    for (id, channel) in existing.iter() {
+        if channel.kind == serenity::ChannelType::Text
+            && channel.name == name
+            && channel.parent_id == category
+        {
+            print_json(&json!({
+                "id": id.get().to_string(),
+                "name": channel.name,
+                "kind": "text",
+                "category_id": category.map(|c| c.get().to_string()),
+                "created": false,
+            }));
+            return Ok(());
+        }
+    }
+
+    let mut builder = serenity::builder::CreateChannel::new(name).kind(serenity::ChannelType::Text);
+    if let Some(category) = category {
+        builder = builder.category(category);
+    }
+    if let Some(topic) = topic {
+        builder = builder.topic(topic);
+    }
+    let channel = guild_id
+        .create_channel(&*http, builder)
+        .await
+        .map_err(|err| format!("create channel {name:?}: {err}"))?;
+    print_json(&json!({
+        "id": channel.id.get().to_string(),
+        "name": channel.name,
+        "kind": "text",
+        "category_id": category.map(|c| c.get().to_string()),
+        "created": true,
+    }));
+    Ok(())
+}
+
+pub(crate) async fn cmd_discord_thread_create(
+    parent_channel_id: &str,
+    name: &str,
+    auto_archive_minutes: u16,
+) -> Result<(), String> {
+    use poise::serenity_prelude as serenity;
+    let state = build_app_state(true).await?;
+    let http = announce_http_for_cli(&state).await?;
+
+    let parent_id = parent_channel_id
+        .parse::<u64>()
+        .map(serenity::ChannelId::new)
+        .map_err(|err| format!("invalid parent channel id {parent_channel_id:?}: {err}"))?;
+
+    let archive = match auto_archive_minutes {
+        60 => serenity::AutoArchiveDuration::OneHour,
+        1440 => serenity::AutoArchiveDuration::OneDay,
+        4320 => serenity::AutoArchiveDuration::ThreeDays,
+        10080 => serenity::AutoArchiveDuration::OneWeek,
+        other => {
+            return Err(format!(
+                "auto_archive_minutes must be 60, 1440, 4320, or 10080; got {other}"
+            ));
+        }
+    };
+
+    // Idempotency: resolve the parent's guild, list its active threads, and
+    // match by parent_id + name. Surface lookup errors instead of silently
+    // creating a duplicate when the guild query fails.
+    let channel = parent_id
+        .to_channel(&*http)
+        .await
+        .map_err(|err| format!("resolve parent channel {parent_id}: {err}"))?;
+    let guild_channel = channel
+        .guild()
+        .ok_or_else(|| format!("parent channel {parent_id} is not in a guild"))?;
+    let active = guild_channel
+        .guild_id
+        .get_active_threads(&*http)
+        .await
+        .map_err(|err| {
+            format!(
+                "list active threads in guild {}: {err}",
+                guild_channel.guild_id
+            )
+        })?;
+    for thread in active.threads {
+        if thread.parent_id == Some(parent_id) && thread.name == name {
+            print_json(&json!({
+                "id": thread.id.get().to_string(),
+                "name": thread.name,
+                "kind": "thread",
+                "parent_channel_id": parent_id.get().to_string(),
+                "created": false,
+            }));
+            return Ok(());
+        }
+    }
+
+    let builder = serenity::builder::CreateThread::new(name)
+        .kind(serenity::ChannelType::PublicThread)
+        .auto_archive_duration(archive);
+    let thread = parent_id
+        .create_thread(&*http, builder)
+        .await
+        .map_err(|err| format!("create thread {name:?} under {parent_id}: {err}"))?;
+    print_json(&json!({
+        "id": thread.id.get().to_string(),
+        "name": thread.name,
+        "kind": "thread",
+        "parent_channel_id": parent_id.get().to_string(),
+        "created": true,
+    }));
+    Ok(())
+}
+
 pub(crate) async fn cmd_discord_read(
     channel_id: &str,
     limit: Option<u32>,
