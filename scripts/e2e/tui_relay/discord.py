@@ -48,13 +48,13 @@ class DiscordClient:
         channel_id: int | str,
         content: str,
         *,
-        channel_kind: str,
+        channel_kind: str = "cc",
     ) -> dict[str, Any]:
         """Send a prompt that needs to land in the target agent's TUI.
 
         Routes through `agentdesk send-to-agent --no-prefix` when a handoff
-        identity is configured, so dcserver's dispatch path auto-spawns the
-        agent's tmux session (cc *and* cdx). Falls back to `send()` otherwise.
+        identity is configured. Each E2E worker agent owns a single channel
+        bound as `cc`, so `channel_kind` defaults to `cc`.
         """
 
         if not self.handoff_to_agent or not self.handoff_from_agent:

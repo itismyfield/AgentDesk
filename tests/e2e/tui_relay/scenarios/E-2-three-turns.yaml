@@ -1,6 +1,6 @@
 id: E-2
 title: 연속 3턴 (각 응답 후 다음 프롬프트), 턴 헤더 분리 확인
-channel: both
+cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
 isolation: required
 steps:
   - send_prompt: "응답에 정확히 한 줄로 [E2E:E2:TURN-1] 만 출력해줘."

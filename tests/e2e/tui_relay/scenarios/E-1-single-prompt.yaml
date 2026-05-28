@@ -1,6 +1,6 @@
 id: E-1
 title: 짧은 단일 프롬프트 → 응답 1회 relay
-channel: both
+cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
 isolation: required
 steps:
   - send_prompt: "응답에 정확히 한 줄로 [E2E:E1:OK] 만 출력해줘."

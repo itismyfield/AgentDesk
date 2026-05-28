@@ -8,14 +8,28 @@ import os
 import time
 from pathlib import Path
 
-DEFAULT_LEASE_PATH = Path("/tmp/agentdesk-e2e-relay.lease")
+DEFAULT_LEASE_DIR = Path("/tmp")
+DEFAULT_LEASE_NAME = "agentdesk-e2e-relay"
+
+
+def lease_path_for(cell: str | None) -> Path:
+    """Per-cell lease path so different cells can run in parallel."""
+    if cell:
+        return DEFAULT_LEASE_DIR / f"{DEFAULT_LEASE_NAME}.{cell}.lease"
+    return DEFAULT_LEASE_DIR / f"{DEFAULT_LEASE_NAME}.lease"
 
 
 @contextlib.contextmanager
-def acquire(run_id: str, *, path: Path | None = None, ttl_s: float = 60 * 60):
+def acquire(
+    run_id: str,
+    *,
+    path: Path | None = None,
+    cell: str | None = None,
+    ttl_s: float = 60 * 60,
+):
     """Acquire an exclusive lease file. Refuses if a fresh lease already exists."""
 
-    lease_path = path or DEFAULT_LEASE_PATH
+    lease_path = path or lease_path_for(cell)
     now = time.time()
     existing = _read_lease(lease_path)
     if existing and now - existing["acquired_at"] < ttl_s:

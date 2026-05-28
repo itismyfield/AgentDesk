@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# DEPRECATED (2026-05-28): drives the python harness with
+# --channel-id-cc/--channel-id-cdx, which the cell-based driver no longer
+# accepts. Use `scripts/e2e/run_tui_relay.py --cell <cell> --channel-id <id>`
+# per cell once the adk-{cell}-e2e channels are live (PR 3 of the
+# multi-provider-e2e migration).
+echo "DEPRECATED: see header for cell-based replacement." >&2
+exit 64
+
 # Live Discord relay E2E for the legacy tmux-wrapper path.
 #
 # This does not use dedicated wrapper channels. It temporarily flips the
