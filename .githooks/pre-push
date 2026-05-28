@@ -5,6 +5,8 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$HOOK_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
+source "$PROJECT_ROOT/scripts/resolve-python-runner.sh"
+
 EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 regen_needed=0
 
@@ -29,7 +31,7 @@ done
 
 [ "$regen_needed" -eq 1 ] || exit 0
 
-if ! regen_output=$(python3 scripts/generate_inventory_docs.py 2>&1); then
+if ! regen_output=$(agentdesk_run_python scripts/generate_inventory_docs.py 2>&1); then
   printf '%s\n' "$regen_output" >&2
   exit 1
 fi
