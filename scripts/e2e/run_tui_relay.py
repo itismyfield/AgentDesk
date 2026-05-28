@@ -152,6 +152,10 @@ def cell_default_agent(cell: str) -> str:
     return f"adk-{cell}-e2e"
 
 
+def cell_channel_kind(cell: str) -> str:
+    return "cdx" if cell_provider(cell) == "codex" else "cc"
+
+
 def cell_workspace_substring(cell: str) -> str:
     """Substring tagged onto runtime/jsonl paths to safely target this cell."""
     return f"adk-{cell}-e2e"
@@ -433,7 +437,11 @@ def run_one_cell(
             if not first_send_done:
                 _advance_window_past_setup_echo()
                 first_send_done = True
-            client.send_prompt(channel_id, step["send_prompt"])
+            client.send_prompt(
+                channel_id,
+                step["send_prompt"],
+                channel_kind=cell_channel_kind(cell),
+            )
             time.sleep(3)
         elif "wait_idle_s" in step:
             time.sleep(float(step["wait_idle_s"]))

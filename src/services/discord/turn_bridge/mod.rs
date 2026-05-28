@@ -1477,6 +1477,11 @@ fn should_finalize_cancel_after_recv(done: bool, cancel_requested: bool) -> bool
     !done && cancel_requested
 }
 
+fn should_suppress_headless_delivery_for_cancel(cancel_token: Option<&CancelToken>) -> bool {
+    cancel_requested(cancel_token)
+        && !cancel_token.is_some_and(crate::services::provider::CancelToken::is_completion_cleanup)
+}
+
 fn sync_inflight_restart_mode_from_cancel(
     cancel_token: &crate::services::provider::CancelToken,
     inflight_state: &mut InflightTurnState,
@@ -2951,10 +2956,11 @@ async fn enqueue_headless_delivery(
         session_key,
     };
     if let Some(pool) = shared.pg_pool.as_ref() {
+        let delivery_cancel_token = cancel_token.filter(|token| !token.is_completion_cleanup());
         match crate::services::message_outbox::enqueue_outbox_pg_returning_id_with_cancel(
             pool,
             outbox_message,
-            cancel_token,
+            delivery_cancel_token,
         )
         .await
         {
@@ -3041,7 +3047,7 @@ async fn enqueue_headless_delivery(
         }
     }
 
-    if cancel_requested(cancel_token) {
+    if should_suppress_headless_delivery_for_cancel(cancel_token) {
         tracing::info!(
             channel_id = channel_id.get(),
             session_key,
@@ -8190,7 +8196,7 @@ mod cancel_recv_toctou_tests {
     //! the cancel token AFTER the pre-recv guard passed but BEFORE the
     //! receive call returned the frame.
 
-    use super::should_finalize_cancel_after_recv;
+    use super::{should_finalize_cancel_after_recv, should_suppress_headless_delivery_for_cancel};
     use crate::services::agent_protocol::StreamMessage;
     use crate::services::provider::{CancelToken, cancel_requested};
     use std::sync::mpsc;
@@ -8208,6 +8214,30 @@ mod cancel_recv_toctou_tests {
         assert!(!should_finalize_cancel_after_recv(false, false));
         assert!(!should_finalize_cancel_after_recv(true, true));
         assert!(!should_finalize_cancel_after_recv(true, false));
+    }
+
+    #[test]
+    fn headless_delivery_cancel_gate_allows_normal_completion_cleanup() {
+        let completed = CancelToken::new();
+        completed.mark_completion_cleanup();
+        completed
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        assert!(cancel_requested(Some(&completed)));
+        assert!(
+            !should_suppress_headless_delivery_for_cancel(Some(&completed)),
+            "normal completion cleanup must not drop the terminal headless response"
+        );
+
+        let stopped = CancelToken::new();
+        stopped
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            should_suppress_headless_delivery_for_cancel(Some(&stopped)),
+            "real user/watchdog cancellation must still suppress terminal delivery"
+        );
     }
 
     /// Models exactly the receive loop's post-`try_recv` checkpoint:

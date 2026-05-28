@@ -51,6 +51,13 @@ class CellHelpers(unittest.TestCase):
         self.assertEqual(driver.cell_default_agent("claude-pipe"), "adk-claude-pipe-e2e")
         self.assertEqual(driver.cell_default_agent("codex-tui"), "adk-codex-tui-e2e")
 
+    def test_channel_kind_matches_provider(self):
+        self.assertEqual(driver.cell_channel_kind("claude-pipe"), "cc")
+        self.assertEqual(driver.cell_channel_kind("claude-tui"), "cc")
+        self.assertEqual(driver.cell_channel_kind("claude-e"), "cc")
+        self.assertEqual(driver.cell_channel_kind("codex-pipe"), "cdx")
+        self.assertEqual(driver.cell_channel_kind("codex-tui"), "cdx")
+
     def test_workspace_substring_safety(self):
         for cell in driver.SUPPORTED_CELLS:
             sub = driver.cell_workspace_substring(cell)

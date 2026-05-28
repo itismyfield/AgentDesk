@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import shutil
-import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -21,11 +19,8 @@ class DiscordClient:
     base_url: str
     timeout_s: float = 30.0
     # When set, prompts are sent via `agentdesk send-to-agent` instead of the
-    # plain `POST /api/discord/send`. send-to-agent goes through the announce
-    # bot's handoff path which causes dcserver to auto-spawn the target
-    # agent's tmux session for both cc and cdx providers (issue #2705). The
-    # plain send endpoint records the message but does not trigger dispatch
-    # for newly-active channels, which is why baseline runs starved.
+    # plain `POST /api/discord/send`. The direct headless turn API starts the
+    # worker even when the provider bot is not currently watching the channel.
     handoff_to_agent: str | None = None
     handoff_from_agent: str | None = None
 
@@ -63,32 +58,34 @@ class DiscordClient:
         if channel_kind not in ("cc", "cdx"):
             raise ValueError(f"channel_kind must be 'cc' or 'cdx', got {channel_kind!r}")
 
-        cli = shutil.which("agentdesk") or "agentdesk"
-        cmd = [
-            cli,
-            "send-to-agent",
-            "--from",
-            self.handoff_from_agent,
-            "--to",
-            self.handoff_to_agent,
-            "--message",
-            content,
-            "--channel-kind",
-            channel_kind,
-            "--no-prefix",
-        ]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout_s)
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"send-to-agent exit={proc.returncode}: stdout={proc.stdout!r} stderr={proc.stderr!r}"
-            )
-        stdout = proc.stdout.strip()
-        if not stdout:
-            return {}
+        provider = "codex" if channel_kind == "cdx" else "claude"
+        body = json.dumps(
+            {
+                "prompt": content,
+                "source": self.handoff_from_agent,
+                "provider": provider,
+                "channel_id": str(channel_id),
+                "metadata": {"e2e_handoff_from": self.handoff_from_agent},
+            }
+        ).encode("utf-8")
+        target = urllib.parse.quote(self.handoff_to_agent, safe="")
+        request = urllib.request.Request(
+            f"{self.base_url}/api/agents/{target}/turn/start",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
         try:
-            return json.loads(stdout)
-        except json.JSONDecodeError:
-            return {"raw": stdout}
+            with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+                payload = response.read().decode("utf-8")
+        except urllib.error.HTTPError as error:
+            raise RuntimeError(
+                f"turn/start HTTP {error.code}: "
+                f"{error.read().decode('utf-8', 'replace')}"
+            ) from error
+        if not payload:
+            return {}
+        return json.loads(payload)
 
     def fetch_messages(
         self,
