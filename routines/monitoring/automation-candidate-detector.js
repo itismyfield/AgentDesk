@@ -157,7 +157,7 @@ function buildMaterializationPrompt(signature, candidate) {
     "",
     "**중요**: `program.repo_dir`가 `<determine from your workspace context>` 상태라면,",
     "현재 워크스페이스의 agentdesk 리포지터리 절대 경로로 대체하세요.",
-    "예: `/Users/kunkun/kunkunGames/agentdesk`",
+    "예: `/Users/example/workspaces/agentdesk`",
     "",
     "API 응답에서 `card_id`를 저장해두세요.",
     "",
