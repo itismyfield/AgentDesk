@@ -2732,6 +2732,37 @@ mod tests {
     }
 
     #[test]
+    fn claim_or_reuse_watcher_replaces_paused_same_tmux_after_prelaunch() {
+        let watchers = TmuxWatcherRegistry::new();
+        let channel_a = ChannelId::new(1485506232256168150);
+        let channel_b = ChannelId::new(1485506232256168151);
+        let tmux_name = "AgentDesk-codex-adk-cdx-paused-incumbent";
+
+        let initial = test_watcher_handle(tmux_name);
+        let initial_cancel = initial.cancel.clone();
+        initial.paused.store(true, Ordering::Relaxed);
+
+        assert!(super::try_claim_watcher(&watchers, channel_a, initial));
+        let outcome = claim_or_reuse_watcher(
+            &watchers,
+            channel_b,
+            test_watcher_handle(tmux_name),
+            &ProviderKind::Codex,
+            "turn_bridge_runtime_ready",
+        );
+
+        assert_eq!(outcome.action(), WatcherClaimAction::SpawnReplacedStale);
+        assert_eq!(outcome.owner_channel_id(), channel_b);
+        assert!(
+            initial_cancel.load(Ordering::Relaxed),
+            "paused incumbent must be cancelled so runtime-ready can spawn a live watcher"
+        );
+        assert!(!watchers.contains_key(&channel_a));
+        assert!(watchers.contains_key(&channel_b));
+        watchers.assert_invariants_for_tests();
+    }
+
+    #[test]
     fn watcher_panic_cleanup_removes_only_matching_handle() {
         let watchers = TmuxWatcherRegistry::new();
         let channel_a = ChannelId::new(1485506232256168138);

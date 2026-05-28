@@ -1713,6 +1713,15 @@ fn stale_removal_reason(
         }
         None => {
             if age_secs > INFLIGHT_MAX_AGE_SECS {
+                if let Some(name) = state.tmux_session_name.as_deref()
+                    && tmux_pane_alive_for_stale_check(name)
+                {
+                    tracing::warn!(
+                        "  ⚠ inflight stale-age ({age_secs}s > {INFLIGHT_MAX_AGE_SECS}s) overridden — tmux pane '{name}' still alive (channel {})",
+                        state.channel_id
+                    );
+                    return None;
+                }
                 Some(format!(
                     "removing stale inflight state file ({age_secs}s old > {INFLIGHT_MAX_AGE_SECS}s)"
                 ))
@@ -2745,6 +2754,72 @@ mod stall_recovery_tests {
         let reason = result.expect("dead-pane DrainRestart past 1800s must be removed");
         assert!(
             reason.contains("removing stale drain_restart"),
+            "unexpected removal reason: {reason}"
+        );
+    }
+
+    /// 2026-05-28 adk-cdx relay gap regression: normal, non-restart inflight
+    /// rows must also be preserved while their tmux pane is alive. Otherwise a
+    /// long-running Codex turn can finish after the 300s cleanup and have its
+    /// terminal response suppressed because the inflight anchor vanished.
+    #[test]
+    fn stale_normal_inflight_preserved_when_tmux_pane_alive() {
+        let _guard = stale_override_test_mutex()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        super::set_test_tmux_alive_override(Some(&["AgentDesk-codex-adk-cdx-stale-alive-79"]));
+
+        let state = InflightTurnState::new(
+            ProviderKind::Codex,
+            79,
+            Some("adk-cdx".to_string()),
+            7,
+            42,
+            43,
+            "hello".to_string(),
+            Some("session-79".to_string()),
+            Some("AgentDesk-codex-adk-cdx-stale-alive-79".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+
+        let result = super::stale_removal_reason(&state, super::INFLIGHT_MAX_AGE_SECS + 1, 7);
+        super::set_test_tmux_alive_override(None);
+        assert!(
+            result.is_none(),
+            "alive tmux pane must preserve normal inflight rows; got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn stale_normal_inflight_removed_when_tmux_pane_dead() {
+        let _guard = stale_override_test_mutex()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        super::set_test_tmux_alive_override(Some(&[]));
+
+        let state = InflightTurnState::new(
+            ProviderKind::Codex,
+            80,
+            Some("adk-cdx".to_string()),
+            7,
+            42,
+            43,
+            "hello".to_string(),
+            Some("session-80".to_string()),
+            Some("AgentDesk-codex-adk-cdx-stale-dead-80".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+
+        let result = super::stale_removal_reason(&state, super::INFLIGHT_MAX_AGE_SECS + 1, 7);
+        super::set_test_tmux_alive_override(None);
+        let reason = result.expect("dead-pane normal inflight past 300s must be removed");
+        assert!(
+            reason.contains("removing stale inflight state file"),
             "unexpected removal reason: {reason}"
         );
     }

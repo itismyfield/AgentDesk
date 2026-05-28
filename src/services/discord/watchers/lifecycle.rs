@@ -463,15 +463,24 @@ mod tests {
     fn restore_scan_only_skips_same_live_output_path() {
         assert!(restore_scan_should_skip_existing_watcher(
             false,
+            false,
             "/tmp/wrapper.jsonl",
             "/tmp/wrapper.jsonl"
         ));
         assert!(!restore_scan_should_skip_existing_watcher(
             false,
+            false,
             "/tmp/prelaunch.jsonl",
             "/tmp/restored.jsonl"
         ));
         assert!(!restore_scan_should_skip_existing_watcher(
+            true,
+            false,
+            "/tmp/wrapper.jsonl",
+            "/tmp/wrapper.jsonl"
+        ));
+        assert!(!restore_scan_should_skip_existing_watcher(
+            false,
             true,
             "/tmp/wrapper.jsonl",
             "/tmp/wrapper.jsonl"
@@ -1220,22 +1229,24 @@ impl WatcherClaimOutcome {
 pub(super) fn find_watcher_by_tmux_session(
     watchers: &TmuxWatcherRegistry,
     tmux_session_name: &str,
-) -> Option<(ChannelId, bool, String)> {
+) -> Option<(ChannelId, bool, bool, String)> {
     let owner = watchers.owner_channel_for_tmux_session(tmux_session_name)?;
     let entry = watchers.by_tmux_session.get(tmux_session_name)?;
     Some((
         owner,
         entry.heartbeat_stale() || entry.cancel.load(std::sync::atomic::Ordering::Relaxed),
+        entry.paused.load(std::sync::atomic::Ordering::Relaxed),
         entry.output_path.clone(),
     ))
 }
 
 fn restore_scan_should_skip_existing_watcher(
     cancelled: bool,
+    paused: bool,
     existing_output_path: &str,
     restored_output_path: &str,
 ) -> bool {
-    !cancelled && existing_output_path == restored_output_path
+    !cancelled && !paused && existing_output_path == restored_output_path
 }
 
 /// #226/#1170: Atomically claim a tmux session for watcher creation.
@@ -1250,7 +1261,7 @@ pub(in crate::services::discord) fn try_claim_watcher(
     let requested_tmux = handle.tmux_session_name.clone();
     let requested_output_path = handle.output_path.clone();
     if let Some(existing) = find_watcher_by_tmux_session(watchers, &requested_tmux) {
-        if existing.1 || existing.2 != requested_output_path {
+        if existing.1 || existing.2 || existing.3 != requested_output_path {
             if let Some((_, existing_handle)) =
                 watchers.remove_tmux_session_locked(&guard, &requested_tmux)
             {
@@ -1333,10 +1344,15 @@ pub(super) fn claim_watcher(
     let requested_output_path = handle.output_path.clone();
     let mut removed_stale_same_tmux = false;
 
-    if let Some((existing_channel_id, existing_cancelled, existing_output_path)) =
+    if let Some((existing_channel_id, existing_cancelled, existing_paused, existing_output_path)) =
         find_watcher_by_tmux_session(watchers, &requested_tmux)
     {
-        if existing_cancelled || existing_output_path != requested_output_path {
+        let replace_paused_incumbent =
+            existing_paused && !matches!(source, "turn_start_message" | "turn_start_headless");
+        if existing_cancelled
+            || replace_paused_incumbent
+            || existing_output_path != requested_output_path
+        {
             if let Some((_, existing_handle)) =
                 watchers.remove_tmux_session_locked(&guard, &requested_tmux)
             {
@@ -1733,11 +1749,12 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                 }
             };
 
-        if let Some((owner_channel_id, cancelled, existing_output_path)) =
+        if let Some((owner_channel_id, cancelled, paused, existing_output_path)) =
             find_watcher_by_tmux_session(&shared.tmux_watchers, session_name)
         {
             if restore_scan_should_skip_existing_watcher(
                 cancelled,
+                paused,
                 &existing_output_path,
                 &output_path,
             ) {
