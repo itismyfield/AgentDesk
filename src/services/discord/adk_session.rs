@@ -60,19 +60,33 @@ pub(super) async fn build_adk_session_key(
     channel_id: serenity::ChannelId,
     provider: &ProviderKind,
 ) -> Option<String> {
-    let tmux_name = {
+    let channel_name = {
         let data = shared.core.lock().await;
         data.sessions
             .get(&channel_id)
             .and_then(|s| s.channel_name.as_ref())
-            .map(|name| provider.build_tmux_session_name(name))
-    }?;
+            .cloned()
+    }
+    .or_else(|| registered_channel_fallback_name(channel_id, provider))?;
+    let tmux_name = provider.build_tmux_session_name(&channel_name);
 
     Some(build_namespaced_session_key(
         &shared.token_hash,
         provider,
         &tmux_name,
     ))
+}
+
+pub(super) fn registered_channel_fallback_name(
+    channel_id: serenity::ChannelId,
+    provider: &ProviderKind,
+) -> Option<String> {
+    super::settings::list_registered_channel_bindings()
+        .into_iter()
+        .find(|binding| {
+            binding.channel_id == channel_id.get() && binding.owner_provider == *provider
+        })
+        .and_then(|binding| binding.fallback_name)
 }
 
 pub(in crate::services::discord) fn build_namespaced_session_key(

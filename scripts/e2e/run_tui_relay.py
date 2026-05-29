@@ -583,17 +583,18 @@ def run_one_cell(
             tmux.kill_pane(target_pane.pane_id)
         elif "send_keys_no_enter" in step:
             thread_channel_id = channel_id if scenario.get("requires_thread_channel") else None
-            tmux.send_keys(
-                cell_session_name(cell, thread_channel_id=thread_channel_id),
-                step["send_keys_no_enter"],
-            )
+            session_name = cell_session_name(cell, thread_channel_id=thread_channel_id)
+            if not tmux.send_keys(session_name, step["send_keys_no_enter"]):
+                raise assertions.AssertionError(
+                    f"tmux send-keys failed for session {session_name!r}"
+                )
         elif "send_keys" in step:
             thread_channel_id = channel_id if scenario.get("requires_thread_channel") else None
-            tmux.send_keys(
-                cell_session_name(cell, thread_channel_id=thread_channel_id),
-                step["send_keys"],
-                "Enter",
-            )
+            session_name = cell_session_name(cell, thread_channel_id=thread_channel_id)
+            if not tmux.send_keys(session_name, step["send_keys"], "Enter"):
+                raise assertions.AssertionError(
+                    f"tmux send-keys failed for session {session_name!r}"
+                )
         else:
             raise assertions.AssertionError(f"unknown step shape: {step!r}")
 

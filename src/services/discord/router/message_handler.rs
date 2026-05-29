@@ -2039,6 +2039,12 @@ async fn start_reserved_headless_turn_with_owner(
         .as_ref()
         .and_then(|binding| binding.provider.clone())
         .unwrap_or_else(|| settings_provider.clone());
+    let resolved_channel_name_for_session = channel_name_hint
+        .clone()
+        .or_else(|| early_resolved_channel_name.clone())
+        .or_else(|| {
+            super::super::adk_session::registered_channel_fallback_name(channel_id, &early_provider)
+        });
     let early_fast_mode_channel_id =
         effective_fast_mode_channel_id(channel_id, early_thread_parent.clone());
     if let GoalCommandKind::Lifecycle(command) = classify_codex_goal_command_for_provider(
@@ -2105,17 +2111,17 @@ async fn start_reserved_headless_turn_with_owner(
     let (mut session_id, mut memento_context_loaded, mut current_path) = {
         let mut data = shared.core.lock().await;
         if let Some(info) = load_session_runtime_state(&mut data.sessions, channel_id) {
-            if let Some(channel_name_hint) = channel_name_hint.as_ref()
+            if let Some(channel_name) = resolved_channel_name_for_session.as_ref()
                 && let Some(session) = data.sessions.get_mut(&channel_id)
                 && session.channel_name.is_none()
             {
-                session.channel_name = Some(channel_name_hint.clone());
+                session.channel_name = Some(channel_name.clone());
             }
             info
         } else {
             let workspace = resolve_headless_workspace(
                 channel_id,
-                channel_name_hint.as_deref(),
+                resolved_channel_name_for_session.as_deref(),
                 metadata.as_ref(),
             )
             .ok_or_else(|| {
@@ -2163,7 +2169,7 @@ async fn start_reserved_headless_turn_with_owner(
                     history: Vec::new(),
                     pending_uploads: Vec::new(),
                     cleared: false,
-                    channel_name: channel_name_hint.clone(),
+                    channel_name: resolved_channel_name_for_session.clone(),
                     category_name: None,
                     remote_profile_name: None,
                     channel_id: Some(channel_id.get()),
