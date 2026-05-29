@@ -28,8 +28,9 @@ use super::stale_resume::{
 use super::{
     advance_tmux_relay_confirmed_end, bridge_should_reclaim_relay_from_missing_watcher,
     merge_task_notification_kind, monitor_handoff_tool_context, release_task_notification_kind,
-    should_delegate_bridge_relay_to_watcher, task_notification_closes_background_child,
-    terminal_delivery_response_after_offset, turn_bridge_replace_outcome_committed,
+    resolve_exact_completion_usage, should_delegate_bridge_relay_to_watcher,
+    task_notification_closes_background_child, terminal_delivery_response_after_offset,
+    turn_bridge_replace_outcome_committed,
 };
 use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::{
@@ -4095,4 +4096,74 @@ fn task_notification_kind_release_preserves_higher_priority_active_kind() {
         Some(TaskNotificationKind::MonitorAutoTurn),
         "#1683: closing a lower-priority child must not clear a higher-priority active kind"
     );
+}
+
+fn inflight_for_usage_test(output_path: Option<String>, last_offset: u64) -> InflightTurnState {
+    InflightTurnState::new(
+        ProviderKind::Claude,
+        1,
+        None,
+        0,
+        0,
+        0,
+        "u".to_string(),
+        None,
+        None,
+        output_path,
+        None,
+        last_offset,
+    )
+}
+
+#[test]
+fn resolve_exact_completion_usage_prefers_live_accumulated() {
+    // #2849: when the live StatusUpdate path already accumulated context
+    // occupancy, use it directly without re-parsing the output.
+    let inflight = inflight_for_usage_test(None, 0);
+    let accumulated = TurnTokenUsage {
+        input_tokens: 1000,
+        cache_create_tokens: 200,
+        cache_read_tokens: 3000,
+        output_tokens: 50,
+    };
+    assert_eq!(
+        resolve_exact_completion_usage(&inflight, None, accumulated),
+        Some(accumulated)
+    );
+}
+
+#[test]
+fn resolve_exact_completion_usage_none_when_no_usage_anywhere() {
+    // #2849 negative case: no live usage and no output path -> None, so the
+    // completed panel never fabricates or reuses stale token counts.
+    let inflight = inflight_for_usage_test(None, 0);
+    assert_eq!(
+        resolve_exact_completion_usage(&inflight, None, TurnTokenUsage::default()),
+        None
+    );
+}
+
+#[test]
+fn resolve_exact_completion_usage_falls_back_to_output_parse() {
+    // #2849: live path carried no usage (accumulated == 0), but the output
+    // JSONL holds the final assistant usage -> backfill from the parsed range.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("output.jsonl");
+    std::fs::write(
+        &path,
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-8\",\"usage\":{\"input_tokens\":1200,\"cache_read_input_tokens\":3000,\"cache_creation_input_tokens\":500,\"output_tokens\":42}}}\n",
+    )
+    .expect("write output");
+    let file_len = std::fs::metadata(&path).expect("stat output").len();
+    let mut inflight = inflight_for_usage_test(Some(path.to_string_lossy().to_string()), file_len);
+    // new() defaults turn_start_offset to last_offset; read from the start so
+    // the range [0, file_len) covers the usage line.
+    inflight.turn_start_offset = Some(0);
+
+    let usage = resolve_exact_completion_usage(&inflight, None, TurnTokenUsage::default())
+        .expect("usage parsed from output range");
+    assert_eq!(usage.input_tokens, 1200);
+    assert_eq!(usage.cache_read_tokens, 3000);
+    assert_eq!(usage.cache_create_tokens, 500);
+    assert!(usage.context_occupancy_input_tokens() > 0);
 }

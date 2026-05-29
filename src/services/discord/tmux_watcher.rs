@@ -5440,6 +5440,36 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         }
 
         if terminal_output_committed && watcher_tui_gate_outcome.should_emit_completion() {
+            // #2849: watcher-completed turns never traverse the bridge
+            // StatusUpdate path, so the completed panel can lack the Context
+            // line even when terminal output carried exact usage. Backfill the
+            // exact final context usage onto the panel BEFORE rendering the
+            // completed panel. Skip entirely when no exact usage exists or the
+            // provider/model has no resolvable window — never fabricate numbers
+            // and never reuse stale prior-turn usage. set_context_panel_usage is
+            // also internally gated to context_window != 0.
+            if shared.status_panel_v2_enabled
+                && let Some(usage) = stream_line_state_token_usage(&state)
+                    .filter(|usage| usage.context_occupancy_input_tokens() > 0)
+            {
+                let context_window =
+                    watcher_provider.resolve_context_window(state.last_model.as_deref());
+                if context_window > 0 {
+                    let ctx_cfg = crate::services::discord::adk_session::fetch_context_thresholds(
+                        shared.api_port,
+                    )
+                    .await;
+                    shared.placeholder_live_events.set_context_panel_usage(
+                        channel_id,
+                        state.last_session_id.as_deref(),
+                        usage.input_tokens,
+                        usage.cache_create_tokens,
+                        usage.cache_read_tokens,
+                        context_window,
+                        ctx_cfg.compact_pct_for(&watcher_provider),
+                    );
+                }
+            }
             // #2427 D wire (Codex round 2 HIGH-1): the watcher loop is not
             // turn-scoped — by the time we reach here a new turn may have
             // rewritten the inflight on disk. Reading user_msg_id from that

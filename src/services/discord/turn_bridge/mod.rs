@@ -3171,6 +3171,28 @@ fn resolve_output_analytics_snapshot(
     )
 }
 
+/// #2849: resolve the EXACT final context-occupancy token usage for the
+/// completed status panel, or `None` if no exact usage exists anywhere.
+///
+/// Prefers the live accumulated snapshot (occupancy > 0). If the live
+/// `StatusUpdate`s never carried token data — common for silent/background
+/// turns — it re-parses the output JSONL range exactly as persisted analytics
+/// does via [`resolve_output_analytics_snapshot`]. Returns `None` when neither
+/// source yields non-zero occupancy, so callers never fabricate numbers and
+/// never reuse stale prior-turn usage.
+fn resolve_exact_completion_usage(
+    inflight_state: &InflightTurnState,
+    fallback_session_id: Option<&str>,
+    accumulated: TurnTokenUsage,
+) -> Option<TurnTokenUsage> {
+    if accumulated.context_occupancy_input_tokens() > 0 {
+        return Some(accumulated);
+    }
+    let snapshot = TurnAnalyticsSnapshot::capture(inflight_state, fallback_session_id, accumulated);
+    let (_session_id, usage) = resolve_output_analytics_snapshot(&snapshot);
+    (usage.context_occupancy_input_tokens() > 0).then_some(usage)
+}
+
 pub(super) fn persist_turn_analytics_row(
     sqlite: &crate::db::Db,
     provider: &ProviderKind,
@@ -7367,6 +7389,41 @@ pub(super) fn spawn_turn_bridge(
 
         let mut status_panel_completion_committed = true;
         if status_panel_terminal_committed && bridge_should_emit_completion {
+            // #2849: before rendering the completed panel, backfill exact final
+            // context usage when the live StatusUpdates never carried it (e.g.
+            // silent/background turns). resolve_exact_completion_usage prefers
+            // the live accumulated snapshot, else re-parses the output JSONL the
+            // same way persisted analytics does, and returns None when no exact
+            // usage exists — so we never fabricate or reuse stale numbers.
+            // set_context_panel_usage is a no-op when the live path already set
+            // the same values, and is gated to context_window_tokens != 0.
+            if shared_owned.status_panel_v2_enabled {
+                let context_provider_session_id = new_raw_provider_session_id
+                    .as_deref()
+                    .or(new_session_id.as_deref())
+                    .or(inflight_state.session_id.as_deref());
+                let accumulated_usage = TurnTokenUsage {
+                    input_tokens: accumulated_input_tokens,
+                    cache_create_tokens: accumulated_cache_create_tokens,
+                    cache_read_tokens: accumulated_cache_read_tokens,
+                    output_tokens: accumulated_output_tokens,
+                };
+                if let Some(usage) = resolve_exact_completion_usage(
+                    &inflight_state,
+                    context_provider_session_id,
+                    accumulated_usage,
+                ) {
+                    shared_owned.placeholder_live_events.set_context_panel_usage(
+                        channel_id,
+                        context_provider_session_id,
+                        usage.input_tokens,
+                        usage.cache_create_tokens,
+                        usage.cache_read_tokens,
+                        context_window_tokens,
+                        context_compact_percent,
+                    );
+                }
+            }
             // #2161 (Codex H1): the bridge-owned delivery path runs the
             // gate ABOVE so it can also block dispatch completion on
             // TimedOut. Here we just reuse the outcome and skip the
