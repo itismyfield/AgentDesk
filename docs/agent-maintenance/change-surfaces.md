@@ -6,7 +6,7 @@
 > [`docs/generated/module-inventory.md`](../generated/module-inventory.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-05-19 (against #2158 streaming STT wiring giant-file registration).
+> Last refreshed: 2026-05-29 (against #2848 maintainability baseline refresh).
 
 ## Read This First
 
@@ -438,7 +438,13 @@ The remaining giant-file modules under `src/services/` not covered above:
   `src/services/discord_config_audit.rs` (1310),
   `src/services/discord/tmux_lifecycle.rs` (1129), and
   `src/services/qwen_tmux_wrapper.rs` (1194).
+- `src/services/discord/session_relay_sink.rs` (1125) — Discord session relay
+  sink delivery/orchestration surface. Split focused helpers before adding
+  non-bugfix relay behavior.
 - `src/services/turn_orchestrator.rs` (2070).
+- `src/services/tui_turn_state.rs` (1105) — TUI turn-state observation and
+  rendering state surface. Split focused helpers before adding non-bugfix turn
+  state behavior.
 - `src/services/session_backend.rs` (1053).
 - `src/voice/turn_link.rs` (1282 lines) — VoiceTurnLink durable store + GC
   (#2362 / #2164 voice epic A); covers per-utterance status row + advisory-lock

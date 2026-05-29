@@ -36,9 +36,9 @@ direct_discord_sends = [
   "src/services/discord/commands/text_commands.rs#direct_discord_sends:db5444d305a41f96",
   "src/services/discord/commands/text_commands.rs#direct_discord_sends:e1dff75fe79e7d70",
   "src/services/discord/discord_io.rs#direct_discord_sends:2f398342de1e7cd7",
-  "src/services/discord/gateway.rs#direct_discord_sends:fbf7eb28e7737abf",
+  "src/services/discord/gateway.rs#direct_discord_sends:b61365ed28b915b2",
   "src/services/discord/gateway.rs#direct_discord_sends:0a20f86f0471df2b",
-  "src/services/discord/gateway.rs#direct_discord_sends:2e80b83349d17883",
+  "src/services/discord/gateway.rs#direct_discord_sends:a78022596f453395",
   "src/services/discord/health.rs#direct_discord_sends:fc0d3cc16af4bca7",
   "src/services/discord/health.rs#direct_discord_sends:9a1e5bc39f554d40",
   "src/services/discord/meeting_orchestrator.rs#direct_discord_sends:64c7fa00eace25a9",
@@ -81,7 +81,7 @@ git_subprocess_callsites = [
 # fallback path); the audit regex `\.sqlite\b` cannot see the cfg gate, so
 # we pin them by file:line.
 legacy_sqlite_refs = [
-  "src/services/discord/turn_bridge/mod.rs:2902",
+  "src/services/discord/turn_bridge/mod.rs:2907",
   "src/services/discord/watchers/lifecycle.rs:370",
 ]
 
