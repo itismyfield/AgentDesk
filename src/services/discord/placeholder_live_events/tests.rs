@@ -835,3 +835,68 @@ fn status_tool_result_closes_subagent_only_for_task_tools() {
         ]
     );
 }
+
+#[test]
+fn tool_use_toolsearch_pretty_json_renders_query_not_bare_brace() {
+    // #2847: tool input arrives as serde_json::to_string_pretty (multi-line).
+    // Before the fix the live-event line collapsed to a bare "[ToolSearch] {".
+    let pretty = serde_json::to_string_pretty(&json!({
+        "query": "select:Read,Edit",
+        "max_results": 5
+    }))
+    .unwrap();
+    let line = RecentPlaceholderEvent::tool_use("ToolSearch", &pretty)
+        .expect("non-empty summary")
+        .render_line();
+    assert!(line.starts_with("[ToolSearch]"), "got: {line}");
+    assert!(line.contains("select:Read,Edit"), "got: {line}");
+    assert!(line.contains("limit 5"), "got: {line}");
+    assert_ne!(line.trim(), "[ToolSearch] {");
+    assert!(!line.trim_end().ends_with('{'), "got: {line}");
+}
+
+#[test]
+fn tool_use_monitor_pretty_json_renders_summary_not_bare_brace() {
+    let pretty = serde_json::to_string_pretty(&json!({
+        "description": "watch CI for PR 2850",
+        "command": "gh pr checks 2850"
+    }))
+    .unwrap();
+    let line = RecentPlaceholderEvent::tool_use("Monitor", &pretty)
+        .expect("non-empty summary")
+        .render_line();
+    assert!(line.starts_with("[Monitor]"), "got: {line}");
+    assert!(line.contains("watch CI for PR 2850"), "got: {line}");
+    assert_ne!(line.trim(), "[Monitor] {");
+    assert!(!line.trim_end().ends_with('{'), "got: {line}");
+}
+
+#[test]
+fn tool_use_unknown_pretty_json_falls_back_to_compact_not_brace() {
+    // The default arm now compacts pretty JSON instead of leaking a "{" line.
+    let pretty = serde_json::to_string_pretty(&json!({ "some_field": "value" })).unwrap();
+    let line = RecentPlaceholderEvent::tool_use("SomeUnknownTool", &pretty)
+        .expect("non-empty summary")
+        .render_line();
+    assert!(!line.trim_end().ends_with('{'), "got: {line}");
+    assert!(line.contains("some_field"), "got: {line}");
+}
+
+#[test]
+fn status_events_toolsearch_pretty_json_args_summary_not_bare_brace() {
+    // #2847: the status-panel path (status_events_from_tool_use) shares the same
+    // format_tool_input fix, so the ToolStart args summary is no longer "{".
+    let pretty = serde_json::to_string_pretty(&json!({
+        "query": "Monitor schema",
+        "max_results": 3
+    }))
+    .unwrap();
+    let events = status_events_from_tool_use("ToolSearch", &pretty);
+    let StatusEvent::ToolStart { args_summary, .. } = &events[0] else {
+        panic!("expected ToolStart, got {:?}", events[0]);
+    };
+    let summary = args_summary.as_deref().unwrap_or("");
+    assert!(summary.contains("Monitor schema"), "got: {summary}");
+    assert_ne!(summary.trim(), "{");
+    assert!(!summary.trim_end().ends_with('{'), "got: {summary}");
+}
