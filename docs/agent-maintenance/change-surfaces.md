@@ -168,6 +168,9 @@
     CLI STT runtime plus streaming session adapter surface, split before adding
     non-bugfix behavior).
   - `src/services/discord/commands/config.rs` (1877 lines).
+  - `src/services/discord/commands/voice.rs` (1003 lines; voice join/attach
+    commands plus auto-join orchestration surface, split before adding
+    non-bugfix behavior).
   - `src/services/discord/commands/inspect.rs` (1058 lines, post-#1701
     context-view manifest binding pushed it past the giant-file threshold).
   - `src/services/discord/{commands/text_commands.rs, commands/diagnostics.rs,
