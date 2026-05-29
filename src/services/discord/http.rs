@@ -162,7 +162,10 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default();
-        assert!(parse.iter().any(|p| p == "users"), "users allowed: {parse:?}");
+        assert!(
+            parse.iter().any(|p| p == "users"),
+            "users allowed: {parse:?}"
+        );
         assert!(
             !parse.iter().any(|p| p == "everyone"),
             "everyone suppressed: {parse:?}"
