@@ -22,7 +22,7 @@ static STARTUP_THREAD_MAP_VALIDATION_STARTED: std::sync::atomic::AtomicBool =
 
 fn voice_auto_join_provider_map(
     cfg: &crate::config::Config,
-) -> std::collections::HashMap<String, String> {
+) -> std::collections::HashMap<String, (String, Option<String>)> {
     let mut map = std::collections::HashMap::new();
     for agent in &cfg.agents {
         for (slot_provider, channel) in agent.channels.iter() {
@@ -33,7 +33,7 @@ fn voice_auto_join_provider_map(
             let provider = channel
                 .provider()
                 .unwrap_or_else(|| slot_provider.to_string());
-            map.insert(channel_id.to_string(), provider);
+            map.insert(channel_id.to_string(), (provider, None));
         }
         if let Some(voice_channel_id) = agent
             .voice
@@ -50,7 +50,10 @@ fn voice_auto_join_provider_map(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .unwrap_or(agent.provider.as_str());
-            map.insert(voice_channel_id.to_string(), provider.to_string());
+            map.insert(
+                voice_channel_id.to_string(),
+                (provider.to_string(), Some(agent.id.clone())),
+            );
         }
     }
     map
@@ -2078,10 +2081,13 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     let barge_in_for_voice = shared_clone.voice_barge_in.clone();
                     let pairings_for_voice = shared_clone.voice_pairings.clone();
                     let provider_for_voice = provider_for_setup.clone();
-                    // #2054 v6: agent yaml binding 에서 channel_id → provider
-                    // 매핑을 build 해서 voice auto-join 가 매핑된 provider
-                    // bot 만 입장하도록. 같은 voice 채널에 양 bot 이 들어가
-                    // STT/TTS 가 이중으로 트리거되던 회귀 차단.
+                    let agent_for_voice = {
+                        let settings = shared_clone.settings.read().await;
+                        settings.agent.clone()
+                    };
+                    // #2054 v7: agent voice binding은 channel_id → provider+agent
+                    // 매핑을 build 해서 같은 provider의 다른 에이전트 봇까지
+                    // 같은 voice 채널에 진입하는 중복 STT/TTS를 차단한다.
                     let cfg = crate::config::load_graceful();
                     let channel_provider_map = voice_auto_join_provider_map(&cfg);
                     tokio::spawn(async move {
@@ -2092,6 +2098,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                             barge_in_for_voice,
                             pairings_for_voice,
                             provider_for_voice,
+                            agent_for_voice,
                             channel_provider_map,
                         )
                         .await;
@@ -2511,8 +2518,13 @@ agents:
 
         let map = voice_auto_join_provider_map(&cfg);
 
-        assert_eq!(map.get("123").map(String::as_str), Some("codex"));
-        assert_eq!(map.get("999").map(String::as_str), Some("codex"));
+        assert_eq!(map.get("123").map(|value| value.0.as_str()), Some("codex"));
+        assert_eq!(map.get("123").and_then(|value| value.1.as_deref()), None);
+        assert_eq!(map.get("999").map(|value| value.0.as_str()), Some("codex"));
+        assert_eq!(
+            map.get("999").and_then(|value| value.1.as_deref()),
+            Some("project-agentdesk")
+        );
     }
 
     #[test]
