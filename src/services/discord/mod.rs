@@ -3067,6 +3067,7 @@ async fn enqueue_internal_followup(
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: false,
+            pending_uploads: Vec::new(),
             voice_announcement: None,
         },
     )
@@ -3693,6 +3694,7 @@ async fn catch_up_missed_messages_inner(
                         && !text.starts_with('!')
                         && !text.starts_with('/')
                         && !text.starts_with("DISPATCH:"),
+                    pending_uploads: Vec::new(),
                     voice_announcement: None,
                 },
             )
@@ -3890,6 +3892,7 @@ async fn catch_up_missed_messages_inner(
                         && !text.starts_with('!')
                         && !text.starts_with('/')
                         && !text.starts_with("DISPATCH:"),
+                    pending_uploads: Vec::new(),
                     voice_announcement: None,
                 },
             )

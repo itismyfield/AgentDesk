@@ -532,6 +532,7 @@ async fn enqueue_busy_tui_followup_for_retry(
     reply_context: Option<String>,
     has_reply_boundary: bool,
     merge_consecutive: bool,
+    pending_uploads: Vec<String>,
     voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> MailboxEnqueueOutcome {
     super::super::mailbox_enqueue_intervention(
@@ -545,6 +546,7 @@ async fn enqueue_busy_tui_followup_for_retry(
             reply_context,
             has_reply_boundary,
             merge_consecutive,
+            pending_uploads,
             voice_announcement,
         ),
     )
@@ -4847,6 +4849,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                 reply_context.clone(),
                 has_reply_boundary,
                 merge_consecutive,
+                pending_uploads.clone(),
                 // #2266: keep the voice payload self-contained in the queued
                 // `Intervention` so `dispatch_queued_turn` can reinsert it
                 // before re-entering `handle_text_message`, which restores
@@ -6161,6 +6164,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             reply_context.clone(),
             has_reply_boundary,
             merge_consecutive,
+            pending_uploads.clone(),
             voice_announcement.clone(),
         )
         .await;
@@ -6739,7 +6743,7 @@ pub(super) async fn handle_file_upload(
     ctx: &serenity::Context,
     msg: &serenity::Message,
     shared: &Arc<SharedData>,
-) -> Result<usize, Error> {
+) -> Result<Vec<String>, Error> {
     let channel_id = msg.channel_id;
 
     // Always use the runtime uploads directory (works without session)
@@ -6748,7 +6752,7 @@ pub(super) async fn handle_file_upload(
         let _ = channel_id
             .say(&ctx.http, "Cannot resolve upload directory.")
             .await;
-        return Ok(0);
+        return Ok(Vec::new());
     };
 
     if let Err(e) = fs::create_dir_all(&save_dir) {
@@ -6759,10 +6763,10 @@ pub(super) async fn handle_file_upload(
                 format!("Failed to prepare upload directory: {}", e),
             )
             .await;
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
-    let mut saved_attachment_count = 0;
+    let mut upload_records = Vec::new();
     for attachment in &msg.attachments {
         let file_name = &attachment.filename;
 
@@ -6807,28 +6811,16 @@ pub(super) async fn handle_file_upload(
             }
         }
 
-        saved_attachment_count += 1;
-
-        // Record upload in session
         let upload_record = format!(
             "[File uploaded] {} → {} ({} bytes)",
             file_name,
             dest.display(),
             file_size
         );
-        {
-            let mut data = shared.core.lock().await;
-            if let Some(session) = data.sessions.get_mut(&channel_id) {
-                session.history.push(HistoryItem {
-                    item_type: HistoryType::User,
-                    content: upload_record.clone(),
-                });
-                session.pending_uploads.push(upload_record);
-            }
-        }
+        upload_records.push(upload_record);
     }
 
-    Ok(saved_attachment_count)
+    Ok(upload_records)
 }
 
 /// Handle shell commands from raw text messages (! prefix)
@@ -10427,6 +10419,7 @@ mod tests {
             None,
             true,
             true,
+            Vec::new(),
             None,
         );
 
@@ -10445,6 +10438,7 @@ mod tests {
             None,
             false,
             false,
+            Vec::new(),
             None,
         );
 
@@ -10481,6 +10475,7 @@ mod tests {
             None,
             false,
             false,
+            Vec::new(),
             Some(announcement.clone()),
         );
 
@@ -10547,6 +10542,7 @@ mod tests {
             None,
             false,
             false,
+            Vec::new(),
             Some(active_take.clone()),
         );
         assert!(queued.voice_announcement.is_some());
@@ -10606,6 +10602,7 @@ mod tests {
             None,
             false,
             false,
+            Vec::new(),
             Some(announcement.clone()),
         );
 
