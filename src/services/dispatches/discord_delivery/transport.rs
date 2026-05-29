@@ -48,7 +48,16 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<std::time::
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.trim().parse::<f64>().ok())
         .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
-        .map(std::time::Duration::from_secs_f64)
+        .map(|seconds| {
+            // Clamp BEFORE constructing the Duration: `Duration::from_secs_f64`
+            // panics on values that overflow Duration's range, so a hostile or
+            // malformed Retry-After (e.g. "1e30") would crash the worker path
+            // instead of being capped. The caller caps the backoff to
+            // DISCORD_RATE_LIMIT_MAX_BACKOFF anyway, so clamping to that ceiling
+            // here is both safe and behavior-preserving.
+            let capped = seconds.min(DISCORD_RATE_LIMIT_MAX_BACKOFF.as_secs_f64());
+            std::time::Duration::from_secs_f64(capped)
+        })
 }
 
 /// Send the request produced by `build`, retrying on HTTP 429 up to
@@ -742,6 +751,14 @@ mod tests {
         headers.insert(RETRY_AFTER, HeaderValue::from_static("soon"));
         assert_eq!(parse_retry_after(&headers), None);
         assert_eq!(parse_retry_after(&HeaderMap::new()), None);
+
+        // A huge/hostile finite value must NOT panic in Duration::from_secs_f64;
+        // it is clamped to the max backoff ceiling instead.
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("1e30"));
+        assert_eq!(
+            parse_retry_after(&headers),
+            Some(DISCORD_RATE_LIMIT_MAX_BACKOFF)
+        );
     }
 
     #[test]
