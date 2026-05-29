@@ -20,6 +20,11 @@ use crate::services::tui_prompt_dedupe::{
 const SSH_DIRECT_PROMPT_PREVIEW_LIMIT: usize = 1500;
 const CODEX_IDLE_ROLLOUT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// #2843: when the background idle relay loop discovers that a session's
+/// transcript path changed, scan this many bytes back from EOF (not from EOF
+/// itself) so a prompt already written to the freshly-resolved transcript is
+/// still observed and its response relayed.
+const CLAUDE_IDLE_FRESH_TRANSCRIPT_LOOKBACK_BYTES: u64 = 65_536;
 const CODEX_IDLE_PROMPT_ANCHOR_WAIT: Duration = Duration::from_secs(2);
 const CODEX_IDLE_PROMPT_ANCHOR_POLL: Duration = Duration::from_millis(100);
 static CODEX_IDLE_ROLLOUT_RELAY_STARTED: AtomicBool = AtomicBool::new(false);
@@ -207,13 +212,6 @@ async fn maybe_spawn_claude_idle_response_tail(
     if super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get()).is_some() {
         return;
     }
-    if shared
-        .tmux_watchers
-        .tmux_session_is_stale(&prompt.tmux_session_name)
-        .is_some_and(|stale| !stale)
-    {
-        return;
-    }
     let Some(binding) = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
         &prompt.tmux_session_name,
     ) else {
@@ -227,11 +225,27 @@ async fn maybe_spawn_claude_idle_response_tail(
         return;
     }
 
-    let transcript_path = PathBuf::from(&binding.output_path);
+    // #2843: resolve the freshest active transcript (the bound output_path can be
+    // stale) and only let a non-stale tmux watcher suppress the tail when it
+    // actually covers that transcript. Re-registers the binding if it changed.
+    let Some(transcript_path) =
+        resolve_idle_relay_transcript(&shared, &prompt.tmux_session_name, channel_id, &binding)
+    else {
+        return;
+    };
+
+    // #2843: if the path changed, don't trust the old binding offset (it indexes
+    // a different transcript and would replay old output); the timestamp-based
+    // resolution still takes precedence, falling back to the fresh EOF.
+    let fallback_offset = if Path::new(&binding.output_path) == transcript_path {
+        binding.last_offset
+    } else {
+        claude_tui_rehydrate_start_offset(&transcript_path)
+    };
     let start_offset = claude_idle_response_start_offset_after_timestamp(
         &transcript_path,
         prompt.observed_at,
-        binding.last_offset,
+        fallback_offset,
     );
     spawn_claude_idle_response_tail_once(
         shared,
@@ -325,13 +339,6 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                     RuntimeHandoffKind::ClaudeTui,
                 )
             {
-                if shared
-                    .tmux_watchers
-                    .tmux_session_is_stale(&tmux_session_name)
-                    .is_some_and(|stale| !stale)
-                {
-                    continue;
-                }
                 let Some(channel_id) = owner_channel_for_tmux_session(&shared, &tmux_session_name)
                 else {
                     continue;
@@ -342,11 +349,42 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                     continue;
                 }
 
-                let transcript_path = PathBuf::from(&binding.output_path);
-                let scan = match scan_claude_idle_transcript_for_prompt(
-                    &transcript_path,
-                    binding.last_offset,
-                ) {
+                // #2843: resolve the freshest transcript (re-registering the
+                // binding if the bound path was stale) and apply the corrected
+                // watcher guard, instead of skipping on tmux_session_is_stale
+                // alone — a watcher pointed at a missing/stale file is non-stale
+                // by heartbeat yet does not relay direct-TUI output.
+                let Some(transcript_path) = resolve_idle_relay_transcript(
+                    &shared,
+                    &tmux_session_name,
+                    channel_id,
+                    &binding,
+                ) else {
+                    continue;
+                };
+                let path_changed = Path::new(&binding.output_path) != transcript_path;
+                let scan_offset = if path_changed {
+                    // #2843 (codex P1): path changed — scan a bounded lookback
+                    // instead of starting at EOF, so a prompt already written to
+                    // the freshly-resolved transcript is still found (the
+                    // observed-prompt path uses timestamp recovery, but this
+                    // background-loop half must not miss the prompt it recovers).
+                    claude_tui_rehydrate_start_offset(&transcript_path)
+                        .saturating_sub(CLAUDE_IDLE_FRESH_TRANSCRIPT_LOOKBACK_BYTES)
+                } else {
+                    binding.last_offset
+                };
+                // #2843 (codex round-2 P1): the lookback window can hold several
+                // finished turns; relaying the first would re-relay an old turn.
+                // On a path change select the NEWEST prompt in the window (the
+                // just-typed one); unchanged-path incremental tailing keeps
+                // first-prompt semantics so it never skips a queued prompt.
+                let scan_result = if path_changed {
+                    scan_claude_idle_transcript_for_last_prompt(&transcript_path, scan_offset)
+                } else {
+                    scan_claude_idle_transcript_for_prompt(&transcript_path, scan_offset)
+                };
+                let scan = match scan_result {
                     Ok(scan) => scan,
                     Err(error) => {
                         tracing::debug!(
@@ -361,7 +399,7 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
 
                 match scan {
                     ClaudeIdleTranscriptScan::NoPrompt { offset } => {
-                        if offset != binding.last_offset {
+                        if offset != scan_offset {
                             advance_claude_tmux_runtime_binding_offset(
                                 &tmux_session_name,
                                 &transcript_path,
@@ -533,6 +571,155 @@ fn rehydrated_claude_tui_binding_for_tmux_session(
         last_offset: start_offset,
         relay_last_offset: None,
     })
+}
+
+#[cfg(unix)]
+fn transcript_mtime(path: &Path) -> std::time::SystemTime {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+}
+
+/// #2843: the working directory and launch-script mtime of a Claude TUI session.
+/// The working_dir locates the Claude project directory when the stored
+/// binding's transcript path is stale; the launch mtime (session start proxy)
+/// discriminates this session's transcripts from older sessions' that share the
+/// same cwd.
+#[cfg(unix)]
+fn claude_tui_launch_context(tmux_session_name: &str) -> Option<(PathBuf, std::time::SystemTime)> {
+    let launch_script_path = crate::services::tmux_common::resolve_session_temp_path(
+        tmux_session_name,
+        crate::services::tmux_common::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
+    )?;
+    let launch_mtime = transcript_mtime(Path::new(&launch_script_path));
+    let launch = parse_claude_tui_launch_script(Path::new(&launch_script_path)).ok()?;
+    Some((launch.working_dir, launch_mtime))
+}
+
+/// #2843: resolve the freshest active Claude transcript for a tmux session.
+/// The stored runtime binding's `output_path` can be stale — an older session_id
+/// the launch script still references, or a missing AgentDesk rollout jsonl —
+/// while the live Claude TUI writes its transcript to a newer `<uuid>.jsonl`
+/// under the project directory. Compare the bound path (if it exists) against
+/// the newest transcript scanned from the launch-script working_dir and return
+/// whichever is newest, plus the session_id (UUID stem) to re-register so future
+/// Discord-turn recovery and offset advances reconcile against the right path.
+#[cfg(unix)]
+fn freshest_claude_transcript_for_session(
+    tmux_session_name: &str,
+    binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+) -> Option<(PathBuf, Option<String>)> {
+    let bound = {
+        let path = PathBuf::from(&binding.output_path);
+        path.exists()
+            .then(|| (transcript_mtime(&path), path, binding.session_id.clone()))
+    };
+    let scanned = claude_tui_launch_context(tmux_session_name)
+        .and_then(|(cwd, launch_mtime)| {
+            crate::services::claude_tui::transcript_tail::latest_claude_transcript_for_cwd(
+                &cwd,
+                launch_mtime,
+                None,
+            )
+        })
+        .map(|path| {
+            let session_id = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_string);
+            (transcript_mtime(&path), path, session_id)
+        });
+    [bound, scanned]
+        .into_iter()
+        .flatten()
+        .max_by_key(|(modified, _, _)| *modified)
+        .map(|(_, path, session_id)| (path, session_id))
+}
+
+/// #2843: re-register the runtime binding to a freshly-resolved transcript so
+/// later reads, offset advances, and Discord-turn recovery all converge on it.
+#[cfg(unix)]
+fn refresh_claude_runtime_binding(
+    tmux_session_name: &str,
+    channel_id: ChannelId,
+    transcript_path: &Path,
+    session_id: Option<String>,
+) {
+    crate::services::tui_prompt_dedupe::register_rehydrated_tmux_runtime_binding(
+        ProviderKind::Claude.as_str(),
+        tmux_session_name,
+        channel_id.get(),
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: transcript_path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id,
+            last_offset: claude_tui_rehydrate_start_offset(transcript_path),
+            relay_last_offset: None,
+        },
+    );
+    tracing::info!(
+        tmux_session_name = %tmux_session_name,
+        channel_id = channel_id.get(),
+        transcript_path = %transcript_path.display(),
+        "refreshed Claude TUI relay binding to freshest active transcript (#2843)"
+    );
+}
+
+/// #2843: decide whether the Claude idle relay should tail this session and on
+/// which transcript. Returns `Some(path)` to tail, or `None` to skip because a
+/// heartbeat-fresh watcher already covers the current transcript. Side effect:
+/// re-registers the binding when a fresher transcript is resolved.
+///
+/// `tmux_session_is_stale` checks only cancel/heartbeat, so a watcher pointed at
+/// a missing/stale file reports non-stale and would wrongly suppress relay of
+/// direct-TUI output. We only let a non-stale watcher suppress when the binding
+/// points at the freshest existing transcript.
+#[cfg(unix)]
+fn resolve_idle_relay_transcript(
+    shared: &Arc<SharedData>,
+    tmux_session_name: &str,
+    channel_id: ChannelId,
+    binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+) -> Option<PathBuf> {
+    let (transcript_path, resolved_session_id) =
+        freshest_claude_transcript_for_session(tmux_session_name, binding).unwrap_or_else(|| {
+            (
+                PathBuf::from(&binding.output_path),
+                binding.session_id.clone(),
+            )
+        });
+
+    // #2843 (codex P0): a non-stale watcher may suppress the idle tail ONLY when
+    // the watcher itself is tailing the freshest transcript. Comparing the
+    // runtime binding's path is wrong — re-registering the binding does not
+    // retarget the running watcher, so the binding can be fresh while the
+    // watcher still tails a stale/missing file (then the idle tail would be
+    // wrongly suppressed and direct-TUI output lost). Use the watcher's own
+    // output path.
+    let watcher_covers_current_transcript = shared
+        .tmux_watchers
+        .tmux_session_is_stale(tmux_session_name)
+        .is_some_and(|stale| !stale)
+        && transcript_path.exists()
+        && shared
+            .tmux_watchers
+            .watcher_output_path(tmux_session_name)
+            .is_some_and(|watcher_path| Path::new(&watcher_path) == transcript_path);
+    if watcher_covers_current_transcript {
+        return None;
+    }
+
+    if Path::new(&binding.output_path) != transcript_path {
+        refresh_claude_runtime_binding(
+            tmux_session_name,
+            channel_id,
+            &transcript_path,
+            resolved_session_id,
+        );
+    }
+    Some(transcript_path)
 }
 
 #[cfg(unix)]
@@ -940,6 +1127,110 @@ fn scan_claude_idle_transcript_for_prompt(
             crate::services::tui_prompt_dedupe::extract_claude_transcript_user_prompt(&json)
         {
             return Ok(ClaudeIdleTranscriptScan::Prompt {
+                prompt,
+                prompt_start_offset: line_start_offset,
+                line_end_offset: offset,
+            });
+        }
+    }
+}
+
+/// #2843 (codex round-2 P1): scan `[start_offset, EOF)` and return the LAST
+/// (newest, closest to EOF) user prompt rather than the first.
+///
+/// The path-change lookback reads a bounded byte window that can contain
+/// several already-finished turns. Selecting the first prompt would re-relay an
+/// old turn (`observe_prompt_by_tmux` only suppresses pending Discord prompts or
+/// recent duplicates, so an older prompt inside the window is misclassified as
+/// SSH-direct and tailed again). The just-typed prompt is always the newest
+/// entry in the window, so returning the last prompt catches the current turn
+/// without replaying stale backlog. Incremental tailing on an unchanged path
+/// keeps first-prompt semantics via [`scan_claude_idle_transcript_for_prompt`].
+fn scan_claude_idle_transcript_for_last_prompt(
+    transcript_path: &Path,
+    start_offset: u64,
+) -> Result<ClaudeIdleTranscriptScan, String> {
+    let mut file = std::fs::File::open(transcript_path).map_err(|error| {
+        format!(
+            "open Claude transcript {}: {error}",
+            transcript_path.display()
+        )
+    })?;
+    let file_len = file
+        .metadata()
+        .map_err(|error| {
+            format!(
+                "stat Claude transcript {}: {error}",
+                transcript_path.display()
+            )
+        })?
+        .len();
+    let mut offset = if start_offset > file_len {
+        0
+    } else {
+        start_offset
+    };
+    file.seek(SeekFrom::Start(offset)).map_err(|error| {
+        format!(
+            "seek Claude transcript {}: {error}",
+            transcript_path.display()
+        )
+    })?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    let mut last_prompt: Option<ClaudeIdleTranscriptScan> = None;
+
+    loop {
+        line.clear();
+        let line_start_offset = offset;
+        let bytes_read = reader.read_line(&mut line).map_err(|error| {
+            format!(
+                "read Claude transcript {}: {error}",
+                transcript_path.display()
+            )
+        })?;
+        if bytes_read == 0 {
+            return Ok(last_prompt.unwrap_or(ClaudeIdleTranscriptScan::NoPrompt { offset }));
+        }
+        offset = offset.saturating_add(bytes_read as u64);
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            if !line.ends_with('\n') {
+                // Partial trailing line: stop before consuming it. Return the
+                // newest COMPLETE prompt found so far; otherwise leave the cursor
+                // at the partial line so the next tick re-reads it once complete.
+                //
+                // #2843 (codex round-3/round-4): deferring here — returning the
+                // scan start so a later tick re-picks the newest prompt once the
+                // partial completes — is NOT viable: `resolve_idle_relay_transcript`
+                // re-registers the binding to the fresh path with `last_offset`
+                // pinned at EOF BEFORE this scan runs, so the next tick has
+                // `path_changed == false` and the first-prompt scanner starts at
+                // that pinned EOF, dropping the deferred (current) turn entirely.
+                // Returning the last complete prompt instead never drops the
+                // current turn: the relayed prompt advances the cursor to its
+                // own line end, and any prompt written after it (e.g. one that
+                // was mid-write this tick) is caught on the next tick by the
+                // unchanged-path first-prompt scanner.
+                //
+                // Residual: if the freshly-resolved transcript is one we already
+                // relayed earlier and then returned to (multi-session mtime
+                // flip-back) AND its just-typed prompt is mid-write at scan time,
+                // the last complete prompt can be an already-relayed older turn,
+                // re-surfaced once (bounded by the 30s recent-duplicate dedup in
+                // observe_prompt_by_tmux). Distinguishing that from the dominant
+                // single-session case ([prompt][its streaming response]) needs
+                // per-transcript relayed-offset memory, which is the relay
+                // delivery-lease / cursor-unification consolidation, not #2843.
+                return Ok(last_prompt.unwrap_or(ClaudeIdleTranscriptScan::NoPrompt {
+                    offset: line_start_offset,
+                }));
+            }
+            continue;
+        };
+        if let Some(prompt) =
+            crate::services::tui_prompt_dedupe::extract_claude_transcript_user_prompt(&json)
+        {
+            last_prompt = Some(ClaudeIdleTranscriptScan::Prompt {
                 prompt,
                 prompt_start_offset: line_start_offset,
                 line_end_offset: offset,
@@ -2049,6 +2340,95 @@ agents:
             scan_claude_idle_transcript_for_prompt(&transcript, 0).expect("scan partial"),
             ClaudeIdleTranscriptScan::NoPrompt {
                 offset: complete.len() as u64,
+            }
+        );
+    }
+
+    #[test]
+    fn claude_idle_transcript_scan_for_last_prompt_selects_newest_in_window() {
+        // #2843 (codex round-2 P1): a path-change lookback window holding an old
+        // finished turn followed by the just-typed prompt must relay only the
+        // newest prompt, not the first (which would re-relay the old turn).
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transcript = dir.path().join("transcript.jsonl");
+        let old_prompt = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"old finished turn\"}]},\"sessionId\":\"s1\"}\n";
+        let old_answer = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"old answer\"}]},\"sessionId\":\"s1\"}\n";
+        let new_prompt = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"just typed prompt\"}]},\"sessionId\":\"s1\"}\n";
+        std::fs::write(&transcript, format!("{old_prompt}{old_answer}{new_prompt}"))
+            .expect("write transcript");
+
+        // First-prompt scan would return the OLD turn (the regression).
+        assert_eq!(
+            scan_claude_idle_transcript_for_prompt(&transcript, 0).expect("first scan"),
+            ClaudeIdleTranscriptScan::Prompt {
+                prompt: "old finished turn".to_string(),
+                prompt_start_offset: 0,
+                line_end_offset: old_prompt.len() as u64,
+            }
+        );
+        // Last-prompt scan returns the just-typed prompt instead.
+        assert_eq!(
+            scan_claude_idle_transcript_for_last_prompt(&transcript, 0).expect("last scan"),
+            ClaudeIdleTranscriptScan::Prompt {
+                prompt: "just typed prompt".to_string(),
+                prompt_start_offset: (old_prompt.len() + old_answer.len()) as u64,
+                line_end_offset: (old_prompt.len() + old_answer.len() + new_prompt.len()) as u64,
+            }
+        );
+    }
+
+    #[test]
+    fn claude_idle_transcript_scan_for_last_prompt_none_when_no_prompt() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transcript = dir.path().join("transcript.jsonl");
+        let init = "{\"type\":\"system\",\"subtype\":\"init\",\"sessionId\":\"s1\"}\n";
+        let answer = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]},\"sessionId\":\"s1\"}\n";
+        std::fs::write(&transcript, format!("{init}{answer}")).expect("write transcript");
+
+        assert_eq!(
+            scan_claude_idle_transcript_for_last_prompt(&transcript, 0).expect("scan"),
+            ClaudeIdleTranscriptScan::NoPrompt {
+                offset: (init.len() + answer.len()) as u64,
+            }
+        );
+    }
+
+    #[test]
+    fn claude_idle_transcript_scan_for_last_prompt_returns_complete_then_catches_next() {
+        // #2843 (codex round-3/round-4): a partial trailing line is NOT consumed
+        // and does NOT defer the already-found complete prompt. Deferring would
+        // drop the current turn (resolve pins the binding at EOF before the
+        // scan, so the next tick starts past the deferred prompt). Returning the
+        // last complete prompt never drops the current turn: a prompt written
+        // after it (mid-write this tick) is caught on the next tick by the
+        // unchanged-path first-prompt scanner from the relayed prompt's line end.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transcript = dir.path().join("transcript.jsonl");
+        let prompt = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"complete prompt\"}]},\"sessionId\":\"s1\"}\n";
+        let next_partial = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"next";
+        std::fs::write(&transcript, format!("{prompt}{next_partial}")).expect("write transcript");
+
+        // Last-prompt scan returns the complete prompt, ignoring the partial.
+        assert_eq!(
+            scan_claude_idle_transcript_for_last_prompt(&transcript, 0).expect("scan"),
+            ClaudeIdleTranscriptScan::Prompt {
+                prompt: "complete prompt".to_string(),
+                prompt_start_offset: 0,
+                line_end_offset: prompt.len() as u64,
+            }
+        );
+
+        // Once the trailing line completes, the next tick's first-prompt scanner
+        // from the relayed prompt's line end catches it — nothing is dropped.
+        let next = format!("{next_partial} prompt\"}}]}},\"sessionId\":\"s1\"}}\n");
+        std::fs::write(&transcript, format!("{prompt}{next}")).expect("rewrite transcript");
+        assert_eq!(
+            scan_claude_idle_transcript_for_prompt(&transcript, prompt.len() as u64)
+                .expect("next-tick scan"),
+            ClaudeIdleTranscriptScan::Prompt {
+                prompt: "next prompt".to_string(),
+                prompt_start_offset: prompt.len() as u64,
+                line_end_offset: (prompt.len() + next.len()) as u64,
             }
         );
     }
