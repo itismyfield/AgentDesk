@@ -34,6 +34,7 @@ pub(crate) struct Intervention {
     pub(crate) reply_context: Option<String>,
     pub(crate) has_reply_boundary: bool,
     pub(crate) merge_consecutive: bool,
+    pub(crate) pending_uploads: Vec<String>,
     /// #2266: when a voice-transcript announcement loses the
     /// `mailbox_try_start_turn` race and is enqueued for later dispatch, the
     /// per-process `voice::announce_meta` store entry is consumed by the
@@ -181,6 +182,7 @@ pub(crate) fn enqueue_intervention(
             if intervention.voice_announcement.is_some() {
                 last.voice_announcement = intervention.voice_announcement;
             }
+            last.pending_uploads.extend(intervention.pending_uploads);
             return EnqueueInterventionResult {
                 enqueued: true,
                 merged: true,
@@ -295,6 +297,9 @@ pub(crate) struct PendingQueueItem {
     pub(crate) has_reply_boundary: bool,
     #[serde(default)]
     pub(crate) merge_consecutive: bool,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) pending_uploads: Vec<String>,
     /// Channel this item belongs to (routing snapshot — used by the kickoff guard).
     #[serde(default)]
     pub(crate) channel_id: Option<u64>,
@@ -537,6 +542,7 @@ pub(crate) fn save_channel_queue(
             reply_context: i.reply_context.clone(),
             has_reply_boundary: i.has_reply_boundary,
             merge_consecutive: i.merge_consecutive,
+            pending_uploads: i.pending_uploads.clone(),
             channel_id: Some(channel_id.get()),
             channel_name: None,
             override_channel_id: dispatch_role_override,
@@ -611,6 +617,7 @@ fn pending_queue_item_to_intervention(item: PendingQueueItem, now: Instant) -> I
         reply_context: item.reply_context,
         has_reply_boundary: item.has_reply_boundary,
         merge_consecutive: item.merge_consecutive,
+        pending_uploads: item.pending_uploads,
         // #2266: durable on-disk queue restores the voice-transcript
         // metadata so the dispatch path on the next run can reinsert it
         // into the per-process announce_meta store. Older queue files that
@@ -671,6 +678,7 @@ pub(crate) fn save_pending_queues(
                 reply_context: i.reply_context.clone(),
                 has_reply_boundary: i.has_reply_boundary,
                 merge_consecutive: i.merge_consecutive,
+                pending_uploads: i.pending_uploads.clone(),
                 channel_id: Some(channel_id.get()),
                 channel_name: None,
                 override_channel_id: override_id,
@@ -2494,6 +2502,7 @@ mod actor_hydrate_regression_tests {
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: false,
+            pending_uploads: Vec::new(),
             voice_announcement: None,
         }
     }
@@ -2979,6 +2988,7 @@ mod enqueue_refusal_reason_tests {
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: false,
+            pending_uploads: Vec::new(),
             voice_announcement: None,
         }
     }
@@ -3109,6 +3119,7 @@ mod persistence_tests {
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: false,
+            pending_uploads: Vec::new(),
             voice_announcement,
         }
     }
@@ -3134,6 +3145,7 @@ mod persistence_tests {
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: false,
+            pending_uploads: Vec::new(),
             voice_announcement: None,
         };
 
@@ -3187,6 +3199,39 @@ mod persistence_tests {
             loaded[&channel_id][0].voice_announcement.as_ref(),
             Some(&announcement),
             "post-restart disk load must not depend on the in-memory announcement TTL"
+        );
+    }
+
+    #[test]
+    fn pending_queue_roundtrip_preserves_upload_context() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        let provider = ProviderKind::Codex;
+        let token_hash = "upload_context_roundtrip";
+        let channel_id = ChannelId::new(2_840_001);
+        let mut intervention = make_intervention(2_840_002, "", None);
+        intervention.pending_uploads = vec![
+            "[File uploaded] report.pdf → /runtime/discord_uploads/1/report.pdf (123 bytes)"
+                .to_string(),
+        ];
+
+        save_channel_queue(
+            &provider,
+            token_hash,
+            channel_id,
+            std::slice::from_ref(&intervention),
+            None,
+        );
+
+        let saved = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
+        assert_eq!(saved[0].pending_uploads, intervention.pending_uploads);
+
+        let (loaded, _) = load_pending_queues(&provider, token_hash);
+        assert_eq!(
+            loaded[&channel_id][0].pending_uploads, intervention.pending_uploads,
+            "queued attachment-only turns must carry their own upload context"
         );
     }
 
@@ -3311,6 +3356,7 @@ mod tests {
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: false,
+            pending_uploads: Vec::new(),
             voice_announcement: None,
         }
     }
@@ -4025,6 +4071,7 @@ mod purge_queue_tests {
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: false,
+            pending_uploads: Vec::new(),
             voice_announcement: None,
         }
     }

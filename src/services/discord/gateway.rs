@@ -657,6 +657,14 @@ impl TurnGateway for DiscordGateway {
             } else {
                 live_turn.request_owner
             };
+            if !intervention.pending_uploads.is_empty() {
+                let mut data = self.shared.core.lock().await;
+                if let Some(session) = data.sessions.get_mut(&channel_id) {
+                    session
+                        .pending_uploads
+                        .extend(intervention.pending_uploads.iter().cloned());
+                }
+            }
             handle_text_message(
                 &deps,
                 channel_id,
@@ -674,6 +682,7 @@ impl TurnGateway for DiscordGateway {
                 // Queued turn kickoff: the prior turn already finished, so
                 // this dispatch is not racing the placeholder-delete path.
                 router::TurnKind::Foreground,
+                Vec::new(),
             )
             .await
             .map_err(|e| e.to_string())

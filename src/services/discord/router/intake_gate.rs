@@ -36,6 +36,55 @@ pub(super) fn should_skip_for_missing_required_mention(
         && !content_has_explicit_user_mention(content, bot_user_id)
 }
 
+fn strip_leading_bot_mention(text: &str) -> String {
+    static BOT_MENTION_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^<@!?\d+>\s*").expect("static bot-mention regex is valid")
+    });
+    BOT_MENTION_RE.replace(text, "").to_string()
+}
+
+fn should_start_attachment_only_turn(text: &str, saved_attachment_count: usize) -> bool {
+    saved_attachment_count > 0 && strip_leading_bot_mention(text).trim().is_empty()
+}
+
+async fn record_upload_history(
+    shared: &std::sync::Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    upload_records: &[String],
+) {
+    if upload_records.is_empty() {
+        return;
+    }
+    let mut data = shared.core.lock().await;
+    if let Some(session) = data.sessions.get_mut(&channel_id) {
+        session
+            .history
+            .extend(upload_records.iter().cloned().map(|content| HistoryItem {
+                item_type: HistoryType::User,
+                content,
+            }));
+    }
+}
+
+async fn append_pending_uploads(
+    shared: &std::sync::Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    upload_records: &[String],
+) -> bool {
+    if upload_records.is_empty() {
+        return true;
+    }
+    let mut data = shared.core.lock().await;
+    if let Some(session) = data.sessions.get_mut(&channel_id) {
+        session
+            .pending_uploads
+            .extend(upload_records.iter().cloned());
+        true
+    } else {
+        false
+    }
+}
+
 pub(in crate::services::discord) fn bot_author_allowed_for_live_intake(
     allowed_bot_ids: &[u64],
     announce_bot_id: Option<u64>,
@@ -235,6 +284,7 @@ fn build_soft_intervention(
     reply_context: Option<String>,
     has_reply_boundary: bool,
     merge_consecutive: bool,
+    pending_uploads: Vec<String>,
     // #2266: when the intake-gate sees a voice-transcript announcement and
     // chooses to enqueue it (busy active turn, thread guard, dispatch
     // collision, drain mode, reconcile gate), the per-process
@@ -256,6 +306,7 @@ fn build_soft_intervention(
         reply_context,
         has_reply_boundary,
         merge_consecutive,
+        pending_uploads,
         voice_announcement,
     }
 }
@@ -270,6 +321,7 @@ async fn enqueue_soft_intervention(
     reply_context: Option<String>,
     has_reply_boundary: bool,
     merge_consecutive: bool,
+    pending_uploads: Vec<String>,
     // #2266: pass-through for the voice-transcript payload (see
     // `build_soft_intervention` doc-comment).
     voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
@@ -286,6 +338,7 @@ async fn enqueue_soft_intervention(
             reply_context,
             has_reply_boundary,
             merge_consecutive,
+            pending_uploads,
             voice_announcement,
         ),
     )
@@ -304,7 +357,17 @@ pub(super) async fn enqueue_soft_intervention_for_test(
         shared,
         &ProviderKind::Codex,
         channel_id,
-        build_soft_intervention(author_id, false, message_id, text, None, false, false, None),
+        build_soft_intervention(
+            author_id,
+            false,
+            message_id,
+            text,
+            None,
+            false,
+            false,
+            Vec::new(),
+            None,
+        ),
     )
     .await
     .enqueued
@@ -1597,19 +1660,53 @@ pub(in crate::services::discord) async fn handle_event(
                 }
             }
 
-            // Handle file attachments — download regardless of session state
-            if !new_message.attachments.is_empty() {
+            // Handle file attachments — download regardless of session state.
+            // For thread messages, bootstrap the thread session before saving so
+            // upload context attaches to the eventual turn instead of being
+            // dropped while only the parent session exists.
+            let upload_records = if !new_message.attachments.is_empty() {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
                     "  [{ts}] ◀ [{user_name}] Upload: {} file(s)",
                     new_message.attachments.len()
                 );
-                // Ensure session exists before handling uploads
                 auto_restore_session_with_dm_hint(&data.shared, channel_id, ctx, Some(is_dm)).await;
-                super::message_handler::handle_file_upload(ctx, new_message, &data.shared).await?;
-            }
+                if effective_channel_id != channel_id {
+                    let needs_parent = {
+                        let d = data.shared.core.lock().await;
+                        !d.sessions.contains_key(&channel_id)
+                    };
+                    if needs_parent {
+                        auto_restore_session(&data.shared, effective_channel_id, ctx).await;
+                        let parent_path = {
+                            let d = data.shared.core.lock().await;
+                            d.sessions
+                                .get(&effective_channel_id)
+                                .and_then(|s| s.current_path.clone())
+                        };
+                        if let Some(path) = parent_path {
+                            bootstrap_thread_session(
+                                &data.shared,
+                                channel_id,
+                                &path,
+                                &ctx.http,
+                                Some(&ctx.cache),
+                            )
+                            .await;
+                        }
+                    }
+                }
+                super::message_handler::handle_file_upload(ctx, new_message, &data.shared).await?
+            } else {
+                Vec::new()
+            };
+            record_upload_history(&data.shared, channel_id, &upload_records).await;
+            let mut upload_records_appended_to_session = false;
 
-            if text.is_empty() {
+            let attachment_only_turn =
+                should_start_attachment_only_turn(text, upload_records.len());
+            let text = if attachment_only_turn { "" } else { text };
+            if text.is_empty() && !attachment_only_turn {
                 return Ok(());
             }
 
@@ -1626,20 +1723,12 @@ pub(in crate::services::discord) async fn handle_event(
             // ── Text commands (!start, !meeting, !stop, !clear) ──
             // Strip leading bot mention to get the actual command text.
             //
-            // #2044 F11: the pattern is constant — compile once via
-            // `LazyLock` instead of paying the per-message compile cost
-            // and exposing intake to a panic on a hypothetical compile
-            // failure (the previous code used `.unwrap()` on a
-            // `regex::Regex::new` result inside the hot path).
-            let cmd_text = {
-                static BOT_MENTION_RE: std::sync::LazyLock<regex::Regex> =
-                    std::sync::LazyLock::new(|| {
-                        regex::Regex::new(r"^<@!?\d+>\s*")
-                            .expect("static bot-mention regex is valid")
-                    });
-                BOT_MENTION_RE.replace(text, "").to_string()
-            };
+            // #2044 F11: the helper uses a constant regex compiled once via
+            // `LazyLock`, avoiding a per-message compile cost in the hot path.
+            let cmd_text = strip_leading_bot_mention(text);
             if cmd_text.starts_with('!') {
+                upload_records_appended_to_session =
+                    append_pending_uploads(&data.shared, channel_id, &upload_records).await;
                 let handled = super::message_handler::handle_text_command(
                     ctx,
                     new_message,
@@ -1649,6 +1738,10 @@ pub(in crate::services::discord) async fn handle_event(
                 )
                 .await?;
                 if handled {
+                    if !upload_records_appended_to_session {
+                        let _ =
+                            append_pending_uploads(&data.shared, channel_id, &upload_records).await;
+                    }
                     return Ok(());
                 }
             }
@@ -1746,7 +1839,8 @@ pub(in crate::services::discord) async fn handle_event(
             } else {
                 None
             };
-            let merge_consecutive = should_merge_consecutive_messages(text, is_allowed_bot);
+            let merge_consecutive = upload_records.is_empty()
+                && should_merge_consecutive_messages(text, is_allowed_bot);
 
             // ── Dispatch-thread guard ─────────────────────────────────
             // When a dispatch thread is active for this channel, bot messages
@@ -1824,6 +1918,7 @@ pub(in crate::services::discord) async fn handle_event(
                                 None,
                                 false,
                                 false,
+                                upload_records.clone(),
                                 // #2266: thread-guard queue path — embed the
                                 // voice payload so the eventual queued
                                 // dispatch can reinsert it into the store
@@ -1882,6 +1977,7 @@ pub(in crate::services::discord) async fn handle_event(
                         None,
                         false,
                         false,
+                        upload_records.clone(),
                         // #2266: DISPATCH: collision guard — DISPATCH messages
                         // never carry voice transcripts, so this is always
                         // None. Explicit for clarity / future audits.
@@ -1941,6 +2037,7 @@ pub(in crate::services::discord) async fn handle_event(
                     reply_context.clone(),
                     has_reply_boundary,
                     merge_consecutive,
+                    upload_records.clone(),
                     // #2266: main busy-active-turn queue path — voice
                     // transcripts that arrive while a previous turn is
                     // running flow through here. Embed the announcement
@@ -2021,6 +2118,7 @@ pub(in crate::services::discord) async fn handle_event(
                     reply_context.clone(),
                     has_reply_boundary,
                     merge_consecutive,
+                    upload_records.clone(),
                     // #2266: reconcile gate — startup-recovery queue path.
                     // Voice transcripts that arrive before recovery
                     // completes need the embedded payload too.
@@ -2071,6 +2169,7 @@ pub(in crate::services::discord) async fn handle_event(
                     reply_context.clone(),
                     has_reply_boundary,
                     merge_consecutive,
+                    upload_records.clone(),
                     // #2266: drain-mode queue path (restart pending) —
                     // pass the embedded voice payload so the post-restart
                     // dispatch path can reinsert it into the store.
@@ -2158,6 +2257,7 @@ pub(in crate::services::discord) async fn handle_event(
                             reply_context.clone(),
                             has_reply_boundary,
                             merge_consecutive,
+                            upload_records.clone(),
                             // #2266: queued-behind-idle-backlog path —
                             // FIFO ordering keeps voice transcripts behind
                             // pre-existing queue items, so embed the
@@ -2202,6 +2302,10 @@ pub(in crate::services::discord) async fn handle_event(
 
             // Meeting command from text (e.g. announce bot sending "/meeting start ...")
             if text.starts_with("/meeting ") {
+                if !upload_records_appended_to_session {
+                    upload_records_appended_to_session =
+                        append_pending_uploads(&data.shared, channel_id, &upload_records).await;
+                }
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!("  [{ts}] ◀ [{user_name}] Meeting cmd: {text}");
                 let http = ctx.http.clone();
@@ -2214,12 +2318,19 @@ pub(in crate::services::discord) async fn handle_event(
                 )
                 .await?
                 {
+                    if !upload_records_appended_to_session {
+                        let _ =
+                            append_pending_uploads(&data.shared, channel_id, &upload_records).await;
+                    }
                     return Ok(());
                 }
             }
 
             // Shell command shortcut
             if text.starts_with('!') {
+                if !upload_records_appended_to_session {
+                    let _ = append_pending_uploads(&data.shared, channel_id, &upload_records).await;
+                }
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 let preview = truncate_str(text, 60);
                 tracing::info!("  [{ts}] ◀ [{user_name}] Shell: {preview}");
@@ -2264,7 +2375,14 @@ pub(in crate::services::discord) async fn handle_event(
             // node first. Only acts when a PG pool exists AND the global
             // mode env var is `observe` or `enforce`; otherwise this is
             // a no-op and the leader runs the intake locally as before.
-            let route_decision = if let Some(pool) = data.shared.pg_pool.as_ref().as_ref() {
+            let route_decision = if !new_message.attachments.is_empty() {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    user_msg_id = %new_message.id,
+                    "[intake_router] Discord attachments are node-local — running locally"
+                );
+                None
+            } else if let Some(pool) = data.shared.pg_pool.as_ref().as_ref() {
                 let mode =
                     crate::services::cluster::intake_router_hook::IntakeRoutingMode::from_env();
                 let leader_instance_id =
@@ -2363,6 +2481,11 @@ pub(in crate::services::discord) async fn handle_event(
                 shared: &data.shared,
                 token: &data.token,
             };
+            let preloaded_uploads = if upload_records_appended_to_session {
+                Vec::new()
+            } else {
+                upload_records.clone()
+            };
             super::message_handler::handle_text_message(
                 &deps,
                 channel_id,
@@ -2378,6 +2501,7 @@ pub(in crate::services::discord) async fn handle_event(
                 has_reply_boundary,
                 Some(is_dm),
                 turn_kind,
+                preloaded_uploads,
             )
             .await?;
         }
@@ -2915,7 +3039,10 @@ mod thread_guard_stale_tests {
 
 #[cfg(test)]
 mod reply_context_tests {
-    use super::{AttachmentReplyItem, format_attachment_reply_context};
+    use super::{
+        AttachmentReplyItem, format_attachment_reply_context, should_start_attachment_only_turn,
+        strip_leading_bot_mention,
+    };
 
     #[test]
     fn attachment_reply_context_keeps_canonical_message_id_and_all_files() {
@@ -2934,6 +3061,20 @@ mod reply_context_tests {
         assert!(context.contains("photo-3.png"));
         assert!(context.contains("middle attachment"));
         assert!(context.contains("photo-5.png"));
+    }
+
+    #[test]
+    fn attachment_only_empty_check_ignores_leading_bot_mention() {
+        assert_eq!(strip_leading_bot_mention("<@123456789>   "), "");
+        assert_eq!(strip_leading_bot_mention("<@!123456789> look"), "look");
+    }
+
+    #[test]
+    fn attachment_only_turn_accepts_any_saved_file_without_prompt() {
+        assert!(should_start_attachment_only_turn("", 1));
+        assert!(should_start_attachment_only_turn("<@123456789>   ", 1));
+        assert!(!should_start_attachment_only_turn("please inspect", 1));
+        assert!(!should_start_attachment_only_turn("", 0));
     }
 }
 
