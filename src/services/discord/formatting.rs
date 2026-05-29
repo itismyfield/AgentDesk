@@ -264,7 +264,7 @@ mod tests {
         build_monitor_handoff_placeholder_with_context, build_placeholder_status_block,
         build_processing_status_block, canonical_tool_name, classify_long_running_tool,
         convert_markdown_tables, escape_for_code_fence, filter_codex_tool_logs,
-        finalize_in_progress_tool_status, format_for_discord_with_provider,
+        finalize_in_progress_tool_status, format_for_discord_with_provider, format_tool_input,
         normalize_allowed_tools, preserve_previous_tool_status,
         replace_long_message_outcome_to_result, strip_codex_tool_log_lines,
     };
@@ -277,6 +277,58 @@ mod tests {
             escape_for_code_fence("``two backticks``"),
             "``two backticks``"
         );
+    }
+
+    #[test]
+    fn format_tool_input_toolsearch_renders_query_and_limit() {
+        // #2847: previously this pretty-printed input fell into the default arm
+        // and returned multi-line JSON whose first content line is "{".
+        assert_eq!(
+            format_tool_input(
+                "ToolSearch",
+                "{\n  \"query\": \"delivery lease\",\n  \"max_results\": 5\n}"
+            ),
+            "\"delivery lease\" (limit 5)"
+        );
+        // `limit` is accepted as an alias for `max_results`.
+        assert_eq!(
+            format_tool_input("ToolSearch", "{\"query\":\"x\",\"limit\":3}"),
+            "\"x\" (limit 3)"
+        );
+        // query-only renders without a limit suffix.
+        assert_eq!(
+            format_tool_input("tool_search", "{\"query\":\"y\"}"),
+            "\"y\""
+        );
+    }
+
+    #[test]
+    fn format_tool_input_toolsearch_missing_query_falls_back_to_compact_json() {
+        let out = format_tool_input("ToolSearch", "{\n  \"max_results\": 9\n}");
+        assert_eq!(out, "{\"max_results\":9}");
+        assert!(!out.contains('\n'));
+    }
+
+    #[test]
+    fn format_tool_input_monitor_renders_description_then_command() {
+        assert_eq!(
+            format_tool_input(
+                "Monitor",
+                "{\n  \"description\": \"watch CI\",\n  \"command\": \"gh pr checks\"\n}"
+            ),
+            "watch CI: `gh pr checks`"
+        );
+        assert_eq!(
+            format_tool_input("Monitor", "{\"command\":\"tail -f log\"}"),
+            "`tail -f log`"
+        );
+    }
+
+    #[test]
+    fn format_tool_input_unknown_pretty_json_is_compacted_not_multiline() {
+        let out = format_tool_input("SomeFutureTool", "{\n  \"a\": 1\n}");
+        assert_eq!(out, "{\"a\":1}");
+        assert!(!out.contains('\n'));
     }
 
     #[test]
@@ -1747,6 +1799,18 @@ pub(super) fn shorten_path(path: &str) -> String {
     }
 }
 
+/// Render parsed tool input as a COMPACT one-line JSON summary (#2847).
+///
+/// Tool input frequently arrives as `serde_json::to_string_pretty` output
+/// (multi-line, indented) from `session_backend`. The first non-empty line of
+/// that is just `{`, which downstream live-event rendering collapses to a bare
+/// `[ToolSearch] {` / `[Monitor] {`. Re-serializing the already-parsed value
+/// compactly removes the newlines so the fallback is always informative.
+fn compact_json_fallback(v: &serde_json::Value, raw: &str) -> String {
+    let compact = serde_json::to_string(v).unwrap_or_else(|_| raw.to_string());
+    truncate_str(&compact, 200).to_string()
+}
+
 /// Format tool input JSON into a human-readable summary (without tool name prefix).
 /// The caller adds the tool name, so this returns only the detail part.
 pub(super) fn format_tool_input(name: &str, input: &str) -> String {
@@ -1838,6 +1902,36 @@ pub(super) fn format_tool_input(name: &str, input: &str) -> String {
             let url = v.get("url").and_then(|v| v.as_str()).unwrap_or("");
             url.to_string()
         }
+        "ToolSearch" | "tool_search" | "tool_search_tool" => {
+            let query = v.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            // ToolSearch's limit field is `max_results`; accept `limit` as an alias.
+            let limit = v
+                .get("max_results")
+                .or_else(|| v.get("limit"))
+                .and_then(|v| v.as_u64());
+            if query.is_empty() {
+                compact_json_fallback(&v, input)
+            } else if let Some(limit) = limit {
+                format!("\"{}\" (limit {})", truncate_str(query, 150), limit)
+            } else {
+                format!("\"{}\"", truncate_str(query, 180))
+            }
+        }
+        "Monitor" => {
+            let desc = v.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            let cmd = v.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            if !desc.is_empty() {
+                if !cmd.is_empty() {
+                    format!("{}: `{}`", desc, truncate_str(cmd, 150))
+                } else {
+                    desc.to_string()
+                }
+            } else if !cmd.is_empty() {
+                format!("`{}`", truncate_str(cmd, 180))
+            } else {
+                compact_json_fallback(&v, input)
+            }
+        }
         "Task" | "Agent" => {
             let desc = v.get("description").and_then(|v| v.as_str()).unwrap_or("");
             let subagent_type = v
@@ -1919,11 +2013,14 @@ pub(super) fn format_tool_input(name: &str, input: &str) -> String {
         _ => {
             // MCP tools: try to extract a meaningful detail
             if name.starts_with("mcp__") {
-                // Show the short tool name (last segment after __)
+                // Show the short tool name (last segment after __). Compact the
+                // input (#2847) so pretty-printed JSON does not leak a bare
+                // `<short_name>: {` line through the live-event collapse.
                 let short_name = name.rsplit("__").next().unwrap_or(name);
-                truncate_str(&format!("{}: {}", short_name, input), 200).to_string()
+                let compact = serde_json::to_string(&v).unwrap_or_else(|_| input.to_string());
+                truncate_str(&format!("{}: {}", short_name, compact), 200).to_string()
             } else {
-                truncate_str(input, 200).to_string()
+                compact_json_fallback(&v, input)
             }
         }
     }
