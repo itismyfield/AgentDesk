@@ -9,9 +9,10 @@ ingestion time so assertions operate purely on what the TUI relay produced.
 from __future__ import annotations
 
 import dataclasses
+import datetime as _dt
 import os
 import re
-from typing import Any
+from typing import Any, Sequence
 
 # Discord author ids:
 #   - Our driver uses the "명령봇" account to push prompts via /api/discord/send.
@@ -128,6 +129,125 @@ def text_present(window: Window, *, needle: str) -> None:
         f"expected to find {needle!r} in relay window, got {len(window.messages)} "
         f"relay messages (raw observed: {len(window.raw_messages)})"
     )
+
+
+# ---------------------------------------------------------------------------
+# #2838 (relay-stability P0-2): completeness / ordering / duplicate-marker /
+# latency assertions.
+#
+# The legacy contract (`text_present` first-hit + `no_duplicate_content`
+# byte-identical) is structurally blind to the exact leak classes that recur:
+# missing tail/body, duplicate-with-differing-header, out-of-order delivery,
+# and relay stalls. These primitives let a scenario assert the *full* expected
+# relay set — ordered content, per-marker uniqueness, untruncated bodies, and a
+# latency budget — instead of mere presence. See docs/plans/
+# tui-relay-e2e-stabilization.md.
+# ---------------------------------------------------------------------------
+
+
+def ordered_text_present(window: Window, *, needles: Sequence[str]) -> None:
+    """Assert every needle appears in the relay window in the given order.
+
+    Matching advances a (message_index, char_offset) cursor, so needles may be
+    split across separate relay messages or share one message, but a later
+    needle must never resolve before an earlier one. Catches missing-fragment
+    and out-of-order delivery that single-needle :func:`text_present` passes.
+    """
+
+    bodies = [(message.get("content") or "") for message in window.messages]
+    cursor_msg = 0
+    cursor_pos = 0
+    for needle in needles:
+        placed = False
+        for idx in range(cursor_msg, len(bodies)):
+            start = cursor_pos if idx == cursor_msg else 0
+            hit = bodies[idx].find(needle, start)
+            if hit != -1:
+                cursor_msg = idx
+                cursor_pos = hit + len(needle)
+                placed = True
+                break
+        if not placed:
+            raise AssertionError(
+                f"ordered needle {needle!r} not found at/after relay position "
+                f"(msg={cursor_msg}, pos={cursor_pos}); {len(bodies)} relay messages, "
+                f"raw observed {len(window.raw_messages)}"
+            )
+
+
+def no_duplicate_marker(window: Window, *, marker: str) -> None:
+    """Fail if a stable E2E marker appears in more than one relay message.
+
+    Unlike :func:`no_duplicate_content` (which only catches byte-identical
+    bodies after chrome stripping), this catches the duplicate-with-differing-
+    header re-emit: the watcher re-relaying the same answer with a different
+    status prefix after a restart or the 10s ACK-timeout fallback. The marker
+    (e.g. ``[E2E:E2:TURN-2]``) is expected exactly once per turn.
+    """
+
+    hits = sum(1 for m in window.messages if marker in (m.get("content") or ""))
+    if hits > 1:
+        raise AssertionError(
+            f"E2E marker {marker!r} appeared in {hits} relay messages "
+            f"(expected exactly 1) — duplicate re-emit"
+        )
+
+
+def body_complete(window: Window, *, head: str, tail: str) -> None:
+    """Assert the relay message containing ``head`` also contains ``tail`` after it.
+
+    Catches a truncated-tail relay even when ``text_present(head)`` passes — the
+    classic "first chunk delivered, remainder dropped" leak on long responses.
+    """
+
+    for message in window.messages:
+        body = message.get("content") or ""
+        head_at = body.find(head)
+        if head_at != -1:
+            if body.find(tail, head_at + len(head)) != -1:
+                return
+            raise AssertionError(
+                f"relay body contains head {head!r} but not tail {tail!r} after it "
+                f"(truncated body): {body[:160]!r}"
+            )
+    raise AssertionError(f"head {head!r} not found in any relay message")
+
+
+def _parse_discord_ts(value: str) -> _dt.datetime | None:
+    """Parse a Discord ISO-8601 timestamp into an aware datetime, or None."""
+
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return _dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def relay_latency_within(window: Window, *, max_seconds: float) -> None:
+    """Assert the first→last relay message span is within ``max_seconds``.
+
+    Uses Discord message timestamps. Catches relay stalls / excessive delay that
+    presence-only assertions ignore. A window with fewer than two timestamped
+    relay messages is a no-op (nothing to bound).
+    """
+
+    times = [
+        parsed
+        for message in window.messages
+        if (parsed := _parse_discord_ts(str(message.get("timestamp") or ""))) is not None
+    ]
+    if len(times) < 2:
+        return
+    span = (max(times) - min(times)).total_seconds()
+    if span > max_seconds:
+        raise AssertionError(
+            f"relay span {span:.1f}s exceeds budget {max_seconds:.1f}s "
+            f"({len(times)} timestamped relay messages)"
+        )
 
 
 def raw_text_present(window: Window, *, needle: str) -> None:

@@ -18,3 +18,14 @@ assertions:
   - text_present: "안녕👋 E-3 UTF-8 relay"
   - text_present: "e2e-utf8"
   - no_control_chars: true
+  # #2838 (P0-2): completeness + ordering. The greeting must precede the code
+  # block, and the code block body must arrive intact — `text_present`
+  # first-hit passes even if the relay truncates between `fn main()` and the
+  # println, so assert the head→tail body explicitly.
+  - ordered_text_present:
+      - "안녕👋 E-3 UTF-8 relay"
+      - "fn main()"
+      - "e2e-utf8"
+  - body_complete:
+      head: "fn main()"
+      tail: "e2e-utf8"

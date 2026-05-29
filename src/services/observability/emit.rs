@@ -354,6 +354,49 @@ pub fn emit_intake_placeholder_post_failed(
     );
 }
 
+/// #2838 (relay-stability P0-1): record a structured event at each terminal
+/// relay delivery decision so the duplicate-emit (root cause #1) and
+/// missing-answer (root cause #4) vectors are PG-queryable and attributable to
+/// a specific owner. `owner` is one of `turn_bridge` | `watcher_direct` |
+/// `session_relay_sink` | `standby` | `recovery`; `op` is `edit` | `post` |
+/// `skip`; `committed` reflects whether the answer actually reached Discord.
+/// The bridge-side delivery decision is NOT covered by the watcher-side
+/// `relay_flight_recorder` tracing, so this closes that observability gap
+/// before the delivery-lease consolidation touches the hot path.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_relay_delivery(
+    provider: &str,
+    channel_id: u64,
+    turn_id: Option<&str>,
+    msg_id: Option<u64>,
+    owner: &str,
+    op: &str,
+    byte_range_start: Option<u64>,
+    byte_range_end: Option<u64>,
+    committed: bool,
+    detail: Option<&str>,
+) {
+    emit_event(
+        "relay_delivery",
+        Some(provider),
+        Some(channel_id),
+        None,
+        None,
+        turn_id,
+        Some(if committed { "committed" } else { "uncommitted" }),
+        CounterDelta::default(),
+        json!({
+            "owner": normalize_string(owner),
+            "op": normalize_string(op),
+            "msg_id": msg_id,
+            "byte_range_start": byte_range_start,
+            "byte_range_end": byte_range_end,
+            "committed": committed,
+            "detail": detail.and_then(normalize_string),
+        }),
+    );
+}
+
 pub fn emit_agent_quality_event(event: AgentQualityEvent) {
     let Some(event_type) = super::helpers::normalize_quality_event_type(&event.event_type) else {
         tracing::warn!(

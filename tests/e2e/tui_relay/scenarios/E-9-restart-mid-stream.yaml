@@ -18,3 +18,9 @@ steps:
 assertions:
   - no_duplicate_content: true
   - text_present: "[E2E:E9:STREAM_OK]"
+  # #2838 (P0-2): the sentinel was relayed BEFORE the restart. A restart that
+  # re-reads the turn from its start offset (root cause #2/#4) re-relays the
+  # same answer with a different status header — which no_duplicate_content
+  # (byte-identical only) does not catch. The sentinel must appear in exactly
+  # one relay message across the whole window, pre- and post-restart.
+  - no_duplicate_marker: "[E2E:E9:STREAM_OK]"

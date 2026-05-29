@@ -4754,6 +4754,23 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 relay_decision.should_direct_send,
                 session_bound_ack_outcome,
             );
+        // #2838 (relay-stability P0-1): count the primary duplicate-emit vector.
+        // The 10s session-bound terminal ACK timed out yet the watcher proceeds
+        // to direct-send, so the StreamRelay sink may have actually posted (just
+        // lagged the committed-sequence metric) and this re-sends the same
+        // answer. Rising counts here are the signal that the dual-authority
+        // terminal-delivery lease (P1) is overdue.
+        if watcher_direct_fallback_after_session_bound_ack
+            && matches!(
+                session_bound_ack_outcome,
+                SessionBoundRelayAckOutcome::TimedOut
+            )
+        {
+            crate::services::observability::metrics::record_relay_terminal_ack_timeout(
+                channel_id.get(),
+                watcher_provider.as_str(),
+            );
+        }
         tracing::info!(
             target: "agentdesk::relay_flight_recorder",
             provider = watcher_provider.as_str(),

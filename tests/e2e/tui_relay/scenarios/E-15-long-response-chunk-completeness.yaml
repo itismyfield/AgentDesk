@@ -1,0 +1,42 @@
+id: E-15
+title: 2000자 초과 응답 청크 완전성 (#2838 P0-2) — head→mid→tail 순서 + 중복 0
+cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
+isolation: required
+notes: |
+  Long responses cross Discord's 2000-char limit and are split into multiple
+  relay messages by the fence-aware chunker. This scenario verifies the FULL
+  span relays in order (no truncated tail, no dropped middle) and that no
+  boundary sentinel is re-emitted. Presence-only text_present passes even when
+  the relay drops everything between BEGIN and END, so we assert the ordered
+  BEGIN → MID → END span and per-marker uniqueness instead.
+
+  The interior markers are requested at explicit positions so the assertion is
+  robust to minor model output variance while still proving the >2000-char body
+  arrived intact across chunk boundaries.
+steps:
+  - send_prompt: |
+      긴 응답 완전성 테스트입니다. 아래를 정확히 순서대로 출력해줘. 설명·요약 금지.
+      1) 첫 줄: [E2E:E15:BEGIN]
+      2) 그다음 "E15-LINE-NNN" 형식으로 001부터 160까지 한 줄에 하나씩 (총 160줄, 0 채움 3자리)
+      3) 80번째 줄(E15-LINE-080) 바로 다음 줄에 단독으로: [E2E:E15:MID]
+      4) 마지막 줄: [E2E:E15:END]
+  - wait_for_discord_text: "[E2E:E15:END]"
+    timeout_s: 300
+assertions:
+  - text_present: "[E2E:E15:BEGIN]"
+  - text_present: "[E2E:E15:END]"
+  - no_control_chars: true
+  # Full span must relay in order across chunk boundaries: BEGIN, an early
+  # interior line, the MID sentinel, a late interior line, then END. If the
+  # relay truncates the tail or drops the middle (the classic long-response
+  # leak), one of these resolves out of order or is missing.
+  - ordered_text_present:
+      - "[E2E:E15:BEGIN]"
+      - "E15-LINE-010"
+      - "[E2E:E15:MID]"
+      - "E15-LINE-150"
+      - "[E2E:E15:END]"
+  # Boundary sentinels must not be re-emitted (e.g. a chunk-retry that re-sends
+  # the first chunk, or an ACK-timeout re-relay).
+  - no_duplicate_marker: "[E2E:E15:BEGIN]"
+  - no_duplicate_marker: "[E2E:E15:END]"

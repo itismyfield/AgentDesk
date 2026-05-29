@@ -20,3 +20,14 @@ assertions:
   - text_present: "[E2E:E2:TURN-2]"
   - text_present: "[E2E:E2:TURN-3]"
   - no_resume_prompt_chrome: true
+  # #2838 (P0-2): the three turns must arrive in order (turn separation), and
+  # no single turn's answer may be re-relayed. Per-marker uniqueness catches a
+  # turn being re-emitted with a different header (which no_duplicate_content
+  # misses); ordering catches a stale earlier-turn answer surfacing late.
+  - ordered_text_present:
+      - "[E2E:E2:TURN-1]"
+      - "[E2E:E2:TURN-2]"
+      - "[E2E:E2:TURN-3]"
+  - no_duplicate_marker: "[E2E:E2:TURN-1]"
+  - no_duplicate_marker: "[E2E:E2:TURN-2]"
+  - no_duplicate_marker: "[E2E:E2:TURN-3]"

@@ -53,6 +53,26 @@ pub struct AtomicCounters {
     /// one occurrence where the legacy code would have silently dropped the
     /// watcher; the runtime now keeps the live watcher attached and observable.
     pub watcher_db_fallback_resolve_failed: AtomicU64,
+    /// #2838 (relay-stability P0-1): the watcher's 10s session-bound terminal
+    /// delivery ACK timed out AND the watcher proceeded to direct-send anyway.
+    /// This is the primary duplicate-emit vector (root cause #1a): the
+    /// StreamRelay sink may have actually posted but lagged the committed
+    /// sequence metric, so the watcher re-sends the same answer. Rising counts
+    /// here mean the dual-authority terminal-delivery lease is overdue.
+    pub relay_terminal_ack_timeout: AtomicU64,
+    /// #2838: finalization cleared inflight while `full_response` was non-empty
+    /// and terminal delivery was NOT committed — i.e. a generated answer was
+    /// destroyed with no retry path (root causes #1b / #4, the missing-answer
+    /// vector). Any non-zero value is a leaked answer.
+    pub relay_uncommitted_inflight_cleared: AtomicU64,
+    /// #2838: a turn started relay with `RelayOwnerKind::Unknown` (ownership not
+    /// cleanly assigned across the three relay-launch paths, root cause #3). A
+    /// phantom/unknown owner can make the bridge skip its own delivery.
+    pub relay_owner_unknown: AtomicU64,
+    /// #2838: a relay emit targeted a (channel, turn, byte-range) that overlaps
+    /// a range already emitted for the same turn — a structurally-detected
+    /// duplicate send (root cause #1). Precursor signal for the delivery lease.
+    pub relay_duplicate_emit: AtomicU64,
 }
 
 impl AtomicCounters {
@@ -68,6 +88,12 @@ impl AtomicCounters {
             watcher_db_fallback_resolve_failed: self
                 .watcher_db_fallback_resolve_failed
                 .load(Ordering::Relaxed),
+            relay_terminal_ack_timeout: self.relay_terminal_ack_timeout.load(Ordering::Relaxed),
+            relay_uncommitted_inflight_cleared: self
+                .relay_uncommitted_inflight_cleared
+                .load(Ordering::Relaxed),
+            relay_owner_unknown: self.relay_owner_unknown.load(Ordering::Relaxed),
+            relay_duplicate_emit: self.relay_duplicate_emit.load(Ordering::Relaxed),
         }
     }
 }
@@ -83,6 +109,14 @@ pub struct AtomicCountersSnapshot {
     pub session_new: u64,
     /// #1136: see [`AtomicCounters::watcher_db_fallback_resolve_failed`].
     pub watcher_db_fallback_resolve_failed: u64,
+    /// #2838: see [`AtomicCounters::relay_terminal_ack_timeout`].
+    pub relay_terminal_ack_timeout: u64,
+    /// #2838: see [`AtomicCounters::relay_uncommitted_inflight_cleared`].
+    pub relay_uncommitted_inflight_cleared: u64,
+    /// #2838: see [`AtomicCounters::relay_owner_unknown`].
+    pub relay_owner_unknown: u64,
+    /// #2838: see [`AtomicCounters::relay_duplicate_emit`].
+    pub relay_duplicate_emit: u64,
 }
 
 /// One row emitted by `ObservabilityCounters::snapshot()`.
@@ -105,6 +139,18 @@ pub struct CounterSnapshotRow {
     /// #1136: cumulative count of watcher DB-dispatch-fallback resolve failures
     /// for which the live watcher was kept attached instead of silently dropping.
     pub watcher_db_fallback_resolve_failed: u64,
+    /// #2838: watcher 10s terminal-delivery ACK timed out then direct-sent (the
+    /// duplicate-emit vector). See [`AtomicCounters::relay_terminal_ack_timeout`].
+    pub relay_terminal_ack_timeout: u64,
+    /// #2838: inflight cleared with a non-empty undelivered `full_response` (the
+    /// missing-answer vector). See [`AtomicCounters::relay_uncommitted_inflight_cleared`].
+    pub relay_uncommitted_inflight_cleared: u64,
+    /// #2838: turns that began relay with an Unknown owner kind. See
+    /// [`AtomicCounters::relay_owner_unknown`].
+    pub relay_owner_unknown: u64,
+    /// #2838: relay emits whose byte-range overlapped an already-emitted range
+    /// for the same turn. See [`AtomicCounters::relay_duplicate_emit`].
+    pub relay_duplicate_emit: u64,
 }
 
 /// In-process registry of `(channel_id, provider) -> AtomicCounters`.
@@ -173,6 +219,37 @@ impl ObservabilityCounters {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// #2838: the watcher's 10s session-bound terminal-delivery ACK timed out
+    /// and it proceeded to direct-send (the duplicate-emit vector).
+    pub fn record_relay_terminal_ack_timeout(&self, channel_id: u64, provider: &str) {
+        self.slot(channel_id, provider)
+            .relay_terminal_ack_timeout
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// #2838: finalization cleared inflight while a non-empty `full_response`
+    /// had not been committed to Discord (the missing-answer vector).
+    pub fn record_relay_uncommitted_inflight_cleared(&self, channel_id: u64, provider: &str) {
+        self.slot(channel_id, provider)
+            .relay_uncommitted_inflight_cleared
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// #2838: a turn began relay with `RelayOwnerKind::Unknown`.
+    pub fn record_relay_owner_unknown(&self, channel_id: u64, provider: &str) {
+        self.slot(channel_id, provider)
+            .relay_owner_unknown
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// #2838: a relay emit overlapped an already-emitted byte-range for the
+    /// same turn (structurally-detected duplicate send).
+    pub fn record_relay_duplicate_emit(&self, channel_id: u64, provider: &str) {
+        self.slot(channel_id, provider)
+            .relay_duplicate_emit
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// #1085: record whether the turn entered with an existing provider session.
     /// `session_id_present == true` increments `session_reused`, else `session_new`.
     pub fn record_session_entry(&self, channel_id: u64, provider: &str, session_id_present: bool) {
@@ -217,6 +294,10 @@ impl ObservabilityCounters {
                     session_new: snap.session_new,
                     session_reuse_rate,
                     watcher_db_fallback_resolve_failed: snap.watcher_db_fallback_resolve_failed,
+                    relay_terminal_ack_timeout: snap.relay_terminal_ack_timeout,
+                    relay_uncommitted_inflight_cleared: snap.relay_uncommitted_inflight_cleared,
+                    relay_owner_unknown: snap.relay_owner_unknown,
+                    relay_duplicate_emit: snap.relay_duplicate_emit,
                 }
             })
             .collect();
@@ -272,6 +353,26 @@ pub fn record_watcher_db_fallback_resolve_failed(channel_id: u64, provider: &str
 /// #1085: convenience wrapper for `ObservabilityCounters::record_session_entry`.
 pub fn record_session_entry(channel_id: u64, provider: &str, session_id_present: bool) {
     global().record_session_entry(channel_id, provider, session_id_present);
+}
+
+/// #2838: convenience wrapper for `ObservabilityCounters::record_relay_terminal_ack_timeout`.
+pub fn record_relay_terminal_ack_timeout(channel_id: u64, provider: &str) {
+    global().record_relay_terminal_ack_timeout(channel_id, provider);
+}
+
+/// #2838: convenience wrapper for `ObservabilityCounters::record_relay_uncommitted_inflight_cleared`.
+pub fn record_relay_uncommitted_inflight_cleared(channel_id: u64, provider: &str) {
+    global().record_relay_uncommitted_inflight_cleared(channel_id, provider);
+}
+
+/// #2838: convenience wrapper for `ObservabilityCounters::record_relay_owner_unknown`.
+pub fn record_relay_owner_unknown(channel_id: u64, provider: &str) {
+    global().record_relay_owner_unknown(channel_id, provider);
+}
+
+/// #2838: convenience wrapper for `ObservabilityCounters::record_relay_duplicate_emit`.
+pub fn record_relay_duplicate_emit(channel_id: u64, provider: &str) {
+    global().record_relay_duplicate_emit(channel_id, provider);
 }
 
 pub fn snapshot() -> Vec<CounterSnapshotRow> {
@@ -375,6 +476,25 @@ mod tests {
         );
         assert_eq!(snap[0].channel_id, 42);
         assert_eq!(snap[0].provider, "codex");
+    }
+
+    #[test]
+    fn relay_counters_increment_independently_per_key() {
+        let c = ObservabilityCounters::new();
+        c.record_relay_terminal_ack_timeout(7, "claude");
+        c.record_relay_terminal_ack_timeout(7, "claude");
+        c.record_relay_uncommitted_inflight_cleared(7, "claude");
+        c.record_relay_owner_unknown(7, "claude");
+        c.record_relay_duplicate_emit(7, "claude");
+        c.record_relay_duplicate_emit(7, "claude");
+        c.record_relay_duplicate_emit(7, "claude");
+
+        let snap = c.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].relay_terminal_ack_timeout, 2);
+        assert_eq!(snap[0].relay_uncommitted_inflight_cleared, 1);
+        assert_eq!(snap[0].relay_owner_unknown, 1);
+        assert_eq!(snap[0].relay_duplicate_emit, 3);
     }
 
     #[test]
