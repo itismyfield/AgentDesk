@@ -153,7 +153,7 @@ async fn edit_placeholder_safe(
 /// is still a placeholder (and therefore safe to overwrite with an abandoned
 /// badge) or has already been replaced with a delivered response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PlaceholderProbe {
+pub(in crate::services::discord) enum PlaceholderProbe {
     /// The current Discord content still matches a known placeholder pattern.
     /// Safe to overwrite with the abandoned badge.
     StillPlaceholder,
@@ -201,7 +201,7 @@ fn classify_get_message_error(err: &serenity::Error) -> PlaceholderProbe {
 ///
 /// Transient probe failures (network errors, rate limits, 5xx) return
 /// `ProbeFailed` — callers must NOT take destructive action in that case.
-async fn probe_placeholder_state(
+pub(in crate::services::discord) async fn probe_placeholder_state(
     http: &Arc<serenity::Http>,
     channel_id: u64,
     message_id: u64,
