@@ -1381,9 +1381,15 @@ async fn backfill_legacy_thread_channel_ids_pg(pool: &PgPool) -> usize {
     updated
 }
 
-pub async fn gc_stale_thread_sessions_pg(pool: &PgPool) -> usize {
+/// Delete stale thread session rows and return the `session_key`s removed so
+/// the caller can reap the matching orphan tmux sessions. The inner CLI of a
+/// thread tmux session usually stays at an interactive prompt (its pane never
+/// goes dead), so the dead-pane reaper can't reap it; and once this GC removes
+/// the row, the idle-kill policy can no longer see it either. Returning the
+/// deleted keys lets the periodic GC kill those tmux sessions directly.
+pub async fn gc_stale_thread_sessions_pg(pool: &PgPool) -> Vec<String> {
     let _ = backfill_legacy_thread_channel_ids_pg(pool).await;
-    match sqlx::query(
+    match sqlx::query_scalar::<_, String>(
         "DELETE FROM sessions
          WHERE thread_channel_id IS NOT NULL
            AND status IN ('idle', 'awaiting_user', 'disconnected', 'aborted')
@@ -1391,17 +1397,18 @@ pub async fn gc_stale_thread_sessions_pg(pool: &PgPool) -> usize {
              (active_dispatch_id IS NULL
                AND COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '1 hour')
              OR COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '3 hours'
-           )",
+           )
+         RETURNING session_key",
     )
-    .execute(pool)
+    .fetch_all(pool)
     .await
     {
-        Ok(result) => result.rows_affected() as usize,
+        Ok(keys) => keys,
         Err(error) => {
             tracing::warn!(
                 "[dispatched-sessions] gc_stale_thread_sessions_pg: failed to delete stale sessions: {error}"
             );
-            0
+            Vec::new()
         }
     }
 }

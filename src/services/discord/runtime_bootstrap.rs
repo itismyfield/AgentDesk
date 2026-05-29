@@ -2418,18 +2418,66 @@ async fn audit_or_prune_global_slash_commands(
 
 /// Periodic GC: delete stale idle/disconnected thread sessions from DB.
 async fn gc_stale_thread_sessions(shared: &Arc<SharedData>) {
-    match shared.pg_pool.as_ref() {
-        Some(pool) => {
-            let gc = crate::db::dispatched_sessions::gc_stale_thread_sessions_pg(pool).await;
-            if gc > 0 {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!("  [{ts}] 🧹 GC: removed {gc} stale thread session(s) from DB");
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!("  [{ts}] ⚠ Thread session GC skipped: postgres pool unavailable");
+        return;
+    };
+    let deleted_keys = crate::db::dispatched_sessions::gc_stale_thread_sessions_pg(pool).await;
+    if deleted_keys.is_empty() {
+        return;
+    }
+    // Option A: kill the orphan thread tmux sessions whose DB rows we just
+    // removed. Their inner CLI commonly stays at an interactive prompt (pane
+    // never dies), so the dead-pane reaper skips them, and with the row gone
+    // the 8h idle-kill policy can never reach them either — they would leak
+    // forever. The effective grace becomes the GC TTL (1h no-dispatch / 3h).
+    let killed = reap_orphan_thread_tmux(&deleted_keys).await;
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!(
+        "  [{ts}] 🧹 GC: removed {} stale thread session(s) from DB, killed {} orphan tmux",
+        deleted_keys.len(),
+        killed
+    );
+}
+
+/// Kill the tmux sessions whose stale thread rows were just GC'd. Only touches
+/// sessions this runtime owns (owner marker) and that still exist locally, so a
+/// co-located dev/release instance can't kill the other's sessions.
+async fn reap_orphan_thread_tmux(deleted_keys: &[String]) -> usize {
+    #[cfg(unix)]
+    {
+        let marker = crate::services::tmux_common::current_tmux_owner_marker();
+        let keys = deleted_keys.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let mut killed = 0usize;
+            for key in &keys {
+                // session_key format is `hostname:tmux_name`.
+                let Some((_, tmux_name)) = key.split_once(':') else {
+                    continue;
+                };
+                if !super::tmux::session_belongs_to_current_runtime(tmux_name, &marker) {
+                    continue;
+                }
+                if !crate::services::platform::tmux::has_session(tmux_name) {
+                    continue;
+                }
+                if crate::services::platform::tmux::kill_session(
+                    tmux_name,
+                    "stale thread session GC — DB row removed",
+                ) {
+                    killed += 1;
+                }
             }
-        }
-        None => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!("  [{ts}] ⚠ Thread session GC skipped: postgres pool unavailable");
-        }
+            killed
+        })
+        .await
+        .unwrap_or(0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = deleted_keys;
+        0
     }
 }
 

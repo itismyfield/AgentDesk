@@ -456,7 +456,7 @@ pub async fn gc_thread_sessions(
         let deleted = dispatched_sessions_db::gc_stale_thread_sessions_pg(pool).await;
         return (
             StatusCode::OK,
-            Json(json!({"ok": true, "gc_threads": deleted})),
+            Json(json!({"ok": true, "gc_threads": deleted.len()})),
         );
     }
 
