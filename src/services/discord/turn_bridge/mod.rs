@@ -2972,12 +2972,22 @@ async fn enqueue_headless_delivery(
                     session_key.map(str::trim).filter(|value| !value.is_empty())
                 {
                     let thread_channel_id = channel_id.get().to_string();
+                    // #2838 (codex review): once enqueue returned Ok(Some(outbox_id))
+                    // the outbox row exists and the message WILL be delivered.
+                    // The delivery marker below is best-effort dedup bookkeeping;
+                    // propagating a marker failure as a delivery Err makes the
+                    // caller preserve inflight, which then re-delivers via
+                    // recovery (duplicate) AND stalls the queue. So every
+                    // post-enqueue marker failure logs and returns Ok (delivery
+                    // committed) — only a genuine non-delivery (no outbox row +
+                    // failed direct fallback, below) returns Err.
                     let mut tx = match pool.begin().await {
                         Ok(tx) => tx,
                         Err(error) => {
-                            return Err(format!(
-                                "terminal delivery marker transaction begin failed for session {session_key}: {error}"
-                            ));
+                            tracing::warn!(
+                                "[outbox] terminal delivery marker tx begin failed for session {session_key} (outbox {outbox_id} already enqueued; treating delivery as committed): {error}"
+                            );
+                            return Ok(());
                         }
                     };
                     if let Err(error) =
@@ -2987,9 +2997,10 @@ async fn enqueue_headless_delivery(
                             .await
                     {
                         let _ = tx.rollback().await;
-                        return Err(format!(
-                            "terminal delivery marker lock failed for session {session_key}: {error}"
-                        ));
+                        tracing::warn!(
+                            "[outbox] terminal delivery marker lock failed for session {session_key} (outbox {outbox_id} already enqueued; treating delivery as committed): {error}"
+                        );
+                        return Ok(());
                     }
 
                     let active_user_message_id =
@@ -3020,14 +3031,16 @@ async fn enqueue_headless_delivery(
                     .await
                     {
                         let _ = tx.rollback().await;
-                        return Err(format!(
-                            "terminal delivery marker write failed for session {session_key} row {outbox_id}: {error}"
-                        ));
+                        tracing::warn!(
+                            "[outbox] terminal delivery marker write failed for session {session_key} row {outbox_id} (already enqueued; treating delivery as committed): {error}"
+                        );
+                        return Ok(());
                     }
                     if let Err(error) = tx.commit().await {
-                        return Err(format!(
-                            "terminal delivery marker commit failed for session {session_key}: {error}"
-                        ));
+                        tracing::warn!(
+                            "[outbox] terminal delivery marker commit failed for session {session_key} (outbox {outbox_id} already enqueued; treating delivery as committed): {error}"
+                        );
+                        return Ok(());
                     }
                 }
                 return Ok(());

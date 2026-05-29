@@ -69,10 +69,6 @@ pub struct AtomicCounters {
     /// cleanly assigned across the three relay-launch paths, root cause #3). A
     /// phantom/unknown owner can make the bridge skip its own delivery.
     pub relay_owner_unknown: AtomicU64,
-    /// #2838: a relay emit targeted a (channel, turn, byte-range) that overlaps
-    /// a range already emitted for the same turn — a structurally-detected
-    /// duplicate send (root cause #1). Precursor signal for the delivery lease.
-    pub relay_duplicate_emit: AtomicU64,
 }
 
 impl AtomicCounters {
@@ -93,7 +89,6 @@ impl AtomicCounters {
                 .relay_uncommitted_inflight_cleared
                 .load(Ordering::Relaxed),
             relay_owner_unknown: self.relay_owner_unknown.load(Ordering::Relaxed),
-            relay_duplicate_emit: self.relay_duplicate_emit.load(Ordering::Relaxed),
         }
     }
 }
@@ -115,8 +110,6 @@ pub struct AtomicCountersSnapshot {
     pub relay_uncommitted_inflight_cleared: u64,
     /// #2838: see [`AtomicCounters::relay_owner_unknown`].
     pub relay_owner_unknown: u64,
-    /// #2838: see [`AtomicCounters::relay_duplicate_emit`].
-    pub relay_duplicate_emit: u64,
 }
 
 /// One row emitted by `ObservabilityCounters::snapshot()`.
@@ -148,9 +141,6 @@ pub struct CounterSnapshotRow {
     /// #2838: turns that began relay with an Unknown owner kind. See
     /// [`AtomicCounters::relay_owner_unknown`].
     pub relay_owner_unknown: u64,
-    /// #2838: relay emits whose byte-range overlapped an already-emitted range
-    /// for the same turn. See [`AtomicCounters::relay_duplicate_emit`].
-    pub relay_duplicate_emit: u64,
 }
 
 /// In-process registry of `(channel_id, provider) -> AtomicCounters`.
@@ -242,14 +232,6 @@ impl ObservabilityCounters {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// #2838: a relay emit overlapped an already-emitted byte-range for the
-    /// same turn (structurally-detected duplicate send).
-    pub fn record_relay_duplicate_emit(&self, channel_id: u64, provider: &str) {
-        self.slot(channel_id, provider)
-            .relay_duplicate_emit
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
     /// #1085: record whether the turn entered with an existing provider session.
     /// `session_id_present == true` increments `session_reused`, else `session_new`.
     pub fn record_session_entry(&self, channel_id: u64, provider: &str, session_id_present: bool) {
@@ -297,7 +279,6 @@ impl ObservabilityCounters {
                     relay_terminal_ack_timeout: snap.relay_terminal_ack_timeout,
                     relay_uncommitted_inflight_cleared: snap.relay_uncommitted_inflight_cleared,
                     relay_owner_unknown: snap.relay_owner_unknown,
-                    relay_duplicate_emit: snap.relay_duplicate_emit,
                 }
             })
             .collect();
@@ -370,10 +351,6 @@ pub fn record_relay_owner_unknown(channel_id: u64, provider: &str) {
     global().record_relay_owner_unknown(channel_id, provider);
 }
 
-/// #2838: convenience wrapper for `ObservabilityCounters::record_relay_duplicate_emit`.
-pub fn record_relay_duplicate_emit(channel_id: u64, provider: &str) {
-    global().record_relay_duplicate_emit(channel_id, provider);
-}
 
 pub fn snapshot() -> Vec<CounterSnapshotRow> {
     global().snapshot()
@@ -485,16 +462,12 @@ mod tests {
         c.record_relay_terminal_ack_timeout(7, "claude");
         c.record_relay_uncommitted_inflight_cleared(7, "claude");
         c.record_relay_owner_unknown(7, "claude");
-        c.record_relay_duplicate_emit(7, "claude");
-        c.record_relay_duplicate_emit(7, "claude");
-        c.record_relay_duplicate_emit(7, "claude");
 
         let snap = c.snapshot();
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].relay_terminal_ack_timeout, 2);
         assert_eq!(snap[0].relay_uncommitted_inflight_cleared, 1);
         assert_eq!(snap[0].relay_owner_unknown, 1);
-        assert_eq!(snap[0].relay_duplicate_emit, 3);
     }
 
     #[test]
