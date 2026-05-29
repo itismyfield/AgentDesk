@@ -160,12 +160,22 @@ module.exports = function attachIdleKill(timeouts, helpers) {
             continue;
           }
 
-          killedCount++;
-
           if (!killResp.tmux_killed) {
-            agentdesk.log.warn("[idle-kill] kill-tmux API succeeded but tmux was already gone for " + s.session_key);
+            // #2861: a no-op kill (tmux already gone) must NOT consume the
+            // per-category kill budget. Otherwise zombie idle rows at the front
+            // of the oldest-first queue spend the entire budget every tick and
+            // permanently starve genuinely-alive idle sessions behind them. The
+            // kill-tmux handler reconciles such a stale row to `disconnected`
+            // (session_row_disconnected=true), so it leaves the candidate pool
+            // on the next tick rather than blocking forever.
+            agentdesk.log.warn(
+              "[idle-kill] kill-tmux: tmux already gone for " + s.session_key +
+              " (reconciled=" + (killResp.session_row_disconnected === true) + ", not counted toward budget)"
+            );
             continue;
           }
+
+          killedCount++;
 
           agentdesk.log.info(
             "[idle-kill] Killed idle tmux after " + idleMin + "min (" + reasonLabel + "): " + s.session_key

@@ -1251,6 +1251,35 @@ async fn kill_tmux_session_impl(
         active_dispatch_id
     );
 
+    // #2861: when the tmux session is already gone, the row is a zombie — it
+    // claims a live process that no longer exists. Reconcile it to
+    // `disconnected` (selectors preserved) so idle-kill stops re-selecting it
+    // every tick and starving genuinely-alive idle sessions behind it. Only
+    // rows with no in-flight dispatch are touched (force-kill owns those).
+    let mut session_row_disconnected = false;
+    if !tmux_was_alive && active_dispatch_id.is_none() {
+        session_row_disconnected =
+            dispatched_sessions_db::reconcile_orphaned_tmuxless_session_pg(pool, session_key).await;
+        if session_row_disconnected {
+            tracing::info!(
+                "  [{ts}] ↪ kill-tmux: tmux already gone for {} — reconciled stale row to disconnected (selectors preserved)",
+                session_key
+            );
+            crate::services::termination_audit::record_termination_with_handles(
+                None,
+                state.pg_pool_ref(),
+                session_key,
+                None,
+                "kill_tmux_api",
+                "stale_tmux_reconcile",
+                Some("tmux already gone; idle row reconciled to disconnected"),
+                None,
+                None,
+                Some(false),
+            );
+        }
+    }
+
     if tmux_killed {
         let termination_reason_code = classify_session_termination_reason(reason);
         crate::services::termination_audit::record_termination_with_handles(
@@ -1275,6 +1304,7 @@ async fn kill_tmux_session_impl(
             "tmux_was_alive": tmux_was_alive,
             "tmux_session_name": tmux_name,
             "session_row_preserved": true,
+            "session_row_disconnected": session_row_disconnected,
             "active_dispatch_id": active_dispatch_id,
         })),
     )

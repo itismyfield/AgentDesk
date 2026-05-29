@@ -655,6 +655,80 @@ test("timeouts idle-kill module calls kill-tmux API for expired idle sessions", 
   assert.match(state.logs.info.join("\n"), /idle kill: agent-idle-1/);
 });
 
+test("timeouts idle-kill module does not let zombie (already-gone tmux) rows starve live idle sessions (#2861)", () => {
+  // Main idle batch has maxKills=3. Put 3 zombie rows (tmux already gone →
+  // tmux_killed:false) ahead of a genuinely-alive idle row. A no-op kill must
+  // NOT consume the budget, so the live row at position 4 still gets reaped.
+  const zombieKeys = [
+    "provider:AgentDesk-claude-zombie-1",
+    "provider:AgentDesk-claude-zombie-2",
+    "provider:AgentDesk-claude-zombie-3"
+  ];
+  const liveKey = "provider:AgentDesk-claude-live-4";
+  function row(session_key) {
+    return {
+      session_key,
+      agent_id: null,
+      provider: "claude",
+      active_dispatch_id: null,
+      thread_channel_id: null,
+      last_seen_at: "2000-01-01 00:00:00"
+    };
+  }
+
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { server_port: 8791 },
+    dbQuery: createSqlRouter([
+      {
+        match: "SELECT id, name, name_ko, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx FROM agents",
+        result: []
+      },
+      {
+        match: "FROM sessions WHERE provider IN ('claude', 'codex', 'qwen') AND (agent_id IS NULL OR TRIM(agent_id) = '')",
+        result: []
+      },
+      {
+        match(sql) {
+          return sql.includes("WHERE status = 'idle'") &&
+            sql.includes("active_dispatch_id IS NULL") &&
+            sql.includes("INTERVAL '6 hours'");
+        },
+        result: [...zombieKeys.map(row), row(liveKey)]
+      },
+      {
+        match(sql) {
+          return sql.includes("WHERE status = 'idle'") &&
+            sql.includes("active_dispatch_id IS NULL") &&
+            sql.includes("INTERVAL '8 hours'");
+        },
+        result: []
+      },
+      {
+        match(sql) {
+          return sql.includes("WHERE status = 'idle'") &&
+            sql.includes("active_dispatch_id IS NOT NULL") &&
+            sql.includes("INTERVAL '24 hours'");
+        },
+        result: []
+      }
+    ]),
+    httpPost(url) {
+      // Zombie rows report the tmux was already gone (reconciled to
+      // disconnected by the handler); the live row is actually killed.
+      const tmuxGone = url.includes("live-4") === false;
+      return { ok: true, tmux_killed: !tmuxGone, session_row_disconnected: tmuxGone };
+    }
+  });
+
+  policy._section_O();
+
+  // All 4 rows get a kill-tmux call (zombies no longer break the budget early).
+  assert.equal(state.httpPosts.length, 4);
+  // The live row was reached and actually killed.
+  assert.ok(state.httpPosts.some((p) => p.url.includes("live-4")));
+  assert.match(state.logs.info.join("\n"), /Killed idle tmux .*live-4/);
+});
+
 test("timeouts idle-kill module reaps thread-suffixed sessions after 8h idle", () => {
   // Thread sessions now have their OWN 8h idle-kill batch (kill-tmux only, DB
   // row preserved for resume). This is the backstop for thread tmux sessions

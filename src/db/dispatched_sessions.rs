@@ -883,7 +883,7 @@ mod dispatch_surface_tests {
 mod selector_cleanup_tests {
     use super::{
         disconnect_session_and_prepare_retry_pg, disconnect_stale_fixed_session_by_key_pg,
-        gc_stale_fixed_working_sessions_db_pg,
+        gc_stale_fixed_working_sessions_db_pg, reconcile_orphaned_tmuxless_session_pg,
     };
 
     struct TestPostgresDb {
@@ -1079,6 +1079,45 @@ mod selector_cleanup_tests {
             1
         );
         assert_cleanup_preserved_selectors(&pool, session_key).await;
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #2861: an idle row whose tmux already vanished must be reconciled to
+    /// `disconnected` (selectors preserved) so it leaves the idle-kill pool.
+    #[tokio::test]
+    async fn reconcile_orphaned_tmuxless_session_pg_disconnects_idle_row_preserving_selectors() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let session_key = "host:tmuxless-idle-zombie";
+
+        seed_session_with_selectors(&pool, session_key, "idle", None).await;
+
+        assert!(reconcile_orphaned_tmuxless_session_pg(&pool, session_key).await);
+        assert_cleanup_preserved_selectors(&pool, session_key).await;
+
+        // Idempotent: an already-disconnected row reports no further transition.
+        assert!(!reconcile_orphaned_tmuxless_session_pg(&pool, session_key).await);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #2861: a row with an in-flight dispatch is owned by force-kill / the
+    /// stuck-dispatch watchdog — the stale-tmux reconcile must leave it alone.
+    #[tokio::test]
+    async fn reconcile_orphaned_tmuxless_session_pg_skips_rows_with_active_dispatch() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let session_key = "host:tmuxless-with-dispatch";
+
+        seed_session_with_selectors(&pool, session_key, "idle", Some("dispatch-2861")).await;
+
+        assert!(!reconcile_orphaned_tmuxless_session_pg(&pool, session_key).await);
+        let (status, active_dispatch_id, _, _) = session_state(&pool, session_key).await;
+        assert_eq!(status, "idle");
+        assert_eq!(active_dispatch_id.as_deref(), Some("dispatch-2861"));
 
         pool.close().await;
         pg_db.drop().await;
@@ -1409,6 +1448,48 @@ pub async fn gc_stale_thread_sessions_pg(pool: &PgPool) -> Vec<String> {
                 "[dispatched-sessions] gc_stale_thread_sessions_pg: failed to delete stale sessions: {error}"
             );
             Vec::new()
+        }
+    }
+}
+
+/// Reconcile a session row whose tmux session has already vanished.
+///
+/// When `kill-tmux` discovers `tmux_was_alive == false`, the row claims a live
+/// provider process that no longer exists. Left as-is (status `idle`), such a
+/// row stays in the `idle-kill` candidate pool forever and — being among the
+/// oldest — monopolizes the per-tick kill budget, starving genuinely-alive idle
+/// sessions behind it (#2861). Transition it to `disconnected` while preserving
+/// provider selectors (claude_session_id etc.) so resume on the next user
+/// message still works via the selector path. Only touches rows with no
+/// in-flight dispatch — sessions with an active dispatch are owned by force-kill
+/// / the stuck-dispatch watchdog, not this reconcile.
+///
+/// Sibling of `mark_session_disconnected_for_idle_cleanup` in the discord
+/// module (in-memory expiry path); both preserve selectors but guard differently.
+/// Returns true if a row transitioned (i.e. it was idle/working with no dispatch).
+pub(crate) async fn reconcile_orphaned_tmuxless_session_pg(
+    pool: &PgPool,
+    session_key: &str,
+) -> bool {
+    match sqlx::query(
+        "UPDATE sessions
+         SET status = 'disconnected'
+         WHERE session_key = $1
+           AND active_dispatch_id IS NULL
+           AND status <> 'disconnected'",
+    )
+    .bind(session_key)
+    .execute(pool)
+    .await
+    {
+        Ok(result) => result.rows_affected() > 0,
+        Err(error) => {
+            tracing::warn!(
+                "[dispatched-sessions] reconcile_orphaned_tmuxless_session_pg: failed for {}: {}",
+                session_key,
+                error
+            );
+            false
         }
     }
 }
