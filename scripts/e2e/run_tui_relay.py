@@ -724,6 +724,29 @@ def run_assertion(spec: dict[str, Any], *, window: assertions.Window) -> None:
         assertions.text_present(window, needle=spec["text_present"])
     elif "raw_text_present" in spec:
         assertions.raw_text_present(window, needle=spec["raw_text_present"])
+    elif "ordered_text_present" in spec:
+        # #2838 (P0-2): completeness + ordering of multiple expected fragments.
+        needles = spec["ordered_text_present"]
+        if not isinstance(needles, list):
+            raise assertions.AssertionError(
+                f"ordered_text_present must be a list of needles: {spec!r}"
+            )
+        assertions.ordered_text_present(window, needles=needles)
+    elif "no_duplicate_marker" in spec:
+        # #2838 (P0-2): catches duplicate-with-differing-header re-emit (e.g.
+        # restart-induced or ACK-timeout re-relay) that no_duplicate_content misses.
+        assertions.no_duplicate_marker(window, marker=spec["no_duplicate_marker"])
+    elif "body_complete" in spec:
+        # #2838 (P0-2): catches a truncated-tail relay on long responses.
+        params = spec["body_complete"]
+        if not isinstance(params, dict) or "head" not in params or "tail" not in params:
+            raise assertions.AssertionError(f"body_complete requires {{head, tail}}: {spec!r}")
+        assertions.body_complete(window, head=params["head"], tail=params["tail"])
+    elif "relay_latency_within" in spec:
+        # #2838 (P0-2): bounds the first→last relay span (catches stalls).
+        params = spec["relay_latency_within"]
+        max_seconds = params.get("max_seconds") if isinstance(params, dict) else params
+        assertions.relay_latency_within(window, max_seconds=float(max_seconds))
     elif spec.get("no_control_chars"):
         assertions.no_control_chars(window)
     elif spec.get("no_resume_prompt_chrome"):

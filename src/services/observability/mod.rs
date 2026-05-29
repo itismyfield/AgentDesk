@@ -40,8 +40,9 @@ mod worker;
 pub use emit::{
     emit_agent_quality_event, emit_dispatch_result, emit_guard_fired,
     emit_inflight_lifecycle_event, emit_intake_placeholder_post_failed, emit_recovery_fired,
-    emit_turn_cancelled, emit_turn_finished, emit_turn_finished_with_dispatch_kind,
-    emit_turn_started, emit_watcher_replaced, record_invariant_check,
+    emit_relay_delivery, emit_turn_cancelled, emit_turn_finished,
+    emit_turn_finished_with_dispatch_kind, emit_turn_started, emit_watcher_replaced,
+    record_invariant_check,
 };
 #[allow(unused_imports)]
 pub use queries::{

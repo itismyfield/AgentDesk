@@ -49,7 +49,7 @@ pub(super) fn turn_bridge_replace_outcome_committed(
     replace_result: Result<ReplaceLongMessageOutcome, String>,
     source: &'static str,
 ) -> bool {
-    match replace_result {
+    let committed = match replace_result {
         Ok(ReplaceLongMessageOutcome::EditedOriginal) => {
             record_turn_bridge_terminal_replace_cleanup(
                 shared,
@@ -109,7 +109,26 @@ pub(super) fn turn_bridge_replace_outcome_committed(
             );
             false
         }
-    }
+    };
+    // #2838 (relay-stability P0-1): emit a structured event for the bridge-side
+    // terminal delivery decision. The watcher path already has the
+    // `relay_flight_recorder` tracing, but bridge-owned replace deliveries were
+    // unobserved; this makes them PG-queryable and attributable so the
+    // duplicate/uncommitted vectors can be measured before the delivery-lease
+    // consolidation lands.
+    crate::services::observability::emit_relay_delivery(
+        provider.as_str(),
+        channel_id.get(),
+        None,
+        Some(message_id.get()),
+        "turn_bridge",
+        "edit",
+        None,
+        None,
+        committed,
+        Some(source),
+    );
+    committed
 }
 
 pub(super) fn should_complete_work_dispatch_after_terminal_delivery(
