@@ -207,13 +207,6 @@ async fn maybe_spawn_claude_idle_response_tail(
     if super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get()).is_some() {
         return;
     }
-    if shared
-        .tmux_watchers
-        .tmux_session_is_stale(&prompt.tmux_session_name)
-        .is_some_and(|stale| !stale)
-    {
-        return;
-    }
     let Some(binding) = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
         &prompt.tmux_session_name,
     ) else {
@@ -227,11 +220,27 @@ async fn maybe_spawn_claude_idle_response_tail(
         return;
     }
 
-    let transcript_path = PathBuf::from(&binding.output_path);
+    // #2843: resolve the freshest active transcript (the bound output_path can be
+    // stale) and only let a non-stale tmux watcher suppress the tail when it
+    // actually covers that transcript. Re-registers the binding if it changed.
+    let Some(transcript_path) =
+        resolve_idle_relay_transcript(&shared, &prompt.tmux_session_name, channel_id, &binding)
+    else {
+        return;
+    };
+
+    // #2843: if the path changed, don't trust the old binding offset (it indexes
+    // a different transcript and would replay old output); the timestamp-based
+    // resolution still takes precedence, falling back to the fresh EOF.
+    let fallback_offset = if Path::new(&binding.output_path) == transcript_path {
+        binding.last_offset
+    } else {
+        claude_tui_rehydrate_start_offset(&transcript_path)
+    };
     let start_offset = claude_idle_response_start_offset_after_timestamp(
         &transcript_path,
         prompt.observed_at,
-        binding.last_offset,
+        fallback_offset,
     );
     spawn_claude_idle_response_tail_once(
         shared,
@@ -325,13 +334,6 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                     RuntimeHandoffKind::ClaudeTui,
                 )
             {
-                if shared
-                    .tmux_watchers
-                    .tmux_session_is_stale(&tmux_session_name)
-                    .is_some_and(|stale| !stale)
-                {
-                    continue;
-                }
                 let Some(channel_id) = owner_channel_for_tmux_session(&shared, &tmux_session_name)
                 else {
                     continue;
@@ -342,26 +344,41 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                     continue;
                 }
 
-                let transcript_path = PathBuf::from(&binding.output_path);
-                let scan = match scan_claude_idle_transcript_for_prompt(
-                    &transcript_path,
-                    binding.last_offset,
-                ) {
-                    Ok(scan) => scan,
-                    Err(error) => {
-                        tracing::debug!(
-                            tmux_session_name = %tmux_session_name,
-                            transcript_path = %transcript_path.display(),
-                            error = %error,
-                            "Claude idle transcript relay scan skipped"
-                        );
-                        continue;
-                    }
+                // #2843: resolve the freshest transcript (re-registering the
+                // binding if the bound path was stale) and apply the corrected
+                // watcher guard, instead of skipping on tmux_session_is_stale
+                // alone — a watcher pointed at a missing/stale file is non-stale
+                // by heartbeat yet does not relay direct-TUI output.
+                let Some(transcript_path) = resolve_idle_relay_transcript(
+                    &shared,
+                    &tmux_session_name,
+                    channel_id,
+                    &binding,
+                ) else {
+                    continue;
                 };
+                let scan_offset = if Path::new(&binding.output_path) == transcript_path {
+                    binding.last_offset
+                } else {
+                    claude_tui_rehydrate_start_offset(&transcript_path)
+                };
+                let scan =
+                    match scan_claude_idle_transcript_for_prompt(&transcript_path, scan_offset) {
+                        Ok(scan) => scan,
+                        Err(error) => {
+                            tracing::debug!(
+                                tmux_session_name = %tmux_session_name,
+                                transcript_path = %transcript_path.display(),
+                                error = %error,
+                                "Claude idle transcript relay scan skipped"
+                            );
+                            continue;
+                        }
+                    };
 
                 match scan {
                     ClaudeIdleTranscriptScan::NoPrompt { offset } => {
-                        if offset != binding.last_offset {
+                        if offset != scan_offset {
                             advance_claude_tmux_runtime_binding_offset(
                                 &tmux_session_name,
                                 &transcript_path,
@@ -533,6 +550,140 @@ fn rehydrated_claude_tui_binding_for_tmux_session(
         last_offset: start_offset,
         relay_last_offset: None,
     })
+}
+
+#[cfg(unix)]
+fn transcript_mtime(path: &Path) -> std::time::SystemTime {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+}
+
+/// #2843: the working directory of a Claude TUI session, from its launch script.
+/// Used to locate the Claude project directory when the stored binding's
+/// transcript path is stale.
+#[cfg(unix)]
+fn claude_tui_launch_working_dir(tmux_session_name: &str) -> Option<PathBuf> {
+    let launch_script_path = crate::services::tmux_common::resolve_session_temp_path(
+        tmux_session_name,
+        crate::services::tmux_common::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
+    )?;
+    let launch = parse_claude_tui_launch_script(Path::new(&launch_script_path)).ok()?;
+    Some(launch.working_dir)
+}
+
+/// #2843: resolve the freshest active Claude transcript for a tmux session.
+/// The stored runtime binding's `output_path` can be stale — an older session_id
+/// the launch script still references, or a missing AgentDesk rollout jsonl —
+/// while the live Claude TUI writes its transcript to a newer `<uuid>.jsonl`
+/// under the project directory. Compare the bound path (if it exists) against
+/// the newest transcript scanned from the launch-script working_dir and return
+/// whichever is newest, plus the session_id (UUID stem) to re-register so future
+/// Discord-turn recovery and offset advances reconcile against the right path.
+#[cfg(unix)]
+fn freshest_claude_transcript_for_session(
+    tmux_session_name: &str,
+    binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+) -> Option<(PathBuf, Option<String>)> {
+    let bound = {
+        let path = PathBuf::from(&binding.output_path);
+        path.exists()
+            .then(|| (transcript_mtime(&path), path, binding.session_id.clone()))
+    };
+    let scanned = claude_tui_launch_working_dir(tmux_session_name)
+        .and_then(|cwd| {
+            crate::services::claude_tui::transcript_tail::latest_claude_transcript_for_cwd(
+                &cwd, None,
+            )
+        })
+        .map(|path| {
+            let session_id = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_string);
+            (transcript_mtime(&path), path, session_id)
+        });
+    [bound, scanned]
+        .into_iter()
+        .flatten()
+        .max_by_key(|(modified, _, _)| *modified)
+        .map(|(_, path, session_id)| (path, session_id))
+}
+
+/// #2843: re-register the runtime binding to a freshly-resolved transcript so
+/// later reads, offset advances, and Discord-turn recovery all converge on it.
+#[cfg(unix)]
+fn refresh_claude_runtime_binding(
+    tmux_session_name: &str,
+    channel_id: ChannelId,
+    transcript_path: &Path,
+    session_id: Option<String>,
+) {
+    crate::services::tui_prompt_dedupe::register_rehydrated_tmux_runtime_binding(
+        ProviderKind::Claude.as_str(),
+        tmux_session_name,
+        channel_id.get(),
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: transcript_path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id,
+            last_offset: claude_tui_rehydrate_start_offset(transcript_path),
+            relay_last_offset: None,
+        },
+    );
+    tracing::info!(
+        tmux_session_name = %tmux_session_name,
+        channel_id = channel_id.get(),
+        transcript_path = %transcript_path.display(),
+        "refreshed Claude TUI relay binding to freshest active transcript (#2843)"
+    );
+}
+
+/// #2843: decide whether the Claude idle relay should tail this session and on
+/// which transcript. Returns `Some(path)` to tail, or `None` to skip because a
+/// heartbeat-fresh watcher already covers the current transcript. Side effect:
+/// re-registers the binding when a fresher transcript is resolved.
+///
+/// `tmux_session_is_stale` checks only cancel/heartbeat, so a watcher pointed at
+/// a missing/stale file reports non-stale and would wrongly suppress relay of
+/// direct-TUI output. We only let a non-stale watcher suppress when the binding
+/// points at the freshest existing transcript.
+#[cfg(unix)]
+fn resolve_idle_relay_transcript(
+    shared: &Arc<SharedData>,
+    tmux_session_name: &str,
+    channel_id: ChannelId,
+    binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+) -> Option<PathBuf> {
+    let (transcript_path, resolved_session_id) =
+        freshest_claude_transcript_for_session(tmux_session_name, binding).unwrap_or_else(|| {
+            (
+                PathBuf::from(&binding.output_path),
+                binding.session_id.clone(),
+            )
+        });
+
+    let watcher_covers_current_transcript = shared
+        .tmux_watchers
+        .tmux_session_is_stale(tmux_session_name)
+        .is_some_and(|stale| !stale)
+        && transcript_path.exists()
+        && Path::new(&binding.output_path) == transcript_path;
+    if watcher_covers_current_transcript {
+        return None;
+    }
+
+    if Path::new(&binding.output_path) != transcript_path {
+        refresh_claude_runtime_binding(
+            tmux_session_name,
+            channel_id,
+            &transcript_path,
+            resolved_session_id,
+        );
+    }
+    Some(transcript_path)
 }
 
 #[cfg(unix)]
