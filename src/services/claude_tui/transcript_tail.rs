@@ -86,14 +86,26 @@ pub fn claude_project_dir_candidates_for_cwd(
 }
 
 /// #2843: find the newest top-level Claude transcript (`<uuid>.jsonl`) under the
-/// Claude project directory for `cwd`. The direct-TUI idle relay uses this to
-/// converge on the SAME transcript a Discord-originated turn writes, even when
-/// the stored runtime binding points at a stale/older transcript path (e.g.
-/// after a redeploy rotated the Claude session_id, or when the binding never
-/// learned the active transcript). Mirrors the codex-side
-/// `latest_rollout_for_cwd_since`. Returns `None` when no project directory or
-/// no UUID-named transcript exists.
-pub fn latest_claude_transcript_for_cwd(cwd: &Path, claude_home: Option<&Path>) -> Option<PathBuf> {
+/// Claude project directory for `cwd` that was modified at/after
+/// `modified_since`. The direct-TUI idle relay uses this to converge on the
+/// SAME transcript a Discord-originated turn writes, even when the stored
+/// runtime binding points at a stale/older transcript path (e.g. after a
+/// redeploy rotated the Claude session_id, or when the binding never learned
+/// the active transcript). Mirrors the codex-side `latest_rollout_for_cwd_since`.
+///
+/// `modified_since` discriminates against transcripts that predate this tmux
+/// session (pass the session's launch-script mtime): a transcript older than the
+/// session launch belongs to a prior session and must not be adopted. Pass
+/// `UNIX_EPOCH` to disable the filter. NOTE: this does not fully disambiguate
+/// two *concurrently active* Claude TUI sessions sharing one cwd — that needs a
+/// per-session transcript identity tracked at handoff, which the binding does
+/// not yet carry (session_id is registered as None by the Discord turn).
+/// Returns `None` when no project directory or no qualifying transcript exists.
+pub fn latest_claude_transcript_for_cwd(
+    cwd: &Path,
+    modified_since: std::time::SystemTime,
+    claude_home: Option<&Path>,
+) -> Option<PathBuf> {
     let project_dirs = claude_project_dir_candidates_for_cwd(cwd, claude_home).ok()?;
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for project_dir in project_dirs {
@@ -117,6 +129,9 @@ pub fn latest_claude_transcript_for_cwd(cwd: &Path, claude_home: Option<&Path>) 
             let Some(modified) = entry.metadata().and_then(|meta| meta.modified()).ok() else {
                 continue;
             };
+            if modified < modified_since {
+                continue;
+            }
             if best
                 .as_ref()
                 .is_none_or(|(best_modified, _)| modified > *best_modified)
@@ -313,8 +328,26 @@ mod tests {
             .set_modified(base + std::time::Duration::from_secs(60))
             .unwrap();
 
-        let latest = latest_claude_transcript_for_cwd(cwd.path(), Some(home.path())).unwrap();
+        let latest = latest_claude_transcript_for_cwd(
+            cwd.path(),
+            std::time::SystemTime::UNIX_EPOCH,
+            Some(home.path()),
+        )
+        .unwrap();
         assert_eq!(latest, newer);
+
+        // #2843: modified_since excludes transcripts older than the session
+        // launch. With the cutoff between `older` and `newer`, only `newer`
+        // qualifies; past both, nothing qualifies.
+        let between = base + std::time::Duration::from_secs(30);
+        assert_eq!(
+            latest_claude_transcript_for_cwd(cwd.path(), between, Some(home.path())),
+            Some(newer.clone())
+        );
+        let after_all = base + std::time::Duration::from_secs(120);
+        assert!(
+            latest_claude_transcript_for_cwd(cwd.path(), after_all, Some(home.path())).is_none()
+        );
     }
 
     #[test]
@@ -322,7 +355,14 @@ mod tests {
         let cwd = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         // No project directory created at all.
-        assert!(latest_claude_transcript_for_cwd(cwd.path(), Some(home.path())).is_none());
+        assert!(
+            latest_claude_transcript_for_cwd(
+                cwd.path(),
+                std::time::SystemTime::UNIX_EPOCH,
+                Some(home.path())
+            )
+            .is_none()
+        );
     }
 
     #[test]
