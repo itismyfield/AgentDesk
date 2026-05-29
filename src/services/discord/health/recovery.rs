@@ -1263,18 +1263,11 @@ pub(crate) async fn run_stall_watchdog_pass(
                 );
 
                 // #2860 delivery-lease consolidation: upgrade detection ->
-                // recovery. The live-message probe (placeholder_sweeper) is the
-                // AUTHORITATIVE signal for whether the generated answer already
-                // reached the user, so this can never double-deliver: only a
-                // placeholder that was never replaced gets the answer edited in
-                // place, mirroring the bridge's terminal-replace path. Anything
-                // already delivered / gone / probe-failed is left untouched.
-                if let Some(state) = leak_inflight.as_ref() {
-                    maybe_recover_completed_stale_leak(
-                        registry, provider, &shared, channel_id, state,
-                    )
-                    .await;
-                }
+                // recovery. Scoped to the watcher-delegated-but-never-relayed
+                // signature and gated on a live-message probe, so it can never
+                // double-deliver (see maybe_recover_completed_stale_leak). The
+                // recovery re-loads its own fresh inflight state.
+                maybe_recover_completed_stale_leak(registry, provider, &shared, channel_id).await;
             }
             continue;
         }
@@ -1411,21 +1404,50 @@ fn render_leak_recovery_delivery(
     }
 }
 
-/// #2860 — recover a completed-stale inflight leak by delivering its generated
+/// #2860 — recover a completed-stale inflight leak by delivering the generated
 /// answer that never reached the user. Returns `true` only when an answer was
-/// actually edited into the live placeholder. Safe against double-delivery: the
-/// live-message probe is the authoritative delivered/not-delivered signal, so an
-/// answer already on screen (`AlreadyDelivered`), a gone message, or a transient
-/// probe failure all leave the row untouched.
+/// actually delivered.
+///
+/// SAFETY (no double-delivery) — two independent guards, both required:
+///   1. Scope to the watcher-delegated-but-never-relayed signature
+///      (`effective_relay_owner_kind() == Watcher` and `last_watcher_relayed_offset
+///      == None`). The only delivery path that strands an answer in a *separate*
+///      message — the bridge's local `SentFallbackAfterEditFailure` fallback-post
+///      — lives exclusively in the bridge-owns-delivery branch
+///      (`bridge_output_owner == None`), which never sets `RelayOwnerKind::Watcher`.
+///      Requiring `Watcher` therefore excludes the fallback class entirely; for the
+///      delegated class the bridge skipped its own delivery and the watcher (per the
+///      null offset) never relayed, so the answer is provably nowhere.
+///   2. A live-message probe of `current_msg_id`: only `StillPlaceholder` proceeds.
+/// Recovery edits `current_msg_id` in place (bridge parity), which is idempotent
+/// across repeated watchdog passes (re-editing to the same content is a no-op).
 async fn maybe_recover_completed_stale_leak(
     registry: &HealthRegistry,
     provider: &ProviderKind,
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
-    state: &discord::inflight::InflightTurnState,
 ) -> bool {
+    // Operate on a freshly re-loaded row, not the detection-time snapshot, so any
+    // relay that advanced state between detection and now is respected.
+    let Some(state) = discord::inflight::load_inflight_state(provider, channel_id.get()) else {
+        return false;
+    };
+
     // Planned restart / rebind flows re-deliver the answer themselves.
     if state.restart_mode.is_some() || state.rebind_origin {
+        return false;
+    }
+    // A silent turn intentionally suppresses assistant-text relay (mirrors the
+    // bridge's `silent_turn` terminal-delivery suppression); never resurface it.
+    if state.silent_turn {
+        return false;
+    }
+    // Scope guard (1): only the watcher-delegated, never-relayed class — the exact
+    // signature of the observed leaks. Excludes the bridge-local fallback-post
+    // class (owner == None) that could strand the answer in a separate message.
+    if state.effective_relay_owner_kind() != discord::inflight::RelayOwnerKind::Watcher
+        || state.last_watcher_relayed_offset.is_some()
+    {
         return false;
     }
     // We recover by editing the existing placeholder in place (bridge parity).
@@ -1438,6 +1460,9 @@ async fn maybe_recover_completed_stale_leak(
     else {
         return false;
     };
+    // NB: the bridge appends a turn-time `review_dispatch_warning` before
+    // formatting; that guard is turn-lifecycle-only, so stale-leak recovery
+    // intentionally delivers just the answer body.
     let Some(delivery_text) = render_leak_recovery_delivery(
         &state.full_response,
         start,
@@ -1466,39 +1491,61 @@ async fn maybe_recover_completed_stale_leak(
         _ => return false,
     }
 
-    let committed = matches!(
-        discord::formatting::replace_long_message_raw_with_outcome(
-            &http,
-            channel_id,
-            MessageId::new(state.current_msg_id),
-            &delivery_text,
-            shared,
-        )
-        .await,
-        Ok(discord::formatting::ReplaceLongMessageOutcome::EditedOriginal)
-    );
-    if !committed {
-        return false;
-    }
+    // Deliver by editing the placeholder in place (bridge parity).
+    //   EditedOriginal               -> the placeholder now holds the answer.
+    //   SentFallbackAfterEditFailure -> our edit failed but the full answer was
+    //                                   posted as a fresh message; delivered.
+    //   PartialContinuationFailure   -> delivered only if >=1 chunk landed;
+    //                                   sent_chunks == 0 means nothing reached the
+    //                                   channel, so fail-closed and retry next pass.
+    //   Err                          -> nothing delivered; retry next pass.
+    // We advance the offset on every *delivered* outcome so a re-fire cannot
+    // re-send a fallback/partial message.
+    use discord::formatting::ReplaceLongMessageOutcome;
+    let (delivery_detail, op) = match discord::formatting::replace_long_message_raw_with_outcome(
+        &http,
+        channel_id,
+        MessageId::new(state.current_msg_id),
+        &delivery_text,
+        shared,
+    )
+    .await
+    {
+        Ok(ReplaceLongMessageOutcome::EditedOriginal) => ("edited", "edit"),
+        Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. }) => {
+            ("fallback_post", "send")
+        }
+        Ok(ReplaceLongMessageOutcome::PartialContinuationFailure { sent_chunks, .. })
+            if sent_chunks > 0 =>
+        {
+            ("partial", "send")
+        }
+        _ => return false,
+    };
 
-    // Advance the offset and persist so a later pass treats this tail as
-    // delivered even before its next probe (belt-and-suspenders; the probe is
-    // the primary cross-restart guard). `end == full_response.len()` is always a
-    // valid char boundary and a monotonic forward move.
-    let mut persisted = state.clone();
-    persisted.response_sent_offset = end;
-    if let Err(error) = discord::inflight::save_inflight_state(&persisted) {
-        tracing::warn!(
-            "[leak-recover] delivered answer on channel {} but failed to persist offset: {error}",
-            channel_id
-        );
+    // Advance the offset and persist so a later pass (even after a dcserver
+    // restart) treats this tail as delivered and never re-sends it. Re-load and
+    // re-check identity first so we never clobber a concurrently-updated row, and
+    // skip if another path already advanced past `end`.
+    if let Some(mut fresh) = discord::inflight::load_inflight_state(provider, channel_id.get())
+        && fresh.user_msg_id == state.user_msg_id
+        && fresh.current_msg_id == state.current_msg_id
+        && fresh.response_sent_offset < end
+    {
+        fresh.response_sent_offset = end;
+        if let Err(error) = discord::inflight::save_inflight_state(&fresh) {
+            tracing::warn!(
+                "[leak-recover] delivered answer on channel {} but failed to persist offset: {error}",
+                channel_id
+            );
+        }
     }
 
     let turn_id = (state.user_msg_id != 0)
         .then(|| format!("discord:{}:{}", state.channel_id, state.user_msg_id));
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::warn!(
-        "  [{ts}] 📤 leak recovered: delivered {}-byte answer on channel {} (provider={})",
+        "  [{ts}] 📤 leak recovered ({delivery_detail}): delivered {}-byte answer on channel {} (provider={})",
         end - start,
         channel_id,
         provider.as_str()
@@ -1514,6 +1561,7 @@ async fn maybe_recover_completed_stale_leak(
             "byte_start": start,
             "byte_end": end,
             "flushed_len": end - start,
+            "delivery": delivery_detail,
         }),
     );
     crate::services::observability::emit_relay_delivery(
@@ -1522,11 +1570,11 @@ async fn maybe_recover_completed_stale_leak(
         turn_id.as_deref(),
         Some(state.current_msg_id),
         "recovery",
-        "edit",
+        op,
         Some(start as u64),
         Some(end as u64),
         true,
-        Some("leak_recovered_flushed"),
+        Some(delivery_detail),
     );
     true
 }
