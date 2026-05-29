@@ -61,12 +61,13 @@ fn claude_tui_transcript_fallback_path(
         return None;
     }
     let workspace = workspace?;
-    let transcript = crate::services::claude_tui::transcript_tail::latest_claude_transcript_for_cwd(
-        std::path::Path::new(workspace),
-        std::time::SystemTime::UNIX_EPOCH,
-        claude_home,
-        &std::collections::HashSet::new(),
-    )?;
+    let transcript =
+        crate::services::claude_tui::transcript_tail::latest_claude_transcript_for_cwd(
+            std::path::Path::new(workspace),
+            std::time::SystemTime::UNIX_EPOCH,
+            claude_home,
+            &std::collections::HashSet::new(),
+        )?;
     Some(transcript.display().to_string())
 }
 
