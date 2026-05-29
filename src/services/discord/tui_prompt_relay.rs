@@ -1195,12 +1195,24 @@ fn scan_claude_idle_transcript_for_last_prompt(
         offset = offset.saturating_add(bytes_read as u64);
         let Ok(json) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             if !line.ends_with('\n') {
-                // Partial trailing line: stop before consuming it. Return the
-                // newest complete prompt if any; otherwise leave the cursor at
-                // the partial line so the next tick re-reads it once complete.
-                return Ok(last_prompt.unwrap_or(ClaudeIdleTranscriptScan::NoPrompt {
-                    offset: line_start_offset,
-                }));
+                // #2843 (codex round-3 P1): a partial trailing line may be a
+                // NEWER prompt still mid-write. Returning the last complete
+                // prompt here would re-relay an older turn once that partial
+                // completes into a fresher prompt; returning `line_start_offset`
+                // (codex's literal suggestion) would instead advance the cursor
+                // PAST the complete prompt and drop the current turn when the
+                // partial is that prompt's own (streaming) response line.
+                //
+                // Defer WITHOUT advancing the cursor: return the scan start so
+                // the caller's NoPrompt arm leaves the binding untouched and the
+                // next 500ms tick re-evaluates the window once the trailing line
+                // is newline-terminated — then picks the true newest prompt
+                // (older turn skipped, current turn's response still tailed).
+                // Claude writes each transcript line atomically, so this defers
+                // by at most one tick.
+                return Ok(ClaudeIdleTranscriptScan::NoPrompt {
+                    offset: start_offset,
+                });
             }
             continue;
         };
@@ -2371,21 +2383,40 @@ agents:
     }
 
     #[test]
-    fn claude_idle_transcript_scan_for_last_prompt_returns_complete_before_partial() {
-        // A partial trailing line must not be consumed; the newest COMPLETE
-        // prompt is returned and the next tick re-reads the partial line.
+    fn claude_idle_transcript_scan_for_last_prompt_defers_on_partial_then_picks_newest() {
+        // #2843 (codex round-3 P1): when a partial trailing line follows an
+        // earlier complete prompt, the partial may be a NEWER prompt mid-write.
+        // The scanner must DEFER without advancing the cursor (return the scan
+        // start) rather than relay the earlier prompt — which could re-relay an
+        // older turn once the partial completes into a fresher prompt.
         let dir = tempfile::tempdir().expect("temp dir");
         let transcript = dir.path().join("transcript.jsonl");
-        let prompt = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"complete prompt\"}]},\"sessionId\":\"s1\"}\n";
-        let partial = "{\"type\":\"user\",\"message\":{\"role\":\"user\"";
-        std::fs::write(&transcript, format!("{prompt}{partial}")).expect("write transcript");
+        let older = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"older prompt\"}]},\"sessionId\":\"s1\"}\n";
+        let older_answer = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"older answer\"}]},\"sessionId\":\"s1\"}\n";
+        let newer_partial = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"newer";
+        std::fs::write(&transcript, format!("{older}{older_answer}{newer_partial}"))
+            .expect("write transcript");
 
+        // Defer: NoPrompt at the scan start (cursor unchanged) so the caller's
+        // NoPrompt arm leaves the binding untouched for a re-scan next tick —
+        // even though the older complete prompt WAS found, it is NOT returned.
+        let scan_start = 0;
         assert_eq!(
-            scan_claude_idle_transcript_for_last_prompt(&transcript, 0).expect("scan"),
+            scan_claude_idle_transcript_for_last_prompt(&transcript, scan_start).expect("defer"),
+            ClaudeIdleTranscriptScan::NoPrompt { offset: scan_start }
+        );
+
+        // Once the trailing line is newline-terminated, the NEWER prompt wins
+        // (the older turn is skipped, not re-relayed).
+        let newer = format!("{newer_partial} prompt\"}}]}},\"sessionId\":\"s1\"}}\n");
+        std::fs::write(&transcript, format!("{older}{older_answer}{newer}"))
+            .expect("rewrite transcript");
+        assert_eq!(
+            scan_claude_idle_transcript_for_last_prompt(&transcript, scan_start).expect("complete"),
             ClaudeIdleTranscriptScan::Prompt {
-                prompt: "complete prompt".to_string(),
-                prompt_start_offset: 0,
-                line_end_offset: prompt.len() as u64,
+                prompt: "newer prompt".to_string(),
+                prompt_start_offset: (older.len() + older_answer.len()) as u64,
+                line_end_offset: (older.len() + older_answer.len() + newer.len()) as u64,
             }
         );
     }
