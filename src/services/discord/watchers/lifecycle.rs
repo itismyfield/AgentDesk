@@ -39,6 +39,109 @@ fn codex_tui_rollout_fallback_for_session(
     Some(rollout.display().to_string())
 }
 
+/// #2853 — for claude_tui sessions whose AgentDesk-side relay JSONL never lands
+/// on disk (claude TUI writes its rollout to `~/.claude/projects/<cwd>/<uuid>.jsonl`
+/// and tails it via the relay-offset, not the wrapper JSONL the codex/pipe path
+/// emits), fall back to the freshest Claude rollout transcript under the
+/// channel's configured workspace. Without this, restart recovery hits the
+/// `no output file` branch and never re-attaches a watcher to a live claude_tui
+/// pane, so direct-TUI (and any) output stops relaying after a dcserver restart.
+///
+/// Unlike the codex fallback, the Discord turn registers a claude_tui inflight
+/// with `session_id = None` (see `transcript_tail` #2843), so the rollout is
+/// resolved by cwd + freshest-transcript rather than by session_id. Returns
+/// `None` for non-Claude providers, when no workspace is configured, or when no
+/// transcript exists yet. The caller still de-dupes against an existing watcher.
+fn claude_tui_transcript_fallback_path(
+    provider: &crate::services::provider::ProviderKind,
+    workspace: Option<&str>,
+    claude_home: Option<&std::path::Path>,
+) -> Option<String> {
+    if *provider != crate::services::provider::ProviderKind::Claude {
+        return None;
+    }
+    let workspace = workspace?;
+    let transcript = crate::services::claude_tui::transcript_tail::latest_claude_transcript_for_cwd(
+        std::path::Path::new(workspace),
+        std::time::SystemTime::UNIX_EPOCH,
+        claude_home,
+        &std::collections::HashSet::new(),
+    )?;
+    Some(transcript.display().to_string())
+}
+
+#[cfg(test)]
+mod claude_tui_transcript_fallback_tests {
+    use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn resolves_freshest_claude_transcript_when_wrapper_jsonl_absent() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let session_id = "11111111-1111-4111-8111-111111111111";
+
+        // Build the transcript path the resolver will scan for, then land it.
+        let transcript = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            cwd.path(),
+            session_id,
+            Some(home.path()),
+        )
+        .unwrap();
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, b"{\"type\":\"assistant\"}\n").unwrap();
+
+        let resolved = super::claude_tui_transcript_fallback_path(
+            &ProviderKind::Claude,
+            Some(cwd.path().to_str().unwrap()),
+            Some(home.path()),
+        );
+        assert_eq!(
+            resolved.as_deref(),
+            transcript.to_str(),
+            "claude_tui fallback must recover onto the live rollout transcript"
+        );
+    }
+
+    #[test]
+    fn returns_none_for_non_claude_provider() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        assert!(
+            super::claude_tui_transcript_fallback_path(
+                &ProviderKind::Codex,
+                Some(cwd.path().to_str().unwrap()),
+                Some(home.path()),
+            )
+            .is_none(),
+            "codex uses its own rollout fallback, not the claude transcript path"
+        );
+    }
+
+    #[test]
+    fn returns_none_without_workspace_or_transcript() {
+        let home = tempfile::tempdir().unwrap();
+        let empty_cwd = tempfile::tempdir().unwrap();
+        // No configured workspace.
+        assert!(
+            super::claude_tui_transcript_fallback_path(
+                &ProviderKind::Claude,
+                None,
+                Some(home.path()),
+            )
+            .is_none()
+        );
+        // Workspace configured but no transcript on disk yet.
+        assert!(
+            super::claude_tui_transcript_fallback_path(
+                &ProviderKind::Claude,
+                Some(empty_cwd.path().to_str().unwrap()),
+                Some(home.path()),
+            )
+            .is_none()
+        );
+    }
+}
+
 pub(super) fn evaluate_liveness_probe(
     marker_present: bool,
     pane_alive: bool,
@@ -1741,26 +1844,44 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             match crate::services::tmux_common::resolve_session_temp_path(session_name, "jsonl") {
                 Some(path) => path,
                 None => {
-                    let codex_fallback =
-                        codex_tui_rollout_fallback_for_session(&provider, *channel_id);
-                    match codex_fallback {
-                        Some(path) => {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::info!(
-                                "  [{ts}] ↻ watcher restore for {} — codex rollout fallback {}",
-                                session_name,
-                                path
-                            );
+                    if let Some(path) =
+                        codex_tui_rollout_fallback_for_session(&provider, *channel_id)
+                    {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] ↻ watcher restore for {} — codex rollout fallback {}",
+                            session_name,
                             path
-                        }
-                        None => {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::info!(
-                                "  [{ts}] ⏭ watcher skip for {} — no output file",
-                                session_name
-                            );
-                            continue;
-                        }
+                        );
+                        path
+                    } else if let Some(path) = claude_tui_transcript_fallback_path(
+                        &provider,
+                        super::super::settings::resolve_workspace(
+                            *channel_id,
+                            Some(channel_name.as_str()),
+                        )
+                        .as_deref(),
+                        None,
+                    ) {
+                        // #2853: claude_tui never lands the wrapper JSONL, so
+                        // recover the watcher onto the freshest Claude rollout
+                        // transcript for the channel's workspace instead of
+                        // skipping (which previously stranded direct-TUI output
+                        // relay after a dcserver restart).
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] ↻ watcher restore for {} — claude transcript fallback {}",
+                            session_name,
+                            path
+                        );
+                        path
+                    } else {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] ⏭ watcher skip for {} — no output file",
+                            session_name
+                        );
+                        continue;
                     }
                 }
             };
