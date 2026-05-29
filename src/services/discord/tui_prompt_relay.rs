@@ -596,6 +596,56 @@ fn claude_tui_launch_context(tmux_session_name: &str) -> Option<(PathBuf, std::t
     Some((launch.working_dir, launch_mtime))
 }
 
+/// #2843 multi-session fix: transcripts that authoritatively belong to OTHER
+/// live Claude TUI tmux sessions (so the freshest scan never steals them).
+/// Three sources, unioned:
+///   1. The live watcher's `output_path` for each other session — the ground
+///      truth of the transcript that session is *currently* tailing, including
+///      after Claude rotated its session_id mid-session (the launch script then
+///      holds a stale id, so this is the only source that captures the rotated
+///      file). This is what fixes concurrent adk-cc threads swapping each
+///      other's rotated transcripts.
+///   2. Each other session's launch-script transcript — source of truth for
+///      SSH-direct sessions that never register a runtime binding or spawn a
+///      relay watcher.
+///   3. Other sessions' registered runtime bindings — belt-and-suspenders.
+#[cfg(unix)]
+fn other_session_claimed_transcripts(
+    shared: &Arc<SharedData>,
+    tmux_session_name: &str,
+) -> std::collections::HashSet<PathBuf> {
+    let mut claimed: std::collections::HashSet<PathBuf> =
+        crate::services::tui_prompt_dedupe::runtime_bindings_for_kind(
+            RuntimeHandoffKind::ClaudeTui,
+        )
+        .into_iter()
+        .filter(|(other_session, _)| other_session != tmux_session_name)
+        .map(|(_, other_binding)| PathBuf::from(other_binding.output_path))
+        .collect();
+    for entry in shared.tmux_watchers.iter() {
+        if entry.key() == tmux_session_name {
+            continue;
+        }
+        let output_path = entry.value().output_path.clone();
+        if !output_path.is_empty() {
+            claimed.insert(PathBuf::from(output_path));
+        }
+    }
+    if let Ok(sessions) = crate::services::platform::tmux::list_session_names() {
+        for other_session in sessions {
+            if other_session == tmux_session_name {
+                continue;
+            }
+            if let Some(other_binding) =
+                rehydrated_claude_tui_binding_for_tmux_session(&other_session)
+            {
+                claimed.insert(PathBuf::from(other_binding.output_path));
+            }
+        }
+    }
+    claimed
+}
+
 /// #2843: resolve the freshest active Claude transcript for a tmux session.
 /// The stored runtime binding's `output_path` can be stale — an older session_id
 /// the launch script still references, or a missing AgentDesk rollout jsonl —
@@ -606,20 +656,35 @@ fn claude_tui_launch_context(tmux_session_name: &str) -> Option<(PathBuf, std::t
 /// Discord-turn recovery and offset advances reconcile against the right path.
 #[cfg(unix)]
 fn freshest_claude_transcript_for_session(
+    shared: &Arc<SharedData>,
     tmux_session_name: &str,
     binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
 ) -> Option<(PathBuf, Option<String>)> {
-    let bound = {
-        let path = PathBuf::from(&binding.output_path);
-        path.exists()
-            .then(|| (transcript_mtime(&path), path, binding.session_id.clone()))
-    };
-    let scanned = claude_tui_launch_context(tmux_session_name)
+    // #2843 multi-session fix: when the bound (launch-script) transcript still
+    // EXISTS, it is the authoritative per-session identity — trust it and do NOT
+    // override with a project-newer file. Picking max-by-mtime across the whole
+    // project dir was wrong for a cwd shared by several Claude sessions: a
+    // *different* session's (or an orphaned older session's) newer transcript
+    // gets pulled in, thrashing the binding against launch rehydration (~5s) and
+    // mis-tailing relay output. The project scan now only fills in when the
+    // bound transcript is genuinely missing (the legitimate stale/rotated-away
+    // case), and even then skips transcripts other live sessions claim.
+    let bound_path = PathBuf::from(&binding.output_path);
+    if bound_path.exists() {
+        return Some((bound_path, binding.session_id.clone()));
+    }
+    // Bound transcript is gone — fall back to the freshest project transcript,
+    // excluding files that authoritatively belong to other live Claude TUI tmux
+    // sessions (live watcher path + launch-script transcript + registered
+    // binding) so we still never steal another session's transcript.
+    let claimed_by_other_sessions = other_session_claimed_transcripts(shared, tmux_session_name);
+    claude_tui_launch_context(tmux_session_name)
         .and_then(|(cwd, launch_mtime)| {
             crate::services::claude_tui::transcript_tail::latest_claude_transcript_for_cwd(
                 &cwd,
                 launch_mtime,
                 None,
+                &claimed_by_other_sessions,
             )
         })
         .map(|path| {
@@ -627,13 +692,8 @@ fn freshest_claude_transcript_for_session(
                 .file_stem()
                 .and_then(|stem| stem.to_str())
                 .map(str::to_string);
-            (transcript_mtime(&path), path, session_id)
-        });
-    [bound, scanned]
-        .into_iter()
-        .flatten()
-        .max_by_key(|(modified, _, _)| *modified)
-        .map(|(_, path, session_id)| (path, session_id))
+            (path, session_id)
+        })
 }
 
 /// #2843: re-register the runtime binding to a freshly-resolved transcript so
@@ -684,12 +744,14 @@ fn resolve_idle_relay_transcript(
     binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
 ) -> Option<PathBuf> {
     let (transcript_path, resolved_session_id) =
-        freshest_claude_transcript_for_session(tmux_session_name, binding).unwrap_or_else(|| {
-            (
-                PathBuf::from(&binding.output_path),
-                binding.session_id.clone(),
-            )
-        });
+        freshest_claude_transcript_for_session(shared, tmux_session_name, binding).unwrap_or_else(
+            || {
+                (
+                    PathBuf::from(&binding.output_path),
+                    binding.session_id.clone(),
+                )
+            },
+        );
 
     // #2843 (codex P0): a non-stale watcher may suppress the idle tail ONLY when
     // the watcher itself is tailing the freshest transcript. Comparing the

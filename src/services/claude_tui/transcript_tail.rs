@@ -105,6 +105,7 @@ pub fn latest_claude_transcript_for_cwd(
     cwd: &Path,
     modified_since: std::time::SystemTime,
     claude_home: Option<&Path>,
+    exclude: &std::collections::HashSet<PathBuf>,
 ) -> Option<PathBuf> {
     let project_dirs = claude_project_dir_candidates_for_cwd(cwd, claude_home).ok()?;
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
@@ -114,6 +115,14 @@ pub fn latest_claude_transcript_for_cwd(
         };
         for entry in entries.flatten() {
             let path = entry.path();
+            // #2843 multi-session fix: skip transcripts already claimed by a
+            // *different* live session's binding. Without this, concurrent
+            // Claude TUI sessions sharing one cwd all collapse onto the single
+            // project-newest transcript, thrashing bindings and losing relay
+            // output. Caller passes the other sessions' bound paths.
+            if exclude.contains(&path) {
+                continue;
+            }
             // Top-level `<uuid>.jsonl` only — Claude writes one transcript per
             // session id at the project-dir root.
             if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
@@ -328,10 +337,12 @@ mod tests {
             .set_modified(base + std::time::Duration::from_secs(60))
             .unwrap();
 
+        let no_exclude = std::collections::HashSet::new();
         let latest = latest_claude_transcript_for_cwd(
             cwd.path(),
             std::time::SystemTime::UNIX_EPOCH,
             Some(home.path()),
+            &no_exclude,
         )
         .unwrap();
         assert_eq!(latest, newer);
@@ -341,12 +352,28 @@ mod tests {
         // qualifies; past both, nothing qualifies.
         let between = base + std::time::Duration::from_secs(30);
         assert_eq!(
-            latest_claude_transcript_for_cwd(cwd.path(), between, Some(home.path())),
+            latest_claude_transcript_for_cwd(cwd.path(), between, Some(home.path()), &no_exclude),
             Some(newer.clone())
         );
         let after_all = base + std::time::Duration::from_secs(120);
         assert!(
-            latest_claude_transcript_for_cwd(cwd.path(), after_all, Some(home.path())).is_none()
+            latest_claude_transcript_for_cwd(cwd.path(), after_all, Some(home.path()), &no_exclude)
+                .is_none()
+        );
+
+        // #2843 multi-session fix: excluding the project-newest transcript
+        // (claimed by another live session) must fall back to the next-newest
+        // qualifying transcript instead of returning the claimed one.
+        let exclude_newer: std::collections::HashSet<PathBuf> =
+            [newer.clone()].into_iter().collect();
+        assert_eq!(
+            latest_claude_transcript_for_cwd(
+                cwd.path(),
+                std::time::SystemTime::UNIX_EPOCH,
+                Some(home.path()),
+                &exclude_newer,
+            ),
+            Some(older.clone())
         );
     }
 
@@ -359,7 +386,8 @@ mod tests {
             latest_claude_transcript_for_cwd(
                 cwd.path(),
                 std::time::SystemTime::UNIX_EPOCH,
-                Some(home.path())
+                Some(home.path()),
+                &std::collections::HashSet::new()
             )
             .is_none()
         );
