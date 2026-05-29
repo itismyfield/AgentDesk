@@ -625,6 +625,15 @@ test("timeouts idle-kill module calls kill-tmux API for expired idle sessions", 
         ]
       },
       {
+        // Thread-channel 8h batch — empty in this scenario.
+        match(sql) {
+          return sql.includes("WHERE status = 'idle'") &&
+            sql.includes("active_dispatch_id IS NULL") &&
+            sql.includes("INTERVAL '8 hours'");
+        },
+        result: []
+      },
+      {
         match(sql) {
           return sql.includes("WHERE status = 'idle'") &&
             sql.includes("active_dispatch_id IS NOT NULL") &&
@@ -646,7 +655,11 @@ test("timeouts idle-kill module calls kill-tmux API for expired idle sessions", 
   assert.match(state.logs.info.join("\n"), /idle kill: agent-idle-1/);
 });
 
-test("timeouts idle-kill module skips thread-suffixed sessions (main channels only)", () => {
+test("timeouts idle-kill module reaps thread-suffixed sessions after 8h idle", () => {
+  // Thread sessions now have their OWN 8h idle-kill batch (kill-tmux only, DB
+  // row preserved for resume). This is the backstop for thread tmux sessions
+  // whose inner CLI stayed alive as an interactive prompt — the dead-session
+  // reaper can never reach them because the pane never goes dead.
   const { policy, state } = loadPolicy("policies/timeouts.js", {
     config: { server_port: 8791 },
     dbQuery: createSqlRouter([
@@ -659,15 +672,21 @@ test("timeouts idle-kill module skips thread-suffixed sessions (main channels on
         result: []
       },
       {
+        // Main-channel 6h batch — empty in this scenario.
         match(sql) {
-          return sql.includes("WHERE status = 'idle'") &&
-            sql.includes("active_dispatch_id IS NULL") &&
-            sql.includes("INTERVAL '6 hours'");
+          return sql.includes("INTERVAL '6 hours'") &&
+            sql.includes("thread_channel_id IS NULL");
+        },
+        result: []
+      },
+      {
+        // Thread-channel 8h batch — one stuck thread session.
+        match(sql) {
+          return sql.includes("INTERVAL '8 hours'") &&
+            sql.includes("thread_channel_id IS NOT NULL");
         },
         result: [
           {
-            // Thread-suffixed session (auto-queue or manual thread) — must be
-            // filtered out so idle-kill only touches main-channel sessions.
             session_key: "claude/discord_x/host:AgentDesk-claude-adk-cc-t1492434645395177545",
             agent_id: "agent-thread-1",
             provider: "claude",
@@ -679,10 +698,14 @@ test("timeouts idle-kill module skips thread-suffixed sessions (main channels on
       },
       {
         match(sql) {
-          return sql.includes("WHERE status = 'idle'") &&
-            sql.includes("active_dispatch_id IS NOT NULL") &&
+          return sql.includes("active_dispatch_id IS NOT NULL") &&
             sql.includes("INTERVAL '24 hours'");
         },
+        result: []
+      },
+      {
+        // Agent resolution for the thread session.
+        match: "SELECT to_agent_id FROM task_dispatches WHERE thread_id = ?",
         result: []
       }
     ]),
@@ -693,13 +716,17 @@ test("timeouts idle-kill module skips thread-suffixed sessions (main channels on
 
   policy._section_O();
 
-  assert.equal(state.httpPosts.length, 0);
+  assert.equal(state.httpPosts.length, 1);
+  assert.match(
+    state.httpPosts[0].url,
+    /AgentDesk-claude-adk-cc-t1492434645395177545\/kill-tmux$/
+  );
+  assert.match(state.httpPosts[0].body.reason, /idle \d+(시간|일) 초과/);
+  // Thread sessions go through kill-tmux (resume preserved), never force-kill.
+  assert.equal(state.httpPosts[0].body.retry, undefined);
 });
 
-test("timeouts idle-kill module keeps main and drops thread rows in a mixed batch", () => {
-  // Defense-in-depth: even if the SQL guard regresses and returns thread
-  // rows, the client-side filter (thread_channel_id + parseSessionThreadId,
-  // including the -dev suffix variant) must still skip them.
+test("timeouts idle-kill module reaps both main and thread idle rows in their batches", () => {
   const { policy, state } = loadPolicy("policies/timeouts.js", {
     config: { server_port: 8791 },
     dbQuery: createSqlRouter([
@@ -722,23 +749,31 @@ test("timeouts idle-kill module keeps main and drops thread rows in a mixed batc
         result: []
       },
       {
+        // Main-channel 6h batch.
         match(sql) {
-          return sql.includes("WHERE status = 'idle'") &&
-            sql.includes("active_dispatch_id IS NULL") &&
-            sql.includes("INTERVAL '6 hours'");
+          return sql.includes("INTERVAL '6 hours'") &&
+            sql.includes("thread_channel_id IS NULL");
         },
         result: [
           {
-            // Main channel — should be killed.
             session_key: "claude/discord_x/host:AgentDesk-claude-adk-cc",
             agent_id: "agent-main",
             provider: "claude",
             active_dispatch_id: null,
             thread_channel_id: null,
             last_seen_at: "2000-01-01 00:00:00"
-          },
+          }
+        ]
+      },
+      {
+        // Thread-channel 8h batch — three thread-shaped rows, all reaped.
+        match(sql) {
+          return sql.includes("INTERVAL '8 hours'") &&
+            sql.includes("thread_channel_id IS NOT NULL");
+        },
+        result: [
           {
-            // Thread suffix — should be skipped.
+            // -t<id> suffix.
             session_key: "claude/discord_x/host:AgentDesk-claude-adk-cc-t1492434645395177545",
             agent_id: "agent-thread-1",
             provider: "claude",
@@ -747,8 +782,7 @@ test("timeouts idle-kill module keeps main and drops thread rows in a mixed batc
             last_seen_at: "2000-01-01 00:00:00"
           },
           {
-            // thread_channel_id populated even though session_key looks main —
-            // should be skipped via the thread_channel_id branch of the filter.
+            // thread_channel_id populated, session_key looks main.
             session_key: "claude/discord_x/host:AgentDesk-claude-other",
             agent_id: "agent-thread-2",
             provider: "claude",
@@ -757,8 +791,7 @@ test("timeouts idle-kill module keeps main and drops thread rows in a mixed batc
             last_seen_at: "2000-01-01 00:00:00"
           },
           {
-            // -t<id>-dev suffix — parseSessionChannelName strips `-dev`, so the
-            // parseSessionThreadId regex still matches and the row is skipped.
+            // -t<id>-dev suffix.
             session_key: "claude/discord_x/host:AgentDesk-claude-adk-cc-t1492434645395177545-dev",
             agent_id: "agent-thread-dev",
             provider: "claude",
@@ -770,10 +803,13 @@ test("timeouts idle-kill module keeps main and drops thread rows in a mixed batc
       },
       {
         match(sql) {
-          return sql.includes("WHERE status = 'idle'") &&
-            sql.includes("active_dispatch_id IS NOT NULL") &&
+          return sql.includes("active_dispatch_id IS NOT NULL") &&
             sql.includes("INTERVAL '24 hours'");
         },
+        result: []
+      },
+      {
+        match: "SELECT to_agent_id FROM task_dispatches WHERE thread_id = ?",
         result: []
       }
     ]),
@@ -784,12 +820,14 @@ test("timeouts idle-kill module keeps main and drops thread rows in a mixed batc
 
   policy._section_O();
 
-  // Only the main-channel row got killed.
-  assert.equal(state.httpPosts.length, 1);
-  assert.match(
-    state.httpPosts[0].url,
-    /\/api\/sessions\/.*AgentDesk-claude-adk-cc\/kill-tmux$/
-  );
-  // Reason text uses the new human-readable formatter (hours, not minutes).
-  assert.match(state.httpPosts[0].body.reason, /idle \d+(시간|일) 초과/);
+  // Main row + 3 thread rows all reaped.
+  assert.equal(state.httpPosts.length, 4);
+  const urls = state.httpPosts.map((p) => p.url).join("\n");
+  assert.match(urls, /AgentDesk-claude-adk-cc\/kill-tmux$/m);
+  assert.match(urls, /AgentDesk-claude-adk-cc-t1492434645395177545\/kill-tmux$/m);
+  assert.match(urls, /AgentDesk-claude-other\/kill-tmux$/m);
+  // Reason text uses the human-readable formatter (hours, not minutes).
+  state.httpPosts.forEach((p) => {
+    assert.match(p.body.reason, /idle \d+(시간|일) 초과/);
+  });
 });
