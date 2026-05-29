@@ -944,6 +944,22 @@ impl RelaySlotGuard {
 
 impl Drop for RelaySlotGuard {
     fn drop(&mut self) {
+        if !self.released {
+            // #2841 (codex review): reaching Drop without a prior explicit
+            // release() means an abnormal exit (panic / `?` / task
+            // cancellation) BEFORE the turn recorded its relayed offset /
+            // advanced confirmed-end — so the delivery outcome of any in-flight
+            // Discord send is UNKNOWN. Freeing the slot prevents a permanent
+            // channel wedge, but a replacement watcher MAY then re-emit the same
+            // range (a bounded duplicate window). This is strictly better than a
+            // permanent wedge; the (channel, turn, byte-range) delivery lease
+            // (P1) closes the window by recording delivery BEFORE the slot
+            // frees. Surface it so the window is measurable until the lease lands.
+            tracing::warn!(
+                target: "agentdesk::relay_flight_recorder",
+                "relay emission slot freed via Drop on abnormal exit (in-flight send outcome unknown); a replacement watcher may re-emit the same range — resolved by the delivery lease"
+            );
+        }
         self.release();
     }
 }
