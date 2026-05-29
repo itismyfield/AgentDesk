@@ -70,15 +70,18 @@ async fn append_pending_uploads(
     shared: &std::sync::Arc<SharedData>,
     channel_id: serenity::ChannelId,
     upload_records: &[String],
-) {
+) -> bool {
     if upload_records.is_empty() {
-        return;
+        return true;
     }
     let mut data = shared.core.lock().await;
     if let Some(session) = data.sessions.get_mut(&channel_id) {
         session
             .pending_uploads
             .extend(upload_records.iter().cloned());
+        true
+    } else {
+        false
     }
 }
 
@@ -1698,6 +1701,7 @@ pub(in crate::services::discord) async fn handle_event(
                 Vec::new()
             };
             record_upload_history(&data.shared, channel_id, &upload_records).await;
+            let mut upload_records_appended_to_session = false;
 
             let attachment_only_turn =
                 should_start_attachment_only_turn(text, upload_records.len());
@@ -1723,6 +1727,8 @@ pub(in crate::services::discord) async fn handle_event(
             // `LazyLock`, avoiding a per-message compile cost in the hot path.
             let cmd_text = strip_leading_bot_mention(text);
             if cmd_text.starts_with('!') {
+                upload_records_appended_to_session =
+                    append_pending_uploads(&data.shared, channel_id, &upload_records).await;
                 let handled = super::message_handler::handle_text_command(
                     ctx,
                     new_message,
@@ -1732,6 +1738,10 @@ pub(in crate::services::discord) async fn handle_event(
                 )
                 .await?;
                 if handled {
+                    if !upload_records_appended_to_session {
+                        let _ =
+                            append_pending_uploads(&data.shared, channel_id, &upload_records).await;
+                    }
                     return Ok(());
                 }
             }
@@ -2292,6 +2302,10 @@ pub(in crate::services::discord) async fn handle_event(
 
             // Meeting command from text (e.g. announce bot sending "/meeting start ...")
             if text.starts_with("/meeting ") {
+                if !upload_records_appended_to_session {
+                    upload_records_appended_to_session =
+                        append_pending_uploads(&data.shared, channel_id, &upload_records).await;
+                }
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!("  [{ts}] ◀ [{user_name}] Meeting cmd: {text}");
                 let http = ctx.http.clone();
@@ -2304,12 +2318,19 @@ pub(in crate::services::discord) async fn handle_event(
                 )
                 .await?
                 {
+                    if !upload_records_appended_to_session {
+                        let _ =
+                            append_pending_uploads(&data.shared, channel_id, &upload_records).await;
+                    }
                     return Ok(());
                 }
             }
 
             // Shell command shortcut
             if text.starts_with('!') {
+                if !upload_records_appended_to_session {
+                    let _ = append_pending_uploads(&data.shared, channel_id, &upload_records).await;
+                }
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 let preview = truncate_str(text, 60);
                 tracing::info!("  [{ts}] ◀ [{user_name}] Shell: {preview}");
@@ -2460,7 +2481,11 @@ pub(in crate::services::discord) async fn handle_event(
                 shared: &data.shared,
                 token: &data.token,
             };
-            append_pending_uploads(&data.shared, channel_id, &upload_records).await;
+            let preloaded_uploads = if upload_records_appended_to_session {
+                Vec::new()
+            } else {
+                upload_records.clone()
+            };
             super::message_handler::handle_text_message(
                 &deps,
                 channel_id,
@@ -2476,6 +2501,7 @@ pub(in crate::services::discord) async fn handle_event(
                 has_reply_boundary,
                 Some(is_dm),
                 turn_kind,
+                preloaded_uploads,
             )
             .await?;
         }

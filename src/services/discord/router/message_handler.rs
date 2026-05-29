@@ -3324,6 +3324,7 @@ pub(crate) async fn execute_intake_turn_core(
         request.has_reply_boundary,
         request.dm_hint,
         request.turn_kind,
+        Vec::new(),
     )
     .await
 }
@@ -3441,6 +3442,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     has_reply_boundary: bool,
     dm_hint: Option<bool>,
     turn_kind: TurnKind,
+    preloaded_uploads: Vec<String>,
 ) -> Result<(), Error> {
     let IntakeDeps {
         http,
@@ -3752,7 +3754,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     let mut session_reset_reason = None;
     let mut reset_session_id_to_clear = None;
     // Get session info, allowed tools, and pending uploads
-    let (session_info, pending_uploads, session_was_cleared) = {
+    let (session_info, mut pending_uploads, session_was_cleared) = {
         let mut data = shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id)
             && let Some(reason) =
@@ -3786,6 +3788,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         drop(data);
         (info, uploads, was_cleared)
     };
+    pending_uploads.extend(preloaded_uploads);
     let provider = settings_provider;
     let dispatch_id_for_thread = super::super::adk_session::parse_dispatch_id(user_text);
     let dispatch_info_cached = if let Some(ref did) = dispatch_id_for_thread {

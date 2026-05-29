@@ -299,6 +299,7 @@ pub(in crate::services::discord) async fn cmd_cc(
             false,
             None,
             TurnKind::Foreground,
+            Vec::new(),
         )
         .await?;
         return Ok(());
@@ -370,6 +371,7 @@ pub(in crate::services::discord) async fn cmd_cc(
         false,
         None,
         TurnKind::Foreground,
+        Vec::new(),
     )
     .await?;
 

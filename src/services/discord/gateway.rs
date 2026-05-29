@@ -682,6 +682,7 @@ impl TurnGateway for DiscordGateway {
                 // Queued turn kickoff: the prior turn already finished, so
                 // this dispatch is not racing the placeholder-delete path.
                 router::TurnKind::Foreground,
+                Vec::new(),
             )
             .await
             .map_err(|e| e.to_string())

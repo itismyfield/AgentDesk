@@ -4063,6 +4063,7 @@ pub(super) async fn kickoff_idle_queues(
             // own their own placeholder; they're never racing for it.
             // Foreground keeps legacy behavior.
             router::TurnKind::Foreground,
+            intervention.pending_uploads.clone(),
         )
         .await
         {
