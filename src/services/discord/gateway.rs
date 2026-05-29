@@ -240,7 +240,12 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
         let channel_id = parse_channel_id(target_channel)?;
         rate_limit_wait(&self.shared, channel_id).await;
         channel_id
-            .send_message(&self.http, serenity::CreateMessage::new().content(content))
+            .send_message(
+                &self.http,
+                serenity::CreateMessage::new()
+                    .content(content)
+                    .allowed_mentions(super::http::relay_allowed_mentions()),
+            )
             .await
             .map(|message| message.id.get().to_string())
             .map_err(dispatch_post_error)
@@ -268,7 +273,8 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
                 &self.http,
                 serenity::CreateMessage::new()
                     .reference_message((reference_channel_id, reference_message_id))
-                    .content(content),
+                    .content(content)
+                    .allowed_mentions(super::http::relay_allowed_mentions()),
             )
             .await
             .map(|message| message.id.get().to_string())
@@ -294,7 +300,9 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
             .edit_message(
                 &self.http,
                 message_id,
-                serenity::EditMessage::new().content(content),
+                serenity::EditMessage::new()
+                    .content(content)
+                    .allowed_mentions(super::http::relay_allowed_mentions()),
             )
             .await
             .map(|message| message.id.get().to_string())
