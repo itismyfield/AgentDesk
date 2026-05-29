@@ -383,7 +383,11 @@ pub fn emit_relay_delivery(
         None,
         None,
         turn_id,
-        Some(if committed { "committed" } else { "uncommitted" }),
+        Some(if committed {
+            "committed"
+        } else {
+            "uncommitted"
+        }),
         CounterDelta::default(),
         json!({
             "owner": normalize_string(owner),

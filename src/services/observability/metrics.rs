@@ -351,7 +351,6 @@ pub fn record_relay_owner_unknown(channel_id: u64, provider: &str) {
     global().record_relay_owner_unknown(channel_id, provider);
 }
 
-
 pub fn snapshot() -> Vec<CounterSnapshotRow> {
     global().snapshot()
 }
