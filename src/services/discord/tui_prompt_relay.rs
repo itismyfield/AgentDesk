@@ -362,9 +362,8 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                 ) else {
                     continue;
                 };
-                let scan_offset = if Path::new(&binding.output_path) == transcript_path {
-                    binding.last_offset
-                } else {
+                let path_changed = Path::new(&binding.output_path) != transcript_path;
+                let scan_offset = if path_changed {
                     // #2843 (codex P1): path changed — scan a bounded lookback
                     // instead of starting at EOF, so a prompt already written to
                     // the freshly-resolved transcript is still found (the
@@ -372,20 +371,31 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                     // background-loop half must not miss the prompt it recovers).
                     claude_tui_rehydrate_start_offset(&transcript_path)
                         .saturating_sub(CLAUDE_IDLE_FRESH_TRANSCRIPT_LOOKBACK_BYTES)
+                } else {
+                    binding.last_offset
                 };
-                let scan =
-                    match scan_claude_idle_transcript_for_prompt(&transcript_path, scan_offset) {
-                        Ok(scan) => scan,
-                        Err(error) => {
-                            tracing::debug!(
-                                tmux_session_name = %tmux_session_name,
-                                transcript_path = %transcript_path.display(),
-                                error = %error,
-                                "Claude idle transcript relay scan skipped"
-                            );
-                            continue;
-                        }
-                    };
+                // #2843 (codex round-2 P1): the lookback window can hold several
+                // finished turns; relaying the first would re-relay an old turn.
+                // On a path change select the NEWEST prompt in the window (the
+                // just-typed one); unchanged-path incremental tailing keeps
+                // first-prompt semantics so it never skips a queued prompt.
+                let scan_result = if path_changed {
+                    scan_claude_idle_transcript_for_last_prompt(&transcript_path, scan_offset)
+                } else {
+                    scan_claude_idle_transcript_for_prompt(&transcript_path, scan_offset)
+                };
+                let scan = match scan_result {
+                    Ok(scan) => scan,
+                    Err(error) => {
+                        tracing::debug!(
+                            tmux_session_name = %tmux_session_name,
+                            transcript_path = %transcript_path.display(),
+                            error = %error,
+                            "Claude idle transcript relay scan skipped"
+                        );
+                        continue;
+                    }
+                };
 
                 match scan {
                     ClaudeIdleTranscriptScan::NoPrompt { offset } => {
@@ -1117,6 +1127,87 @@ fn scan_claude_idle_transcript_for_prompt(
             crate::services::tui_prompt_dedupe::extract_claude_transcript_user_prompt(&json)
         {
             return Ok(ClaudeIdleTranscriptScan::Prompt {
+                prompt,
+                prompt_start_offset: line_start_offset,
+                line_end_offset: offset,
+            });
+        }
+    }
+}
+
+/// #2843 (codex round-2 P1): scan `[start_offset, EOF)` and return the LAST
+/// (newest, closest to EOF) user prompt rather than the first.
+///
+/// The path-change lookback reads a bounded byte window that can contain
+/// several already-finished turns. Selecting the first prompt would re-relay an
+/// old turn (`observe_prompt_by_tmux` only suppresses pending Discord prompts or
+/// recent duplicates, so an older prompt inside the window is misclassified as
+/// SSH-direct and tailed again). The just-typed prompt is always the newest
+/// entry in the window, so returning the last prompt catches the current turn
+/// without replaying stale backlog. Incremental tailing on an unchanged path
+/// keeps first-prompt semantics via [`scan_claude_idle_transcript_for_prompt`].
+fn scan_claude_idle_transcript_for_last_prompt(
+    transcript_path: &Path,
+    start_offset: u64,
+) -> Result<ClaudeIdleTranscriptScan, String> {
+    let mut file = std::fs::File::open(transcript_path).map_err(|error| {
+        format!(
+            "open Claude transcript {}: {error}",
+            transcript_path.display()
+        )
+    })?;
+    let file_len = file
+        .metadata()
+        .map_err(|error| {
+            format!(
+                "stat Claude transcript {}: {error}",
+                transcript_path.display()
+            )
+        })?
+        .len();
+    let mut offset = if start_offset > file_len {
+        0
+    } else {
+        start_offset
+    };
+    file.seek(SeekFrom::Start(offset)).map_err(|error| {
+        format!(
+            "seek Claude transcript {}: {error}",
+            transcript_path.display()
+        )
+    })?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    let mut last_prompt: Option<ClaudeIdleTranscriptScan> = None;
+
+    loop {
+        line.clear();
+        let line_start_offset = offset;
+        let bytes_read = reader.read_line(&mut line).map_err(|error| {
+            format!(
+                "read Claude transcript {}: {error}",
+                transcript_path.display()
+            )
+        })?;
+        if bytes_read == 0 {
+            return Ok(last_prompt.unwrap_or(ClaudeIdleTranscriptScan::NoPrompt { offset }));
+        }
+        offset = offset.saturating_add(bytes_read as u64);
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            if !line.ends_with('\n') {
+                // Partial trailing line: stop before consuming it. Return the
+                // newest complete prompt if any; otherwise leave the cursor at
+                // the partial line so the next tick re-reads it once complete.
+                return Ok(last_prompt.unwrap_or(ClaudeIdleTranscriptScan::NoPrompt {
+                    offset: line_start_offset,
+                }));
+            }
+            continue;
+        };
+        if let Some(prompt) =
+            crate::services::tui_prompt_dedupe::extract_claude_transcript_user_prompt(&json)
+        {
+            last_prompt = Some(ClaudeIdleTranscriptScan::Prompt {
                 prompt,
                 prompt_start_offset: line_start_offset,
                 line_end_offset: offset,
@@ -2226,6 +2317,75 @@ agents:
             scan_claude_idle_transcript_for_prompt(&transcript, 0).expect("scan partial"),
             ClaudeIdleTranscriptScan::NoPrompt {
                 offset: complete.len() as u64,
+            }
+        );
+    }
+
+    #[test]
+    fn claude_idle_transcript_scan_for_last_prompt_selects_newest_in_window() {
+        // #2843 (codex round-2 P1): a path-change lookback window holding an old
+        // finished turn followed by the just-typed prompt must relay only the
+        // newest prompt, not the first (which would re-relay the old turn).
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transcript = dir.path().join("transcript.jsonl");
+        let old_prompt = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"old finished turn\"}]},\"sessionId\":\"s1\"}\n";
+        let old_answer = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"old answer\"}]},\"sessionId\":\"s1\"}\n";
+        let new_prompt = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"just typed prompt\"}]},\"sessionId\":\"s1\"}\n";
+        std::fs::write(&transcript, format!("{old_prompt}{old_answer}{new_prompt}"))
+            .expect("write transcript");
+
+        // First-prompt scan would return the OLD turn (the regression).
+        assert_eq!(
+            scan_claude_idle_transcript_for_prompt(&transcript, 0).expect("first scan"),
+            ClaudeIdleTranscriptScan::Prompt {
+                prompt: "old finished turn".to_string(),
+                prompt_start_offset: 0,
+                line_end_offset: old_prompt.len() as u64,
+            }
+        );
+        // Last-prompt scan returns the just-typed prompt instead.
+        assert_eq!(
+            scan_claude_idle_transcript_for_last_prompt(&transcript, 0).expect("last scan"),
+            ClaudeIdleTranscriptScan::Prompt {
+                prompt: "just typed prompt".to_string(),
+                prompt_start_offset: (old_prompt.len() + old_answer.len()) as u64,
+                line_end_offset: (old_prompt.len() + old_answer.len() + new_prompt.len()) as u64,
+            }
+        );
+    }
+
+    #[test]
+    fn claude_idle_transcript_scan_for_last_prompt_none_when_no_prompt() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transcript = dir.path().join("transcript.jsonl");
+        let init = "{\"type\":\"system\",\"subtype\":\"init\",\"sessionId\":\"s1\"}\n";
+        let answer = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]},\"sessionId\":\"s1\"}\n";
+        std::fs::write(&transcript, format!("{init}{answer}")).expect("write transcript");
+
+        assert_eq!(
+            scan_claude_idle_transcript_for_last_prompt(&transcript, 0).expect("scan"),
+            ClaudeIdleTranscriptScan::NoPrompt {
+                offset: (init.len() + answer.len()) as u64,
+            }
+        );
+    }
+
+    #[test]
+    fn claude_idle_transcript_scan_for_last_prompt_returns_complete_before_partial() {
+        // A partial trailing line must not be consumed; the newest COMPLETE
+        // prompt is returned and the next tick re-reads the partial line.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transcript = dir.path().join("transcript.jsonl");
+        let prompt = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"complete prompt\"}]},\"sessionId\":\"s1\"}\n";
+        let partial = "{\"type\":\"user\",\"message\":{\"role\":\"user\"";
+        std::fs::write(&transcript, format!("{prompt}{partial}")).expect("write transcript");
+
+        assert_eq!(
+            scan_claude_idle_transcript_for_last_prompt(&transcript, 0).expect("scan"),
+            ClaudeIdleTranscriptScan::Prompt {
+                prompt: "complete prompt".to_string(),
+                prompt_start_offset: 0,
+                line_end_offset: prompt.len() as u64,
             }
         );
     }
