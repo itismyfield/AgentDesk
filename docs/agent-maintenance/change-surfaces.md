@@ -135,6 +135,9 @@
   - `src/services/cluster/stream_relay.rs` (1049 lines; session-bound
     StreamRelay queue, delivery metrics, and terminal ack sequencing surface —
     split before adding non-bugfix behavior).
+  - `src/services/discord/session_relay_sink.rs` (1125 lines; Discord session
+    relay sink, queue delivery, and message update surface — bugfix only
+    outside an extraction plan).
   - `src/services/discord/gateway.rs` (1006 lines; Discord gateway adapter
     and `TurnGateway` bridge for turn send/edit/pin/unpin behavior — bugfix
     only outside a split plan).
@@ -177,6 +180,9 @@
     TUI ready/draft heuristics surface — bugfix only outside a split plan).
   - `src/services/discord/standby_relay.rs` (1095 lines; cluster-standby
     JSONL→Discord relay loop from #2011 phase 5.3, bugfix only outside an
+    extraction plan).
+  - `src/services/tui_turn_state.rs` (1105 lines; TUI turn-state persistence,
+    reconciliation, and lifecycle snapshot surface — bugfix only outside an
     extraction plan).
 - active_callsite_coverage: n/a.
 - invariants: watcher single-owner per #1222; placeholder lifecycle invariants

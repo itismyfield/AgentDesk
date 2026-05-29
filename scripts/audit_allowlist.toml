@@ -81,7 +81,7 @@ git_subprocess_callsites = [
 # fallback path); the audit regex `\.sqlite\b` cannot see the cfg gate, so
 # we pin them by file:line.
 legacy_sqlite_refs = [
-  "src/services/discord/turn_bridge/mod.rs:2902",
+  "src/services/discord/turn_bridge/mod.rs:2907",
   "src/services/discord/watchers/lifecycle.rs:370",
 ]
 
