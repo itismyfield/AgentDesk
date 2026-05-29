@@ -6374,7 +6374,11 @@ mod tests {
         let slot = Arc::new(AtomicU64::new(7));
         let mut guard = RelaySlotGuard::new(slot.clone());
         guard.release();
-        assert_eq!(slot.load(Ordering::Acquire), 0, "explicit release frees slot");
+        assert_eq!(
+            slot.load(Ordering::Acquire),
+            0,
+            "explicit release frees slot"
+        );
 
         // After the explicit release, another watcher may legitimately acquire
         // the slot. The first guard's trailing Drop must NOT reset that token to
