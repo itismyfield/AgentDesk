@@ -450,6 +450,25 @@ fn agent_voice_channel_for_background(
         .then_some(voice_channel_id)
 }
 
+fn agent_voice_source_channel_for_background(
+    config: &crate::config::Config,
+    background_channel_id: ChannelId,
+) -> Option<ChannelId> {
+    let mut matches = config
+        .agents
+        .iter()
+        .filter_map(|agent| agent_voice_channel_for_background(agent, background_channel_id));
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+fn effective_voice_source_channel(
+    config: &crate::config::Config,
+    channel_id: ChannelId,
+) -> ChannelId {
+    agent_voice_source_channel_for_background(config, channel_id).unwrap_or(channel_id)
+}
+
 fn agent_text_channel_matches(agent: &crate::config::AgentDef, channel_id: ChannelId) -> bool {
     let channel_id = channel_id.get().to_string();
     agent
@@ -3748,8 +3767,10 @@ impl VoiceBargeInRuntime {
         };
 
         let transcript = transcribed.text.trim();
+        let config_snapshot = crate::config::load_graceful();
+        let source_channel_id = effective_voice_source_channel(&config_snapshot, channel_id);
         let flight_context = VoiceFlightUtteranceContext::from_utterance(
-            channel_id,
+            source_channel_id,
             utterance,
             transcript,
             &transcribed,
@@ -3761,10 +3782,14 @@ impl VoiceBargeInRuntime {
             return VoiceBargeInTranscriptOutcome::EmptyTranscript;
         }
 
-        let config_snapshot = crate::config::load_graceful();
-        let source_is_lobby = super::settings::resolve_role_binding(channel_id, None).is_none()
-            && voice_lobby_accepts_source_channel(&config_snapshot.voice, channel_id);
-        let transcript = if source_is_lobby {
+        let source_is_agent_voice = config_snapshot
+            .agents
+            .iter()
+            .any(|agent| agent_voice_matches_channel(agent, source_channel_id));
+        let source_is_lobby = super::settings::resolve_role_binding(source_channel_id, None)
+            .is_none()
+            && voice_lobby_accepts_source_channel(&config_snapshot.voice, source_channel_id);
+        let transcript = if source_is_agent_voice || source_is_lobby {
             transcript.to_string()
         } else {
             match self.runtime_wake_word_decision(transcript).await {
@@ -3793,16 +3818,16 @@ impl VoiceBargeInRuntime {
         // spawned child.
         let has_inflight_foreground = self
             .inflight_foreground_cancels
-            .get(&channel_id.get())
+            .get(&source_channel_id.get())
             .is_some_and(|entry| !entry.value().is_empty());
         if self
-            .active_barge_in_mailbox_channel(shared, channel_id)
+            .active_barge_in_mailbox_channel(shared, source_channel_id)
             .await
             .is_some()
             || has_inflight_foreground
         {
             let outcome = self
-                .handle_processing_transcript(shared, provider, channel_id, transcript)
+                .handle_processing_transcript(shared, provider, source_channel_id, transcript)
                 .await;
             let mut event = match &outcome {
                 VoiceBargeInTranscriptOutcome::ExplicitStop {
@@ -3836,7 +3861,7 @@ impl VoiceBargeInRuntime {
                     event
                 }
             };
-            if let Some(route) = self.active_voice_routes.get(&channel_id.get()) {
+            if let Some(route) = self.active_voice_routes.get(&source_channel_id.get()) {
                 event.agent_id = Some(route.agent_id.clone());
                 event.background_channel_id = Some(route.channel_id.get());
             }
@@ -3844,12 +3869,15 @@ impl VoiceBargeInRuntime {
             return outcome;
         }
 
-        if let Some(outcome) = self.apply_dispatcher_command(channel_id, transcript).await {
+        if let Some(outcome) = self
+            .apply_dispatcher_command(source_channel_id, transcript)
+            .await
+        {
             return outcome;
         }
 
         let (target_channel_id, transcript) = match self
-            .resolve_voice_turn_target(shared, channel_id, transcript)
+            .resolve_voice_turn_target(shared, source_channel_id, transcript)
             .await
         {
             VoiceTurnTargetResolution::Target {
@@ -3873,7 +3901,7 @@ impl VoiceBargeInRuntime {
 
         self.start_voice_turn(
             shared,
-            channel_id,
+            source_channel_id,
             target_channel_id,
             utterance,
             &transcript,
@@ -5676,6 +5704,46 @@ mod tests {
         assert_eq!(
             agent_voice_channel_for_background(&agent, ChannelId::new(100)),
             None
+        );
+    }
+
+    #[test]
+    fn control_channel_utterance_resolves_to_agent_voice_source_channel() {
+        let mut config = crate::config::Config::default();
+        config.agents = vec![test_agent("codex")];
+
+        assert_eq!(
+            agent_voice_source_channel_for_background(&config, ChannelId::new(200)),
+            Some(ChannelId::new(300))
+        );
+        assert_eq!(
+            effective_voice_source_channel(&config, ChannelId::new(200)),
+            ChannelId::new(300)
+        );
+        assert_eq!(
+            effective_voice_source_channel(&config, ChannelId::new(999)),
+            ChannelId::new(999)
+        );
+    }
+
+    #[test]
+    fn control_channel_reverse_lookup_fails_closed_on_multi_agent_collision() {
+        let mut config = crate::config::Config::default();
+        let mut agent_a = test_agent("codex");
+        agent_a.id = "agent-a".to_string();
+        agent_a.voice.channel_id = Some("300".to_string());
+        let mut agent_b = test_agent("codex");
+        agent_b.id = "agent-b".to_string();
+        agent_b.voice.channel_id = Some("400".to_string());
+        config.agents = vec![agent_a, agent_b];
+
+        assert_eq!(
+            agent_voice_source_channel_for_background(&config, ChannelId::new(200)),
+            None
+        );
+        assert_eq!(
+            effective_voice_source_channel(&config, ChannelId::new(200)),
+            ChannelId::new(200)
         );
     }
 

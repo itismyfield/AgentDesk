@@ -92,6 +92,10 @@ async fn voice_join_impl(ctx: Context<'_>) -> Result<(), Error> {
         .shared
         .voice_barge_in
         .register_voice_context(control_channel_id, guild_id);
+    ctx.data()
+        .shared
+        .voice_barge_in
+        .register_voice_context(channel_id, guild_id);
     voice_occupancy().insert(
         (ctx.data().provider.as_str().to_string(), guild_id.get()),
         channel_id.get(),
@@ -167,6 +171,10 @@ async fn cmd_voice_attach(
         .shared
         .voice_barge_in
         .register_voice_context(text_channel_id, guild_id);
+    ctx.data()
+        .shared
+        .voice_barge_in
+        .register_voice_context(voice_channel_id, guild_id);
 
     ctx.say(format!(
         "Voice channel `{}` is attached to text channel `{}`.",
@@ -276,6 +284,9 @@ pub(in crate::services::discord) async fn handle_vc_text_command(
             data.shared
                 .voice_barge_in
                 .register_voice_context(control_channel_id, guild_id);
+            data.shared
+                .voice_barge_in
+                .register_voice_context(channel_id, guild_id);
             voice_occupancy().insert(
                 (data.provider.as_str().to_string(), guild_id.get()),
                 channel_id.get(),
@@ -675,6 +686,7 @@ async fn try_join_for_provider(
                 "voice auto-join skipped: songbird call already connected for guild (#2054 idempotency)"
             );
             barge_in.register_voice_context(control_channel_id, guild_id);
+            barge_in.register_voice_context(ChannelId::new(recorded_channel), guild_id);
             voice_occupancy().insert(
                 (self_provider.to_string(), guild_id.get()),
                 recorded_channel,
@@ -710,6 +722,7 @@ async fn try_join_for_provider(
                 "voice auto-join Ok: songbird connected, receiver registered"
             );
             barge_in.register_voice_context(control_channel_id, guild_id);
+            barge_in.register_voice_context(channel_id, guild_id);
             voice_occupancy().insert(
                 (self_provider.to_string(), guild_id.get()),
                 channel_id.get(),
