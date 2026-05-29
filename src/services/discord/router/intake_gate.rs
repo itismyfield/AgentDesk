@@ -73,6 +73,13 @@ fn attachment_prompt_field(raw: &str) -> String {
         .replace(['\r', '\n'], " ")
 }
 
+fn strip_leading_bot_mention(text: &str) -> String {
+    static BOT_MENTION_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^<@!?\d+>\s*").expect("static bot-mention regex is valid")
+    });
+    BOT_MENTION_RE.replace(text, "").to_string()
+}
+
 fn build_attachment_only_image_prompt(
     attachments: &[super::message_handler::SavedDiscordAttachment],
 ) -> Option<String> {
@@ -1685,7 +1692,8 @@ pub(in crate::services::discord) async fn handle_event(
                 Vec::new()
             };
 
-            let attachment_only_prompt = if text.is_empty() {
+            let text_without_routing_mention = strip_leading_bot_mention(text);
+            let attachment_only_prompt = if text_without_routing_mention.trim().is_empty() {
                 build_attachment_only_image_prompt(&saved_attachments)
             } else {
                 None
@@ -1708,19 +1716,9 @@ pub(in crate::services::discord) async fn handle_event(
             // ── Text commands (!start, !meeting, !stop, !clear) ──
             // Strip leading bot mention to get the actual command text.
             //
-            // #2044 F11: the pattern is constant — compile once via
-            // `LazyLock` instead of paying the per-message compile cost
-            // and exposing intake to a panic on a hypothetical compile
-            // failure (the previous code used `.unwrap()` on a
-            // `regex::Regex::new` result inside the hot path).
-            let cmd_text = {
-                static BOT_MENTION_RE: std::sync::LazyLock<regex::Regex> =
-                    std::sync::LazyLock::new(|| {
-                        regex::Regex::new(r"^<@!?\d+>\s*")
-                            .expect("static bot-mention regex is valid")
-                    });
-                BOT_MENTION_RE.replace(text, "").to_string()
-            };
+            // #2044 F11: the helper uses a constant regex compiled once via
+            // `LazyLock`, avoiding a per-message compile cost in the hot path.
+            let cmd_text = strip_leading_bot_mention(text);
             if cmd_text.starts_with('!') {
                 let handled = super::message_handler::handle_text_command(
                     ctx,
@@ -2346,7 +2344,14 @@ pub(in crate::services::discord) async fn handle_event(
             // node first. Only acts when a PG pool exists AND the global
             // mode env var is `observe` or `enforce`; otherwise this is
             // a no-op and the leader runs the intake locally as before.
-            let route_decision = if let Some(pool) = data.shared.pg_pool.as_ref().as_ref() {
+            let route_decision = if !new_message.attachments.is_empty() {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    user_msg_id = %new_message.id,
+                    "[intake_router] Discord attachments are node-local — running locally"
+                );
+                None
+            } else if let Some(pool) = data.shared.pg_pool.as_ref().as_ref() {
                 let mode =
                     crate::services::cluster::intake_router_hook::IntakeRoutingMode::from_env();
                 let leader_instance_id =
@@ -3000,7 +3005,7 @@ mod reply_context_tests {
     use super::super::message_handler::SavedDiscordAttachment;
     use super::{
         AttachmentReplyItem, build_attachment_only_image_prompt, format_attachment_reply_context,
-        saved_attachment_is_image_like,
+        saved_attachment_is_image_like, strip_leading_bot_mention,
     };
 
     #[test]
@@ -3075,6 +3080,12 @@ mod reply_context_tests {
         assert!(prompt.contains("content_type=\"image/png\""));
         assert!(prompt.contains("filename=\"notes.txt\""));
         assert!(prompt.contains("image=false"));
+    }
+
+    #[test]
+    fn attachment_only_empty_check_ignores_leading_bot_mention() {
+        assert_eq!(strip_leading_bot_mention("<@123456789>   "), "");
+        assert_eq!(strip_leading_bot_mention("<@!123456789> look"), "look");
     }
 }
 
