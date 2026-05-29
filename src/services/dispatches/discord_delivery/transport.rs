@@ -30,6 +30,59 @@ pub(crate) fn discord_api_url(base_url: &str, path: &str) -> String {
     )
 }
 
+/// #2842 (relay-stability P2): bounded retry budget for transient HTTP 429s on
+/// the raw dispatch transport. Discord rate-limits are a normal operating
+/// condition; previously a single 429 fell through to `Other` and became a
+/// terminal PermanentFailure with no backoff. The budget is capped so a long
+/// (or hostile) Retry-After cannot stall a dispatch worker indefinitely.
+const DISCORD_RATE_LIMIT_MAX_RETRIES: u32 = 3;
+const DISCORD_RATE_LIMIT_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(10);
+const DISCORD_RATE_LIMIT_DEFAULT_BACKOFF: std::time::Duration =
+    std::time::Duration::from_millis(500);
+
+/// Parse Discord's `Retry-After` header (seconds, possibly fractional) into a
+/// backoff duration. Returns `None` when the header is absent or unparseable.
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .map(std::time::Duration::from_secs_f64)
+}
+
+/// Send the request produced by `build`, retrying on HTTP 429 up to
+/// `DISCORD_RATE_LIMIT_MAX_RETRIES` times while honoring a capped Retry-After.
+/// Returns the first non-429 response, or the last 429 response once the retry
+/// budget is exhausted (callers then classify it as any other failure).
+/// `build` is invoked fresh per attempt because a reqwest `RequestBuilder` is
+/// consumed on `send()`.
+async fn send_with_rate_limit_retry<F>(build: F) -> reqwest::Result<reqwest::Response>
+where
+    F: Fn() -> reqwest::RequestBuilder,
+{
+    let mut attempt: u32 = 0;
+    loop {
+        let response = build().send().await?;
+        if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS
+            || attempt >= DISCORD_RATE_LIMIT_MAX_RETRIES
+        {
+            return Ok(response);
+        }
+        let backoff = parse_retry_after(response.headers())
+            .unwrap_or(DISCORD_RATE_LIMIT_DEFAULT_BACKOFF)
+            .min(DISCORD_RATE_LIMIT_MAX_BACKOFF);
+        attempt += 1;
+        tracing::warn!(
+            target: "discord::dispatch_transport",
+            attempt,
+            backoff_ms = backoff.as_millis() as u64,
+            "dispatch transport received HTTP 429; backing off then retrying"
+        );
+        tokio::time::sleep(backoff).await;
+    }
+}
+
 pub(crate) fn is_discord_length_error(status: reqwest::StatusCode, body: &str) -> bool {
     if status != reqwest::StatusCode::BAD_REQUEST {
         return false;
@@ -52,18 +105,19 @@ pub(crate) async fn post_raw_message_once(
     message: &str,
 ) -> Result<String, DispatchMessagePostError> {
     let message_url = discord_api_url(base_url, &format!("/channels/{channel_id}/messages"));
-    let response = client
-        .post(&message_url)
-        .header("Authorization", format!("Bot {}", token))
-        .json(&serde_json::json!({"content": message}))
-        .send()
-        .await
-        .map_err(|error| {
-            DispatchMessagePostError::new(
-                DispatchMessagePostErrorKind::Other,
-                format!("failed to post dispatch message to {channel_id}: {error}"),
-            )
-        })?;
+    let response = send_with_rate_limit_retry(|| {
+        client
+            .post(&message_url)
+            .header("Authorization", format!("Bot {}", token))
+            .json(&serde_json::json!({"content": message}))
+    })
+    .await
+    .map_err(|error| {
+        DispatchMessagePostError::new(
+            DispatchMessagePostErrorKind::Other,
+            format!("failed to post dispatch message to {channel_id}: {error}"),
+        )
+    })?;
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
@@ -112,18 +166,19 @@ pub(crate) async fn edit_raw_message_once(
         base_url,
         &format!("/channels/{channel_id}/messages/{message_id}"),
     );
-    let response = client
-        .patch(url)
-        .header("Authorization", format!("Bot {}", token))
-        .json(&serde_json::json!({ "content": content }))
-        .send()
-        .await
-        .map_err(|error| {
-            DispatchMessagePostError::new(
-                DispatchMessagePostErrorKind::Other,
-                format!("failed to edit dispatch message {message_id}: {error}"),
-            )
-        })?;
+    let response = send_with_rate_limit_retry(|| {
+        client
+            .patch(&url)
+            .header("Authorization", format!("Bot {}", token))
+            .json(&serde_json::json!({ "content": content }))
+    })
+    .await
+    .map_err(|error| {
+        DispatchMessagePostError::new(
+            DispatchMessagePostErrorKind::Other,
+            format!("failed to edit dispatch message {message_id}: {error}"),
+        )
+    })?;
 
     let status = response.status();
     if !status.is_success() {
@@ -666,6 +721,27 @@ mod tests {
             reqwest::StatusCode::FORBIDDEN,
             "BASE_TYPE_MAX_LENGTH",
         ));
+    }
+
+    #[test]
+    fn parse_retry_after_reads_seconds_and_rejects_garbage() {
+        use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+
+        // #2842: Discord sends Retry-After as (possibly fractional) seconds.
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("1.5"));
+        assert_eq!(
+            parse_retry_after(&headers),
+            Some(std::time::Duration::from_secs_f64(1.5))
+        );
+
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("0"));
+        assert_eq!(parse_retry_after(&headers), Some(std::time::Duration::ZERO));
+
+        // Unparseable / absent header => no backoff hint (caller uses default).
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("soon"));
+        assert_eq!(parse_retry_after(&headers), None);
+        assert_eq!(parse_retry_after(&HeaderMap::new()), None);
     }
 
     #[test]
