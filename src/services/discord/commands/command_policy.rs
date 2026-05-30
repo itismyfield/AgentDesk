@@ -165,13 +165,14 @@ pub(in crate::services::discord) fn slash_command_risk(slash_cmd: &str) -> Comma
     match slash_cmd {
         // Inspection only.
         "/help" | "/pwd" | "/health" | "/status" | "/inflight" | "/queue" | "/metrics"
-        | "/allowedtools" | "/sessions" | "/receipt" | "/usage" | "/adk" | "/cost"
-        | "/context" => CommandRisk::ReadOnly,
+        | "/allowedtools" | "/sessions" | "/receipt" | "/usage" | "/adk" | "/cost" | "/context" => {
+            CommandRisk::ReadOnly
+        }
 
         // Per-channel session shaping (mirrors text-command tiers).
-        "/start" | "/down" | "/cc" | "/skill" | "/meeting" | "/model" | "/fast"
-        | "/goals" | "/effort" | "/compact" | "/clear" | "/deletesession" | "/stop"
-        | "/restart" | "/debug" => CommandRisk::Mutating,
+        "/start" | "/down" | "/cc" | "/skill" | "/meeting" | "/model" | "/fast" | "/goals"
+        | "/effort" | "/compact" | "/clear" | "/deletesession" | "/stop" | "/restart"
+        | "/debug" => CommandRisk::Mutating,
 
         // RCE-equivalent surface.
         // `/deadlock-recover`, `/machine-flip`, and `/stuck-pr-rebase` (issue

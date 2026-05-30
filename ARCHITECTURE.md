@@ -420,6 +420,7 @@ src/
 │   │   │   ├── session.rs
 │   │   │   ├── skill.rs
 │   │   │   ├── text_commands.rs
+│   │   │   ├── tui_passthrough.rs
 │   │   │   └── voice.rs
 │   │   ├── health/
 │   │   │   ├── mailbox.rs
