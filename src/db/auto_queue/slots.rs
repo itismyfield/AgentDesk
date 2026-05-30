@@ -88,12 +88,13 @@ pub async fn slot_has_recent_terminal_auto_queue_dispatch_pg(
         "SELECT EXISTS (
              SELECT 1
              FROM task_dispatches d
+             CROSS JOIN LATERAL (SELECT COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb AS ctx) c
              WHERE d.to_agent_id = $1
                AND d.status IN ('completed', 'failed', 'cancelled')
                AND {slot_index_expr} = $2
-               AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->>'auto_queue')::BOOLEAN, FALSE) = TRUE
-               AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
-               AND (COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->'phase_gate' IS NULL
+               AND COALESCE((c.ctx->>'auto_queue')::BOOLEAN, FALSE) = TRUE
+               AND COALESCE((c.ctx->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
+               AND c.ctx->'phase_gate' IS NULL
                AND COALESCE(d.completed_at, d.updated_at, d.created_at)
                    >= NOW() - make_interval(secs => $3::INT)
          )"
