@@ -82,7 +82,7 @@ git_subprocess_callsites = [
 # we pin them by file:line.
 legacy_sqlite_refs = [
   "src/services/discord/turn_bridge/mod.rs:2907",
-  "src/services/discord/watchers/lifecycle.rs:370",
+  "src/services/discord/watchers/lifecycle.rs:474",
 ]
 
 # Source-of-truth alias writes: runtime_layout is already exempt.
