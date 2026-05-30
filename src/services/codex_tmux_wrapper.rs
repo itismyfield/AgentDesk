@@ -472,9 +472,8 @@ fn run_turn(
     });
 
     let mut stdout_line = String::new();
-    let mut final_text = String::new();
+    let mut state = CodexWrapperTurnState::default();
     let start = std::time::Instant::now();
-    let mut saw_turn_completed = false;
     let mut saw_any_stdout = false;
     let first_event_timeout = codex_first_event_timeout();
 
@@ -517,67 +516,7 @@ fn run_turn(
             continue;
         };
 
-        match json.get("type").and_then(|v| v.as_str()).unwrap_or("") {
-            "thread.started" => {
-                if let Some(id) = json.get("thread_id").and_then(|v| v.as_str()) {
-                    *thread_id = Some(id.to_string());
-                    emit_json_line(
-                        output,
-                        serde_json::json!({
-                            "type": "system",
-                            "subtype": "init",
-                            "session_id": id,
-                        }),
-                    )?;
-                }
-            }
-            "item.started" => {
-                if let Some(item) = json.get("item") {
-                    handle_item_started(output, item)?;
-                }
-            }
-            "item.completed" => {
-                if let Some(item) = json.get("item") {
-                    handle_item_completed(output, item, &mut final_text)?;
-                }
-            }
-            "background_event" => {
-                handle_background_event(output, &json)?;
-            }
-            "turn.completed" => {
-                let usage = json.get("usage").cloned().unwrap_or_default();
-                let input_tokens = usage
-                    .get("input_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let output_tokens = usage
-                    .get("output_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                emit_json_line(
-                    output,
-                    serde_json::json!({
-                        "type": "result",
-                        "subtype": "success",
-                        "result": final_text,
-                        "session_id": thread_id.as_deref(),
-                        "duration_ms": start.elapsed().as_millis() as u64,
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
-                    }),
-                )?;
-                saw_turn_completed = true;
-            }
-            "error" => {
-                let message = json
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Unknown Codex error");
-                emit_result_error(output, message);
-                saw_turn_completed = true;
-            }
-            _ => {}
-        }
+        handle_codex_wrapper_event(output, &json, thread_id, &mut state, start)?;
     }
 
     // Kill Codex process tree (including any cmd.exe / bash children) before waiting.
@@ -589,7 +528,7 @@ fn run_turn(
         .wait_with_output()
         .map_err(|e| format!("Failed to wait for Codex: {}", e))?;
 
-    if !wait.status.success() && !saw_turn_completed {
+    if !wait.status.success() && !state.saw_turn_completed {
         let stderr = String::from_utf8_lossy(&wait.stderr).trim().to_string();
         let message = if stderr.is_empty() {
             format!("Codex exited with code {:?}", wait.status.code())
@@ -600,13 +539,13 @@ fn run_turn(
         return Err(message);
     }
 
-    if !saw_turn_completed {
+    if !state.saw_turn_completed {
         emit_json_line(
             output,
             serde_json::json!({
                 "type": "result",
                 "subtype": "success",
-                "result": final_text,
+                "result": state.final_text,
                 "session_id": thread_id.as_deref(),
                 "duration_ms": start.elapsed().as_millis() as u64,
             }),
@@ -614,6 +553,604 @@ fn run_turn(
     }
 
     Ok(())
+}
+
+#[derive(Default)]
+struct CodexWrapperTurnState {
+    final_text: String,
+    saw_turn_completed: bool,
+    unknown_event_count: u64,
+}
+
+fn handle_codex_wrapper_event(
+    output: &mut RotatingJsonlWriter,
+    json: &serde_json::Value,
+    thread_id: &mut Option<String>,
+    state: &mut CodexWrapperTurnState,
+    start: std::time::Instant,
+) -> Result<(), String> {
+    match json.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+        "thread.started" => {
+            if let Some(id) = json.get("thread_id").and_then(|v| v.as_str()) {
+                *thread_id = Some(id.to_string());
+                emit_json_line(
+                    output,
+                    serde_json::json!({
+                        "type": "system",
+                        "subtype": "init",
+                        "session_id": id,
+                    }),
+                )?;
+            }
+        }
+        "item.started" => {
+            if let Some(item) = json.get("item") {
+                handle_item_started(output, item)?;
+            }
+        }
+        "item.completed" => {
+            if let Some(item) = json.get("item") {
+                handle_item_completed(output, item, &mut state.final_text)?;
+            }
+        }
+        "response_item" => {
+            if let Some(payload) = json.get("payload") {
+                handle_response_item(output, payload, &mut state.final_text)?;
+            }
+        }
+        "background_event" => {
+            handle_background_event(output, json)?;
+        }
+        "event_msg" => {
+            handle_event_msg(output, json, thread_id, state, start)?;
+        }
+        "task_complete" => {
+            emit_success_result(
+                output,
+                json.get("payload").unwrap_or(json),
+                thread_id,
+                state,
+                start,
+            )?;
+        }
+        "turn.completed" => {
+            emit_success_result(output, json, thread_id, state, start)?;
+        }
+        "error" => {
+            let message = json
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown Codex error");
+            emit_result_error(output, message);
+            state.saw_turn_completed = true;
+        }
+        event_type => {
+            record_unknown_codex_event(output, state, event_type)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_response_item(
+    output: &mut RotatingJsonlWriter,
+    payload: &serde_json::Value,
+    final_text: &mut String,
+) -> Result<(), String> {
+    match payload.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+        "message" => handle_response_message(output, payload, final_text),
+        "function_call" | "custom_tool_call" | "tool_search_call" => {
+            handle_response_tool_call(output, payload)
+        }
+        "function_call_output" | "custom_tool_call_output" | "tool_search_output" => {
+            handle_response_tool_output(output, payload)
+        }
+        "reasoning" => emit_json_line(output, assistant_redacted_thinking_event()),
+        _ => Ok(()),
+    }
+}
+
+fn handle_response_message(
+    output: &mut RotatingJsonlWriter,
+    payload: &serde_json::Value,
+    final_text: &mut String,
+) -> Result<(), String> {
+    if payload.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+        return Ok(());
+    }
+    let Some(content) = payload.get("content").and_then(|v| v.as_array()) else {
+        return Ok(());
+    };
+    let include_in_final_text = payload.get("phase").and_then(|v| v.as_str()) != Some("commentary");
+    for item in content {
+        let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if item_type != "output_text" && item_type != "text" {
+            continue;
+        }
+        let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        if text.is_empty() {
+            continue;
+        }
+        if include_in_final_text {
+            if !final_text.is_empty() {
+                final_text.push_str("\n\n");
+            }
+            final_text.push_str(text);
+        }
+        emit_json_line(
+            output,
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "content": [{
+                        "type": "text",
+                        "text": text,
+                    }]
+                }
+            }),
+        )?;
+    }
+    Ok(())
+}
+
+fn handle_response_tool_call(
+    output: &mut RotatingJsonlWriter,
+    payload: &serde_json::Value,
+) -> Result<(), String> {
+    let Some(name) = payload
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    else {
+        return Ok(());
+    };
+    let input = payload
+        .get("arguments")
+        .or_else(|| payload.get("input"))
+        .or_else(|| payload.get("action"))
+        .map(compact_json_or_string)
+        .unwrap_or_else(|| "{}".to_string());
+    emit_json_line(
+        output,
+        serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "name": name,
+                    "input": input,
+                }]
+            }
+        }),
+    )
+}
+
+fn handle_response_tool_output(
+    output: &mut RotatingJsonlWriter,
+    payload: &serde_json::Value,
+) -> Result<(), String> {
+    let content = payload
+        .get("output")
+        .or_else(|| payload.get("content"))
+        .map(compact_json_or_string)
+        .unwrap_or_default();
+    let is_error = payload
+        .get("is_error")
+        .or_else(|| payload.get("isError"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    emit_json_line(
+        output,
+        serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "content": content,
+                    "is_error": is_error,
+                }]
+            }
+        }),
+    )
+}
+
+fn handle_event_msg(
+    output: &mut RotatingJsonlWriter,
+    json: &serde_json::Value,
+    thread_id: &Option<String>,
+    state: &mut CodexWrapperTurnState,
+    start: std::time::Instant,
+) -> Result<(), String> {
+    let Some(payload) = json.get("payload") else {
+        return Ok(());
+    };
+    match payload.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+        "task_complete" => emit_success_result(output, payload, thread_id, state, start),
+        "agent_reasoning" => emit_json_line(output, assistant_redacted_thinking_event()),
+        "token_count" | "composer_ready" => Ok(()),
+        event_type => record_unknown_codex_event(output, state, event_type),
+    }
+}
+
+fn emit_success_result(
+    output: &mut RotatingJsonlWriter,
+    json: &serde_json::Value,
+    thread_id: &Option<String>,
+    state: &mut CodexWrapperTurnState,
+    start: std::time::Instant,
+) -> Result<(), String> {
+    if state.saw_turn_completed {
+        return Ok(());
+    }
+    if let Some(text) = json
+        .get("last_agent_message")
+        .and_then(|v| v.as_str())
+        .filter(|text| !text.is_empty())
+    {
+        state.final_text.clear();
+        state.final_text.push_str(text);
+    }
+    let usage = json
+        .get("usage")
+        .or_else(|| {
+            json.get("info")
+                .and_then(|info| info.get("total_token_usage"))
+        })
+        .cloned()
+        .unwrap_or_default();
+    let input_tokens = usage
+        .get("input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("output_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    emit_json_line(
+        output,
+        serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "result": state.final_text,
+            "session_id": thread_id.as_deref(),
+            "duration_ms": start.elapsed().as_millis() as u64,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }),
+    )?;
+    state.saw_turn_completed = true;
+    Ok(())
+}
+
+fn record_unknown_codex_event(
+    output: &mut RotatingJsonlWriter,
+    state: &mut CodexWrapperTurnState,
+    event_type: &str,
+) -> Result<(), String> {
+    state.unknown_event_count = state.unknown_event_count.saturating_add(1);
+    let label = if event_type.is_empty() {
+        "<missing>"
+    } else {
+        event_type
+    };
+    eprintln!(
+        "\x1b[90m[codex wrapper ignored unknown event type: {label}; count={}]\x1b[0m",
+        state.unknown_event_count
+    );
+    emit_json_line(
+        output,
+        serde_json::json!({
+            "type": "system",
+            "subtype": "diagnostic",
+            "source": "codex_tmux_wrapper",
+            "diagnostic_kind": "unknown_event",
+            "event_type": label,
+            "count": state.unknown_event_count,
+            "message": format!("Codex wrapper ignored unknown event type: {label}"),
+        }),
+    )
+}
+
+fn compact_json_or_string(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string())
+}
+
+#[cfg(test)]
+mod modern_event_tests {
+    use super::{CodexWrapperTurnState, handle_codex_wrapper_event};
+    use crate::services::codex::{
+        CODEX_BACKGROUND_TASK_NOTIFICATION_ID, CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
+    };
+    use crate::services::tmux_common::RotatingJsonlWriter;
+    use serde_json::json;
+
+    fn read_jsonl(path: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn modern_response_item_and_task_complete_emit_assistant_and_result() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut thread_id = Some("thread-modern".to_string());
+        let mut state = CodexWrapperTurnState::default();
+        let start = std::time::Instant::now();
+
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "modern final" }]
+                }
+            }),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "turn_id": "turn-1",
+                    "last_agent_message": "modern final",
+                    "duration_ms": 12
+                }
+            }),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+
+        let lines = read_jsonl(&path);
+        assert_eq!(
+            lines[0],
+            json!({
+                "type": "assistant",
+                "message": {
+                    "content": [{
+                        "type": "text",
+                        "text": "modern final"
+                    }]
+                }
+            })
+        );
+        assert_eq!(lines[1]["type"], "result");
+        assert_eq!(lines[1]["subtype"], "success");
+        assert_eq!(lines[1]["result"], "modern final");
+        assert_eq!(lines[1]["session_id"], "thread-modern");
+        assert!(state.saw_turn_completed);
+    }
+
+    #[test]
+    fn top_level_task_complete_finalizes_with_last_agent_message_fallback() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut thread_id = None;
+        let mut state = CodexWrapperTurnState::default();
+
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "task_complete",
+                "last_agent_message": "fallback final"
+            }),
+            &mut thread_id,
+            &mut state,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+        let lines = read_jsonl(&path);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["type"], "result");
+        assert_eq!(lines[0]["subtype"], "success");
+        assert_eq!(lines[0]["result"], "fallback final");
+        assert!(state.saw_turn_completed);
+    }
+
+    #[test]
+    fn task_complete_last_agent_message_replaces_partial_response_item_text() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut thread_id = Some("thread-modern".to_string());
+        let mut state = CodexWrapperTurnState::default();
+        let start = std::time::Instant::now();
+
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "partial" }]
+                }
+            }),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "last_agent_message": "full final"
+                }
+            }),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+
+        let lines = read_jsonl(&path);
+        assert_eq!(lines[0]["type"], "assistant");
+        assert_eq!(lines[0]["message"]["content"][0]["text"], "partial");
+        assert_eq!(lines[1]["type"], "result");
+        assert_eq!(lines[1]["result"], "full final");
+        assert_eq!(state.final_text, "full final");
+        assert!(state.saw_turn_completed);
+    }
+
+    #[test]
+    fn old_item_completed_and_turn_completed_still_emit_assistant_and_result() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut thread_id = Some("thread-old".to_string());
+        let mut state = CodexWrapperTurnState::default();
+        let start = std::time::Instant::now();
+
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({"type":"item.completed","item":{"type":"agent_message","text":"legacy final"}}),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":3}}),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+
+        let lines = read_jsonl(&path);
+        assert_eq!(lines[0]["type"], "assistant");
+        assert_eq!(lines[0]["message"]["content"][0]["text"], "legacy final");
+        assert_eq!(lines[1]["type"], "result");
+        assert_eq!(lines[1]["result"], "legacy final");
+        assert_eq!(lines[1]["input_tokens"], 10);
+        assert_eq!(lines[1]["output_tokens"], 3);
+    }
+
+    #[test]
+    fn unknown_future_events_are_counted_for_diagnostics() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut thread_id = None;
+        let mut state = CodexWrapperTurnState::default();
+
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({"type":"future.event","payload":{"type":"nested"}}),
+            &mut thread_id,
+            &mut state,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({"type":"event_msg","payload":{"type":"future_event"}}),
+            &mut thread_id,
+            &mut state,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+        assert_eq!(state.unknown_event_count, 2);
+        assert!(!state.saw_turn_completed);
+        let lines = read_jsonl(&path);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["type"], "system");
+        assert_eq!(lines[0]["subtype"], "diagnostic");
+        assert_eq!(lines[0]["diagnostic_kind"], "unknown_event");
+        assert_eq!(lines[0]["event_type"], "future.event");
+        assert_eq!(lines[0]["count"], 1);
+        assert_eq!(lines[1]["event_type"], "future_event");
+        assert_eq!(lines[1]["count"], 2);
+    }
+
+    #[test]
+    fn background_event_emits_task_notification_marker() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut thread_id = None;
+        let mut state = CodexWrapperTurnState::default();
+
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({"type":"background_event","message":"CI green"}),
+            &mut thread_id,
+            &mut state,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+        let lines = read_jsonl(&path);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0],
+            json!({
+                "type": "system",
+                "subtype": "task_notification",
+                "task_id": CODEX_BACKGROUND_TASK_NOTIFICATION_ID,
+                "status": CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
+                "summary": "CI green",
+                "task_notification_kind": "background",
+            })
+        );
+        assert!(!state.saw_turn_completed);
+    }
+
+    #[test]
+    fn response_item_reasoning_emits_redacted_thinking() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut thread_id = None;
+        let mut state = CodexWrapperTurnState::default();
+
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "reasoning",
+                    "summary": [{ "type": "summary_text", "text": "internal reasoning" }]
+                }
+            }),
+            &mut thread_id,
+            &mut state,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(!content.contains("internal reasoning"));
+        let lines = read_jsonl(&path);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["type"], "assistant");
+        assert_eq!(lines[0]["message"]["content"][0]["type"], "thinking");
+        assert!(lines[0]["message"]["content"][0].get("thinking").is_none());
+        assert!(!state.saw_turn_completed);
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]

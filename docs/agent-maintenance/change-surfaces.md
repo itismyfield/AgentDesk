@@ -122,6 +122,9 @@
   - `src/services/discord/tui_prompt_relay.rs` (1155 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan).
+  - `src/services/codex_tmux_wrapper.rs` (1470 lines; Codex tmux wrapper JSON
+    event parser and relay bridge for native Codex session events — bugfix only
+    outside an extraction plan).
   - `src/services/tui_prompt_dedupe.rs` (1045 lines; shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
     outside an extraction plan).
