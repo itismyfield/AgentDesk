@@ -1,0 +1,889 @@
+use super::*;
+
+#[test]
+fn session_strategy_lifecycle_event_records_fresh_and_resumed_details() {
+    let fresh = session_strategy_lifecycle_event(None, "no_cached_provider_session", None);
+    match fresh {
+        TurnEvent::SessionFresh(details) => {
+            assert_eq!(details.reason, "no_cached_provider_session");
+            assert_eq!(details.provider_session_id, None);
+            assert_eq!(details.fingerprint, None);
+            assert_eq!(details.recovery_message_count, None);
+        }
+        other => panic!("expected session_fresh event, got {other:?}"),
+    }
+
+    let fresh_with_recovery = session_strategy_lifecycle_event(None, "idle_timeout", Some(9));
+    match fresh_with_recovery {
+        TurnEvent::SessionFresh(details) => {
+            assert_eq!(details.recovery_message_count, Some(9));
+        }
+        other => panic!("expected session_fresh event, got {other:?}"),
+    }
+
+    let resumed = session_strategy_lifecycle_event(
+        Some("provider-session-123"),
+        "db_provider_session_restored",
+        Some(9),
+    );
+    match resumed {
+        TurnEvent::SessionResumed(details) => {
+            assert_eq!(details.reason, "db_provider_session_restored");
+            assert_eq!(
+                details.provider_session_id.as_deref(),
+                Some("provider-session-123")
+            );
+            assert_eq!(
+                details.fingerprint.as_deref(),
+                Some(
+                    crate::services::observability::turn_lifecycle::provider_session_fingerprint(
+                        "provider-session-123",
+                    )
+                    .as_str()
+                )
+            );
+            assert_eq!(details.recovery_message_count, None);
+        }
+        other => panic!("expected session_resumed event, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_just_spawned_for_emit_handles_none_and_blank_session_names() {
+    // Non-tmux mode (ProcessBackend / no managed session) always
+    // re-spawns the CLI per turn, so the helper must report "just
+    // spawned" for None / blank tmux session names.
+    assert!(cli_just_spawned_for_emit(None));
+    assert!(cli_just_spawned_for_emit(Some("")));
+    assert!(cli_just_spawned_for_emit(Some("   ")));
+}
+
+#[test]
+fn watchdog_timeout_cancel_request_uses_canonical_cancel_source() {
+    let channel_id = serenity::ChannelId::new(1479671301387059200);
+    let mut inflight = InflightTurnState::new(
+        ProviderKind::Codex,
+        channel_id.get(),
+        Some("adk-cdx".to_string()),
+        343742347365974026,
+        1501205715878936748,
+        1501205715878936749,
+        "work on issue".to_string(),
+        Some("provider-session".to_string()),
+        Some("AgentDesk-codex-adk-cdx".to_string()),
+        Some("/tmp/agentdesk-output.jsonl".to_string()),
+        None,
+        0,
+    );
+    inflight.dispatch_id = Some("dispatch-1748".to_string());
+    inflight.session_key = Some("mac-mini:AgentDesk-codex-adk-cdx".to_string());
+
+    let request = watchdog_timeout_cancel_request(
+        &ProviderKind::Codex,
+        channel_id,
+        Some(&inflight),
+        Some(2),
+        true,
+    );
+
+    assert_eq!(request.reason, WATCHDOG_TIMEOUT_REASON);
+    assert_eq!(request.surface, WATCHDOG_TIMEOUT_CANCEL_SOURCE);
+    assert_eq!(
+        request.lifecycle_path,
+        "mailbox_cancel_active_turn.watchdog_timeout"
+    );
+    assert_eq!(request.queue_depth, Some(2));
+    assert!(request.queue_preserved);
+    assert!(request.termination_recorded);
+    assert_eq!(
+        request.correlation.dispatch_id.as_deref(),
+        Some("dispatch-1748")
+    );
+    assert_eq!(
+        request.correlation.session_key.as_deref(),
+        Some("mac-mini:AgentDesk-codex-adk-cdx")
+    );
+    assert_eq!(
+        request.correlation.turn_id.as_deref(),
+        Some("discord:1479671301387059200:1501205715878936748")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_tui_inflight_diagnostic_state_uses_persisted_timestamp_format() {
+    let mut inflight = InflightTurnState::new(
+        ProviderKind::Claude,
+        1479671301387059200,
+        Some("adk-cc".to_string()),
+        343742347365974026,
+        1501205715878936748,
+        1501205715878936749,
+        "continue".to_string(),
+        Some("provider-session".to_string()),
+        Some("AgentDesk-claude-adk-cc".to_string()),
+        Some("/tmp/agentdesk-output.jsonl".to_string()),
+        None,
+        0,
+    );
+
+    assert_eq!(
+        classify_inflight_diagnostic_state(Some(&inflight)),
+        "present"
+    );
+
+    inflight.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+    assert_eq!(
+        classify_inflight_diagnostic_state(Some(&inflight)),
+        "watcher_owned"
+    );
+
+    inflight.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::None);
+    inflight.updated_at = (chrono::Local::now()
+        - chrono::Duration::seconds(
+            crate::services::discord::inflight::INFLIGHT_STALENESS_THRESHOLD_SECS as i64 + 1,
+        ))
+    .format("%Y-%m-%d %H:%M:%S")
+    .to_string();
+    assert_eq!(classify_inflight_diagnostic_state(Some(&inflight)), "stale");
+
+    inflight.updated_at = "not-a-timestamp".to_string();
+    assert_eq!(
+        classify_inflight_diagnostic_state(Some(&inflight)),
+        "stale_unparseable_updated_at"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_tui_structured_busy_followup_blocks_before_prompt_submit() {
+    let snapshot = HostedTuiPromptReadinessSnapshot {
+        prompt_marker_detected: false,
+        prompt_draft_detected: false,
+        tmux_pane_alive: true,
+        capture_available: true,
+        pane_tail: "Thinking...\nRunning tool".to_string(),
+    };
+
+    let diagnostic = classify_claude_tui_followup_submission(
+        &snapshot,
+        "attached",
+        Some(1479671301387059200),
+        "missing",
+        crate::services::tui_turn_state::TuiTurnState::Streaming,
+        "AgentDesk-claude-adk-cdx-direct",
+    )
+    .expect("structured busy TUI turn should block follow-up submission");
+
+    assert!(diagnostic.previous_tui_turn_still_running);
+    assert!(!diagnostic.prompt_marker_detected);
+    assert_eq!(diagnostic.watcher_state, "attached");
+    assert_eq!(diagnostic.inflight_state, "missing");
+    assert_eq!(
+        diagnostic.watcher_owner_channel_id,
+        Some(1479671301387059200)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_tui_jsonl_authoritative_busy_diagnostic_does_not_capture_pane() {
+    let snapshot = HostedTuiPromptReadinessSnapshot::jsonl_authoritative(true);
+
+    let diagnostic = classify_claude_tui_followup_submission(
+        &snapshot,
+        "attached",
+        Some(1479671301387059200),
+        "missing",
+        crate::services::tui_turn_state::TuiTurnState::Streaming,
+        "AgentDesk-claude-adk-cdx-direct",
+    )
+    .expect("structured busy TUI turn should block follow-up submission");
+
+    assert!(diagnostic.previous_tui_turn_still_running);
+    assert!(!diagnostic.capture_available);
+    assert_eq!(
+        diagnostic.pane_tail,
+        "<not captured; JSONL turn state is authoritative>"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_tui_ready_or_dead_pane_does_not_busy_block_followup() {
+    let ready = HostedTuiPromptReadinessSnapshot {
+        prompt_marker_detected: true,
+        prompt_draft_detected: false,
+        tmux_pane_alive: true,
+        capture_available: true,
+        pane_tail: ">".to_string(),
+    };
+    assert!(
+        classify_claude_tui_followup_submission(
+            &ready,
+            "attached",
+            Some(1),
+            "present",
+            crate::services::tui_turn_state::TuiTurnState::Unknown,
+            "AgentDesk-claude-ready",
+        )
+        .is_none()
+    );
+
+    let dead = HostedTuiPromptReadinessSnapshot {
+        prompt_marker_detected: false,
+        prompt_draft_detected: false,
+        tmux_pane_alive: false,
+        capture_available: false,
+        pane_tail: "<capture unavailable>".to_string(),
+    };
+    assert!(
+        classify_claude_tui_followup_submission(
+            &dead,
+            "missing",
+            None,
+            "stale",
+            crate::services::tui_turn_state::TuiTurnState::Unknown,
+            "AgentDesk-claude-dead",
+        )
+        .is_none()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_tui_transcript_idle_overrides_busy_pane_scrape() {
+    let snapshot = HostedTuiPromptReadinessSnapshot {
+        prompt_marker_detected: false,
+        prompt_draft_detected: false,
+        tmux_pane_alive: true,
+        capture_available: true,
+        pane_tail: "old assistant output with no visible prompt marker".to_string(),
+    };
+
+    assert!(
+        classify_claude_tui_followup_submission(
+            &snapshot,
+            "attached",
+            Some(1),
+            "missing",
+            crate::services::tui_turn_state::TuiTurnState::Idle,
+            "AgentDesk-claude-ready",
+        )
+        .is_none()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_tui_transcript_idle_with_prompt_draft_reaches_provider_recovery() {
+    let snapshot = HostedTuiPromptReadinessSnapshot {
+        prompt_marker_detected: false,
+        prompt_draft_detected: true,
+        tmux_pane_alive: true,
+        capture_available: true,
+        pane_tail: "❯ [TUI-REL-F815-CC-5] stranded draft".to_string(),
+    };
+
+    assert!(
+        classify_claude_tui_followup_submission(
+            &snapshot,
+            "attached",
+            Some(1),
+            "missing",
+            crate::services::tui_turn_state::TuiTurnState::Idle,
+            "AgentDesk-claude-ready",
+        )
+        .is_none(),
+        "idle transcript plus draft is a provider recovery case, not a router busy block"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_tui_unknown_transcript_with_prompt_draft_reaches_provider_recovery() {
+    let snapshot = HostedTuiPromptReadinessSnapshot {
+        prompt_marker_detected: false,
+        prompt_draft_detected: true,
+        tmux_pane_alive: true,
+        capture_available: true,
+        pane_tail: "❯ [TUI-REL-F815-CC-5] stranded draft".to_string(),
+    };
+
+    assert!(
+        classify_claude_tui_followup_submission(
+            &snapshot,
+            "missing",
+            None,
+            "missing",
+            crate::services::tui_turn_state::TuiTurnState::Unknown,
+            "AgentDesk-claude-ready",
+        )
+        .is_none(),
+        "unknown transcript plus draft is a provider recovery case, not a router busy block"
+    );
+    assert!(
+        classify_claude_tui_followup_submission(
+            &snapshot,
+            "cancelled",
+            Some(1479671298497183835),
+            "missing",
+            crate::services::tui_turn_state::TuiTurnState::Unknown,
+            "AgentDesk-claude-ready",
+        )
+        .is_none(),
+        "cancelled watcher plus draft has no active relay evidence; let provider recovery handle it"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_tui_visible_prompt_draft_reaches_provider_recovery() {
+    let snapshot = HostedTuiPromptReadinessSnapshot {
+            prompt_marker_detected: true,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "› Run /review on my current changes\n\n  gpt-5.5 · gpt-5.5 xhigh · ~/repo · repo · main".to_string(),
+        };
+
+    assert!(hosted_tui_draft_should_enter_provider_recovery(
+        &ProviderKind::Codex,
+        &snapshot
+    ));
+    assert!(
+        !hosted_tui_draft_should_enter_provider_recovery(&ProviderKind::Claude, &snapshot),
+        "Claude keeps transcript-busy authority; only Codex compact drafts bypass router busy preflight"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_tui_unknown_transcript_with_stranded_draft_ignores_persistent_watcher() {
+    let snapshot = HostedTuiPromptReadinessSnapshot {
+        prompt_marker_detected: false,
+        prompt_draft_detected: true,
+        tmux_pane_alive: true,
+        capture_available: true,
+        pane_tail: "❯ possible redraw".to_string(),
+    };
+
+    assert!(
+        classify_claude_tui_followup_submission(
+            &snapshot,
+            "attached",
+            Some(1),
+            "missing",
+            crate::services::tui_turn_state::TuiTurnState::Unknown,
+            "AgentDesk-claude-active",
+        )
+        .is_none(),
+        "a persistent attached watcher is idle coverage, not active-turn evidence by itself"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_tui_unknown_transcript_with_active_inflight_still_blocks() {
+    let snapshot = HostedTuiPromptReadinessSnapshot {
+        prompt_marker_detected: false,
+        prompt_draft_detected: true,
+        tmux_pane_alive: true,
+        capture_available: true,
+        pane_tail: "❯ possible redraw".to_string(),
+    };
+
+    assert!(
+        classify_claude_tui_followup_submission(
+            &snapshot,
+            "missing",
+            None,
+            "present",
+            crate::services::tui_turn_state::TuiTurnState::Unknown,
+            "AgentDesk-claude-active",
+        )
+        .is_some(),
+        "active inflight evidence keeps unknown transcript conservative"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_tui_transcript_busy_can_block_even_if_prompt_marker_is_visible() {
+    let snapshot = HostedTuiPromptReadinessSnapshot {
+        prompt_marker_detected: true,
+        prompt_draft_detected: false,
+        tmux_pane_alive: true,
+        capture_available: true,
+        pane_tail: "Ready for input (type message + Enter)".to_string(),
+    };
+
+    let diagnostic = classify_claude_tui_followup_submission(
+        &snapshot,
+        "attached",
+        Some(1),
+        "present",
+        crate::services::tui_turn_state::TuiTurnState::Streaming,
+        "AgentDesk-claude-streaming",
+    )
+    .expect("transcript streaming state must be authoritative over pane marker");
+
+    assert!(diagnostic.prompt_marker_detected);
+    assert_eq!(
+        diagnostic.transcript_turn_state,
+        crate::services::tui_turn_state::TuiTurnState::Streaming
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_busy_preflight_uses_idle_transcript_wait_when_transcript_exists() {
+    let cwd = tempfile::tempdir().expect("create temp cwd");
+    let claude_home = tempfile::tempdir().expect("create temp claude home");
+    let session_id = "01234567-89ab-cdef-0123-456789abcdef";
+    let transcript_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        cwd.path(),
+        session_id,
+        Some(claude_home.path()),
+    )
+    .expect("resolve transcript path");
+    std::fs::create_dir_all(transcript_path.parent().expect("transcript parent"))
+        .expect("create transcript parent");
+    std::fs::write(
+        &transcript_path,
+        r#"{"type":"system","subtype":"turn_duration","session_id":"s"}"#,
+    )
+    .expect("write transcript");
+
+    let wait_strategy = hosted_tui_busy_preflight_readiness_wait_with_claude_home(
+        &ProviderKind::Claude,
+        cwd.path().to_str(),
+        Some(session_id),
+        Some(claude_home.path()),
+    );
+
+    assert_eq!(
+        wait_strategy,
+        HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOrIdleTranscript(transcript_path)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_busy_preflight_falls_back_when_transcript_is_unavailable() {
+    let cwd = tempfile::tempdir().expect("create temp cwd");
+    let claude_home = tempfile::tempdir().expect("create temp claude home");
+
+    assert_eq!(
+        hosted_tui_busy_preflight_readiness_wait_with_claude_home(
+            &ProviderKind::Claude,
+            cwd.path().to_str(),
+            None,
+            Some(claude_home.path()),
+        ),
+        HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
+    );
+    assert_eq!(
+        hosted_tui_busy_preflight_readiness_wait_with_claude_home(
+            &ProviderKind::Claude,
+            cwd.path().to_str(),
+            Some("not-a-uuid"),
+            Some(claude_home.path()),
+        ),
+        HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
+    );
+    assert_eq!(
+        hosted_tui_busy_preflight_readiness_wait_with_claude_home(
+            &ProviderKind::Claude,
+            cwd.path().to_str(),
+            Some("01234567-89ab-cdef-0123-456789abcdef"),
+            Some(claude_home.path()),
+        ),
+        HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_busy_preflight_keeps_codex_readiness_wait() {
+    let cwd = tempfile::tempdir().expect("create temp cwd");
+
+    let wait_strategy = hosted_tui_busy_preflight_readiness_wait_with_claude_home(
+        &ProviderKind::Codex,
+        cwd.path().to_str(),
+        Some("01234567-89ab-cdef-0123-456789abcdef"),
+        None,
+    );
+
+    assert_eq!(wait_strategy, HostedTuiBusyPreflightReadinessWait::Codex);
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_rollout_idle_state_allows_followup() {
+    // observe_codex_tui_rollout_state_for_cwd_with_sessions returns Idle
+    // when the most recent rollout envelope signals task_complete.
+    let cwd = tempfile::tempdir().expect("create temp cwd");
+    let sessions = tempfile::tempdir().expect("create temp sessions dir");
+    let rollout_path = sessions.path().join("rollout-test-idle.jsonl");
+    std::fs::write(
+            &rollout_path,
+            format!(
+                concat!(
+                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"s\",\"cwd\":\"{}\"}}}}\n",
+                    "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_complete\",\"turn_id\":\"t1\"}}}}\n"
+                ),
+                cwd.path().display()
+            ),
+        )
+        .expect("write rollout file");
+
+    let state = observe_codex_tui_rollout_state_for_cwd_with_sessions(
+        cwd.path().to_str(),
+        Some("s"),
+        Some(sessions.path()),
+        None,
+    );
+
+    assert_eq!(
+        state,
+        crate::services::tui_turn_state::TuiTurnState::Idle,
+        "task_complete envelope must yield Idle so followup is not blocked"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_rollout_user_submitted_blocks_followup() {
+    // classify_claude_tui_followup_submission blocks when Codex rollout
+    // signals UserSubmitted (user message written but agent not yet streaming).
+    let snapshot = HostedTuiPromptReadinessSnapshot {
+        prompt_marker_detected: false,
+        prompt_draft_detected: false,
+        tmux_pane_alive: true,
+        capture_available: true,
+        pane_tail: String::new(),
+    };
+
+    let diagnostic = classify_claude_tui_followup_submission(
+        &snapshot,
+        "attached",
+        None,
+        "present",
+        crate::services::tui_turn_state::TuiTurnState::UserSubmitted,
+        "AgentDesk-codex-test",
+    );
+
+    assert!(
+        diagnostic.is_some(),
+        "UserSubmitted state must block follow-up injection"
+    );
+    assert_eq!(
+        diagnostic.unwrap().transcript_turn_state,
+        crate::services::tui_turn_state::TuiTurnState::UserSubmitted
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_rollout_no_file_treats_as_idle() {
+    // When no rollout file exists for the cwd, the gate must not fire
+    // (session hasn't started yet or cwd doesn't match any rollout).
+    let cwd = tempfile::tempdir().expect("create temp cwd");
+    let empty_sessions = tempfile::tempdir().expect("create empty sessions dir");
+
+    let state = observe_codex_tui_rollout_state_for_cwd_with_sessions(
+        cwd.path().to_str(),
+        None,
+        Some(empty_sessions.path()),
+        None,
+    );
+
+    assert_eq!(
+        state,
+        crate::services::tui_turn_state::TuiTurnState::Idle,
+        "missing rollout file must yield Idle (session not started)"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_rollout_provider_session_id_wins_over_newer_same_cwd_rollout() {
+    let cwd = tempfile::tempdir().expect("create temp cwd");
+    let sessions = tempfile::tempdir().expect("create temp sessions dir");
+    let selected_rollout = sessions.path().join("rollout-selected-idle.jsonl");
+    let other_rollout = sessions.path().join("rollout-other-streaming.jsonl");
+    std::fs::write(
+            &selected_rollout,
+            format!(
+                concat!(
+                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"selected\",\"cwd\":\"{}\"}}}}\n",
+                    "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_complete\",\"turn_id\":\"t1\"}}}}\n"
+                ),
+                cwd.path().display()
+            ),
+        )
+        .expect("write selected rollout");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(
+            &other_rollout,
+            format!(
+                concat!(
+                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"other\",\"cwd\":\"{}\"}}}}\n",
+                    "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"function_call\",\"name\":\"run\",\"call_id\":\"c1\"}}}}\n"
+                ),
+                cwd.path().display()
+            ),
+        )
+        .expect("write other rollout");
+
+    let state = observe_codex_tui_rollout_state_for_cwd_with_sessions(
+        cwd.path().to_str(),
+        Some("selected"),
+        Some(sessions.path()),
+        None,
+    );
+
+    assert_eq!(
+        state,
+        crate::services::tui_turn_state::TuiTurnState::Idle,
+        "provider session id must beat a newer rollout from another session in the same cwd"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_rollout_runtime_binding_path_wins_over_newer_same_cwd_rollout() {
+    let cwd = tempfile::tempdir().expect("create temp cwd");
+    let sessions = tempfile::tempdir().expect("create temp sessions dir");
+    let bound_rollout = sessions.path().join("rollout-bound-idle.jsonl");
+    let other_rollout = sessions.path().join("rollout-other-streaming.jsonl");
+    std::fs::write(
+            &bound_rollout,
+            format!(
+                concat!(
+                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"bound\",\"cwd\":\"{}\"}}}}\n",
+                    "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_complete\",\"turn_id\":\"t1\"}}}}\n"
+                ),
+                cwd.path().display()
+            ),
+        )
+        .expect("write bound rollout");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(
+            &other_rollout,
+            format!(
+                concat!(
+                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"other\",\"cwd\":\"{}\"}}}}\n",
+                    "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"function_call\",\"name\":\"run\",\"call_id\":\"c1\"}}}}\n"
+                ),
+                cwd.path().display()
+            ),
+        )
+        .expect("write other rollout");
+    let runtime_binding = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+        runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+        output_path: bound_rollout.display().to_string(),
+        relay_output_path: None,
+        input_fifo_path: None,
+        session_id: Some("bound".to_string()),
+        last_offset: 0,
+        relay_last_offset: None,
+    };
+
+    let state = observe_codex_tui_rollout_state_for_cwd_with_sessions(
+        cwd.path().to_str(),
+        None,
+        Some(sessions.path()),
+        Some(&runtime_binding),
+    );
+
+    assert_eq!(
+        state,
+        crate::services::tui_turn_state::TuiTurnState::Idle,
+        "pane-bound runtime binding must beat a newer rollout from another session in the same cwd"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_rollout_runtime_binding_cross_cwd_is_unknown() {
+    let cwd = tempfile::tempdir().expect("create temp cwd");
+    let other_cwd = tempfile::tempdir().expect("create other cwd");
+    let sessions = tempfile::tempdir().expect("create temp sessions dir");
+    let rollout_path = sessions.path().join("rollout-cross-cwd.jsonl");
+    std::fs::write(
+            &rollout_path,
+            format!(
+                concat!(
+                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"bound\",\"cwd\":\"{}\"}}}}\n",
+                    "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_complete\",\"turn_id\":\"t1\"}}}}\n"
+                ),
+                other_cwd.path().display()
+            ),
+        )
+        .expect("write cross-cwd rollout");
+    let runtime_binding = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+        runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+        output_path: rollout_path.display().to_string(),
+        relay_output_path: None,
+        input_fifo_path: None,
+        session_id: Some("bound".to_string()),
+        last_offset: 0,
+        relay_last_offset: None,
+    };
+
+    let state = observe_codex_tui_rollout_state_for_cwd_with_sessions(
+        cwd.path().to_str(),
+        None,
+        Some(sessions.path()),
+        Some(&runtime_binding),
+    );
+
+    assert_eq!(
+        state,
+        crate::services::tui_turn_state::TuiTurnState::Unknown,
+        "stale tmux runtime bindings must not make readiness decisions for a different cwd"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_rollout_without_binding_or_session_is_unknown_when_same_cwd_rollout_exists() {
+    let cwd = tempfile::tempdir().expect("create temp cwd");
+    let sessions = tempfile::tempdir().expect("create temp sessions dir");
+    let rollout_path = sessions.path().join("rollout-ambiguous.jsonl");
+    std::fs::write(
+            &rollout_path,
+            format!(
+                concat!(
+                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"ambiguous\",\"cwd\":\"{}\"}}}}\n",
+                    "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_complete\",\"turn_id\":\"t1\"}}}}\n"
+                ),
+                cwd.path().display()
+            ),
+        )
+        .expect("write ambiguous rollout");
+
+    let state = observe_codex_tui_rollout_state_for_cwd_with_sessions(
+        cwd.path().to_str(),
+        None,
+        Some(sessions.path()),
+        None,
+    );
+
+    assert_eq!(
+        state,
+        crate::services::tui_turn_state::TuiTurnState::Unknown,
+        "without a tmux binding or provider session id, same-cwd rollout files are not pane-bound enough to decide readiness"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_rollout_without_binding_or_session_conservatively_blocks_busy_same_cwd_rollout() {
+    let cwd = tempfile::tempdir().expect("create temp cwd");
+    let sessions = tempfile::tempdir().expect("create temp sessions dir");
+    let rollout_path = sessions.path().join("rollout-ambiguous-busy.jsonl");
+    std::fs::write(
+            &rollout_path,
+            format!(
+                concat!(
+                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"ambiguous\",\"cwd\":\"{}\"}}}}\n",
+                    "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"function_call\",\"name\":\"run\",\"call_id\":\"c1\"}}}}\n"
+                ),
+                cwd.path().display()
+            ),
+        )
+        .expect("write ambiguous busy rollout");
+
+    let state = observe_codex_tui_rollout_state_for_cwd_with_sessions(
+        cwd.path().to_str(),
+        None,
+        Some(sessions.path()),
+        None,
+    );
+
+    assert_eq!(
+        state,
+        crate::services::tui_turn_state::TuiTurnState::Streaming,
+        "an unbound same-cwd rollout is ambiguous, but a busy envelope must still block unsafe prompt injection"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn successful_busy_wait_recaptures_offset_past_previous_turn_bytes() {
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let output_path = dir.path().join("claude-tui-transcript.jsonl");
+    std::fs::write(&output_path, b"already delivered\n").expect("write initial transcript");
+    let stale_offset = std::fs::metadata(&output_path).unwrap().len();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&output_path)
+        .unwrap()
+        .write_all(b"previous turn bytes appended during busy wait\n")
+        .expect("append previous-turn bytes");
+
+    let corrected_offset =
+        recapture_inflight_offset_after_successful_busy_wait(output_path.to_str(), stale_offset);
+    let transcript = std::fs::read(&output_path).expect("read transcript");
+    let stale_window = &transcript[stale_offset as usize..];
+    let corrected_window = &transcript[corrected_offset as usize..];
+
+    assert!(
+        String::from_utf8_lossy(stale_window).contains("previous turn bytes"),
+        "test setup must prove the stale offset would recover previous-turn bytes"
+    );
+    assert_eq!(
+        corrected_window, b"",
+        "corrected new-turn offset must skip bytes appended while waiting"
+    );
+}
+
+#[test]
+fn parse_dispatch_context_hints_extracts_auto_queue_retry_resume_session() {
+    let hints = parse_dispatch_context_hints(
+        Some(
+            r#"{"auto_queue_retry_resume_session_id":" thread-1585 ","reset_provider_state":false}"#,
+        ),
+        Some("implementation"),
+    );
+
+    assert_eq!(
+        hints.retry_resume_session_id.as_deref(),
+        Some("thread-1585")
+    );
+    assert!(!hints.reset_provider_state);
+}
+
+#[test]
+fn provider_worktree_isolation_policy_keeps_main_provider_on_main_workspace() {
+    assert!(!should_force_provider_worktree_isolation(false, None, None,));
+}
+
+#[test]
+fn provider_worktree_isolation_policy_forces_non_main_provider_channel() {
+    assert!(should_force_provider_worktree_isolation(true, None, None));
+}
+
+#[test]
+fn provider_worktree_isolation_policy_honors_override_false() {
+    assert!(!should_force_provider_worktree_isolation(
+        true,
+        Some(false),
+        None,
+    ));
+}
+
+#[test]
+fn provider_worktree_isolation_policy_bypasses_review_e2e_and_consultation_dispatches() {
+    for dispatch_type in ["review", "e2e-test", "consultation"] {
+        assert!(
+            !should_force_provider_worktree_isolation(true, None, Some(dispatch_type)),
+            "{dispatch_type} dispatches should bypass provider-channel isolation"
+        );
+    }
+}
