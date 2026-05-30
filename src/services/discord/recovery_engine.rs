@@ -268,33 +268,30 @@ async fn relay_recovery_terminal_notice(
 }
 
 /// Outcome of `complete_recovery_visible_turn` exposed to callers so they can
-/// short-circuit dispatch / mailbox / analytics work on a still-busy pane.
-///
-/// #2293 H3 — pre-existing callers ignored the gate outcome entirely because
-/// the helper returned `()`. They then proceeded with `persist_turn_analytics`
-/// + dispatch completion + mailbox finalize regardless of whether the
-/// `응답 완료` panel actually emitted. The new outcome lets each call site
-/// observe `LifecyclePaused` and skip the side effects, mirroring the
-/// bridge/watcher behaviour landed in the same PR.
+/// tell whether the visible completion UI was emitted. A TUI quiescence timeout
+/// may suppress that UI, but once recovery has terminal delivery evidence it
+/// must still release mailbox/inflight ownership.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RecoveryCompletionOutcome {
     /// Visible completion emitted (or status-panel-v2 was disabled / no
     /// status message id was wired). Callers may proceed with downstream
     /// dispatch / analytics / mailbox finalization as before.
     Emitted,
-    /// Recovery short-circuited because the TUI quiescence gate reported
-    /// `TimedOut`. Callers MUST skip dispatch completion, mailbox finish,
-    /// and analytics persistence — the next watcher pass / placeholder
-    /// sweeper reconciles when the pane finally reports idle.
-    LifecyclePaused,
+    /// Terminal response delivery is authoritative, but the visible completion
+    /// status/reaction was suppressed because the TUI quiescence probe timed
+    /// out. Callers still proceed with cleanup.
+    VisibleCompletionSuppressed,
 }
 
 impl RecoveryCompletionOutcome {
-    /// `true` when callers should proceed with downstream side effects. False
-    /// only on `LifecyclePaused`, where the gate explicitly suppressed
-    /// completion to avoid the #2161 / #2293 premature-completion cascade.
+    /// `true` when callers should proceed with downstream side effects.
+    /// Visible completion suppression is not a mailbox correctness primitive.
     pub(super) fn should_proceed(self) -> bool {
-        matches!(self, RecoveryCompletionOutcome::Emitted)
+        matches!(
+            self,
+            RecoveryCompletionOutcome::Emitted
+                | RecoveryCompletionOutcome::VisibleCompletionSuppressed
+        )
     }
 }
 
@@ -337,9 +334,9 @@ async fn complete_recovery_visible_turn(
                 provider = %provider.as_str(),
                 channel = channel_id.get(),
                 source = source,
-                "[{ts}] ⚠ #2293 recovery lifecycle-stage paused — TUI quiescence gate timed out; suppressing ⏳→✅ reaction AND downstream dispatch / analytics / mailbox finalize until the next pass observes idle"
+                "[{ts}] ⚠ #2935 recovery visible completion suppressed — TUI quiescence gate timed out; continuing dispatch / analytics / mailbox cleanup because terminal delivery already committed"
             );
-            return RecoveryCompletionOutcome::LifecyclePaused;
+            return RecoveryCompletionOutcome::VisibleCompletionSuppressed;
         }
     }
 
@@ -408,15 +405,65 @@ mod recovery_completion_outcome_tests {
     }
 
     #[test]
-    fn lifecycle_paused_blocks_dispatch_finalize() {
-        // #2293 H3: the three recovery callers
-        // (`completed_during_downtime`, `captured_full_response`,
-        // `output_completed`) MUST observe `false` here and `continue` the
-        // recovery loop. If this assertion ever flips to `true`, the gate
-        // would let dispatch finalize + analytics persist + mailbox finish
-        // run while the pane is still busy — the exact cascade #2293
-        // exists to prevent.
-        assert!(!RecoveryCompletionOutcome::LifecyclePaused.should_proceed());
+    fn visible_completion_suppression_still_allows_cleanup() {
+        assert!(
+            RecoveryCompletionOutcome::VisibleCompletionSuppressed.should_proceed(),
+            "#2935: quiescence timeout may hide 응답 완료, but must not preserve stale active ownership"
+        );
+    }
+}
+
+#[cfg(test)]
+mod delivered_inflight_reregister_tests {
+    use super::{inflight, recovery_terminal_delivery_already_committed};
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn committed_terminal_delivery_is_not_recoverable_active_turn() {
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            4243,
+            Some("adk-cc".to_string()),
+            7,
+            9101,
+            9102,
+            "summarize recent PRs".to_string(),
+            Some("session-2".to_string()),
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/claude-transcript.jsonl".to_string()),
+            None,
+            128,
+        );
+        state.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        state.full_response = "already posted response".to_string();
+        state.response_sent_offset = state.full_response.len();
+        state.terminal_delivery_committed = true;
+
+        assert!(recovery_terminal_delivery_already_committed(&state));
+    }
+
+    #[test]
+    fn ordinary_inflight_still_recoverable_even_with_relayed_prefix() {
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            4244,
+            Some("adk-cc".to_string()),
+            7,
+            9201,
+            9202,
+            "continue streaming".to_string(),
+            Some("session-3".to_string()),
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/claude-transcript.jsonl".to_string()),
+            None,
+            256,
+        );
+        state.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        state.full_response = "partial response".to_string();
+        state.response_sent_offset = state.full_response.len();
+
+        assert!(!recovery_terminal_delivery_already_committed(&state));
     }
 }
 
@@ -609,6 +656,10 @@ fn recovery_ready_without_output_has_captured_response(
     state: &inflight::InflightTurnState,
 ) -> bool {
     !state.full_response.trim().is_empty()
+}
+
+fn recovery_terminal_delivery_already_committed(state: &inflight::InflightTurnState) -> bool {
+    state.terminal_delivery_completed() && state.restart_mode.is_none() && !state.rebind_origin
 }
 
 fn recovery_phase_after_tmux_probe(can_recover: bool, pane_alive: Option<bool>) -> RecoveryPhase {
@@ -809,6 +860,23 @@ pub(super) async fn reregister_active_turn_from_inflight(
         );
         return false;
     };
+    if recovery_terminal_delivery_already_committed(state) {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel = state.channel_id,
+            user_msg_id = state.user_msg_id,
+            "inflight reregister skipped: terminal delivery already committed; clearing stale active turn state"
+        );
+        finish_recovered_turn_mailbox(
+            shared,
+            &provider,
+            channel_id,
+            "recovery_terminal_delivery_already_committed",
+        )
+        .await;
+        clear_inflight_state(&provider, state.channel_id);
+        return false;
+    }
     if snapshot.cancel_token.is_some() {
         if let Some(token) = snapshot.cancel_token.as_ref()
             && snapshot.active_user_message_id == Some(user_msg_id)
@@ -1592,15 +1660,14 @@ pub(super) async fn restore_inflight_turns(
                 )
                 .await;
                 if !visible_outcome.should_proceed() {
-                    // #2293 H3 — TUI quiescence gate paused recovery. Skip
-                    // dispatch finalize + analytics persist; preserve the
-                    // inflight so the next pass can retry once the pane
-                    // reports idle.
+                    // Reserved for future non-proceeding recovery outcomes.
+                    // A TUI quiescence timeout is not one: terminal delivery
+                    // evidence is authoritative for mailbox/inflight cleanup.
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!(
                         provider = %provider.as_str(),
                         channel = channel_id.get(),
-                        "[{ts}] ⚠ #2293: recovery (completed_during_downtime) deferred — TUI gate paused; will retry on next watcher pass"
+                        "[{ts}] ⚠ recovery (completed_during_downtime) deferred by non-proceeding visible outcome"
                     );
                     continue;
                 }
@@ -2216,14 +2283,14 @@ pub(super) async fn restore_inflight_turns(
             )
             .await;
             if !visible_outcome.should_proceed() {
-                // #2293 H3 — TUI quiescence gate paused recovery. Skip
-                // dispatch finalize + analytics persist; preserve the
-                // inflight so the next pass retries once the pane is idle.
+                // Reserved for future non-proceeding recovery outcomes.
+                // A TUI quiescence timeout is not one: terminal delivery
+                // evidence is authoritative for mailbox/inflight cleanup.
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
                     provider = %provider.as_str(),
                     channel = channel_id.get(),
-                    "[{ts}] ⚠ #2293: recovery (captured_full_response) deferred — TUI gate paused"
+                    "[{ts}] ⚠ recovery (captured_full_response) deferred by non-proceeding visible outcome"
                 );
                 continue;
             }
@@ -2466,13 +2533,14 @@ pub(super) async fn restore_inflight_turns(
             )
             .await;
             if !visible_outcome.should_proceed() {
-                // #2293 H3 — TUI quiescence gate paused recovery. Skip
-                // downstream dispatch / analytics work; the next pass retries.
+                // Reserved for future non-proceeding recovery outcomes.
+                // A TUI quiescence timeout is not one: terminal delivery
+                // evidence is authoritative for mailbox/inflight cleanup.
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
                     provider = %provider.as_str(),
                     channel = channel_id.get(),
-                    "[{ts}] ⚠ #2293: recovery (output_completed) deferred — TUI gate paused"
+                    "[{ts}] ⚠ recovery (output_completed) deferred by non-proceeding visible outcome"
                 );
                 continue;
             }
@@ -2896,6 +2964,25 @@ pub(super) async fn restore_inflight_turns(
                 continue;
             }
         };
+
+        if recovery_terminal_delivery_already_committed(&state) {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = state.channel_id,
+                user_msg_id = state.user_msg_id,
+                "  [{ts}] ✓ recovery: clearing delivered inflight before watcher re-register; terminal response already reached Discord"
+            );
+            finish_recovered_turn_mailbox(
+                shared,
+                provider,
+                channel_id,
+                "recovery_terminal_delivery_already_committed",
+            )
+            .await;
+            clear_inflight_state(provider, state.channel_id);
+            continue;
+        }
 
         // If tmux pane is alive, skip recovery reader entirely.
         // The session is idle (waiting for input) — spawn a watcher immediately
@@ -4854,6 +4941,63 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn reregister_skips_inflight_after_terminal_delivery_committed() {
+        let shared = super::super::make_shared_data_for_tests();
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            4243,
+            Some("adk-cc".to_string()),
+            7,
+            9101,
+            9102,
+            "summarize recent PRs".to_string(),
+            Some("session-2".to_string()),
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/claude-transcript.jsonl".to_string()),
+            None,
+            128,
+        );
+        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        state.full_response = "already posted response".to_string();
+        state.response_sent_offset = state.full_response.len();
+        state.terminal_delivery_committed = true;
+        let channel_id = ChannelId::new(state.channel_id);
+
+        assert!(!reregister_active_turn_from_inflight(&shared, &state).await);
+        assert!(
+            !super::super::mailbox_has_active_turn(&shared, channel_id).await,
+            "recovery must not recreate an active mailbox turn after terminal delivery committed"
+        );
+    }
+
+    #[tokio::test]
+    async fn reregister_keeps_ordinary_inflight_active() {
+        let shared = super::super::make_shared_data_for_tests();
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            4244,
+            Some("adk-cc".to_string()),
+            7,
+            9201,
+            9202,
+            "continue streaming".to_string(),
+            Some("session-3".to_string()),
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/claude-transcript.jsonl".to_string()),
+            None,
+            256,
+        );
+        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        state.full_response = "partial response".to_string();
+        state.response_sent_offset = state.full_response.len();
+
+        assert!(reregister_active_turn_from_inflight(&shared, &state).await);
+        assert!(
+            super::super::mailbox_has_active_turn(&shared, ChannelId::new(state.channel_id)).await
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn rebind_adopts_detected_output_path_when_inode_differs() {
@@ -5022,6 +5166,7 @@ mod tests {
             turn_start_offset: Some(123),
             full_response: "중간까지 정리했습니다.".to_string(),
             response_sent_offset: 0,
+            terminal_delivery_committed: false,
             current_tool_line: None,
             last_tool_name: None,
             last_tool_summary: None,
@@ -5150,6 +5295,7 @@ mod tests {
             turn_start_offset: Some(123),
             full_response: "중간까지 정리했습니다.".to_string(),
             response_sent_offset: 0,
+            terminal_delivery_committed: false,
             current_tool_line: None,
             last_tool_name: None,
             last_tool_summary: None,

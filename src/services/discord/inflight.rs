@@ -119,6 +119,12 @@ pub(super) struct InflightTurnState {
     pub turn_start_offset: Option<u64>,
     pub full_response: String,
     pub response_sent_offset: usize,
+    /// True once the terminal assistant response has been committed to the
+    /// outbound Discord delivery path. Completion/status UI may still be
+    /// suppressed by a TUI quiescence timeout, but recovery must not treat
+    /// this row as an active provider turn after this point.
+    #[serde(default)]
+    pub terminal_delivery_committed: bool,
     #[serde(default)]
     pub current_tool_line: Option<String>,
     #[serde(default)]
@@ -526,6 +532,7 @@ impl InflightTurnState {
             turn_start_offset: Some(last_offset),
             full_response: String::new(),
             response_sent_offset: 0,
+            terminal_delivery_committed: false,
             current_tool_line: None,
             last_tool_name: None,
             last_tool_summary: None,
@@ -566,6 +573,10 @@ impl InflightTurnState {
     pub(in crate::services::discord) fn set_relay_owner_kind(&mut self, kind: RelayOwnerKind) {
         self.relay_owner_kind = kind;
         self.watcher_owns_live_relay = matches!(kind, RelayOwnerKind::Watcher);
+    }
+
+    pub(in crate::services::discord) fn terminal_delivery_completed(&self) -> bool {
+        self.terminal_delivery_committed
     }
 
     pub fn set_restart_mode(&mut self, restart_mode: InflightRestartMode) {

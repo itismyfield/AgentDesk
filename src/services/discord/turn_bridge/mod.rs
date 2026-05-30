@@ -1415,7 +1415,7 @@ use stale_resume::{
 use terminal_delivery::{
     send_ordered_long_terminal_response, should_complete_work_dispatch_after_terminal_delivery,
     should_fail_dispatch_after_terminal_delivery, terminal_delivery_should_send_new_chunks,
-    turn_bridge_replace_outcome_committed,
+    tui_quiescence_timeout_requires_inflight_retry, turn_bridge_replace_outcome_committed,
 };
 use tmux_runtime::is_dcserver_restart_command;
 use turn_analytics::{
@@ -7314,6 +7314,18 @@ pub(super) fn spawn_turn_bridge(
             }
 
             if terminal_delivery_committed {
+                response_sent_offset = full_response.len();
+                inflight_state.response_sent_offset = response_sent_offset;
+                inflight_state.terminal_delivery_committed = true;
+                inflight_state.full_response = full_response.clone();
+                if let Err(error) = save_inflight_state(&inflight_state) {
+                    tracing::warn!(
+                        provider = %provider.as_str(),
+                        channel = channel_id.get(),
+                        error = %error,
+                        "turn bridge failed to mirror committed terminal delivery before cleanup"
+                    );
+                }
                 for frozen_msg_id in terminal_full_replay_cleanup_msg_ids.drain(..) {
                     if frozen_msg_id == current_msg_id {
                         continue;
@@ -7499,7 +7511,15 @@ pub(super) fn spawn_turn_bridge(
                     bridge_gate_outcome,
                     super::tmux::TuiCompletionGateOutcome::TimedOut
                 ) {
-                    preserve_inflight_for_cleanup_retry = true;
+                    if tui_quiescence_timeout_requires_inflight_retry(terminal_delivery_committed) {
+                        preserve_inflight_for_cleanup_retry = true;
+                    } else {
+                        tracing::warn!(
+                            provider = %provider.as_str(),
+                            channel = channel_id.get(),
+                            "TUI completion quiescence timed out after terminal delivery committed; suppressing visible completion only and continuing inflight cleanup"
+                        );
+                    }
                 }
             }
 
