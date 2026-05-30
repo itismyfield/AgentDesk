@@ -1471,19 +1471,22 @@ async fn maybe_recover_completed_stale_leak(
     ) else {
         return false;
     };
-    // Recovery delivers by editing a SINGLE placeholder message. Skip answers
-    // that would chunk into continuation messages so we never hit a partial
-    // multi-chunk delivery (which could strand the tail or duplicate chunks on a
-    // re-fire). `len()` (UTF-8 bytes) <= 2000 guarantees a single Discord message.
-    if delivery_text.len() > 2000 {
+    // Recovery delivers via a raw, fallback-free single-message EDIT of the
+    // placeholder. Skip anything the chunker would split into continuation
+    // messages — a single chunk is the only shape we can edit in place without
+    // creating a separate message or risking a stranded tail. `split_message` is
+    // the authoritative limit (its effective cap is below Discord's 2000).
+    let chunks = discord::formatting::split_message(&delivery_text);
+    let [delivery_chunk] = chunks.as_slice() else {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
-            "  [{ts}] ⚠ leak too large to auto-recover ({} bytes) on channel {}; left for manual follow-up",
+            "  [{ts}] ⚠ leak too large to auto-recover ({} bytes, {} chunks) on channel {}; left for manual follow-up",
             delivery_text.len(),
+            chunks.len(),
             channel_id
         );
         return false;
-    }
+    };
 
     let http = match super::resolve_bot_http(registry, provider.as_str()).await {
         Ok(http) => http,
@@ -1492,7 +1495,7 @@ async fn maybe_recover_completed_stale_leak(
 
     // AUTHORITATIVE guard: only deliver when the live message is still an
     // undelivered placeholder. AlreadyDelivered / MessageGone / ProbeFailed all
-    // mean "do not post".
+    // mean "do not touch".
     match discord::placeholder_sweeper::probe_placeholder_state(
         &http,
         channel_id.get(),
@@ -1504,28 +1507,22 @@ async fn maybe_recover_completed_stale_leak(
         _ => return false,
     }
 
-    // Deliver by editing the placeholder in place (bridge parity). The single-
-    // message gate above means the answer fits one Discord message, so the only
-    // delivered outcomes are EditedOriginal (placeholder now holds the answer) and
-    // SentFallbackAfterEditFailure (our edit failed but the full answer was posted
-    // as a fresh message). PartialContinuationFailure (multi-chunk) cannot occur
-    // here, and Err means nothing reached the user; both fail closed and retry.
-    use discord::formatting::ReplaceLongMessageOutcome;
-    let (delivery_detail, op) = match discord::formatting::replace_long_message_raw_with_outcome(
-        &http,
+    // Edit the placeholder in place with a raw, fallback-free edit. No new
+    // message is ever created, so a re-fire just re-edits the same message to the
+    // same content (idempotent) — no double-delivery, no stranded tail. On error
+    // nothing was delivered; fail closed and retry next pass.
+    if discord::http::edit_channel_message(
+        http.as_ref(),
         channel_id,
         MessageId::new(state.current_msg_id),
-        &delivery_text,
-        shared,
+        delivery_chunk,
     )
     .await
+    .is_err()
     {
-        Ok(ReplaceLongMessageOutcome::EditedOriginal) => ("edited", "edit"),
-        Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. }) => {
-            ("fallback_post", "send")
-        }
-        _ => return false,
-    };
+        return false;
+    }
+    let (delivery_detail, op) = ("edited", "edit");
 
     // Advance the offset and persist so a later pass (even after a dcserver
     // restart) treats this tail as delivered and never re-sends it. Re-load and

@@ -7135,11 +7135,11 @@ pub(super) fn spawn_turn_bridge(
                         preserve_inflight_for_cleanup_retry = true;
                         if fallback_delivered {
                             // Mark the whole response delivered: the fallback
-                            // message carried it. Keep the inflight preserved for
-                            // orphan-placeholder cleanup, but never let recovery
-                            // re-send it.
+                            // message carried it. The preserved-inflight save on
+                            // the `preserve_inflight_for_cleanup_retry` path below
+                            // persists this advanced offset, so the turn never
+                            // re-presents as a never-delivered leak for recovery.
                             inflight_state.response_sent_offset = full_response.len();
-                            let _ = save_inflight_state(&inflight_state);
                         }
                     }
                 } else {
