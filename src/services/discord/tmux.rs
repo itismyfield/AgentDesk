@@ -4069,6 +4069,37 @@ mod tests {
     }
 
     #[test]
+    fn cancel_induced_watcher_death_does_not_suppress_e12_followup_rollout_frame() {
+        // #2929: E-12 resets the scenario with a force-cancel, then starts a
+        // fresh Codex TUI turn on the same tmux session within the tombstone
+        // TTL. The follow-up rollout frame observed in the failing run was
+        // 6,725 bytes past the cancel boundary; that is real next-turn output,
+        // not cancel teardown, so pane death must surface its lifecycle signal.
+        let _lock = match test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        clear_recent_turn_stops_for_tests();
+        let channel = ChannelId::new(987_2929_012);
+        let tmux_name = "AgentDesk-codex-e12-followup";
+        let stop_offset: u64 = 411_519;
+
+        record_recent_turn_stop_with_offset_for_tests(
+            channel,
+            tmux_name,
+            stop_offset,
+            "scenario reset force-cancel",
+        );
+
+        assert!(
+            !cancel_induced_watcher_death(channel, tmux_name, Some(stop_offset + 6_725)),
+            "E-12 follow-up output inside the old 16 KiB grace must not be classified as cancel cleanup"
+        );
+
+        clear_recent_turn_stops_for_tests();
+    }
+
+    #[test]
     fn cancel_induced_watcher_death_consumes_only_matching_tombstone() {
         // When two channels independently cancel turns, consuming one
         // channel's tombstone must NOT remove the other channel's.

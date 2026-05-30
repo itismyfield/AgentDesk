@@ -50,10 +50,10 @@ pub const CANCEL_TOMBSTONE_FALLBACK_TTL_SECS: i64 = 60;
 
 /// Same teardown grace as the in-memory store
 /// (`CANCEL_TEARDOWN_GRACE_BYTES`). The wrapper writes ~2 KB of post-cancel
-/// teardown bytes after the cancel boundary; anything beyond 16 KB means
-/// the watcher already saw a follow-up turn's output and the death is no
-/// longer attributable to the cancel.
-pub const CANCEL_TEARDOWN_GRACE_BYTES: i64 = 16 * 1024;
+/// teardown bytes after the cancel boundary; anything beyond this small
+/// buffer means the watcher already saw a follow-up turn's output and the
+/// death is no longer attributable to the cancel.
+pub const CANCEL_TEARDOWN_GRACE_BYTES: i64 = 4 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct CancelTombstone {
@@ -342,6 +342,42 @@ mod tests {
             "death past cancel EOF + grace is not cancel-induced"
         );
         // Tombstone still present for legitimate later consumer (TTL).
+        assert_eq!(count_cancel_tombstones_for_tests(&pool).await.unwrap(), 1);
+
+        test_pg.teardown().await;
+    }
+
+    #[tokio::test]
+    async fn consume_skips_e12_followup_rollout_frame() {
+        let Some(test_pg) = fresh_pg().await else {
+            return;
+        };
+        let pool = test_pg.pool.clone();
+
+        let stop_offset: i64 = 411_519;
+        insert_cancel_tombstone(
+            &pool,
+            Uuid::new_v4(),
+            9292,
+            Some("AgentDesk-codex-e12-followup"),
+            Some(stop_offset),
+            "scenario reset force-cancel",
+        )
+        .await
+        .expect("insert");
+
+        let consumed = consume_cancel_tombstone(
+            &pool,
+            9292,
+            "AgentDesk-codex-e12-followup",
+            Some(stop_offset + 6_725),
+        )
+        .await
+        .expect("consume");
+        assert!(
+            !consumed,
+            "E-12 follow-up rollout output inside the old 16 KiB grace must not be consumed"
+        );
         assert_eq!(count_cancel_tombstones_for_tests(&pool).await.unwrap(), 1);
 
         test_pg.teardown().await;

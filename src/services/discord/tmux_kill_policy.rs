@@ -9,9 +9,10 @@ pub(in crate::services::discord) const RECENT_TURN_STOP_METADATA_FALLBACK_TTL: s
 /// session actually dies. Anything beyond this boundary is treated as
 /// follow-up turn output and disqualifies the death from
 /// `cancel_induced_watcher_death`. Empirically the wrapper writes <2 KB of
-/// teardown lines (final stream item, "[stderr] killed", etc.) so 16 KB is
-/// generous yet far below the multi-KB output of even a tiny new turn.
-pub(in crate::services::discord) const CANCEL_TEARDOWN_GRACE_BYTES: u64 = 16 * 1024;
+/// teardown lines (final stream item, "[stderr] killed", etc.). Keep the
+/// bound below the smallest observed Codex TUI follow-up rollout frame so a
+/// reset/cancel tombstone cannot suppress the next pane-death lifecycle.
+pub(in crate::services::discord) const CANCEL_TEARDOWN_GRACE_BYTES: u64 = 4 * 1024;
 pub(in crate::services::discord) const MONITOR_AUTO_TURN_REASON_CODE: &str =
     "lifecycle.monitor_auto_turn";
 pub(in crate::services::discord) const MONITOR_AUTO_TURN_DEFERRED_REASON_CODE: &str =
