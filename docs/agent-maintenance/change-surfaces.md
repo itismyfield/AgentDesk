@@ -153,6 +153,12 @@
     hosted-TUI structured turn-state probe — "is the last turn fully over?";
     bugfix only outside a split plan).
   - `src/services/discord/router/message_handler.rs` (7013 lines).
+  - `src/services/discord/router/message_handler/intake_turn.rs` (3810 lines;
+    Discord message intake turn orchestration split from the router message
+    handler; bugfix only outside a further extraction plan).
+  - `src/services/discord/router/message_handler/headless_turn.rs` (1318 lines;
+    headless Discord turn launch/terminal-response path split from the router
+    message handler; bugfix only outside a further extraction plan).
   - `src/services/discord/meeting_orchestrator.rs` (3779 lines).
   - `src/services/discord/turn_bridge/mod.rs` (7062 lines).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (1525 lines; provider

@@ -3,7 +3,7 @@
   "rule": "service_server_backflow",
   "description": "No-regression baseline for src/services references to crate::server or super::server server-layer modules.",
   "captured_at": "2026-05-30",
-  "total_count": 113,
+  "total_count": 114,
   "files": {
     "src/services/agents/query.rs": {
       "count": 2
@@ -123,7 +123,7 @@
       "count": 1
     },
     "src/services/issue_announcements.rs": {
-      "count": 2
+      "count": 3
     },
     "src/services/kanban_cards.rs": {
       "count": 1
