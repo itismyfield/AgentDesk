@@ -20,7 +20,16 @@ pub(super) fn resolve_done_response(
     if any_tool_used && !has_post_tool_text {
         return Some(result.to_string());
     }
+    if done_result_supersedes_streamed_tail(full_response, result) {
+        return Some(result.to_string());
+    }
     None
+}
+
+fn done_result_supersedes_streamed_tail(full_response: &str, result: &str) -> bool {
+    let streamed = full_response.trim();
+    let terminal = result.trim();
+    !streamed.is_empty() && terminal.len() > streamed.len() && terminal.ends_with(streamed)
 }
 
 pub(super) fn total_context_tokens(
@@ -85,4 +94,26 @@ pub(super) fn apply_context_token_update(
     *accumulated_cache_create_tokens = next_cache_create_tokens;
     *accumulated_cache_read_tokens = next_cache_read_tokens;
     next_total != current_total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_done_response;
+
+    #[test]
+    fn done_uses_terminal_result_when_streamed_response_is_tail_only() {
+        let streamed_tail = "E15-LINE-150\nE15-LINE-151\n[E2E:E15:END]";
+        let terminal_body = "[E2E:E15:BEGIN]\nE15-LINE-001\nE15-LINE-002\nE15-LINE-150\nE15-LINE-151\n[E2E:E15:END]";
+
+        let resolved = resolve_done_response(streamed_tail, terminal_body, false, false);
+
+        assert_eq!(resolved, Some(terminal_body.to_string()));
+    }
+
+    #[test]
+    fn done_keeps_equal_streaming_response_when_no_tools_used() {
+        let resolved = resolve_done_response("final response", "final response", false, false);
+
+        assert_eq!(resolved, None);
+    }
 }

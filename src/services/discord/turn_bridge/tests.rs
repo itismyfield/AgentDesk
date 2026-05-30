@@ -3214,6 +3214,18 @@ fn done_keeps_full_response_when_no_tools_used() {
 }
 
 #[test]
+fn done_uses_terminal_result_when_streamed_response_is_tail_only() {
+    // Codex TUI can surface only the pane/rollout tail through live Text,
+    // while the terminal JSONL envelope carries the complete final answer.
+    // In that case the bridge must send the authoritative terminal body.
+    let streamed_tail = "E15-LINE-150\nE15-LINE-151\n[E2E:E15:END]";
+    let terminal_body =
+        "[E2E:E15:BEGIN]\nE15-LINE-001\nE15-LINE-002\nE15-LINE-150\nE15-LINE-151\n[E2E:E15:END]";
+    let res = resolve_done_response(streamed_tail, terminal_body, false, false);
+    assert_eq!(res, Some(terminal_body.to_string()));
+}
+
+#[test]
 fn done_noop_when_result_empty() {
     // Synthetic Done with empty result — nothing to replace with
     let res = resolve_done_response("중간 텍스트\n\n", "", true, false);
