@@ -48,6 +48,8 @@ struct PolicyEngineInner {
     policies: PolicyStore,
     _hot_reload: Option<loader::HotReloadGuard>,
     context: Context,
+    eval_deadline: Arc<std::sync::atomic::AtomicU64>,
+    hook_timeout: Option<Duration>,
     _runtime: Runtime,
 }
 
@@ -348,6 +350,16 @@ impl PolicyEngine {
         let supervisor_bridge = crate::supervisor::BridgeHandle::new();
         let runtime =
             Runtime::new().map_err(|e| anyhow::anyhow!("QuickJS runtime creation failed: {e}"))?;
+        let policy_hardening_disabled = std::env::var("AGENTDESK_POLICY_HARDENING")
+            .ok()
+            .is_some_and(|value| matches!(value.trim(), "0" | "off" | "OFF" | "false" | "FALSE"));
+        if !policy_hardening_disabled && config.policies.memory_limit_bytes > 0 {
+            runtime.set_memory_limit(config.policies.memory_limit_bytes);
+        }
+        let eval_deadline = loader::new_eval_deadline_slot();
+        loader::install_policy_interrupt_handler(&runtime, eval_deadline.clone(), None);
+        let hook_timeout = (!policy_hardening_disabled && config.policies.hook_timeout_ms > 0)
+            .then(|| Duration::from_millis(config.policies.hook_timeout_ms));
         let context = Context::full(&runtime)
             .map_err(|e| anyhow::anyhow!("QuickJS context creation failed: {e}"))?;
 
@@ -408,7 +420,12 @@ impl PolicyEngine {
                 .map_err(|e| anyhow::anyhow!("Failed to register bridge ops in reload ctx: {e}"))
             })?;
 
-            match loader::start_hot_reload(policies_dir.clone(), reload_ctx, store.clone()) {
+            match loader::start_hot_reload(
+                policies_dir.clone(),
+                reload_ctx,
+                store.clone(),
+                eval_deadline.clone(),
+            ) {
                 Ok(w) => {
                     tracing::info!(
                         engine_label = label,
@@ -439,6 +456,8 @@ impl PolicyEngine {
             policies: store,
             _hot_reload: watcher,
             context,
+            eval_deadline,
+            hook_timeout,
             _runtime: runtime,
         }));
         let tick_hook_in_flight = Arc::new(AtomicBool::new(false));
@@ -932,6 +951,9 @@ impl PolicyEngine {
                     }
                 };
 
+                let _deadline_guard = inner
+                    .hook_timeout
+                    .map(|budget| loader::ArmedDeadline::new(&inner.eval_deadline, budget));
                 let effects_before = Self::count_pending_effects(&ctx);
                 let policy_start = std::time::Instant::now();
                 let result: rquickjs::Result<rquickjs::Value> = func.call((js_payload.clone(),));
@@ -1085,6 +1107,9 @@ impl PolicyEngine {
                     }
                 };
 
+                let _deadline_guard = inner
+                    .hook_timeout
+                    .map(|budget| loader::ArmedDeadline::new(&inner.eval_deadline, budget));
                 let effects_before = Self::count_pending_effects(&ctx);
                 let policy_start = std::time::Instant::now();
                 let result: rquickjs::Result<rquickjs::Value> = func.call((js_payload.clone(),));
@@ -1433,6 +1458,7 @@ mod tests {
             policies: crate::config::PoliciesConfig {
                 dir: std::path::PathBuf::from("/nonexistent"),
                 hot_reload: false,
+                ..crate::config::PoliciesConfig::default()
             },
             ..Config::default()
         }
@@ -1443,6 +1469,7 @@ mod tests {
             policies: crate::config::PoliciesConfig {
                 dir: dir.to_path_buf(),
                 hot_reload: false,
+                ..crate::config::PoliciesConfig::default()
             },
             ..Config::default()
         }
@@ -1615,6 +1642,58 @@ mod tests {
         let engine = PolicyEngine::new_with_legacy_db(&config, db).unwrap();
         let result: i32 = engine.eval_js("1 + 2").unwrap();
         assert_eq!(result, 3);
+    }
+
+    #[test]
+    fn policy_runtime_memory_limit_rejects_large_allocation() {
+        let db = test_db();
+        let mut config = test_config();
+        config.policies.memory_limit_bytes = 8 * 1024 * 1024;
+        let engine = PolicyEngine::new_with_legacy_db(&config, db).unwrap();
+
+        let allocation_failed: bool = engine
+            .eval_js("try { new ArrayBuffer(64 * 1024 * 1024); false } catch (e) { true }")
+            .unwrap();
+
+        assert!(
+            allocation_failed,
+            "QuickJS memory limit should reject a large policy allocation"
+        );
+    }
+
+    #[test]
+    fn policy_hook_deadline_interrupts_runaway_live_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy_path = dir.path().join("runaway-hook.js");
+        std::fs::write(
+            &policy_path,
+            r#"
+            agentdesk.registerPolicy({
+                name: "runaway-hook",
+                priority: 1,
+                onTick: function() {
+                    while (true) {}
+                }
+            });
+            "#,
+        )
+        .unwrap();
+
+        let db = test_db();
+        let mut config = test_config_with_dir(dir.path());
+        config.policies.hook_timeout_ms = 100;
+        let engine = PolicyEngine::new_with_legacy_db(&config, db).unwrap();
+
+        let start = std::time::Instant::now();
+        engine
+            .fire_hook(Hook::OnTick, serde_json::json!({}))
+            .unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "runaway live hook should be interrupted promptly, took {elapsed:?}"
+        );
     }
 
     #[test]

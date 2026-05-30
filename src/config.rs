@@ -848,6 +848,14 @@ pub struct PoliciesConfig {
     pub dir: PathBuf,
     #[serde(default = "default_true")]
     pub hot_reload: bool,
+    /// QuickJS heap limit for policy runtimes. `0` disables the limit for
+    /// local diagnostics; release deployments should keep the default.
+    #[serde(default = "default_policy_memory_limit_bytes")]
+    pub memory_limit_bytes: usize,
+    /// Per-policy hook wall-clock deadline. `0` disables hook deadlines for
+    /// emergency diagnostics; hot-reload evals still use their own loader budget.
+    #[serde(default = "default_policy_hook_timeout_ms")]
+    pub hook_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1673,6 +1681,14 @@ fn default_sync_interval() -> u64 {
 fn default_policies_dir() -> PathBuf {
     PathBuf::from("./policies")
 }
+
+fn default_policy_memory_limit_bytes() -> usize {
+    128 * 1024 * 1024
+}
+
+fn default_policy_hook_timeout_ms() -> u64 {
+    5_000
+}
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -1795,6 +1811,8 @@ impl Default for PoliciesConfig {
         Self {
             dir: default_policies_dir(),
             hot_reload: true,
+            memory_limit_bytes: default_policy_memory_limit_bytes(),
+            hook_timeout_ms: default_policy_hook_timeout_ms(),
         }
     }
 }

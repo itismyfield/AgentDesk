@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use rquickjs::{Context, Ctx, Error as JsError, Function, Persistent};
+use rquickjs::{Context, Ctx, Error as JsError, Function, Persistent, Runtime};
 
 use super::hooks::Hook;
 
@@ -51,6 +51,102 @@ unsafe impl Sync for LoadedPolicy {}
 /// Thread-safe container for loaded policies.
 pub type PolicyStore = Arc<Mutex<Vec<LoadedPolicy>>>;
 
+fn policy_trust_override_enabled() -> bool {
+    std::env::var("AGENTDESK_POLICY_TRUST_OVERRIDE")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+}
+
+fn policy_trust_enforce_enabled() -> bool {
+    std::env::var("AGENTDESK_POLICY_TRUST_ENFORCE")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+}
+
+fn policy_hardening_disabled() -> bool {
+    std::env::var("AGENTDESK_POLICY_HARDENING")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "0" | "off" | "OFF" | "false" | "FALSE"))
+}
+
+#[cfg(unix)]
+fn policy_trust_findings(dir: &Path) -> Vec<String> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let current_uid = unsafe { libc::geteuid() };
+    let mut findings = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                findings.push(format!("{}: metadata unavailable: {error}", path.display()));
+                continue;
+            }
+        };
+        let mode = metadata.permissions().mode();
+        if metadata.uid() != current_uid && metadata.uid() != 0 {
+            findings.push(format!(
+                "{}: owned by uid {}, expected current uid {} or root",
+                path.display(),
+                metadata.uid(),
+                current_uid
+            ));
+        }
+        if mode & 0o022 != 0 {
+            findings.push(format!(
+                "{}: group/world writable mode {:o}",
+                path.display(),
+                mode & 0o777
+            ));
+        }
+        if metadata.file_type().is_symlink() {
+            findings.push(format!("{}: symlink is not trusted", path.display()));
+            continue;
+        }
+        if metadata.is_dir() {
+            let Ok(entries) = std::fs::read_dir(&path) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let child = entry.path();
+                if child.is_dir() || child.extension().is_some_and(|ext| ext == "js") {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+    findings
+}
+
+#[cfg(not(unix))]
+fn policy_trust_findings(_dir: &Path) -> Vec<String> {
+    Vec::new()
+}
+
+pub(crate) fn check_policy_tree_trust(dir: &Path) -> Result<()> {
+    if policy_hardening_disabled() || policy_trust_override_enabled() || !dir.exists() {
+        return Ok(());
+    }
+    let findings = policy_trust_findings(dir);
+    if findings.is_empty() {
+        return Ok(());
+    }
+    let summary = findings.join("; ");
+    if policy_trust_enforce_enabled() {
+        return Err(anyhow::anyhow!(
+            "untrusted policy tree {}: {summary}; set AGENTDESK_POLICY_TRUST_OVERRIDE=1 only for emergency diagnostics",
+            dir.display()
+        ));
+    }
+    tracing::warn!(
+        policies_dir = %dir.display(),
+        findings = %summary,
+        "policy trust check found unsafe ownership or permissions; set AGENTDESK_POLICY_TRUST_ENFORCE=1 to refuse at runtime"
+    );
+    Ok(())
+}
+
 /// Scan the given directory for *.js files and load each as a policy.
 pub fn load_policies_from_dir(ctx: &Context, dir: &Path) -> Result<Vec<LoadedPolicy>> {
     let mut policies = Vec::new();
@@ -59,6 +155,7 @@ pub fn load_policies_from_dir(ctx: &Context, dir: &Path) -> Result<Vec<LoadedPol
         tracing::warn!("Policies directory does not exist: {}", dir.display());
         return Ok(policies);
     }
+    check_policy_tree_trust(dir)?;
 
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok())
@@ -135,6 +232,7 @@ pub(crate) fn load_policies_from_dir_validated_inner(
     if !dir.exists() {
         return Ok(policies);
     }
+    check_policy_tree_trust(dir)?;
 
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok())
@@ -836,6 +934,25 @@ fn deadline_reached(encoded: u64) -> bool {
     elapsed >= encoded as u128
 }
 
+pub(crate) fn new_eval_deadline_slot() -> Arc<AtomicU64> {
+    Arc::new(AtomicU64::new(0))
+}
+
+pub(crate) fn install_policy_interrupt_handler(
+    runtime: &Runtime,
+    eval_deadline: Arc<AtomicU64>,
+    stop: Option<Arc<AtomicBool>>,
+) {
+    runtime.set_interrupt_handler(Some(Box::new(move || {
+        if stop.as_ref().is_some_and(|flag| {
+            flag.load(Ordering::Acquire) && hot_reload_worker_interrupts_enabled()
+        }) {
+            return true;
+        }
+        deadline_reached(eval_deadline.load(Ordering::Acquire))
+    })));
+}
+
 #[cfg(test)]
 const HOT_RELOAD_SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_millis(100);
 #[cfg(not(test))]
@@ -968,6 +1085,7 @@ pub fn start_hot_reload(
     policies_dir: PathBuf,
     ctx: Context,
     store: PolicyStore,
+    eval_deadline: Arc<AtomicU64>,
 ) -> Result<HotReloadGuard> {
     let (tx, rx) = std::sync::mpsc::channel();
 
@@ -995,15 +1113,7 @@ pub fn start_hot_reload(
     let stop = Arc::new(AtomicBool::new(false));
     let stop_worker = stop.clone();
     let stop_interrupt = stop.clone();
-    // Per-eval wall-clock deadline shared with the interrupt handler. `0`
-    // means no deadline armed; any non-zero value is the deadline encoded
-    // as millis-since `deadline_reference()`. The worker arms this before
-    // each hot-reload pre-validation and clears it on completion, but the
-    // arc is also exposed on the guard so live engine callers can arm a
-    // deadline of their own for any other eval that runs on this runtime.
-    let eval_deadline = Arc::new(AtomicU64::new(0));
     let eval_deadline_worker = eval_deadline.clone();
-    let eval_deadline_interrupt = eval_deadline.clone();
     // Install a QuickJS interrupt handler that aborts in-flight worker evals
     // when EITHER the shutdown flag is set OR the per-eval deadline has
     // passed. The handler lives on the shared Runtime, so the shutdown leg is
@@ -1011,12 +1121,7 @@ pub fn start_hot_reload(
     // interrupt main-engine policy hooks running on another context (#2386).
     // The deadline leg remains runtime-wide but is armed only while the
     // bounded eval owns the runtime lock.
-    ctx.runtime().set_interrupt_handler(Some(Box::new(move || {
-        if stop_interrupt.load(Ordering::Acquire) && hot_reload_worker_interrupts_enabled() {
-            return true;
-        }
-        deadline_reached(eval_deadline_interrupt.load(Ordering::Acquire))
-    })));
+    install_policy_interrupt_handler(ctx.runtime(), eval_deadline.clone(), Some(stop_interrupt));
     // Spawn a background thread to process file-change events
     let dir = policies_dir.clone();
     let join = std::thread::Builder::new()
@@ -1120,13 +1225,13 @@ pub fn start_hot_reload(
 /// only fires between bytecode instructions — a Rust function called from
 /// JS holds the runtime lock for its entire duration and can otherwise
 /// blow past the deadline (#2378).
-struct ArmedDeadline<'a> {
+pub(crate) struct ArmedDeadline<'a> {
     slot: &'a Arc<AtomicU64>,
     previous_thread_local: Option<Instant>,
 }
 
 impl<'a> ArmedDeadline<'a> {
-    fn new(slot: &'a Arc<AtomicU64>, budget: Duration) -> Self {
+    pub(crate) fn new(slot: &'a Arc<AtomicU64>, budget: Duration) -> Self {
         let deadline = Instant::now() + budget;
         slot.store(encode_deadline(deadline), Ordering::Release);
         let previous_thread_local =
@@ -1223,6 +1328,38 @@ mod tests {
     use super::*;
     use rquickjs::Runtime;
 
+    #[cfg(unix)]
+    #[test]
+    fn policy_trust_findings_flag_writable_policy_and_symlink() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let policy = tmp.path().join("unsafe.js");
+        std::fs::write(&policy, "agentdesk.registerPolicy({ name: 'unsafe' });")
+            .expect("write policy");
+        let mut permissions = std::fs::metadata(&policy)
+            .expect("policy metadata")
+            .permissions();
+        permissions.set_mode(0o666);
+        std::fs::set_permissions(&policy, permissions).expect("chmod policy");
+        symlink(&policy, tmp.path().join("linked.js")).expect("symlink policy");
+
+        let findings = policy_trust_findings(tmp.path());
+
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.contains("group/world writable")),
+            "expected writable policy finding, got {findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.contains("symlink is not trusted")),
+            "expected symlink policy finding, got {findings:?}"
+        );
+    }
+
     fn policy_test_context() -> (Runtime, Context) {
         let runtime = Runtime::new().expect("create QuickJS runtime");
         let ctx = Context::full(&runtime).expect("create QuickJS context");
@@ -1247,8 +1384,13 @@ mod tests {
         let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
         let tmp = tempfile::tempdir().expect("tempdir");
 
-        let guard =
-            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
+        let guard = start_hot_reload(
+            tmp.path().to_path_buf(),
+            ctx,
+            store,
+            new_eval_deadline_slot(),
+        )
+        .expect("start hot reload");
 
         // Dropping the guard must:
         //   1. signal stop,
@@ -1314,8 +1456,13 @@ mod tests {
         let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
         let tmp = tempfile::tempdir().expect("tempdir");
 
-        let mut guard =
-            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
+        let mut guard = start_hot_reload(
+            tmp.path().to_path_buf(),
+            ctx,
+            store,
+            new_eval_deadline_slot(),
+        )
+        .expect("start hot reload");
 
         guard.stop.store(true, Ordering::Release);
         let _worker_scope = HotReloadWorkerInterruptScope::enter();
@@ -1348,8 +1495,13 @@ mod tests {
         let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
         let tmp = tempfile::tempdir().expect("tempdir");
 
-        let mut guard =
-            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
+        let mut guard = start_hot_reload(
+            tmp.path().to_path_buf(),
+            ctx,
+            store,
+            new_eval_deadline_slot(),
+        )
+        .expect("start hot reload");
 
         guard.shutdown();
 
@@ -1378,8 +1530,13 @@ mod tests {
         let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
         let tmp = tempfile::tempdir().expect("tempdir");
 
-        let guard =
-            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
+        let guard = start_hot_reload(
+            tmp.path().to_path_buf(),
+            ctx,
+            store,
+            new_eval_deadline_slot(),
+        )
+        .expect("start hot reload");
 
         // Arm a tight per-eval deadline (100ms) WITHOUT requesting shutdown.
         // The interrupt handler must abort the runaway loop based on the
@@ -1421,8 +1578,13 @@ mod tests {
         let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
         let tmp = tempfile::tempdir().expect("tempdir");
 
-        let guard =
-            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
+        let guard = start_hot_reload(
+            tmp.path().to_path_buf(),
+            ctx,
+            store,
+            new_eval_deadline_slot(),
+        )
+        .expect("start hot reload");
 
         let _armed = guard.arm_eval_deadline(Duration::from_secs(5));
         let probe_ctx = Context::full(&runtime).expect("create probe context");
@@ -1448,8 +1610,13 @@ mod tests {
         let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
         let tmp = tempfile::tempdir().expect("tempdir");
 
-        let guard =
-            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
+        let guard = start_hot_reload(
+            tmp.path().to_path_buf(),
+            ctx,
+            store,
+            new_eval_deadline_slot(),
+        )
+        .expect("start hot reload");
 
         // No deadline armed. A short busy-loop must complete normally.
         let probe_ctx = Context::full(&runtime).expect("create probe context");
@@ -1482,8 +1649,13 @@ mod tests {
 
         // start_hot_reload installs the deadline-aware interrupt handler on
         // the shared runtime.
-        let guard =
-            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
+        let guard = start_hot_reload(
+            tmp.path().to_path_buf(),
+            ctx,
+            store,
+            new_eval_deadline_slot(),
+        )
+        .expect("start hot reload");
         let deadline_slot = guard.eval_deadline.clone();
 
         let policy_file = tmp.path().join("runaway.js");
@@ -1545,8 +1717,13 @@ mod tests {
         let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
         let tmp = tempfile::tempdir().expect("tempdir");
 
-        let guard =
-            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
+        let guard = start_hot_reload(
+            tmp.path().to_path_buf(),
+            ctx,
+            store,
+            new_eval_deadline_slot(),
+        )
+        .expect("start hot reload");
 
         // Sanity: the deadline slot is 0 (no deadline armed) for the entire
         // duration of this live eval, because we never call the loader and
@@ -1590,8 +1767,13 @@ mod tests {
         let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
         let tmp = tempfile::tempdir().expect("tempdir");
 
-        let mut guard =
-            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
+        let mut guard = start_hot_reload(
+            tmp.path().to_path_buf(),
+            ctx,
+            store,
+            new_eval_deadline_slot(),
+        )
+        .expect("start hot reload");
 
         // Calling shutdown explicitly then dropping must not panic, even
         // when the implicit Drop runs a second shutdown.
@@ -1674,8 +1856,13 @@ mod tests {
         let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
         let tmp = tempfile::tempdir().expect("tempdir");
 
-        let guard =
-            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
+        let guard = start_hot_reload(
+            tmp.path().to_path_buf(),
+            ctx,
+            store,
+            new_eval_deadline_slot(),
+        )
+        .expect("start hot reload");
         let deadline_slot = guard.eval_deadline.clone();
 
         // Policy whose `name` accessor spins forever. The eval itself

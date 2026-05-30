@@ -246,6 +246,7 @@ fn intake_gate_enqueue_stays_responsive_while_policy_tick_times_out() {
         policies: crate::config::PoliciesConfig {
             dir: std::path::PathBuf::from("/nonexistent"),
             hot_reload: false,
+            ..crate::config::PoliciesConfig::default()
         },
         ..Default::default()
     };

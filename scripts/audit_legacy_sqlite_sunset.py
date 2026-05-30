@@ -29,6 +29,11 @@ LEGACY_NOT_CFG_RE = re.compile(
 SQLITE_SYMBOL_RE = re.compile(r"\bsqlite_test(?:::|\b)")
 SQLITE_TEST_IDENTIFIER_RE = re.compile(r"\b[A-Za-z0-9_]+_sqlite_test\b")
 DB_CONN_RE = re.compile(r"\.(read_conn|separate_conn)\s*\(")
+OBSOLETE_SQLITE_IGNORE_RE = re.compile(
+    r"#\s*\[\s*ignore\s*=\s*\"[^\"]*obsolete SQLite[^\"]*\"\s*\]"
+)
+RUST_TEST_ATTR_RE = re.compile(r"#\s*\[\s*(?:tokio::|async_std::)?test\b")
+RUST_CFG_ATTR_RE = re.compile(r"#\s*\[\s*cfg\s*\((?P<expr>.*)\)\s*\]")
 
 DEFAULT_INCLUDE_EXTENSIONS = {".rs", ".toml", ".md"}
 SKIP_PARTS = {".git", "target", "node_modules", ".next", "dist"}
@@ -44,6 +49,8 @@ class FileMetrics:
     sqlite_symbol_refs: int
     sqlite_test_identifiers: int
     db_conn_calls: int
+    prod_db_conn_calls: int
+    obsolete_sqlite_ignored_tests: int
     category: str
 
     @property
@@ -55,6 +62,7 @@ class FileMetrics:
             + self.sqlite_symbol_refs
             + self.sqlite_test_identifiers
             + self.db_conn_calls
+            + self.obsolete_sqlite_ignored_tests
         )
 
 
@@ -71,6 +79,8 @@ class AuditReport:
             "sqlite_symbol_refs",
             "sqlite_test_identifiers",
             "db_conn_calls",
+            "prod_db_conn_calls",
+            "obsolete_sqlite_ignored_tests",
         )
         return {field: sum(getattr(file, field) for file in self.files) for field in fields}
 
@@ -99,6 +109,103 @@ def iter_candidate_files(root: Path) -> Iterable[Path]:
         yield path
 
 
+def is_explicit_test_surface(rel: str) -> bool:
+    return (
+        rel.endswith("_tests.rs")
+        or rel.endswith("/tests.rs")
+        or "/tests/" in rel
+        or "/routes_tests/" in rel
+        or rel == "src/integration_tests.rs"
+    )
+
+
+def rust_brace_delta(line: str) -> int:
+    return line.count("{") - line.count("}")
+
+
+def split_cfg_args(expr: str) -> list[str]:
+    args: list[str] = []
+    depth = 0
+    start = 0
+    for index, char in enumerate(expr):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(depth - 1, 0)
+        elif char == "," and depth == 0:
+            args.append(expr[start:index].strip())
+            start = index + 1
+    tail = expr[start:].strip()
+    if tail:
+        args.append(tail)
+    return args
+
+
+def cfg_expr_requires_test(expr: str) -> bool:
+    expr = re.sub(r"\s+", "", expr)
+    if expr == "test":
+        return True
+    if expr.startswith("not(") and expr.endswith(")"):
+        return False
+    if expr.startswith("all(") and expr.endswith(")"):
+        return any(cfg_expr_requires_test(arg) for arg in split_cfg_args(expr[4:-1]))
+    if expr.startswith("any(") and expr.endswith(")"):
+        args = split_cfg_args(expr[4:-1])
+        return bool(args) and all(cfg_expr_requires_test(arg) for arg in args)
+    return False
+
+
+def is_test_only_cfg_attr(line: str) -> bool:
+    match = RUST_CFG_ATTR_RE.search(line)
+    return bool(match and cfg_expr_requires_test(match.group("expr")))
+
+
+def has_test_only_cfg(text: str) -> bool:
+    return any(is_test_only_cfg_attr(line.strip()) for line in text.splitlines())
+
+
+def has_rust_test_attr(text: str) -> bool:
+    return any(RUST_TEST_ATTR_RE.search(line.strip()) for line in text.splitlines())
+
+
+def prod_db_conn_call_count(rel: str, text: str) -> int:
+    if not rel.endswith(".rs") or is_explicit_test_surface(rel):
+        return 0
+
+    count = 0
+    pending_test_scope = False
+    test_scope_depth: int | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if test_scope_depth is not None:
+            test_scope_depth += rust_brace_delta(line)
+            if test_scope_depth <= 0:
+                test_scope_depth = None
+            continue
+
+        if RUST_TEST_ATTR_RE.search(stripped) or is_test_only_cfg_attr(stripped):
+            pending_test_scope = True
+            continue
+
+        if pending_test_scope:
+            if "{" in line and (
+                stripped.startswith("{")
+                or stripped.startswith("mod ")
+                or stripped.startswith("fn ")
+                or stripped.startswith("async fn ")
+            ):
+                test_scope_depth = rust_brace_delta(line)
+                if test_scope_depth <= 0:
+                    test_scope_depth = None
+                pending_test_scope = False
+                continue
+            if stripped and not stripped.startswith("#"):
+                pending_test_scope = False
+
+        count += len(DB_CONN_RE.findall(line))
+    return count
+
+
 def classify_file(rel: str, text: str) -> str:
     if rel in {"Cargo.toml", "Cargo.lock"}:
         return "cargo_feature"
@@ -108,16 +215,10 @@ def classify_file(rel: str, text: str) -> str:
         return "sqlite_backend_core"
     if rel.startswith("src/compat/"):
         return "compat_cleanup"
-    if (
-        rel.endswith("_tests.rs")
-        or rel.endswith("/tests.rs")
-        or "/tests/" in rel
-        or rel == "src/integration_tests.rs"
-        or "#[test]" in text
-    ):
-        return "test_surface"
-    if rel.startswith("src/") and DB_CONN_RE.search(text):
+    if rel.startswith("src/") and prod_db_conn_call_count(rel, text) > 0:
         return "prod_stub_dependency"
+    if is_explicit_test_surface(rel) or has_rust_test_attr(text) or has_test_only_cfg(text):
+        return "test_surface"
     if rel.startswith("src/") and SQLITE_SYMBOL_RE.search(text):
         return "prod_sqlite_symbol"
     return "other"
@@ -136,6 +237,8 @@ def collect_metrics(root: Path) -> AuditReport:
             sqlite_symbol_refs=len(SQLITE_SYMBOL_RE.findall(text)),
             sqlite_test_identifiers=len(set(SQLITE_TEST_IDENTIFIER_RE.findall(text))),
             db_conn_calls=len(DB_CONN_RE.findall(text)),
+            prod_db_conn_calls=prod_db_conn_call_count(rel, text),
+            obsolete_sqlite_ignored_tests=len(OBSOLETE_SQLITE_IGNORE_RE.findall(text)),
             category=classify_file(rel, text),
         )
         if metrics.total_refs:
@@ -146,6 +249,14 @@ def collect_metrics(root: Path) -> AuditReport:
 def top_files(files: Sequence[FileMetrics], category: str | None, limit: int) -> list[FileMetrics]:
     selected = [file for file in files if category is None or file.category == category]
     return sorted(selected, key=lambda file: (-file.total_refs, file.path))[:limit]
+
+
+def obsolete_ignore_files(files: Sequence[FileMetrics], limit: int) -> list[FileMetrics]:
+    selected = [file for file in files if file.obsolete_sqlite_ignored_tests]
+    return sorted(
+        selected,
+        key=lambda file: (-file.obsolete_sqlite_ignored_tests, -file.total_refs, file.path),
+    )[:limit]
 
 
 def render_markdown(report: AuditReport, *, top_limit: int) -> str:
@@ -179,18 +290,42 @@ def render_markdown(report: AuditReport, *, top_limit: int) -> str:
             "queries or be deleted before the final feature sweep can remove "
             "`src/db/mod.rs` stubs.",
             "",
-            "| File | refs | db_conn_calls | sqlite refs |",
-            "| --- | ---: | ---: | ---: |",
+            "| File | refs | prod db_conn_calls | all db_conn_calls | sqlite refs |",
+            "| --- | ---: | ---: | ---: | ---: |",
         ]
     )
     if blockers:
         for file in blockers:
             lines.append(
-                f"| `{file.path}` | {file.total_refs} | {file.db_conn_calls} | "
-                f"{file.sqlite_symbol_refs} |"
+                f"| `{file.path}` | {file.total_refs} | {file.prod_db_conn_calls} | "
+                f"{file.db_conn_calls} | {file.sqlite_symbol_refs} |"
             )
     else:
-        lines.append("| none | 0 | 0 | 0 |")
+        lines.append("| none | 0 | 0 | 0 | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Remove/Migrate Decision Inventory",
+            "",
+            "Ignored tests already annotated as obsolete SQLite and PostgreSQL-only "
+            "are remove candidates, not CI expansion candidates. Production "
+            "stub dependencies remain migrate/keep decisions until PG-backed "
+            "coverage replaces each callsite.",
+            "",
+            "| File | obsolete SQLite ignored tests | category | refs |",
+            "| --- | ---: | --- | ---: |",
+        ]
+    )
+    obsolete_files = obsolete_ignore_files(report.files, top_limit)
+    if obsolete_files:
+        for file in obsolete_files:
+            lines.append(
+                f"| `{file.path}` | {file.obsolete_sqlite_ignored_tests} | "
+                f"{file.category} | {file.total_refs} |"
+            )
+    else:
+        lines.append("| none | 0 | n/a | 0 |")
 
     lines.extend(
         [

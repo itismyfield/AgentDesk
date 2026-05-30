@@ -1929,6 +1929,7 @@ async fn kanban_terminal_status_fires_hook() {
         policies: crate::config::PoliciesConfig {
             dir: dir.path().to_path_buf(),
             hot_reload: false,
+            ..crate::config::PoliciesConfig::default()
         },
         ..crate::config::Config::default()
     };
