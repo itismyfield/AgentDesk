@@ -2442,7 +2442,8 @@ mod tests {
         PlaceholderSuppressDecision, PlaceholderSuppressOrigin, READY_FOR_INPUT_STUCK_REASON,
         SUPPRESSED_INTERNAL_LABEL, SUPPRESSED_RESTART_LABEL, SuppressedPlaceholderAction,
         TmuxWatcherHandle, TmuxWatcherRegistry, WatcherClaimAction, WatcherToolState,
-        build_bg_trigger_session_key, cancel_induced_watcher_death, claim_or_reuse_watcher,
+        build_bg_trigger_session_key, cancel_induced_watcher_death,
+        cancel_suppression_applies_to_watcher_death, claim_or_reuse_watcher,
         clear_recent_turn_stops_for_tests, consume_monitor_auto_turn_preamble_once,
         dead_session_cleanup_plan, decide_placeholder_suppression,
         enqueue_background_trigger_response_to_notify_outbox,
@@ -2458,15 +2459,15 @@ mod tests {
         refresh_session_heartbeat_from_tmux_output,
         reset_stale_local_relay_offset_if_output_regressed,
         reset_stale_relay_watermark_if_output_regressed, restored_watcher_turn_from_inflight,
-        rollback_enqueued_offset_for_reconciled_failures,
+        rollback_enqueued_offset_for_reconciled_failures, session_ended_notice,
         should_discard_restored_seed_for_idle_direct_prompt,
-        should_flush_post_terminal_success_continuation, should_suppress_relay_before_emit,
-        should_suppress_streaming_placeholder_after_recent_stop,
+        should_flush_post_terminal_success_continuation, should_send_session_ended_notice,
+        should_suppress_relay_before_emit, should_suppress_streaming_placeholder_after_recent_stop,
         should_suppress_terminal_output_after_recent_stop, start_monitor_auto_turn_when_available,
         strip_inprogress_indicators, suppressed_placeholder_action, terminal_relay_decision,
         tmux_death_is_normal_completion, tmux_death_lifecycle_notification_reason,
-        watcher_ready_for_input_turn_completed, watcher_should_yield_to_inflight_state,
-        watcher_stream_seed,
+        watcher_output_file_offset, watcher_ready_for_input_turn_completed,
+        watcher_should_yield_to_inflight_state, watcher_stream_seed,
     };
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::db::session_transcripts::SessionTranscriptEventKind;
@@ -4097,6 +4098,47 @@ mod tests {
         );
 
         clear_recent_turn_stops_for_tests();
+    }
+
+    #[test]
+    fn watcher_death_uses_actual_watcher_output_path_offset() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output_path = tmp.path().join("rollout.jsonl");
+        std::fs::write(&output_path, vec![b'x'; 6_725]).expect("write rollout");
+
+        assert_eq!(
+            watcher_output_file_offset(output_path.to_str().expect("utf8 path")),
+            Some(6_725),
+            "pane-death cancel suppression must compare against the transcript the live watcher is actually tailing"
+        );
+    }
+
+    #[test]
+    fn relayed_terminal_turn_disqualifies_stale_cancel_suppression() {
+        assert!(
+            cancel_suppression_applies_to_watcher_death(true, false),
+            "pre-terminal watcher death can still be suppressed by a matching cancel"
+        );
+        assert!(
+            !cancel_suppression_applies_to_watcher_death(true, true),
+            "after a fresh terminal response was relayed, a prior cancel tombstone must not suppress pane death"
+        );
+        assert!(
+            !cancel_suppression_applies_to_watcher_death(false, true),
+            "no cancel tombstone means no suppression"
+        );
+    }
+
+    #[test]
+    fn session_ended_notice_is_limited_to_relayed_abnormal_pane_death() {
+        assert!(session_ended_notice().contains("session ended"));
+        assert!(should_send_session_ended_notice(false, false, true, false));
+        assert!(!should_send_session_ended_notice(true, false, true, false));
+        assert!(!should_send_session_ended_notice(false, true, true, false));
+        assert!(!should_send_session_ended_notice(
+            false, false, false, false
+        ));
+        assert!(!should_send_session_ended_notice(false, false, true, true));
     }
 
     #[test]

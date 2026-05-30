@@ -125,6 +125,36 @@ pub(in crate::services::discord) fn tmux_output_offset(tmux_session_name: &str) 
     std::fs::metadata(output_path).ok().map(|meta| meta.len())
 }
 
+fn provider_native_output_offset_for_stop(
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+) -> Option<u64> {
+    let (provider, _) = parse_provider_and_channel_from_tmux_name(tmux_session_name)?;
+    if provider != ProviderKind::Codex {
+        return None;
+    }
+
+    let state = crate::services::discord::inflight::load_inflight_state(
+        &ProviderKind::Codex,
+        channel_id.get(),
+    )?;
+    if !matches!(
+        state.runtime_kind,
+        Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui)
+    ) {
+        return None;
+    }
+
+    let session_id = state.session_id.as_deref()?;
+    let rollout = crate::services::codex_tui::rollout_tail::find_rollout_by_session_id(session_id)?;
+    std::fs::metadata(rollout).ok().map(|meta| meta.len())
+}
+
+fn tmux_output_offset_for_stop(channel_id: ChannelId, tmux_session_name: &str) -> Option<u64> {
+    provider_native_output_offset_for_stop(channel_id, tmux_session_name)
+        .or_else(|| tmux_output_offset(tmux_session_name))
+}
+
 fn tmux_generation_mtime_for_stop(tmux_session_name: Option<&str>) -> Option<i64> {
     tmux_session_name
         .map(read_generation_file_mtime_ns)
@@ -136,7 +166,8 @@ pub(in crate::services::discord) async fn record_recent_turn_stop(
     tmux_session_name: Option<&str>,
     reason: &str,
 ) {
-    let stop_output_offset = tmux_session_name.and_then(tmux_output_offset);
+    let stop_output_offset =
+        tmux_session_name.and_then(|name| tmux_output_offset_for_stop(channel_id, name));
     let stop_generation_mtime_ns = tmux_generation_mtime_for_stop(tmux_session_name);
     // #2549: the in-memory entry is still published immediately so a live
     // watcher can classify the cancel race, but async consumers wait for the
@@ -318,9 +349,8 @@ fn recent_turn_stop_matches_watcher_death(
     if !session_matches {
         return false;
     }
-    if let (Some(_entry_tmux), Some(_stop_offset), Some(stop_generation_mtime_ns)) = (
+    if let (Some(_entry_tmux), Some(stop_generation_mtime_ns)) = (
         entry.tmux_session_name.as_deref(),
-        entry.stop_output_offset,
         entry.stop_generation_mtime_ns,
     ) {
         let current_generation_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
@@ -596,6 +626,28 @@ mod tests {
                 now
             ),
             "a stale cancel tombstone from an older wrapper generation must not suppress a later session death"
+        );
+    }
+
+    #[test]
+    fn recent_turn_stop_generation_mismatch_does_not_match_watcher_death_without_stop_offset() {
+        let now = std::time::Instant::now();
+        let channel = ChannelId::new(987_2929_002);
+        let tmux_name = "AgentDesk-codex-generation-mismatch-no-offset";
+        let entry = RecentTurnStop {
+            id: uuid::Uuid::new_v4(),
+            channel_id: channel,
+            tmux_session_name: Some(tmux_name.to_string()),
+            stop_output_offset: None,
+            stop_generation_mtime_ns: Some(123_456),
+            reason: "scenario reset force-cancel".to_string(),
+            recorded_at: now,
+            pg_persistence: None,
+        };
+
+        assert!(
+            !recent_turn_stop_matches_watcher_death(&entry, channel, tmux_name, None, now),
+            "generation mismatch must disqualify stale cancel tombstones even when the stop offset is unavailable"
         );
     }
 
