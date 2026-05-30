@@ -22,10 +22,11 @@ use crate::services::remote::RemoteProfile;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use crate::services::session_backend::parse_stream_message;
 use crate::services::session_backend::{
-    StreamLineState, insert_process_session, observe_stream_context,
-    parse_assistant_extra_tool_uses, parse_stream_message_with_state, process_session_is_alive,
-    process_session_pid, process_session_probe, read_output_file_until_result,
-    remove_process_session, send_process_session_input, terminate_process_handle,
+    StreamLineState, emit_status_events_from_stream_json, insert_process_session,
+    observe_stream_context, parse_assistant_extra_tool_uses, parse_stream_message_with_state,
+    process_session_is_alive, process_session_pid, process_session_probe,
+    read_output_file_until_result, remove_process_session, send_process_session_input,
+    terminate_process_handle,
 };
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{
@@ -1214,6 +1215,9 @@ IMPORTANT: Format your responses using Markdown for better readability:
             }
 
             observe_stream_context(&json, &mut stream_state);
+            if !emit_status_events_from_stream_json(&json, &sender) {
+                break;
+            }
 
             debug_log("  Calling parse_stream_message...");
             if let Some(msg) = parse_stream_message_with_state(&json, &stream_state) {
@@ -1299,6 +1303,9 @@ IMPORTANT: Format your responses using Markdown for better readability:
                             "  >>> StatusUpdate: model={:?}, cost={:?}, total_cost={:?}, cache_create={:?}, cache_read={:?}",
                             model, cost_usd, total_cost_usd, cache_create_tokens, cache_read_tokens
                         ));
+                    }
+                    StreamMessage::StatusEvents { events } => {
+                        debug_log(&format!("  >>> StatusEvents: {} event(s)", events.len()));
                     }
                     StreamMessage::TmuxReady { .. }
                     | StreamMessage::RuntimeReady { .. }

@@ -1,11 +1,13 @@
 use serde_json::Value;
 
-use crate::services::agent_protocol::{StatusEvent, StatusTodoItem, StatusTodoStatus};
+use crate::services::agent_protocol::{
+    StatusEvent, StatusTodoItem, StatusTodoStatus, status_events_from_workflow_json,
+};
 
 use super::super::formatting::format_tool_input;
 use super::common::{
-    EVENT_LINE_MAX_CHARS, first_content_line, normalize_summary, normalize_tool_key,
-    truncate_chars, value_to_compact_string,
+    EVENT_LINE_MAX_CHARS, first_content_line, is_harness_task_tool_name, normalize_summary,
+    normalize_tool_key, truncate_chars, value_to_compact_string,
 };
 
 pub(in crate::services::discord) fn status_events_from_tool_use(
@@ -27,8 +29,24 @@ pub(in crate::services::discord) fn status_events_from_tool_use(
         name: name.to_string(),
         args_summary: args_summary.clone(),
     }];
+    if is_harness_task_tool_name(name) {
+        let value = tool_input_value(input);
+        let task_id = task_tool_id(&value);
+        let status = task_tool_status(name, &value);
+        let summary = task_tool_summary(name, &value).or_else(|| {
+            (task_id.is_none() && status.is_none())
+                .then(|| args_summary.clone())
+                .flatten()
+        });
+        events.push(StatusEvent::TaskToolUpdate {
+            name: name.to_string(),
+            task_id,
+            summary,
+            status,
+        });
+    }
     if is_task_tool(name) {
-        let value = serde_json::from_str::<Value>(input).unwrap_or(Value::Null);
+        let value = tool_input_value(input);
         events.push(StatusEvent::SubagentStart {
             subagent_type: value
                 .get("subagent_type")
@@ -40,7 +58,7 @@ pub(in crate::services::discord) fn status_events_from_tool_use(
         });
     }
     if is_todo_write_tool(name) {
-        let value = serde_json::from_str::<Value>(input).unwrap_or(Value::Null);
+        let value = tool_input_value(input);
         if let Some(items) = todo_items_from_input(&value) {
             events.push(StatusEvent::TodoUpdate { items });
         }
@@ -51,6 +69,13 @@ pub(in crate::services::discord) fn status_events_from_tool_use(
         });
     }
     events
+}
+
+fn tool_input_value(input: &str) -> Value {
+    match serde_json::from_str::<Value>(input).unwrap_or(Value::Null) {
+        Value::String(raw) => serde_json::from_str::<Value>(&raw).unwrap_or(Value::String(raw)),
+        value => value,
+    }
 }
 
 pub(in crate::services::discord) fn status_events_from_tool_result(
@@ -89,12 +114,24 @@ pub(in crate::services::discord) fn status_events_from_task_notification(
                 events.push(StatusEvent::Heartbeat);
             }
         }
+        "workflow" => {
+            events.push(StatusEvent::WorkflowEnd {
+                task_id: None,
+                success: !task_notification_is_error(status),
+                summary: Some(first_content_line(summary)).filter(|value| !value.is_empty()),
+            });
+        }
         _ => {}
     }
     events
 }
 
 pub(in crate::services::discord) fn status_events_from_json(value: &Value) -> Vec<StatusEvent> {
+    let workflow_events = status_events_from_workflow_json(value);
+    if !workflow_events.is_empty() {
+        return workflow_events;
+    }
+
     match value.get("type").and_then(Value::as_str).unwrap_or("") {
         "assistant" => assistant_status_events(value),
         "content_block_start" => content_block_start_status_events(value),
@@ -108,7 +145,7 @@ pub(in crate::services::discord) fn status_events_from_json(value: &Value) -> Ve
 pub(super) fn is_task_tool(name: &str) -> bool {
     matches!(
         normalize_tool_key(name).as_str(),
-        "task" | "taskcreate" | "agent" | "spawnagent"
+        "task" | "agent" | "spawnagent"
     )
 }
 
@@ -124,6 +161,47 @@ fn is_todo_write_tool(name: &str) -> bool {
         normalize_tool_key(name).as_str(),
         "todowrite" | "updateplan"
     )
+}
+
+fn task_tool_id(value: &Value) -> Option<String> {
+    ["task_id", "taskId", "taskID", "id"]
+        .into_iter()
+        .find_map(|key| value.get(key).and_then(Value::as_str))
+        .map(normalize_summary)
+        .filter(|value| !value.is_empty())
+}
+
+fn task_tool_summary(name: &str, value: &Value) -> Option<String> {
+    [
+        "subject",
+        "title",
+        "description",
+        "desc",
+        "content",
+        "task",
+        "message",
+    ]
+    .into_iter()
+    .find_map(|key| value.get(key).and_then(Value::as_str))
+    .map(normalize_summary)
+    .filter(|value| !value.is_empty())
+    .or_else(|| (normalize_tool_key(name) == "tasklist").then(|| "list".to_string()))
+}
+
+fn task_tool_status(name: &str, value: &Value) -> Option<String> {
+    let status = value
+        .get("status")
+        .or_else(|| value.get("state"))
+        .and_then(Value::as_str)
+        .map(normalize_summary)
+        .filter(|value| !value.is_empty());
+    if status.is_some() {
+        return status;
+    }
+    match normalize_tool_key(name).as_str() {
+        "taskstop" => Some("stopped".to_string()),
+        _ => None,
+    }
 }
 
 pub(super) fn is_schedule_wakeup_tool(name: &str) -> bool {
@@ -150,6 +228,7 @@ fn todo_items_from_input(value: &Value) -> Option<Vec<StatusTodoItem>> {
         .get("todos")
         .or_else(|| value.get("items"))
         .or_else(|| value.get("todo_list"))
+        .or_else(|| value.get("plan"))
         .and_then(Value::as_array)?;
     let parsed = items
         .iter()
@@ -159,6 +238,7 @@ fn todo_items_from_input(value: &Value) -> Option<Vec<StatusTodoItem>> {
                 .or_else(|| item.get("text"))
                 .or_else(|| item.get("title"))
                 .or_else(|| item.get("task"))
+                .or_else(|| item.get("step"))
                 .and_then(Value::as_str)
                 .map(normalize_summary)
                 .filter(|content| !content.is_empty())?;
@@ -290,6 +370,11 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
 }
 
 fn system_status_events(value: &Value) -> Vec<StatusEvent> {
+    let workflow_events = status_events_from_workflow_json(value);
+    if !workflow_events.is_empty() {
+        return workflow_events;
+    }
+
     if value.get("subtype").and_then(Value::as_str) != Some("task_notification") {
         return Vec::new();
     }

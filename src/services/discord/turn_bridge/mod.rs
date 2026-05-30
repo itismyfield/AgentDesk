@@ -5017,7 +5017,7 @@ pub(super) fn spawn_turn_bridge(
                                     .as_deref()
                                     .or(new_session_id.as_deref())
                                     .or(inflight_state.session_id.as_deref());
-                                status_panel_dirty |= shared_owned
+                                let context_dirty = shared_owned
                                     .placeholder_live_events
                                     .set_context_panel_usage(
                                         channel_id,
@@ -5028,7 +5028,15 @@ pub(super) fn spawn_turn_bridge(
                                         context_window_tokens,
                                         context_compact_percent,
                                     );
+                                status_panel_dirty |= context_dirty;
                             }
+                        }
+                        StreamMessage::StatusEvents { events } => {
+                            status_panel_dirty |= record_status_panel_events(
+                                shared_owned.as_ref(),
+                                channel_id,
+                                events,
+                            );
                         }
                         StreamMessage::TmuxReady {
                             output_path,

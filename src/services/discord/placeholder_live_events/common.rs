@@ -10,7 +10,11 @@ pub(super) const EVENT_BLOCK_MAX_CHARS: usize = 1500;
 // Discord's 2000-character content ceiling rather than the 4096-char embed limit.
 pub(super) const STATUS_PANEL_MAX_CHARS: usize = 2000;
 pub(super) const STATUS_PANEL_TODO_LIMIT: usize = 8;
+pub(super) const STATUS_PANEL_TASK_LIMIT: usize = 10;
 pub(super) const STATUS_PANEL_SUBAGENT_LIMIT: usize = 10;
+pub(super) const STATUS_PANEL_WORKFLOW_LIMIT: usize = 5;
+pub(super) const STATUS_PANEL_WORKFLOW_PHASE_LIMIT: usize = 10;
+pub(super) const STATUS_PANEL_WORKFLOW_AGENT_LIMIT: usize = 10;
 pub(super) const SESSION_PANEL_LINE_MAX_CHARS: usize = 100;
 pub(super) const TASK_PANEL_LINE_MAX_CHARS: usize = 140;
 pub(super) const CONTEXT_PANEL_LINE_MAX_CHARS: usize = 120;
@@ -51,6 +55,13 @@ pub(super) fn normalize_tool_key(name: &str) -> String {
         .collect()
 }
 
+pub(super) fn is_harness_task_tool_name(name: &str) -> bool {
+    matches!(
+        normalize_tool_key(name).as_str(),
+        "taskcreate" | "taskupdate" | "tasklist" | "taskget" | "taskoutput" | "taskstop"
+    )
+}
+
 pub(super) fn tool_prefix(name: &str) -> String {
     let lower = name.trim().to_ascii_lowercase();
     let prefix = match lower.as_str() {
@@ -62,7 +73,8 @@ pub(super) fn tool_prefix(name: &str) -> String {
         "monitor" => Some("Monitor"),
         "schedulewakeup" | "schedule_wakeup" => Some("ScheduleWakeup"),
         "toolsearch" | "tool_search" | "tool_search_tool" => Some("ToolSearch"),
-        "task" | "agent" | "taskcreate" | "taskget" | "taskupdate" | "tasklist" => Some("Task"),
+        "task" | "agent" | "taskcreate" | "taskget" | "taskupdate" | "tasklist" | "taskoutput"
+        | "taskstop" => Some("Task"),
         "webfetch" => Some("WebFetch"),
         "websearch" => Some("WebSearch"),
         _ => canonical_tool_name(name),

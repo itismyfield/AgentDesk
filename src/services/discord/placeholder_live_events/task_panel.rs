@@ -1,5 +1,6 @@
 use super::common::{
-    TASK_PANEL_LINE_MAX_CHARS, escape_status_panel_markdown, first_content_line, truncate_chars,
+    EVENT_LINE_MAX_CHARS, TASK_PANEL_LINE_MAX_CHARS, escape_status_panel_markdown,
+    first_content_line, sanitized_tool_name, truncate_chars,
 };
 
 const DISPATCH_ID_SHORT_LEN: usize = 8;
@@ -81,6 +82,42 @@ pub(super) fn render_task_panel_line(task: &TaskPanelSnapshot) -> String {
         format!("{header} {body}")
     };
     truncate_chars(&line, TASK_PANEL_LINE_MAX_CHARS)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TaskToolSlot {
+    pub(super) name: String,
+    pub(super) task_id: Option<String>,
+    pub(super) summary: Option<String>,
+    pub(super) status: Option<String>,
+}
+
+pub(super) fn clean_task_tool_value(raw: impl AsRef<str>) -> Option<String> {
+    let value = first_content_line(raw.as_ref());
+    (!value.is_empty()).then_some(value)
+}
+
+pub(super) fn render_task_tool_slot(slot: &TaskToolSlot) -> String {
+    let label = sanitized_tool_name(&slot.name).unwrap_or_else(|| "Task".to_string());
+    let mut detail_parts = Vec::new();
+    if let Some(task_id) = slot.task_id.as_deref() {
+        detail_parts.push(escape_status_panel_markdown(task_id));
+    }
+    if let Some(summary) = slot.summary.as_deref() {
+        if slot.task_id.as_deref() != Some(summary) {
+            detail_parts.push(escape_status_panel_markdown(summary));
+        }
+    }
+    if let Some(status) = slot.status.as_deref() {
+        detail_parts.push(escape_status_panel_markdown(status));
+    }
+
+    let line = if detail_parts.is_empty() {
+        format!("└ {label}")
+    } else {
+        format!("└ {label} {}", detail_parts.join(" · "))
+    };
+    truncate_chars(&line, EVENT_LINE_MAX_CHARS)
 }
 
 fn short_dispatch_id(dispatch_id: &str) -> String {

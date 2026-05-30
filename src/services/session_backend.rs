@@ -6,7 +6,9 @@
 //! - normalized output-file tailing/parsing for wrapper JSONL streams
 
 use crate::db::turns::TurnTokenUsage;
-use crate::services::agent_protocol::{StreamMessage, TaskNotificationKind};
+use crate::services::agent_protocol::{
+    StreamMessage, TaskNotificationKind, status_events_from_workflow_json,
+};
 use crate::services::provider::{CancelToken, ReadOutputResult, SessionProbe};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -459,6 +461,9 @@ pub fn process_stream_line(
     }
 
     observe_stream_context(&json, state);
+    if !emit_status_events_from_stream_json(&json, sender) {
+        return false;
+    }
 
     let Some(message) = parse_stream_message_with_state(&json, state) else {
         return true;
@@ -492,6 +497,17 @@ pub fn process_stream_line(
     }
 
     true
+}
+
+pub(crate) fn emit_status_events_from_stream_json(
+    json: &Value,
+    sender: &Sender<StreamMessage>,
+) -> bool {
+    let events = status_events_from_workflow_json(json);
+    if events.is_empty() {
+        return true;
+    }
+    sender.send(StreamMessage::StatusEvents { events }).is_ok()
 }
 
 pub fn parse_stream_message(json: &Value) -> Option<StreamMessage> {
@@ -979,6 +995,44 @@ mod stream_tail_guard_tests {
         assert!(messages.iter().any(
             |message| matches!(message, StreamMessage::Done { result, .. } if result == "done")
         ));
+    }
+
+    #[test]
+    fn process_stream_line_emits_workflow_status_events() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut state = StreamLineState::new();
+
+        assert!(process_stream_line(
+            r#"{"type":"system","subtype":"task_progress","task_id":"wf-1","workflow_progress":[{"type":"workflow_phase","index":1,"title":"P1"},{"type":"workflow_agent","index":1,"label":"pinger","phaseIndex":1,"phaseTitle":"P1","state":"progress"}]}"#,
+            &sender,
+            &mut state,
+        ));
+
+        let message = receiver
+            .try_iter()
+            .find(|message| matches!(message, StreamMessage::StatusEvents { .. }))
+            .expect("workflow status events");
+        let StreamMessage::StatusEvents { events } = message else {
+            panic!("expected StatusEvents");
+        };
+        assert_eq!(
+            events,
+            vec![
+                crate::services::agent_protocol::StatusEvent::WorkflowPhase {
+                    task_id: Some("wf-1".to_string()),
+                    index: 1,
+                    title: "P1".to_string()
+                },
+                crate::services::agent_protocol::StatusEvent::WorkflowAgent {
+                    task_id: Some("wf-1".to_string()),
+                    index: 1,
+                    label: "pinger".to_string(),
+                    phase_index: Some(1),
+                    phase_title: Some("P1".to_string()),
+                    state: "progress".to_string()
+                }
+            ]
+        );
     }
 }
 
