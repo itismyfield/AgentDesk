@@ -746,9 +746,26 @@ fn normalize_tool_feedback_trigger_type(trigger_type: Option<String>) -> String 
         .map(|value| value.to_ascii_lowercase())
         .as_deref()
     {
-        Some("automatic") => "automatic".to_string(),
+        Some("sampled") | Some("automatic") => "sampled".to_string(),
         Some("voluntary") | Some("manual") => "voluntary".to_string(),
         _ => "voluntary".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tool_feedback_trigger_type_tests {
+    use super::normalize_tool_feedback_trigger_type;
+
+    #[test]
+    fn normalizes_automatic_tool_feedback_trigger_to_sampled() {
+        assert_eq!(
+            normalize_tool_feedback_trigger_type(Some("automatic".to_string())),
+            "sampled"
+        );
+        assert_eq!(
+            normalize_tool_feedback_trigger_type(Some("sampled".to_string())),
+            "sampled"
+        );
     }
 }
 
@@ -2910,7 +2927,7 @@ mod tests {
                 fragment_ids: vec!["frag-1".to_string(), "frag-2".to_string()],
                 suggestion: Some("Keep this search path".to_string()),
                 context: Some("auto-generated after missing in-turn feedback".to_string()),
-                trigger_type: Some("automatic".to_string()),
+                trigger_type: Some("sampled".to_string()),
             })
             .await
             .unwrap();
@@ -2931,7 +2948,7 @@ mod tests {
         assert!(requests[1].contains("\"sessionId\":\"session-1\""));
         assert!(requests[1].contains("\"searchEventId\":\"search-1\""));
         assert!(requests[1].contains("\"fragmentIds\":[\"frag-1\",\"frag-2\"]"));
-        assert!(requests[1].contains("\"triggerType\":\"automatic\""));
+        assert!(requests[1].contains("\"triggerType\":\"sampled\""));
         assert_eq!(
             usage,
             crate::services::memory::TokenUsage {
@@ -3010,7 +3027,7 @@ mod tests {
                 fragment_ids: vec!["frag-1".to_string()],
                 suggestion: None,
                 context: None,
-                trigger_type: Some("automatic".to_string()),
+                trigger_type: Some("sampled".to_string()),
             })
             .await
             .unwrap();

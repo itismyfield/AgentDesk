@@ -29,7 +29,7 @@ impl PendingRecallFeedback {
             fragment_ids: self.fragment_ids,
             suggestion: None,
             context: None,
-            trigger_type: Some("automatic".to_string()),
+            trigger_type: Some("sampled".to_string()),
         }
     }
 }
@@ -476,6 +476,25 @@ pub(super) fn reminder_transcript_event(content: String) -> SessionTranscriptEve
         content,
         status: Some("info".to_string()),
         is_error: false,
+    }
+}
+
+#[cfg(test)]
+mod trigger_type_tests {
+    use super::*;
+
+    #[test]
+    fn automatic_fallback_request_uses_sampled_trigger_type() {
+        let request = PendingRecallFeedback {
+            session_id: None,
+            search_event_id: Some("search-1".to_string()),
+            fragment_ids: vec!["frag-1".to_string()],
+            relevant: true,
+            sufficient: true,
+        }
+        .into_request(Some("session-1"));
+
+        assert_eq!(request.trigger_type.as_deref(), Some("sampled"));
     }
 }
 

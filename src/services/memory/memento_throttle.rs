@@ -700,7 +700,7 @@ pub(crate) fn memento_call_metrics_snapshot(window_hours: usize) -> Value {
 
 fn normalize_feedback_trigger_type(trigger_type: &str) -> String {
     match trigger_type.trim().to_ascii_lowercase().as_str() {
-        "automatic" => "automatic".to_string(),
+        "automatic" | "sampled" => "automatic".to_string(),
         "manual" | "voluntary" => "voluntary".to_string(),
         _ => "voluntary".to_string(),
     }
