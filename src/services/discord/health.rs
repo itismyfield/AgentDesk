@@ -138,6 +138,43 @@ impl HealthRegistry {
         providers.push(ProviderEntry { name, shared });
     }
 
+    async fn dm_default_agent_authorizes_private_channel(
+        &self,
+        channel_id: ChannelId,
+        is_private_channel: bool,
+        source: &str,
+    ) -> bool {
+        if !is_private_channel {
+            return false;
+        }
+
+        let shared_runtimes: Vec<Arc<SharedData>> = self
+            .providers
+            .lock()
+            .await
+            .iter()
+            .map(|entry| entry.shared.clone())
+            .collect();
+
+        for shared in shared_runtimes {
+            let provider = { shared.settings.read().await.provider.clone() };
+            let session_bound = {
+                let data = shared.core.lock().await;
+                data.sessions.contains_key(&channel_id)
+            };
+            if dm_default_agent_authorizes_unmapped_private_channel(
+                is_private_channel,
+                source,
+                &provider,
+                session_bound,
+            ) {
+                return true;
+            }
+        }
+
+        false
+    }
+
     pub(super) async fn registered_provider_count(&self) -> usize {
         self.providers.lock().await.len()
     }
@@ -1552,6 +1589,25 @@ pub(crate) async fn send_message_with_backends_and_delivery_id(
     .await
 }
 
+const HEADLESS_TURN_OUTBOX_SOURCE: &str = "headless_turn";
+
+fn dm_default_agent_authorizes_unmapped_private_channel(
+    is_private_channel: bool,
+    source: &str,
+    provider: &ProviderKind,
+    session_bound_to_provider: bool,
+) -> bool {
+    if !is_private_channel {
+        return false;
+    }
+
+    let source = source.trim();
+    super::agentdesk_config::dm_default_agent_allows_outbound_source(provider, source)
+        || (source == HEADLESS_TURN_OUTBOX_SOURCE
+            && session_bound_to_provider
+            && super::agentdesk_config::resolve_dm_default_agent(provider).is_some())
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ManualOutboundOptions {
     pub(crate) allow_unbound_internal_channel: bool,
@@ -1635,6 +1691,24 @@ pub(crate) async fn send_message_with_backends_and_delivery_options(
         if let Ok(http) = resolve_bot_http(registry, bot).await {
             if let Ok(channel) = channel_id.to_channel(&*http).await {
                 target_channel_accessible = true;
+                let is_private_channel = matches!(&channel, serenity::Channel::Private(_));
+                if !authorized
+                    && registry
+                        .dm_default_agent_authorizes_private_channel(
+                            channel_id,
+                            is_private_channel,
+                            source,
+                        )
+                        .await
+                {
+                    authorized = true;
+                    tracing::info!(
+                        target_channel_id = channel_id.get(),
+                        source,
+                        bot,
+                        "allowing outbound delivery to dm_default_agent-bound private channel"
+                    );
+                }
                 // `Channel::guild` consumes the value, so derive the target
                 // channel name first via `clone()`; the original `channel`
                 // is then consumed by the thread/parent walk below.
@@ -3441,6 +3515,8 @@ mod tests {
     use crate::services::discord::DISCORD_MSG_LIMIT;
     use chrono::TimeZone;
     use poise::serenity_prelude::{MessageId, UserId};
+    use std::fs;
+    use tempfile::TempDir;
 
     struct TestTmuxSession {
         name: String,
@@ -3480,6 +3556,90 @@ mod tests {
 
     fn test_db() -> Db {
         crate::db::test_db()
+    }
+
+    fn with_temp_agentdesk_yaml<F>(content: &str, f: F)
+    where
+        F: FnOnce(),
+    {
+        let _guard = super::super::runtime_store::lock_test_env();
+        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+        let temp = TempDir::new().expect("temp root");
+        let root = temp.path().join(".adk");
+        let config_dir = root.join("config");
+        fs::create_dir_all(&config_dir).expect("config dir");
+        fs::write(config_dir.join("agentdesk.yaml"), content).expect("agentdesk.yaml");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &root) };
+        f();
+        match previous {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
+    }
+
+    const FAMILY_COUNSEL_DM_DEFAULT_CONFIG: &str = r#"
+server:
+  port: 8791
+discord:
+  dm_default_agent: family-counsel
+agents:
+  - id: family-counsel
+    name: "Family Counsel"
+    provider: claude
+    channels:
+      claude:
+        id: "1473922824350601297"
+        name: "family-counsel"
+        workspace: "~/.adk/release/workspaces/family-counsel"
+        provider: claude
+"#;
+
+    #[test]
+    fn dm_default_agent_allows_private_headless_turn_when_session_bound() {
+        with_temp_agentdesk_yaml(FAMILY_COUNSEL_DM_DEFAULT_CONFIG, || {
+            assert!(dm_default_agent_authorizes_unmapped_private_channel(
+                true,
+                "headless_turn",
+                &ProviderKind::Claude,
+                true,
+            ));
+        });
+    }
+
+    #[test]
+    fn dm_default_agent_rejects_non_dm_unmapped_channel() {
+        with_temp_agentdesk_yaml(FAMILY_COUNSEL_DM_DEFAULT_CONFIG, || {
+            assert!(!dm_default_agent_authorizes_unmapped_private_channel(
+                false,
+                "headless_turn",
+                &ProviderKind::Claude,
+                true,
+            ));
+        });
+    }
+
+    #[test]
+    fn dm_default_agent_rejects_unbound_headless_turn() {
+        with_temp_agentdesk_yaml(FAMILY_COUNSEL_DM_DEFAULT_CONFIG, || {
+            assert!(!dm_default_agent_authorizes_unmapped_private_channel(
+                true,
+                "headless_turn",
+                &ProviderKind::Claude,
+                false,
+            ));
+        });
+    }
+
+    #[test]
+    fn dm_default_agent_allows_private_channel_for_default_agent_source() {
+        with_temp_agentdesk_yaml(FAMILY_COUNSEL_DM_DEFAULT_CONFIG, || {
+            assert!(dm_default_agent_authorizes_unmapped_private_channel(
+                true,
+                "family-counsel",
+                &ProviderKind::Claude,
+                false,
+            ));
+        });
     }
 
     #[test]

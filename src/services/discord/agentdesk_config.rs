@@ -448,6 +448,17 @@ pub(super) fn resolve_dm_default_agent(provider: &ProviderKind) -> Option<Resolv
     })
 }
 
+pub(super) fn dm_default_agent_allows_outbound_source(
+    provider: &ProviderKind,
+    source: &str,
+) -> bool {
+    let source = source.trim();
+    !source.is_empty()
+        && resolve_dm_default_agent(provider)
+            .map(|resolved| resolved.role_binding.role_id == source)
+            .unwrap_or(false)
+}
+
 fn meeting_agent_from_entry(
     config: &Config,
     entry: &MeetingAgentEntry,
@@ -1290,6 +1301,44 @@ agents:
             );
 
             assert!(resolve_dm_default_agent(&ProviderKind::Codex).is_none());
+        });
+    }
+
+    #[test]
+    fn dm_default_agent_outbound_source_matches_default_agent_only() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_agentdesk_yaml(
+                temp_home.path(),
+                r#"
+server:
+  port: 8791
+discord:
+  dm_default_agent: family-counsel
+agents:
+  - id: family-counsel
+    name: "상담봇"
+    provider: claude
+    channels:
+      claude:
+        id: "1473922824350601297"
+        name: "윤호네비서"
+        workspace: "~/.adk/release/workspaces/family-counsel"
+        provider: claude
+"#,
+            );
+
+            assert!(dm_default_agent_allows_outbound_source(
+                &ProviderKind::Claude,
+                "family-counsel"
+            ));
+            assert!(!dm_default_agent_allows_outbound_source(
+                &ProviderKind::Claude,
+                "system"
+            ));
+            assert!(!dm_default_agent_allows_outbound_source(
+                &ProviderKind::Codex,
+                "family-counsel"
+            ));
         });
     }
 
