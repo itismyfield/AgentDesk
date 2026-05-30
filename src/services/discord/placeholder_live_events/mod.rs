@@ -20,9 +20,9 @@ mod tests;
 use common::{
     CHANNEL_EVENT_CAPACITY, EVENT_LINE_MAX_CHARS, STATUS_PANEL_MAX_CHARS,
     STATUS_PANEL_SUBAGENT_LIMIT, STATUS_PANEL_TASK_LIMIT, STATUS_PANEL_TODO_LIMIT,
-    STATUS_PANEL_WORKFLOW_LIMIT,
-    escape_status_panel_markdown, normalize_summary, sanitized_tool_name, tool_prefix,
-    truncate_chars,
+    STATUS_PANEL_WORKFLOW_AGENT_LIMIT, STATUS_PANEL_WORKFLOW_LIMIT,
+    STATUS_PANEL_WORKFLOW_PHASE_LIMIT, escape_status_panel_markdown, normalize_summary,
+    sanitized_tool_name, tool_prefix, truncate_chars,
 };
 use context_panel::{ContextPanelSnapshot, render_context_panel_line};
 use recent_events::render_events;
@@ -484,13 +484,15 @@ impl StatusPanelState {
                 self.status = DerivedStatus::ScheduleWakeup(eta_secs);
             }
             StatusEvent::WorkflowStart { task_id, name } => {
-                let slot = self.workflow_slot_mut(task_id.clone());
-                if let Some(name) = name.filter(|value| !value.trim().is_empty()) {
-                    slot.name = Some(normalize_summary(&name));
-                }
-                self.status = DerivedStatus::WorkflowRunning {
-                    label: workflow_status_label(slot),
+                let label = {
+                    let slot = self.workflow_slot_mut(task_id.clone());
+                    if let Some(name) = name.filter(|value| !value.trim().is_empty()) {
+                        slot.name = Some(normalize_summary(&name));
+                    }
+                    trim_workflow_slot(slot);
+                    workflow_status_label(slot)
                 };
+                self.status = DerivedStatus::WorkflowRunning { label };
                 trim_workflows(&mut self.workflows);
             }
             StatusEvent::WorkflowPhase {
@@ -498,11 +500,14 @@ impl StatusPanelState {
                 index,
                 title,
             } => {
-                let slot = self.workflow_slot_mut(task_id);
-                upsert_workflow_phase(&mut slot.phases, index, title);
-                self.status = DerivedStatus::WorkflowRunning {
-                    label: workflow_status_label(slot),
+                let label = {
+                    let slot = self.workflow_slot_mut(task_id);
+                    upsert_workflow_phase(&mut slot.phases, index, title);
+                    trim_workflow_slot(slot);
+                    workflow_status_label(slot)
                 };
+                self.status = DerivedStatus::WorkflowRunning { label };
+                trim_workflows(&mut self.workflows);
             }
             StatusEvent::WorkflowAgent {
                 task_id,
@@ -512,38 +517,49 @@ impl StatusPanelState {
                 phase_title,
                 state,
             } => {
-                let slot = self.workflow_slot_mut(task_id);
-                upsert_workflow_agent(
-                    &mut slot.agents,
-                    WorkflowAgentSlot {
-                        index,
-                        label,
-                        phase_index,
-                        phase_title,
-                        state,
-                    },
-                );
-                self.status = DerivedStatus::WorkflowRunning {
-                    label: workflow_status_label(slot),
+                let label = {
+                    let slot = self.workflow_slot_mut(task_id);
+                    upsert_workflow_agent(
+                        &mut slot.agents,
+                        WorkflowAgentSlot {
+                            index,
+                            label,
+                            phase_index,
+                            phase_title,
+                            state,
+                        },
+                    );
+                    trim_workflow_slot(slot);
+                    workflow_status_label(slot)
                 };
+                self.status = DerivedStatus::WorkflowRunning { label };
+                trim_workflows(&mut self.workflows);
             }
             StatusEvent::WorkflowLog { task_id, summary } => {
-                let slot = self.workflow_slot_mut(task_id);
-                let summary = normalize_summary(&summary);
-                if !summary.is_empty() {
-                    slot.recent = Some(summary);
+                {
+                    let slot = self.workflow_slot_mut(task_id);
+                    let summary = normalize_summary(&summary);
+                    if !summary.is_empty() {
+                        slot.recent = Some(summary);
+                    }
+                    trim_workflow_slot(slot);
                 }
+                trim_workflows(&mut self.workflows);
             }
             StatusEvent::WorkflowEnd {
                 task_id,
                 success,
                 summary,
             } => {
-                let slot = self.workflow_slot_mut(task_id);
-                if let Some(summary) = summary.filter(|value| !value.trim().is_empty()) {
-                    slot.recent = Some(normalize_summary(&summary));
+                {
+                    let slot = self.workflow_slot_mut(task_id);
+                    if let Some(summary) = summary.filter(|value| !value.trim().is_empty()) {
+                        slot.recent = Some(normalize_summary(&summary));
+                    }
+                    slot.finished = Some(success);
+                    trim_workflow_slot(slot);
                 }
-                slot.finished = Some(success);
+                trim_workflows(&mut self.workflows);
                 if matches!(self.status, DerivedStatus::WorkflowRunning { .. }) {
                     self.status = DerivedStatus::Running;
                 }
@@ -912,7 +928,7 @@ fn render_workflow_slot(slot: &WorkflowSlot) -> Vec<String> {
     }
     lines.push(truncate_chars(&header, EVENT_LINE_MAX_CHARS));
 
-    for agent in slot.agents.iter().take(STATUS_PANEL_SUBAGENT_LIMIT) {
+    for agent in slot.agents.iter().take(STATUS_PANEL_WORKFLOW_AGENT_LIMIT) {
         let mut line = String::from("  ");
         line.push_str(&escape_status_panel_markdown(&workflow_agent_label(agent)));
         let marker = workflow_agent_marker(&agent.state);
@@ -924,7 +940,7 @@ fn render_workflow_slot(slot: &WorkflowSlot) -> Vec<String> {
     }
 
     if slot.agents.is_empty() {
-        for phase in &slot.phases {
+        for phase in slot.phases.iter().take(STATUS_PANEL_WORKFLOW_PHASE_LIMIT) {
             let line = format!("  {}", escape_status_panel_markdown(&phase.title));
             lines.push(truncate_chars(&line, EVENT_LINE_MAX_CHARS));
         }
@@ -982,5 +998,16 @@ fn trim_workflows(slots: &mut Vec<WorkflowSlot>) {
     if slots.len() > STATUS_PANEL_WORKFLOW_LIMIT {
         let excess = slots.len() - STATUS_PANEL_WORKFLOW_LIMIT;
         slots.drain(0..excess);
+    }
+}
+
+fn trim_workflow_slot(slot: &mut WorkflowSlot) {
+    if slot.phases.len() > STATUS_PANEL_WORKFLOW_PHASE_LIMIT {
+        let excess = slot.phases.len() - STATUS_PANEL_WORKFLOW_PHASE_LIMIT;
+        slot.phases.drain(0..excess);
+    }
+    if slot.agents.len() > STATUS_PANEL_WORKFLOW_AGENT_LIMIT {
+        let excess = slot.agents.len() - STATUS_PANEL_WORKFLOW_AGENT_LIMIT;
+        slot.agents.drain(0..excess);
     }
 }

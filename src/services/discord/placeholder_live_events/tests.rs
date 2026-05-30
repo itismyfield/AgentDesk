@@ -850,6 +850,55 @@ fn status_events_from_json_captures_workflow_progress_array() {
 }
 
 #[test]
+fn status_events_from_json_captures_top_level_workflow_events() {
+    assert_eq!(
+        status_events_from_json(&json!({
+            "type": "workflow_phase",
+            "taskId": "wf-1",
+            "index": 2,
+            "title": "Implement"
+        })),
+        vec![StatusEvent::WorkflowPhase {
+            task_id: Some("wf-1".to_string()),
+            index: 2,
+            title: "Implement".to_string(),
+        }]
+    );
+
+    assert_eq!(
+        status_events_from_json(&json!({
+            "type": "workflow_agent",
+            "task_id": "wf-1",
+            "index": 3,
+            "label": "reviewer",
+            "phase_index": 2,
+            "phase_title": "Implement",
+            "status": "running"
+        })),
+        vec![StatusEvent::WorkflowAgent {
+            task_id: Some("wf-1".to_string()),
+            index: 3,
+            label: "reviewer".to_string(),
+            phase_index: Some(2),
+            phase_title: Some("Implement".to_string()),
+            state: "running".to_string(),
+        }]
+    );
+
+    assert_eq!(
+        status_events_from_json(&json!({
+            "type": "workflow_log",
+            "workflowRunId": "wf-1",
+            "message": "review started"
+        })),
+        vec![StatusEvent::WorkflowLog {
+            task_id: Some("wf-1".to_string()),
+            summary: "review started".to_string(),
+        }]
+    );
+}
+
+#[test]
 fn status_panel_tracks_workflow_phase_agents() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(2894);
@@ -899,6 +948,109 @@ fn status_panel_tracks_workflow_phase_agents() {
     assert!(rendered.contains("P1: pinger ✓"));
     assert!(rendered.contains("Dynamic workflow"));
     assert!(rendered.chars().count() <= STATUS_PANEL_MAX_CHARS);
+}
+
+#[test]
+fn status_panel_caps_partial_workflow_state_without_start() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(2895);
+    for idx in 0..=STATUS_PANEL_WORKFLOW_LIMIT {
+        events.push_status_events(
+            channel_id,
+            status_events_from_json(&json!({
+                "type": "workflow_phase",
+                "task_id": format!("wf-{idx}"),
+                "index": 1,
+                "title": format!("phase {idx}")
+            })),
+        );
+    }
+
+    let status_entry = events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("status panel state");
+    let guard = status_entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    assert_eq!(
+        guard.workflows.len(),
+        STATUS_PANEL_WORKFLOW_LIMIT,
+        "partial workflow events cap stored workflow slots at the visible workflow limit"
+    );
+    assert_eq!(
+        guard
+            .workflows
+            .first()
+            .and_then(|slot| slot.task_id.as_deref()),
+        Some("wf-1")
+    );
+    assert_eq!(
+        guard
+            .workflows
+            .last()
+            .and_then(|slot| slot.task_id.as_deref()),
+        Some("wf-5")
+    );
+    drop(guard);
+
+    let channel_id = ChannelId::new(2896);
+    for idx in 0..=STATUS_PANEL_WORKFLOW_PHASE_LIMIT {
+        events.push_status_events(
+            channel_id,
+            status_events_from_json(&json!({
+                "type": "workflow_phase",
+                "task_id": "wf-partial",
+                "index": idx,
+                "title": format!("phase {idx}")
+            })),
+        );
+    }
+    for idx in 0..=STATUS_PANEL_WORKFLOW_AGENT_LIMIT {
+        events.push_status_events(
+            channel_id,
+            status_events_from_json(&json!({
+                "type": "workflow_agent",
+                "task_id": "wf-partial",
+                "index": idx,
+                "label": format!("agent {idx}"),
+                "phaseIndex": idx,
+                "phaseTitle": format!("phase {idx}"),
+                "state": "progress"
+            })),
+        );
+    }
+
+    let status_entry = events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("status panel state");
+    let guard = status_entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let slot = guard.workflows.first().expect("partial workflow slot");
+
+    assert_eq!(
+        slot.phases.len(),
+        STATUS_PANEL_WORKFLOW_PHASE_LIMIT,
+        "partial workflow phases are capped at ten stored rows"
+    );
+    assert_eq!(slot.phases.first().map(|phase| phase.index), Some(1));
+    assert_eq!(
+        slot.phases.last().map(|phase| phase.index),
+        Some(STATUS_PANEL_WORKFLOW_PHASE_LIMIT as u64)
+    );
+    assert_eq!(
+        slot.agents.len(),
+        STATUS_PANEL_WORKFLOW_AGENT_LIMIT,
+        "partial workflow agents are capped at ten stored rows"
+    );
+    assert_eq!(slot.agents.first().map(|agent| agent.index), Some(1));
+    assert_eq!(
+        slot.agents.last().map(|agent| agent.index),
+        Some(STATUS_PANEL_WORKFLOW_AGENT_LIMIT as u64)
+    );
 }
 
 #[test]

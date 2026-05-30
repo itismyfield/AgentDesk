@@ -127,6 +127,11 @@ pub(in crate::services::discord) fn status_events_from_task_notification(
 }
 
 pub(in crate::services::discord) fn status_events_from_json(value: &Value) -> Vec<StatusEvent> {
+    let workflow_events = status_events_from_workflow_json(value);
+    if !workflow_events.is_empty() {
+        return workflow_events;
+    }
+
     match value.get("type").and_then(Value::as_str).unwrap_or("") {
         "assistant" => assistant_status_events(value),
         "content_block_start" => content_block_start_status_events(value),
