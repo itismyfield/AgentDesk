@@ -12,7 +12,7 @@ fn build_main_help_body(provider: &ProviderKind) -> String {
             "\n`/model` — Open the model picker for this channel\n`/fast` — Toggle native fast mode for this channel\n`/goals` — Toggle Codex goals for this channel"
         }
         ProviderKind::Claude => {
-            "\n`/model` — Open the model picker for this channel\n`/fast` — Toggle native fast mode for this channel"
+            "\n`/model` — Open the model picker for this channel\n`/fast` — Toggle native fast mode for this channel\n`/effort <level>` — Claude effort (`low`…`max`)\n`/compact`, `/cost`, `/context` — Claude native session commands"
         }
         _ => "\n`/model` — Open the model picker for this channel",
     };

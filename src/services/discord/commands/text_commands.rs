@@ -666,6 +666,18 @@ pub(in crate::services::discord) async fn handle_text_command(
             tracing::info!("  [{ts}] ◀ [{}] !help", msg.author.name);
 
             let provider_name = data.provider.display_name();
+            let claude_tui_settings = if matches!(
+                &data.provider,
+                &crate::services::provider::ProviderKind::Claude
+            ) {
+                "\
+`/effort <level>` — Claude live TUI native effort (`low`…`max`)
+`/compact` — Claude live TUI compact
+`/cost` — Claude live TUI cost view
+`/context` — Claude live TUI context view"
+            } else {
+                "Claude TUI-only passthrough commands are hidden for non-Claude providers."
+            };
             let help = format!(
                 "\
 **AgentDesk Discord Bot**
@@ -701,6 +713,7 @@ Any other message is sent to {p}.
 
 **Settings**
 `/model` — Open the interactive model picker
+{claude_tui_settings}
 `!debug` — Toggle debug logging
 `!metrics [date]` — Show turn metrics
 `!queue [all]` — Show pending queue
@@ -719,6 +732,7 @@ Any other message is sent to {p}.
 
 {risk_block}",
                 p = provider_name,
+                claude_tui_settings = claude_tui_settings,
                 risk_block = super::risk_tier_summary_for_help(super::high_risk_enabled_via_env()),
             );
             send_long_message_raw(&ctx.http, channel_id, &help, &data.shared).await?;

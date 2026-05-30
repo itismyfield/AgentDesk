@@ -165,11 +165,15 @@ pub(in crate::services::discord) fn slash_command_risk(slash_cmd: &str) -> Comma
     match slash_cmd {
         // Inspection only.
         "/help" | "/pwd" | "/health" | "/status" | "/inflight" | "/queue" | "/metrics"
-        | "/allowedtools" | "/sessions" | "/receipt" | "/adk" => CommandRisk::ReadOnly,
+        | "/allowedtools" | "/sessions" | "/receipt" | "/adk" | "/cost" | "/context" => {
+            CommandRisk::ReadOnly
+        }
 
         // Per-channel session shaping (mirrors text-command tiers).
-        "/start" | "/down" | "/cc" | "/meeting" | "/model" | "/fast" | "/goals" | "/clear"
-        | "/deletesession" | "/stop" | "/restart" | "/debug" => CommandRisk::Mutating,
+        "/start" | "/down" | "/cc" | "/meeting" | "/model" | "/fast" | "/goals" | "/effort"
+        | "/compact" | "/clear" | "/deletesession" | "/stop" | "/restart" | "/debug" => {
+            CommandRisk::Mutating
+        }
 
         // RCE-equivalent surface.
         // `/deadlock-recover`, `/machine-flip`, and `/stuck-pr-rebase` (issue
@@ -197,7 +201,8 @@ pub(in crate::services::discord) fn risk_tier_summary_for_help(high_risk_enabled
     format!(
         "**Command Risk Tiers** (issue #1005)\n\
          `read-only` — help/status/metrics/allowedtools: any authorized user\n\
-         `mutating` — start/down/cc/meeting/model/clear/deletesession/stop/restart/debug: any authorized user\n\
+         `mutating` — start/down/cc/meeting/model/fast/goals/effort/compact/clear/deletesession/stop/restart/debug: any authorized user\n\
+         `read-only (Claude native)` — cost/context: any authorized user\n\
          `shell/tool-grant` — shell/allowed: {shell_state}\n\
          `credential/system` — allowall/adduser/removeuser/escalation: owner-only"
     )
@@ -273,6 +278,10 @@ mod tests {
         assert_eq!(command_risk("!start", "."), CommandRisk::Mutating);
         assert_eq!(command_risk("!down", "foo.txt"), CommandRisk::Mutating);
         assert_eq!(command_risk("!cc", "clear"), CommandRisk::Mutating);
+        assert_eq!(slash_command_risk("/cost"), CommandRisk::ReadOnly);
+        assert_eq!(slash_command_risk("/context"), CommandRisk::ReadOnly);
+        assert_eq!(slash_command_risk("/effort"), CommandRisk::Mutating);
+        assert_eq!(slash_command_risk("/compact"), CommandRisk::Mutating);
     }
 
     #[test]
@@ -486,6 +495,14 @@ mod tests {
                 "tier mismatch between {text_cmd} and {slash_cmd}",
             );
         }
+    }
+
+    #[test]
+    fn claude_passthrough_slash_commands_use_expected_tiers() {
+        assert_eq!(slash_command_risk("/effort"), CommandRisk::Mutating);
+        assert_eq!(slash_command_risk("/compact"), CommandRisk::Mutating);
+        assert_eq!(slash_command_risk("/cost"), CommandRisk::ReadOnly);
+        assert_eq!(slash_command_risk("/context"), CommandRisk::ReadOnly);
     }
 
     /// Issue #2653: recovery commands run launchctl/ssh/git push pipelines
