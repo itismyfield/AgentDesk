@@ -93,6 +93,251 @@ class LegacySqliteSunsetAuditTest(unittest.TestCase):
         self.assertEqual(report.files[0].db_conn_calls, 1)
         self.assertEqual(report.files[0].prod_db_conn_calls, 0)
 
+    def test_cfg_qualified_visibility_fn_stays_test_surface(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src" / "engine"
+            src.mkdir(parents=True)
+            target = src / "mod.rs"
+            target.write_text(
+                '#[cfg(all(test, feature = "legacy-sqlite-tests"))] pub(crate) fn helper(db: &Db) {\n'
+                "    let conn = db.read_conn()?;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            report = audit.collect_metrics(root)
+
+        self.assertEqual(len(report.files), 1)
+        self.assertEqual(report.files[0].path, "src/engine/mod.rs")
+        self.assertEqual(report.files[0].category, "test_surface")
+        self.assertEqual(report.files[0].db_conn_calls, 1)
+        self.assertEqual(report.files[0].prod_db_conn_calls, 0)
+
+    def test_cfg_test_multiline_visibility_fn_stays_test_surface(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src" / "engine"
+            src.mkdir(parents=True)
+            target = src / "mod.rs"
+            target.write_text(
+                "#[cfg(test)]\n"
+                "pub(crate) fn helper(\n"
+                "    db: &Db,\n"
+                ") -> anyhow::Result<()> {\n"
+                "    let conn = db.separate_conn()?;\n"
+                "    Ok(())\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            report = audit.collect_metrics(root)
+
+        self.assertEqual(len(report.files), 1)
+        self.assertEqual(report.files[0].path, "src/engine/mod.rs")
+        self.assertEqual(report.files[0].category, "test_surface")
+        self.assertEqual(report.files[0].db_conn_calls, 1)
+        self.assertEqual(report.files[0].prod_db_conn_calls, 0)
+
+    def test_cfg_test_if_block_does_not_count_as_prod_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src" / "engine"
+            src.mkdir(parents=True)
+            target = src / "mod.rs"
+            target.write_text(
+                "fn drain(db: &Db, enabled: bool) {\n"
+                "    #[cfg(test)]\n"
+                "    if enabled {\n"
+                "        let conn = db.read_conn()?;\n"
+                "    }\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            report = audit.collect_metrics(root)
+
+        self.assertEqual(len(report.files), 1)
+        self.assertEqual(report.files[0].path, "src/engine/mod.rs")
+        self.assertEqual(report.files[0].category, "test_surface")
+        self.assertEqual(report.files[0].db_conn_calls, 1)
+        self.assertEqual(report.files[0].prod_db_conn_calls, 0)
+
+    def test_same_line_cfg_test_visibility_fn_does_not_count_as_prod_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src" / "engine"
+            src.mkdir(parents=True)
+            target = src / "mod.rs"
+            target.write_text(
+                "#[cfg(test)] pub(crate) fn helper(db: &Db) { "
+                "let read = db.read_conn()?; let separate = db.separate_conn()?; }\n",
+                encoding="utf-8",
+            )
+
+            report = audit.collect_metrics(root)
+
+        self.assertEqual(len(report.files), 1)
+        self.assertEqual(report.files[0].path, "src/engine/mod.rs")
+        self.assertEqual(report.files[0].category, "test_surface")
+        self.assertEqual(report.files[0].db_conn_calls, 2)
+        self.assertEqual(report.files[0].prod_db_conn_calls, 0)
+
+    def test_same_line_cfg_test_if_block_does_not_count_as_prod_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src" / "engine"
+            src.mkdir(parents=True)
+            target = src / "mod.rs"
+            target.write_text(
+                "fn drain(db: &Db, enabled: bool) {\n"
+                "    #[cfg(test)] if enabled { "
+                "let read = db.read_conn()?; let separate = db.separate_conn()?; }\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            report = audit.collect_metrics(root)
+
+        self.assertEqual(len(report.files), 1)
+        self.assertEqual(report.files[0].path, "src/engine/mod.rs")
+        self.assertEqual(report.files[0].category, "test_surface")
+        self.assertEqual(report.files[0].db_conn_calls, 2)
+        self.assertEqual(report.files[0].prod_db_conn_calls, 0)
+
+    def test_same_line_cfg_test_statement_does_not_hide_next_prod_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src" / "engine"
+            src.mkdir(parents=True)
+            target = src / "mod.rs"
+            target.write_text(
+                "fn drain(db: &Db) {\n"
+                "    #[cfg(test)] let test_conn = db.read_conn()?;\n"
+                "    let prod_conn = db.read_conn()?;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            report = audit.collect_metrics(root)
+
+        self.assertEqual(len(report.files), 1)
+        self.assertEqual(report.files[0].path, "src/engine/mod.rs")
+        self.assertEqual(report.files[0].category, "prod_stub_dependency")
+        self.assertEqual(report.files[0].db_conn_calls, 2)
+        self.assertEqual(report.files[0].prod_db_conn_calls, 1)
+
+    def test_same_line_non_test_then_cfg_test_attr_does_not_count_as_prod_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src" / "engine"
+            src.mkdir(parents=True)
+            target = src / "mod.rs"
+            target.write_text(
+                "#[allow(dead_code)] #[cfg(test)] "
+                "fn helper(db: &Db) { let conn = db.read_conn()?; }\n",
+                encoding="utf-8",
+            )
+
+            report = audit.collect_metrics(root)
+
+        self.assertEqual(len(report.files), 1)
+        self.assertEqual(report.files[0].path, "src/engine/mod.rs")
+        self.assertEqual(report.files[0].category, "test_surface")
+        self.assertEqual(report.files[0].db_conn_calls, 1)
+        self.assertEqual(report.files[0].prod_db_conn_calls, 0)
+
+    def test_same_line_cfg_test_statement_with_comment_does_not_hide_next_prod_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src" / "engine"
+            src.mkdir(parents=True)
+            target = src / "mod.rs"
+            target.write_text(
+                "fn drain(db: &Db) {\n"
+                "    #[cfg(test)] let test_conn = db.read_conn()?; // comment\n"
+                "    let prod_conn = db.read_conn()?;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            report = audit.collect_metrics(root)
+
+        self.assertEqual(len(report.files), 1)
+        self.assertEqual(report.files[0].path, "src/engine/mod.rs")
+        self.assertEqual(report.files[0].category, "prod_stub_dependency")
+        self.assertEqual(report.files[0].db_conn_calls, 2)
+        self.assertEqual(report.files[0].prod_db_conn_calls, 1)
+
+    def test_test_only_cfg_statement_with_block_comment_stays_test_surface(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src" / "engine"
+            src.mkdir(parents=True)
+            target = src / "mod.rs"
+            target.write_text(
+                "fn drain(db: &Db) {\n"
+                '    #[cfg(all(test, feature = "legacy-sqlite-tests"))] '
+                "let test_conn = db.read_conn()?; /* comment */\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            report = audit.collect_metrics(root)
+
+        self.assertEqual(len(report.files), 1)
+        self.assertEqual(report.files[0].path, "src/engine/mod.rs")
+        self.assertEqual(report.files[0].category, "test_surface")
+        self.assertEqual(report.files[0].db_conn_calls, 1)
+        self.assertEqual(report.files[0].prod_db_conn_calls, 0)
+
+    def test_same_line_cfg_test_statement_with_block_comment_does_not_hide_next_prod_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src" / "engine"
+            src.mkdir(parents=True)
+            target = src / "mod.rs"
+            target.write_text(
+                "fn drain(db: &Db) {\n"
+                "    #[cfg(test)] let test_conn = db.read_conn()?; /* comment */\n"
+                "    let prod_conn = db.read_conn()?;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            report = audit.collect_metrics(root)
+
+        self.assertEqual(len(report.files), 1)
+        self.assertEqual(report.files[0].path, "src/engine/mod.rs")
+        self.assertEqual(report.files[0].category, "prod_stub_dependency")
+        self.assertEqual(report.files[0].db_conn_calls, 2)
+        self.assertEqual(report.files[0].prod_db_conn_calls, 1)
+
+    def test_same_line_cfg_test_statement_with_multiline_block_comment_does_not_hide_next_prod_blocker(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src" / "engine"
+            src.mkdir(parents=True)
+            target = src / "mod.rs"
+            target.write_text(
+                "fn drain(db: &Db) {\n"
+                "    #[cfg(test)] let test_conn = db.read_conn()?; /* starts\n"
+                "    continues */\n"
+                "    let prod_conn = db.read_conn()?;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            report = audit.collect_metrics(root)
+
+        self.assertEqual(len(report.files), 1)
+        self.assertEqual(report.files[0].path, "src/engine/mod.rs")
+        self.assertEqual(report.files[0].category, "prod_stub_dependency")
+        self.assertEqual(report.files[0].db_conn_calls, 2)
+        self.assertEqual(report.files[0].prod_db_conn_calls, 1)
+
     def test_cfg_not_test_blocks_count_as_prod_blockers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -152,6 +397,108 @@ class LegacySqliteSunsetAuditTest(unittest.TestCase):
                 '    #[cfg(any(test, feature = "prod-db"))]\n'
                 "    {\n"
                 "        let conn = db.read_conn()?;\n"
+                "    }\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            report = audit.collect_metrics(root)
+
+        self.assertEqual(len(report.files), 1)
+        self.assertEqual(report.files[0].path, "src/engine/mod.rs")
+        self.assertEqual(report.files[0].category, "prod_stub_dependency")
+        self.assertEqual(report.files[0].db_conn_calls, 1)
+        self.assertEqual(report.files[0].prod_db_conn_calls, 1)
+
+    def test_multiline_cfg_test_blocks_do_not_create_prod_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src" / "engine"
+            src.mkdir(parents=True)
+            target = src / "mod.rs"
+            target.write_text(
+                "fn drain(db: &Db) {\n"
+                "    #[cfg(\n"
+                "        test\n"
+                "    )]\n"
+                "    {\n"
+                "        let conn = db.read_conn()?;\n"
+                "    }\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            report = audit.collect_metrics(root)
+
+        self.assertEqual(len(report.files), 1)
+        self.assertEqual(report.files[0].path, "src/engine/mod.rs")
+        self.assertEqual(report.files[0].category, "test_surface")
+        self.assertEqual(report.files[0].db_conn_calls, 1)
+        self.assertEqual(report.files[0].prod_db_conn_calls, 0)
+
+    def test_multiline_cfg_test_trailing_if_db_call_does_not_count_as_prod_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src" / "engine"
+            src.mkdir(parents=True)
+            target = src / "mod.rs"
+            target.write_text(
+                "fn drain(db: &Db, enabled: bool) {\n"
+                "    #[cfg(\n"
+                "        test\n"
+                "    )] if enabled { let conn = db.read_conn()?; }\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            report = audit.collect_metrics(root)
+
+        self.assertEqual(len(report.files), 1)
+        self.assertEqual(report.files[0].path, "src/engine/mod.rs")
+        self.assertEqual(report.files[0].category, "test_surface")
+        self.assertEqual(report.files[0].db_conn_calls, 1)
+        self.assertEqual(report.files[0].prod_db_conn_calls, 0)
+
+    def test_multiline_cfg_any_test_feature_blocks_count_as_prod_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src" / "engine"
+            src.mkdir(parents=True)
+            target = src / "mod.rs"
+            target.write_text(
+                "fn drain(db: &Db) {\n"
+                "    #[cfg(any(\n"
+                "        test,\n"
+                '        feature = "prod-db"\n'
+                "    ))]\n"
+                "    {\n"
+                "        let conn = db.read_conn()?;\n"
+                "    }\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            report = audit.collect_metrics(root)
+
+        self.assertEqual(len(report.files), 1)
+        self.assertEqual(report.files[0].path, "src/engine/mod.rs")
+        self.assertEqual(report.files[0].category, "prod_stub_dependency")
+        self.assertEqual(report.files[0].db_conn_calls, 1)
+        self.assertEqual(report.files[0].prod_db_conn_calls, 1)
+
+    def test_multiline_cfg_not_test_blocks_count_as_prod_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src" / "engine"
+            src.mkdir(parents=True)
+            target = src / "mod.rs"
+            target.write_text(
+                "fn drain(db: &Db) {\n"
+                "    #[cfg(not(\n"
+                "        test\n"
+                "    ))]\n"
+                "    {\n"
+                "        let conn = db.separate_conn()?;\n"
                 "    }\n"
                 "}\n",
                 encoding="utf-8",
