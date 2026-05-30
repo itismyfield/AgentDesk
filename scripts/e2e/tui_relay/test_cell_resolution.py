@@ -128,6 +128,22 @@ class ScenarioFilter(unittest.TestCase):
                 f"E-11 (cross-cell concurrency) should be excluded from cell {cell}",
             )
 
+    def test_e9_restart_waits_for_deterministic_end_marker(self):
+        scenarios = driver.load_scenarios(self.scenarios_dir, cell="codex-tui")
+        e9 = next(s for s in scenarios if s.get("id") == "E-9")
+        prompt = e9["steps"][0]["send_prompt"]
+        waits = [
+            step["wait_for_discord_text"]
+            for step in e9["steps"]
+            if "wait_for_discord_text" in step
+        ]
+
+        self.assertIn("[E2E:E9:STREAM_OK]", prompt)
+        self.assertIn("[E2E:E9:END]", prompt)
+        self.assertEqual(waits, ["[E2E:E9:STREAM_OK]", "[E2E:E9:END]"])
+        self.assertNotIn("E-9", waits)
+        self.assertIn({"text_present": "[E2E:E9:END]"}, e9["assertions"])
+
     def test_no_legacy_adk_dash_residue_in_scenarios(self):
         """Scenarios must not embed the legacy `adk-dash` reverify substring.
 
