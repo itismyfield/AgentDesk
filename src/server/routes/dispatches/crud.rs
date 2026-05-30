@@ -7,11 +7,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::Row;
 
+use crate::dispatch::{VALID_DISPATCH_STATUSES, is_valid_dispatch_status};
 use crate::server::dto::dispatches::{DispatchListItem, DispatchRouteResponse};
 use crate::server::routes::AppState;
 
-const VALID_DISPATCH_STATUSES: &[&str] =
-    &["pending", "dispatched", "completed", "cancelled", "failed"];
 const DISPATCH_COMPLETION_SOURCE_STATUSES: &[&str] = &["pending", "dispatched"];
 
 // ── Query / Body types ─────────────────────────────────────────
@@ -240,7 +239,7 @@ pub async fn update_dispatch(
     };
 
     if let Some(status) = body.status.as_deref()
-        && !VALID_DISPATCH_STATUSES.contains(&status)
+        && !is_valid_dispatch_status(status)
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -254,7 +253,7 @@ pub async fn update_dispatch(
     if let Some(allowed_from) = body.allowed_from.as_ref()
         && let Some(invalid) = allowed_from
             .iter()
-            .find(|status| !VALID_DISPATCH_STATUSES.contains(&status.as_str()))
+            .find(|status| !is_valid_dispatch_status(status.as_str()))
     {
         return (
             StatusCode::BAD_REQUEST,

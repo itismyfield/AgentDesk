@@ -2757,7 +2757,7 @@ async fn mailbox_clear_recovery_marker(shared: &SharedData, channel_id: ChannelI
 /// success and whether the incoming intervention was merged into the previous
 /// queue entry, so callers can pick a different reaction emoji for merged
 /// vs standalone queue entries (#1190 follow-up).
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct MailboxEnqueueOutcome {
     pub(super) enqueued: bool,
     pub(super) merged: bool,
@@ -2765,6 +2765,21 @@ pub(super) struct MailboxEnqueueOutcome {
     /// (source-id dedup / last-item dedup / actor unreachable) produced the
     /// refusal so callers can surface it in producer-exit diagnostics.
     pub(super) refusal_reason: Option<crate::services::turn_orchestrator::EnqueueRefusalReason>,
+    pub(super) persistence_error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct MailboxTakeNextSoftOutcome {
+    pub(super) intervention: Option<Intervention>,
+    pub(super) has_more: bool,
+    pub(super) persistence_error: Option<String>,
+}
+
+impl MailboxTakeNextSoftOutcome {
+    fn into_intervention(self) -> Option<(Intervention, bool)> {
+        self.intervention
+            .map(|intervention| (intervention, self.has_more))
+    }
 }
 
 async fn mailbox_enqueue_intervention(
@@ -2781,10 +2796,19 @@ async fn mailbox_enqueue_intervention(
         )
         .await;
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    if let Some(error) = result.persistence_error.as_ref() {
+        tracing::error!(
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            error = %error,
+            "mailbox enqueue failed durable pending-queue persistence"
+        );
+    }
     MailboxEnqueueOutcome {
         enqueued: result.enqueued,
         merged: result.merged,
         refusal_reason: result.refusal_reason,
+        persistence_error: result.persistence_error,
     }
 }
 
@@ -3085,6 +3109,17 @@ async fn enqueue_internal_followup(
     )
     .await;
 
+    if let Some(error) = outcome.persistence_error.as_ref() {
+        tracing::error!(
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            reason,
+            error = %error,
+            "internal followup enqueue failed durable pending-queue persistence"
+        );
+        return false;
+    }
+
     if outcome.enqueued {
         schedule_deferred_idle_queue_kickoff(shared.clone(), provider.clone(), channel_id, reason);
     }
@@ -3154,7 +3189,7 @@ async fn mailbox_take_next_soft_intervention(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
-) -> Option<(Intervention, bool)> {
+) -> MailboxTakeNextSoftOutcome {
     loop {
         let result: TakeNextSoftResult = shared
             .mailbox(channel_id)
@@ -3162,6 +3197,19 @@ async fn mailbox_take_next_soft_intervention(
             .await;
         let queue_len_after = result.queue_len_after;
         apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+        if let Some(error) = result.persistence_error {
+            tracing::error!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                error = %error,
+                "mailbox dequeue failed durable pending-queue persistence"
+            );
+            return MailboxTakeNextSoftOutcome {
+                intervention: None,
+                has_more: result.has_more,
+                persistence_error: Some(error),
+            };
+        }
         maybe_schedule_catch_up_retry_after_queue_drain(
             shared,
             provider,
@@ -3169,7 +3217,11 @@ async fn mailbox_take_next_soft_intervention(
             queue_len_after,
         );
         let Some(intervention) = result.intervention else {
-            return None;
+            return MailboxTakeNextSoftOutcome {
+                intervention: None,
+                has_more: result.has_more,
+                persistence_error: None,
+            };
         };
 
         if let Some(stale) =
@@ -3190,7 +3242,11 @@ async fn mailbox_take_next_soft_intervention(
             continue;
         }
 
-        return Some((intervention, result.has_more));
+        return MailboxTakeNextSoftOutcome {
+            intervention: Some(intervention),
+            has_more: result.has_more,
+            persistence_error: None,
+        };
     }
 }
 
@@ -3198,12 +3254,12 @@ async fn idle_queue_take_next_soft_if_ready(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
-) -> Option<(Intervention, bool)> {
+) -> MailboxTakeNextSoftOutcome {
     if mailbox_has_active_turn(shared, channel_id).await
         || cleanup_retry_inflight_blocks_idle_kickoff(shared, provider, channel_id)
         || idle_queue_blocked_by_hosted_tui_busy_pane(shared, provider, channel_id).await
     {
-        return None;
+        return MailboxTakeNextSoftOutcome::default();
     }
 
     mailbox_take_next_soft_intervention(shared, provider, channel_id).await
@@ -3309,15 +3365,27 @@ async fn mailbox_hydrate_pending_queue_from_disk(
         .await
 }
 
-async fn mailbox_restart_drain_all(shared: &SharedData, provider: &ProviderKind) -> usize {
-    shared
+async fn mailbox_restart_drain_all(
+    shared: &SharedData,
+    provider: &ProviderKind,
+) -> crate::services::turn_orchestrator::RestartDrainAllResult {
+    let result = shared
         .mailboxes
         .restart_drain_all(
             provider,
             &shared.token_hash,
             &shared.dispatch_role_overrides,
         )
-        .await
+        .await;
+    for failure in &result.persistence_errors {
+        tracing::error!(
+            provider = provider.as_str(),
+            channel_id = failure.channel_id.get(),
+            error = %failure.error,
+            "restart drain failed durable pending-queue persistence for mailbox"
+        );
+    }
+    result
 }
 
 async fn mailbox_queue_snapshots(shared: &SharedData) -> HashMap<ChannelId, Vec<Intervention>> {
@@ -3990,9 +4058,17 @@ pub(super) async fn kickoff_idle_queues(
             continue;
         }
 
-        let Some((intervention, has_more)) =
-            idle_queue_take_next_soft_if_ready(shared, provider, channel_id).await
-        else {
+        let take_next = idle_queue_take_next_soft_if_ready(shared, provider, channel_id).await;
+        if let Some(error) = take_next.persistence_error.as_ref() {
+            tracing::error!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                error = %error,
+                "KICKOFF: preserving queued turn after pending-queue persistence failure"
+            );
+            continue;
+        }
+        let Some((intervention, has_more)) = take_next.into_intervention() else {
             continue;
         };
         started_count += 1;
@@ -5490,6 +5566,7 @@ mod tests {
         assert!(
             super::idle_queue_take_next_soft_if_ready(&shared, &provider, channel_id)
                 .await
+                .intervention
                 .is_none()
         );
 
@@ -5515,10 +5592,12 @@ mod tests {
             channel_id,
             &snapshot
         ));
-        let (started, has_more) =
-            super::idle_queue_take_next_soft_if_ready(&shared, &provider, channel_id)
-                .await
-                .expect("resolved cleanup should allow queued turn kickoff");
+        let take_next =
+            super::idle_queue_take_next_soft_if_ready(&shared, &provider, channel_id).await;
+        assert!(take_next.persistence_error.is_none());
+        let (started, has_more) = take_next
+            .into_intervention()
+            .expect("resolved cleanup should allow queued turn kickoff");
         assert_eq!(started.message_id, queued_msg_id);
         assert!(!has_more);
 

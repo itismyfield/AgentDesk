@@ -1456,11 +1456,18 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                                 {
                                     continue;
                                 }
-                                let queue_count = mailbox_restart_drain_all(
+                                let drain = mailbox_restart_drain_all(
                                     &shared_for_deferred,
                                     &provider_for_deferred,
                                 )
                                 .await;
+                                let queue_count = drain.queued_count;
+                                if !drain.persistence_errors.is_empty() {
+                                    tracing::error!(
+                                        failures = drain.persistence_errors.len(),
+                                        "restart_pending quick exit continuing after pending-queue persistence failure(s)"
+                                    );
+                                }
                                 let ids: std::collections::HashMap<u64, u64> = shared_for_deferred
                                     .last_message_ids
                                     .iter()
@@ -1519,11 +1526,18 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                             && g_finalizing == 0
                             && shared_for_deferred.restart_pending.load(Ordering::Relaxed)
                         {
-                            let queue_count = mailbox_restart_drain_all(
+                            let drain = mailbox_restart_drain_all(
                                 &shared_for_deferred,
                                 &provider_for_deferred,
                             )
                             .await;
+                            let queue_count = drain.queued_count;
+                            if !drain.persistence_errors.is_empty() {
+                                tracing::error!(
+                                    failures = drain.persistence_errors.len(),
+                                    "deferred restart observed pending-queue persistence failure(s)"
+                                );
+                            }
                             if queue_count > 0 {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
                                 tracing::info!(
@@ -2166,8 +2180,15 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                             .store(true, std::sync::atomic::Ordering::SeqCst);
                     }
 
-                    let queue_count =
+                    let drain =
                         mailbox_restart_drain_all(&shared_for_lease, &provider_for_lease).await;
+                    let queue_count = drain.queued_count;
+                    if !drain.persistence_errors.is_empty() {
+                        tracing::error!(
+                            failures = drain.persistence_errors.len(),
+                            "gateway lease self-fence observed pending-queue persistence failure(s)"
+                        );
+                    }
                     if queue_count > 0 {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::info!(
@@ -2221,8 +2242,15 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 // Save pending queues and last_message_ids FIRST, before any
                 // network calls that might block/timeout and prevent saving.
 
-                let queue_count =
+                let drain =
                     mailbox_restart_drain_all(&shared_for_signal, &provider_for_shutdown).await;
+                let queue_count = drain.queued_count;
+                if !drain.persistence_errors.is_empty() {
+                    tracing::error!(
+                        failures = drain.persistence_errors.len(),
+                        "SIGTERM initial drain observed pending-queue persistence failure(s)"
+                    );
+                }
                 if queue_count > 0 {
                     let ts3 = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
@@ -2267,8 +2295,15 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 // finished and mutated queues/last_message_ids. Re-save to capture
                 // any changes that occurred after the initial save.
                 {
-                    let queue_count =
+                    let drain =
                         mailbox_restart_drain_all(&shared_for_signal, &provider_for_shutdown).await;
+                    let queue_count = drain.queued_count;
+                    if !drain.persistence_errors.is_empty() {
+                        tracing::error!(
+                            failures = drain.persistence_errors.len(),
+                            "SIGTERM final drain observed pending-queue persistence failure(s)"
+                        );
+                    }
                     if queue_count > 0 {
                         let ts4 = chrono::Local::now().format("%H:%M:%S");
                         tracing::info!(

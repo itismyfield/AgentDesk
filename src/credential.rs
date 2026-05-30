@@ -5,6 +5,7 @@ fn agentdesk_root() -> Option<PathBuf> {
 }
 
 fn read_trimmed_token(path: &Path) -> Option<String> {
+    crate::utils::secret_file::audit_or_harden_secret_file(path, "discord-bot-token");
     let token = std::fs::read_to_string(path).ok()?;
     let trimmed = token.trim().to_string();
     if trimmed.is_empty() {

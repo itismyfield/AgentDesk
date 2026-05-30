@@ -8104,7 +8104,16 @@ pub(super) fn spawn_turn_bridge(
                     )
                     .await;
 
-                    if let Some((intervention, has_more_queued_turns)) = next_intervention {
+                    if let Some(error) = next_intervention.persistence_error.as_ref() {
+                        tracing::error!(
+                            provider = bot_owner_provider.as_str(),
+                            channel_id = channel_id.get(),
+                            error = %error,
+                            "QUEUE-GUARD: preserving queued command after pending-queue persistence failure"
+                        );
+                    } else if let Some((intervention, has_more_queued_turns)) =
+                        next_intervention.into_intervention()
+                    {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::info!("  [{ts}] 📋 Processing next queued command");
                         if let Err(e) = gateway

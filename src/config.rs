@@ -2059,6 +2059,7 @@ pub fn load() -> Result<Config> {
         .apply_runtime_defaults()
         .resolve_runtime_relative_paths(runtime_root.as_deref());
     register_config_secrets(&config);
+    audit_config_file_permissions_if_secret_bearing(&path, &config);
 
     // Ensure data dir exists
     std::fs::create_dir_all(&config.data.dir)?;
@@ -2077,6 +2078,7 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
         .apply_runtime_defaults()
         .resolve_runtime_relative_paths(runtime_root.as_deref());
     register_config_secrets(&config);
+    audit_config_file_permissions_if_secret_bearing(path, &config);
     Ok(config)
 }
 
@@ -2102,15 +2104,75 @@ fn register_config_secrets(config: &Config) {
     }
 }
 
+fn config_contains_file_secrets(config: &Config) -> bool {
+    config.server.auth_token.is_some()
+        || config.database.password.is_some()
+        || config.discord.bots.values().any(|bot| {
+            bot.token
+                .as_deref()
+                .is_some_and(|token| !token.trim().is_empty())
+        })
+}
+
+fn audit_config_file_permissions_if_secret_bearing(path: &Path, config: &Config) {
+    if config_contains_file_secrets(config) {
+        crate::utils::secret_file::audit_or_harden_secret_file(path, "agentdesk-config");
+    }
+}
+
 pub fn save_to_path(path: &Path, config: &Config) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let rendered = serde_yaml::to_string(config)
         .with_context(|| format!("Failed to serialize config for {}", path.display()))?;
-    std::fs::write(path, rendered)
-        .with_context(|| format!("Failed to write config {}", path.display()))?;
+    if config_contains_file_secrets(config) {
+        crate::utils::secret_file::write_secret_file(path, rendered)
+            .with_context(|| format!("Failed to write config {}", path.display()))?;
+    } else {
+        std::fs::write(path, rendered)
+            .with_context(|| format!("Failed to write config {}", path.display()))?;
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod secret_bearing_config_file_tests {
+    use super::*;
+
+    #[test]
+    fn save_and_load_harden_secret_bearing_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agentdesk.yaml");
+        let mut config = Config::default();
+        config.database.password = Some("database-secret".to_string());
+
+        save_to_path(&path, &config).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let saved_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(saved_mode, 0o600);
+
+            let mut loose_permissions = std::fs::metadata(&path).unwrap().permissions();
+            loose_permissions.set_mode(0o644);
+            std::fs::set_permissions(&path, loose_permissions).unwrap();
+
+            let loaded = load_from_path(&path).unwrap();
+            assert_eq!(loaded.database.password.as_deref(), Some("database-secret"));
+
+            let hardened_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(hardened_mode, 0o600);
+        }
+
+        #[cfg(not(unix))]
+        {
+            let loaded = load_from_path(&path).unwrap();
+            assert_eq!(loaded.database.password.as_deref(), Some("database-secret"));
+        }
+    }
 }
 
 fn resolve_graceful_config_path(
@@ -2817,6 +2879,13 @@ routines:
 
         save_to_path(&path, &config).unwrap();
         assert!(path.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
         let loaded = load_from_path(&path).unwrap();
 
         assert_eq!(loaded.server.port, 4317);

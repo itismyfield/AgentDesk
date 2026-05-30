@@ -5417,7 +5417,8 @@ mod tests {
             channel_id,
             &[intervention],
             None,
-        );
+        )
+        .unwrap();
 
         // Pre-condition: mailbox is empty, disk file is present.
         let pre_snapshot = snapshot_pending_queue_state(&harness.registry(), "codex", channel_id)
@@ -5534,7 +5535,8 @@ mod tests {
             channel_id,
             &disk_items,
             None,
-        );
+        )
+        .unwrap();
 
         // Simulate the racer: a brand-new user message that landed in
         // the in-memory mailbox after the cancel emptied it but before
@@ -5623,7 +5625,8 @@ mod tests {
             channel_id,
             &[intervention],
             None,
-        );
+        )
+        .unwrap();
 
         let first = schedule_pending_queue_drain_after_cancel(
             &harness.registry(),

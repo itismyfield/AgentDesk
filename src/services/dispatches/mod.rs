@@ -2,7 +2,7 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 use sqlx::Row;
 
-use crate::dispatch;
+use crate::dispatch::{self, VALID_DISPATCH_STATUSES, is_valid_dispatch_status};
 use crate::engine::PolicyEngine;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 
@@ -22,9 +22,6 @@ pub(crate) mod outbox_queue;
 pub(crate) mod outbox_route;
 pub(crate) mod routing_constraint;
 pub(crate) mod wait_queue;
-
-const VALID_DISPATCH_STATUSES: &[&str] =
-    &["pending", "dispatched", "completed", "cancelled", "failed"];
 
 #[derive(Clone)]
 pub struct DispatchService {
@@ -232,7 +229,7 @@ impl DispatchService {
         }
 
         if let Some(status) = input.status.as_deref()
-            && !VALID_DISPATCH_STATUSES.contains(&status)
+            && !is_valid_dispatch_status(status)
         {
             return Err(ServiceError::bad_request(format!(
                 "invalid dispatch status '{}' — allowed values: {}",

@@ -6255,6 +6255,7 @@ mod tests {
         assert_eq!(snapshot.intervention_queue.len(), 1);
         let next = super::super::mailbox_take_next_soft_intervention(&shared, &provider, channel)
             .await
+            .into_intervention()
             .map(|(intervention, _)| intervention.text);
         assert_eq!(next.as_deref(), Some("queued behind monitor"));
 

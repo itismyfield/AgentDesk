@@ -6,4 +6,5 @@ pub mod format;
 pub mod github_links;
 pub mod loopback_url;
 pub mod redact;
+pub mod secret_file;
 pub mod wip_detect;

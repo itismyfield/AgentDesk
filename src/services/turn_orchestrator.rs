@@ -145,6 +145,7 @@ pub(crate) fn enqueue_intervention(
             merged: false,
             refusal_reason: Some(EnqueueRefusalReason::SourceIdAlreadyQueued),
             queue_exit_events,
+            persistence_error: None,
         };
     }
 
@@ -160,6 +161,7 @@ pub(crate) fn enqueue_intervention(
                 merged: false,
                 refusal_reason: Some(EnqueueRefusalReason::LastItemDedup),
                 queue_exit_events,
+                persistence_error: None,
             };
         }
     }
@@ -188,6 +190,7 @@ pub(crate) fn enqueue_intervention(
                 merged: true,
                 refusal_reason: None,
                 queue_exit_events,
+                persistence_error: None,
             };
         }
     }
@@ -206,6 +209,7 @@ pub(crate) fn enqueue_intervention(
         merged: false,
         refusal_reason: None,
         queue_exit_events,
+        persistence_error: None,
     }
 }
 
@@ -223,6 +227,7 @@ pub(crate) fn has_soft_intervention(queue: &mut Vec<Intervention>) -> HasPending
     HasPendingSoftQueueResult {
         has_pending: queue.iter().any(|item| item.mode == InterventionMode::Soft),
         queue_exit_events,
+        persistence_error: None,
     }
 }
 
@@ -238,6 +243,7 @@ pub(crate) fn dequeue_next_soft_intervention(queue: &mut Vec<Intervention>) -> T
         has_more,
         queue_len_after: queue.len(),
         queue_exit_events,
+        persistence_error: None,
     }
 }
 
@@ -262,6 +268,7 @@ pub(crate) fn cancel_soft_intervention_by_message_id(
     CancelQueuedMessageResult {
         removed,
         queue_exit_events,
+        persistence_error: None,
     }
 }
 
@@ -515,18 +522,33 @@ pub(crate) fn save_channel_queue(
     channel_id: ChannelId,
     queue: &[Intervention],
     dispatch_role_override: Option<u64>,
-) {
+) -> Result<(), String> {
     let Some(path) = pending_queue_file_path(provider, token_hash, channel_id) else {
-        return;
+        return Err(format!(
+            "pending queue root unavailable for provider={} token_hash={} channel_id={}",
+            provider.as_str(),
+            token_hash,
+            channel_id.get()
+        ));
     };
     if queue.is_empty() {
-        let _ = fs::remove_file(&path);
-        return;
+        return match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => {
+                let message = format!("remove pending queue file {}: {error}", path.display());
+                tracing::error!(
+                    provider = provider.as_str(),
+                    token_hash,
+                    channel_id = channel_id.get(),
+                    path = %path.display(),
+                    error = %message,
+                    "recovery-critical pending queue removal failed"
+                );
+                Err(message)
+            }
+        };
     }
-    let Some(dir) = path.parent() else {
-        return;
-    };
-    let _ = fs::create_dir_all(dir);
     let items: Vec<PendingQueueItem> = queue
         .iter()
         .map(|i| PendingQueueItem {
@@ -554,9 +576,14 @@ pub(crate) fn save_channel_queue(
             voice_announcement: i.voice_announcement.clone(),
         })
         .collect();
-    if let Ok(json) = serde_json::to_string_pretty(&items) {
-        let _ = crate::services::discord::runtime_store::atomic_write(&path, &json);
-    }
+    let json = serde_json::to_string_pretty(&items)
+        .map_err(|error| format!("serialize pending queue {}: {error}", path.display()))?;
+    let context =
+        crate::services::discord::runtime_store::AtomicWriteContext::new("discord_pending_queue")
+            .provider(provider.as_str())
+            .token_hash(token_hash)
+            .channel_id(channel_id.get());
+    crate::services::discord::runtime_store::critical_atomic_write(&path, &json, context)
 }
 
 /// Remove persisted pending-queue files for one channel across all token
@@ -645,16 +672,27 @@ pub(crate) fn save_pending_queues(
     token_hash: &str,
     queues: &HashMap<ChannelId, Vec<Intervention>>,
     dispatch_role_overrides: &dashmap::DashMap<ChannelId, ChannelId>,
-) {
+) -> Result<(), String> {
     let Some(root) = pending_queue_root() else {
-        return;
+        return Err(format!(
+            "pending queue root unavailable for provider={} token_hash={}",
+            provider.as_str(),
+            token_hash
+        ));
     };
     let dir = root.join(provider.as_str()).join(token_hash);
-    let _ = fs::create_dir_all(&dir);
-    if let Ok(entries) = fs::read_dir(&dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let _ = fs::remove_file(entry.path());
-        }
+    fs::create_dir_all(&dir)
+        .map_err(|error| format!("create pending queue dir {}: {error}", dir.display()))?;
+    let entries = fs::read_dir(&dir)
+        .map_err(|error| format!("read pending queue dir {}: {error}", dir.display()))?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        fs::remove_file(&path).map_err(|error| {
+            format!(
+                "remove stale pending queue file {}: {error}",
+                path.display()
+            )
+        })?;
     }
     for (channel_id, queue) in queues {
         if queue.is_empty() {
@@ -687,11 +725,24 @@ pub(crate) fn save_pending_queues(
                 voice_announcement: i.voice_announcement.clone(),
             })
             .collect();
-        if let Ok(json) = serde_json::to_string_pretty(&items) {
-            let path = dir.join(format!("{}.json", channel_id.get()));
-            let _ = crate::services::discord::runtime_store::atomic_write(&path, &json);
-        }
+        let json = serde_json::to_string_pretty(&items).map_err(|error| {
+            format!(
+                "serialize pending queue provider={} token_hash={} channel_id={}: {error}",
+                provider.as_str(),
+                token_hash,
+                channel_id.get()
+            )
+        })?;
+        let path = dir.join(format!("{}.json", channel_id.get()));
+        let context = crate::services::discord::runtime_store::AtomicWriteContext::new(
+            "discord_pending_queue",
+        )
+        .provider(provider.as_str())
+        .token_hash(token_hash)
+        .channel_id(channel_id.get());
+        crate::services::discord::runtime_store::critical_atomic_write(&path, &json, context)?;
     }
+    Ok(())
 }
 
 /// Only reads files in this bot's token-namespaced subdirectory.
@@ -819,7 +870,14 @@ pub(crate) fn take_next_soft_intervention_persisted(
         if remove_queue {
             intervention_queue.remove(&channel_id);
             dispatch_role_overrides.remove(&channel_id);
-            save_channel_queue(provider, token_hash, channel_id, &[], None);
+            if let Err(error) = save_channel_queue(provider, token_hash, channel_id, &[], None) {
+                tracing::error!(
+                    provider = provider.as_str(),
+                    token_hash,
+                    channel_id = channel_id.get(),
+                    "failed to persist pending queue removal: {error}"
+                );
+            }
         }
         return None;
     }
@@ -829,9 +887,16 @@ pub(crate) fn take_next_soft_intervention_persisted(
     if remove_queue {
         intervention_queue.remove(&channel_id);
         dispatch_role_overrides.remove(&channel_id);
-        save_channel_queue(provider, token_hash, channel_id, &[], None);
+        if let Err(error) = save_channel_queue(provider, token_hash, channel_id, &[], None) {
+            tracing::error!(
+                provider = provider.as_str(),
+                token_hash,
+                channel_id = channel_id.get(),
+                "failed to persist pending queue removal: {error}"
+            );
+        }
     } else if let Some(queue) = intervention_queue.get(&channel_id) {
-        save_channel_queue(
+        if let Err(error) = save_channel_queue(
             provider,
             token_hash,
             channel_id,
@@ -839,7 +904,14 @@ pub(crate) fn take_next_soft_intervention_persisted(
             dispatch_role_overrides
                 .get(&channel_id)
                 .map(|override_id| override_id.value().get()),
-        );
+        ) {
+            tracing::error!(
+                provider = provider.as_str(),
+                token_hash,
+                channel_id = channel_id.get(),
+                "failed to persist pending queue after dequeue: {error}"
+            );
+        }
     }
 
     Some((intervention, has_more))
@@ -856,7 +928,7 @@ pub(crate) fn requeue_intervention_front_persisted(
 ) {
     let queue = intervention_queue.entry(channel_id).or_default();
     let _ = requeue_intervention_front(queue, intervention);
-    save_channel_queue(
+    if let Err(error) = save_channel_queue(
         provider,
         token_hash,
         channel_id,
@@ -864,7 +936,14 @@ pub(crate) fn requeue_intervention_front_persisted(
         dispatch_role_overrides
             .get(&channel_id)
             .map(|override_id| override_id.value().get()),
-    );
+    ) {
+        tracing::error!(
+            provider = provider.as_str(),
+            token_hash,
+            channel_id = channel_id.get(),
+            "failed to persist pending queue after requeue: {error}"
+        );
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -893,6 +972,7 @@ pub(crate) struct HydratePendingQueueResult {
     pub(crate) absorbed: usize,
     pub(crate) queue_len_after: usize,
     pub(crate) restored_override: Option<ChannelId>,
+    pub(crate) persistence_error: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -915,11 +995,13 @@ pub(crate) struct FinishTurnResult {
     pub(crate) has_pending: bool,
     pub(crate) mailbox_online: bool,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
+    pub(crate) persistence_error: Option<String>,
 }
 
 pub(crate) struct ClearChannelResult {
     pub(crate) removed_token: Option<Arc<CancelToken>>,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
+    pub(crate) persistence_error: Option<String>,
 }
 
 pub(crate) struct CancelActiveTurnResult {
@@ -930,6 +1012,7 @@ pub(crate) struct CancelActiveTurnResult {
 pub(crate) struct HasPendingSoftQueueResult {
     pub(crate) has_pending: bool,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
+    pub(crate) persistence_error: Option<String>,
 }
 
 pub(crate) struct RecoveryKickoffResult {
@@ -938,6 +1021,19 @@ pub(crate) struct RecoveryKickoffResult {
 
 pub(crate) struct RestartDrainResult {
     pub(crate) queued_count: usize,
+    pub(crate) persistence_error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct QueuePersistenceFailure {
+    pub(crate) channel_id: ChannelId,
+    pub(crate) error: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RestartDrainAllResult {
+    pub(crate) queued_count: usize,
+    pub(crate) persistence_errors: Vec<QueuePersistenceFailure>,
 }
 
 /// #2728: identifies which guard in `enqueue_intervention` produced an
@@ -976,16 +1072,19 @@ pub(crate) struct EnqueueInterventionResult {
     /// accumulated). Callers use this to surface a different reaction emoji
     /// for merged messages so users can tell merged from standalone entries.
     pub(crate) merged: bool,
-    /// #2728: present iff `enqueued == false`. Identifies which guard in
-    /// `enqueue_intervention` (or the handle-layer actor fallback) produced
-    /// the refusal.
+    /// #2728: identifies which guard in `enqueue_intervention` (or the
+    /// handle-layer actor fallback) produced the refusal. Persistence failures
+    /// are reported in `persistence_error` instead so adding that path does not
+    /// expand the externally matched refusal enum.
     pub(crate) refusal_reason: Option<EnqueueRefusalReason>,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
+    pub(crate) persistence_error: Option<String>,
 }
 
 pub(crate) struct CancelQueuedMessageResult {
     pub(crate) removed: Option<Intervention>,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
+    pub(crate) persistence_error: Option<String>,
 }
 
 pub(crate) struct TakeNextSoftResult {
@@ -993,10 +1092,12 @@ pub(crate) struct TakeNextSoftResult {
     pub(crate) has_more: bool,
     pub(crate) queue_len_after: usize,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
+    pub(crate) persistence_error: Option<String>,
 }
 
 pub(crate) struct RequeueInterventionResult {
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
+    pub(crate) persistence_error: Option<String>,
 }
 
 static GLOBAL_CHANNEL_MAILBOXES: LazyLock<dashmap::DashMap<ChannelId, ChannelMailboxHandle>> =
@@ -1230,6 +1331,7 @@ impl ChannelMailboxHandle {
                 merged: false,
                 refusal_reason: Some(EnqueueRefusalReason::ActorUnreachable),
                 queue_exit_events: Vec::new(),
+                persistence_error: None,
             },
         )
         .await
@@ -1244,6 +1346,7 @@ impl ChannelMailboxHandle {
             HasPendingSoftQueueResult {
                 has_pending: false,
                 queue_exit_events: Vec::new(),
+                persistence_error: None,
             },
         )
         .await
@@ -1260,6 +1363,7 @@ impl ChannelMailboxHandle {
                 has_more: false,
                 queue_len_after: 0,
                 queue_exit_events: Vec::new(),
+                persistence_error: None,
             },
         )
         .await
@@ -1278,6 +1382,7 @@ impl ChannelMailboxHandle {
             },
             RequeueInterventionResult {
                 queue_exit_events: Vec::new(),
+                persistence_error: None,
             },
         )
         .await
@@ -1297,6 +1402,7 @@ impl ChannelMailboxHandle {
             CancelQueuedMessageResult {
                 removed: None,
                 queue_exit_events: Vec::new(),
+                persistence_error: None,
             },
         )
         .await
@@ -1313,6 +1419,7 @@ impl ChannelMailboxHandle {
                 has_pending: false,
                 mailbox_online: false,
                 queue_exit_events: Vec::new(),
+                persistence_error: None,
             },
         )
         .await
@@ -1326,6 +1433,7 @@ impl ChannelMailboxHandle {
                 has_pending: false,
                 mailbox_online: false,
                 queue_exit_events: Vec::new(),
+                persistence_error: None,
             },
         )
         .await
@@ -1337,6 +1445,7 @@ impl ChannelMailboxHandle {
             ClearChannelResult {
                 removed_token: None,
                 queue_exit_events: Vec::new(),
+                persistence_error: None,
             },
         )
         .await
@@ -1388,7 +1497,10 @@ impl ChannelMailboxHandle {
     ) -> RestartDrainResult {
         self.request(
             |reply| ChannelMailboxMsg::RestartDrain { persistence, reply },
-            RestartDrainResult { queued_count: 0 },
+            RestartDrainResult {
+                queued_count: 0,
+                persistence_error: None,
+            },
         )
         .await
     }
@@ -1687,13 +1799,14 @@ impl ChannelMailboxRegistry {
         provider: &ProviderKind,
         token_hash: &str,
         dispatch_role_overrides: &dashmap::DashMap<ChannelId, ChannelId>,
-    ) -> usize {
+    ) -> RestartDrainAllResult {
         let handles: Vec<_> = self
             .handles
             .iter()
             .map(|entry| (*entry.key(), entry.value().clone()))
             .collect();
         let mut queued_total = 0usize;
+        let mut persistence_errors = Vec::new();
         for (channel_id, handle) in handles {
             let persistence = QueuePersistenceContext::new(
                 provider,
@@ -1702,9 +1815,16 @@ impl ChannelMailboxRegistry {
                     .get(&channel_id)
                     .map(|override_id| override_id.value().get()),
             );
-            queued_total += handle.restart_drain(persistence).await.queued_count;
+            let result = handle.restart_drain(persistence).await;
+            queued_total += result.queued_count;
+            if let Some(error) = result.persistence_error {
+                persistence_errors.push(QueuePersistenceFailure { channel_id, error });
+            }
         }
-        queued_total
+        RestartDrainAllResult {
+            queued_count: queued_total,
+            persistence_errors,
+        }
     }
 }
 
@@ -1854,14 +1974,47 @@ fn persist_queue(
     channel_id: ChannelId,
     queue: &[Intervention],
     persistence: &QueuePersistenceContext,
-) {
+) -> Result<(), String> {
     save_channel_queue(
         &persistence.provider,
         &persistence.token_hash,
         channel_id,
         queue,
         persistence.dispatch_role_override,
+    )
+}
+
+fn log_queue_persistence_rollback(
+    operation: &str,
+    channel_id: ChannelId,
+    persistence: &QueuePersistenceContext,
+    error: &str,
+) {
+    tracing::error!(
+        operation,
+        provider = persistence.provider.as_str(),
+        token_hash = %persistence.token_hash,
+        channel_id = channel_id.get(),
+        error = %error,
+        "rolled back in-memory pending queue mutation after durable persistence failed"
     );
+}
+
+fn persist_queue_or_restore(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    persistence: &QueuePersistenceContext,
+    previous_queue: Vec<Intervention>,
+    operation: &str,
+) -> Result<(), String> {
+    match persist_queue(channel_id, &state.intervention_queue, persistence) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            state.intervention_queue = previous_queue;
+            log_queue_persistence_rollback(operation, channel_id, persistence, &error);
+            Err(error)
+        }
+    }
 }
 
 fn hydrate_pending_queue_into_state(
@@ -1872,6 +2025,7 @@ fn hydrate_pending_queue_into_state(
     restored_override: Option<ChannelId>,
 ) -> HydratePendingQueueResult {
     state.last_persistence = Some(persistence.clone());
+    let previous_queue = state.intervention_queue.clone();
     let mut existing_ids: HashSet<MessageId> = state
         .intervention_queue
         .iter()
@@ -1888,12 +2042,26 @@ fn hydrate_pending_queue_into_state(
         absorbed += 1;
     }
     if absorbed > 0 {
-        persist_queue(channel_id, &state.intervention_queue, &persistence);
+        if let Err(error) = persist_queue_or_restore(
+            state,
+            channel_id,
+            &persistence,
+            previous_queue,
+            "hydrate_pending_queue_from_disk",
+        ) {
+            return HydratePendingQueueResult {
+                absorbed: 0,
+                queue_len_after: state.intervention_queue.len(),
+                restored_override,
+                persistence_error: Some(error),
+            };
+        }
     }
     HydratePendingQueueResult {
         absorbed,
         queue_len_after: state.intervention_queue.len(),
         restored_override,
+        persistence_error: None,
     }
 }
 
@@ -1909,10 +2077,28 @@ fn finalize_turn_state(
     state.turn_started_at = None;
     reset_watchdog_extension_state(state);
     let previous_len = state.intervention_queue.len();
+    let previous_queue = state.intervention_queue.clone();
     let pending_result = has_soft_intervention(&mut state.intervention_queue);
     if let Some(persistence) = persistence {
         if state.intervention_queue.len() != previous_len || !state.intervention_queue.is_empty() {
-            persist_queue(channel_id, &state.intervention_queue, persistence);
+            if let Err(error) = persist_queue_or_restore(
+                state,
+                channel_id,
+                persistence,
+                previous_queue,
+                "finish_turn",
+            ) {
+                return FinishTurnResult {
+                    removed_token,
+                    has_pending: state
+                        .intervention_queue
+                        .iter()
+                        .any(|item| item.mode == InterventionMode::Soft),
+                    mailbox_online: true,
+                    queue_exit_events: Vec::new(),
+                    persistence_error: Some(error),
+                };
+            }
         }
     }
     FinishTurnResult {
@@ -1920,6 +2106,7 @@ fn finalize_turn_state(
         has_pending: pending_result.has_pending,
         mailbox_online: true,
         queue_exit_events: pending_result.queue_exit_events,
+        persistence_error: None,
     }
 }
 
@@ -2292,31 +2479,85 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     reply,
                 } => {
                     state.last_persistence = Some(persistence.clone());
-                    let enqueue_result =
+                    let previous_queue = state.intervention_queue.clone();
+                    let mut enqueue_result =
                         enqueue_intervention(&mut state.intervention_queue, intervention);
-                    persist_queue(channel_id, &state.intervention_queue, &persistence);
+                    if enqueue_result.enqueued
+                        && let Err(error) = persist_queue_or_restore(
+                            &mut state,
+                            channel_id,
+                            &persistence,
+                            previous_queue,
+                            "enqueue",
+                        )
+                    {
+                        enqueue_result = EnqueueInterventionResult {
+                            enqueued: false,
+                            merged: false,
+                            refusal_reason: None,
+                            queue_exit_events: Vec::new(),
+                            persistence_error: Some(error),
+                        };
+                    }
                     let _ = reply.send(enqueue_result);
                 }
                 ChannelMailboxMsg::HasPendingSoftQueue { persistence, reply } => {
                     state.last_persistence = Some(persistence.clone());
                     let previous_len = state.intervention_queue.len();
-                    let pending_result = has_soft_intervention(&mut state.intervention_queue);
-                    if state.intervention_queue.len() != previous_len {
-                        persist_queue(channel_id, &state.intervention_queue, &persistence);
+                    let previous_queue = state.intervention_queue.clone();
+                    let mut pending_result = has_soft_intervention(&mut state.intervention_queue);
+                    if state.intervention_queue.len() != previous_len
+                        && let Err(error) = persist_queue_or_restore(
+                            &mut state,
+                            channel_id,
+                            &persistence,
+                            previous_queue,
+                            "has_pending_soft_queue",
+                        )
+                    {
+                        pending_result = HasPendingSoftQueueResult {
+                            has_pending: state
+                                .intervention_queue
+                                .iter()
+                                .any(|item| item.mode == InterventionMode::Soft),
+                            queue_exit_events: Vec::new(),
+                            persistence_error: Some(error),
+                        };
                     }
                     let _ = reply.send(pending_result);
                 }
                 ChannelMailboxMsg::TakeNextSoft { persistence, reply } => {
                     state.last_persistence = Some(persistence.clone());
+                    let previous_queue = state.intervention_queue.clone();
                     let next_result = dequeue_next_soft_intervention(&mut state.intervention_queue);
                     let queue_len_after = state.intervention_queue.len();
-                    persist_queue(channel_id, &state.intervention_queue, &persistence);
-                    let _ = reply.send(TakeNextSoftResult {
-                        intervention: next_result.intervention,
-                        has_more: next_result.has_more,
-                        queue_len_after,
-                        queue_exit_events: next_result.queue_exit_events,
-                    });
+                    let result = if let Err(error) = persist_queue_or_restore(
+                        &mut state,
+                        channel_id,
+                        &persistence,
+                        previous_queue,
+                        "take_next_soft",
+                    ) {
+                        TakeNextSoftResult {
+                            intervention: None,
+                            has_more: state
+                                .intervention_queue
+                                .iter()
+                                .any(|item| item.mode == InterventionMode::Soft),
+                            queue_len_after: state.intervention_queue.len(),
+                            queue_exit_events: Vec::new(),
+                            persistence_error: Some(error),
+                        }
+                    } else {
+                        TakeNextSoftResult {
+                            intervention: next_result.intervention,
+                            has_more: next_result.has_more,
+                            queue_len_after,
+                            queue_exit_events: next_result.queue_exit_events,
+                            persistence_error: None,
+                        }
+                    };
+                    let _ = reply.send(result);
                 }
                 ChannelMailboxMsg::RequeueFront {
                     intervention,
@@ -2324,12 +2565,27 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     reply,
                 } => {
                     state.last_persistence = Some(persistence.clone());
+                    let previous_queue = state.intervention_queue.clone();
                     let requeue_result =
                         requeue_intervention_front(&mut state.intervention_queue, intervention);
-                    persist_queue(channel_id, &state.intervention_queue, &persistence);
-                    let _ = reply.send(RequeueInterventionResult {
-                        queue_exit_events: requeue_result,
-                    });
+                    let result = if let Err(error) = persist_queue_or_restore(
+                        &mut state,
+                        channel_id,
+                        &persistence,
+                        previous_queue,
+                        "requeue_front",
+                    ) {
+                        RequeueInterventionResult {
+                            queue_exit_events: Vec::new(),
+                            persistence_error: Some(error),
+                        }
+                    } else {
+                        RequeueInterventionResult {
+                            queue_exit_events: requeue_result,
+                            persistence_error: None,
+                        }
+                    };
+                    let _ = reply.send(result);
                 }
                 ChannelMailboxMsg::CancelQueuedMessage {
                     message_id,
@@ -2337,14 +2593,27 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     reply,
                 } => {
                     state.last_persistence = Some(persistence.clone());
-                    let cancel_result = cancel_soft_intervention_by_message_id(
+                    let previous_queue = state.intervention_queue.clone();
+                    let mut cancel_result = cancel_soft_intervention_by_message_id(
                         &mut state.intervention_queue,
                         message_id,
                     );
                     if cancel_result.removed.is_some()
                         || !cancel_result.queue_exit_events.is_empty()
                     {
-                        persist_queue(channel_id, &state.intervention_queue, &persistence);
+                        if let Err(error) = persist_queue_or_restore(
+                            &mut state,
+                            channel_id,
+                            &persistence,
+                            previous_queue,
+                            "cancel_queued_message",
+                        ) {
+                            cancel_result = CancelQueuedMessageResult {
+                                removed: None,
+                                queue_exit_events: Vec::new(),
+                                persistence_error: Some(error),
+                            };
+                        }
                     }
                     let _ = reply.send(cancel_result);
                 }
@@ -2374,6 +2643,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     state.recovery_started_at = None;
                     state.turn_started_at = None;
                     reset_watchdog_extension_state(&mut state);
+                    let previous_queue = state.intervention_queue.clone();
                     let queue_exit_events = state
                         .intervention_queue
                         .drain(..)
@@ -2381,11 +2651,26 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             QueueExitEvent::new(intervention, QueueExitKind::Superseded)
                         })
                         .collect();
-                    persist_queue(channel_id, &state.intervention_queue, &persistence);
-                    let _ = reply.send(ClearChannelResult {
-                        removed_token,
-                        queue_exit_events,
-                    });
+                    let result = if let Err(error) = persist_queue_or_restore(
+                        &mut state,
+                        channel_id,
+                        &persistence,
+                        previous_queue,
+                        "clear",
+                    ) {
+                        ClearChannelResult {
+                            removed_token,
+                            queue_exit_events: Vec::new(),
+                            persistence_error: Some(error),
+                        }
+                    } else {
+                        ClearChannelResult {
+                            removed_token,
+                            queue_exit_events,
+                            persistence_error: None,
+                        }
+                    };
+                    let _ = reply.send(result);
                     mark_turn_finished_signal_done(channel_id);
                 }
                 ChannelMailboxMsg::PurgeQueue { persistence, reply } => {
@@ -2395,9 +2680,22 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     // between force-kill and purge is not collaterally
                     // cancelled.
                     state.last_persistence = Some(persistence.clone());
+                    let previous_queue = state.intervention_queue.clone();
                     let drained = state.intervention_queue.drain(..).count();
-                    persist_queue(channel_id, &state.intervention_queue, &persistence);
-                    let _ = reply.send(drained);
+                    let result = if persist_queue_or_restore(
+                        &mut state,
+                        channel_id,
+                        &persistence,
+                        previous_queue,
+                        "purge_queue",
+                    )
+                    .is_err()
+                    {
+                        0
+                    } else {
+                        drained
+                    };
+                    let _ = reply.send(result);
                 }
                 ChannelMailboxMsg::ReplaceQueue {
                     queue,
@@ -2405,8 +2703,15 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     reply,
                 } => {
                     state.last_persistence = Some(persistence.clone());
+                    let previous_queue = state.intervention_queue.clone();
                     state.intervention_queue = queue;
-                    persist_queue(channel_id, &state.intervention_queue, &persistence);
+                    let _ = persist_queue_or_restore(
+                        &mut state,
+                        channel_id,
+                        &persistence,
+                        previous_queue,
+                        "replace_queue",
+                    );
                     let _ = reply.send(());
                 }
                 ChannelMailboxMsg::HydratePendingQueueFromDisk { persistence, reply } => {
@@ -2435,9 +2740,15 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 }
                 ChannelMailboxMsg::RestartDrain { persistence, reply } => {
                     state.last_persistence = Some(persistence.clone());
-                    persist_queue(channel_id, &state.intervention_queue, &persistence);
+                    let persistence_error =
+                        persist_queue(channel_id, &state.intervention_queue, &persistence).err();
                     let _ = reply.send(RestartDrainResult {
-                        queued_count: state.intervention_queue.len(),
+                        queued_count: if persistence_error.is_some() {
+                            0
+                        } else {
+                            state.intervention_queue.len()
+                        },
+                        persistence_error,
                     });
                 }
                 ChannelMailboxMsg::ExtendTimeout {
@@ -3124,6 +3435,48 @@ mod persistence_tests {
         }
     }
 
+    #[tokio::test]
+    async fn enqueue_rolls_back_when_pending_queue_persistence_fails() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+        std::fs::write(tmp.path().join("runtime"), "not-a-directory").unwrap();
+
+        let provider = ProviderKind::Codex;
+        let token_hash = "unwritable-pending-queue";
+        let channel_id = ChannelId::new(2_867_001);
+        let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+        let direct_error = save_channel_queue(
+            &provider,
+            token_hash,
+            channel_id,
+            &[make_intervention(2_867_002, "must persist", None)],
+            None,
+        )
+        .expect_err("direct pending queue write must surface persistence failure");
+        assert!(
+            direct_error.contains("create_dir_all") || direct_error.contains("Not a directory")
+        );
+
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(channel_id);
+        let result = handle
+            .enqueue(
+                make_intervention(2_867_003, "must not be accepted without disk", None),
+                persistence,
+            )
+            .await;
+
+        assert!(!result.enqueued);
+        assert_eq!(result.refusal_reason, None);
+        assert!(result.persistence_error.is_some());
+        let snapshot = handle.snapshot().await;
+        assert!(
+            snapshot.intervention_queue.is_empty(),
+            "mailbox must roll back non-durable queued work"
+        );
+    }
+
     #[test]
     fn pending_queue_roundtrip_preserves_author_is_bot() {
         let _lock = TEST_ENV_LOCK.lock().unwrap();
@@ -3149,7 +3502,7 @@ mod persistence_tests {
             voice_announcement: None,
         };
 
-        save_channel_queue(&provider, token_hash, channel_id, &[intervention], None);
+        save_channel_queue(&provider, token_hash, channel_id, &[intervention], None).unwrap();
 
         let path = tmp
             .path()
@@ -3189,7 +3542,8 @@ mod persistence_tests {
             channel_id,
             std::slice::from_ref(&intervention),
             None,
-        );
+        )
+        .unwrap();
 
         let saved = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
         assert_eq!(saved[0].voice_announcement.as_ref(), Some(&announcement));
@@ -3223,7 +3577,8 @@ mod persistence_tests {
             channel_id,
             std::slice::from_ref(&intervention),
             None,
-        );
+        )
+        .unwrap();
 
         let saved = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
         assert_eq!(saved[0].pending_uploads, intervention.pending_uploads);
@@ -3259,7 +3614,8 @@ mod persistence_tests {
             channel_id,
             std::slice::from_ref(&intervention),
             None,
-        );
+        )
+        .unwrap();
 
         let registry = ChannelMailboxRegistry::default();
         let handle = registry.handle(channel_id);
@@ -3310,6 +3666,43 @@ mod persistence_tests {
         assert_eq!(result.queued_count, 1);
         let saved = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
         assert_eq!(saved[0].voice_announcement.as_ref(), Some(&announcement));
+    }
+
+    #[tokio::test]
+    async fn restart_drain_all_reports_pending_queue_persistence_errors() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        let provider = ProviderKind::Claude;
+        let token_hash = "mailbox-restart-drain-failure";
+        let channel_id = ChannelId::new(143);
+        let registry = ChannelMailboxRegistry::default();
+
+        registry
+            .handle(channel_id)
+            .replace_queue(
+                vec![make_intervention(1, "queued item", None)],
+                QueuePersistenceContext::new(&provider, token_hash, None),
+            )
+            .await;
+
+        std::fs::remove_dir_all(tmp.path().join("runtime")).unwrap();
+        std::fs::write(tmp.path().join("runtime"), "not-a-directory").unwrap();
+
+        let drain = registry
+            .restart_drain_all(&provider, token_hash, &dashmap::DashMap::new())
+            .await;
+
+        assert_eq!(drain.queued_count, 0);
+        assert_eq!(drain.persistence_errors.len(), 1);
+        assert_eq!(drain.persistence_errors[0].channel_id, channel_id);
+        assert!(
+            drain.persistence_errors[0].error.contains("create_dir_all")
+                || drain.persistence_errors[0]
+                    .error
+                    .contains("Not a directory")
+        );
     }
 }
 
@@ -3577,11 +3970,12 @@ mod tests {
         let dispatch_role_overrides = dashmap::DashMap::new();
         dispatch_role_overrides.insert(channel_b, ChannelId::new(9_999));
 
-        let queued_total = registry
+        let drain = registry
             .restart_drain_all(&provider, token_hash, &dispatch_role_overrides)
             .await;
 
-        assert_eq!(queued_total, 3);
+        assert_eq!(drain.queued_count, 3);
+        assert!(drain.persistence_errors.is_empty());
 
         let items_a = read_saved_items(tmp.path(), &provider, token_hash, channel_a);
         assert_eq!(items_a.len(), 1);
@@ -3594,6 +3988,46 @@ mod tests {
         assert_eq!(items_b[1].text, "third queued item");
         assert_eq!(items_b[0].override_channel_id, Some(9_999));
         assert_eq!(items_b[1].override_channel_id, Some(9_999));
+
+        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+    }
+
+    #[tokio::test]
+    async fn restart_drain_all_reports_pending_queue_persistence_errors() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let provider = ProviderKind::Claude;
+        let token_hash = "mailbox-restart-drain-failure";
+        let channel_id = ChannelId::new(143);
+        let registry = ChannelMailboxRegistry::default();
+        let now = Instant::now();
+
+        registry
+            .handle(channel_id)
+            .replace_queue(
+                vec![make_intervention(1, "queued item", now)],
+                QueuePersistenceContext::new(&provider, token_hash, None),
+            )
+            .await;
+
+        std::fs::remove_dir_all(tmp.path().join("runtime")).unwrap();
+        std::fs::write(tmp.path().join("runtime"), "not-a-directory").unwrap();
+
+        let drain = registry
+            .restart_drain_all(&provider, token_hash, &dashmap::DashMap::new())
+            .await;
+
+        assert_eq!(drain.queued_count, 0);
+        assert_eq!(drain.persistence_errors.len(), 1);
+        assert_eq!(drain.persistence_errors[0].channel_id, channel_id);
+        assert!(
+            drain.persistence_errors[0].error.contains("create_dir_all")
+                || drain.persistence_errors[0]
+                    .error
+                    .contains("Not a directory")
+        );
 
         unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
     }

@@ -107,7 +107,11 @@ pub fn increment_generation() -> u64 {
     let current = load_generation();
     let next = current + 1;
     if let Some(path) = generation_path() {
-        let _ = atomic_write(&path, &next.to_string());
+        best_effort_atomic_write_logged(
+            &path,
+            &next.to_string(),
+            AtomicWriteContext::new("runtime_generation"),
+        );
     }
     next
 }
@@ -124,7 +128,13 @@ pub(super) fn save_last_message_id(provider: &str, channel_id: u64, message_id: 
     let dir = root.join(provider);
     let _ = fs::create_dir_all(&dir);
     let path = dir.join(format!("{}.txt", channel_id));
-    let _ = atomic_write(&path, &message_id.to_string());
+    best_effort_atomic_write_logged(
+        &path,
+        &message_id.to_string(),
+        AtomicWriteContext::new("last_message")
+            .provider(provider)
+            .channel_id(channel_id),
+    );
 }
 
 /// Save all last_message_ids from a map (used during SIGTERM).
@@ -182,6 +192,89 @@ pub(crate) fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
     file.sync_all()
         .map_err(|e| classify_io_error("sync_all", e))?;
     fs::rename(&tmp, path).map_err(|e| classify_io_error("rename", e))
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AtomicWriteContext<'a> {
+    pub(crate) store: &'a str,
+    pub(crate) provider: Option<&'a str>,
+    pub(crate) token_hash: Option<&'a str>,
+    pub(crate) channel_id: Option<u64>,
+    pub(crate) session_key: Option<&'a str>,
+    pub(crate) turn_id: Option<&'a str>,
+}
+
+impl<'a> AtomicWriteContext<'a> {
+    pub(crate) fn new(store: &'a str) -> Self {
+        Self {
+            store,
+            provider: None,
+            token_hash: None,
+            channel_id: None,
+            session_key: None,
+            turn_id: None,
+        }
+    }
+
+    pub(crate) fn provider(mut self, provider: &'a str) -> Self {
+        self.provider = Some(provider);
+        self
+    }
+
+    pub(crate) fn token_hash(mut self, token_hash: &'a str) -> Self {
+        self.token_hash = Some(token_hash);
+        self
+    }
+
+    pub(crate) fn channel_id(mut self, channel_id: u64) -> Self {
+        self.channel_id = Some(channel_id);
+        self
+    }
+}
+
+/// Recovery-critical writes must be visible when they fail because startup
+/// reconciliation depends on their last durable snapshot.
+pub(crate) fn critical_atomic_write(
+    path: &Path,
+    data: &str,
+    context: AtomicWriteContext<'_>,
+) -> Result<(), String> {
+    atomic_write(path, data).map_err(|error| {
+        tracing::error!(
+            store = context.store,
+            path = %path.display(),
+            provider = ?context.provider,
+            token_hash = ?context.token_hash,
+            channel_id = ?context.channel_id,
+            session_key = ?context.session_key,
+            turn_id = ?context.turn_id,
+            error = %error,
+            "recovery-critical atomic write failed"
+        );
+        error
+    })
+}
+
+/// Best-effort snapshots may not abort their caller, but failures should still
+/// be observable in structured logs.
+pub(crate) fn best_effort_atomic_write_logged(
+    path: &Path,
+    data: &str,
+    context: AtomicWriteContext<'_>,
+) {
+    if let Err(error) = atomic_write(path, data) {
+        tracing::warn!(
+            store = context.store,
+            path = %path.display(),
+            provider = ?context.provider,
+            token_hash = ?context.token_hash,
+            channel_id = ?context.channel_id,
+            session_key = ?context.session_key,
+            turn_id = ?context.turn_id,
+            error = %error,
+            "best-effort atomic write failed"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -371,5 +464,34 @@ mod tests {
             })
             .collect();
         assert!(leftovers.is_empty(), "no .tmp files should remain");
+    }
+}
+
+#[cfg(test)]
+mod atomic_write_logging_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn critical_atomic_write_returns_error_for_unwritable_parent_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent_file = tmp.path().join("not-a-dir");
+        fs::write(&parent_file, "blocking-file").unwrap();
+        let target = parent_file.join("queue.json");
+
+        let error = critical_atomic_write(
+            &target,
+            "[]",
+            AtomicWriteContext::new("discord_pending_queue")
+                .provider("codex")
+                .token_hash("discord_deadbeef")
+                .channel_id(42),
+        )
+        .expect_err("critical write must expose persistence failure");
+
+        assert!(
+            error.contains("create_dir_all") || error.contains("Not a directory"),
+            "unexpected critical write error: {error}"
+        );
     }
 }

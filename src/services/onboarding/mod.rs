@@ -1402,12 +1402,49 @@ fn write_credential_token(
     let path = crate::runtime_layout::credential_token_path(runtime_root, bot_name);
 
     match token.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(value) => std::fs::write(path, format!("{value}\n")).map_err(|e| e.to_string()),
+        Some(value) => crate::utils::secret_file::write_secret_file(&path, format!("{value}\n"))
+            .map_err(|e| e.to_string()),
         None => {
             if path.exists() {
                 std::fs::remove_file(path).map_err(|e| e.to_string())?;
             }
             Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod credential_token_permission_tests {
+    use super::*;
+
+    #[test]
+    fn write_credential_token_creates_owner_only_secret_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(crate::runtime_layout::config_dir(root)).unwrap();
+
+        write_credential_token(root, "announce", Some("announce-token")).unwrap();
+
+        let token_path = crate::runtime_layout::credential_token_path(root, "announce");
+        assert_eq!(
+            std::fs::read_to_string(&token_path).unwrap(),
+            "announce-token\n"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let credential_dir_mode =
+                std::fs::metadata(crate::runtime_layout::credential_dir(root))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777;
+            let token_mode = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
+
+            assert_eq!(credential_dir_mode, 0o700);
+            assert_eq!(token_mode, 0o600);
         }
     }
 }
@@ -4112,6 +4149,26 @@ mod tests {
                 .unwrap(),
             "notify-token\n"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let credential_dir_mode =
+                std::fs::metadata(crate::runtime_layout::credential_dir(root))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777;
+            let announce_mode = std::fs::metadata(crate::runtime_layout::credential_token_path(
+                root, "announce",
+            ))
+            .unwrap()
+            .permissions()
+            .mode()
+                & 0o777;
+            assert_eq!(credential_dir_mode, 0o700);
+            assert_eq!(announce_mode, 0o600);
+        }
         assert!(
             std::fs::symlink_metadata(crate::runtime_layout::legacy_credential_dir(root))
                 .unwrap()

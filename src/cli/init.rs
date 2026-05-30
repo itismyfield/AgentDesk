@@ -659,7 +659,7 @@ fn write_agentdesk_discord_config(
 
     let rendered = serde_yaml::to_string(&config)
         .map_err(|e| format!("Failed to serialize config {}: {e}", config_path.display()))?;
-    write_with_backup(&config_path, &rendered, reconfigure)
+    write_secret_with_backup(&config_path, &rendered, reconfigure)
         .map_err(|e| format!("Failed to write config {}: {e}", config_path.display()))?;
 
     Ok(config_path)
@@ -744,8 +744,12 @@ fn write_postgres_compose_template(
     }
 
     let compose_path = root.join("docker-compose.postgres.yml");
-    write_with_backup(&compose_path, &postgres_compose_yaml(database), reconfigure)
-        .map_err(|e| format!("Failed to write {}: {e}", compose_path.display()))?;
+    write_secret_with_backup_preserving_parent(
+        &compose_path,
+        &postgres_compose_yaml(database),
+        reconfigure,
+    )
+    .map_err(|e| format!("Failed to write {}: {e}", compose_path.display()))?;
     Ok(Some(compose_path))
 }
 
@@ -1420,6 +1424,30 @@ mod tests {
         assert!(!root.join("docker-compose.postgres.yml").exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn write_postgres_compose_template_preserves_root_directory_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path().join(".adk").join("runtime");
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut database = crate::config::DatabaseConfig::default();
+        database.enabled = true;
+        database.password = Some("secretpw".to_string());
+
+        let compose_path = write_postgres_compose_template(&root, &database, false)
+            .unwrap()
+            .expect("compose should be written");
+
+        let root_mode = fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+        let compose_mode = fs::metadata(&compose_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(root_mode, 0o755);
+        assert_eq!(compose_mode, 0o600);
+    }
+
     #[test]
     fn write_init_artifacts_writes_postgres_compose_and_database_config_when_enabled() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1746,4 +1774,51 @@ fn write_with_backup(path: &Path, content: &str, reconfigure: bool) -> Result<()
         }
     }
     fs::write(path, content)
+}
+
+fn write_secret_with_backup(
+    path: &Path,
+    content: &str,
+    reconfigure: bool,
+) -> Result<(), io::Error> {
+    write_secret_with_backup_with_writer(path, content, reconfigure, |path, content| {
+        crate::utils::secret_file::write_secret_file(path, content)
+    })
+}
+
+fn write_secret_with_backup_preserving_parent(
+    path: &Path,
+    content: &str,
+    reconfigure: bool,
+) -> Result<(), io::Error> {
+    write_secret_with_backup_with_writer(path, content, reconfigure, |path, content| {
+        crate::utils::secret_file::write_secret_file_preserving_parent_mode(path, content)
+    })
+}
+
+fn write_secret_with_backup_with_writer(
+    path: &Path,
+    content: &str,
+    reconfigure: bool,
+    writer: impl Fn(&Path, &[u8]) -> Result<(), io::Error>,
+) -> Result<(), io::Error> {
+    if reconfigure && path.exists() {
+        let existing = fs::read_to_string(path).unwrap_or_default();
+        if existing == content {
+            crate::utils::secret_file::audit_or_harden_secret_file(path, "init-secret-artifact");
+            return Ok(());
+        }
+        let backup = path.with_extension(format!(
+            "{}.bak",
+            path.extension().and_then(|e| e.to_str()).unwrap_or("bak")
+        ));
+        if !backup.exists() {
+            let _ = fs::copy(path, &backup);
+            crate::utils::secret_file::audit_or_harden_secret_file(
+                &backup,
+                "init-secret-artifact-backup",
+            );
+        }
+    }
+    writer(path, content.as_bytes())
 }
