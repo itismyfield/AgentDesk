@@ -733,6 +733,119 @@ fn status_panel_tracks_one_level_subagents() {
 }
 
 #[test]
+fn status_panel_keeps_latest_ten_subagents() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(180);
+    for idx in 0..=10 {
+        events.push_status_events(
+            channel_id,
+            status_events_from_tool_use(
+                "Task",
+                &json!({
+                    "subagent_type": "explorer",
+                    "description": format!("subagent {idx}")
+                })
+                .to_string(),
+            ),
+        );
+    }
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let status_entry = events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("status panel state");
+    let guard = status_entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    assert_eq!(guard.subagents.len(), STATUS_PANEL_SUBAGENT_LIMIT);
+    assert_eq!(
+        guard.subagents.first().map(|slot| slot.desc.as_str()),
+        Some("subagent 1")
+    );
+    assert_eq!(
+        guard.subagents.last().map(|slot| slot.desc.as_str()),
+        Some("subagent 10")
+    );
+    assert!(!rendered.contains("explorer subagent 0"));
+    assert!(rendered.contains("explorer subagent 1"));
+    assert!(rendered.contains("explorer subagent 10"));
+}
+
+#[test]
+fn status_panel_stays_within_plain_content_limit() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(181);
+
+    let todos = (0..STATUS_PANEL_TODO_LIMIT)
+        .map(|idx| {
+            json!({
+                "content": format!("todo {idx} {}", "x".repeat(200)),
+                "status": "in_progress"
+            })
+        })
+        .collect::<Vec<_>>();
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use("TodoWrite", &json!({ "todos": todos }).to_string()),
+    );
+    events.set_task_panel_info(
+        channel_id,
+        TaskPanelInfo {
+            dispatch_id: "1234567890abcdef",
+            card_id: Some("CARD-123"),
+            dispatch_type: Some("issue"),
+            owner_instance_id: Some("mac-book-release"),
+            card_title: Some(
+                "status panel plain-content limit regression guard with a deliberately long task title",
+            ),
+            dispatch_title: None,
+            github_issue_number: Some(2891),
+        },
+    );
+    events.set_context_panel_usage(
+        channel_id,
+        Some("session-123456789"),
+        85_000,
+        15_000,
+        5_000,
+        100_000,
+        60,
+    );
+
+    for idx in 0..STATUS_PANEL_SUBAGENT_LIMIT {
+        events.push_status_events(
+            channel_id,
+            status_events_from_tool_use(
+                "Task",
+                &json!({
+                    "subagent_type": "explorer",
+                    "description": format!("subagent {idx} {}", "d".repeat(180))
+                })
+                .to_string(),
+            ),
+        );
+        events.push_status_events(
+            channel_id,
+            status_events_from_task_notification(
+                "subagent",
+                "running",
+                &format!("recent {idx} {}", "r".repeat(180)),
+            ),
+        );
+    }
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+
+    assert!(
+        rendered.chars().count() <= STATUS_PANEL_MAX_CHARS,
+        "status panel exceeded Discord plain-content limit: {}",
+        rendered.chars().count()
+    );
+}
+
+#[test]
 fn status_panel_keeps_taskcreate_open_after_ack() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(81);

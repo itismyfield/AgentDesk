@@ -6,9 +6,11 @@ pub(super) const CHANNEL_EVENT_CAPACITY: usize = 20;
 pub(super) const EVENT_RENDER_LIMIT: usize = 5;
 pub(super) const EVENT_LINE_MAX_CHARS: usize = 100;
 pub(super) const EVENT_BLOCK_MAX_CHARS: usize = 1500;
-pub(super) const STATUS_PANEL_MAX_CHARS: usize = 4096;
+// Status panels are sent as plain message content, so they must stay under
+// Discord's 2000-character content ceiling rather than the 4096-char embed limit.
+pub(super) const STATUS_PANEL_MAX_CHARS: usize = 2000;
 pub(super) const STATUS_PANEL_TODO_LIMIT: usize = 8;
-pub(super) const STATUS_PANEL_SUBAGENT_LIMIT: usize = 6;
+pub(super) const STATUS_PANEL_SUBAGENT_LIMIT: usize = 10;
 pub(super) const SESSION_PANEL_LINE_MAX_CHARS: usize = 100;
 pub(super) const TASK_PANEL_LINE_MAX_CHARS: usize = 140;
 pub(super) const CONTEXT_PANEL_LINE_MAX_CHARS: usize = 120;
