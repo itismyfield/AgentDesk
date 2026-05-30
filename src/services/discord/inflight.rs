@@ -266,6 +266,7 @@ pub(in crate::services::discord) enum RelayOwnerKind {
     None,
     Watcher,
     StandbyRelay,
+    SessionBoundRelay,
     Unknown,
 }
 
@@ -275,6 +276,7 @@ impl RelayOwnerKind {
             Self::None => "none",
             Self::Watcher => "watcher",
             Self::StandbyRelay => "standby_relay",
+            Self::SessionBoundRelay => "session_bound_relay",
             Self::Unknown => "unknown",
         }
     }
@@ -410,6 +412,44 @@ mod turn_source_tests {
 
         assert_eq!(state.relay_owner_kind, RelayOwnerKind::Unknown);
         assert_eq!(state.effective_relay_owner_kind(), RelayOwnerKind::Unknown);
+    }
+
+    #[test]
+    fn relay_owner_kind_session_bound_relay_round_trips() {
+        let state: InflightTurnState = serde_json::from_value(serde_json::json!({
+            "version": 8,
+            "provider": "codex",
+            "channel_id": 42,
+            "channel_name": "adk-cdx",
+            "request_owner_user_id": 7,
+            "user_msg_id": 8,
+            "current_msg_id": 9,
+            "current_msg_len": 0,
+            "user_text": "hello",
+            "source": "text",
+            "session_id": null,
+            "tmux_session_name": "AgentDesk-codex-adk-cdx",
+            "output_path": "/tmp/out.jsonl",
+            "input_fifo_path": null,
+            "last_offset": 0,
+            "full_response": "",
+            "response_sent_offset": 0,
+            "started_at": "2026-05-17 10:00:00",
+            "updated_at": "2026-05-17 10:00:00",
+            "watcher_owns_live_relay": false,
+            "relay_owner_kind": "session_bound_relay"
+        }))
+        .expect("session-bound relay owner should deserialize");
+
+        assert_eq!(state.relay_owner_kind, RelayOwnerKind::SessionBoundRelay);
+        assert_eq!(
+            state.effective_relay_owner_kind(),
+            RelayOwnerKind::SessionBoundRelay
+        );
+        assert_eq!(
+            RelayOwnerKind::SessionBoundRelay.as_str(),
+            "session_bound_relay"
+        );
     }
 
     #[test]
@@ -638,6 +678,7 @@ where
     Ok(match raw.as_deref() {
         Some("watcher") => RelayOwnerKind::Watcher,
         Some("standby_relay") => RelayOwnerKind::StandbyRelay,
+        Some("session_bound_relay") => RelayOwnerKind::SessionBoundRelay,
         Some("none") | None => RelayOwnerKind::None,
         _ => RelayOwnerKind::Unknown,
     })

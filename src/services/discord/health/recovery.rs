@@ -1798,6 +1798,8 @@ async fn maybe_recover_completed_stale_leak(
     crate::services::observability::emit_relay_delivery(
         provider.as_str(),
         channel_id.get(),
+        state.dispatch_id.as_deref(),
+        state.session_key.as_deref(),
         turn_id.as_deref(),
         Some(state.current_msg_id),
         "recovery",

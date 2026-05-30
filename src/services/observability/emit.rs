@@ -390,6 +390,8 @@ pub fn emit_intake_placeholder_post_failed(
 pub fn emit_relay_delivery(
     provider: &str,
     channel_id: u64,
+    dispatch_id: Option<&str>,
+    session_key: Option<&str>,
     turn_id: Option<&str>,
     msg_id: Option<u64>,
     owner: &str,
@@ -403,8 +405,8 @@ pub fn emit_relay_delivery(
         "relay_delivery",
         Some(provider),
         Some(channel_id),
-        None,
-        None,
+        dispatch_id,
+        session_key,
         turn_id,
         Some(if committed {
             "committed"

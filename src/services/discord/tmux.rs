@@ -2113,6 +2113,9 @@ fn watcher_should_yield_to_inflight_state(
         super::inflight::RelayOwnerKind::StandbyRelay => {
             return current_offset > data_start_offset;
         }
+        super::inflight::RelayOwnerKind::SessionBoundRelay => {
+            return current_offset > data_start_offset;
+        }
         super::inflight::RelayOwnerKind::Unknown => {
             return current_offset > data_start_offset;
         }

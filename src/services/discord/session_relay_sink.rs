@@ -18,7 +18,7 @@ use serenity::model::id::{ChannelId, MessageId};
 
 use super::formatting::{self, ReplaceLongMessageOutcome};
 use super::health::HealthRegistry;
-use super::inflight::InflightTurnState;
+use super::inflight::{InflightTurnState, RelayOwnerKind, TurnSource};
 use super::tmux::{WatcherToolState, process_watcher_lines};
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::stream_relay::{
@@ -27,6 +27,7 @@ use crate::services::cluster::stream_relay::{
 use crate::services::cluster::watcher_supervisor::{SupervisorConfig, run_watcher_supervisor_loop};
 use crate::services::provider::ProviderKind;
 use crate::services::session_backend::StreamLineState;
+use tracing::Instrument;
 
 static SESSION_BOUND_DISCORD_DELIVERY_ENABLED: AtomicBool = AtomicBool::new(false);
 const IDLE_JSONL_RELAY_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -56,7 +57,10 @@ pub(in crate::services::discord) fn session_bound_discord_relay_can_own_terminal
     // present creates a second terminal post. Treat only rebind/adopted rows
     // as no real foreground turn; scheduled wakeups and idle background output
     // reach this path with no inflight at all.
-    state.rebind_origin
+    matches!(
+        state.effective_relay_owner_kind(),
+        RelayOwnerKind::SessionBoundRelay
+    ) || state.rebind_origin
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +87,13 @@ fn session_bound_terminal_delivery_route(
     };
     if !session_bound_discord_relay_can_own_terminal_delivery(Some(state), tmux_session_name) {
         return None;
+    }
+    if matches!(
+        state.effective_relay_owner_kind(),
+        RelayOwnerKind::SessionBoundRelay
+    ) && matches!(state.turn_source, TurnSource::ExternalInput)
+    {
+        return Some(SessionBoundTerminalDeliveryRoute::NewMessage);
     }
     if !state.rebind_origin && state.current_msg_id != 0 {
         return Some(SessionBoundTerminalDeliveryRoute::PlaceholderEdit(
@@ -123,6 +134,77 @@ fn session_bound_terminal_delivery_route_decision(
         Ok(route) => SessionBoundTerminalDeliveryRouteDecision::Route(route),
         Err(_) => SessionBoundTerminalDeliveryRouteDecision::Skipped,
     }
+}
+
+#[derive(Clone, Debug, Default)]
+struct SessionRelayTraceContext {
+    turn_id: Option<String>,
+    dispatch_id: Option<String>,
+    session_key: Option<String>,
+    relay_owner: Option<String>,
+    runtime_kind: Option<String>,
+}
+
+impl SessionRelayTraceContext {
+    fn turn_id(&self) -> Option<&str> {
+        self.turn_id.as_deref()
+    }
+
+    fn dispatch_id(&self) -> Option<&str> {
+        self.dispatch_id.as_deref()
+    }
+
+    fn session_key(&self) -> Option<&str> {
+        self.session_key.as_deref()
+    }
+
+    fn relay_owner(&self) -> &str {
+        self.relay_owner.as_deref().unwrap_or("none")
+    }
+
+    fn runtime_kind(&self) -> &str {
+        self.runtime_kind.as_deref().unwrap_or("unknown")
+    }
+}
+
+fn session_relay_trace_context(
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_session_name: &str,
+    inflight: Option<&InflightTurnState>,
+) -> SessionRelayTraceContext {
+    let lease = crate::services::tui_prompt_dedupe::external_input_relay_lease(
+        provider.as_str(),
+        tmux_session_name,
+        channel_id,
+    );
+    SessionRelayTraceContext {
+        turn_id: inflight
+            .and_then(inflight_turn_id)
+            .or_else(|| lease.as_ref().and_then(|lease| lease.turn_id.clone())),
+        dispatch_id: inflight.and_then(|state| state.dispatch_id.clone()),
+        session_key: inflight
+            .and_then(|state| state.session_key.clone())
+            .or_else(|| lease.as_ref().and_then(|lease| lease.session_key.clone())),
+        relay_owner: inflight
+            .map(|state| state.effective_relay_owner_kind().as_str().to_string())
+            .or_else(|| {
+                lease
+                    .as_ref()
+                    .map(|lease| lease.relay_owner.as_str().to_string())
+            }),
+        runtime_kind: inflight
+            .and_then(|state| state.runtime_kind.map(|kind| kind.as_str().to_string()))
+            .or_else(|| {
+                lease
+                    .as_ref()
+                    .and_then(|lease| lease.runtime_kind.map(|kind| kind.as_str().to_string()))
+            }),
+    }
+}
+
+fn inflight_turn_id(state: &InflightTurnState) -> Option<String> {
+    (state.user_msg_id != 0).then(|| format!("discord:{}:{}", state.channel_id, state.user_msg_id))
 }
 
 pub(in crate::services::discord) struct SessionBoundDiscordRelaySink {
@@ -169,6 +251,12 @@ impl SessionBoundDiscordRelaySink {
         let channel_id = delivery.channel_id;
         let provider = delivery.provider;
         let inflight = super::inflight::load_inflight_state(&provider, channel_id);
+        let trace = session_relay_trace_context(
+            &provider,
+            channel_id,
+            &delivery.session_name,
+            inflight.as_ref(),
+        );
         let route = match session_bound_terminal_delivery_route_decision(
             inflight.as_ref(),
             &delivery.session_name,
@@ -181,7 +269,26 @@ impl SessionBoundDiscordRelaySink {
                     provider = provider.as_str(),
                     channel = channel_id,
                     tmux_session = %delivery.session_name,
+                    turn_id = trace.turn_id().unwrap_or(""),
+                    dispatch_id = trace.dispatch_id().unwrap_or(""),
+                    session_key = trace.session_key().unwrap_or(""),
+                    relay_owner = trace.relay_owner(),
+                    runtime_kind = trace.runtime_kind(),
                     "session-bound relay sink skipped bridge-owned or mismatched inflight"
+                );
+                crate::services::observability::emit_relay_delivery(
+                    provider.as_str(),
+                    channel_id,
+                    trace.dispatch_id(),
+                    trace.session_key(),
+                    trace.turn_id(),
+                    None,
+                    "session_relay_sink",
+                    "skip",
+                    None,
+                    None,
+                    false,
+                    Some("bridge-owned or mismatched inflight"),
                 );
                 return Ok(SessionRelayDeliveryOutcome::Skipped);
             }
@@ -234,8 +341,27 @@ impl SessionBoundDiscordRelaySink {
                         channel = channel_id,
                         message = msg_id.get(),
                         tmux_session = %delivery.session_name,
+                        turn_id = trace.turn_id().unwrap_or(""),
+                        dispatch_id = trace.dispatch_id().unwrap_or(""),
+                        session_key = trace.session_key().unwrap_or(""),
+                        relay_owner = trace.relay_owner(),
+                        runtime_kind = trace.runtime_kind(),
                         chars = relay_text.chars().count(),
                         "session-bound relay sink delivered terminal response via placeholder edit"
+                    );
+                    crate::services::observability::emit_relay_delivery(
+                        provider.as_str(),
+                        channel_id,
+                        trace.dispatch_id(),
+                        trace.session_key(),
+                        trace.turn_id(),
+                        Some(msg_id.get()),
+                        "session_relay_sink",
+                        "edit",
+                        None,
+                        None,
+                        true,
+                        Some("placeholder edit"),
                     );
                     crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
                         provider.as_str(),
@@ -258,9 +384,28 @@ impl SessionBoundDiscordRelaySink {
                         channel = channel_id,
                         message = msg_id.get(),
                         tmux_session = %delivery.session_name,
+                        turn_id = trace.turn_id().unwrap_or(""),
+                        dispatch_id = trace.dispatch_id().unwrap_or(""),
+                        session_key = trace.session_key().unwrap_or(""),
+                        relay_owner = trace.relay_owner(),
+                        runtime_kind = trace.runtime_kind(),
                         chars = relay_text.chars().count(),
                         error = %edit_error,
                         "session-bound relay sink delivered terminal response via fallback; preserving original msg_id (#2757)"
+                    );
+                    crate::services::observability::emit_relay_delivery(
+                        provider.as_str(),
+                        channel_id,
+                        trace.dispatch_id(),
+                        trace.session_key(),
+                        trace.turn_id(),
+                        Some(msg_id.get()),
+                        "session_relay_sink",
+                        "post",
+                        None,
+                        None,
+                        true,
+                        Some("fallback after edit failure"),
                     );
                     crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
                         provider.as_str(),
@@ -303,10 +448,29 @@ impl SessionBoundDiscordRelaySink {
                 provider = provider.as_str(),
                 channel = channel_id,
                 tmux_session = %delivery.session_name,
+                turn_id = trace.turn_id().unwrap_or(""),
+                dispatch_id = trace.dispatch_id().unwrap_or(""),
+                session_key = trace.session_key().unwrap_or(""),
+                relay_owner = trace.relay_owner(),
+                runtime_kind = trace.runtime_kind(),
                 prompt_anchor_message_id = prompt_anchor_reference
                     .map(|(_, message_id)| message_id.get()),
                 chars = relay_text.chars().count(),
                 "session-bound relay sink delivered terminal response via new message"
+            );
+            crate::services::observability::emit_relay_delivery(
+                provider.as_str(),
+                channel_id,
+                trace.dispatch_id(),
+                trace.session_key(),
+                trace.turn_id(),
+                prompt_anchor_reference.map(|(_, message_id)| message_id.get()),
+                "session_relay_sink",
+                "post",
+                None,
+                None,
+                true,
+                Some("new message"),
             );
             Ok(SessionRelayDeliveryOutcome::Committed)
         }
@@ -368,9 +532,13 @@ pub(crate) async fn run_session_bound_discord_relay_supervisor(
     SESSION_BOUND_DISCORD_DELIVERY_ENABLED.store(true, Ordering::Release);
     let sink: Arc<dyn RelaySink> = Arc::new(SessionBoundDiscordRelaySink::new(health_registry));
     let idle_shutdown = shutdown.clone();
-    super::task_supervisor::spawn_observed("session_bound_idle_jsonl_relay", async move {
-        run_idle_jsonl_relay_loop(idle_shutdown).await;
-    });
+    super::task_supervisor::spawn_observed(
+        "session_bound_idle_jsonl_relay",
+        async move {
+            run_idle_jsonl_relay_loop(idle_shutdown).await;
+        }
+        .instrument(tracing::info_span!("session_bound_idle_jsonl_relay")),
+    );
     run_watcher_supervisor_loop(SupervisorConfig::default(), sink, shutdown).await;
     SESSION_BOUND_DISCORD_DELIVERY_ENABLED.store(false, Ordering::Release);
 }
@@ -746,7 +914,7 @@ fn merge_task_notification_kind(
 mod tests {
     use super::*;
     use crate::services::cluster::session_matcher::{MatchedChannel, expected_rollout_path_for};
-    use crate::services::discord::inflight::RelayOwnerKind;
+    use crate::services::discord::inflight::{RelayOwnerKind, TurnSource};
 
     fn matched(channel_id: &str) -> MatchedChannel {
         let session = ProviderKind::Claude.build_tmux_session_name(channel_id);
@@ -896,6 +1064,14 @@ mod tests {
             Some(&adopted),
             tmux
         ));
+
+        let mut external_session_bound =
+            inflight_for(tmux, RelayOwnerKind::SessionBoundRelay, false);
+        external_session_bound.turn_source = TurnSource::ExternalInput;
+        assert!(session_bound_discord_relay_can_own_terminal_delivery(
+            Some(&external_session_bound),
+            tmux
+        ));
         assert!(!session_bound_discord_relay_can_own_terminal_delivery(
             Some(&watcher_owned),
             "AgentDesk-claude-other"
@@ -942,9 +1118,73 @@ mod tests {
             Some(SessionBoundTerminalDeliveryRoute::NewMessage)
         );
 
+        let mut external_session_bound =
+            inflight_for(tmux, RelayOwnerKind::SessionBoundRelay, false);
+        external_session_bound.turn_source = TurnSource::ExternalInput;
+        external_session_bound.current_msg_id = 9002;
+        assert_eq!(
+            session_bound_terminal_delivery_route(Some(&external_session_bound), tmux),
+            Some(SessionBoundTerminalDeliveryRoute::NewMessage),
+            "TUI-direct external turns keep the prompt notification as an anchor; the sink posts a response message instead of editing it"
+        );
+
         assert_eq!(
             session_bound_terminal_delivery_route(Some(&watcher_owned), "AgentDesk-claude-other"),
             None
+        );
+    }
+
+    #[test]
+    fn discord_and_tui_direct_have_explicit_terminal_owner_models() {
+        let tmux = "AgentDesk-claude-relay-test";
+        let discord_bridge_owned = inflight_for(tmux, RelayOwnerKind::None, false);
+        assert_eq!(
+            session_bound_terminal_delivery_route(Some(&discord_bridge_owned), tmux),
+            None,
+            "Discord-originated bridge-owned turns must stay out of the session-bound sink"
+        );
+
+        let mut tui_direct = inflight_for(tmux, RelayOwnerKind::SessionBoundRelay, false);
+        tui_direct.turn_source = TurnSource::ExternalInput;
+        assert_eq!(
+            session_bound_terminal_delivery_route(Some(&tui_direct), tmux),
+            Some(SessionBoundTerminalDeliveryRoute::NewMessage),
+            "TUI-direct turns that select the session-bound owner converge on the same sink route without Discord intake resubmission"
+        );
+    }
+
+    #[test]
+    fn session_relay_trace_context_uses_external_input_lease_without_inflight() {
+        let tmux = "AgentDesk-codex-external-trace";
+        crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+            ProviderKind::Codex.as_str(),
+            tmux,
+            crate::services::tui_prompt_dedupe::ExternalInputRelayLease {
+                channel_id: Some(4242),
+                turn_id: Some("external:codex:4242:trace:1".to_string()),
+                session_key: Some("host:AgentDesk-codex-external-trace".to_string()),
+                relay_owner:
+                    crate::services::tui_prompt_dedupe::ExternalInputRelayOwner::SessionBoundRelay,
+                runtime_kind: Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui),
+            },
+        );
+
+        let trace = session_relay_trace_context(&ProviderKind::Codex, 4242, tmux, None);
+
+        assert_eq!(trace.turn_id(), Some("external:codex:4242:trace:1"));
+        assert_eq!(
+            trace.session_key(),
+            Some("host:AgentDesk-codex-external-trace")
+        );
+        assert_eq!(trace.dispatch_id(), None);
+        assert_eq!(trace.relay_owner(), "session_bound_relay");
+        assert_eq!(trace.runtime_kind(), "codex_tui");
+        assert!(
+            crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
+                ProviderKind::Codex.as_str(),
+                tmux,
+                4242,
+            )
         );
     }
 

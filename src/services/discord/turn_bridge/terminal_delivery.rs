@@ -47,6 +47,9 @@ pub(super) fn turn_bridge_replace_outcome_committed(
     message_id: MessageId,
     tmux_session_name: Option<&str>,
     replace_result: Result<ReplaceLongMessageOutcome, String>,
+    dispatch_id: Option<&str>,
+    session_key: Option<&str>,
+    turn_id: Option<&str>,
     source: &'static str,
 ) -> bool {
     let committed = match replace_result {
@@ -119,7 +122,9 @@ pub(super) fn turn_bridge_replace_outcome_committed(
     crate::services::observability::emit_relay_delivery(
         provider.as_str(),
         channel_id.get(),
-        None,
+        dispatch_id,
+        session_key,
+        turn_id,
         Some(message_id.get()),
         "turn_bridge",
         "edit",
