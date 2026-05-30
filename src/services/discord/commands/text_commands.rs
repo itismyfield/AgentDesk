@@ -697,7 +697,8 @@ Any other message is sent to {p}.
 `!allowed -name` — Remove tool
 
 **Skills**
-`!cc <skill>` — Run a provider skill
+`!skill <skill>` — Run a provider skill
+`!cc <skill>` — Legacy alias for `!skill`
 
 **Settings**
 `/model` — Open the interactive model picker
@@ -1252,10 +1253,11 @@ Any other message is sent to {p}.
             return Ok(true);
         }
 
-        "!cc" => {
+        "!cc" | "!skill" => {
+            let invoked_as = cmd;
             let skill = arg1.to_string();
             let args_str = text
-                .strip_prefix("!cc")
+                .strip_prefix(invoked_as)
                 .unwrap_or("")
                 .trim()
                 .strip_prefix(&skill)
@@ -1263,14 +1265,20 @@ Any other message is sent to {p}.
                 .trim();
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
-                "  [{ts}] ◀ [{}] !cc {} {}",
+                "  [{ts}] ◀ [{}] {} {} {}",
                 msg.author.name,
+                invoked_as,
                 skill,
                 args_str
             );
 
             if skill.is_empty() {
-                let _ = msg.reply(&ctx.http, "Usage: `!cc <skill> [args]`").await;
+                let _ = msg
+                    .reply(
+                        &ctx.http,
+                        "Usage: `!skill <skill> [args]` (legacy: `!cc <skill> [args]`)",
+                    )
+                    .await;
                 return Ok(true);
             }
 
@@ -1280,7 +1288,8 @@ Any other message is sent to {p}.
                     return Ok(true);
                 }
                 "stop" => {
-                    // Issue #1005: `!cc stop` is an alias for `!stop` — same
+                    // Issue #1005: `!skill stop` and `!cc stop` are aliases for
+                    // `!stop` — same
                     // cancel path. Mirror `!stop`'s tier (Mutating, post-#1190)
                     // so the alias policy matches the canonical surface.
                     let is_owner = check_owner(msg.author.id, &data.shared).await;
@@ -1290,10 +1299,16 @@ Any other message is sent to {p}.
                         is_owner,
                         high_risk_enabled,
                     );
-                    if let Some(reply) = alias_decision.denial_message("!cc stop") {
+                    let stop_reason = if invoked_as == "!skill" {
+                        "!skill stop"
+                    } else {
+                        "!cc stop"
+                    };
+                    if let Some(reply) = alias_decision.denial_message(&stop_reason) {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::warn!(
-                            "  [{ts}] ⛔ CommandPolicy denied !cc stop for {} (id:{})",
+                            "  [{ts}] ⛔ CommandPolicy denied {} for {} (id:{})",
+                            stop_reason,
                             msg.author.name,
                             msg.author.id.get(),
                         );
@@ -1309,14 +1324,14 @@ Any other message is sent to {p}.
                                 &data.provider,
                                 &token,
                                 super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
-                                "!cc stop",
+                                &stop_reason,
                             )
                             .await;
                             crate::services::turn_cancel_finalizer::finalize_turn_cancel(
                                 crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest::from_text_stop(
                                     data.provider.clone(),
                                     channel_id,
-                                    "!cc stop",
+                                    &stop_reason,
                                     termination_recorded,
                                 ),
                             );
@@ -1325,7 +1340,7 @@ Any other message is sent to {p}.
                                 &data.shared,
                                 &data.provider,
                                 channel_id,
-                                "!cc stop",
+                                &stop_reason,
                             )
                             .await;
                             // #1672: mirror the !stop / cancel API drain
@@ -1336,7 +1351,7 @@ Any other message is sent to {p}.
                                 &data.shared,
                                 &data.provider,
                                 channel_id,
-                                "!cc stop",
+                                &stop_reason,
                             );
                             let _ = msg.reply(&ctx.http, "Stopping...").await;
                         }
@@ -1382,11 +1397,11 @@ Any other message is sent to {p}.
                 let _ = msg
                     .reply(
                         &ctx.http,
-                        format!(
-                            "Unknown skill: `{}`. Use `!cc` to see available skills.",
-                            skill
-                        ),
-                    )
+                            format!(
+                                "Unknown skill: `{}`. Use `!skill` to see available skills. `!cc` still works.",
+                                skill
+                            ),
+                        )
                     .await;
                 return Ok(true);
             }

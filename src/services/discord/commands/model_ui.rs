@@ -377,7 +377,7 @@ mod tests {
             &ProviderKind::Claude,
             Some(crate::services::discord::model_catalog::DEFAULT_PICKER_VALUE),
             Some("claude-sonnet-4-6"),
-            "claude-opus-4-6",
+            "claude-opus-4-8",
             SOURCE_PROVIDER_DEFAULT,
             None,
         );
