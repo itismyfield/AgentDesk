@@ -891,6 +891,13 @@ mod tests {
         crate::pipeline::ensure_loaded();
         seed_agent(&pool, "agent-1720-a", Some(r#"{"states":["broken"]}"#)).await;
         seed_repo_with_default_agent(&pool, "repo-1720-a", "agent-1720-a", None).await;
+        seed_card(
+            &pool,
+            "card-1720-a",
+            Some("repo-1720-a"),
+            Some("agent-1720-a"),
+        )
+        .await;
 
         let service = PipelineOverrideService::new(&pool);
         let result = service
@@ -945,6 +952,13 @@ mod tests {
             "repo-1720-b",
             "agent-1720-b",
             Some(r#"{"states":["broken"]}"#),
+        )
+        .await;
+        seed_card(
+            &pool,
+            "card-1720-b",
+            Some("repo-1720-b"),
+            Some("agent-1720-b"),
         )
         .await;
 
