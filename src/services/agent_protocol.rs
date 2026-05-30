@@ -260,6 +260,12 @@ pub enum StatusEvent {
     SubagentEnd {
         success: bool,
     },
+    TaskToolUpdate {
+        name: String,
+        task_id: Option<String>,
+        summary: Option<String>,
+        status: Option<String>,
+    },
     TodoUpdate {
         items: Vec<StatusTodoItem>,
     },

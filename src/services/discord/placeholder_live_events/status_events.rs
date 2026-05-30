@@ -4,8 +4,8 @@ use crate::services::agent_protocol::{StatusEvent, StatusTodoItem, StatusTodoSta
 
 use super::super::formatting::format_tool_input;
 use super::common::{
-    EVENT_LINE_MAX_CHARS, first_content_line, normalize_summary, normalize_tool_key,
-    truncate_chars, value_to_compact_string,
+    EVENT_LINE_MAX_CHARS, first_content_line, is_harness_task_tool_name, normalize_summary,
+    normalize_tool_key, truncate_chars, value_to_compact_string,
 };
 
 pub(in crate::services::discord) fn status_events_from_tool_use(
@@ -27,6 +27,22 @@ pub(in crate::services::discord) fn status_events_from_tool_use(
         name: name.to_string(),
         args_summary: args_summary.clone(),
     }];
+    if is_harness_task_tool_name(name) {
+        let value = serde_json::from_str::<Value>(input).unwrap_or(Value::Null);
+        let task_id = task_tool_id(&value);
+        let status = task_tool_status(name, &value);
+        let summary = task_tool_summary(name, &value).or_else(|| {
+            (task_id.is_none() && status.is_none())
+                .then(|| args_summary.clone())
+                .flatten()
+        });
+        events.push(StatusEvent::TaskToolUpdate {
+            name: name.to_string(),
+            task_id,
+            summary,
+            status,
+        });
+    }
     if is_task_tool(name) {
         let value = serde_json::from_str::<Value>(input).unwrap_or(Value::Null);
         events.push(StatusEvent::SubagentStart {
@@ -108,7 +124,7 @@ pub(in crate::services::discord) fn status_events_from_json(value: &Value) -> Ve
 pub(super) fn is_task_tool(name: &str) -> bool {
     matches!(
         normalize_tool_key(name).as_str(),
-        "task" | "taskcreate" | "agent" | "spawnagent"
+        "task" | "agent" | "spawnagent"
     )
 }
 
@@ -124,6 +140,47 @@ fn is_todo_write_tool(name: &str) -> bool {
         normalize_tool_key(name).as_str(),
         "todowrite" | "updateplan"
     )
+}
+
+fn task_tool_id(value: &Value) -> Option<String> {
+    ["task_id", "taskId", "taskID", "id"]
+        .into_iter()
+        .find_map(|key| value.get(key).and_then(Value::as_str))
+        .map(normalize_summary)
+        .filter(|value| !value.is_empty())
+}
+
+fn task_tool_summary(name: &str, value: &Value) -> Option<String> {
+    [
+        "subject",
+        "title",
+        "description",
+        "desc",
+        "content",
+        "task",
+        "message",
+    ]
+    .into_iter()
+    .find_map(|key| value.get(key).and_then(Value::as_str))
+    .map(normalize_summary)
+    .filter(|value| !value.is_empty())
+    .or_else(|| (normalize_tool_key(name) == "tasklist").then(|| "list".to_string()))
+}
+
+fn task_tool_status(name: &str, value: &Value) -> Option<String> {
+    let status = value
+        .get("status")
+        .or_else(|| value.get("state"))
+        .and_then(Value::as_str)
+        .map(normalize_summary)
+        .filter(|value| !value.is_empty());
+    if status.is_some() {
+        return status;
+    }
+    match normalize_tool_key(name).as_str() {
+        "taskstop" => Some("stopped".to_string()),
+        _ => None,
+    }
 }
 
 pub(super) fn is_schedule_wakeup_tool(name: &str) -> bool {
@@ -150,6 +207,7 @@ fn todo_items_from_input(value: &Value) -> Option<Vec<StatusTodoItem>> {
         .get("todos")
         .or_else(|| value.get("items"))
         .or_else(|| value.get("todo_list"))
+        .or_else(|| value.get("plan"))
         .and_then(Value::as_array)?;
     let parsed = items
         .iter()
@@ -159,6 +217,7 @@ fn todo_items_from_input(value: &Value) -> Option<Vec<StatusTodoItem>> {
                 .or_else(|| item.get("text"))
                 .or_else(|| item.get("title"))
                 .or_else(|| item.get("task"))
+                .or_else(|| item.get("step"))
                 .and_then(Value::as_str)
                 .map(normalize_summary)
                 .filter(|content| !content.is_empty())?;

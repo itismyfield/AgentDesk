@@ -19,15 +19,19 @@ mod tests;
 
 use common::{
     CHANNEL_EVENT_CAPACITY, EVENT_LINE_MAX_CHARS, STATUS_PANEL_MAX_CHARS,
-    STATUS_PANEL_SUBAGENT_LIMIT, STATUS_PANEL_TODO_LIMIT, escape_status_panel_markdown,
-    normalize_summary, sanitized_tool_name, tool_prefix, truncate_chars,
+    STATUS_PANEL_SUBAGENT_LIMIT, STATUS_PANEL_TASK_LIMIT, STATUS_PANEL_TODO_LIMIT,
+    escape_status_panel_markdown, normalize_summary, sanitized_tool_name, tool_prefix,
+    truncate_chars,
 };
 use context_panel::{ContextPanelSnapshot, render_context_panel_line};
 use recent_events::render_events;
 use session_panel::{SessionPanelSnapshot, render_session_panel_line};
 use status_events::{is_schedule_wakeup_tool, parse_eta_secs};
 pub(in crate::services::discord) use task_panel::TaskPanelInfo;
-use task_panel::{TaskPanelSnapshot, clean_task_panel_value, render_task_panel_line};
+use task_panel::{
+    TaskPanelSnapshot, TaskToolSlot, clean_task_panel_value, clean_task_tool_value,
+    render_task_panel_line, render_task_tool_slot,
+};
 
 pub(in crate::services::discord) use recent_events::RecentPlaceholderEvent;
 pub(in crate::services::discord) use status_events::{
@@ -364,6 +368,7 @@ struct StatusPanelState {
     task: Option<TaskPanelSnapshot>,
     context: Option<ContextPanelSnapshot>,
     todos: Vec<StatusTodoItem>,
+    tasks: Vec<TaskToolSlot>,
     subagents: Vec<SubagentSlot>,
 }
 
@@ -427,6 +432,14 @@ impl StatusPanelState {
                 }
                 self.status = DerivedStatus::Running;
             }
+            StatusEvent::TaskToolUpdate {
+                name,
+                task_id,
+                summary,
+                status,
+            } => {
+                self.upsert_task_tool(name, task_id, summary, status);
+            }
             StatusEvent::TodoUpdate { items } => {
                 self.todos = items
                     .into_iter()
@@ -451,6 +464,42 @@ impl StatusPanelState {
                 }
             }
         }
+    }
+
+    fn upsert_task_tool(
+        &mut self,
+        name: String,
+        task_id: Option<String>,
+        summary: Option<String>,
+        status: Option<String>,
+    ) {
+        let task_id = task_id.and_then(clean_task_tool_value);
+        let summary = summary.and_then(clean_task_tool_value);
+        let status = status.and_then(clean_task_tool_value);
+        if let Some(task_id_value) = task_id.as_deref()
+            && let Some(slot) = self
+                .tasks
+                .iter_mut()
+                .rev()
+                .find(|slot| slot.task_id.as_deref() == Some(task_id_value))
+        {
+            slot.name = name;
+            if summary.is_some() {
+                slot.summary = summary;
+            }
+            if status.is_some() {
+                slot.status = status;
+            }
+            return;
+        }
+
+        self.tasks.push(TaskToolSlot {
+            name,
+            task_id,
+            summary,
+            status,
+        });
+        trim_tasks(&mut self.tasks);
     }
 }
 
@@ -490,7 +539,7 @@ fn render_status_panel(
         sections.push(context_line);
     }
 
-    if !matches!(provider, ProviderKind::Codex) && !snapshot.todos.is_empty() {
+    if !snapshot.todos.is_empty() {
         let lines = snapshot
             .todos
             .iter()
@@ -505,6 +554,17 @@ fn render_status_panel(
             })
             .collect::<Vec<_>>();
         sections.push(format!("Plan\n{}", lines.join("\n")));
+    }
+
+    if !snapshot.tasks.is_empty() {
+        let lines = snapshot
+            .tasks
+            .iter()
+            .rev()
+            .take(STATUS_PANEL_TASK_LIMIT)
+            .map(render_task_tool_slot)
+            .collect::<Vec<_>>();
+        sections.push(format!("Tasks\n{}", lines.join("\n")));
     }
 
     if !matches!(provider, ProviderKind::Codex) && !snapshot.subagents.is_empty() {
@@ -642,6 +702,13 @@ fn sanitize_label(raw: &str) -> String {
 fn trim_subagents(slots: &mut Vec<SubagentSlot>) {
     if slots.len() > STATUS_PANEL_SUBAGENT_LIMIT {
         let excess = slots.len() - STATUS_PANEL_SUBAGENT_LIMIT;
+        slots.drain(0..excess);
+    }
+}
+
+fn trim_tasks(slots: &mut Vec<TaskToolSlot>) {
+    if slots.len() > STATUS_PANEL_TASK_LIMIT {
+        let excess = slots.len() - STATUS_PANEL_TASK_LIMIT;
         slots.drain(0..excess);
     }
 }

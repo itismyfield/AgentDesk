@@ -3,8 +3,8 @@ use serde_json::Value;
 use super::super::formatting::format_tool_input;
 use super::common::{
     EVENT_BLOCK_MAX_CHARS, EVENT_LINE_MAX_CHARS, EVENT_RENDER_LIMIT, first_content_line,
-    normalize_summary, sanitize_for_code_fence, tool_prefix, truncate_chars,
-    value_to_compact_string,
+    is_harness_task_tool_name, normalize_summary, sanitize_for_code_fence, tool_prefix,
+    truncate_chars, value_to_compact_string,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +15,9 @@ pub(in crate::services::discord) struct RecentPlaceholderEvent {
 
 impl RecentPlaceholderEvent {
     pub(in crate::services::discord) fn tool_use(name: &str, input: &str) -> Option<Self> {
+        if is_harness_task_tool_name(name) {
+            return None;
+        }
         let summary = format_tool_input(name, input);
         let summary = if summary.trim().is_empty() {
             first_content_line(input)

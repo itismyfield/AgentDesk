@@ -4,6 +4,7 @@ use super::super::formatting::{
 };
 use super::common::{
     EVENT_BLOCK_MAX_CHARS, EVENT_LINE_MAX_CHARS, EVENT_RENDER_LIMIT, STATUS_PANEL_MAX_CHARS,
+    STATUS_PANEL_TASK_LIMIT,
 };
 use super::*;
 use serde_json::json;
@@ -706,6 +707,49 @@ fn status_panel_tracks_todowrite_plan() {
 }
 
 #[test]
+fn status_panel_tracks_codex_update_plan_items() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(785);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "update_plan",
+            &json!({
+                "plan": [
+                    {"step": "Inspect wrapper events", "status": "completed"},
+                    {"step": "Render Codex plan", "status": "in_progress"}
+                ]
+            })
+            .to_string(),
+        ),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Codex, 1_700_000_000);
+    assert!(rendered.contains("Plan"));
+    assert!(rendered.contains("- [x] Inspect wrapper events"));
+    assert!(rendered.contains("- [ ] Render Codex plan"));
+    assert!(!rendered.contains("Subagents"));
+}
+
+#[test]
+fn recent_events_skip_task_tool_family_represented_by_tasks_section() {
+    assert!(
+        RecentPlaceholderEvent::tool_use(
+            "TaskCreate",
+            &json!({"subject": "Create grouped Tasks section"}).to_string(),
+        )
+        .is_none()
+    );
+    assert!(
+        RecentPlaceholderEvent::tool_use(
+            "TaskUpdate",
+            &json!({"taskId": "task-1", "status": "completed"}).to_string(),
+        )
+        .is_none()
+    );
+}
+
+#[test]
 fn status_panel_tracks_one_level_subagents() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(79);
@@ -846,7 +890,7 @@ fn status_panel_stays_within_plain_content_limit() {
 }
 
 #[test]
-fn status_panel_keeps_taskcreate_open_after_ack() {
+fn status_panel_renders_taskcreate_in_tasks_after_ack() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(81);
     events.push_status_events(
@@ -862,13 +906,13 @@ fn status_panel_keeps_taskcreate_open_after_ack() {
     );
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(rendered.contains("Subagents"));
+    assert!(rendered.contains("Tasks"));
     assert!(rendered.contains("TaskCreate Stream parser extraction layer"));
-    assert!(!rendered.contains("TaskCreate Stream parser extraction layer ✓"));
+    assert!(!rendered.contains("Subagents"));
 }
 
 #[test]
-fn status_panel_does_not_close_subagent_on_unrelated_tool_end() {
+fn status_panel_does_not_render_taskcreate_as_subagent_on_unrelated_tool_end() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(82);
     events.push_status_events(
@@ -884,12 +928,82 @@ fn status_panel_does_not_close_subagent_on_unrelated_tool_end() {
     );
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(rendered.contains("Tasks"));
     assert!(rendered.contains("TaskCreate Turn bridge integration"));
-    assert!(!rendered.contains("TaskCreate Turn bridge integration ✓"));
+    assert!(!rendered.contains("Subagents"));
 }
 
 #[test]
-fn status_panel_hides_plan_and_subagents_for_codex() {
+fn status_panel_taskupdate_updates_existing_task_by_id() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(83);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "TaskCreate",
+            &json!({"taskId": "task-1", "subject": "Wire Tasks panel"}).to_string(),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "TaskUpdate",
+            &json!({"taskId": "task-1", "status": "completed"}).to_string(),
+        ),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let task_lines = rendered
+        .lines()
+        .filter(|line| line.starts_with("└ Task"))
+        .collect::<Vec<_>>();
+    assert_eq!(task_lines.len(), 1, "rendered:\n{rendered}");
+    assert!(rendered.contains("TaskUpdate task-1 · Wire Tasks panel · completed"));
+}
+
+#[test]
+fn status_panel_keeps_latest_task_tool_entries_under_cap() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(84);
+    for idx in 0..=STATUS_PANEL_TASK_LIMIT {
+        events.push_status_events(
+            channel_id,
+            status_events_from_tool_use(
+                "TaskCreate",
+                &json!({
+                    "taskId": format!("task-{idx}"),
+                    "subject": format!("task subject {idx}")
+                })
+                .to_string(),
+            ),
+        );
+    }
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let status_entry = events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("status panel state");
+    let guard = status_entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    assert_eq!(guard.tasks.len(), STATUS_PANEL_TASK_LIMIT);
+    assert_eq!(
+        guard.tasks.first().and_then(|slot| slot.task_id.as_deref()),
+        Some("task-1")
+    );
+    assert_eq!(
+        guard.tasks.last().and_then(|slot| slot.task_id.as_deref()),
+        Some("task-10")
+    );
+    assert!(!rendered.contains("task subject 0"));
+    assert!(rendered.contains("task subject 1"));
+    assert!(rendered.contains("task subject 10"));
+}
+
+#[test]
+fn status_panel_renders_plan_but_hides_subagents_for_codex() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(80);
     events.push_status_events(
@@ -908,9 +1022,9 @@ fn status_panel_hides_plan_and_subagents_for_codex() {
     );
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Codex, 1_700_000_000);
-    assert!(!rendered.contains("Plan"));
+    assert!(rendered.contains("Plan"));
+    assert!(rendered.contains("Hidden for Codex"));
     assert!(!rendered.contains("Subagents"));
-    assert!(!rendered.contains("Hidden for Codex"));
     assert!(!rendered.contains("Hidden subagent"));
 }
 

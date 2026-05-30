@@ -938,6 +938,42 @@ mod modern_event_tests {
     }
 
     #[test]
+    fn modern_update_plan_function_call_emits_tool_use_event() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut thread_id = Some("thread-modern".to_string());
+        let mut state = CodexWrapperTurnState::default();
+
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "update_plan",
+                    "arguments": "{\"plan\":[{\"step\":\"Render Codex plan\",\"status\":\"in_progress\"}]}",
+                    "call_id": "call-plan"
+                }
+            }),
+            &mut thread_id,
+            &mut state,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+        let lines = read_jsonl(&path);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["type"], "assistant");
+        assert_eq!(lines[0]["message"]["content"][0]["type"], "tool_use");
+        assert_eq!(lines[0]["message"]["content"][0]["name"], "update_plan");
+        assert_eq!(
+            lines[0]["message"]["content"][0]["input"],
+            "{\"plan\":[{\"step\":\"Render Codex plan\",\"status\":\"in_progress\"}]}"
+        );
+    }
+
+    #[test]
     fn top_level_task_complete_finalizes_with_last_agent_message_fallback() {
         let tdir = tempfile::tempdir().unwrap();
         let path = tdir.path().join("codex.jsonl");
