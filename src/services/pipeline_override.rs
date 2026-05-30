@@ -82,7 +82,6 @@ impl<'a> PipelineOverrideService<'a> {
         let (config_str, agent_override) = parse_pipeline_override_config(config)?;
         self.ensure_agent_exists(agent_id).await?;
         crate::pipeline::ensure_loaded();
-        validate_pipeline_override(None, agent_override.as_ref())?;
         self.validate_against_existing_repo_overrides(agent_id, agent_override.as_ref())
             .await?;
         Ok((config_str, agent_override))
@@ -183,8 +182,10 @@ impl<'a> PipelineOverrideService<'a> {
     /// agent at runtime — i.e. every repo referenced by
     /// `kanban_cards.assigned_agent_id = $1` via `kanban_cards.repo_id`, plus
     /// the `github_repos.default_agent_id = $1` fallback for unassigned
-    /// cards — that carries its own non-null pipeline override, and validate
-    /// the merged repo+agent effective pipeline. Reject the write if any
+    /// cards — and validate the merged repo+agent effective pipeline. Repos
+    /// without overrides validate the default+agent merge. If the agent is not
+    /// currently paired with any repo, validate the default+agent merge so
+    /// standalone agent configs remain guarded. Reject the write if any
     /// combination is invalid.
     ///
     /// The runtime resolver `crate::pipeline::resolve(repo_override,
@@ -201,36 +202,37 @@ impl<'a> PipelineOverrideService<'a> {
                FROM kanban_cards c \
                JOIN github_repos r ON r.id = c.repo_id \
               WHERE c.assigned_agent_id = $1 \
-                AND r.pipeline_config IS NOT NULL \
-                AND TRIM(r.pipeline_config::text) <> '' \
              UNION \
              SELECT r.id, r.pipeline_config::text \
                FROM github_repos r \
-              WHERE r.default_agent_id = $1 \
-                AND r.pipeline_config IS NOT NULL \
-                AND TRIM(r.pipeline_config::text) <> ''",
+              WHERE r.default_agent_id = $1",
         )
         .bind(agent_id)
         .fetch_all(self.pool)
         .await
         .map_err(database_error)?;
 
+        if rows.is_empty() {
+            validate_pipeline_override(None, new_agent_override)?;
+            return Ok(());
+        }
+
         for (repo_id, raw) in rows {
-            let raw = match raw {
-                Some(value) => value,
-                None => continue,
-            };
-            let existing = match crate::pipeline::parse_override(&raw) {
-                Ok(Some(parsed)) => parsed,
-                Ok(None) => continue,
-                Err(error) => {
-                    return Err(PipelineOverrideError::BadRequest(format!(
-                        "malformed existing repo override (repo={repo_id}) blocks pipeline override write: {error}"
-                    )));
+            let existing = match raw.as_deref() {
+                Some(value) if !value.trim().is_empty() => {
+                    match crate::pipeline::parse_override(value) {
+                        Ok(parsed) => parsed,
+                        Err(error) => {
+                            return Err(PipelineOverrideError::BadRequest(format!(
+                                "malformed existing repo override (repo={repo_id}) blocks pipeline override write: {error}"
+                            )));
+                        }
+                    }
                 }
+                _ => None,
             };
             if let Err(PipelineOverrideError::BadRequest(message)) =
-                validate_pipeline_override(Some(&existing), new_agent_override)
+                validate_pipeline_override(existing.as_ref(), new_agent_override)
             {
                 return Err(PipelineOverrideError::BadRequest(format!(
                     "merged pipeline invalid when combined with existing repo override (repo={repo_id}): {message}"

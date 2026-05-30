@@ -1705,6 +1705,110 @@ async fn agents_pg_patch_rejects_pipeline_config_invalid_after_repo_merge() {
 }
 
 #[tokio::test]
+async fn agents_pg_patch_accepts_pipeline_config_valid_after_repo_merge_with_custom_state() {
+    crate::pipeline::ensure_loaded();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+
+    let repo_override_with_staging_review = json!({
+        "states": [
+            {"id": "backlog", "label": "Backlog"},
+            {"id": "ready", "label": "Ready"},
+            {"id": "requested", "label": "Requested"},
+            {"id": "in_progress", "label": "In Progress"},
+            {"id": "review", "label": "Review"},
+            {"id": "staging_review", "label": "Staging Review"},
+            {"id": "done", "label": "Done", "terminal": true}
+        ]
+    });
+
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, status, xp)
+         VALUES ('pg-agent-merge-valid-custom', 'PG Agent Merge Valid Custom', 'codex', 'idle', 0)",
+    )
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO github_repos (id, display_name, pipeline_config)
+         VALUES ('owner/repo-with-staging-review', 'Repo With Staging Review', $1::jsonb)",
+    )
+    .bind(repo_override_with_staging_review.to_string())
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (id, title, status, repo_id, assigned_agent_id, created_at, updated_at)
+         VALUES ('card-merge-valid-custom', 'Merge Valid Custom', 'ready', 'owner/repo-with-staging-review', 'pg-agent-merge-valid-custom', NOW(), NOW())",
+    )
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let update_response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/agents/pg-agent-merge-valid-custom")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "pipeline_config": {
+                            "transitions": [
+                                {"from": "in_progress", "to": "staging_review", "type": "free"},
+                                {"from": "staging_review", "to": "done", "type": "free"}
+                            ],
+                            "hooks": {
+                                "staging_review": {
+                                    "on_enter": ["OnReviewEnter"],
+                                    "on_exit": []
+                                }
+                            }
+                        }
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let update_status = update_response.status();
+    let update_body = axum::body::to_bytes(update_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let update_json: serde_json::Value = serde_json::from_slice(&update_body).unwrap();
+    assert_eq!(
+        update_status,
+        StatusCode::OK,
+        "repo custom state should make the effective repo+agent pipeline valid: {update_json}"
+    );
+
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT pipeline_config::text FROM agents WHERE id = 'pg-agent-merge-valid-custom'",
+    )
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    let stored = stored.expect("agent pipeline_config should be stored");
+    assert!(
+        stored.contains("staging_review"),
+        "agent pipeline_config should contain the custom-state transition: {stored}"
+    );
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
 async fn claude_session_id_pg_get_clears_stale_fixed_working_session() {
     let pg_db = TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
