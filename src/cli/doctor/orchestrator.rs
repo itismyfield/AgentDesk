@@ -3703,9 +3703,8 @@ fn check_postgres_connection(cfg: &config::Config) -> Check {
     match runtime.block_on(crate::db::postgres::connect(cfg)) {
         Ok(Some(pool)) => {
             let migration_status = runtime.block_on(crate::db::postgres::migration_status(&pool));
-            let checksum_mismatches = runtime.block_on(
-                crate::db::postgres::applied_migration_checksum_mismatches(&pool),
-            );
+            let checksum_mismatches = runtime
+                .block_on(crate::db::postgres::applied_migration_checksum_mismatch_details(&pool));
             drop(pool);
             match (migration_status, checksum_mismatches) {
                 (Ok(status), Ok(checksum_mismatches))
@@ -3727,7 +3726,7 @@ fn check_postgres_connection(cfg: &config::Config) -> Check {
                         "applied_count": status.applied.len(),
                         "resolved_count": status.resolved_versions.len(),
                         "pending_versions": status.pending_versions,
-                        "checksum_mismatches": checksum_mismatches,
+                        "checksum_mismatches": checksum_mismatch_evidence(&checksum_mismatches),
                     }))
                     .with_expected_actual("postgres connection and migration metadata readable", "ok")
                 }
@@ -3736,10 +3735,10 @@ fn check_postgres_connection(cfg: &config::Config) -> Check {
                     CheckGroup::Core,
                     "PostgreSQL",
                     format!(
-                        "{summary} — migration drift: missing_from_resolved={:?} unsuccessful={:?} checksum_mismatches={:?}",
+                        "{summary} — migration drift: missing_from_resolved={:?} unsuccessful={:?} checksum_mismatches={}",
                         status.missing_from_resolved,
                         unsuccessful_migration_versions(&status),
-                        checksum_mismatches
+                        format_checksum_mismatches(&checksum_mismatches)
                     ),
                     "Postgres _sqlx_migrations contains drift or unsuccessful migration records.",
                 )
@@ -3752,7 +3751,7 @@ fn check_postgres_connection(cfg: &config::Config) -> Check {
                     "missing_from_resolved": status.missing_from_resolved,
                     "unsuccessful_versions": unsuccessful_migration_versions(&status),
                     "pending_versions": status.pending_versions,
-                    "checksum_mismatches": checksum_mismatches,
+                    "checksum_mismatches": checksum_mismatch_evidence(&checksum_mismatches),
                 }))
                 .with_expected_actual(
                     "applied migrations all exist in resolved migrations, succeeded, and checksum-matched",
@@ -3810,9 +3809,42 @@ fn unsuccessful_migration_versions(status: &crate::db::postgres::MigrationStatus
         .collect()
 }
 
+fn checksum_mismatch_evidence(
+    mismatches: &[crate::db::postgres::MigrationChecksumMismatch],
+) -> Vec<Value> {
+    mismatches
+        .iter()
+        .map(|mismatch| {
+            json!({
+                "version": mismatch.version,
+                "applied_checksum": mismatch.applied_checksum,
+                "resolved_checksum": mismatch.resolved_checksum,
+            })
+        })
+        .collect()
+}
+
+fn format_checksum_mismatches(
+    mismatches: &[crate::db::postgres::MigrationChecksumMismatch],
+) -> String {
+    if mismatches.is_empty() {
+        return "[]".to_string();
+    }
+    let parts = mismatches
+        .iter()
+        .map(|mismatch| {
+            format!(
+                "version={} applied_checksum={} resolved_checksum={}",
+                mismatch.version, mismatch.applied_checksum, mismatch.resolved_checksum
+            )
+        })
+        .collect::<Vec<_>>();
+    format!("[{}]", parts.join(", "))
+}
+
 fn postgres_migration_status_is_healthy(
     status: &crate::db::postgres::MigrationStatus,
-    checksum_mismatches: &[i64],
+    checksum_mismatches: &[crate::db::postgres::MigrationChecksumMismatch],
 ) -> bool {
     status.missing_from_resolved.is_empty()
         && unsuccessful_migration_versions(status).is_empty()
@@ -4306,7 +4338,7 @@ pub fn cmd_doctor(options: DoctorOptions) -> Result<(), String> {
 mod profile_filter_tests {
     use super::{
         Check, CheckGroup, DoctorOptions, build_json_report, check_group_from_report,
-        doctor_profile_includes_check,
+        checksum_mismatch_evidence, doctor_profile_includes_check, format_checksum_mismatches,
     };
     use crate::cli::doctor::contract::{DoctorProfile, RunContext};
 
@@ -4398,6 +4430,25 @@ mod profile_filter_tests {
             check_group_from_report("optional_connectors"),
             CheckGroup::OptionalConnectors
         );
+    }
+
+    #[test]
+    fn postgres_checksum_mismatch_detail_includes_applied_and_resolved_hashes() {
+        let mismatches = vec![crate::db::postgres::MigrationChecksumMismatch {
+            version: 1,
+            applied_checksum: "oldchecksum".to_string(),
+            resolved_checksum: "newchecksum".to_string(),
+        }];
+
+        let formatted = format_checksum_mismatches(&mismatches);
+        assert!(formatted.contains("version=1"));
+        assert!(formatted.contains("applied_checksum=oldchecksum"));
+        assert!(formatted.contains("resolved_checksum=newchecksum"));
+
+        let evidence = checksum_mismatch_evidence(&mismatches);
+        assert_eq!(evidence[0]["version"], 1);
+        assert_eq!(evidence[0]["applied_checksum"], "oldchecksum");
+        assert_eq!(evidence[0]["resolved_checksum"], "newchecksum");
     }
 }
 
@@ -5221,7 +5272,11 @@ mod tests {
 
         assert!(!postgres_migration_status_is_healthy(
             &status,
-            &[202604250001]
+            &[crate::db::postgres::MigrationChecksumMismatch {
+                version: 202604250001,
+                applied_checksum: "applied".to_string(),
+                resolved_checksum: "resolved".to_string(),
+            }]
         ));
     }
 

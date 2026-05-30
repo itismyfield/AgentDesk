@@ -1,0 +1,361 @@
+{
+  "policy": "Numbered postgres migrations are immutable after merge. Add new migration files and append their checksum here. For intentional edits to an existing migration, keep this baseline unchanged and add migrations/postgres/checksum-repair-allowlist.json.",
+  "protected_migrations": [
+    {
+      "path": "migrations/postgres/0001_initial_schema.sql",
+      "sha256": "c044f9e24cfba51126a6176095c198f16ad1275fcee07ed468e6345e0d79a88b",
+      "version": 1
+    },
+    {
+      "path": "migrations/postgres/0002_sqlite_compat_functions.sql",
+      "sha256": "c0b8e75c906126b9b3b0b2a4f57b7e34f72b7228853dcf1c2976e3cdeb40f3ae",
+      "version": 2
+    },
+    {
+      "path": "migrations/postgres/0003_pr_tracking_create_pr_support.sql",
+      "sha256": "beeb263fb71d6fed0becd8042a01a9dd1d804905da0cd27706877e064e4f1bb4",
+      "version": 3
+    },
+    {
+      "path": "migrations/postgres/0004_auto_queue_entry_retry_count.sql",
+      "sha256": "205b9831f2a04a2533fa632fa608508a7b2745e94164ec145808053d5008a664",
+      "version": 4
+    },
+    {
+      "path": "migrations/postgres/0005_message_outbox_dedupe.sql",
+      "sha256": "11868d2b7a4ff10e090c40f8cdb2bf123025213b2689a3ad796487bc0f6f60ab",
+      "version": 5
+    },
+    {
+      "path": "migrations/postgres/0006_drop_deploy_phases_and_dev_deploy_stages.sql",
+      "sha256": "bb6d24dd6e5f353aaa3efdaf929d23ebfb484fe7538335c5e7cd19fdb6f8cd8b",
+      "version": 6
+    },
+    {
+      "path": "migrations/postgres/0007_skills_soft_delete.sql",
+      "sha256": "6d176542303319575bbb1a981f03694c10a0e759e7ea111fcf2d7110eff543cf",
+      "version": 7
+    },
+    {
+      "path": "migrations/postgres/0008_int4_to_bigint_audit.sql",
+      "sha256": "0c2007fee6af1bb57d0e19868b425e2cc49576297b4d099ef26630e1e28a388f",
+      "version": 8
+    },
+    {
+      "path": "migrations/postgres/0009_observability_backbone.sql",
+      "sha256": "57f6029ea29abaf0f837c8f29eac54f597cd30455b67506459f428f6048adf64",
+      "version": 9
+    },
+    {
+      "path": "migrations/postgres/0010_issue_card_unique_upsert.sql",
+      "sha256": "b1ec7a543ffd7062d5c54a189680cbc28b4d15b52cfdb17b85aee4a2a6d240e7",
+      "version": 10
+    },
+    {
+      "path": "migrations/postgres/0011_auto_queue_review_mode.sql",
+      "sha256": "c1b7dd5b92e60d698bafcc6af147a5f0a407f1de88d4fc06f418dd666c5a42d8",
+      "version": 11
+    },
+    {
+      "path": "migrations/postgres/0012_agent_quality_event.sql",
+      "sha256": "53c12eae985e3f558ab4f688922a6353fb329023d8ae97dbaf85051bf7f6f94a",
+      "version": 12
+    },
+    {
+      "path": "migrations/postgres/0013_agent_quality_daily.down.sql",
+      "sha256": "80e124b0a0ed61b727e463348eff78f5e64579f9c6a8fac67f2a7d9c912ead2f",
+      "version": 13
+    },
+    {
+      "path": "migrations/postgres/0013_agent_quality_daily.up.sql",
+      "sha256": "486a56ffe3fe335167cd09be649a61ef693c4af27b6d5e178a93a69f3bfa548b",
+      "version": 13
+    },
+    {
+      "path": "migrations/postgres/0014_agent_archive.sql",
+      "sha256": "8b4a9b0f01be676874cea0d08ddc38828b98b8c188fbef71ac51f2f8459c0a09",
+      "version": 14
+    },
+    {
+      "path": "migrations/postgres/0015_slo_aggregates.sql",
+      "sha256": "97e3dbdf3cdaeadb288a0455d56debe631b61d21ab163093dc4be9929cab2979",
+      "version": 15
+    },
+    {
+      "path": "migrations/postgres/0016_retention_tables.sql",
+      "sha256": "3d4d1b19ca543f831efacf5917ab068679ceee715c4806581d750e1e52739efd",
+      "version": 16
+    },
+    {
+      "path": "migrations/postgres/0018_agent_quality_daily_extended.sql",
+      "sha256": "bb6783731ed66595e3b33582dc721dc9f27dd5e0b4313df8cee378c102363840",
+      "version": 18
+    },
+    {
+      "path": "migrations/postgres/0019_db_table_metadata.sql",
+      "sha256": "d13a04bd30864bcb97ee00e4b38ac31f2588e928722780af5a7b2bb4a6b5f577",
+      "version": 19
+    },
+    {
+      "path": "migrations/postgres/0020_quality_regression_cooldowns.sql",
+      "sha256": "9cfd28e68b3e8c71d20a043e0e400ade31db4b75564b4690d8fe69fe7b727ee4",
+      "version": 20
+    },
+    {
+      "path": "migrations/postgres/0021_agent_prompt_commits.sql",
+      "sha256": "49a558795715e8af9450c21e0aaf47d1125e9f6c79d05e064178c1b8161c2bf3",
+      "version": 21
+    },
+    {
+      "path": "migrations/postgres/0022_dispatch_outbox_delivery_result.sql",
+      "sha256": "7e95db317daf3fe858b1a92a3cb3f39243c4fd68ce981fececb45b749c94e4fd",
+      "version": 22
+    },
+    {
+      "path": "migrations/postgres/0023_analytics_indices.sql",
+      "sha256": "3fcd6135108e45874442837573fb1f04ce1e87483c4c42995d7a9fa2eb1f18e0",
+      "version": 23
+    },
+    {
+      "path": "migrations/postgres/0024_cancel_tombstones.sql",
+      "sha256": "87c810db217ce322ea0bf1800bbd7d12bbe873b92047dc89ba21c7844f0031d6",
+      "version": 24
+    },
+    {
+      "path": "migrations/postgres/0025_auto_queue_phase_gate_grace.sql",
+      "sha256": "1a301410d4fdb6557a2f92ff08bb3a008af608446e48d85e2b0e27e55fadb32a",
+      "version": 25
+    },
+    {
+      "path": "migrations/postgres/0026_session_observability_backbone.sql",
+      "sha256": "02816c8822d31239ab61039cb46ccdcbb2a3505e8d13594f75a8d987e0b654f8",
+      "version": 26
+    },
+    {
+      "path": "migrations/postgres/0027_issue_announcements.sql",
+      "sha256": "306ce268a9ddbb46882ef713ba469fed53f7e10a1ef278da425fbee6b8a12bc9",
+      "version": 27
+    },
+    {
+      "path": "migrations/postgres/0028_sessions_status_4state.sql",
+      "sha256": "c07da0e8e6a2efdc78fba606997333260231785eb0cbfa3a65db24f667a94566",
+      "version": 28
+    },
+    {
+      "path": "migrations/postgres/0029_worker_nodes.sql",
+      "sha256": "ccf9331d01bb3cd80027196738dd4d6fcef2346ff597af260f9df17f322d928f",
+      "version": 29
+    },
+    {
+      "path": "migrations/postgres/0030_dispatch_outbox_claims.sql",
+      "sha256": "7a850847df8c218199761492145dfbec8f20a6549fc8e817d40d12f95da41cc0",
+      "version": 30
+    },
+    {
+      "path": "migrations/postgres/0031_worker_capability_routing.sql",
+      "sha256": "596f87b33f39993ab044a05ca3708b686c408a198b4a4743c6d784bba13acfd2",
+      "version": 31
+    },
+    {
+      "path": "migrations/postgres/0032_resource_locks.sql",
+      "sha256": "c3d2282ba19d17bc2df45f203be676a2f26afb8994eed02d73b82467eeb2b235",
+      "version": 32
+    },
+    {
+      "path": "migrations/postgres/0033_test_phase_runs.sql",
+      "sha256": "f25fe0664bfc39c9ef3f17636668399f525e8f7524f57aba68b3681dacd85a18",
+      "version": 33
+    },
+    {
+      "path": "migrations/postgres/0034_multinode_phase_gate_contract.sql",
+      "sha256": "5cae9bf0b84ce15016f12849e9809f99c9b623264c0caec913492fa73f3aafea",
+      "version": 34
+    },
+    {
+      "path": "migrations/postgres/0035_routines.sql",
+      "sha256": "1a5680bd568a4c8d20fe14944304d811d7aca80261a095b9aedf331e7dc7ad03",
+      "version": 35
+    },
+    {
+      "path": "migrations/postgres/0036_routines_revision.sql",
+      "sha256": "3dc19b14a9b05f6d440610edd9eea4a0456da0b23098e92dcf77aefbe2fd950a",
+      "version": 36
+    },
+    {
+      "path": "migrations/postgres/0037_turn_lifecycle_events.sql",
+      "sha256": "fedc630bc77eb2ab3c68a11f1bd87c3d8eba586054237245ce84a8983bd225ef",
+      "version": 37
+    },
+    {
+      "path": "migrations/postgres/0038_prompt_manifests.sql",
+      "sha256": "31d4579c40b8e3616fb0b3f24e86c12c5b9820cc58b45f36a05eabcc6f5a3034",
+      "version": 38
+    },
+    {
+      "path": "migrations/postgres/0039_recovery_audit_records.sql",
+      "sha256": "53597b66f80e36f6d950c9d7e59dcaf16338993a266b0071834b224984e04e43",
+      "version": 39
+    },
+    {
+      "path": "migrations/postgres/0040_sessions_instance_id.sql",
+      "sha256": "a95435900d554a3229435aba3fdfcfc98ca14f99a6728bca8de0ed3ec975c71b",
+      "version": 40
+    },
+    {
+      "path": "migrations/postgres/0041_prompt_manifest_retention.sql",
+      "sha256": "a3314ca41cc1c66048c794ed1342faf3e9e110b894d8b6a096564d5567ea7e49",
+      "version": 41
+    },
+    {
+      "path": "migrations/postgres/0042_message_outbox_retry.sql",
+      "sha256": "bf4440aee8d5771f24ff9bc3d2aafd66d3af3c8b3655fab9dabbe6f06d44a9c9",
+      "version": 42
+    },
+    {
+      "path": "migrations/postgres/0043_auto_queue_entries_updated_at.sql",
+      "sha256": "c58559473a4852c8031959f7e6e9994f5a7f6ef9db3300b16b2519831ab270f3",
+      "version": 43
+    },
+    {
+      "path": "migrations/postgres/0044_dispatch_stuck_alert.sql",
+      "sha256": "4029dc1731f585ae5975bdc0f33fa63f0c06c8527d5de01604bdc2764c9497f1",
+      "version": 44
+    },
+    {
+      "path": "migrations/postgres/0045_sessions_terminal_delivery_marker.sql",
+      "sha256": "813c46eb99cd1f8dc2d3afd7fa230a15a56633d79ae10ee5024bfb6466949cd4",
+      "version": 45
+    },
+    {
+      "path": "migrations/postgres/0046_dispatch_delivery_events.sql",
+      "sha256": "6c64f21ec0542e108950cdcb70ac831cd51a8aaaf4fd12776aaa37a7e69adf2e",
+      "version": 46
+    },
+    {
+      "path": "migrations/postgres/0047_dispatch_semaphore_holdings.sql",
+      "sha256": "df00e176f64dba0c912874336a864157f36f5c6926f219f5b7769a0c59146745",
+      "version": 47
+    },
+    {
+      "path": "migrations/postgres/0048_routing_constraint_results.sql",
+      "sha256": "f5cd4a96ea1a3d8bcaf3827c1b26d01ea97996fc4f08add874d5357fbdeeca61",
+      "version": 48
+    },
+    {
+      "path": "migrations/postgres/0049_node_concurrency_cap.sql",
+      "sha256": "947d7d59abe594d15f724728f4ffe78ab18f5dee56f62c1ebc58e8bdec85f873",
+      "version": 49
+    },
+    {
+      "path": "migrations/postgres/0050_dispatch_outbox_stale_claim_owner.sql",
+      "sha256": "0d438b9906c003f9401f73f17e24f9e6b81f1d3241baff5eb15983ee0bb7b219",
+      "version": 50
+    },
+    {
+      "path": "migrations/postgres/0051_dispatch_outbox_wait_queue.sql",
+      "sha256": "f6f0a2c102cd7e9823d4661a09ebb48f95b3e70ef74bda215e45a57d2c823709",
+      "version": 51
+    },
+    {
+      "path": "migrations/postgres/0052_intake_node_routing.sql",
+      "sha256": "9ed1933c4d1506183bbe28bf496b5f1044d13b7446f37c33e3e18743c3cd5d11",
+      "version": 52
+    },
+    {
+      "path": "migrations/postgres/0053_automation_candidate_iterations.sql",
+      "sha256": "33226a72adced7aa1f2378c04d54c57a08bfd3cce981244a13549c22027d6810",
+      "version": 53
+    },
+    {
+      "path": "migrations/postgres/0054_routine_run_discord_summary.sql",
+      "sha256": "22bd8c58ea6d4703a9efc7d466652d8b5f734d72cec9e09e5dc3d1743831a06d",
+      "version": 54
+    },
+    {
+      "path": "migrations/postgres/0055_sessions_idle_recap_state.sql",
+      "sha256": "7d1026cbf2c1881fc1e58568b29733c7c9909b2f346f26c70cbbb489f2641f42",
+      "version": 55
+    },
+    {
+      "path": "migrations/postgres/0056_sessions_tokens_updated_at.sql",
+      "sha256": "90200c1a70367963800fe21c1235149ada90e27957d1fbf6a8019d72c6d57dc3",
+      "version": 56
+    },
+    {
+      "path": "migrations/postgres/0057_auto_queue_entries_phase_gate_kind.sql",
+      "sha256": "1ada932a8f7481552a73eccd9fc1e2734d55b06b051f49bc4ae62b004c329dea",
+      "version": 57
+    },
+    {
+      "path": "migrations/postgres/0058_sqlite_compat_json_extract_array.down.sql",
+      "sha256": "3074601911b323e6ceec6a7fae4eec11dda08e562bc826ded5e4f87eb8185d35",
+      "version": 58
+    },
+    {
+      "path": "migrations/postgres/0058_sqlite_compat_json_extract_array.up.sql",
+      "sha256": "9202cb7cc664482eac6e897cd09d0b17330d78d969f85ccb190c202d8f83c6f4",
+      "version": 58
+    },
+    {
+      "path": "migrations/postgres/0059_idempotency_keys.down.sql",
+      "sha256": "3a7e603176082d28559294bbf1b6c0be10c08f420297db27f26e7210fb1f7b62",
+      "version": 59
+    },
+    {
+      "path": "migrations/postgres/0059_idempotency_keys.up.sql",
+      "sha256": "26d2bd00c0a32205edd62a538d8f4dfcce72abec8d9ba6286c81eeb82a1d67b4",
+      "version": 59
+    },
+    {
+      "path": "migrations/postgres/0060_voice_turn_link.down.sql",
+      "sha256": "1806492df629e6edeca59dac63064a31e48afe3fa62d27d38d70a3bcfbda7c3b",
+      "version": 60
+    },
+    {
+      "path": "migrations/postgres/0060_voice_turn_link.up.sql",
+      "sha256": "9101cacca3ad66fb9cca11a543e773a1bcacab6a62b2ad6a4befded519e23c2a",
+      "version": 60
+    },
+    {
+      "path": "migrations/postgres/0061_voice_background_handoff_meta.sql",
+      "sha256": "21067125bffe0fa56977b625b701d0a56d06acb7996a8808a86c8b602a51a037",
+      "version": 61
+    },
+    {
+      "path": "migrations/postgres/0062_skill_usage_fast_path_indexes.sql",
+      "sha256": "a2a935b6f826d2d9f6f90ffbc72ea669b1c24e8455b82f1d0b2c229312a8ce12",
+      "version": 62
+    },
+    {
+      "path": "migrations/postgres/0063_voice_transcript_announcement_meta.sql",
+      "sha256": "0455de0f407867223aff5fb810b37ece60eab49d111c2f5439a0901604b93f2e",
+      "version": 63
+    },
+    {
+      "path": "migrations/postgres/0064_voice_turn_link_turn_id_resolution.sql",
+      "sha256": "71150c85b25a9a2634d7d847377eb814eab206bb07966e129f3399b988c8f0f8",
+      "version": 64
+    },
+    {
+      "path": "migrations/postgres/0065_voice_handoff_meta_expires_at.sql",
+      "sha256": "ce013f8e309723a14fc1b8c7dfb68d699361027b5e95e2b9f79a11450ae22732",
+      "version": 65
+    },
+    {
+      "path": "migrations/postgres/0066_message_outbox_dedupe_key.sql",
+      "sha256": "e69b2d9d459bb11b7e842d0a86c93e8ee00affe1ce066c48379a883c9863bf66",
+      "version": 66
+    },
+    {
+      "path": "migrations/postgres/0067_task_dispatches_status_check.sql",
+      "sha256": "6357853f2c69e7b4281efd9733aea31a3ca9fcf5b8076cffe6f2ed7b78816726",
+      "version": 67
+    },
+    {
+      "path": "migrations/postgres/0068_core_status_constraints.sql",
+      "sha256": "be3ec7a7e55ed066599f34a6c08ae3e11c7ad69490e758df04faf6f060a35b38",
+      "version": 68
+    }
+  ],
+  "version": 1
+}
