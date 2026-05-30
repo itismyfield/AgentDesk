@@ -1,7 +1,7 @@
 use poise::serenity_prelude as serenity;
-use serenity::CreateMessage;
 
 use super::super::formatting::{send_long_message_ctx, truncate_str};
+use super::super::outbound::confirmation::send_command_confirmation_message;
 use super::super::router::{IntakeDeps, TurnKind, handle_text_message};
 use super::super::{
     Context, Error, auto_restore_session, check_auth, mailbox_cancel_active_turn,
@@ -265,17 +265,17 @@ async fn run_skill_slash_command(
         let channel_id = ctx.channel_id();
         let serenity_ctx = ctx.serenity_context();
         ctx.defer().await?;
-        let confirm = channel_id
-            .send_message(
-                serenity_ctx,
-                CreateMessage::new().content(format!(
-                    "↪ Forwarding unknown skill `{}` to the AI provider as a regular prompt.",
-                    full_text
-                )),
-            )
-            .await?;
-        auto_restore_session(&ctx.data().shared, channel_id, serenity_ctx).await;
         let data = ctx.data();
+        let confirm_id = send_command_confirmation_message(
+            &data.token,
+            channel_id,
+            format!(
+                "↪ Forwarding unknown skill `{}` to the AI provider as a regular prompt.",
+                full_text
+            ),
+        )
+        .await?;
+        auto_restore_session(&ctx.data().shared, channel_id, serenity_ctx).await;
         let deps = IntakeDeps {
             http: &serenity_ctx.http,
             cache: Some(&serenity_ctx.cache),
@@ -286,7 +286,7 @@ async fn run_skill_slash_command(
         handle_text_message(
             &deps,
             channel_id,
-            confirm.id,
+            confirm_id,
             ctx.author().id,
             &ctx.author().name,
             &full_text,
@@ -337,16 +337,15 @@ async fn run_skill_slash_command(
 
     // Send a confirmation message that we can use as the "user message" for reactions
     ctx.defer().await?;
-    let confirm = ctx
-        .channel_id()
-        .send_message(
-            ctx.serenity_context(),
-            CreateMessage::new().content(format!("⚡ Running skill: `/{skill}`")),
-        )
-        .await?;
+    let data = ctx.data();
+    let confirm_id = send_command_confirmation_message(
+        &data.token,
+        ctx.channel_id(),
+        format!("⚡ Running skill: `/{skill}`"),
+    )
+    .await?;
 
     // Hand off to the text message handler (it creates its own placeholder)
-    let data = ctx.data();
     let serenity_ctx = ctx.serenity_context();
     let deps = IntakeDeps {
         http: &serenity_ctx.http,
@@ -358,7 +357,7 @@ async fn run_skill_slash_command(
     handle_text_message(
         &deps,
         ctx.channel_id(),
-        confirm.id,
+        confirm_id,
         ctx.author().id,
         &ctx.author().name,
         &skill_prompt,

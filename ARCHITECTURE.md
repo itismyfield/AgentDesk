@@ -429,6 +429,7 @@ src/
 │   │   │   ├── session_enrichment.rs
 │   │   │   └── snapshot.rs
 │   │   ├── outbound/
+│   │   │   ├── confirmation.rs
 │   │   │   ├── decision.rs
 │   │   │   ├── delivery.rs
 │   │   │   ├── message.rs
