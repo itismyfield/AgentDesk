@@ -2201,6 +2201,10 @@ mod auto_queue_terminal_sync_policy_tests {
             "agents.status must have a closed stable CHECK"
         );
         assert!(
+            sql.contains("WHEN lower(btrim(status)) IN ('active') THEN 'idle'"),
+            "legacy onboarding agents.status='active' must normalize to canonical idle before CHECK install"
+        );
+        assert!(
             sql.contains("kanban_cards_status_slug_check")
                 && sql.contains("regexp_replace(lower(btrim(status))")
                 && sql.contains("qa_test"),

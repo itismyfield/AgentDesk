@@ -500,6 +500,69 @@ mod tests {
         })
     }
 
+    fn invalid_slug_state_override() -> Value {
+        serde_json::json!({
+            "states": [
+                {"id": "backlog", "label": "Backlog"},
+                {"id": "qa-test", "label": "QA Test"},
+                {"id": "done", "label": "Done", "terminal": true}
+            ],
+            "transitions": [
+                {"from": "backlog", "to": "qa-test", "type": "free"},
+                {"from": "qa-test", "to": "done", "type": "gated", "gates": ["review_passed"]}
+            ],
+            "gates": {
+                "review_passed": {"type": "builtin", "check": "review_verdict_pass"}
+            }
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repo_write_rejects_state_id_that_would_fail_kanban_status_check() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.connect_with_minimal_schema().await else {
+            pg_db.drop().await;
+            return;
+        };
+        crate::pipeline::ensure_loaded();
+        seed_agent(&pool, "agent-slug-a", None).await;
+        seed_repo_with_default_agent(&pool, "repo-slug-a", "agent-slug-a", None).await;
+
+        let service = PipelineOverrideService::new(&pool);
+        let result = service
+            .set_repo_pipeline("repo-slug-a", Some(&invalid_slug_state_override()))
+            .await;
+
+        match result {
+            Err(PipelineOverrideError::BadRequest(message)) => {
+                assert!(
+                    message.contains("kanban status slug contract ^[a-z][a-z0-9_]*$"),
+                    "BadRequest must explain kanban status slug contract, got: {message}"
+                );
+            }
+            other => panic!(
+                "expected BadRequest for invalid state id, got: {:?}",
+                other.map(|()| "Ok").unwrap_or("non-BadRequest err")
+            ),
+        }
+
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT pipeline_config::text FROM github_repos WHERE id = 'repo-slug-a'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("repo pipeline_config lookup");
+        assert!(
+            stored.is_none(),
+            "repo pipeline_config must remain NULL after rejected write; got {stored:?}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn repo_write_rejects_malformed_existing_agent_override() {
         let Some(pg_db) = TestPostgresDb::create().await else {

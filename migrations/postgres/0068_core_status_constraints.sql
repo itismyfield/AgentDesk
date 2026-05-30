@@ -16,7 +16,8 @@ UPDATE agents
 SET status = CASE
     WHEN status IS NULL OR btrim(status) = '' THEN 'idle'
     WHEN lower(btrim(status)) IN ('idle', 'working', 'archived') THEN lower(btrim(status))
-    WHEN lower(btrim(status)) IN ('active', 'busy', 'running') THEN 'working'
+    WHEN lower(btrim(status)) IN ('active') THEN 'idle'
+    WHEN lower(btrim(status)) IN ('busy', 'running') THEN 'working'
     WHEN lower(btrim(status)) IN ('disabled', 'deleted', 'inactive') THEN 'archived'
     ELSE 'idle'
 END;

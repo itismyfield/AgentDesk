@@ -711,6 +711,15 @@ pub struct StateConfig {
     pub terminal: bool,
 }
 
+fn is_valid_state_id_slug(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    match bytes.next() {
+        Some(b'a'..=b'z') => {}
+        _ => return false,
+    }
+    bytes.all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_'))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransitionConfig {
     pub from: String,
@@ -1196,6 +1205,15 @@ impl PipelineConfig {
     pub fn validate(&self) -> Result<()> {
         let state_ids: Vec<&str> = self.states.iter().map(|s| s.id.as_str()).collect();
 
+        for state in &self.states {
+            if !is_valid_state_id_slug(&state.id) {
+                anyhow::bail!(
+                    "state id '{}' must match kanban status slug contract ^[a-z][a-z0-9_]*$",
+                    state.id
+                );
+            }
+        }
+
         // All transition from/to must reference valid states
         for t in &self.transitions {
             if !state_ids.contains(&t.from.as_str()) {
@@ -1314,6 +1332,38 @@ impl PipelineConfig {
             "nodes": nodes,
             "edges": edges,
         })
+    }
+}
+
+#[cfg(test)]
+mod state_slug_contract_tests {
+    use super::*;
+
+    #[test]
+    fn validate_rejects_state_id_that_would_fail_kanban_status_check() {
+        let config = PipelineConfig {
+            name: "test".to_string(),
+            version: 1,
+            states: vec![StateConfig {
+                id: "qa-test".to_string(),
+                label: "QA Test".to_string(),
+                terminal: false,
+            }],
+            transitions: Vec::new(),
+            gates: HashMap::new(),
+            hooks: HashMap::new(),
+            events: HashMap::new(),
+            clocks: HashMap::new(),
+            timeouts: HashMap::new(),
+            phase_gate: PhaseGateConfig::default(),
+        };
+
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("kanban status slug contract ^[a-z][a-z0-9_]*$"),
+            "{err}"
+        );
     }
 }
 

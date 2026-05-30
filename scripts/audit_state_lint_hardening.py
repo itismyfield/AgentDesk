@@ -36,7 +36,7 @@ UNWRAP_PATTERNS = (
 )
 
 INTEGER_COLUMN_RE = re.compile(
-    r"(?i)^\s*(?:ALTER\s+TABLE\s+\S+\s+)?(?:ADD\s+COLUMN\s+)?"
+    r"(?i)^\s*(?:ALTER\s+TABLE\s+\S+\s+)?(?:ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?)?"
     r"([a-z_][a-z0-9_]*)\s+(INTEGER|SERIAL)\b"
 )
 
