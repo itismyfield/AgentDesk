@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use poise::serenity_prelude as serenity;
 use serenity::CreateAttachment;
 
-use super::super::formatting::send_long_message_ctx;
+use super::super::formatting::send_long_message_reply_ctx;
 use super::super::{Context, Error, check_auth};
 use crate::receipt;
 use crate::services::platform;
@@ -190,7 +190,7 @@ pub(in crate::services::discord) async fn cmd_usage(
         .await
         .map_err(|e| format!("usage collection failed: {e}"))?;
 
-    send_long_message_ctx(ctx, &build_usage_report(&data)).await?;
+    send_long_message_reply_ctx(ctx, &build_usage_report(&data)).await?;
     Ok(())
 }
 
@@ -269,7 +269,10 @@ fn build_usage_report(data: &receipt::ReceiptData) -> String {
 mod tests {
     use super::build_usage_report;
     use crate::receipt::{AgentShare, ModelLineItem, ProviderShare, ReceiptData, ReceiptStats};
-    use crate::services::discord::{DISCORD_MSG_LIMIT, formatting::split_message};
+    use crate::services::discord::{
+        DISCORD_MSG_LIMIT,
+        formatting::{long_message_reply_builders, split_message},
+    };
     use std::collections::HashMap;
 
     #[test]
@@ -382,5 +385,12 @@ mod tests {
             chunks.iter().all(|chunk| chunk.len() <= DISCORD_MSG_LIMIT),
             "all chunks must fit Discord's 2000-byte message cap"
         );
+
+        let replies = long_message_reply_builders(&report);
+        let reply_contents: Vec<String> = replies
+            .iter()
+            .map(|reply| reply.content.as_ref().expect("reply content").clone())
+            .collect();
+        assert_eq!(reply_contents, chunks);
     }
 }

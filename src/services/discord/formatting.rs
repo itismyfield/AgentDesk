@@ -2546,6 +2546,50 @@ pub(super) async fn send_long_message_ctx(ctx: Context<'_>, text: &str) -> Resul
     Ok(())
 }
 
+pub(in crate::services::discord) fn long_message_reply_builders(
+    text: &str,
+) -> Vec<poise::CreateReply> {
+    if text.len() <= DISCORD_MSG_LIMIT {
+        return vec![poise::CreateReply::default().content(text.to_string())];
+    }
+
+    split_message(text)
+        .into_iter()
+        .map(|chunk| poise::CreateReply::default().content(chunk))
+        .collect()
+}
+
+/// Send a long command response through poise's reply abstraction.
+///
+/// In slash-command contexts, poise maps the first call to an interaction
+/// response and later calls to interaction followups. That avoids direct
+/// channel sends from slash command handlers while preserving chunking.
+pub(in crate::services::discord) async fn send_long_message_reply_ctx(
+    ctx: Context<'_>,
+    text: &str,
+) -> Result<(), Error> {
+    let replies = long_message_reply_builders(text);
+    let total = replies.len();
+
+    for (i, reply) in replies.into_iter().enumerate() {
+        let byte_len = reply.content.as_ref().map_or(0, String::len);
+        tracing::debug!(
+            target: "discord::chunker",
+            path = "send_long_message_reply_ctx",
+            chunk_index = i,
+            byte_len,
+            total_chunks = total,
+            "discord command reply chunk"
+        );
+        if i > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
+        ctx.send(reply).await?;
+    }
+
+    Ok(())
+}
+
 /// Send a long message using raw HTTP, splitting if necessary
 pub(super) async fn send_long_message_raw(
     http: &serenity::Http,
