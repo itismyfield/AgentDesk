@@ -69,17 +69,13 @@ impl TurnGateway for TuiDirectBridgeGateway {
         content: &'a str,
     ) -> GatewayFuture<'a, Result<MessageId, String>> {
         Box::pin(async move {
-            super::rate_limit_wait(&self.shared, channel_id).await;
-            channel_id
-                .send_message(
-                    &self.http,
-                    serenity::CreateMessage::new()
-                        .content(content)
-                        .allowed_mentions(super::http::relay_allowed_mentions()),
-                )
-                .await
-                .map(|message| message.id)
-                .map_err(|error| error.to_string())
+            super::gateway::send_outbound_message(
+                self.http.clone(),
+                self.shared.clone(),
+                channel_id,
+                content,
+            )
+            .await
         })
     }
 
