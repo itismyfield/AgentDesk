@@ -23,7 +23,6 @@ pub(super) fn parse_watchdog_alert_channel_id(raw: &str) -> Option<serenity::Cha
         .map(serenity::ChannelId::new)
 }
 
-#[cfg(unix)]
 pub(super) fn configured_watchdog_alert_channel_id() -> Option<serenity::ChannelId> {
     for key in [
         "deadlock_manager_channel_id",
