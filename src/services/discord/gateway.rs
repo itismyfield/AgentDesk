@@ -413,6 +413,18 @@ pub(super) async fn send_intake_placeholder(
         .ok_or_else(|| "intake placeholder delivery was skipped".to_string())
 }
 
+pub(super) async fn send_outbound_message(
+    http: Arc<serenity::Http>,
+    shared: Arc<SharedData>,
+    channel_id: ChannelId,
+    content: &str,
+) -> Result<MessageId, String> {
+    let client = SerenityTurnOutboundClient { http, shared };
+    let msg = gateway_outbound_message(channel_id, content);
+    outbound_delivery_error(deliver_outbound(&client, shared_outbound_deduper(), msg, None).await)?
+        .ok_or_else(|| "message delivery was skipped".to_string())
+}
+
 pub(super) async fn edit_outbound_message(
     http: Arc<serenity::Http>,
     shared: Arc<SharedData>,
@@ -444,15 +456,7 @@ impl TurnGateway for DiscordGateway {
         content: &'a str,
     ) -> GatewayFuture<'a, Result<MessageId, String>> {
         Box::pin(async move {
-            let client = SerenityTurnOutboundClient {
-                http: self.http.clone(),
-                shared: self.shared.clone(),
-            };
-            let msg = gateway_outbound_message(channel_id, content);
-            outbound_delivery_error(
-                deliver_outbound(&client, shared_outbound_deduper(), msg, None).await,
-            )?
-            .ok_or_else(|| "message delivery was skipped".to_string())
+            send_outbound_message(self.http.clone(), self.shared.clone(), channel_id, content).await
         })
     }
 

@@ -40,6 +40,7 @@ pub(crate) struct TuiPromptAnchor {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ExternalInputRelayOwner {
     Unassigned,
+    BridgeAdapter,
     TuiPromptRelay,
     TmuxWatcher,
     SessionBoundRelay,
@@ -49,6 +50,7 @@ impl ExternalInputRelayOwner {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Unassigned => "unassigned",
+            Self::BridgeAdapter => "bridge_adapter",
             Self::TuiPromptRelay => "tui_prompt_relay",
             Self::TmuxWatcher => "tmux_watcher",
             Self::SessionBoundRelay => "session_bound_relay",
