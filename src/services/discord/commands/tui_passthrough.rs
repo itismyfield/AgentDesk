@@ -92,6 +92,19 @@ fn live_session_required_notice(command: ClaudeSlashPassthrough) -> String {
     )
 }
 
+fn provider_preflight_notice(
+    provider: &ProviderKind,
+    command: ClaudeSlashPassthrough,
+) -> Option<String> {
+    if !matches!(provider, ProviderKind::Claude) {
+        return Some(unsupported_notice(provider, command));
+    }
+    if let ClaudeSlashPassthrough::Effort(EffortLevel::Ultracode) = command {
+        return Some(ultracode_notice().to_string());
+    }
+    None
+}
+
 async fn resolve_effective_provider_and_tmux_name(
     ctx: Context<'_>,
 ) -> (ProviderKind, Option<String>) {
@@ -130,15 +143,9 @@ async fn run_claude_passthrough(
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!("  [{ts}] ◀ [{user_name}] {}", command.prompt());
 
-    if let ClaudeSlashPassthrough::Effort(EffortLevel::Ultracode) = command {
-        ctx.say(ultracode_notice()).await?;
-        return Ok(());
-    }
-
     let (effective_provider, tmux_name) = resolve_effective_provider_and_tmux_name(ctx).await;
-    if !matches!(effective_provider, ProviderKind::Claude) {
-        ctx.say(unsupported_notice(&effective_provider, command))
-            .await?;
+    if let Some(notice) = provider_preflight_notice(&effective_provider, command) {
+        ctx.say(notice).await?;
         return Ok(());
     }
 
@@ -231,7 +238,7 @@ pub(in crate::services::discord) async fn cmd_context(ctx: Context<'_>) -> Resul
 mod tests {
     use super::{
         ClaudeSlashPassthrough, EffortLevel, codex_effort_notice, live_session_required_notice,
-        ultracode_notice, unsupported_notice,
+        provider_preflight_notice, ultracode_notice, unsupported_notice,
     };
     use crate::services::provider::ProviderKind;
 
@@ -260,6 +267,27 @@ mod tests {
         assert!(notice.contains("Codex"));
         assert!(notice.contains("채널 단위 설정면"));
         assert_eq!(notice, codex_effort_notice());
+    }
+
+    #[test]
+    fn codex_ultracode_is_rejected_before_claude_ultracode_notice() {
+        let notice = provider_preflight_notice(
+            &ProviderKind::Codex,
+            ClaudeSlashPassthrough::Effort(EffortLevel::Ultracode),
+        )
+        .expect("Codex /effort ultracode must be rejected as unsupported");
+        assert_eq!(notice, codex_effort_notice());
+        assert!(!notice.contains("안전하게 passthrough하지 않습니다"));
+    }
+
+    #[test]
+    fn claude_ultracode_uses_claude_specific_notice() {
+        let notice = provider_preflight_notice(
+            &ProviderKind::Claude,
+            ClaudeSlashPassthrough::Effort(EffortLevel::Ultracode),
+        )
+        .expect("Claude /effort ultracode must use the Claude-specific guardrail");
+        assert_eq!(notice, ultracode_notice());
     }
 
     #[test]
