@@ -1300,11 +1300,13 @@ mod tests {
     fn bundled_sample_routines_load_and_validate() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routines");
         let loader = RoutineScriptLoader::new().unwrap();
-        assert_eq!(loader.load_dir(&root).unwrap(), 20);
+        assert_eq!(loader.load_dir(&root).unwrap(), 22);
         assert_eq!(
             loader.script_refs().unwrap(),
             vec![
                 "agent-checkpoint-review.js".to_string(),
+                "family-profile-probe-obujang.js".to_string(),
+                "family-profile-probe-yohoejang.js".to_string(),
                 "migrated-launchd/agent-feedback-briefing.js".to_string(),
                 "migrated-launchd/ai-integrated-briefing.js".to_string(),
                 "migrated-launchd/banchan-day-reminder-cook.js".to_string(),
@@ -1415,6 +1417,74 @@ mod tests {
                 .unwrap(),
             crate::services::routines::RoutineAction::Agent { .. }
         ));
+    }
+
+    #[test]
+    fn family_profile_probe_agent_action_defers_daily_marker_until_delivery() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routines");
+        let loader = RoutineScriptLoader::new().unwrap();
+        loader
+            .load_script(&root, &root.join("family-profile-probe-obujang.js"))
+            .unwrap();
+
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-30T03:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let action = loader
+            .execute_tick(
+                "family-profile-probe-obujang.js",
+                RoutineTickContext {
+                    routine: RoutineTickRoutine {
+                        id: "routine-family-profile".to_string(),
+                        agent_id: Some("family-counsel".to_string()),
+                        script_ref: "family-profile-probe-obujang.js".to_string(),
+                        name: "family-profile-probe-obujang".to_string(),
+                        execution_strategy: "fresh".to_string(),
+                        fresh_context_guaranteed: false,
+                    },
+                    run: RoutineTickRun {
+                        id: "run-family-profile".to_string(),
+                        lease_expires_at: now,
+                    },
+                    agent: None,
+                    checkpoint: Some(serde_json::json!({
+                        "plan": {"date": "2026-05-30", "hour": 12, "minute": 0}
+                    })),
+                    now,
+                    observations: None,
+                    automation_inventory: None,
+                    limits: ObservationLimits::default(),
+                },
+            )
+            .unwrap();
+
+        match action {
+            crate::services::routines::RoutineAction::Agent {
+                dm_user_id,
+                checkpoint,
+                ..
+            } => {
+                assert_eq!(dm_user_id.as_deref(), Some("343742347365974026"));
+                let checkpoint = checkpoint.expect("agent checkpoint");
+                assert!(
+                    checkpoint.get("lastTriggeredDate").is_none(),
+                    "generated-but-undelivered DM must not consume today's marker"
+                );
+                assert_eq!(
+                    checkpoint
+                        .pointer("/pendingDelivery/kind")
+                        .and_then(serde_json::Value::as_str),
+                    Some("family-profile-probe")
+                );
+                assert_eq!(
+                    checkpoint
+                        .pointer("/pendingDelivery/triggerDate")
+                        .and_then(serde_json::Value::as_str),
+                    Some("2026-05-30")
+                );
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
     }
 
     fn automation_recommender_context(

@@ -27,10 +27,11 @@ function dailyPlan(checkpoint, today) {
   return { date: today, hour, minute };
 }
 
-function withHistory(checkpoint, item) {
-  const history = Array.isArray(checkpoint.history) ? checkpoint.history.slice(-199) : [];
-  history.push(item);
-  return history;
+function withPendingDelivery(checkpoint, pendingDelivery) {
+  return Object.assign({}, checkpoint, {
+    plan: pendingDelivery.plan,
+    pendingDelivery,
+  });
 }
 
 function promptFor(targetKey) {
@@ -82,20 +83,20 @@ agentdesk.routines.register({
       };
     }
 
-    nextCheckpoint.lastTriggeredDate = now.date;
-    nextCheckpoint.lastTriggeredAt = now.iso;
-    nextCheckpoint.history = withHistory(checkpoint, {
+    const pendingDelivery = {
+      kind: "family-profile-probe",
       targetKey: TARGET_KEY,
       target: TARGET_DISCORD_ID,
+      triggerDate: now.date,
       triggeredAt: now.iso,
       plan,
-    });
+    };
 
     return {
       action: "agent",
       dmUserId: TARGET_DISCORD_ID,
       prompt: promptFor(TARGET_KEY),
-      checkpoint: nextCheckpoint,
+      checkpoint: withPendingDelivery(nextCheckpoint, pendingDelivery),
     };
   },
 });

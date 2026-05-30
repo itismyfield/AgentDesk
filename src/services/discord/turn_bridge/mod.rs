@@ -1482,6 +1482,28 @@ fn should_suppress_headless_delivery_for_cancel(cancel_token: Option<&CancelToke
         && !cancel_token.is_some_and(crate::services::provider::CancelToken::is_completion_cleanup)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn should_record_final_turn_transcript(
+    is_prompt_too_long: bool,
+    resume_failure_detected: bool,
+    recovery_retry: bool,
+    rx_disconnected: bool,
+    tmux_handed_off: bool,
+    bridge_output_delegated: bool,
+    terminal_delivery_committed: bool,
+    preserve_inflight_for_cleanup_retry: bool,
+    full_response: &str,
+) -> bool {
+    !(is_prompt_too_long
+        || resume_failure_detected
+        || recovery_retry
+        || (rx_disconnected && tmux_handed_off && full_response.is_empty())
+        || bridge_output_delegated
+        || !terminal_delivery_committed
+        || preserve_inflight_for_cleanup_retry)
+        && !full_response.trim().is_empty()
+}
+
 fn sync_inflight_restart_mode_from_cancel(
     cancel_token: &crate::services::provider::CancelToken,
     inflight_state: &mut InflightTurnState,
@@ -7543,12 +7565,17 @@ pub(super) fn spawn_turn_bridge(
             watcher.paused.store(false, Ordering::Relaxed);
         }
 
-        let should_record_final_turn = !(is_prompt_too_long
-            || resume_failure_detected
-            || recovery_retry
-            || (rx_disconnected && tmux_handed_off && full_response.is_empty())
-            || bridge_output_owner.is_some())
-            && !full_response.trim().is_empty();
+        let should_record_final_turn = should_record_final_turn_transcript(
+            is_prompt_too_long,
+            resume_failure_detected,
+            recovery_retry,
+            rx_disconnected,
+            tmux_handed_off,
+            bridge_output_owner.is_some(),
+            terminal_delivery_committed,
+            preserve_inflight_for_cleanup_retry,
+            &full_response,
+        );
 
         // Update in-memory session under lock.
         let mut should_persist_transcript = false;
@@ -8371,6 +8398,44 @@ mod status_panel_v2_rework_tests {
 
         assert_eq!(status_panel_msg_id, Some(MessageId::new(99)));
         assert_eq!(state.status_message_id, Some(99));
+    }
+}
+
+#[cfg(test)]
+mod transcript_delivery_gate_tests {
+    use super::should_record_final_turn_transcript;
+
+    #[test]
+    fn generated_but_undelivered_dm_response_is_not_transcript_completion_evidence() {
+        assert!(
+            !should_record_final_turn_transcript(
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                "오늘 윤호 수면 루틴에서 바뀐 점이 있을까요?",
+            ),
+            "a generated response with failed outbound delivery must stay retryable"
+        );
+    }
+
+    #[test]
+    fn delivered_dm_response_can_be_transcript_completion_evidence() {
+        assert!(should_record_final_turn_transcript(
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            "오늘 윤호 수면 루틴에서 바뀐 점이 있을까요?",
+        ));
     }
 }
 

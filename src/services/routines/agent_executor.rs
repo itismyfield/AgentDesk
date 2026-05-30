@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sqlx::PgPool;
 use std::sync::Arc;
 
@@ -803,6 +803,68 @@ fn pending_checkpoint(result_json: Option<&Value>) -> Option<Value> {
         .and_then(|value| value.get("checkpoint"))
         .filter(|value| !value.is_null())
         .cloned()
+        .map(finalize_family_profile_probe_pending_delivery)
+}
+
+fn finalize_family_profile_probe_pending_delivery(mut checkpoint: Value) -> Value {
+    let Some(object) = checkpoint.as_object_mut() else {
+        return checkpoint;
+    };
+    let Some(pending_delivery) = object.remove("pendingDelivery") else {
+        return checkpoint;
+    };
+    if pending_delivery.get("kind").and_then(Value::as_str) != Some("family-profile-probe") {
+        object.insert("pendingDelivery".to_string(), pending_delivery);
+        return checkpoint;
+    }
+
+    let Some(trigger_date) = pending_delivery
+        .get("triggerDate")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        object.insert("pendingDelivery".to_string(), pending_delivery);
+        return checkpoint;
+    };
+    let triggered_at = pending_delivery
+        .get("triggeredAt")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    object.insert(
+        "lastTriggeredDate".to_string(),
+        Value::String(trigger_date.clone()),
+    );
+    if let Some(triggered_at) = triggered_at.clone() {
+        object.insert("lastTriggeredAt".to_string(), Value::String(triggered_at));
+    }
+
+    let mut history = object
+        .get("history")
+        .and_then(Value::as_array)
+        .map(|items| {
+            let start = items.len().saturating_sub(199);
+            items[start..].to_vec()
+        })
+        .unwrap_or_default();
+    let mut item = Map::new();
+    if let Some(target_key) = pending_delivery.get("targetKey").cloned() {
+        item.insert("targetKey".to_string(), target_key);
+    }
+    if let Some(target) = pending_delivery.get("target").cloned() {
+        item.insert("target".to_string(), target);
+    }
+    item.insert("triggerDate".to_string(), Value::String(trigger_date));
+    if let Some(triggered_at) = triggered_at {
+        item.insert("triggeredAt".to_string(), Value::String(triggered_at));
+    }
+    if let Some(plan) = pending_delivery.get("plan").cloned() {
+        item.insert("plan".to_string(), plan);
+    }
+    history.push(Value::Object(item));
+    object.insert("history".to_string(), Value::Array(history));
+
+    checkpoint
 }
 
 fn pending_next_due_at(result_json: Option<&Value>) -> Option<DateTime<Utc>> {
@@ -853,6 +915,47 @@ mod tests {
         assert_eq!(
             pending_checkpoint(Some(&json!({"checkpoint": {"cursor": 3}}))),
             Some(json!({"cursor": 3}))
+        );
+    }
+
+    #[test]
+    fn pending_checkpoint_marks_family_profile_probe_after_confirmed_delivery() {
+        let result = pending_checkpoint(Some(&json!({
+            "checkpoint": {
+                "plan": {"date": "2026-05-30", "hour": 12, "minute": 0},
+                "history": [{"targetKey": "obujang", "triggerDate": "2026-05-29"}],
+                "pendingDelivery": {
+                    "kind": "family-profile-probe",
+                    "targetKey": "obujang",
+                    "target": "343742347365974026",
+                    "triggerDate": "2026-05-30",
+                    "triggeredAt": "2026-05-30T12:00:00+09:00",
+                    "plan": {"date": "2026-05-30", "hour": 12, "minute": 0}
+                }
+            }
+        })))
+        .expect("checkpoint");
+
+        assert_eq!(
+            result.get("lastTriggeredDate").and_then(Value::as_str),
+            Some("2026-05-30")
+        );
+        assert_eq!(
+            result.get("lastTriggeredAt").and_then(Value::as_str),
+            Some("2026-05-30T12:00:00+09:00")
+        );
+        assert!(
+            result.get("pendingDelivery").is_none(),
+            "confirmed delivery must clear the pending marker"
+        );
+        let history = result
+            .get("history")
+            .and_then(Value::as_array)
+            .expect("history");
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history[1].get("targetKey").and_then(Value::as_str),
+            Some("obujang")
         );
     }
 
