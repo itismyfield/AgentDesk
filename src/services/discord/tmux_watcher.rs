@@ -59,6 +59,13 @@ fn watcher_should_suppress_streaming_after_bridge_delivery(
     bridge_delivered_turn && has_assistant_response
 }
 
+pub(super) fn watcher_lifecycle_terminal_delivery_observed(
+    terminal_delivery_observed: bool,
+    bridge_delivered_turn: bool,
+) -> bool {
+    terminal_delivery_observed || bridge_delivered_turn
+}
+
 #[cfg(test)]
 fn watcher_terminal_edit_consumes_placeholder(outcome: &ReplaceLongMessageOutcome) -> bool {
     matches!(outcome, ReplaceLongMessageOutcome::EditedOriginal)
@@ -2252,7 +2259,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // the watcher from using a stale current_offset after unpausing.
         if let Some(new_offset) = resume_offset.lock().ok().and_then(|mut g| g.take()) {
             current_offset = new_offset;
-            let bridge_delivered_turn = turn_delivered.load(Ordering::Relaxed);
+            let bridge_delivered_turn = turn_delivered.load(Ordering::Acquire);
+            terminal_delivery_observed = watcher_lifecycle_terminal_delivery_observed(
+                terminal_delivery_observed,
+                bridge_delivered_turn,
+            );
             // If the bridge already delivered the previous turn, treat this resume
             // point as already consumed once so the watcher doesn't re-relay the
             // same batch after unpausing.
@@ -2329,7 +2340,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         &output_path,
                         &watcher_provider,
                         prompt_too_long_killed,
-                        terminal_delivery_observed,
+                        watcher_lifecycle_terminal_delivery_observed(
+                            terminal_delivery_observed,
+                            turn_delivered.load(Ordering::Acquire),
+                        ),
                     )
                     .await;
                     break;
@@ -2454,7 +2468,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             &output_path,
                             &watcher_provider,
                             prompt_too_long_killed,
-                            terminal_delivery_observed,
+                            watcher_lifecycle_terminal_delivery_observed(
+                                terminal_delivery_observed,
+                                turn_delivered.load(Ordering::Acquire),
+                            ),
                         )
                         .await;
                         break;
@@ -2505,7 +2522,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     &output_path,
                     &watcher_provider,
                     prompt_too_long_killed,
-                    terminal_delivery_observed,
+                    watcher_lifecycle_terminal_delivery_observed(
+                        terminal_delivery_observed,
+                        turn_delivered.load(Ordering::Acquire),
+                    ),
                 )
                 .await;
                 break;
@@ -3718,7 +3738,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     &output_path,
                     &watcher_provider,
                     prompt_too_long_killed,
-                    terminal_delivery_observed,
+                    watcher_lifecycle_terminal_delivery_observed(
+                        terminal_delivery_observed,
+                        turn_delivered.load(Ordering::Acquire),
+                    ),
                 )
                 .await;
                 break 'watcher_loop;
@@ -6125,7 +6148,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &output_path,
                 &watcher_provider,
                 prompt_too_long_killed,
-                terminal_delivery_observed,
+                watcher_lifecycle_terminal_delivery_observed(
+                    terminal_delivery_observed,
+                    turn_delivered.load(Ordering::Acquire),
+                ),
             )
             .await;
             break 'watcher_loop;

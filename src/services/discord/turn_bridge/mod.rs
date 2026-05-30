@@ -7546,7 +7546,7 @@ pub(super) fn spawn_turn_bridge(
                 && !bridge_relay_delegated_to_watcher
                 && let Some(watcher) = shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
             {
-                watcher.turn_delivered.store(true, Ordering::Relaxed);
+                watcher.turn_delivered.store(true, Ordering::Release);
             }
 
             if can_chain_locally

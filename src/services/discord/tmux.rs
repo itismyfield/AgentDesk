@@ -2435,6 +2435,7 @@ mod watcher_placeholder_status_tests {
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
     use super::FallbackPlaceholderCleanupDecision;
+    use super::tmux_watcher::watcher_lifecycle_terminal_delivery_observed;
     use super::{
         CANCEL_TEARDOWN_GRACE_BYTES, DeadSessionCleanupPlan,
         MONITOR_AUTO_TURN_DEFERRED_REASON_CODE, MONITOR_AUTO_TURN_PREAMBLE_HINT,
@@ -4158,6 +4159,30 @@ mod tests {
         assert!(
             decision.send_session_ended_notice,
             "E-12 expects an abnormal pane death after a delivered marker response to emit session ended"
+        );
+    }
+
+    #[test]
+    fn bridge_delivered_resume_then_pane_dead_preserves_lifecycle_delivery_signal() {
+        let terminal_delivery_observed = watcher_lifecycle_terminal_delivery_observed(false, true);
+        let decision = tmux_death_lifecycle_decision(
+            true,  // reset cleanup left a session-unscoped cancel tombstone
+            false, // prompt-too-long did not kill this pane
+            terminal_delivery_observed,
+            false, // manual pane death is abnormal
+        );
+
+        assert!(
+            terminal_delivery_observed,
+            "watcher resume must carry bridge turn_delivered into lifecycle state before clearing the duplicate-relay flag"
+        );
+        assert!(
+            !decision.cancel_induced,
+            "bridge-delivered marker response must disqualify the reset cancel tombstone"
+        );
+        assert!(
+            decision.send_session_ended_notice,
+            "subsequent E-12 pane death should emit session ended"
         );
     }
 
