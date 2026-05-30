@@ -1340,9 +1340,13 @@ impl PolicyEngine {
         Ok(f(&inner.context))
     }
 
-    /// Evaluate arbitrary JS in the engine context (useful for testing).
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    pub fn eval_js<T: for<'js> rquickjs::FromJs<'js> + Send>(&self, code: &str) -> Result<T> {
+    /// Evaluate arbitrary JS in the engine context (test-only helper that does
+    /// not depend on the legacy SQLite fixture path).
+    #[cfg(test)]
+    pub(crate) fn eval_js<T: for<'js> rquickjs::FromJs<'js> + Send>(
+        &self,
+        code: &str,
+    ) -> Result<T> {
         let inner = self
             .inner
             .lock()
@@ -1439,6 +1443,83 @@ fn json_to_js<'js>(
             }
             Ok(obj.into_value())
         }
+    }
+}
+
+#[cfg(test)]
+mod runtime_policy_tests {
+    use super::*;
+
+    fn test_config() -> Config {
+        Config {
+            policies: crate::config::PoliciesConfig {
+                dir: std::path::PathBuf::from("/nonexistent"),
+                hot_reload: false,
+                ..crate::config::PoliciesConfig::default()
+            },
+            ..Config::default()
+        }
+    }
+
+    fn test_config_with_dir(dir: &std::path::Path) -> Config {
+        Config {
+            policies: crate::config::PoliciesConfig {
+                dir: dir.to_path_buf(),
+                hot_reload: false,
+                ..crate::config::PoliciesConfig::default()
+            },
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn policy_runtime_memory_limit_rejects_large_allocation() {
+        let mut config = test_config();
+        config.policies.memory_limit_bytes = 8 * 1024 * 1024;
+        let engine = PolicyEngine::new_with_pg(&config, None).unwrap();
+
+        let allocation_failed: bool = engine
+            .eval_js("try { new ArrayBuffer(64 * 1024 * 1024); false } catch (e) { true }")
+            .unwrap();
+
+        assert!(
+            allocation_failed,
+            "QuickJS memory limit should reject a large policy allocation"
+        );
+    }
+
+    #[test]
+    fn policy_hook_deadline_interrupts_runaway_live_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy_path = dir.path().join("runaway-hook.js");
+        std::fs::write(
+            &policy_path,
+            r#"
+            agentdesk.registerPolicy({
+                name: "runaway-hook",
+                priority: 1,
+                onTick: function() {
+                    while (true) {}
+                }
+            });
+            "#,
+        )
+        .unwrap();
+
+        let mut config = test_config_with_dir(dir.path());
+        config.policies.hook_timeout_ms = 100;
+        let engine = PolicyEngine::new_with_pg(&config, None).unwrap();
+
+        let start = std::time::Instant::now();
+        engine
+            .fire_hook(Hook::OnTick, serde_json::json!({}))
+            .unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "runaway live hook should be interrupted promptly, took {elapsed:?}"
+        );
     }
 }
 
@@ -1642,58 +1723,6 @@ mod tests {
         let engine = PolicyEngine::new_with_legacy_db(&config, db).unwrap();
         let result: i32 = engine.eval_js("1 + 2").unwrap();
         assert_eq!(result, 3);
-    }
-
-    #[test]
-    fn policy_runtime_memory_limit_rejects_large_allocation() {
-        let db = test_db();
-        let mut config = test_config();
-        config.policies.memory_limit_bytes = 8 * 1024 * 1024;
-        let engine = PolicyEngine::new_with_legacy_db(&config, db).unwrap();
-
-        let allocation_failed: bool = engine
-            .eval_js("try { new ArrayBuffer(64 * 1024 * 1024); false } catch (e) { true }")
-            .unwrap();
-
-        assert!(
-            allocation_failed,
-            "QuickJS memory limit should reject a large policy allocation"
-        );
-    }
-
-    #[test]
-    fn policy_hook_deadline_interrupts_runaway_live_hook() {
-        let dir = tempfile::tempdir().unwrap();
-        let policy_path = dir.path().join("runaway-hook.js");
-        std::fs::write(
-            &policy_path,
-            r#"
-            agentdesk.registerPolicy({
-                name: "runaway-hook",
-                priority: 1,
-                onTick: function() {
-                    while (true) {}
-                }
-            });
-            "#,
-        )
-        .unwrap();
-
-        let db = test_db();
-        let mut config = test_config_with_dir(dir.path());
-        config.policies.hook_timeout_ms = 100;
-        let engine = PolicyEngine::new_with_legacy_db(&config, db).unwrap();
-
-        let start = std::time::Instant::now();
-        engine
-            .fire_hook(Hook::OnTick, serde_json::json!({}))
-            .unwrap();
-        let elapsed = start.elapsed();
-
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "runaway live hook should be interrupted promptly, took {elapsed:?}"
-        );
     }
 
     #[test]

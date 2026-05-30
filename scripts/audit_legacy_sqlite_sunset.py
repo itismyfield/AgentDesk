@@ -33,7 +33,7 @@ OBSOLETE_SQLITE_IGNORE_RE = re.compile(
     r"#\s*\[\s*ignore\s*=\s*\"[^\"]*obsolete SQLite[^\"]*\"\s*\]"
 )
 RUST_TEST_ATTR_RE = re.compile(r"#\s*\[\s*(?:tokio::|async_std::)?test\b")
-RUST_CFG_ATTR_RE = re.compile(r"#\s*\[\s*cfg\s*\((?P<expr>.*)\)\s*\]")
+RUST_CFG_ATTR_RE = re.compile(r"#\s*\[\s*cfg\s*\((?P<expr>.*)\)\s*\]", re.DOTALL)
 
 DEFAULT_INCLUDE_EXTENSIONS = {".rs", ".toml", ".md"}
 SKIP_PARTS = {".git", "target", "node_modules", ".next", "dist"}
@@ -123,6 +123,35 @@ def rust_brace_delta(line: str) -> int:
     return line.count("{") - line.count("}")
 
 
+def strip_rust_line_comment(line: str) -> str:
+    return line.split("//", 1)[0].rstrip()
+
+
+def rust_code_before_comment(line: str) -> str:
+    comment_starts = [
+        index for index in (line.find("//"), line.find("/*")) if index != -1
+    ]
+    if not comment_starts:
+        return line.rstrip()
+    return line[: min(comment_starts)].rstrip()
+
+
+def strip_trailing_rust_comments(line: str) -> str:
+    stripped = line.rstrip()
+    while stripped:
+        without_line_comment = strip_rust_line_comment(stripped)
+        if without_line_comment != stripped:
+            stripped = without_line_comment
+            continue
+        if stripped.endswith("*/"):
+            block_comment_start = stripped.rfind("/*")
+            if block_comment_start != -1:
+                stripped = stripped[:block_comment_start].rstrip()
+                continue
+        break
+    return stripped
+
+
 def split_cfg_args(expr: str) -> list[str]:
     args: list[str] = []
     depth = 0
@@ -161,11 +190,70 @@ def is_test_only_cfg_attr(line: str) -> bool:
 
 
 def has_test_only_cfg(text: str) -> bool:
-    return any(is_test_only_cfg_attr(line.strip()) for line in text.splitlines())
+    return any(
+        is_test_only_cfg_attr(attr)
+        for attrs, _ in iter_rust_attr_targets(text)
+        for attr in attrs
+    )
 
 
 def has_rust_test_attr(text: str) -> bool:
-    return any(RUST_TEST_ATTR_RE.search(line.strip()) for line in text.splitlines())
+    return any(
+        RUST_TEST_ATTR_RE.search(attr)
+        for attrs, _ in iter_rust_attr_targets(text)
+        for attr in attrs
+    )
+
+
+def consume_rust_attribute(
+    lines: Sequence[str], start: int, initial: str
+) -> tuple[str, str, int]:
+    parts = [initial]
+    attr_text = initial
+    index = start
+    while "]" not in attr_text and index + 1 < len(lines):
+        index += 1
+        parts.append(lines[index].strip())
+        attr_text = "\n".join(parts)
+
+    attr_end = attr_text.find("]")
+    if attr_end < 0:
+        return initial, "", start + 1
+    remainder = attr_text[attr_end + 1 :].lstrip()
+    return attr_text[: attr_end + 1], remainder, index + 1
+
+
+def iter_rust_attr_targets(text: str) -> Iterable[tuple[list[str], str]]:
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if not stripped.startswith("#["):
+            index += 1
+            continue
+
+        attrs: list[str] = []
+        remainder = ""
+        line_index = index
+        attr_index = index
+        while stripped.startswith("#["):
+            attr, remainder, next_index = consume_rust_attribute(lines, attr_index, stripped)
+            attrs.append(attr)
+            if remainder:
+                stripped = remainder
+                index = next_index
+                attr_index = line_index
+                continue
+            index = next_index
+            if index >= len(lines):
+                break
+            stripped = lines[index].strip()
+            if not stripped.startswith("#["):
+                break
+            attr_index = index
+        if not remainder:
+            index = max(index, attr_index + 1)
+        yield attrs, remainder
 
 
 def prod_db_conn_call_count(rel: str, text: str) -> int:
@@ -175,34 +263,75 @@ def prod_db_conn_call_count(rel: str, text: str) -> int:
     count = 0
     pending_test_scope = False
     test_scope_depth: int | None = None
-    for line in text.splitlines():
-        stripped = line.strip()
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line_index = index
+        line = lines[index]
         if test_scope_depth is not None:
             test_scope_depth += rust_brace_delta(line)
+            index += 1
             if test_scope_depth <= 0:
                 test_scope_depth = None
             continue
 
-        if RUST_TEST_ATTR_RE.search(stripped) or is_test_only_cfg_attr(stripped):
+        attrs: list[str] = []
+        stripped = line.strip()
+        scanned = line
+        index += 1
+        if stripped.startswith("#["):
+            scanned = ""
+            attr_index = line_index
+            next_index = index
+            while stripped.startswith("#["):
+                attr, remainder, next_index = consume_rust_attribute(
+                    lines, attr_index, stripped
+                )
+                attrs.append(attr)
+                if remainder:
+                    stripped = remainder
+                    scanned = remainder
+                    attr_index = line_index
+                    continue
+                if next_index >= len(lines):
+                    stripped = ""
+                    break
+                next_stripped = lines[next_index].strip()
+                if not next_stripped.startswith("#["):
+                    stripped = ""
+                    break
+                attr_index = next_index
+                stripped = next_stripped
+            index = next_index
+        else:
+            stripped = scanned.strip()
+
+        attr_is_test_only = any(
+            RUST_TEST_ATTR_RE.search(attr) or is_test_only_cfg_attr(attr) for attr in attrs
+        )
+
+        if attr_is_test_only:
             pending_test_scope = True
-            continue
+            if not stripped:
+                continue
 
         if pending_test_scope:
-            if "{" in line and (
-                stripped.startswith("{")
-                or stripped.startswith("mod ")
-                or stripped.startswith("fn ")
-                or stripped.startswith("async fn ")
-            ):
-                test_scope_depth = rust_brace_delta(line)
+            if "{" in stripped:
+                test_scope_depth = rust_brace_delta(stripped)
                 if test_scope_depth <= 0:
                     test_scope_depth = None
                 pending_test_scope = False
                 continue
-            if stripped and not stripped.startswith("#"):
+            if (
+                stripped
+                and not stripped.startswith("#")
+                and not stripped.startswith("//")
+                and rust_code_before_comment(stripped).endswith(";")
+            ):
                 pending_test_scope = False
+                continue
 
-        count += len(DB_CONN_RE.findall(line))
+        count += len(DB_CONN_RE.findall(scanned))
     return count
 
 
