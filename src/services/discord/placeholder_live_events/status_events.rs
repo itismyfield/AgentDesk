@@ -28,7 +28,7 @@ pub(in crate::services::discord) fn status_events_from_tool_use(
         args_summary: args_summary.clone(),
     }];
     if is_harness_task_tool_name(name) {
-        let value = serde_json::from_str::<Value>(input).unwrap_or(Value::Null);
+        let value = tool_input_value(input);
         let task_id = task_tool_id(&value);
         let status = task_tool_status(name, &value);
         let summary = task_tool_summary(name, &value).or_else(|| {
@@ -44,7 +44,7 @@ pub(in crate::services::discord) fn status_events_from_tool_use(
         });
     }
     if is_task_tool(name) {
-        let value = serde_json::from_str::<Value>(input).unwrap_or(Value::Null);
+        let value = tool_input_value(input);
         events.push(StatusEvent::SubagentStart {
             subagent_type: value
                 .get("subagent_type")
@@ -56,7 +56,7 @@ pub(in crate::services::discord) fn status_events_from_tool_use(
         });
     }
     if is_todo_write_tool(name) {
-        let value = serde_json::from_str::<Value>(input).unwrap_or(Value::Null);
+        let value = tool_input_value(input);
         if let Some(items) = todo_items_from_input(&value) {
             events.push(StatusEvent::TodoUpdate { items });
         }
@@ -67,6 +67,13 @@ pub(in crate::services::discord) fn status_events_from_tool_use(
         });
     }
     events
+}
+
+fn tool_input_value(input: &str) -> Value {
+    match serde_json::from_str::<Value>(input).unwrap_or(Value::Null) {
+        Value::String(raw) => serde_json::from_str::<Value>(&raw).unwrap_or(Value::String(raw)),
+        value => value,
+    }
 }
 
 pub(in crate::services::discord) fn status_events_from_tool_result(

@@ -732,6 +732,39 @@ fn status_panel_tracks_codex_update_plan_items() {
 }
 
 #[test]
+fn status_panel_tracks_codex_update_plan_from_bridge_stringified_arguments() {
+    for (idx, name) in ["update_plan", "updateplan"].into_iter().enumerate() {
+        let events = PlaceholderLiveEvents::default();
+        let channel_id = ChannelId::new(786 + idx as u64);
+        let modern_arguments = json!({
+            "plan": [
+                {"step": "Read modern Codex function call", "status": "completed"},
+                {"step": "Render bridge plan", "status": "in_progress"}
+            ]
+        })
+        .to_string();
+        let bridge_input = serde_json::to_string_pretty(&json!(modern_arguments)).unwrap();
+
+        events.push_status_events(channel_id, status_events_from_tool_use(name, &bridge_input));
+
+        let rendered = events.render_status_panel(channel_id, &ProviderKind::Codex, 1_700_000_000);
+        assert!(rendered.contains("Plan"), "{name} rendered:\n{rendered}");
+        assert!(
+            rendered.contains("- [x] Read modern Codex function call"),
+            "{name} rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("- [ ] Render bridge plan"),
+            "{name} rendered:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("Subagents"),
+            "{name} rendered:\n{rendered}"
+        );
+    }
+}
+
+#[test]
 fn recent_events_skip_task_tool_family_represented_by_tasks_section() {
     assert!(
         RecentPlaceholderEvent::tool_use(
