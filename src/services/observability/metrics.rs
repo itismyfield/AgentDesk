@@ -339,16 +339,23 @@ pub fn record_session_entry(channel_id: u64, provider: &str, session_id_present:
 /// #2838: convenience wrapper for `ObservabilityCounters::record_relay_terminal_ack_timeout`.
 pub fn record_relay_terminal_ack_timeout(channel_id: u64, provider: &str) {
     global().record_relay_terminal_ack_timeout(channel_id, provider);
+    super::emit::emit_relay_root_cause_counter(provider, channel_id, "relay_terminal_ack_timeout");
 }
 
 /// #2838: convenience wrapper for `ObservabilityCounters::record_relay_uncommitted_inflight_cleared`.
 pub fn record_relay_uncommitted_inflight_cleared(channel_id: u64, provider: &str) {
     global().record_relay_uncommitted_inflight_cleared(channel_id, provider);
+    super::emit::emit_relay_root_cause_counter(
+        provider,
+        channel_id,
+        "relay_uncommitted_inflight_cleared",
+    );
 }
 
 /// #2838: convenience wrapper for `ObservabilityCounters::record_relay_owner_unknown`.
 pub fn record_relay_owner_unknown(channel_id: u64, provider: &str) {
     global().record_relay_owner_unknown(channel_id, provider);
+    super::emit::emit_relay_root_cause_counter(provider, channel_id, "relay_owner_unknown");
 }
 
 pub fn snapshot() -> Vec<CounterSnapshotRow> {

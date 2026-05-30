@@ -26,8 +26,8 @@ use poise::serenity_prelude as serenity;
 
 use super::SharedData;
 use super::formatting::{
-    MonitorHandoffReason, MonitorHandoffStatus, build_monitor_handoff_placeholder,
-    build_monitor_handoff_placeholder_with_context,
+    MonitorHandoffReason, MonitorHandoffStatus, PLACEHOLDER_PROBE_MARKER,
+    build_monitor_handoff_placeholder, build_monitor_handoff_placeholder_with_context,
 };
 use super::gateway::edit_outbound_message;
 use super::inflight::{
@@ -256,13 +256,10 @@ pub(in crate::services::discord) async fn probe_placeholder_state(
 ///     glyphs followed by a space, e.g. `⠋ Processing...` or
 ///     `⠹ ⚙ Bash: cargo build`. Produced by
 ///     [`build_placeholder_status_block`] / [`build_processing_status_block`].
-///   - Monitor handoff card: the **first line** of the message matches one
-///     of the canonical Korean header strings emitted by
-///     [`monitor_handoff_header`] exactly (modulo the optional `: {detail}`
-///     suffix that the Failed variants append). We deliberately do NOT use
-///     looser prefixes like `{emoji} **` — a real assistant response can
-///     legitimately begin with `✅ **Done**`, `⚠ **주의**`, or
-///     `❌ **Error**` and those must be protected from sweeper overwrite.
+///   - Monitor handoff card: new cards carry [`PLACEHOLDER_PROBE_MARKER`].
+///     Legacy unmarked cards must match the full generated card skeleton, not
+///     just the first header line. This protects delivered answers whose first
+///     line is exactly one of the Korean handoff headers (#2877).
 ///
 /// Anything else (real prose, code blocks, embeds rendered as text) is
 /// treated as a delivered response and protected from sweeper overwrite.
@@ -308,16 +305,50 @@ pub(super) fn is_message_still_placeholder(content: &str) -> bool {
         }
     }
 
-    // First-line-bounded match: handoff cards put the header on its own
-    // first line. Comparing only the first line avoids accidental matches
-    // inside long prose continuations or embedded code blocks.
-    let first_line = trimmed.lines().next().unwrap_or(trimmed).trim_end();
-    if HANDOFF_HEADERS_EXACT.iter().any(|h| first_line == *h) {
+    if trimmed.contains(PLACEHOLDER_PROBE_MARKER) {
         return true;
     }
-    HANDOFF_FAILED_HEADERS
+
+    // Legacy pre-marker handoff cards are still recognized, but only when the
+    // whole generated card skeleton is present. First-line-only matching is
+    // what caused #2877 false StillPlaceholder classifications.
+    let lines = trimmed.lines().collect::<Vec<_>>();
+    let first_line = lines.first().copied().unwrap_or(trimmed).trim_end();
+    let header_matches = HANDOFF_HEADERS_EXACT.iter().any(|h| first_line == *h)
+        || HANDOFF_FAILED_HEADERS
+            .iter()
+            .any(|h| first_line == *h || first_line.starts_with(&format!("{h}: ")));
+    if header_matches && legacy_handoff_card_shape(&lines) {
+        return true;
+    }
+
+    false
+}
+
+fn legacy_handoff_card_shape(lines: &[&str]) -> bool {
+    let has_reason_or_tool = lines.iter().skip(1).any(|line| {
+        let line = line.trim();
+        line.starts_with("> **도구**:") || line.starts_with("> **사유**:")
+    });
+    let has_started_at = lines
         .iter()
-        .any(|h| first_line == *h || first_line.starts_with(&format!("{h}: ")))
+        .skip(1)
+        .any(|line| line.trim().starts_with("> **시작**: <t:"));
+    let has_known_footer_or_tail = lines.iter().skip(1).any(|line| {
+        let line = line.trim();
+        matches!(
+            line,
+            "현재 진행 중인 턴 완료 후 처리 시작합니다."
+                | "완료 시 이 채널로 결과 이어서 보냅니다."
+                | "완료 시 이 채널로 결과를 이어서 표시합니다."
+                | "스트림 진행이 멈춰 복구 상태를 확인 중입니다."
+                | "결과가 위에 도착했습니다."
+                | "자세한 사유는 다음 응답을 확인해 주세요."
+                | "타임아웃 임계를 넘어 종료되었습니다."
+                | "브릿지 또는 세션이 종료되었습니다."
+        ) || line.starts_with('⠋')
+    });
+    has_reason_or_tool && has_started_at && has_known_footer_or_tail
 }
 
 /// Run a single sweep pass for the given provider. Public for testability —
@@ -805,6 +836,7 @@ mod probe_classification_tests {
 #[cfg(test)]
 mod is_message_still_placeholder_tests {
     use super::is_message_still_placeholder;
+    use crate::services::discord::formatting::PLACEHOLDER_PROBE_MARKER;
 
     #[test]
     fn spinner_prefixed_placeholder_is_placeholder() {
@@ -823,17 +855,42 @@ mod is_message_still_placeholder_tests {
 
     #[test]
     fn handoff_card_headers_are_placeholder() {
-        assert!(is_message_still_placeholder("🔄 **응답 처리 중**\nfooter"));
-        assert!(is_message_still_placeholder("🔄 **백그라운드 처리 중**"));
-        assert!(is_message_still_placeholder("⚠ **응답 정체**"));
-        assert!(is_message_still_placeholder("⚠ **백그라운드 정체**"));
-        assert!(is_message_still_placeholder("📬 **메시지 대기 중**"));
-        assert!(is_message_still_placeholder("⏱ **응답 타임아웃**"));
-        assert!(is_message_still_placeholder("❌ **응답 실패**: foo"));
-        assert!(is_message_still_placeholder("✅ **응답 완료**"));
+        assert!(is_message_still_placeholder(&format!(
+            "🔄 **응답 처리 중**\n{PLACEHOLDER_PROBE_MARKER}"
+        )));
+        assert!(is_message_still_placeholder(&format!(
+            "🔄 **백그라운드 처리 중**\n{PLACEHOLDER_PROBE_MARKER}"
+        )));
+        assert!(is_message_still_placeholder(&format!(
+            "⚠ **응답 정체**\n{PLACEHOLDER_PROBE_MARKER}"
+        )));
+        assert!(is_message_still_placeholder(&format!(
+            "⚠ **백그라운드 정체**\n{PLACEHOLDER_PROBE_MARKER}"
+        )));
+        assert!(is_message_still_placeholder(&format!(
+            "📬 **메시지 대기 중**\n{PLACEHOLDER_PROBE_MARKER}"
+        )));
+        assert!(is_message_still_placeholder(&format!(
+            "⏱ **응답 타임아웃**\n{PLACEHOLDER_PROBE_MARKER}"
+        )));
+        assert!(is_message_still_placeholder(&format!(
+            "❌ **응답 실패**: foo\n{PLACEHOLDER_PROBE_MARKER}"
+        )));
+        assert!(is_message_still_placeholder(&format!(
+            "✅ **응답 완료**\n{PLACEHOLDER_PROBE_MARKER}"
+        )));
         assert!(is_message_still_placeholder(
-            "⚠ **응답 중단**\n브릿지 또는 세션이 종료되었습니다."
+            "⚠ **응답 중단**\n> **도구**: Bash · **사유**: 응답 스트리밍 중\n> **시작**: <t:123:R>\n브릿지 또는 세션이 종료되었습니다."
         ));
+    }
+
+    #[test]
+    fn exact_handoff_header_without_marker_is_not_placeholder() {
+        assert!(!is_message_still_placeholder("✅ **응답 완료**"));
+        assert!(!is_message_still_placeholder(
+            "✅ **응답 완료**\n이 줄부터 실제 답변입니다."
+        ));
+        assert!(!is_message_still_placeholder("⚠ **응답 중단**"));
     }
 
     #[test]
@@ -909,7 +966,9 @@ mod is_message_still_placeholder_tests {
     #[test]
     fn leading_whitespace_does_not_mask_placeholder_shape() {
         assert!(is_message_still_placeholder("   ⠋ Processing..."));
-        assert!(is_message_still_placeholder("\n🔄 **응답 처리 중**"));
+        assert!(is_message_still_placeholder(&format!(
+            "\n🔄 **응답 처리 중**\n{PLACEHOLDER_PROBE_MARKER}"
+        )));
     }
 }
 

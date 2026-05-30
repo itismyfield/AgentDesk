@@ -625,6 +625,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             source     TEXT NOT NULL DEFAULT 'system',
             reason_code TEXT,
             session_key TEXT,
+            dedupe_key TEXT,
+            dedupe_expires_at DATETIME,
             status     TEXT NOT NULL DEFAULT 'pending',
             created_at DATETIME DEFAULT (datetime('now')),
             sent_at    DATETIME,
@@ -651,9 +653,45 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             conn.execute_batch("ALTER TABLE message_outbox ADD COLUMN session_key TEXT;")?;
         }
     }
+    {
+        let has_dedupe_key: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('message_outbox') WHERE name = 'dedupe_key'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !has_dedupe_key {
+            conn.execute_batch("ALTER TABLE message_outbox ADD COLUMN dedupe_key TEXT;")?;
+        }
+    }
+    {
+        let has_dedupe_expires_at: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('message_outbox') WHERE name = 'dedupe_expires_at'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !has_dedupe_expires_at {
+            conn.execute_batch(
+                "ALTER TABLE message_outbox ADD COLUMN dedupe_expires_at DATETIME;",
+            )?;
+        }
+    }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_message_outbox_lifecycle_dedupe
          ON message_outbox(target, reason_code, session_key, created_at);",
+    )?;
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_outbox_active_dedupe_key
+         ON message_outbox(dedupe_key)
+         WHERE dedupe_key IS NOT NULL AND status != 'failed';",
+    )?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_message_outbox_dedupe_expiry
+         ON message_outbox(dedupe_expires_at)
+         WHERE dedupe_key IS NOT NULL;",
     )?;
 
     {

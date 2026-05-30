@@ -304,7 +304,9 @@ CREATE TABLE IF NOT EXISTS message_outbox (
     sent_at    TIMESTAMPTZ,
     error      TEXT,
     claimed_at TIMESTAMPTZ,
-    claim_owner TEXT
+    claim_owner TEXT,
+    dedupe_key TEXT,
+    dedupe_expires_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS dispatch_outbox (

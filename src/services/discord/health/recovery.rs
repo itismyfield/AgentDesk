@@ -1415,6 +1415,17 @@ fn render_leak_recovery_delivery(
     }
 }
 
+fn leak_recovery_chunk_fingerprints(chunks: &[String]) -> Vec<String> {
+    chunks
+        .iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            let hash = blake3::hash(chunk.as_bytes());
+            format!("{index}:{}", hash.to_hex())
+        })
+        .collect()
+}
+
 /// #2860 — recover a completed-stale inflight leak by delivering the generated
 /// answer that never reached the user. Returns `true` only when an answer was
 /// actually delivered.
@@ -1511,6 +1522,7 @@ async fn maybe_recover_completed_stale_leak(
             serde_json::json!({
                 "byte_len": delivery_text.len(),
                 "chunks": chunks.len(),
+                "chunk_fingerprints": leak_recovery_chunk_fingerprints(&chunks),
             }),
         );
         return false;
@@ -1617,8 +1629,8 @@ async fn maybe_recover_completed_stale_leak(
 mod stall_watchdog_pure_tests {
     use super::{
         STALL_WATCHDOG_THRESHOLD_SECS, inflight_completed_stale_leak_detected,
-        leak_recovery_unrelayed_range, render_leak_recovery_delivery,
-        stall_watchdog_should_force_clean,
+        leak_recovery_chunk_fingerprints, leak_recovery_unrelayed_range,
+        render_leak_recovery_delivery, stall_watchdog_should_force_clean,
     };
     use crate::services::provider::ProviderKind;
     use chrono::TimeZone;
@@ -1683,6 +1695,19 @@ mod stall_watchdog_pure_tests {
         let out = render_leak_recovery_delivery("실제 답변입니다", 0, false, &provider)
             .expect("real answer should render");
         assert!(out.contains("실제 답변입니다"));
+    }
+
+    #[test]
+    fn large_leak_chunk_fingerprints_are_stable_and_ordered() {
+        let chunks = vec!["first".to_string(), "second".to_string()];
+        let first = leak_recovery_chunk_fingerprints(&chunks);
+        let second = leak_recovery_chunk_fingerprints(&chunks);
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 2);
+        assert!(first[0].starts_with("0:"));
+        assert!(first[1].starts_with("1:"));
+        assert_ne!(first[0], first[1]);
     }
 
     fn local_string(unix: i64) -> String {

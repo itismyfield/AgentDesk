@@ -19,6 +19,10 @@ const STREAMING_PLACEHOLDER_MARGIN: usize = 10;
 const UTF8_ELLIPSIS_EXTRA_BYTES: usize = "…".len().saturating_sub(1);
 const THINKING_STATUS_MAX_BYTES: usize = 600;
 const TOOL_STATUS_MAX_BYTES: usize = 300;
+/// Invisible marker appended to newly-rendered placeholder cards so probes can
+/// distinguish status surfaces from delivered answers that happen to start
+/// with the same handoff header text.
+pub(super) const PLACEHOLDER_PROBE_MARKER: &str = "\u{2063}\u{2062}\u{2063}\u{2062}";
 
 static REPLACE_CONTINUATION_ROLLBACKS: LazyLock<
     Mutex<HashMap<(u64, u64), ReplaceContinuationRollback>>,
@@ -4054,6 +4058,7 @@ pub(super) fn build_monitor_handoff_placeholder_with_live_events(
     if matches!(status, MonitorHandoffStatus::Active) {
         lines.push(monitor_handoff_active_tail(started_at_unix));
     }
+    lines.push(PLACEHOLDER_PROBE_MARKER.to_string());
 
     lines.join("\n")
 }

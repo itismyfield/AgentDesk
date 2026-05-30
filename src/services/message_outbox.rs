@@ -31,6 +31,68 @@ fn normalized_reason_code(reason_code: Option<&str>) -> Option<&str> {
     reason_code.map(str::trim).filter(|value| !value.is_empty())
 }
 
+fn dedupe_key_for_message(
+    target: &str,
+    content: &str,
+    reason_code: Option<&str>,
+    session_key: Option<&str>,
+) -> Option<String> {
+    let session_key = session_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let reason_code = normalized_reason_code(reason_code);
+    let identity_kind = if reason_code.is_some() {
+        "reason_code"
+    } else {
+        "content"
+    };
+    let content_identity = reason_code.is_none().then_some(content).unwrap_or("");
+    let mut hasher = blake3::Hasher::new();
+    for part in [
+        "message_outbox:v1",
+        identity_kind,
+        target.trim(),
+        session_key,
+        reason_code.unwrap_or("").trim(),
+        content_identity,
+    ] {
+        hasher.update(&(part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    Some(format!("message_outbox:v1:{}", hasher.finalize().to_hex()))
+}
+
+#[cfg(test)]
+mod dedupe_key_tests {
+    use super::dedupe_key_for_message;
+
+    #[test]
+    fn reason_code_dedupe_key_ignores_content() {
+        let first = dedupe_key_for_message(
+            "channel:123",
+            "first rendered lifecycle text",
+            Some("relay_terminal_ack_timeout"),
+            Some("session-abc"),
+        );
+        let second = dedupe_key_for_message(
+            "channel:123",
+            "second rendered lifecycle text",
+            Some("relay_terminal_ack_timeout"),
+            Some("session-abc"),
+        );
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn content_dedupe_key_keeps_content_identity_without_reason_code() {
+        let first = dedupe_key_for_message("channel:123", "first", None, Some("session-abc"));
+        let second = dedupe_key_for_message("channel:123", "second", None, Some("session-abc"));
+
+        assert_ne!(first, second);
+    }
+}
+
 fn warn_outbox_enqueue_failure(
     backend: &'static str,
     message: OutboxMessage<'_>,
@@ -142,10 +204,24 @@ fn enqueue_lifecycle_notification_sqlite(
         return Ok(false);
     };
     let ttl_secs = LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS.to_string();
+    let dedupe_key =
+        dedupe_key_for_message(target, content, reason_code, Some(session_key.as_str()));
 
     let conn = db
         .lock()
         .map_err(|error| format!("db lock failed: {error}"))?;
+    if let Some(dedupe_key) = dedupe_key.as_deref() {
+        conn.execute(
+            "UPDATE message_outbox
+                SET dedupe_key = NULL,
+                    dedupe_expires_at = NULL
+              WHERE dedupe_key = ?1
+                AND status != 'failed'
+                AND dedupe_expires_at <= datetime('now')",
+            [dedupe_key],
+        )
+        .map_err(|error| format!("expire lifecycle notification sqlite dedupe key: {error}"))?;
+    }
     let duplicate_id = if let Some(reason_code) = reason_code {
         conn.query_row(
             "SELECT id
@@ -184,34 +260,50 @@ fn enqueue_lifecycle_notification_sqlite(
     }
 
     if let Some(reason_code) = reason_code {
-        conn.execute(
-            "INSERT INTO message_outbox
-             (target, content, bot, source, reason_code, session_key)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            [
-                target,
-                content,
-                "notify",
-                LIFECYCLE_NOTIFIER_SOURCE,
-                reason_code,
-                session_key.as_str(),
-            ],
-        )
-        .map_err(|error| format!("insert lifecycle notification sqlite: {error}"))?;
+        let inserted = conn
+            .execute(
+                "INSERT INTO message_outbox
+             (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now', '+' || ?8 || ' seconds'))
+             ON CONFLICT(dedupe_key) WHERE dedupe_key IS NOT NULL AND status != 'failed'
+             DO NOTHING",
+                [
+                    target,
+                    content,
+                    "notify",
+                    LIFECYCLE_NOTIFIER_SOURCE,
+                    reason_code,
+                    session_key.as_str(),
+                    dedupe_key.as_deref().unwrap_or(""),
+                    ttl_secs.as_str(),
+                ],
+            )
+            .map_err(|error| format!("insert lifecycle notification sqlite: {error}"))?;
+        if inserted == 0 {
+            return Ok(false);
+        }
     } else {
-        conn.execute(
-            "INSERT INTO message_outbox
-             (target, content, bot, source, reason_code, session_key)
-             VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
-            [
-                target,
-                content,
-                "notify",
-                LIFECYCLE_NOTIFIER_SOURCE,
-                session_key.as_str(),
-            ],
-        )
-        .map_err(|error| format!("insert lifecycle notification sqlite: {error}"))?;
+        let inserted = conn
+            .execute(
+                "INSERT INTO message_outbox
+             (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, datetime('now', '+' || ?7 || ' seconds'))
+             ON CONFLICT(dedupe_key) WHERE dedupe_key IS NOT NULL AND status != 'failed'
+             DO NOTHING",
+                [
+                    target,
+                    content,
+                    "notify",
+                    LIFECYCLE_NOTIFIER_SOURCE,
+                    session_key.as_str(),
+                    dedupe_key.as_deref().unwrap_or(""),
+                    ttl_secs.as_str(),
+                ],
+            )
+            .map_err(|error| format!("insert lifecycle notification sqlite: {error}"))?;
+        if inserted == 0 {
+            return Ok(false);
+        }
     }
 
     Ok(true)
@@ -269,6 +361,27 @@ async fn find_duplicate_outbox_message_pg(
     .await
 }
 
+async fn release_expired_outbox_dedupe_key_pg(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    dedupe_key: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    let Some(dedupe_key) = dedupe_key else {
+        return Ok(());
+    };
+    sqlx::query(
+        "UPDATE message_outbox
+            SET dedupe_key = NULL,
+                dedupe_expires_at = NULL
+          WHERE dedupe_key = $1
+            AND status != 'failed'
+            AND dedupe_expires_at <= NOW()",
+    )
+    .bind(dedupe_key)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 pub(crate) async fn enqueue_outbox_pg_returning_id(
     pool: &PgPool,
     message: OutboxMessage<'_>,
@@ -310,6 +423,16 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl_and_cancel(
 ) -> Result<Option<i64>, sqlx::Error> {
     let reason_code = normalized_reason_code(message.reason_code);
     let session_key = normalized_session_key(message.target, message.session_key);
+    let dedupe_key = (dedupe_ttl_secs > 0)
+        .then(|| {
+            dedupe_key_for_message(
+                message.target,
+                message.content,
+                reason_code,
+                session_key.as_deref(),
+            )
+        })
+        .flatten();
 
     let duplicate_id = find_duplicate_outbox_message_pg(
         pool,
@@ -345,10 +468,19 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl_and_cancel(
         return Ok(None);
     }
 
+    let mut tx = pool.begin().await?;
+    release_expired_outbox_dedupe_key_pg(&mut tx, dedupe_key.as_deref()).await?;
     let outbox_id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO message_outbox
-         (target, content, bot, source, reason_code, session_key)
-         VALUES ($1, $2, $3, $4, $5, $6)
+         (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7,
+                 CASE WHEN $8::BIGINT > 0
+                      THEN NOW() + ($8::BIGINT * INTERVAL '1 second')
+                      ELSE NULL
+                 END)
+         ON CONFLICT (dedupe_key)
+             WHERE dedupe_key IS NOT NULL AND status != 'failed'
+         DO NOTHING
          RETURNING id",
     )
     .bind(message.target)
@@ -357,10 +489,23 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl_and_cancel(
     .bind(message.source)
     .bind(reason_code)
     .bind(session_key.as_deref())
-    .fetch_one(pool)
+    .bind(dedupe_key.as_deref())
+    .bind(dedupe_ttl_secs)
+    .fetch_optional(&mut *tx)
     .await?;
+    tx.commit().await?;
 
-    Ok(Some(outbox_id))
+    if outbox_id.is_none() {
+        tracing::info!(
+            target = message.target,
+            reason_code,
+            session_key = session_key.as_deref(),
+            dedupe_ttl_secs,
+            "suppressed duplicate outbox message by database dedupe key"
+        );
+    }
+
+    Ok(outbox_id)
 }
 
 /// Variant of [`enqueue_outbox_pg`] that lets the caller pick the dedupe TTL.
@@ -416,6 +561,7 @@ pub(crate) async fn enqueue_lifecycle_notification_pg(
 ) -> Result<bool, sqlx::Error> {
     let reason_code = normalized_reason_code(Some(reason_code));
     let session_key = normalized_session_key(target, session_key);
+    let dedupe_key = dedupe_key_for_message(target, content, reason_code, session_key.as_deref());
 
     let duplicate_id = find_duplicate_outbox_message_pg(
         pool,
@@ -438,10 +584,17 @@ pub(crate) async fn enqueue_lifecycle_notification_pg(
         return Ok(false);
     }
 
-    sqlx::query(
+    let mut tx = pool.begin().await?;
+    release_expired_outbox_dedupe_key_pg(&mut tx, dedupe_key.as_deref()).await?;
+    let inserted = sqlx::query_scalar::<_, i64>(
         "INSERT INTO message_outbox
-         (target, content, bot, source, reason_code, session_key)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+         (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7,
+                 NOW() + ($8::BIGINT * INTERVAL '1 second'))
+         ON CONFLICT (dedupe_key)
+             WHERE dedupe_key IS NOT NULL AND status != 'failed'
+         DO NOTHING
+         RETURNING id",
     )
     .bind(target)
     .bind(content)
@@ -449,8 +602,21 @@ pub(crate) async fn enqueue_lifecycle_notification_pg(
     .bind(LIFECYCLE_NOTIFIER_SOURCE)
     .bind(reason_code)
     .bind(session_key.as_deref())
-    .execute(pool)
+    .bind(dedupe_key.as_deref())
+    .bind(LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS)
+    .fetch_optional(&mut *tx)
     .await?;
+    tx.commit().await?;
+
+    if inserted.is_none() {
+        tracing::info!(
+            target,
+            reason_code,
+            session_key = session_key.as_deref(),
+            "suppressed duplicate lifecycle notification by database dedupe key"
+        );
+        return Ok(false);
+    }
 
     Ok(true)
 }
@@ -460,13 +626,14 @@ mod tests {
     use super::{
         LIFECYCLE_NOTIFIER_SOURCE, OutboxMessage, enqueue_lifecycle_notification_pg,
         enqueue_lifecycle_notification_sqlite, enqueue_outbox_pg_returning_id,
-        enqueue_outbox_pg_returning_id_with_cancel, warn_lifecycle_enqueue_failure,
-        warn_outbox_enqueue_failure,
+        enqueue_outbox_pg_returning_id_with_cancel, enqueue_outbox_pg_returning_id_with_ttl,
+        warn_lifecycle_enqueue_failure, warn_outbox_enqueue_failure,
     };
     use crate::services::provider::CancelToken;
     use std::io::{self, Write};
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
+    use tokio::sync::Barrier;
 
     struct TestDatabase {
         admin_url: String,
@@ -754,6 +921,170 @@ mod tests {
         .await
         .expect("count postgres outbox rows");
         assert_eq!(count, 0);
+
+        pool.close().await;
+        test_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn outbox_pg_concurrent_duplicate_enqueue_creates_one_sendable_row() {
+        let test_db = TestDatabase::create().await;
+        let pool = test_db.migrate().await;
+        let barrier = Arc::new(Barrier::new(12));
+        let mut handles = Vec::new();
+
+        for _ in 0..12 {
+            let pool = pool.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                enqueue_outbox_pg_returning_id(
+                    &pool,
+                    OutboxMessage {
+                        target: "channel:pg-concurrent",
+                        content: "same concurrent body",
+                        bot: "notify",
+                        source: "test",
+                        reason_code: Some("test.concurrent"),
+                        session_key: Some("session-concurrent"),
+                    },
+                )
+                .await
+                .expect("concurrent postgres outbox enqueue")
+            }));
+        }
+
+        let mut inserted = 0;
+        for handle in handles {
+            if handle.await.expect("join concurrent enqueue").is_some() {
+                inserted += 1;
+            }
+        }
+        assert_eq!(inserted, 1);
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM message_outbox
+             WHERE target = $1
+               AND status IN ('pending', 'processing', 'sent')",
+        )
+        .bind("channel:pg-concurrent")
+        .fetch_one(&pool)
+        .await
+        .expect("count postgres outbox rows");
+        assert_eq!(count, 1);
+
+        pool.close().await;
+        test_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn lifecycle_pg_concurrent_same_reason_session_different_content_creates_one_sendable_row()
+     {
+        let test_db = TestDatabase::create().await;
+        let pool = test_db.migrate().await;
+        let barrier = Arc::new(Barrier::new(8));
+        let mut handles = Vec::new();
+
+        for idx in 0..8 {
+            let pool = pool.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                enqueue_lifecycle_notification_pg(
+                    &pool,
+                    "channel:pg-lifecycle-reason-race",
+                    Some("session-lifecycle-race"),
+                    "test.same_reason",
+                    &format!("lifecycle body variant {idx}"),
+                )
+                .await
+                .expect("concurrent postgres lifecycle enqueue")
+            }));
+        }
+
+        let mut inserted = 0;
+        for handle in handles {
+            if handle.await.expect("join concurrent lifecycle enqueue") {
+                inserted += 1;
+            }
+        }
+        assert_eq!(inserted, 1);
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM message_outbox
+             WHERE target = $1
+               AND status IN ('pending', 'processing', 'sent')",
+        )
+        .bind("channel:pg-lifecycle-reason-race")
+        .fetch_one(&pool)
+        .await
+        .expect("count postgres lifecycle rows");
+        assert_eq!(count, 1);
+
+        pool.close().await;
+        test_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn outbox_pg_allows_repeat_after_dedupe_window() {
+        let test_db = TestDatabase::create().await;
+        let pool = test_db.migrate().await;
+
+        let first = enqueue_outbox_pg_returning_id_with_ttl(
+            &pool,
+            OutboxMessage {
+                target: "channel:pg-repeat-window",
+                content: "repeatable body",
+                bot: "notify",
+                source: "test",
+                reason_code: Some("test.repeat"),
+                session_key: Some("session-repeat"),
+            },
+            60,
+        )
+        .await
+        .expect("enqueue first postgres outbox message");
+        assert!(first.is_some());
+
+        sqlx::query(
+            "UPDATE message_outbox
+                SET created_at = NOW() - INTERVAL '2 minutes',
+                    dedupe_expires_at = NOW() - INTERVAL '1 second'
+              WHERE id = $1",
+        )
+        .bind(first.unwrap())
+        .execute(&pool)
+        .await
+        .expect("age first outbox row past dedupe window");
+
+        let second = enqueue_outbox_pg_returning_id_with_ttl(
+            &pool,
+            OutboxMessage {
+                target: "channel:pg-repeat-window",
+                content: "repeatable body",
+                bot: "notify",
+                source: "test",
+                reason_code: Some("test.repeat"),
+                session_key: Some("session-repeat"),
+            },
+            60,
+        )
+        .await
+        .expect("enqueue second postgres outbox message after dedupe expiry");
+        assert!(second.is_some());
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM message_outbox
+             WHERE target = $1",
+        )
+        .bind("channel:pg-repeat-window")
+        .fetch_one(&pool)
+        .await
+        .expect("count postgres repeat rows");
+        assert_eq!(count, 2);
 
         pool.close().await;
         test_db.drop().await;

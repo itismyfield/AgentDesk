@@ -248,6 +248,29 @@ pub fn emit_inflight_lifecycle_event(
     );
 }
 
+/// Persist one relay root-cause counter increment. The hot-path atomic counter
+/// remains in `metrics`; this event gives operators a restart-safe stream they
+/// can aggregate across deploys (#2878).
+pub(super) fn emit_relay_root_cause_counter(provider: &str, channel_id: u64, counter: &str) {
+    let Some(counter) = normalize_string(counter) else {
+        return;
+    };
+    emit_event(
+        "relay_root_cause_counter",
+        Some(provider),
+        Some(channel_id),
+        None,
+        None,
+        None,
+        Some(counter.as_str()),
+        CounterDelta::default(),
+        json!({
+            "counter": counter,
+            "delta": 1,
+        }),
+    );
+}
+
 pub fn record_invariant_check(condition: bool, violation: InvariantViolation<'_>) -> bool {
     if condition {
         return true;
@@ -710,5 +733,36 @@ mod tests {
         assert_eq!(quality.payload["dispatch_id"], "dispatch-quality");
         assert_eq!(quality.payload["source_event_id"], "turn-quality");
         assert_eq!(quality.payload["status"], "review_pass");
+    }
+
+    #[test]
+    fn relay_root_cause_metric_wrappers_record_persistent_events() {
+        let _guard = super::super::test_runtime_lock();
+        super::super::reset_for_tests();
+
+        metrics::record_relay_terminal_ack_timeout(77, "Codex");
+        metrics::record_relay_uncommitted_inflight_cleared(77, "Codex");
+        metrics::record_relay_owner_unknown(77, "Codex");
+
+        let events = events::recent(10);
+        let counters = events
+            .iter()
+            .filter(|event| event.event_type == "relay_root_cause_counter")
+            .map(|event| event.payload["counter"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            counters,
+            vec![
+                "relay_terminal_ack_timeout",
+                "relay_uncommitted_inflight_cleared",
+                "relay_owner_unknown"
+            ]
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.provider.as_deref() == Some("codex"))
+        );
+        assert!(events.iter().all(|event| event.channel_id == Some(77)));
     }
 }
