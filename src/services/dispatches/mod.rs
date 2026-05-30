@@ -47,6 +47,13 @@ pub struct UpdateDispatchInput {
     pub result: Option<Value>,
 }
 
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct LinkDispatchThreadBody {
+    pub dispatch_id: String,
+    pub thread_id: String,
+    pub channel_id: Option<String>,
+}
+
 impl DispatchService {
     pub fn new(engine: PolicyEngine) -> Self {
         Self { engine }

@@ -114,7 +114,7 @@ pub(super) async fn link_dispatch_thread(
 ) {
     let _ = api_port;
     let _ = crate::services::discord::internal_api::link_dispatch_thread(
-        crate::server::routes::dispatches::LinkDispatchThreadBody {
+        crate::services::dispatches::LinkDispatchThreadBody {
             dispatch_id: dispatch_id.to_string(),
             thread_id: thread_id.to_string(),
             channel_id: Some(channel_id.to_string()),

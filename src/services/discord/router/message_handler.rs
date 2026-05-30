@@ -4112,7 +4112,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             // Use cached dispatch metadata for thread reuse and cross-channel role override
             let dispatch_info = &dispatch_info_cached;
             let is_counter_model_dispatch =
-                crate::server::routes::dispatches::use_counter_model_channel(
+                crate::services::dispatches::outbox_route::use_counter_model_channel(
                     dispatch_type_str.as_deref(),
                 );
             let alt_channel_id = dispatch_info

@@ -16,12 +16,28 @@
 use sqlx::PgPool;
 
 use crate::db::dispatches::outbox::CompletedDispatchInfo;
-use crate::server::dto::dispatches::DispatchFollowupConfig;
 use crate::services::dispatches::discord_delivery::{
     DispatchTransport, HttpDispatchTransport, discord_api_url,
     send_review_result_to_primary_with_transport,
 };
 use crate::services::git::GitCommand;
+
+#[derive(Clone, Debug)]
+pub(crate) struct DispatchFollowupConfig {
+    pub discord_api_base: String,
+    pub notify_bot_token: Option<String>,
+    pub announce_bot_token: Option<String>,
+}
+
+impl DispatchFollowupConfig {
+    pub(crate) fn from_runtime() -> Self {
+        Self {
+            discord_api_base: crate::services::dispatches::discord_delivery::discord_api_base_url(),
+            notify_bot_token: crate::credential::read_bot_token("notify"),
+            announce_bot_token: crate::credential::read_bot_token("announce"),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DispatchMergeStatus {
@@ -644,7 +660,7 @@ async fn should_defer_done_card_thread_archive(
     thread_id: &str,
     _dispatch_id: &str,
 ) -> Result<bool, String> {
-    crate::server::routes::dispatches::should_defer_thread_archive_pg(pg_pool, thread_id).await
+    crate::services::discord::should_defer_thread_archive_pg(pg_pool, thread_id).await
 }
 
 async fn clear_all_dispatch_threads(
@@ -662,9 +678,68 @@ async fn clear_all_dispatch_threads(
 // ── Channel helpers ─────────────────────────────────────────────
 
 /// Resolve a channel name alias (e.g. "adk-cc") to a numeric channel ID.
+pub(crate) fn resolve_channel_alias(alias: &str) -> Option<u64> {
+    if let Some(channel_id) =
+        crate::services::discord::agentdesk_config::resolve_channel_alias(alias)
+    {
+        return Some(channel_id);
+    }
+
+    let root = crate::cli::agentdesk_runtime_root()?;
+    let path = root.join("config/role_map.json");
+    let content = std::fs::read_to_string(&path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    let by_name = json.get("byChannelName")?.as_object()?;
+    if let Some(entry) = by_name.get(alias) {
+        if let Some(id) = entry.get("channelId").and_then(|value| value.as_str()) {
+            return id.parse().ok();
+        }
+        if let Some(id) = entry.get("channelId").and_then(|value| value.as_u64()) {
+            return Some(id);
+        }
+    }
+
+    let by_id = json.get("byChannelId")?.as_object()?;
+    for (channel_id, entry) in by_id {
+        if entry.get("channelName").and_then(|value| value.as_str()) == Some(alias) {
+            return channel_id.parse().ok();
+        }
+    }
+
+    if let Some(entry) = by_name.get(alias) {
+        let role_id = entry.get("roleId").and_then(|value| value.as_str())?;
+        let provider = entry.get("provider").and_then(|value| value.as_str());
+        for (channel_id, channel_entry) in by_id {
+            let entry_role = channel_entry.get("roleId").and_then(|value| value.as_str());
+            let entry_provider = channel_entry
+                .get("provider")
+                .and_then(|value| value.as_str());
+            if entry_role == Some(role_id) {
+                if let (Some(expected), Some(actual)) = (provider, entry_provider) {
+                    if expected == actual {
+                        return channel_id.parse().ok();
+                    }
+                } else {
+                    return channel_id.parse().ok();
+                }
+            }
+        }
+    }
+
+    None
+}
+
+pub(crate) fn parse_channel_id(channel: &str) -> Option<u64> {
+    channel
+        .parse::<u64>()
+        .ok()
+        .or_else(|| resolve_channel_alias(channel))
+}
+
 /// Public wrapper around the shared resolve_channel_alias.
 pub fn resolve_channel_alias_pub(alias: &str) -> Option<u64> {
-    crate::server::routes::dispatches::resolve_channel_alias(alias)
+    resolve_channel_alias(alias)
 }
 
 pub(crate) fn use_counter_model_channel(dispatch_type: Option<&str>) -> bool {

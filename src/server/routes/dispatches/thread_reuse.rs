@@ -3,23 +3,14 @@ use axum::{
     extract::{Query, State},
     http::StatusCode,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{PgPool, Row as SqlxRow};
 
 use crate::db::agents::{resolve_agent_counter_model_channel_pg, resolve_agent_primary_channel_pg};
 use crate::server::routes::AppState;
+use crate::services::dispatches::LinkDispatchThreadBody;
 
 use super::parse_channel_id;
-
-// ── Body types ─────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct LinkDispatchThreadBody {
-    pub dispatch_id: String,
-    pub thread_id: String,
-    pub channel_id: Option<String>,
-}
 
 // ── Channel-thread map helpers ────────────────────────────────
 

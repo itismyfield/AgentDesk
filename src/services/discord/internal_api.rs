@@ -8,6 +8,7 @@ use serde_json::Value;
 use sqlx::Row;
 
 use crate::server::routes;
+use crate::services::dispatches::LinkDispatchThreadBody;
 
 #[derive(Clone)]
 struct DirectApiContext {
@@ -133,9 +134,7 @@ pub(super) async fn lookup_dispatch_type(dispatch_id: &str) -> Result<Option<Str
         .map(str::to_string))
 }
 
-pub(super) async fn link_dispatch_thread(
-    body: routes::dispatches::LinkDispatchThreadBody,
-) -> Result<Value, String> {
+pub(super) async fn link_dispatch_thread(body: LinkDispatchThreadBody) -> Result<Value, String> {
     request_body(Method::POST, "/api/internal/link-dispatch-thread", &body).await
 }
 

@@ -7,8 +7,6 @@
 
 pub(crate) use crate::db::dispatches::outbox::requeue_dispatch_notify_pg;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) use crate::server::dto::dispatches::DispatchFollowupConfig;
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) use crate::services::dispatches::outbox_claiming::claim_pending_dispatch_outbox_batch_pg;
 pub(crate) use crate::services::dispatches::outbox_queue::dispatch_outbox_loop;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -16,6 +14,8 @@ pub(crate) use crate::services::dispatches::outbox_queue::{
     OutboxNotifier, process_outbox_batch, process_outbox_batch_with_pg,
     process_outbox_batch_with_real_notifier,
 };
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+pub(crate) use crate::services::dispatches::outbox_route::DispatchFollowupConfig;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) use crate::services::dispatches::outbox_route::parse_json_value;
 pub use crate::services::dispatches::outbox_route::resolve_channel_alias_pub;
