@@ -3,7 +3,7 @@
   "rule": "service_server_backflow",
   "description": "No-regression baseline for src/services references to crate::server or super::server server-layer modules.",
   "captured_at": "2026-05-30",
-  "total_count": 118,
+  "total_count": 113,
   "files": {
     "src/services/agents/query.rs": {
       "count": 2
@@ -78,10 +78,10 @@
       "count": 1
     },
     "src/services/discord/router/message_handler.rs": {
-      "count": 1
+      "count": 0
     },
     "src/services/discord/router/thread_binding.rs": {
-      "count": 1
+      "count": 0
     },
     "src/services/discord/runtime_bootstrap.rs": {
       "count": 4
@@ -114,7 +114,7 @@
       "count": 1
     },
     "src/services/dispatches/outbox_route.rs": {
-      "count": 3
+      "count": 0
     },
     "src/services/dispatches/routing_constraint.rs": {
       "count": 3

@@ -270,27 +270,6 @@ impl DispatchRouteResponse {
     }
 }
 
-// #1694: Followup configuration DTO that the outbox followup orchestration
-// uses to thread Discord API base URL + bot tokens through. Lives here so
-// the route + test layers can construct it without depending on the
-// route module internals.
-#[derive(Clone, Debug)]
-pub(crate) struct DispatchFollowupConfig {
-    pub discord_api_base: String,
-    pub notify_bot_token: Option<String>,
-    pub announce_bot_token: Option<String>,
-}
-
-impl DispatchFollowupConfig {
-    pub(crate) fn from_runtime() -> Self {
-        Self {
-            discord_api_base: crate::services::dispatches::discord_delivery::discord_api_base_url(),
-            notify_bot_token: crate::credential::read_bot_token("notify"),
-            announce_bot_token: crate::credential::read_bot_token("announce"),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
