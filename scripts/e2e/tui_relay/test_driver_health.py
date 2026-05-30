@@ -51,7 +51,9 @@ class FakeRawResponse:
 def _fake_urlopen_for(payloads_by_path):
     def fake_urlopen(request, timeout=0):  # noqa: ARG001
         url = getattr(request, "full_url", str(request))
-        for path, payloads in payloads_by_path.items():
+        for path, payloads in sorted(
+            payloads_by_path.items(), key=lambda item: len(item[0]), reverse=True
+        ):
             if path in url:
                 if len(payloads) > 1:
                     item = payloads.pop(0)
@@ -73,6 +75,7 @@ def _health_detail(*mailboxes: dict, status: str = "healthy") -> dict:
         "status": status,
         "ok": status == "healthy",
         "fully_recovered": status == "healthy",
+        "global_active": 0,
         "global_finalizing": 0,
         "mailboxes": list(mailboxes),
     }
@@ -332,6 +335,118 @@ class PostScenarioIdle(unittest.TestCase):
                         poll_interval_s=0.01,
                     )
         self.assertIn("queued_placeholders", str(ctx.exception))
+
+
+class ScenarioHealthProbe(unittest.TestCase):
+    def test_assert_health_passes_with_status_and_counter_caps(self):
+        payloads = {
+            "/api/health/detail": [
+                (200, _health_detail(_idle_mailbox("42", provider="codex")))
+            ],
+            "/api/health": [
+                (
+                    200,
+                    {
+                        "status": "healthy",
+                        "ok": True,
+                        "fully_recovered": True,
+                        "degraded_reasons": [],
+                    },
+                )
+            ],
+        }
+
+        with patch("run_tui_relay.urllib.request.urlopen", _fake_urlopen_for(payloads)):
+            result = driver.assert_health(
+                "http://agentdesk.test",
+                {
+                    "require_status": "healthy",
+                    "forbid_degraded_reasons": ["global_active_counter_out_of_bounds"],
+                    "global_active_max": 0,
+                    "global_finalizing_max": 0,
+                },
+            )
+
+        self.assertEqual(result["status"], "healthy")
+        self.assertEqual(result["global_active"], 0)
+        self.assertEqual(result["global_finalizing"], 0)
+
+    def test_assert_health_fails_on_forbidden_reason_and_counter_cap(self):
+        payloads = {
+            "/api/health/detail": [
+                (
+                    503,
+                    {
+                        **_health_detail(_busy_mailbox("42", provider="codex")),
+                        "global_active": 2,
+                        "global_finalizing": 1,
+                    },
+                )
+            ],
+            "/api/health": [
+                (
+                    503,
+                    {
+                        "status": "unhealthy",
+                        "ok": False,
+                        "fully_recovered": False,
+                        "degraded": True,
+                        "degraded_reasons": [
+                            "global_active_counter_out_of_bounds:raw=4"
+                        ],
+                    },
+                )
+            ],
+        }
+
+        with patch("run_tui_relay.urllib.request.urlopen", _fake_urlopen_for(payloads)):
+            with self.assertRaises(assertions.AssertionError) as ctx:
+                driver.assert_health(
+                    "http://agentdesk.test",
+                    {
+                        "forbid_degraded_reasons": [
+                            "global_active_counter_out_of_bounds"
+                        ],
+                        "global_active_max": 0,
+                        "global_finalizing_max": 0,
+                    },
+                )
+
+        message = str(ctx.exception)
+        self.assertIn("forbidden_degraded_reasons", message)
+        self.assertIn("global_active=2 > 0", message)
+        self.assertIn("global_finalizing=1 > 0", message)
+
+    def test_cancel_turn_posts_expected_endpoint(self):
+        captured = {}
+
+        def fake_urlopen(request, timeout=0):  # noqa: ANN001
+            captured["url"] = request.full_url
+            captured["method"] = request.get_method()
+            captured["timeout"] = timeout
+            return FakeResponse(
+                200,
+                {
+                    "ok": True,
+                    "queued_remaining": 0,
+                    "queue_purged": True,
+                    "tmux_killed": False,
+                    "lifecycle_path": "preserve",
+                },
+            )
+
+        with patch("run_tui_relay.urllib.request.urlopen", fake_urlopen):
+            result = driver.cancel_turn(
+                base_url="http://agentdesk.test",
+                channel_id="42",
+                force=False,
+                timeout_s=7,
+            )
+
+        self.assertEqual(captured["url"], "http://agentdesk.test/api/turns/42/cancel?force=false")
+        self.assertEqual(captured["method"], "POST")
+        self.assertEqual(captured["timeout"], 7)
+        self.assertEqual(result["queue_purged"], True)
 
 
 class ScenarioTeardown(unittest.TestCase):

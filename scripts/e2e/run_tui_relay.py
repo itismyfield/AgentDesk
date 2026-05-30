@@ -218,6 +218,7 @@ def is_destructive(scenario: dict[str, Any]) -> bool:
             "kill_tui_process",
             "send_keys_no_enter",
             "poison_claude_tui_relay_offset",
+            "cancel_turn",
         ):
             if key in step:
                 return True
@@ -303,24 +304,14 @@ def reset_channel_state(
 ) -> dict[str, Any]:
     summary: dict[str, Any] = {"channel_id": channel_id, "actions": []}
     try:
-        url = f"{base_url}/api/turns/{channel_id}/cancel?force=true"
-        req = urllib.request.Request(
-            url,
-            data=b"",
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
         summary["actions"].append(
             {
-                "cancel_turn": {
-                    "ok": payload.get("ok"),
-                    "queued_remaining": payload.get("queued_remaining"),
-                    "queue_purged": payload.get("queue_purged"),
-                    "tmux_killed": payload.get("tmux_killed"),
-                    "lifecycle_path": payload.get("lifecycle_path"),
-                }
+                "cancel_turn": cancel_turn(
+                    base_url=base_url,
+                    channel_id=channel_id,
+                    force=True,
+                    timeout_s=15,
+                )
             }
         )
     except Exception as error:  # noqa: BLE001
@@ -340,6 +331,60 @@ def reset_channel_state(
                     cleared.append(str(target))
         summary["actions"].append({kind: cleared})
     return summary
+
+
+def cancel_turn(
+    *,
+    base_url: str,
+    channel_id: str,
+    force: bool = True,
+    timeout_s: float = 15.0,
+) -> dict[str, Any]:
+    """POST the reusable turn-cancel endpoint used by reset and scenarios."""
+
+    url = f"{base_url.rstrip('/')}/api/turns/{channel_id}/cancel?force={'true' if force else 'false'}"
+    req = urllib.request.Request(
+        url,
+        data=b"",
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+            status = int(getattr(resp, "status", 200))
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", "replace")
+        raise assertions.AssertionError(
+            f"cancel_turn HTTP {error.code} for channel={channel_id}: {body[:500]!r}"
+        ) from error
+    except urllib.error.URLError as error:
+        raise assertions.AssertionError(
+            f"cancel_turn URL error for channel={channel_id}: {error}"
+        ) from error
+
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError as error:
+        raise assertions.AssertionError(
+            f"cancel_turn returned non-JSON HTTP {status}: {raw[:500]!r}"
+        ) from error
+    if not isinstance(payload, dict):
+        raise assertions.AssertionError(
+            f"cancel_turn returned non-object HTTP {status}: {payload!r}"
+        )
+    if status >= 400 or payload.get("ok") is False:
+        raise assertions.AssertionError(
+            f"cancel_turn failed HTTP {status} for channel={channel_id}: "
+            f"{_payload_summary(payload)}"
+        )
+    return {
+        "ok": payload.get("ok"),
+        "queued_remaining": payload.get("queued_remaining"),
+        "queue_purged": payload.get("queue_purged"),
+        "tmux_killed": payload.get("tmux_killed"),
+        "lifecycle_path": payload.get("lifecycle_path"),
+    }
 
 
 def poison_claude_tui_relay_offset(
@@ -506,6 +551,114 @@ def _health_summary(
     if last_error:
         fields["last_error"] = last_error
     return json.dumps(fields, ensure_ascii=False, sort_keys=True)
+
+
+def _as_string_tuple(value: Any, *, default: tuple[str, ...] = ()) -> tuple[str, ...]:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, list):
+        return tuple(str(item) for item in value)
+    return (str(value),)
+
+
+def _reason_matches(pattern: str, reason: str) -> bool:
+    if pattern.endswith("*"):
+        return reason.startswith(pattern[:-1])
+    return pattern == reason or pattern in reason
+
+
+def _counter_from_payloads(
+    name: str, payloads: list[dict[str, Any]]
+) -> tuple[int | None, str | None]:
+    for payload in payloads:
+        if name in payload:
+            return _as_nonnegative_int(payload.get(name)), name
+    return None, None
+
+
+def assert_health(
+    base_url: str,
+    params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Scenario-level health probe with explicit status/reason/counter checks."""
+
+    options = params or {}
+    status_code, health = _read_api_json(base_url, "/api/health", timeout=5)
+    if not isinstance(health, dict):
+        raise assertions.AssertionError(
+            f"assert_health /api/health returned non-object HTTP {status_code}: "
+            f"{health!r}"
+        )
+
+    required_statuses = _as_string_tuple(
+        options.get("require_status") or options.get("allowed_statuses"),
+        default=("healthy",),
+    )
+    violations = _health_ready_violations(
+        health,
+        allowed_statuses=required_statuses,
+        allowed_degraded_reasons=_as_string_tuple(options.get("allowed_degraded_reasons")),
+    )
+
+    forbidden_reasons = _as_string_tuple(options.get("forbid_degraded_reasons"))
+    degraded_reasons = health.get("degraded_reasons") or []
+    if not isinstance(degraded_reasons, list):
+        degraded_reasons = [degraded_reasons]
+    blocked_reasons = [
+        str(reason)
+        for reason in degraded_reasons
+        if any(_reason_matches(pattern, str(reason)) for pattern in forbidden_reasons)
+    ]
+    if blocked_reasons:
+        violations.append(f"forbidden_degraded_reasons={blocked_reasons}")
+
+    counter_payloads = [health]
+    needs_detail = any(
+        key in options for key in ("global_active_max", "global_finalizing_max")
+    )
+    detail: dict[str, Any] | None = None
+    if needs_detail:
+        detail = _read_health_detail(base_url)
+        counter_payloads.insert(0, detail)
+
+    counter_values: dict[str, int] = {}
+    for counter_name, option_name in (
+        ("global_active", "global_active_max"),
+        ("global_finalizing", "global_finalizing_max"),
+    ):
+        if option_name not in options:
+            continue
+        actual, source_key = _counter_from_payloads(counter_name, counter_payloads)
+        if actual is None:
+            violations.append(f"{counter_name}=<missing>")
+            continue
+        counter_values[counter_name] = actual
+        maximum = int(options[option_name])
+        if actual > maximum:
+            violations.append(f"{source_key}={actual} > {maximum}")
+
+    if status_code < 200 or status_code >= 300:
+        violations.append(f"http={status_code}")
+    if violations:
+        summary_payload = dict(health)
+        if detail is not None:
+            summary_payload["detail_counters"] = {
+                "global_active": detail.get("global_active"),
+                "global_finalizing": detail.get("global_finalizing"),
+            }
+        raise assertions.AssertionError(
+            "assert_health failed: "
+            f"{_health_summary(http_status=status_code, payload=summary_payload, violations=violations)}"
+        )
+
+    return {
+        "http": status_code,
+        "status": health.get("status"),
+        "degraded_reasons": degraded_reasons,
+        **counter_values,
+    }
 
 
 def _as_nonnegative_int(value: Any) -> int:
@@ -870,6 +1023,7 @@ def run_one_cell(
             if not first_send_done:
                 _advance_window_past_setup_echo()
                 first_send_done = True
+            window.mark_prompt_sent()
             client.send_prompt(
                 channel_id,
                 step["send_prompt"],
@@ -933,6 +1087,21 @@ def run_one_cell(
                     runtime_root=Path(args.queue_runtime_root),
                 )
             )
+        elif "cancel_turn" in step:
+            params = step["cancel_turn"] or {}
+            record.setdefault("cancel_turns", []).append(
+                cancel_turn(
+                    base_url=client.base_url,
+                    channel_id=channel_id,
+                    force=bool(params.get("force", True)),
+                    timeout_s=float(params.get("timeout_s", 15)),
+                )
+            )
+        elif "assert_health" in step:
+            params = step["assert_health"] or {}
+            record.setdefault("health_assertions", []).append(
+                assert_health(client.base_url, params)
+            )
         elif "kill_pane" in step:
             thread_channel_id = channel_id if scenario.get("requires_thread_channel") else None
             session_name = cell_session_name(cell, thread_channel_id=thread_channel_id)
@@ -976,10 +1145,18 @@ def run_one_cell(
         else:
             raise assertions.AssertionError(f"unknown step shape: {step!r}")
 
-    _ingest_observed(client.fetch_messages(channel_id, after_id=after_id, limit=100))
+    final_refetches = max(1, int(os.environ.get("AGENTDESK_E2E_FINAL_REFETCHES", "2")))
+    final_refetch_interval_s = float(
+        os.environ.get("AGENTDESK_E2E_FINAL_REFETCH_INTERVAL_S", "1")
+    )
+    for attempt in range(final_refetches):
+        if attempt > 0:
+            time.sleep(final_refetch_interval_s)
+        _ingest_observed(client.fetch_messages(channel_id, after_id=after_id, limit=100))
 
     record["relay_count"] = len(window.messages)
     record["raw_count"] = len(window.raw_messages)
+    record["message_updates"] = len(window.message_updates)
     record["sample_relay"] = [
         (m.get("content") or "")[:120] for m in window.messages[:6]
     ]
@@ -1172,12 +1349,41 @@ def run_assertion(spec: dict[str, Any], *, window: assertions.Window) -> None:
         assertions.message_count_between_markers(
             window, low=int(params.get("min", 0)), high=int(params.get("max", 99))
         )
+    elif "raw_message_count_between_markers" in spec:
+        params = spec["raw_message_count_between_markers"]
+        assertions.raw_message_count_between_markers(
+            window,
+            low=int(params.get("min", 0)),
+            high=int(params.get("max", 999)),
+            include_our_send=bool(params.get("include_our_send", False)),
+        )
     elif spec.get("no_duplicate_content"):
         assertions.no_duplicate_content(window)
     elif "text_present" in spec:
         assertions.text_present(window, needle=spec["text_present"])
     elif "raw_text_present" in spec:
         assertions.raw_text_present(window, needle=spec["raw_text_present"])
+    elif "raw_text_absent" in spec:
+        params = spec["raw_text_absent"]
+        if isinstance(params, dict):
+            assertions.raw_text_absent(
+                window,
+                needle=str(params["needle"]),
+                include_our_send=bool(params.get("include_our_send", False)),
+            )
+        else:
+            assertions.raw_text_absent(window, needle=str(params))
+    elif "marker_absent" in spec:
+        params = spec["marker_absent"]
+        if isinstance(params, dict):
+            assertions.marker_absent(
+                window,
+                marker=str(params["marker"]),
+                surface=str(params.get("surface", "relay")),
+                include_our_send=bool(params.get("include_our_send", False)),
+            )
+        else:
+            assertions.marker_absent(window, marker=str(params))
     elif "ordered_text_present" in spec:
         # #2838 (P0-2): completeness + ordering of multiple expected fragments.
         needles = spec["ordered_text_present"]
@@ -1201,6 +1407,35 @@ def run_assertion(spec: dict[str, Any], *, window: assertions.Window) -> None:
         params = spec["relay_latency_within"]
         max_seconds = params.get("max_seconds") if isinstance(params, dict) else params
         assertions.relay_latency_within(window, max_seconds=float(max_seconds))
+    elif "chrome_count" in spec:
+        params = spec["chrome_count"]
+        if not isinstance(params, dict):
+            raise assertions.AssertionError(f"chrome_count requires a mapping: {spec!r}")
+        assertions.chrome_count(
+            window,
+            text=params.get("text"),
+            regex=params.get("regex"),
+            min_count=int(params.get("min", 0)),
+            max_count=(
+                int(params["max"])
+                if "max" in params and params.get("max") is not None
+                else None
+            ),
+            exact=(
+                int(params["exact"])
+                if "exact" in params and params.get("exact") is not None
+                else None
+            ),
+            include_our_send=bool(params.get("include_our_send", False)),
+        )
+    elif "completion_chrome_after_body" in spec:
+        params = spec["completion_chrome_after_body"]
+        body_marker = params.get("body_marker") if isinstance(params, dict) else params
+        assertions.completion_chrome_after_body(window, body_marker=str(body_marker))
+    elif "body_not_overwritten" in spec:
+        assertions.body_not_overwritten(window, marker=str(spec["body_not_overwritten"]))
+    elif spec.get("no_suppressed_label_chrome"):
+        assertions.no_suppressed_label_chrome(window)
     elif spec.get("no_control_chars"):
         assertions.no_control_chars(window)
     elif spec.get("no_resume_prompt_chrome"):

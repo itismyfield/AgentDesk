@@ -44,7 +44,9 @@ coverage because this matrix does not create a persistent Claude Code wake
 session for those cells. `E-16` and `E-17` are #2935 regression stubs: they are
 loaded by the relevant cells but skipped until the runtime/orchestrator exposes
 hooks to force Claude TUI completion-quiescence timeout and to hold a foreign
-active mailbox during a destructive restart attempt. `E-11` (cross-cell
+active mailbox during a destructive restart attempt. `E-18` is the conservative
+Phase 1 `cancel_turn` stop-mid-turn scenario; it currently runs only on
+`codex-tui` until live timing is calibrated across more cells. `E-11` (cross-cell
 concurrency) is `cells: []` — the orchestrator owns that scenario.
 
 ## Driver
@@ -78,8 +80,9 @@ at one `--output` directory does not overwrite sibling reports. Per-cell lease
 files (`/tmp/agentdesk-e2e-relay.<cell>.lease`) let cells run in parallel from
 separate operator sessions.
 
-Destructive steps (`restart_dcserver`, `kill_pane`, `send_keys_no_enter`) are
-gated by both `--allow-destructive` and `AGENTDESK_E2E_ALLOW_DESTRUCTIVE=1`.
+Destructive steps (`restart_dcserver`, `kill_pane`, `send_keys_no_enter`,
+`cancel_turn`) are gated by both `--allow-destructive` and
+`AGENTDESK_E2E_ALLOW_DESTRUCTIVE=1`.
 Before a destructive restart, the driver now fails closed if
 `/api/health/detail.mailboxes` shows any foreign channel/provider with active
 mailbox state, cancel token, inflight state, queue depth, recovery/finalizing
@@ -97,6 +100,26 @@ mailbox is idle via `/api/health/detail`: `agent_turn_status=idle`,
 pending Discord callback, and no stale/relay-stall proof. It also checks the
 tested provider/channel's on-disk pending queue and queued placeholder files
 under the runtime root are empty.
+
+Scenario steps can also run an explicit `assert_health` probe. The probe reads
+`/api/health` and, when counter caps are requested, `/api/health/detail`; it can
+require `status: healthy`, forbid degraded reason substrings such as
+`global_active_counter_out_of_bounds`, and cap `global_active` /
+`global_finalizing`. Destructive scenarios use this after the tested turn has
+settled so counter underflow and stuck-finalizing regressions are visible in the
+E2E report.
+
+Observation assertions now include negative and edit-aware primitives:
+`raw_text_absent`, `marker_absent`, `chrome_count`,
+`completion_chrome_after_body`, `raw_message_count_between_markers`,
+`body_not_overwritten`, and `no_suppressed_label_chrome`. The observation
+window updates messages by Discord id during final re-fetches, so assertions see
+the final edited body rather than only the first placeholder/chrome body.
+Latency budgets use the first prompt timestamp to make
+`relay_latency_within` meaningful even for one-response scenarios. Current
+baselines are deliberately loose: simple/turn-separation cases use 240s
+latency, raw-message budgets count status chrome but exclude harness-sent
+control/prompt messages unless a scenario opts into `include_our_send`.
 
 ## Orchestrator (`adk-e2e-orchestrator`)
 

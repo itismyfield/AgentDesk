@@ -1,0 +1,34 @@
+id: E-18
+title: cancel_turn 중단 후 late marker 미전송 보장
+cells: [codex-tui]
+isolation: required
+destructive: true
+notes: |
+  Phase 1 coverage for #2937. Scope is intentionally conservative: codex-tui
+  exercises the reusable cancel_turn step without expanding the flaky live
+  matrix. Enable more cells after live timing is calibrated.
+steps:
+  - send_prompt: |
+      첫 줄에는 정확히 "[E2E:E18:OK]"만 출력해줘.
+      그 다음부터 250줄을 번호와 함께 작성해줘.
+      250번째 마지막 줄에 도달하기 전에는 절대 "[E2E:E18:LATE]"를 출력하지 말고,
+      정말 마지막 줄에서만 "[E2E:E18:LATE]"를 출력해줘.
+  - wait_for_discord_text: "[E2E:E18:OK]"
+    timeout_s: 180
+  - cancel_turn:
+      force: true
+      timeout_s: 15
+  - wait_idle_s: 15
+  - assert_health:
+      forbid_degraded_reasons:
+        - global_active_counter_out_of_bounds
+        - underflow
+      global_active_max: 0
+      global_finalizing_max: 0
+assertions:
+  - text_present: "[E2E:E18:OK]"
+  - marker_absent:
+      marker: "[E2E:E18:LATE]"
+      surface: relay
+  - no_duplicate_content: true
+  - no_suppressed_label_chrome: true

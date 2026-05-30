@@ -10,6 +10,14 @@ assertions:
   - message_count_between_markers:
       min: 1
       max: 6
+  - raw_message_count_between_markers:
+      min: 1
+      max: 12
+  - relay_latency_within:
+      max_seconds: 240
+  - completion_chrome_after_body:
+      body_marker: "[E2E:E1:OK]"
   - no_duplicate_content: true
   - no_control_chars: true
   - no_resume_prompt_chrome: true
+  - no_suppressed_label_chrome: true

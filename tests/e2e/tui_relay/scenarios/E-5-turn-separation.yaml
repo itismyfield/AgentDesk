@@ -11,7 +11,15 @@ steps:
   - wait_for_discord_text: "[E2E:E5:TURN-B]"
     timeout_s: 240
 assertions:
+  - raw_message_count_between_markers:
+      min: 2
+      max: 24
+  - relay_latency_within:
+      max_seconds: 240
   - no_duplicate_content: true
   - text_present: "[E2E:E5:TURN-A]"
   - text_present: "[E2E:E5:TURN-B]"
+  - body_not_overwritten: "[E2E:E5:TURN-A]"
+  - body_not_overwritten: "[E2E:E5:TURN-B]"
+  - no_suppressed_label_chrome: true
   - no_resume_prompt_chrome: true

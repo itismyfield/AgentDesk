@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+import datetime as dt
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -28,6 +29,27 @@ def _relay_msg(msg_id: int, content: str, ts: str | None = None) -> dict:
     if ts is not None:
         message["timestamp"] = ts
     return message
+
+
+def _raw_bot_msg(msg_id: int, content: str, ts: str | None = None) -> dict:
+    message = {
+        "id": str(msg_id),
+        "content": content,
+        "author": {"id": "999", "bot": True},
+        "type": 0,
+    }
+    if ts is not None:
+        message["timestamp"] = ts
+    return message
+
+
+def _our_msg(msg_id: int, content: str) -> dict:
+    return {
+        "id": str(msg_id),
+        "content": content,
+        "author": {"id": assertions.OUR_BOT_ID, "bot": True},
+        "type": 0,
+    }
 
 
 def _window(*messages: dict) -> assertions.Window:
@@ -114,6 +136,89 @@ class RelayLatency(unittest.TestCase):
         window = _window(_relay_msg(1, "only", ts="2026-05-29T00:00:00Z"))
         assertions.relay_latency_within(window, max_seconds=0)
 
+    def test_single_message_uses_prompt_start_when_available(self):
+        window = _window(_relay_msg(1, "only", ts="2026-05-29T00:00:02Z"))
+        window.mark_prompt_sent(dt.datetime.fromisoformat("2026-05-29T00:00:00+00:00"))
+        assertions.relay_latency_within(window, max_seconds=3)
+        with self.assertRaises(assertions.AssertionError):
+            assertions.relay_latency_within(window, max_seconds=1)
+
+
+class RawChromeAndEditAssertions(unittest.TestCase):
+    def test_window_updates_same_message_id_to_final_body(self):
+        window = _window(_raw_bot_msg(1, "Processing..."))
+        window.add(_relay_msg(1, "final [E2E:EDIT]", ts="2026-05-29T00:00:00Z"))
+
+        self.assertEqual(len(window.raw_messages), 1)
+        self.assertEqual(window.raw_messages[0]["content"], "final [E2E:EDIT]")
+        self.assertEqual(len(window.messages), 1)
+        self.assertEqual(len(window.message_updates), 1)
+        assertions.text_present(window, needle="[E2E:EDIT]")
+
+    def test_body_not_overwritten_uses_final_non_own_raw_body(self):
+        window = _window(
+            _our_msg(1, "prompt contains [E2E:BODY]"),
+            _relay_msg(2, "answer [E2E:BODY]"),
+        )
+        assertions.body_not_overwritten(window, marker="[E2E:BODY]")
+        window.add(_raw_bot_msg(2, "SUPPRESSED_INTERNAL_LABEL"))
+        with self.assertRaises(assertions.AssertionError):
+            assertions.body_not_overwritten(window, marker="[E2E:BODY]")
+        with self.assertRaises(assertions.AssertionError):
+            assertions.no_suppressed_label_chrome(window)
+
+    def test_raw_text_absent_and_marker_absent(self):
+        window = _window(
+            _our_msg(1, "prompt [LATE]"),
+            _raw_bot_msg(2, "✅ 응답 완료"),
+            _relay_msg(3, "body [OK]"),
+        )
+        assertions.raw_text_absent(window, needle="[LATE]")
+        assertions.marker_absent(window, marker="[LATE]")
+        assertions.marker_absent(window, marker="✅", surface="relay")
+        with self.assertRaises(assertions.AssertionError):
+            assertions.marker_absent(window, marker="[OK]")
+        with self.assertRaises(assertions.AssertionError):
+            assertions.raw_text_absent(window, needle="✅")
+
+    def test_raw_message_count_between_markers_counts_chrome(self):
+        window = _window(
+            _our_msg(1, "prompt"),
+            _raw_bot_msg(2, "✅ 응답 완료"),
+            _relay_msg(3, "body"),
+        )
+        assertions.raw_message_count_between_markers(window, low=2, high=2)
+        assertions.raw_message_count_between_markers(
+            window, low=3, high=3, include_our_send=True
+        )
+        with self.assertRaises(assertions.AssertionError):
+            assertions.raw_message_count_between_markers(window, low=1, high=1)
+
+    def test_chrome_count_exact_text_and_regex(self):
+        window = _window(
+            _raw_bot_msg(1, "✅ 응답 완료"),
+            _raw_bot_msg(2, "✅ 응답 완료"),
+            _relay_msg(3, "body"),
+        )
+        assertions.chrome_count(window, text="응답 완료", exact=2)
+        assertions.chrome_count(window, regex=r"^✅", min_count=2, max_count=2)
+        with self.assertRaises(assertions.AssertionError):
+            assertions.chrome_count(window, text="응답 완료", exact=1)
+
+    def test_completion_chrome_after_body(self):
+        window = _window(
+            _relay_msg(1, "body [BODY]"),
+            _raw_bot_msg(2, "✅ 응답 완료"),
+        )
+        assertions.completion_chrome_after_body(window, body_marker="[BODY]")
+
+        bad = _window(
+            _raw_bot_msg(1, "✅ 응답 완료"),
+            _relay_msg(2, "body [BODY]"),
+        )
+        with self.assertRaises(assertions.AssertionError):
+            assertions.completion_chrome_after_body(bad, body_marker="[BODY]")
+
 
 class RunAssertionDispatch(unittest.TestCase):
     """The YAML `run_assertion` dispatch must route the new spec keys, and every
@@ -149,6 +254,26 @@ class RunAssertionDispatch(unittest.TestCase):
         )
         self.run_assertion({"relay_latency_within": {"max_seconds": 5}}, window=window)
         self.run_assertion({"relay_latency_within": 5}, window=window)
+
+    def test_raw_and_chrome_dispatch(self):
+        window = _window(
+            _our_msg(1, "prompt [LATE]"),
+            _relay_msg(2, "body [BODY]"),
+            _raw_bot_msg(3, "✅ 응답 완료"),
+        )
+        self.run_assertion(
+            {"raw_message_count_between_markers": {"min": 2, "max": 2}},
+            window=window,
+        )
+        self.run_assertion({"raw_text_absent": "[LATE]"}, window=window)
+        self.run_assertion({"marker_absent": {"marker": "[LATE]"}}, window=window)
+        self.run_assertion({"chrome_count": {"text": "응답 완료", "exact": 1}}, window=window)
+        self.run_assertion(
+            {"completion_chrome_after_body": {"body_marker": "[BODY]"}},
+            window=window,
+        )
+        self.run_assertion({"body_not_overwritten": "[BODY]"}, window=window)
+        self.run_assertion({"no_suppressed_label_chrome": True}, window=window)
 
     def test_every_scenario_assertion_spec_is_dispatchable(self):
         import glob  # noqa: PLC0415

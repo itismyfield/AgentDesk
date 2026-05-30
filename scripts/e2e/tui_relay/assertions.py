@@ -44,6 +44,18 @@ _STATUS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\[Stopped\]"),
 )
 
+_COMPLETION_CHROME_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^✅"),
+    re.compile(r"응답 완료"),
+)
+
+_SUPPRESSED_LABEL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"SUPPRESSED_INTERNAL_LABEL", re.IGNORECASE),
+    re.compile(r"suppressed internal", re.IGNORECASE),
+    re.compile(r"보류된 출력"),
+    re.compile(r"출력 보류"),
+)
+
 
 class AssertionError(Exception):
     pass
@@ -87,16 +99,85 @@ class Window:
     teardown_marker_id: str | None = None
     messages: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     raw_messages: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    message_updates: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    first_prompt_at: _dt.datetime | None = None
+
+    def mark_prompt_sent(self, when: _dt.datetime | None = None) -> None:
+        if self.first_prompt_at is None:
+            self.first_prompt_at = when or _dt.datetime.now(_dt.timezone.utc)
 
     def add(self, message: dict[str, Any]) -> None:
         # Track every observed message for debug/forensics, but only keep
         # relay-response bodies in the canonical messages list used by
         # assertions.
-        if message.get("id") and any(m.get("id") == message["id"] for m in self.raw_messages):
-            return
+        message_id = str(message.get("id") or "")
+        if message_id:
+            for idx, existing in enumerate(self.raw_messages):
+                if str(existing.get("id") or "") != message_id:
+                    continue
+                if _message_changed(existing, message):
+                    self.message_updates.append(
+                        {
+                            "id": message_id,
+                            "before": existing.get("content") or "",
+                            "after": message.get("content") or "",
+                            "before_edited_timestamp": existing.get("edited_timestamp"),
+                            "after_edited_timestamp": message.get("edited_timestamp"),
+                        }
+                    )
+                self.raw_messages[idx] = message
+                self.messages = [m for m in self.raw_messages if is_relay_response(m)]
+                return
         self.raw_messages.append(message)
         if is_relay_response(message):
             self.messages.append(message)
+
+
+def _message_changed(old: dict[str, Any], new: dict[str, Any]) -> bool:
+    return (old.get("content") or "") != (new.get("content") or "") or old.get(
+        "edited_timestamp"
+    ) != new.get("edited_timestamp")
+
+
+def _message_order_key(message: dict[str, Any]) -> tuple[int, str]:
+    timestamp = _parse_discord_ts(str(message.get("timestamp") or ""))
+    if timestamp is not None:
+        return (int(timestamp.timestamp() * 1000), str(message.get("id") or ""))
+    try:
+        return (int(str(message.get("id") or "0")), str(message.get("id") or ""))
+    except ValueError:
+        return (0, str(message.get("id") or ""))
+
+
+def _raw_assertion_messages(
+    window: Window, *, include_our_send: bool = False
+) -> list[dict[str, Any]]:
+    if include_our_send:
+        return list(window.raw_messages)
+    return [message for message in window.raw_messages if not is_our_send(message)]
+
+
+def _chrome_messages(
+    window: Window,
+    *,
+    text: str | None = None,
+    regex: str | None = None,
+    include_our_send: bool = False,
+) -> list[dict[str, Any]]:
+    messages = []
+    for message in _raw_assertion_messages(window, include_our_send=include_our_send):
+        body = message.get("content") or ""
+        if text is not None:
+            if text in body:
+                messages.append(message)
+            continue
+        if regex is not None:
+            if re.search(regex, body):
+                messages.append(message)
+            continue
+        if is_status_chrome(message):
+            messages.append(message)
+    return messages
 
 
 def message_count_between_markers(window: Window, *, low: int, high: int) -> None:
@@ -105,6 +186,17 @@ def message_count_between_markers(window: Window, *, low: int, high: int) -> Non
         raise AssertionError(
             f"relay message count {actual} outside [{low}, {high}] "
             f"(raw observed: {len(window.raw_messages)})"
+        )
+
+
+def raw_message_count_between_markers(
+    window: Window, *, low: int, high: int, include_our_send: bool = False
+) -> None:
+    actual = len(_raw_assertion_messages(window, include_our_send=include_our_send))
+    if not (low <= actual <= high):
+        raise AssertionError(
+            f"raw message count {actual} outside [{low}, {high}] "
+            f"(relay observed: {len(window.messages)})"
         )
 
 
@@ -129,6 +221,43 @@ def text_present(window: Window, *, needle: str) -> None:
         f"expected to find {needle!r} in relay window, got {len(window.messages)} "
         f"relay messages (raw observed: {len(window.raw_messages)})"
     )
+
+
+def raw_text_absent(
+    window: Window, *, needle: str, include_our_send: bool = False
+) -> None:
+    hits = [
+        message
+        for message in _raw_assertion_messages(window, include_our_send=include_our_send)
+        if needle in (message.get("content") or "")
+    ]
+    if hits:
+        raise AssertionError(
+            f"unexpected raw text {needle!r} appeared in {len(hits)} message(s): "
+            f"{[(m.get('id'), (m.get('content') or '')[:80]) for m in hits[:3]]}"
+        )
+
+
+def marker_absent(
+    window: Window,
+    *,
+    marker: str,
+    surface: str = "relay",
+    include_our_send: bool = False,
+) -> None:
+    if surface == "relay":
+        messages = window.messages
+    elif surface == "raw":
+        messages = _raw_assertion_messages(window, include_our_send=include_our_send)
+    else:
+        raise AssertionError(f"marker_absent surface must be relay or raw, got {surface!r}")
+    hits = [message for message in messages if marker in (message.get("content") or "")]
+    if hits:
+        raise AssertionError(
+            f"unexpected marker {marker!r} appeared on {surface} surface "
+            f"in {len(hits)} message(s): "
+            f"{[(m.get('id'), (m.get('content') or '')[:80]) for m in hits[:3]]}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -228,11 +357,12 @@ def _parse_discord_ts(value: str) -> _dt.datetime | None:
 
 
 def relay_latency_within(window: Window, *, max_seconds: float) -> None:
-    """Assert the first→last relay message span is within ``max_seconds``.
+    """Assert relay latency is within ``max_seconds``.
 
-    Uses Discord message timestamps. Catches relay stalls / excessive delay that
-    presence-only assertions ignore. A window with fewer than two timestamped
-    relay messages is a no-op (nothing to bound).
+    When the driver recorded a prompt start timestamp, single-response
+    scenarios are bounded by prompt→first relay latency. Otherwise this falls
+    back to the historical first→last relay span and remains a no-op with
+    fewer than two timestamped relay messages.
     """
 
     times = [
@@ -240,6 +370,14 @@ def relay_latency_within(window: Window, *, max_seconds: float) -> None:
         for message in window.messages
         if (parsed := _parse_discord_ts(str(message.get("timestamp") or ""))) is not None
     ]
+    if window.first_prompt_at is not None and times:
+        span = (min(times) - window.first_prompt_at).total_seconds()
+        if span > max_seconds:
+            raise AssertionError(
+                f"prompt→first relay latency {span:.1f}s exceeds budget "
+                f"{max_seconds:.1f}s ({len(times)} timestamped relay messages)"
+            )
+        return
     if len(times) < 2:
         return
     span = (max(times) - min(times)).total_seconds()
@@ -258,6 +396,86 @@ def raw_text_present(window: Window, *, needle: str) -> None:
         f"expected to find {needle!r} in raw window, got {len(window.raw_messages)} "
         "raw messages"
     )
+
+
+def chrome_count(
+    window: Window,
+    *,
+    text: str | None = None,
+    regex: str | None = None,
+    min_count: int = 0,
+    max_count: int | None = None,
+    exact: int | None = None,
+    include_our_send: bool = False,
+) -> None:
+    if text is None and regex is None:
+        raise AssertionError("chrome_count requires text or regex")
+    if exact is not None:
+        min_count = exact
+        max_count = exact
+    matches = _chrome_messages(
+        window, text=text, regex=regex, include_our_send=include_our_send
+    )
+    count = len(matches)
+    if count < min_count or (max_count is not None and count > max_count):
+        label = text if text is not None else regex
+        raise AssertionError(
+            f"chrome count for {label!r} was {count}, expected "
+            f"min={min_count} max={max_count}; hits="
+            f"{[(m.get('id'), (m.get('content') or '')[:80]) for m in matches[:5]]}"
+        )
+
+
+def completion_chrome_after_body(window: Window, *, body_marker: str) -> None:
+    body_messages = [
+        message
+        for message in _raw_assertion_messages(window)
+        if body_marker in (message.get("content") or "")
+    ]
+    if not body_messages:
+        raise AssertionError(f"body marker {body_marker!r} not found in raw window")
+    first_body = min(body_messages, key=_message_order_key)
+    completion_messages = [
+        message
+        for message in _raw_assertion_messages(window)
+        if any(
+            pattern.search(message.get("content") or "")
+            for pattern in _COMPLETION_CHROME_PATTERNS
+        )
+    ]
+    if not completion_messages:
+        return
+    first_completion = min(completion_messages, key=_message_order_key)
+    if _message_order_key(first_completion) < _message_order_key(first_body):
+        raise AssertionError(
+            "completion chrome appeared before body marker "
+            f"{body_marker!r}: completion={first_completion.get('id')} "
+            f"body={first_body.get('id')}"
+        )
+
+
+def body_not_overwritten(window: Window, *, marker: str) -> None:
+    hits = [
+        m
+        for m in _raw_assertion_messages(window)
+        if marker in (m.get("content") or "")
+    ]
+    if not hits:
+        raise AssertionError(
+            f"marker {marker!r} is absent from final observed raw bodies; "
+            f"updates={window.message_updates[:3]}"
+        )
+
+
+def no_suppressed_label_chrome(window: Window) -> None:
+    for message in _raw_assertion_messages(window):
+        body = message.get("content") or ""
+        for pattern in _SUPPRESSED_LABEL_PATTERNS:
+            if pattern.search(body):
+                raise AssertionError(
+                    "suppressed-label chrome leaked into observed Discord body "
+                    f"({pattern.pattern!r}): {body[:120]!r}"
+                )
 
 
 def no_control_chars(window: Window) -> None:
