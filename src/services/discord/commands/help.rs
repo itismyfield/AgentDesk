@@ -50,7 +50,9 @@ AI can read, edit, and run commands in your session.
 `/allowed -name` — Remove tool
 
 **Analytics**
-`/receipt [month|ratelimit]` — Show token usage receipt (PNG)
+`/usage [ratelimit|month]` — Text token/rate-limit summary
+`/receipt [month|ratelimit]` — Same usage data as PNG
+`/metrics [date]` — Local turn metrics by date/channel
 
 **Skills**
 `/cc <skill>` — Run a provider skill (autocomplete)
