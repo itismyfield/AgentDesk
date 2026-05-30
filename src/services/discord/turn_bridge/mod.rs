@@ -1413,8 +1413,10 @@ use stale_resume::{
     stream_error_requires_terminal_session_reset,
 };
 use terminal_delivery::{
+    send_ordered_long_terminal_response,
     should_complete_work_dispatch_after_terminal_delivery,
-    should_fail_dispatch_after_terminal_delivery, turn_bridge_replace_outcome_committed,
+    should_fail_dispatch_after_terminal_delivery, terminal_delivery_should_send_new_chunks,
+    turn_bridge_replace_outcome_committed,
 };
 use tmux_runtime::is_dcserver_restart_command;
 use turn_analytics::{
@@ -7145,53 +7147,94 @@ pub(super) fn spawn_turn_bridge(
                     )
                 };
                 if can_chain_locally {
-                    let replace_outcome = gateway
-                        .replace_message_with_outcome(
+                    if terminal_delivery_should_send_new_chunks(
+                        can_chain_locally,
+                        &delivery_response,
+                    ) {
+                        match send_ordered_long_terminal_response(
+                            shared_owned.as_ref(),
+                            gateway.as_ref(),
+                            &provider,
                             channel_id,
                             current_msg_id,
-                            &delivery_response,
-                        )
-                        .await;
-                    // #2860: the answer reached the channel if the placeholder was
-                    // edited OR a fallback message was posted. A fallback posts the
-                    // full delivery_response as a fresh message and reports the
-                    // placeholder edit as non-committed; record it as delivered
-                    // (advance the offset) so this turn does not later present as a
-                    // never-delivered completed-stale leak and get re-delivered by
-                    // the stall-watchdog recovery.
-                    let fallback_delivered = matches!(
-                        &replace_outcome,
-                        Ok(super::formatting::ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. })
-                    );
-                    let replace_committed = turn_bridge_replace_outcome_committed(
-                        shared_owned.as_ref(),
-                        &provider,
-                        channel_id,
-                        current_msg_id,
-                        inflight_state.tmux_session_name.as_deref(),
-                        replace_outcome,
-                        dispatch_id.as_deref(),
-                        adk_session_key.as_deref(),
-                        Some(turn_id.as_str()),
-                        "turn_bridge_terminal_replace",
-                    );
-                    if replace_committed {
-                        advance_tmux_relay_confirmed_end(
-                            shared_owned.as_ref(),
-                            watcher_owner_channel_id,
-                            tmux_last_offset,
                             inflight_state.tmux_session_name.as_deref(),
-                        );
-                        terminal_delivery_committed = true;
+                            &delivery_response,
+                            dispatch_id.as_deref(),
+                            adk_session_key.as_deref(),
+                            Some(turn_id.as_str()),
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                terminal_delivery_committed = true;
+                                response_sent_offset = full_response.len();
+                                inflight_state.response_sent_offset = response_sent_offset;
+                                advance_tmux_relay_confirmed_end(
+                                    shared_owned.as_ref(),
+                                    watcher_owner_channel_id,
+                                    tmux_last_offset,
+                                    inflight_state.tmux_session_name.as_deref(),
+                                );
+                            }
+                            Err(error) => {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                tracing::warn!(
+                                    "  [{ts}] ⚠ terminal long response send failed for channel {}: {} — preserving inflight for retry",
+                                    channel_id,
+                                    error
+                                );
+                                preserve_inflight_for_cleanup_retry = true;
+                            }
+                        }
                     } else {
-                        preserve_inflight_for_cleanup_retry = true;
-                        if fallback_delivered {
-                            // Mark the whole response delivered: the fallback
-                            // message carried it. The preserved-inflight save on
-                            // the `preserve_inflight_for_cleanup_retry` path below
-                            // persists this advanced offset, so the turn never
-                            // re-presents as a never-delivered leak for recovery.
-                            inflight_state.response_sent_offset = full_response.len();
+                        let replace_outcome = gateway
+                            .replace_message_with_outcome(
+                                channel_id,
+                                current_msg_id,
+                                &delivery_response,
+                            )
+                            .await;
+                        // #2860: the answer reached the channel if the placeholder was
+                        // edited OR a fallback message was posted. A fallback posts the
+                        // full delivery_response as a fresh message and reports the
+                        // placeholder edit as non-committed; record it as delivered
+                        // (advance the offset) so this turn does not later present as a
+                        // never-delivered completed-stale leak and get re-delivered by
+                        // the stall-watchdog recovery.
+                        let fallback_delivered = matches!(
+                            &replace_outcome,
+                            Ok(super::formatting::ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. })
+                        );
+                        let replace_committed = turn_bridge_replace_outcome_committed(
+                            shared_owned.as_ref(),
+                            &provider,
+                            channel_id,
+                            current_msg_id,
+                            inflight_state.tmux_session_name.as_deref(),
+                            replace_outcome,
+                            dispatch_id.as_deref(),
+                            adk_session_key.as_deref(),
+                            Some(turn_id.as_str()),
+                            "turn_bridge_terminal_replace",
+                        );
+                        if replace_committed {
+                            advance_tmux_relay_confirmed_end(
+                                shared_owned.as_ref(),
+                                watcher_owner_channel_id,
+                                tmux_last_offset,
+                                inflight_state.tmux_session_name.as_deref(),
+                            );
+                            terminal_delivery_committed = true;
+                        } else {
+                            preserve_inflight_for_cleanup_retry = true;
+                            if fallback_delivered {
+                                // Mark the whole response delivered: the fallback
+                                // message carried it. The preserved-inflight save on
+                                // the `preserve_inflight_for_cleanup_retry` path below
+                                // persists this advanced offset, so the turn never
+                                // re-presents as a never-delivered leak for recovery.
+                                inflight_state.response_sent_offset = full_response.len();
+                            }
                         }
                     }
                 } else {

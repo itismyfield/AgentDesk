@@ -136,6 +136,10 @@ fn session_bound_terminal_delivery_route_decision(
     }
 }
 
+fn session_bound_should_send_new_chunks_for_placeholder(response_text: &str) -> bool {
+    response_text.len() > super::DISCORD_MSG_LIMIT
+}
+
 #[derive(Clone, Debug, Default)]
 struct SessionRelayTraceContext {
     turn_id: Option<String>,
@@ -325,6 +329,52 @@ impl SessionBoundDiscordRelaySink {
         };
         let channel = ChannelId::new(channel_id);
         if let SessionBoundTerminalDeliveryRoute::PlaceholderEdit(msg_id) = route {
+            if session_bound_should_send_new_chunks_for_placeholder(&relay_text) {
+                formatting::send_long_message_raw_with_rollback(
+                    &http,
+                    channel,
+                    msg_id,
+                    &relay_text,
+                    &shared,
+                )
+                .await
+                .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
+                let _ = super::http::delete_channel_message(&http, channel, msg_id).await;
+                self.delivered_total.fetch_add(1, Ordering::AcqRel);
+                tracing::info!(
+                    provider = provider.as_str(),
+                    channel = channel_id,
+                    message = msg_id.get(),
+                    tmux_session = %delivery.session_name,
+                    turn_id = trace.turn_id().unwrap_or(""),
+                    dispatch_id = trace.dispatch_id().unwrap_or(""),
+                    session_key = trace.session_key().unwrap_or(""),
+                    relay_owner = trace.relay_owner(),
+                    runtime_kind = trace.runtime_kind(),
+                    chars = relay_text.chars().count(),
+                    "session-bound relay sink delivered long terminal response as ordered new chunks"
+                );
+                crate::services::observability::emit_relay_delivery(
+                    provider.as_str(),
+                    channel_id,
+                    trace.dispatch_id(),
+                    trace.session_key(),
+                    trace.turn_id(),
+                    None,
+                    "session_relay_sink",
+                    "post",
+                    None,
+                    None,
+                    true,
+                    Some("long response sent as ordered chunks"),
+                );
+                crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
+                    provider.as_str(),
+                    &delivery.session_name,
+                    channel_id,
+                );
+                return Ok(SessionRelayDeliveryOutcome::Committed);
+            }
             match formatting::replace_long_message_raw_with_outcome(
                 &http,
                 channel,
@@ -1087,6 +1137,20 @@ mod tests {
             Some(SessionBoundTerminalDeliveryRoute::NewMessage)
         );
         assert_eq!(session_bound_terminal_delivery_route(None, ""), None);
+    }
+
+    #[test]
+    fn placeholder_long_terminal_delivery_uses_ordered_new_chunks() {
+        let body = format!(
+            "[E2E:E15:BEGIN]\n{}\n[E2E:E15:MID]\n{}\n[E2E:E15:END]",
+            "E15-LINE-010\n".repeat(90),
+            "E15-LINE-150\n".repeat(90)
+        );
+
+        assert!(session_bound_should_send_new_chunks_for_placeholder(&body));
+        assert!(!session_bound_should_send_new_chunks_for_placeholder(
+            "[E2E:E15:BEGIN]\nE15-LINE-150\n[E2E:E15:END]"
+        ));
     }
 
     #[test]

@@ -414,6 +414,10 @@ fn standby_completed_drain_expired(
     pending_result_text.is_none() && drain_until.is_some_and(|until| now >= until)
 }
 
+fn standby_should_send_new_chunks_for_placeholder(response_text: &str) -> bool {
+    response_text.len() > super::DISCORD_MSG_LIMIT
+}
+
 fn standby_heartbeat_offset(
     current_offset: u64,
     pending_result_retry_offset: Option<u64>,
@@ -613,6 +617,33 @@ async fn deliver_response(
 
     match placeholder_msg_id {
         Some(msg_id) => {
+            if standby_should_send_new_chunks_for_placeholder(&formatted) {
+                if let Err(error) = formatting::send_long_message_raw_with_rollback(
+                    http,
+                    channel_id,
+                    msg_id,
+                    &formatted,
+                    shared,
+                )
+                .await
+                {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ⚠ standby_relay long send failed for channel {}: {error}",
+                        channel_id.get()
+                    );
+                    return false;
+                }
+                let _ = super::http::delete_channel_message(http, channel_id, msg_id).await;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 👁 standby_relay ✓ delivered long terminal response as ordered new chunks channel {} msg {} ({} chars)",
+                    channel_id.get(),
+                    msg_id.get(),
+                    chars
+                );
+                return true;
+            }
             let outcome = formatting::replace_long_message_raw_with_outcome(
                 http, channel_id, msg_id, &formatted, shared,
             )
@@ -857,6 +888,20 @@ mod tests {
         assert_eq!(standby_heartbeat_offset(250, Some(120), None), 120);
         assert_eq!(standby_heartbeat_offset(250, None, Some(180)), 180);
         assert_eq!(standby_heartbeat_offset(250, Some(120), Some(180)), 120);
+    }
+
+    #[test]
+    fn placeholder_long_terminal_delivery_uses_ordered_new_chunks() {
+        let body = format!(
+            "[E2E:E15:BEGIN]\n{}\n[E2E:E15:MID]\n{}\n[E2E:E15:END]",
+            "E15-LINE-010\n".repeat(90),
+            "E15-LINE-150\n".repeat(90)
+        );
+
+        assert!(standby_should_send_new_chunks_for_placeholder(&body));
+        assert!(!standby_should_send_new_chunks_for_placeholder(
+            "[E2E:E15:BEGIN]\nE15-LINE-150\n[E2E:E15:END]"
+        ));
     }
 
     fn with_isolated_runtime_root<F: FnOnce()>(f: F) {
