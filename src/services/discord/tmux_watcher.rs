@@ -2161,6 +2161,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     let mut utf8_decoder = Utf8ChunkDecoder::default();
     let mut prompt_too_long_killed = false;
     let mut turn_result_relayed = false;
+    let mut terminal_delivery_observed = false;
     let mut last_activity_heartbeat_at: Option<std::time::Instant> = None;
     // #1137: 1-shot guard so the "post-terminal-success continuation" log
     // is emitted exactly once per dispatch. Real-world traces (codex
@@ -2328,7 +2329,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         &output_path,
                         &watcher_provider,
                         prompt_too_long_killed,
-                        turn_result_relayed,
+                        terminal_delivery_observed,
                     )
                     .await;
                     break;
@@ -2453,7 +2454,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             &output_path,
                             &watcher_provider,
                             prompt_too_long_killed,
-                            turn_result_relayed,
+                            terminal_delivery_observed,
                         )
                         .await;
                         break;
@@ -2504,7 +2505,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     &output_path,
                     &watcher_provider,
                     prompt_too_long_killed,
-                    turn_result_relayed,
+                    terminal_delivery_observed,
                 )
                 .await;
                 break;
@@ -3717,7 +3718,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     &output_path,
                     &watcher_provider,
                     prompt_too_long_killed,
-                    turn_result_relayed,
+                    terminal_delivery_observed,
                 )
                 .await;
                 break 'watcher_loop;
@@ -5489,6 +5490,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         };
         let relay_suppressed = relay_decision.suppressed;
         let terminal_output_committed = relay_ok || relay_suppressed;
+        if terminal_output_committed {
+            terminal_delivery_observed = true;
+        }
         let runtime_binding_candidate_offset = terminal_output_committed
             .then(|| terminal_event_consumed_offset(current_offset, &all_data));
 
@@ -6121,7 +6125,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &output_path,
                 &watcher_provider,
                 prompt_too_long_killed,
-                turn_result_relayed,
+                terminal_delivery_observed,
             )
             .await;
             break 'watcher_loop;

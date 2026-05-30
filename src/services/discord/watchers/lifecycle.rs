@@ -512,18 +512,48 @@ pub(super) fn watcher_output_file_offset(output_path: &str) -> Option<u64> {
 
 pub(super) fn cancel_suppression_applies_to_watcher_death(
     cancel_induced_candidate: bool,
-    turn_result_relayed: bool,
+    terminal_delivery_observed: bool,
 ) -> bool {
-    cancel_induced_candidate && !turn_result_relayed
+    cancel_induced_candidate && !terminal_delivery_observed
 }
 
 pub(super) fn should_send_session_ended_notice(
     cancel_induced: bool,
     prompt_too_long_killed: bool,
-    turn_result_relayed: bool,
+    terminal_delivery_observed: bool,
     is_normal_completion: bool,
 ) -> bool {
-    !cancel_induced && !prompt_too_long_killed && turn_result_relayed && !is_normal_completion
+    !cancel_induced
+        && !prompt_too_long_killed
+        && terminal_delivery_observed
+        && !is_normal_completion
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TmuxDeathLifecycleDecision {
+    pub(super) cancel_induced: bool,
+    pub(super) send_session_ended_notice: bool,
+}
+
+pub(super) fn tmux_death_lifecycle_decision(
+    cancel_induced_candidate: bool,
+    prompt_too_long_killed: bool,
+    terminal_delivery_observed: bool,
+    is_normal_completion: bool,
+) -> TmuxDeathLifecycleDecision {
+    let cancel_induced = cancel_suppression_applies_to_watcher_death(
+        cancel_induced_candidate,
+        terminal_delivery_observed,
+    );
+    TmuxDeathLifecycleDecision {
+        cancel_induced,
+        send_session_ended_notice: should_send_session_ended_notice(
+            cancel_induced,
+            prompt_too_long_killed,
+            terminal_delivery_observed,
+            is_normal_completion,
+        ),
+    }
 }
 
 pub(super) fn session_ended_notice() -> &'static str {
@@ -538,7 +568,7 @@ pub(super) async fn handle_tmux_watcher_observed_death(
     output_path: &str,
     _watcher_provider: &ProviderKind,
     prompt_too_long_killed: bool,
-    turn_result_relayed: bool,
+    terminal_delivery_observed: bool,
 ) {
     let ts = chrono::Local::now().format("%H:%M:%S");
     let diagnostic = build_tmux_death_diagnostic(tmux_session_name, Some(output_path));
@@ -565,9 +595,12 @@ pub(super) async fn handle_tmux_watcher_observed_death(
     // For provider-native TUI relays the active watcher may be tailing a
     // rollout/transcript path rather than the legacy tmux-wrapper jsonl. Use
     // this watcher instance's actual output path for the EOF boundary check.
-    // Also, once this watcher has relayed a terminal response for a fresh turn,
+    // Also, once this watcher has observed terminal delivery for a fresh turn,
     // a later pane death is a lifecycle event for that turn, not the previous
-    // reset/cancel cleanup.
+    // reset/cancel cleanup. This signal is intentionally broader than the
+    // watcher-local `turn_result_relayed` flag: session-bound StreamRelay can
+    // deliver the Discord response before the watcher finishes its later
+    // inflight/mailbox cleanup block.
     let death_output_offset = watcher_output_file_offset(output_path);
     let cancel_induced_candidate = cancel_induced_watcher_death_async(
         channel_id,
@@ -576,14 +609,14 @@ pub(super) async fn handle_tmux_watcher_observed_death(
         shared.pg_pool.as_ref(),
     )
     .await;
-    let cancel_induced =
-        cancel_suppression_applies_to_watcher_death(cancel_induced_candidate, turn_result_relayed);
-    let send_session_ended_notice = should_send_session_ended_notice(
-        cancel_induced,
+    let decision = tmux_death_lifecycle_decision(
+        cancel_induced_candidate,
         prompt_too_long_killed,
-        turn_result_relayed,
+        terminal_delivery_observed,
         is_normal_completion,
     );
+    let cancel_induced = decision.cancel_induced;
+    let send_session_ended_notice = decision.send_session_ended_notice;
     if cancel_induced {
         tracing::info!(
             "  [{ts}] 👁 tmux session {tmux_session_name} ended after recent cancel/turn-stop, skipping lifecycle notification + restart handoff"
@@ -605,7 +638,7 @@ pub(super) async fn handle_tmux_watcher_observed_death(
             "  [{ts}] 👁 tmux session {tmux_session_name} ended after normal completion, skipping lifecycle notification"
         );
     }
-    if !cancel_induced && !prompt_too_long_killed && !turn_result_relayed {
+    if !cancel_induced && !prompt_too_long_killed && !terminal_delivery_observed {
         // Suppress warning for normal dispatch completion — not an error.
         let suppress_restart = is_normal_completion
             || reason_short

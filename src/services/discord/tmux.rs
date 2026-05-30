@@ -2465,9 +2465,10 @@ mod tests {
         should_suppress_relay_before_emit, should_suppress_streaming_placeholder_after_recent_stop,
         should_suppress_terminal_output_after_recent_stop, start_monitor_auto_turn_when_available,
         strip_inprogress_indicators, suppressed_placeholder_action, terminal_relay_decision,
-        tmux_death_is_normal_completion, tmux_death_lifecycle_notification_reason,
-        watcher_output_file_offset, watcher_ready_for_input_turn_completed,
-        watcher_should_yield_to_inflight_state, watcher_stream_seed,
+        tmux_death_is_normal_completion, tmux_death_lifecycle_decision,
+        tmux_death_lifecycle_notification_reason, watcher_output_file_offset,
+        watcher_ready_for_input_turn_completed, watcher_should_yield_to_inflight_state,
+        watcher_stream_seed,
     };
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::db::session_transcripts::SessionTranscriptEventKind;
@@ -4114,14 +4115,14 @@ mod tests {
     }
 
     #[test]
-    fn relayed_terminal_turn_disqualifies_stale_cancel_suppression() {
+    fn terminal_delivery_disqualifies_stale_cancel_suppression() {
         assert!(
             cancel_suppression_applies_to_watcher_death(true, false),
             "pre-terminal watcher death can still be suppressed by a matching cancel"
         );
         assert!(
             !cancel_suppression_applies_to_watcher_death(true, true),
-            "after a fresh terminal response was relayed, a prior cancel tombstone must not suppress pane death"
+            "after fresh terminal delivery was observed, a prior cancel tombstone must not suppress pane death"
         );
         assert!(
             !cancel_suppression_applies_to_watcher_death(false, true),
@@ -4130,7 +4131,7 @@ mod tests {
     }
 
     #[test]
-    fn session_ended_notice_is_limited_to_relayed_abnormal_pane_death() {
+    fn session_ended_notice_is_limited_to_delivered_abnormal_pane_death() {
         assert!(session_ended_notice().contains("session ended"));
         assert!(should_send_session_ended_notice(false, false, true, false));
         assert!(!should_send_session_ended_notice(true, false, true, false));
@@ -4139,6 +4140,25 @@ mod tests {
             false, false, false, false
         ));
         assert!(!should_send_session_ended_notice(false, false, true, true));
+    }
+
+    #[test]
+    fn bridge_terminal_delivery_then_pane_dead_ignores_session_unscoped_cancel_tombstone() {
+        let decision = tmux_death_lifecycle_decision(
+            true,  // session-unscoped recent reset/cancel tombstone matched
+            false, // prompt-too-long did not kill this pane
+            true,  // StreamRelay already delivered/committed the terminal response
+            false, // pane death was not a normal provider completion exit
+        );
+
+        assert!(
+            !decision.cancel_induced,
+            "a pre-reset cancel tombstone must not suppress pane death after fresh terminal delivery"
+        );
+        assert!(
+            decision.send_session_ended_notice,
+            "E-12 expects an abnormal pane death after a delivered marker response to emit session ended"
+        );
     }
 
     #[test]
