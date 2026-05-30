@@ -125,7 +125,7 @@ pub(crate) fn classify_degraded_reason(raw: &str) -> ClassifiedReason {
             fix_safety: FixSafety::ReadOnly,
             security_exposure: SecurityExposure::OperationalMetadata,
             summary: "no providers are currently registered".to_string(),
-            next_step: "register a provider via the CLI or dashboard".to_string(),
+            next_step: "register a provider via the dashboard or check agentdesk.yaml".to_string(),
         },
         ["startup_doctor_failed", count] => ClassifiedReason {
             raw: raw.to_string(),
