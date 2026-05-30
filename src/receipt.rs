@@ -220,12 +220,14 @@ fn pricing_for(model: &str) -> Pricing {
             cache_read_factor: 0.0,
             cache_create_factor: 0.0,
         },
-        m if m.contains("opus-4-6") || m.contains("opus-4-5") => Pricing {
-            input_per_m: 15.0,
-            output_per_m: 75.0,
-            cache_read_factor: 0.1,
-            cache_create_factor: 1.25,
-        },
+        m if m.contains("opus-4-8") || m.contains("opus-4-6") || m.contains("opus-4-5") => {
+            Pricing {
+                input_per_m: 15.0,
+                output_per_m: 75.0,
+                cache_read_factor: 0.1,
+                cache_create_factor: 1.25,
+            }
+        }
         m if m.contains("sonnet-4-6") || m.contains("sonnet-4-5") => Pricing {
             input_per_m: 3.0,
             output_per_m: 15.0,
@@ -367,6 +369,7 @@ fn shorten_model(model: &str) -> String {
         m if m.contains("qwen3.5-flash") || m.contains("qwen3.5:flash") => "Qwen3.5 Flash".into(),
         m if m.contains("qwen3.5") && m.contains("397b") => "Qwen3.5 397B".into(),
         m if m.contains("qwen") || m.contains("coder-model") => "Qwen".into(),
+        m if m.contains("opus-4-8") => "Opus 4.8".into(),
         m if m.contains("opus-4-6") => "Opus 4.6".into(),
         m if m.contains("opus-4-5") => "Opus 4.5".into(),
         m if m.contains("sonnet-4-6") => "Sonnet 4.6".into(),
@@ -1958,6 +1961,17 @@ mod tests {
         assert_eq!(agent.cache_read_tokens, 800);
         assert_eq!(agent.cache_creation_tokens, 40);
         assert!(agent.cost_without_cache > agent.cost);
+    }
+
+    #[test]
+    fn opus_4_8_receipt_uses_opus_pricing_and_short_label() {
+        let pricing = pricing_for("claude-opus-4-8");
+
+        assert_eq!(pricing.input_per_m, 15.0);
+        assert_eq!(pricing.output_per_m, 75.0);
+        assert_eq!(pricing.cache_read_factor, 0.1);
+        assert_eq!(pricing.cache_create_factor, 1.25);
+        assert_eq!(shorten_model("claude-opus-4-8"), "Opus 4.8");
     }
 
     #[test]

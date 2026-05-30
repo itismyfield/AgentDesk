@@ -420,6 +420,7 @@ src/
 │   │   │   ├── session.rs
 │   │   │   ├── skill.rs
 │   │   │   ├── text_commands.rs
+│   │   │   ├── tui_passthrough.rs
 │   │   │   └── voice.rs
 │   │   ├── health/
 │   │   │   ├── mailbox.rs
@@ -429,6 +430,7 @@ src/
 │   │   │   ├── session_enrichment.rs
 │   │   │   └── snapshot.rs
 │   │   ├── outbound/
+│   │   │   ├── confirmation.rs
 │   │   │   ├── decision.rs
 │   │   │   ├── delivery.rs
 │   │   │   ├── message.rs

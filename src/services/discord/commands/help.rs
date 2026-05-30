@@ -12,15 +12,15 @@ fn build_main_help_body(provider: &ProviderKind) -> String {
             "\n`/model` — Open the model picker for this channel\n`/fast` — Toggle native fast mode for this channel\n`/goals` — Toggle Codex goals for this channel"
         }
         ProviderKind::Claude => {
-            "\n`/model` — Open the model picker for this channel\n`/fast` — Toggle native fast mode for this channel\n`/effort <level>` — Claude effort (`low`…`max`)\n`/compact`, `/cost`, `/context` — Claude native session commands"
+            "\n`/model` — Open the model picker for this channel\n`/fast` — Toggle native fast mode for this channel\n`/effort <level>` — Claude effort (`low`…`max`)\n`/compact`, `/cost`, `/context` — Claude session commands"
         }
         _ => "\n`/model` — Open the model picker for this channel",
     };
     format!(
         "\
 **AgentDesk Discord Bot**
-Manage server files & chat with {}.
-Each channel gets its own independent {} session.
+Manage files and chat with {}.
+Each channel gets an independent session.
 
 **Session**
 `/start <path>` — Start session at directory
@@ -44,19 +44,22 @@ Send a file/photo — Upload to session directory
 Any other message is sent to {}.
 AI can read, edit, and run commands in your session.
 
-**Tool Management** (Qwen only — Claude exposes all tools by default)
+**Tool Management** (Qwen only)
 `/allowedtools` — Show currently allowed tools
 `/allowed +name` — Add tool (e.g. `/allowed +Bash`)
 `/allowed -name` — Remove tool
 
 **Analytics**
-`/receipt [month|ratelimit]` — Show token usage receipt (PNG)
+`/usage [ratelimit|month]` — Text token/rate-limit summary
+`/receipt [month|ratelimit]` — Same usage data as PNG
+`/metrics [date]` — Local turn metrics by date/channel
 
 **Skills**
-`/cc <skill>` — Run a provider skill (autocomplete)
+`/skill <skill>` — Run a provider skill (autocomplete)
+`/cc <skill>` — Legacy alias for `/skill`
 
 **Restart**
-`/restart` — Restart this provider session immediately (preserves conversation via --resume when supported)
+`/restart` — Restart this provider session (resumes when supported)
 
 **Settings**
 {}
@@ -68,8 +71,8 @@ AI can read, edit, and run commands in your session.
 `/removeuser @user` — Remove a user's access
 `/help` — Show this help
 
-(See follow-up message for command risk tiers — issue #1005.)",
-        provider_name, provider_name, provider_name, model_section
+(Command risk tiers follow.)",
+        provider_name, provider_name, model_section
     )
 }
 
