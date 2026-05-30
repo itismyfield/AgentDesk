@@ -204,6 +204,21 @@ fn decide_operator_override(ctx: &TransitionContext, target: &str) -> Transition
         };
     }
 
+    if !ctx.pipeline.is_valid_state(target) {
+        return TransitionDecision {
+            outcome: TransitionOutcome::Blocked(format!(
+                "target status '{target}' is not defined in the effective pipeline"
+            )),
+            intents: vec![TransitionIntent::AuditLog {
+                card_id: card.id.clone(),
+                from: card.status.clone(),
+                to: target.to_string(),
+                source: "pmd".to_string(),
+                message: "BLOCKED: target status not in effective pipeline".to_string(),
+            }],
+        };
+    }
+
     let mut intents = vec![];
     intents.push(TransitionIntent::UpdateStatus {
         card_id: card.id.clone(),
@@ -263,6 +278,21 @@ fn decide_pipeline_transition(
         return TransitionDecision {
             outcome: TransitionOutcome::NoOp,
             intents: vec![],
+        };
+    }
+
+    if !pipeline.is_valid_state(target) {
+        return TransitionDecision {
+            outcome: TransitionOutcome::Blocked(format!(
+                "target status '{target}' is not defined in the effective pipeline"
+            )),
+            intents: vec![TransitionIntent::AuditLog {
+                card_id: card.id.clone(),
+                from: card.status.clone(),
+                to: target.to_string(),
+                source: source.to_string(),
+                message: "BLOCKED: target status not in effective pipeline".to_string(),
+            }],
         };
     }
 
@@ -912,6 +942,30 @@ mod tests {
         let ctx = test_ctx("backlog", false);
         let decision = decide_status_transition(&ctx, "done", "pmd", ForceIntent::OperatorOverride);
         assert_eq!(decision.outcome, TransitionOutcome::Allowed);
+    }
+
+    #[test]
+    fn force_rejects_unknown_target_state() {
+        let ctx = test_ctx("backlog", false);
+        let decision =
+            decide_status_transition(&ctx, "qa_test", "pmd", ForceIntent::OperatorOverride);
+        assert!(matches!(decision.outcome, TransitionOutcome::Blocked(_)));
+        assert!(
+            decision.intents.iter().any(|intent| matches!(
+                intent,
+                TransitionIntent::AuditLog { message, .. }
+                    if message.contains("target status not in effective pipeline")
+            )),
+            "blocked forced transition must audit the unknown target: {:?}",
+            decision.intents
+        );
+        assert!(
+            !decision
+                .intents
+                .iter()
+                .any(|intent| matches!(intent, TransitionIntent::UpdateStatus { .. })),
+            "unknown forced target must not emit UpdateStatus"
+        );
     }
 
     #[test]

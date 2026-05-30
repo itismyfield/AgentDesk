@@ -64,15 +64,28 @@ impl<'a> PipelineOverrideService<'a> {
         agent_id: &str,
         config: Option<&Value>,
     ) -> Result<(), PipelineOverrideError> {
-        let (config_str, agent_override) = parse_pipeline_override_config(config)?;
-        self.ensure_agent_exists(agent_id).await?;
-        validate_pipeline_override(None, agent_override.as_ref())?;
-        self.validate_against_existing_repo_overrides(agent_id, agent_override.as_ref())
+        let (config_str, _) = self
+            .validate_agent_pipeline_config(agent_id, config)
             .await?;
         self.write_agent_pipeline(agent_id, config_str.as_deref())
             .await?;
         crate::pipeline::refresh_override_health_report(Some(self.pool)).await;
         Ok(())
+    }
+
+    pub async fn validate_agent_pipeline_config(
+        &self,
+        agent_id: &str,
+        config: Option<&Value>,
+    ) -> Result<(Option<String>, Option<crate::pipeline::PipelineOverride>), PipelineOverrideError>
+    {
+        let (config_str, agent_override) = parse_pipeline_override_config(config)?;
+        self.ensure_agent_exists(agent_id).await?;
+        crate::pipeline::ensure_loaded();
+        validate_pipeline_override(None, agent_override.as_ref())?;
+        self.validate_against_existing_repo_overrides(agent_id, agent_override.as_ref())
+            .await?;
+        Ok((config_str, agent_override))
     }
 
     async fn ensure_repo_exists(&self, repo_id: &str) -> Result<(), PipelineOverrideError> {

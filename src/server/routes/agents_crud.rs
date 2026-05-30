@@ -15,6 +15,7 @@ use std::path::{Path as FsPath, PathBuf};
 use super::{AppState, agents_setup};
 use crate::services::git::{GitCommand, GitCommandError};
 use crate::services::observability::session_inventory::derive_visual_status;
+use crate::services::pipeline_override::{PipelineOverrideError, PipelineOverrideService};
 
 // ── Query / Body structs ─────────────────────────────────────────
 
@@ -159,6 +160,24 @@ fn merged_channel_values(
 
 fn parse_pipeline_config_json(raw: Option<String>) -> Option<serde_json::Value> {
     raw.and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+}
+
+fn pipeline_override_error_response(
+    error: PipelineOverrideError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match error {
+        PipelineOverrideError::BadRequest(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid pipeline_config: {error}")})),
+        ),
+        PipelineOverrideError::NotFound(error) => {
+            (StatusCode::NOT_FOUND, Json(json!({"error": error})))
+        }
+        PipelineOverrideError::Database(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        ),
+    }
 }
 
 fn visual_status_fields(row: &PgRow, agent_status: Option<&str>) -> (String, String, String) {
@@ -942,25 +961,19 @@ pub(super) async fn update_agent(
         if let Some(ref pipeline_config) = body.pipeline_config {
             updated_any = true;
             if pipeline_config.is_null() {
+                let service = PipelineOverrideService::new(pool);
+                if let Err(error) = service.validate_agent_pipeline_config(&id, None).await {
+                    return pipeline_override_error_response(error);
+                }
                 separated.push("pipeline_config = NULL");
             } else {
                 let pipeline_text = pipeline_config.to_string();
-                let pipeline_override = match crate::pipeline::parse_override(&pipeline_text) {
-                    Ok(pipeline_override) => pipeline_override,
-                    Err(error) => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(json!({"error": format!("invalid pipeline_config: {error}")})),
-                        );
-                    }
-                };
-                crate::pipeline::ensure_loaded();
-                let effective = crate::pipeline::resolve(None, pipeline_override.as_ref());
-                if let Err(error) = effective.validate() {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({"error": format!("invalid pipeline_config: {error}")})),
-                    );
+                let service = PipelineOverrideService::new(pool);
+                if let Err(error) = service
+                    .validate_agent_pipeline_config(&id, Some(pipeline_config))
+                    .await
+                {
+                    return pipeline_override_error_response(error);
                 }
                 separated
                     .push("pipeline_config = ")
