@@ -701,6 +701,10 @@ Any other message is sent to {p}.
 
 **Settings**
 `/model` — Open the interactive model picker
+`/effort <level>` — Claude live TUI native effort (`low`…`max`)
+`/compact` — Claude live TUI compact
+`/cost` — Claude live TUI cost view
+`/context` — Claude live TUI context view
 `!debug` — Toggle debug logging
 `!metrics [date]` — Show turn metrics
 `!queue [all]` — Show pending queue
