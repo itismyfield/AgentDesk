@@ -805,6 +805,9 @@ test("timeouts idle-kill module excludes thread idle rows from the main batch", 
 
   policy._section_O();
 
+  const idleSql = state.queries.map((q) => q.sql).join("\n");
+  assert.match(idleSql, /thread_channel_id IS NULL/);
+  assert.match(idleSql, /session_key !~ '-t\[0-9\]\{15,\}\(-dev\)\?\$'/);
   assert.equal(state.httpPosts.length, 1);
   const urls = state.httpPosts.map((p) => p.url).join("\n");
   assert.match(urls, /AgentDesk-claude-adk-cc\/kill-tmux$/m);

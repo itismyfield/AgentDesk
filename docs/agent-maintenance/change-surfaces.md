@@ -32,8 +32,10 @@
 - legacy_modules: none; `src/services/discord/outbound/legacy.rs` was removed
   in #2535.
 - do_not_edit_without_migration_plan:
-  `src/services/discord/formatting.rs::send_long_message_raw` (line 1971,
-  ordered-chunk continuation contract not yet modelled in v3).
+  - `src/services/discord/formatting.rs::send_long_message_raw` (line 1971,
+    ordered-chunk continuation contract not yet modelled in v3).
+  - `src/services/message_outbox.rs` (1137 lines; PG-backed message outbox
+    enqueue/claim/accounting surface — bugfix only until split).
 - active_callsite_coverage: see
   [`discord-outbound-migration.md`](discord-outbound-migration.md) (table is
   the authoritative coverage record).

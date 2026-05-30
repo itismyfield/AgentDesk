@@ -4,7 +4,7 @@
 > moving any AgentDesk runtime, worker, dispatch, provider, MCP, merge, or test
 > execution path from one dcserver node to multiple nodes.
 >
-> Last refreshed: 2026-05-18 (against #2431 SSH-direct TUI relay ownership).
+> Last refreshed: 2026-05-30 (against #2896 runtime bootstrap thread-session GC safety).
 
 ## Read This First
 
@@ -122,6 +122,11 @@
   wrapper JSONL and rollout JSONL carry separate output paths/offsets, and
   watcher ownership must be claimed by both tmux session and output path before
   any future multinode routing can move this surface.
+- 2026-05-30 audit note (#2896): stale thread-session GC in
+  `runtime_bootstrap` may reap only session keys whose tmux name parses as a
+  thread channel, belongs to the current runtime owner marker, and exists in the
+  local tmux server. Fixed/main-channel sessions are not reap candidates for
+  this path.
 - invariants: `heartbeat_capability_registry_routing`,
   `resource_locks_before_exclusive_editor_test`.
 - allowed_changes: `bugfix`, or `new_feature` only when routed through the

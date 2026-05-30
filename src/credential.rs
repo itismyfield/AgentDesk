@@ -5,7 +5,9 @@ fn agentdesk_root() -> Option<PathBuf> {
 }
 
 fn read_trimmed_token(path: &Path) -> Option<String> {
-    crate::utils::secret_file::audit_or_harden_secret_file(path, "discord-bot-token");
+    if !crate::utils::secret_file::audit_or_harden_secret_file(path, "discord-bot-token") {
+        return None;
+    }
     let token = std::fs::read_to_string(path).ok()?;
     let trimmed = token.trim().to_string();
     if trimmed.is_empty() {
@@ -178,5 +180,33 @@ mod tests {
         fs::write(&path, "   \n \t ").expect("write empty_bot credential file");
 
         assert_eq!(read_bot_token("empty_bot"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_bot_token_rejects_symlink_without_chmoding_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().expect("create TempDir for credential test");
+        let _guard = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let outside = temp.path().join("outside-token");
+        fs::write(&outside, "outside_secret\n").expect("write outside token");
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o644))
+            .expect("make outside token world-readable for fixture");
+
+        let root = temp.path();
+        let _ = crate::runtime_layout::ensure_credential_layout(root);
+        let path = crate::runtime_layout::credential_token_path(root, "symlink_bot");
+        fs::create_dir_all(
+            path.parent()
+                .expect("credential_token_path returns a child of credential dir"),
+        )
+        .expect("mkdir credential dir for symlink_bot");
+        std::os::unix::fs::symlink(&outside, &path).expect("symlink credential token");
+
+        assert_eq!(read_bot_token("symlink_bot"), None);
+
+        let outside_mode = fs::metadata(&outside).unwrap().permissions().mode() & 0o777;
+        assert_eq!(outside_mode, 0o644);
     }
 }

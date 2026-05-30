@@ -74,15 +74,13 @@ git_subprocess_callsites = [
 ]
 
 # Legacy SQLite references: cli/migrate, compat, and db/legacy_sqlite are
-# exempt by path rule already. Baseline cleared in #1440 — keep this list
-# empty; new violations should be removed from production sources rather
-# than allowlisted. The two entries below are `#[cfg(all(test, feature =
-# "legacy-sqlite-tests"))]`-gated test helpers (`shared.sqlite.as_ref()`
-# fallback path); the audit regex `\.sqlite\b` cannot see the cfg gate, so
-# we pin them by file:line.
+# exempt by path rule already. Baseline cleared in #1440 — new violations
+# should be removed from production sources rather than allowlisted. The
+# entry below is a `#[cfg(all(test, feature =
+# "legacy-sqlite-tests"))]`-gated test helper fallback path; the audit regex
+# cannot see the cfg gate, so we pin it by file:line.
 legacy_sqlite_refs = [
   "src/services/discord/turn_bridge/mod.rs:2907",
-  "src/services/discord/watchers/lifecycle.rs:474",
 ]
 
 # Source-of-truth alias writes: runtime_layout is already exempt.

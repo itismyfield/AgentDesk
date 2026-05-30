@@ -794,7 +794,8 @@ pub(super) fn sqlite_runtime_db(shared: &SharedData) -> Option<&crate::db::Db> {
     } else {
         #[cfg(all(test, feature = "legacy-sqlite-tests"))]
         {
-            return shared.sqlite.as_ref();
+            let SharedData { sqlite, .. } = shared;
+            return sqlite.as_ref();
         }
         #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
         None::<&crate::db::Db>

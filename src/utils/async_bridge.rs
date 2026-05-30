@@ -57,6 +57,26 @@ where
     })
 }
 
+async fn apply_bridge_deadline_then_cleanup<R, T, E, M, F, C, CF>(
+    future: F,
+    deadline: Option<Duration>,
+    map_runtime_error: M,
+    cleanup_factory: CF,
+) -> Result<T, E>
+where
+    F: Future<Output = Result<(R, T), E>> + Send + 'static,
+    R: Send + 'static,
+    T: Send + 'static,
+    E: Send + 'static,
+    M: Fn(String) -> E + Copy + Send + 'static,
+    C: Future<Output = ()> + Send + 'static,
+    CF: FnOnce(R) -> C + Send + 'static,
+{
+    let (resource, result) = apply_bridge_deadline(future, deadline, map_runtime_error).await?;
+    cleanup_factory(resource).await;
+    Ok(result)
+}
+
 fn block_on_runtime_thread<F, T, E, M>(future: F, map_runtime_error: M) -> Result<T, E>
 where
     F: Future<Output = Result<T, E>> + Send + 'static,
@@ -169,14 +189,17 @@ where
         let operation = async move {
             let bridge_pool = build_bridge_pg_pool(&source_pool, map_runtime_error).await?;
             let result = future_factory(bridge_pool.clone()).await;
-            bridge_pool.close().await;
-            result
+            Ok((bridge_pool, result))
         };
-        runtime.block_on(apply_bridge_deadline(
+        let result = runtime.block_on(apply_bridge_deadline_then_cleanup(
             operation,
             deadline,
             map_runtime_error,
-        ))
+            |bridge_pool: PgPool| async move {
+                bridge_pool.close().await;
+            },
+        ))?;
+        result
     })
     .join()
     {
@@ -218,8 +241,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn block_on_pg_result_fails_fast_when_bridge_deadline_already_passed() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn block_on_pg_result_fails_fast_when_bridge_deadline_already_passed() {
         let options = PgConnectOptions::new()
             .host("127.0.0.1")
             .port(1)
@@ -236,5 +259,30 @@ mod tests {
             result,
             Err(ref error) if error == "bridge deadline passed before async bridge started"
         ));
+    }
+
+    #[test]
+    fn bridge_deadline_does_not_mask_successful_operation_during_cleanup() {
+        let runtime = build_runtime(|error| error).unwrap();
+        let start = Instant::now();
+
+        let result: Result<&'static str, String> =
+            runtime.block_on(apply_bridge_deadline_then_cleanup(
+                async {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    Ok(((), "committed"))
+                },
+                Some(Duration::from_millis(20)),
+                |error| error,
+                |_| async {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                },
+            ));
+
+        assert_eq!(result, Ok("committed"));
+        assert!(
+            start.elapsed() >= Duration::from_millis(50),
+            "cleanup still runs after the operation result is fixed"
+        );
     }
 }

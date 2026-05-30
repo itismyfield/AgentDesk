@@ -2487,16 +2487,14 @@ async fn reap_orphan_thread_tmux(deleted_keys: &[String]) -> usize {
         tokio::task::spawn_blocking(move || {
             let mut killed = 0usize;
             for key in &keys {
-                // session_key format is `hostname:tmux_name`.
-                let Some((_, tmux_name)) = key.split_once(':') else {
+                let Some(tmux_name) = deleted_thread_tmux_reap_candidate(
+                    key,
+                    &marker,
+                    super::tmux::session_belongs_to_current_runtime,
+                    crate::services::platform::tmux::has_session,
+                ) else {
                     continue;
                 };
-                if !super::tmux::session_belongs_to_current_runtime(tmux_name, &marker) {
-                    continue;
-                }
-                if !crate::services::platform::tmux::has_session(tmux_name) {
-                    continue;
-                }
                 if crate::services::platform::tmux::kill_session(
                     tmux_name,
                     "stale thread session GC — DB row removed",
@@ -2513,6 +2511,97 @@ async fn reap_orphan_thread_tmux(deleted_keys: &[String]) -> usize {
     {
         let _ = deleted_keys;
         0
+    }
+}
+
+#[cfg(unix)]
+fn deleted_thread_tmux_reap_candidate<'a>(
+    session_key: &'a str,
+    current_owner_marker: &str,
+    belongs_to_current_runtime: impl Fn(&str, &str) -> bool,
+    has_session: impl Fn(&str) -> bool,
+) -> Option<&'a str> {
+    // session_key format is `hostname:tmux_name`.
+    let (_, tmux_name) = session_key.split_once(':')?;
+    let (_, channel_name) =
+        crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_name)?;
+    super::adk_session::parse_thread_channel_id_from_name(&channel_name)?;
+    if !belongs_to_current_runtime(tmux_name, current_owner_marker) {
+        return None;
+    }
+    if !has_session(tmux_name) {
+        return None;
+    }
+    Some(tmux_name)
+}
+
+#[cfg(all(test, unix))]
+mod thread_session_gc_tests {
+    use super::deleted_thread_tmux_reap_candidate;
+    use std::collections::HashSet;
+
+    #[test]
+    fn thread_gc_reap_candidate_requires_thread_owner_marker_and_existing_tmux() {
+        let marker = "runtime-a";
+        let owned_thread = "AgentDesk-codex-adk-cdx-t1500628371829428350";
+        let foreign_thread = "AgentDesk-codex-adk-cdx-t1500628371829428351";
+        let main_channel = "AgentDesk-codex-adk-cdx";
+        let missing_thread = "AgentDesk-codex-adk-cdx-t1500628371829428352";
+        let existing: HashSet<&str> = [owned_thread, foreign_thread, main_channel].into();
+        let owned: HashSet<&str> = [owned_thread, main_channel].into();
+
+        let belongs_to_current_runtime =
+            |name: &str, owner_marker: &str| owner_marker == marker && owned.contains(name);
+        let has_session = |name: &str| existing.contains(name);
+
+        assert_eq!(
+            deleted_thread_tmux_reap_candidate(
+                &format!("host:{owned_thread}"),
+                marker,
+                &belongs_to_current_runtime,
+                &has_session,
+            ),
+            Some(owned_thread)
+        );
+        assert_eq!(
+            deleted_thread_tmux_reap_candidate(
+                &format!("host:{foreign_thread}"),
+                marker,
+                &belongs_to_current_runtime,
+                &has_session,
+            ),
+            None,
+            "foreign owner marker must prevent killing another runtime's thread tmux"
+        );
+        assert_eq!(
+            deleted_thread_tmux_reap_candidate(
+                &format!("host:{main_channel}"),
+                marker,
+                &belongs_to_current_runtime,
+                &has_session,
+            ),
+            None,
+            "thread GC must not kill fixed-channel tmux names"
+        );
+        assert_eq!(
+            deleted_thread_tmux_reap_candidate(
+                &format!("host:{missing_thread}"),
+                marker,
+                &belongs_to_current_runtime,
+                &has_session,
+            ),
+            None,
+            "missing local tmux session is not a reap target"
+        );
+        assert_eq!(
+            deleted_thread_tmux_reap_candidate(
+                "malformed-session-key",
+                marker,
+                &belongs_to_current_runtime,
+                &has_session,
+            ),
+            None
+        );
     }
 }
 

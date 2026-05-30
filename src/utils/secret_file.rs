@@ -77,14 +77,33 @@ fn write_secret_file_after_parent(path: &Path, contents: impl AsRef<[u8]>) -> io
     }
 }
 
-/// Correct unsafe existing secret-file modes on Unix. The warning is path- and
-/// label-only; secret contents are never read or logged by this helper.
-pub(crate) fn audit_or_harden_secret_file(path: &Path, label: &str) {
+/// Correct unsafe existing secret-file modes on Unix. Symlinks and non-files
+/// are refused so a read-side audit cannot chmod an arbitrary target. The
+/// warning is path- and label-only; secret contents are never read or logged by
+/// this helper.
+pub(crate) fn audit_or_harden_secret_file(path: &Path, label: &str) -> bool {
     #[cfg(unix)]
     {
-        let Ok(metadata) = fs::metadata(path) else {
-            return;
+        let Ok(metadata) = fs::symlink_metadata(path) else {
+            return false;
         };
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            tracing::warn!(
+                credential_file = %path.display(),
+                label,
+                "refusing to harden secret symlink"
+            );
+            return false;
+        }
+        if !file_type.is_file() {
+            tracing::warn!(
+                credential_file = %path.display(),
+                label,
+                "refusing to harden non-file secret path"
+            );
+            return false;
+        }
         let mode = metadata.permissions().mode() & 0o777;
         if mode != SECRET_FILE_MODE {
             match set_mode(path, SECRET_FILE_MODE) {
@@ -103,11 +122,13 @@ pub(crate) fn audit_or_harden_secret_file(path: &Path, label: &str) {
                 ),
             }
         }
+        true
     }
 
     #[cfg(not(unix))]
     {
         let _ = (path, label);
+        true
     }
 }
 
@@ -140,10 +161,32 @@ mod tests {
         fs::write(&path, "secret\n").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
 
-        audit_or_harden_secret_file(&path, "test-token");
+        assert!(audit_or_harden_secret_file(&path, "test-token"));
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_or_harden_secret_file_refuses_symlink_without_chmoding_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("outside-token");
+        let link = temp.path().join("token-link");
+        fs::write(&target, "secret\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(!audit_or_harden_secret_file(&link, "test-token"));
+
+        let target_mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(target_mode, 0o644);
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[cfg(unix)]
