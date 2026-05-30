@@ -444,6 +444,38 @@ class ScenarioHealthProbe(unittest.TestCase):
 
         self.assertEqual(result["status"], "degraded")
 
+    def test_assert_health_forbid_non_strict_still_raises_on_forbidden(self):
+        payloads = {
+            "/api/health": [
+                (
+                    200,
+                    {
+                        "status": "degraded",
+                        "ok": False,
+                        "fully_recovered": False,
+                        "degraded": True,
+                        "degraded_reasons": [
+                            "global_active_counter_out_of_bounds:raw=4"
+                        ],
+                    },
+                )
+            ],
+        }
+
+        with patch("run_tui_relay.urllib.request.urlopen", _fake_urlopen_for(payloads)):
+            with self.assertRaises(assertions.AssertionError) as ctx:
+                driver.assert_health(
+                    "http://agentdesk.test",
+                    {
+                        "require_status": ["healthy", "degraded"],
+                        "forbid_degraded_reasons": [
+                            "global_active_counter_out_of_bounds"
+                        ],
+                    },
+                )
+
+        self.assertIn("forbidden_degraded_reasons", str(ctx.exception))
+
     def test_cancel_turn_posts_expected_endpoint(self):
         captured = {}
 

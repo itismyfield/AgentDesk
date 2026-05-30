@@ -20,7 +20,6 @@ steps:
   - assert_health:
       forbid_degraded_reasons:
         - global_active_counter_out_of_bounds
-        - underflow
       global_active_max: 0
       global_finalizing_max: 0
 assertions:

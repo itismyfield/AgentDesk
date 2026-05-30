@@ -282,6 +282,16 @@ class RunAssertionDispatch(unittest.TestCase):
             {"completion_chrome_after_body": {"body_marker": "[BODY]"}},
             window=window,
         )
+        with self.assertRaises(assertions.AssertionError):
+            self.run_assertion(
+                {
+                    "completion_chrome_after_body": {
+                        "body_marker": "[BODY]",
+                        "required": True,
+                    }
+                },
+                window=_window(_relay_msg(1, "body [BODY]")),
+            )
         self.run_assertion({"body_not_overwritten": "[BODY]"}, window=window)
         self.run_assertion({"no_suppressed_label_chrome": True}, window=window)
 

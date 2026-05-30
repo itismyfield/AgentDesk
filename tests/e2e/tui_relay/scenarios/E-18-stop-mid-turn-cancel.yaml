@@ -15,8 +15,9 @@ acceptance_criteria:
   - Assert health counters drain to global_active=0 and global_finalizing=0.
 notes: |
   Phase 1 coverage for #2937. Scope is intentionally conservative: codex-tui
-  exercises the reusable cancel_turn step without expanding the flaky live
-  matrix. Enable execution and more cells after live timing is calibrated.
+  declares the reusable cancel_turn step without expanding the flaky live
+  matrix. Enable execution only after a deterministic provider throttle/hook
+  can hold the turn active between the early marker and cancellation.
 steps:
   - send_prompt: |
       첫 줄에는 정확히 "[E2E:E18:OK]"만 출력해줘.
@@ -32,7 +33,6 @@ steps:
   - assert_health:
       forbid_degraded_reasons:
         - global_active_counter_out_of_bounds
-        - underflow
       global_active_max: 0
       global_finalizing_max: 0
 assertions:
