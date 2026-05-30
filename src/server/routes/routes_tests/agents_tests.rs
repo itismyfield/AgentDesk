@@ -1472,6 +1472,98 @@ async fn agents_pg_crud_round_trip() {
 }
 
 #[tokio::test]
+async fn agents_pg_patch_rejects_pipeline_config_with_invalid_state_slug() {
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/agents")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"id":"pg-agent-invalid-slug","name":"PG Agent","provider":"codex","office_id":"hq"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+
+    let update_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/agents/pg-agent-invalid-slug")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "pipeline_config": {
+                            "states": [
+                                {"id": "backlog", "label": "Backlog"},
+                                {"id": "qa-test", "label": "QA Test"},
+                                {"id": "done", "label": "Done", "terminal": true}
+                            ],
+                            "transitions": [
+                                {"from": "backlog", "to": "qa-test", "type": "free"},
+                                {"from": "qa-test", "to": "done", "type": "gated", "gates": ["review_passed"]}
+                            ],
+                            "gates": {
+                                "review_passed": {"type": "builtin", "check": "review_verdict_pass"}
+                            }
+                        }
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let update_status = update_response.status();
+    let update_body = axum::body::to_bytes(update_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let update_json: serde_json::Value = serde_json::from_slice(&update_body).unwrap();
+    assert_eq!(
+        update_status,
+        StatusCode::BAD_REQUEST,
+        "unexpected update body: {update_json}"
+    );
+    assert!(
+        update_json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("kanban status slug contract ^[a-z][a-z0-9_]*$"),
+        "error should explain slug contract: {update_json}"
+    );
+
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT pipeline_config::text FROM agents WHERE id = 'pg-agent-invalid-slug'",
+    )
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    assert!(
+        stored.is_none(),
+        "agent pipeline_config must remain NULL after rejected write; got {stored:?}"
+    );
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
 async fn claude_session_id_pg_get_clears_stale_fixed_working_session() {
     let pg_db = TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;

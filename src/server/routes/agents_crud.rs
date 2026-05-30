@@ -945,7 +945,18 @@ pub(super) async fn update_agent(
                 separated.push("pipeline_config = NULL");
             } else {
                 let pipeline_text = pipeline_config.to_string();
-                if let Err(error) = crate::pipeline::parse_override(&pipeline_text) {
+                let pipeline_override = match crate::pipeline::parse_override(&pipeline_text) {
+                    Ok(pipeline_override) => pipeline_override,
+                    Err(error) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"error": format!("invalid pipeline_config: {error}")})),
+                        );
+                    }
+                };
+                crate::pipeline::ensure_loaded();
+                let effective = crate::pipeline::resolve(None, pipeline_override.as_ref());
+                if let Err(error) = effective.validate() {
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(json!({"error": format!("invalid pipeline_config: {error}")})),
