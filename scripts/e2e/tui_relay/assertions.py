@@ -426,7 +426,9 @@ def chrome_count(
         )
 
 
-def completion_chrome_after_body(window: Window, *, body_marker: str) -> None:
+def completion_chrome_after_body(
+    window: Window, *, body_marker: str, required: bool = False
+) -> None:
     body_messages = [
         message
         for message in _raw_assertion_messages(window)
@@ -444,6 +446,10 @@ def completion_chrome_after_body(window: Window, *, body_marker: str) -> None:
         )
     ]
     if not completion_messages:
+        if required:
+            raise AssertionError(
+                f"completion chrome not found after body marker {body_marker!r}"
+            )
         return
     first_completion = min(completion_messages, key=_message_order_key)
     if _message_order_key(first_completion) < _message_order_key(first_body):

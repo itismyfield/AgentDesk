@@ -45,9 +45,10 @@ session for those cells. `E-16` and `E-17` are #2935 regression stubs: they are
 loaded by the relevant cells but skipped until the runtime/orchestrator exposes
 hooks to force Claude TUI completion-quiescence timeout and to hold a foreign
 active mailbox during a destructive restart attempt. `E-18` is the conservative
-Phase 1 `cancel_turn` stop-mid-turn scenario; it currently runs only on
-`codex-tui` until live timing is calibrated across more cells. `E-11` (cross-cell
-concurrency) is `cells: []` — the orchestrator owns that scenario.
+Phase 1 `cancel_turn` stop-mid-turn stub for `codex-tui`; it is skipped until a
+deterministic provider throttle/hook can hold the turn active between the early
+marker and cancellation. `E-11` (cross-cell concurrency) is `cells: []` — the
+orchestrator owns that scenario.
 
 ## Driver
 
@@ -115,6 +116,8 @@ Observation assertions now include negative and edit-aware primitives:
 `body_not_overwritten`, and `no_suppressed_label_chrome`. The observation
 window updates messages by Discord id during final re-fetches, so assertions see
 the final edited body rather than only the first placeholder/chrome body.
+`completion_chrome_after_body` checks ordering by default and can set
+`required: true` when a scenario wants to fail on missing completion chrome.
 Latency budgets use the first prompt timestamp to make
 `relay_latency_within` meaningful even for one-response scenarios. Current
 baselines are deliberately loose: simple/turn-separation cases use 240s

@@ -211,6 +211,9 @@ class RawChromeAndEditAssertions(unittest.TestCase):
             _raw_bot_msg(2, "✅ 응답 완료"),
         )
         assertions.completion_chrome_after_body(window, body_marker="[BODY]")
+        assertions.completion_chrome_after_body(
+            window, body_marker="[BODY]", required=True
+        )
 
         bad = _window(
             _raw_bot_msg(1, "✅ 응답 완료"),
@@ -218,6 +221,13 @@ class RawChromeAndEditAssertions(unittest.TestCase):
         )
         with self.assertRaises(assertions.AssertionError):
             assertions.completion_chrome_after_body(bad, body_marker="[BODY]")
+
+        no_completion = _window(_relay_msg(1, "body [BODY]"))
+        assertions.completion_chrome_after_body(no_completion, body_marker="[BODY]")
+        with self.assertRaises(assertions.AssertionError):
+            assertions.completion_chrome_after_body(
+                no_completion, body_marker="[BODY]", required=True
+            )
 
 
 class RunAssertionDispatch(unittest.TestCase):

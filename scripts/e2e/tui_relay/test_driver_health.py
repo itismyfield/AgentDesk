@@ -417,6 +417,33 @@ class ScenarioHealthProbe(unittest.TestCase):
         self.assertIn("global_active=2 > 0", message)
         self.assertIn("global_finalizing=1 > 0", message)
 
+    def test_assert_health_forbid_only_allows_unrelated_transitional_reasons(self):
+        payloads = {
+            "/api/health": [
+                (
+                    200,
+                    {
+                        "status": "degraded",
+                        "ok": False,
+                        "fully_recovered": False,
+                        "degraded": True,
+                        "degraded_reasons": ["provider:claude:reconcile_in_progress"],
+                    },
+                )
+            ],
+        }
+
+        with patch("run_tui_relay.urllib.request.urlopen", _fake_urlopen_for(payloads)):
+            result = driver.assert_health(
+                "http://agentdesk.test",
+                {
+                    "require_status": ["healthy", "degraded"],
+                    "forbid_degraded_reasons": ["global_active_counter_out_of_bounds"],
+                },
+            )
+
+        self.assertEqual(result["status"], "degraded")
+
     def test_cancel_turn_posts_expected_endpoint(self):
         captured = {}
 

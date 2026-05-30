@@ -3,10 +3,20 @@ title: cancel_turn 중단 후 late marker 미전송 보장
 cells: [codex-tui]
 isolation: required
 destructive: true
+skip_reason: >
+  Stub for #2937. The harness now has a reusable cancel_turn step and negative
+  marker assertions, but this live stop-mid-turn scenario needs a deterministic
+  provider throttle/hook. A long prompt only probabilistically leaves time for
+  cancel_turn, so running it by default would create timing flakes.
+acceptance_criteria:
+  - Provide a deterministic hook or prompt fixture that holds the turn after [E2E:E18:OK].
+  - Execute cancel_turn while the turn is still active.
+  - Assert [E2E:E18:LATE] is absent from relay output after cancellation.
+  - Assert health counters drain to global_active=0 and global_finalizing=0.
 notes: |
   Phase 1 coverage for #2937. Scope is intentionally conservative: codex-tui
   exercises the reusable cancel_turn step without expanding the flaky live
-  matrix. Enable more cells after live timing is calibrated.
+  matrix. Enable execution and more cells after live timing is calibrated.
 steps:
   - send_prompt: |
       첫 줄에는 정확히 "[E2E:E18:OK]"만 출력해줘.

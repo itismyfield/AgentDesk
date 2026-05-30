@@ -126,6 +126,9 @@ class ScenarioFilter(unittest.TestCase):
         e17 = next(s for s in scenarios if s.get("id") == "E-17")
         self.assertIn("skip_reason", e17)
         self.assertIn("acceptance_criteria", e17)
+        e18 = next(s for s in scenarios if s.get("id") == "E-18")
+        self.assertIn("skip_reason", e18)
+        self.assertIn("acceptance_criteria", e18)
 
     def test_e18_cancel_turn_scope_is_codex_tui_only(self):
         for cell in driver.SUPPORTED_CELLS:

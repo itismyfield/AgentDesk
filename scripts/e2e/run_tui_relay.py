@@ -596,16 +596,22 @@ def assert_health(
         options.get("require_status") or options.get("allowed_statuses"),
         default=("healthy",),
     )
-    violations = _health_ready_violations(
-        health,
-        allowed_statuses=required_statuses,
-        allowed_degraded_reasons=_as_string_tuple(options.get("allowed_degraded_reasons")),
-    )
-
     forbidden_reasons = _as_string_tuple(options.get("forbid_degraded_reasons"))
     degraded_reasons = health.get("degraded_reasons") or []
     if not isinstance(degraded_reasons, list):
         degraded_reasons = [degraded_reasons]
+    if "allowed_degraded_reasons" in options:
+        allowed_degraded_reasons = _as_string_tuple(options.get("allowed_degraded_reasons"))
+    elif forbidden_reasons and {s.lower() for s in required_statuses} != {"healthy"}:
+        allowed_degraded_reasons = tuple(str(reason) for reason in degraded_reasons)
+    else:
+        allowed_degraded_reasons = ()
+    violations = _health_ready_violations(
+        health,
+        allowed_statuses=required_statuses,
+        allowed_degraded_reasons=allowed_degraded_reasons,
+    )
+
     blocked_reasons = [
         str(reason)
         for reason in degraded_reasons
@@ -1431,7 +1437,12 @@ def run_assertion(spec: dict[str, Any], *, window: assertions.Window) -> None:
     elif "completion_chrome_after_body" in spec:
         params = spec["completion_chrome_after_body"]
         body_marker = params.get("body_marker") if isinstance(params, dict) else params
-        assertions.completion_chrome_after_body(window, body_marker=str(body_marker))
+        required = bool(params.get("required", False)) if isinstance(params, dict) else False
+        assertions.completion_chrome_after_body(
+            window,
+            body_marker=str(body_marker),
+            required=required,
+        )
     elif "body_not_overwritten" in spec:
         assertions.body_not_overwritten(window, marker=str(spec["body_not_overwritten"]))
     elif spec.get("no_suppressed_label_chrome"):
