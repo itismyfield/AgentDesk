@@ -1487,14 +1487,31 @@ async fn maybe_recover_completed_stale_leak(
     // messages — a single chunk is the only shape we can edit in place without
     // creating a separate message or risking a stranded tail. `split_message` is
     // the authoritative limit (its effective cap is below Discord's 2000).
+    // Multi-chunk (long-answer) auto-recovery is a deliberate follow-up: this v1
+    // recovers the common small-answer case safely and ESCALATES the rare large
+    // case via telemetry rather than risking a multi-message double-delivery.
     let chunks = discord::formatting::split_message(&delivery_text);
     let [delivery_chunk] = chunks.as_slice() else {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
-            "  [{ts}] ⚠ leak too large to auto-recover ({} bytes, {} chunks) on channel {}; left for manual follow-up",
+            "  [{ts}] ⚠ leak too large to auto-recover ({} bytes, {} chunks) on channel {}; escalating for manual follow-up",
             delivery_text.len(),
             chunks.len(),
             channel_id
+        );
+        let turn_id = (state.user_msg_id != 0)
+            .then(|| format!("discord:{}:{}", state.channel_id, state.user_msg_id));
+        crate::services::observability::emit_inflight_lifecycle_event(
+            provider.as_str(),
+            channel_id.get(),
+            state.dispatch_id.as_deref(),
+            state.session_key.as_deref(),
+            turn_id.as_deref(),
+            "leak_recovery_skipped_too_large",
+            serde_json::json!({
+                "byte_len": delivery_text.len(),
+                "chunks": chunks.len(),
+            }),
         );
         return false;
     };

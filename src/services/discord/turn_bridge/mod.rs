@@ -7111,7 +7111,7 @@ pub(super) fn spawn_turn_bridge(
                     // never-delivered completed-stale leak and get re-delivered by
                     // the stall-watchdog recovery.
                     let fallback_delivered = matches!(
-                        replace_outcome,
+                        &replace_outcome,
                         Ok(super::formatting::ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. })
                     );
                     let replace_committed = turn_bridge_replace_outcome_committed(
