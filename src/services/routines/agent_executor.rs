@@ -10,6 +10,7 @@ use crate::services::discord::health::{
 };
 
 use super::runtime::RoutineRunOutcome;
+use super::session_control::RoutineSessionController;
 use super::store::{ClaimedRoutineRun, NextDueAtUpdate, RoutineStore, RunningAgentRoutineRun};
 
 const FRESH_CONTEXT_GUARANTEED: bool = false;
@@ -165,6 +166,13 @@ impl RoutineAgentExecutor {
                 if !closed {
                     continue;
                 }
+                self.teardown_fresh_agent_session(
+                    store,
+                    &run.routine_id,
+                    result_json.as_ref(),
+                    "routine fresh agent run completed",
+                )
+                .await;
                 outcomes.push(RoutineRunOutcome {
                     run_id: run.run_id,
                     routine_id: run.routine_id,
@@ -191,6 +199,13 @@ impl RoutineAgentExecutor {
                 if !closed {
                     continue;
                 }
+                self.teardown_fresh_agent_session(
+                    store,
+                    &run.routine_id,
+                    result_json.as_ref(),
+                    "routine fresh agent run timed out",
+                )
+                .await;
                 outcomes.push(RoutineRunOutcome {
                     run_id: run.run_id,
                     routine_id: run.routine_id,
@@ -205,6 +220,56 @@ impl RoutineAgentExecutor {
             }
         }
         Ok(outcomes)
+    }
+
+    async fn teardown_fresh_agent_session(
+        &self,
+        store: &RoutineStore,
+        routine_id: &str,
+        result_json: Option<&Value>,
+        reason: &str,
+    ) {
+        let routine = match store.get_routine(routine_id).await {
+            Ok(Some(routine)) => routine,
+            Ok(None) => {
+                tracing::warn!(
+                    routine_id,
+                    "fresh routine session teardown skipped: routine row not found"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    routine_id,
+                    error = %error,
+                    "fresh routine session teardown skipped: routine lookup failed"
+                );
+                return;
+            }
+        };
+        if routine.execution_strategy != "fresh" {
+            return;
+        }
+
+        let controller =
+            RoutineSessionController::new(self.pool.clone(), self.health_registry.clone());
+        match controller
+            .teardown_fresh_session(&routine, result_json, reason)
+            .await
+        {
+            Ok(result) => tracing::info!(
+                routine_id,
+                tmux_session = %result.tmux_session,
+                tmux_killed = result.tmux_killed,
+                disconnected_sessions = result.disconnected_sessions,
+                "fresh routine session teardown complete"
+            ),
+            Err(error) => tracing::warn!(
+                routine_id,
+                error = %error,
+                "fresh routine session teardown failed"
+            ),
+        }
     }
 
     async fn start_turn(
@@ -672,7 +737,8 @@ fn completed_result(
     completion: &AgentTurnCompletion,
     assistant_preview: &str,
 ) -> Value {
-    json!({
+    with_started_run_routing_metadata(
+        json!({
         "status": "completed",
         "turn_id": run.turn_id,
         "routine_id": run.routine_id,
@@ -684,7 +750,9 @@ fn completed_result(
         "duration_ms": completion.duration_ms,
         "transcript_created_at": completion.created_at,
         "fresh_context_guaranteed": FRESH_CONTEXT_GUARANTEED,
-    })
+        }),
+        run.result_json.as_ref(),
+    )
 }
 
 fn merge_pending_result(
@@ -693,7 +761,8 @@ fn merge_pending_result(
     error: Option<&str>,
     completion: Option<&AgentTurnCompletion>,
 ) -> Value {
-    json!({
+    with_started_run_routing_metadata(
+        json!({
         "status": status,
         "turn_id": run.turn_id,
         "routine_id": run.routine_id,
@@ -702,7 +771,31 @@ fn merge_pending_result(
         "error": error,
         "duration_ms": completion.and_then(|value| value.duration_ms),
         "fresh_context_guaranteed": FRESH_CONTEXT_GUARANTEED,
-    })
+        }),
+        run.result_json.as_ref(),
+    )
+}
+
+fn with_started_run_routing_metadata(mut result: Value, started_result: Option<&Value>) -> Value {
+    const ROUTING_KEYS: &[&str] = &["channel_id", "parent_channel_id", "discord_thread_id"];
+
+    let Some(started_result) = started_result else {
+        return result;
+    };
+    let Some(result_object) = result.as_object_mut() else {
+        return result;
+    };
+
+    for key in ROUTING_KEYS {
+        if result_object.contains_key(*key) {
+            continue;
+        }
+        if let Some(value) = started_result.get(*key) {
+            result_object.insert((*key).to_string(), value.clone());
+        }
+    }
+
+    result
 }
 
 fn pending_checkpoint(result_json: Option<&Value>) -> Option<Value> {
@@ -747,6 +840,13 @@ mod tests {
         }
     }
 
+    fn running_run_with_result(result_json: Value) -> RunningAgentRoutineRun {
+        RunningAgentRoutineRun {
+            result_json: Some(result_json),
+            ..running_run(None)
+        }
+    }
+
     #[test]
     fn pending_checkpoint_ignores_null() {
         assert_eq!(pending_checkpoint(Some(&json!({"checkpoint": null}))), None);
@@ -770,6 +870,41 @@ mod tests {
         assert_eq!(timeout_secs_for_run(&running_run(None), 1800), 1800);
         assert_eq!(timeout_secs_for_run(&running_run(Some(0)), 1800), 1800);
         assert_eq!(timeout_secs_for_run(&running_run(Some(-5)), 1800), 1800);
+    }
+
+    #[test]
+    fn completed_result_preserves_started_thread_metadata() {
+        let run = running_run_with_result(json!({
+            "channel_id": "200",
+            "parent_channel_id": "100",
+            "discord_thread_id": "200"
+        }));
+        let completion = AgentTurnCompletion {
+            assistant_message: "done".to_string(),
+            duration_ms: Some(50),
+            created_at: Utc::now(),
+        };
+
+        let result = completed_result(&run, &completion, "done");
+
+        assert_eq!(result.get("channel_id"), Some(&json!("200")));
+        assert_eq!(result.get("parent_channel_id"), Some(&json!("100")));
+        assert_eq!(result.get("discord_thread_id"), Some(&json!("200")));
+    }
+
+    #[test]
+    fn timeout_result_preserves_started_thread_metadata_for_teardown_fallback() {
+        let run = running_run_with_result(json!({
+            "channel_id": "200",
+            "parent_channel_id": "100",
+            "discord_thread_id": "200"
+        }));
+
+        let result = merge_pending_result(&run, "timeout", Some("timed out"), None);
+
+        assert_eq!(result.get("channel_id"), Some(&json!("200")));
+        assert_eq!(result.get("parent_channel_id"), Some(&json!("100")));
+        assert_eq!(result.get("discord_thread_id"), Some(&json!("200")));
     }
 
     #[test]

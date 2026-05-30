@@ -329,6 +329,7 @@ fn run_turn_once(
             settings_override.path(),
         );
     }
+    crate::services::process::configure_child_process_group(&mut command);
     let mut child = command.spawn().map_err(|e| TurnFailure {
         message: format!("Failed to start Qwen: {}", e),
         retryable: false,

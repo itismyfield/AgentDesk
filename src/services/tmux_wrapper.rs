@@ -84,6 +84,7 @@ pub fn run(
     // Spawn Claude with piped stdin (kept open for multi-turn)
     let mut claude_command = Command::new(claude_bin);
     crate::services::platform::augment_exec_path(&mut claude_command, claude_bin);
+    crate::services::process::configure_child_process_group(&mut claude_command);
     let mut child = match claude_command
         .args(claude_args)
         .current_dir(&expanded_dir)

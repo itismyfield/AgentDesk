@@ -644,6 +644,18 @@ fn should_reuse_existing_provider_session(
     existing_session_usable && !force_fresh_provider_session
 }
 
+fn should_preserve_live_reused_provider_session(
+    resume_session_id: Option<&str>,
+    has_live_pane: bool,
+    force_fresh_provider_session: bool,
+) -> bool {
+    resume_session_id
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+        && has_live_pane
+        && !force_fresh_provider_session
+}
+
 #[cfg(unix)]
 fn codex_wrapper_script_uses_pipe_input(script: &str) -> bool {
     script
@@ -1391,6 +1403,7 @@ fn execute_streaming_direct(
     if let Some(provider) = report_provider {
         command.env(RESTART_REPORT_PROVIDER_ENV, provider.as_str());
     }
+    crate::services::process::configure_child_process_group(&mut command);
 
     let mut child = command
         .spawn()
@@ -1961,11 +1974,12 @@ fn execute_streaming_local_tmux(
     // so that dcserver restarts that lost /tmp files still re-attach to a
     // live tmux pane owned by an older wrapper. See issue #892.
     let session_exists = tmux_session_exists(tmux_session_name);
+    let has_live_pane = tmux_session_has_live_pane(tmux_session_name);
     let resolved_output =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "jsonl");
     let resolved_input =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "input");
-    let session_usable = tmux_session_has_live_pane(tmux_session_name)
+    let session_usable = has_live_pane
         && resolved_output.is_some()
         && resolved_input.is_some()
         && codex_tmux_wrapper_session_uses_pipe_input(tmux_session_name);
@@ -2005,6 +2019,22 @@ fn execute_streaming_local_tmux(
                 // Fall through to new session creation below
             }
         }
+    } else if should_preserve_live_reused_provider_session(
+        session_id,
+        has_live_pane,
+        force_fresh_provider_session,
+    ) {
+        tracing::warn!(
+            tmux_session_name,
+            session_id = session_id.unwrap_or_default(),
+            output_path_present = resolved_output.is_some(),
+            input_path_present = resolved_input.is_some(),
+            pipe_input = codex_tmux_wrapper_session_uses_pipe_input(tmux_session_name),
+            "refusing to kill live Codex tmux selected for provider-session reuse"
+        );
+        return Err(format!(
+            "live Codex tmux session {tmux_session_name} was selected for reuse but wrapper I/O is unavailable; refusing stale cleanup/recreate"
+        ));
     } else if session_exists {
         let cleanup_reason =
             codex_wrapper_existing_session_termination_reason(force_fresh_provider_session);
@@ -2772,6 +2802,7 @@ mod tui_hosting_tests {
         codex_resume_help_mentions_hook_trust_bypass, codex_tui_idle_relay_binding,
         direct_tui_material_fallback_reason, insert_codex_resume_option_before_other_options,
         render_codex_tui_tmux_script, render_codex_wrapper_tmux_script,
+        should_preserve_live_reused_provider_session, should_reuse_existing_provider_session,
     };
     #[cfg(unix)]
     use super::{
@@ -3145,6 +3176,41 @@ mod tui_hosting_tests {
             "stale_session_recreate"
         );
     }
+
+    #[test]
+    fn codex_provider_session_reuse_decision_honors_explicit_fresh_flag() {
+        assert!(should_reuse_existing_provider_session(true, false));
+        assert!(!should_reuse_existing_provider_session(true, true));
+        assert!(!should_reuse_existing_provider_session(false, false));
+        assert!(!should_reuse_existing_provider_session(false, true));
+    }
+
+    #[test]
+    fn live_reused_provider_session_is_preserved_when_wrapper_io_is_missing() {
+        assert!(should_preserve_live_reused_provider_session(
+            Some("codex-session-1"),
+            true,
+            false
+        ));
+        assert!(!should_preserve_live_reused_provider_session(
+            Some("codex-session-1"),
+            true,
+            true
+        ));
+        assert!(!should_preserve_live_reused_provider_session(
+            Some("codex-session-1"),
+            false,
+            false
+        ));
+        assert!(!should_preserve_live_reused_provider_session(
+            Some("  "),
+            true,
+            false
+        ));
+        assert!(!should_preserve_live_reused_provider_session(
+            None, true, false
+        ));
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -3155,7 +3221,7 @@ mod tests {
         CODEX_BACKGROUND_TASK_NOTIFICATION_ID, CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
         CodexLaunchOptions, TMUX_PROMPT_B64_PREFIX, base_exec_args, build_codex_exec_args,
         build_tmux_launch_env_lines, compose_codex_developer_instructions, compose_codex_prompt,
-        handle_codex_json_line, should_reuse_existing_provider_session,
+        handle_codex_json_line,
     };
     use crate::services::agent_protocol::StreamMessage;
     use crate::services::discord::restart_report::{
@@ -3298,14 +3364,6 @@ mod tests {
     fn test_compose_codex_prompt_returns_plain_prompt_without_overrides() {
         let prompt = compose_codex_prompt("just answer", None, None);
         assert_eq!(prompt, "just answer");
-    }
-
-    #[test]
-    fn test_provider_session_reuse_decision_honors_explicit_fresh_flag() {
-        assert!(should_reuse_existing_provider_session(true, false));
-        assert!(!should_reuse_existing_provider_session(true, true));
-        assert!(!should_reuse_existing_provider_session(false, false));
-        assert!(!should_reuse_existing_provider_session(false, true));
     }
 
     #[test]

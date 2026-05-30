@@ -276,6 +276,7 @@ pub fn execute_command_simple_cancellable(
 
     let mut command = Command::new(&qwen_bin);
     crate::services::platform::apply_binary_resolution(&mut command, &resolution);
+    crate::services::process::configure_child_process_group(&mut command);
     let mut child = command
         .args(build_simple_exec_args(prompt))
         .current_dir(working_dir)
@@ -448,6 +449,7 @@ fn execute_qwen_streaming_attempt(
     if let Some(provider) = report_provider {
         command.env(RESTART_REPORT_PROVIDER_ENV, provider.as_str());
     }
+    crate::services::process::configure_child_process_group(&mut command);
 
     let mut child = command
         .spawn()
@@ -1159,6 +1161,16 @@ fn validated_resume_session_id(session_id: Option<&str>) -> Result<Option<&str>,
     Ok(Some(session_id))
 }
 
+fn should_preserve_live_reused_provider_session(
+    resume_session_id: Option<&str>,
+    has_live_pane: bool,
+) -> bool {
+    resume_session_id
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+        && has_live_pane
+}
+
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn execute_streaming_local_tmux(
@@ -1192,9 +1204,8 @@ fn execute_streaming_local_tmux(
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "jsonl");
     let resolved_input =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "input");
-    let session_usable = tmux_session_has_live_pane(tmux_session_name)
-        && resolved_output.is_some()
-        && resolved_input.is_some();
+    let has_live_pane = tmux_session_has_live_pane(tmux_session_name);
+    let session_usable = has_live_pane && resolved_output.is_some() && resolved_input.is_some();
 
     if session_usable {
         let output_path = resolved_output
@@ -1223,6 +1234,17 @@ fn execute_streaming_local_tmux(
                 );
             }
         }
+    } else if should_preserve_live_reused_provider_session(resume_session_id, has_live_pane) {
+        tracing::warn!(
+            tmux_session_name,
+            session_id = resume_session_id.unwrap_or_default(),
+            output_path_present = resolved_output.is_some(),
+            input_path_present = resolved_input.is_some(),
+            "refusing to kill live Qwen tmux selected for provider-session reuse"
+        );
+        return Err(format!(
+            "live Qwen tmux session {tmux_session_name} was selected for reuse but wrapper I/O is unavailable; refusing stale cleanup/recreate"
+        ));
     } else if session_exists {
         record_tmux_exit_reason(
             tmux_session_name,
@@ -2157,6 +2179,28 @@ fn render_qwen_value(value: &Value) -> String {
         Value::Number(v) => v.to_string(),
         Value::String(v) => v.clone(),
         _ => serde_json::to_string(value).unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+mod qwen_provider_lifecycle_tests {
+    use super::should_preserve_live_reused_provider_session;
+
+    #[test]
+    fn live_reused_provider_session_is_preserved_when_wrapper_io_is_missing() {
+        assert!(should_preserve_live_reused_provider_session(
+            Some("qwen-session-1"),
+            true
+        ));
+        assert!(!should_preserve_live_reused_provider_session(
+            Some("qwen-session-1"),
+            false
+        ));
+        assert!(!should_preserve_live_reused_provider_session(
+            Some("  "),
+            true
+        ));
+        assert!(!should_preserve_live_reused_provider_session(None, true));
     }
 }
 

@@ -835,6 +835,89 @@ fn get_process_command(pid: i32) -> Option<String> {
     }
 }
 
+#[cfg(all(test, unix))]
+mod process_group_tests {
+    use super::*;
+    use std::io::Read;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn configured_process_group_kill_reaps_grandchild() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let grandchild_pid_path = temp.path().join("grandchild.pid");
+        let script = format!(
+            "sleep 100 & echo $! > {}; wait",
+            shell_escape(&grandchild_pid_path.display().to_string())
+        );
+
+        let mut command = Command::new("sh");
+        command.args(["-c", &script]);
+        configure_child_process_group(&mut command);
+        let mut child = command.spawn().expect("wrapper shell should spawn");
+        let child_pid = child.id();
+
+        let grandchild_pid =
+            wait_for_pid_file(&grandchild_pid_path).expect("wrapper should write grandchild pid");
+        assert!(
+            process_is_running(grandchild_pid),
+            "grandchild should be alive before process-group kill"
+        );
+
+        kill_pid_tree(child_pid);
+        let _ = child.wait();
+
+        assert!(
+            wait_until_not_running(grandchild_pid, Duration::from_secs(3)),
+            "grandchild should be reaped by process-group kill"
+        );
+    }
+
+    fn wait_for_pid_file(path: &std::path::Path) -> Option<u32> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Ok(mut file) = std::fs::File::open(path) {
+                let mut contents = String::new();
+                if file.read_to_string(&mut contents).is_ok()
+                    && let Ok(pid) = contents.trim().parse::<u32>()
+                {
+                    return Some(pid);
+                }
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_until_not_running(pid: u32, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if !process_is_running(pid) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    #[allow(unsafe_code)]
+    fn process_is_running(pid: u32) -> bool {
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+            return false;
+        }
+        let Ok(output) = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "stat="])
+            .output()
+        else {
+            return true;
+        };
+        let stat = String::from_utf8_lossy(&output.stdout);
+        !stat.trim_start().starts_with('Z')
+    }
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
     use super::*;

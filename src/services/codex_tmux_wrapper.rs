@@ -432,6 +432,7 @@ fn run_turn(
 
     let mut cmd = Command::new(codex_bin);
     crate::services::platform::augment_exec_path(&mut cmd, codex_bin);
+    crate::services::process::configure_child_process_group(&mut cmd);
     let mut child = cmd
         .args(&args)
         .current_dir(working_dir)
