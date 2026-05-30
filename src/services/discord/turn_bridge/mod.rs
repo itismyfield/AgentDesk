@@ -2344,6 +2344,19 @@ fn terminal_delivery_response_after_offset(
     delivery_response
 }
 
+fn done_result_requires_full_terminal_replay(
+    full_response: &str,
+    result: &str,
+    response_sent_offset: usize,
+    streamed_assistant_text_this_turn: bool,
+) -> bool {
+    response_sent_offset > 0
+        && streamed_assistant_text_this_turn
+        && result.len() > super::DISCORD_MSG_LIMIT
+        && !result.trim().is_empty()
+        && full_response.trim() == result.trim()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WatcherHandoffClaimOutcome {
     None,
@@ -3837,6 +3850,9 @@ pub(super) fn spawn_turn_bridge(
         let mut terminal_control_drain_until: Option<std::time::Instant> = None;
         let mut current_msg_id = bridge.current_msg_id;
         let mut response_sent_offset = bridge.response_sent_offset;
+        let mut streamed_assistant_text_this_turn = false;
+        let mut streaming_rollover_frozen_msg_ids: Vec<MessageId> = Vec::new();
+        let mut terminal_full_replay_cleanup_msg_ids: Vec<MessageId> = Vec::new();
         let mut tmux_last_offset = bridge.tmux_last_offset;
         let mut watcher_owner_channel_id = channel_id;
         let mut bridge_created_response_placeholder_msg_id: Option<MessageId> = None;
@@ -4207,6 +4223,7 @@ pub(super) fn spawn_turn_bridge(
                             if content.is_empty() {
                                 continue;
                             }
+                            streamed_assistant_text_this_turn = true;
                             full_response.push_str(&content);
                             if (watcher_owns_assistant_relay
                                 && watcher_relay_available_for_turn)
@@ -4869,6 +4886,26 @@ pub(super) fn spawn_turn_bridge(
                             ) {
                                 full_response = resolved;
                                 inflight_state.full_response = full_response.clone();
+                            }
+                            if done_result_requires_full_terminal_replay(
+                                &full_response,
+                                &result,
+                                response_sent_offset,
+                                streamed_assistant_text_this_turn,
+                            ) {
+                                tracing::info!(
+                                    target: "agentdesk::codex_rollout_handoff",
+                                    provider = %provider.as_str(),
+                                    channel = channel_id.get(),
+                                    previous_response_sent_offset = response_sent_offset,
+                                    full_response_len = full_response.len(),
+                                    done_result_len = result.len(),
+                                    frozen_rollover_messages = streaming_rollover_frozen_msg_ids.len(),
+                                    "turn_bridge reset terminal delivery offset for authoritative Done body"
+                                );
+                                terminal_full_replay_cleanup_msg_ids =
+                                    streaming_rollover_frozen_msg_ids.clone();
+                                response_sent_offset = 0;
                             }
                             if let Some(s) = sid {
                                 new_session_id = Some(s.clone());
@@ -5687,6 +5724,7 @@ pub(super) fn spawn_turn_bridge(
                                     "src/services/discord/turn_bridge/mod.rs:rollover_response_sent_offset",
                                 );
                                 response_sent_offset = next_response_sent_offset;
+                                streaming_rollover_frozen_msg_ids.push(current_msg_id);
                                 current_msg_id = next_msg_id;
                                 last_edit_text = status_block;
                                 last_status_edit = tokio::time::Instant::now() - status_interval;
@@ -7282,6 +7320,32 @@ pub(super) fn spawn_turn_bridge(
             }
 
             if terminal_delivery_committed {
+                for frozen_msg_id in terminal_full_replay_cleanup_msg_ids.drain(..) {
+                    if frozen_msg_id == current_msg_id {
+                        continue;
+                    }
+                    match gateway.delete_message(channel_id, frozen_msg_id).await {
+                        Ok(()) => {
+                            tracing::info!(
+                                target: "agentdesk::codex_rollout_handoff",
+                                provider = %provider.as_str(),
+                                channel = channel_id.get(),
+                                message_id = frozen_msg_id.get(),
+                                "turn_bridge removed streamed rollover prefix after full terminal replay"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "agentdesk::codex_rollout_handoff",
+                                provider = %provider.as_str(),
+                                channel = channel_id.get(),
+                                message_id = frozen_msg_id.get(),
+                                error = %error,
+                                "turn_bridge failed to remove streamed rollover prefix after full terminal replay"
+                            );
+                        }
+                    }
+                }
                 // #2236: look up the typed handoff marker stamped at dispatch
                 // time so multi-agent setups with overlapping background
                 // channels can be disambiguated by the stored agent_id. The
