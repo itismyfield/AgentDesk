@@ -7539,8 +7539,7 @@ Any other message is sent to {p}.
 `!allowed -name` — Remove tool
 
 **Skills**
-`!skill <skill>` — Run a provider skill
-`!cc <skill>` — Legacy alias for `!skill`
+`!cc <skill>` — Run a provider skill
 
 **Settings**
 `/model` — Open the interactive model picker
@@ -7947,11 +7946,10 @@ Any other message is sent to {p}.
                 return Ok(true);
             }
 
-            "!cc" | "!skill" => {
-                let invoked_as = cmd;
+            "!cc" => {
                 let skill = arg1.to_string();
                 let args_str = text
-                    .strip_prefix(invoked_as)
+                    .strip_prefix("!cc")
                     .unwrap_or("")
                     .trim()
                     .strip_prefix(&skill)
@@ -7959,20 +7957,14 @@ Any other message is sent to {p}.
                     .trim();
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
-                    "  [{ts}] ◀ [{}] {} {} {}",
+                    "  [{ts}] ◀ [{}] !cc {} {}",
                     msg.author.name,
-                    invoked_as,
                     skill,
                     args_str
                 );
 
                 if skill.is_empty() {
-                    let _ = msg
-                        .reply(
-                            &ctx.http,
-                            "Usage: `!skill <skill> [args]` (legacy: `!cc <skill> [args]`)",
-                        )
-                        .await;
+                    let _ = msg.reply(&ctx.http, "Usage: `!cc <skill> [args]`").await;
                     return Ok(true);
                 }
 
@@ -7983,7 +7975,6 @@ Any other message is sent to {p}.
                         return Ok(true);
                     }
                     "stop" => {
-                        let stop_reason = format!("{invoked_as} stop");
                         // #441: flows through cancel_text_stop_token_mailbox (mailbox_cancel_active_turn)
                         // → stop_active_turn → token.cancelled triggers turn_bridge loop exit
                         // → mailbox_finish_turn canonical cleanup
@@ -7997,14 +7988,14 @@ Any other message is sent to {p}.
                                     &data.provider,
                                     &token,
                                     super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
-                                    &stop_reason,
+                                    "!cc stop",
                                 )
                                 .await;
                                 crate::services::turn_cancel_finalizer::finalize_turn_cancel(
                                     crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest::from_text_stop(
                                         data.provider.clone(),
                                         channel_id,
-                                        &stop_reason,
+                                        "!cc stop",
                                         termination_recorded,
                                     ),
                                 );
@@ -8013,7 +8004,7 @@ Any other message is sent to {p}.
                                     &data.shared,
                                     &data.provider,
                                     channel_id,
-                                    &stop_reason,
+                                    "!cc stop",
                                 )
                                 .await;
                                 let _ = msg.reply(&ctx.http, "Stopping...").await;
@@ -8064,7 +8055,7 @@ Any other message is sent to {p}.
                         .reply(
                             &ctx.http,
                             format!(
-                                "Unknown skill: `{}`. Use `!skill` to see available skills. `!cc` still works.",
+                                "Unknown skill: `{}`. Use `!cc` to see available skills.",
                                 skill
                             ),
                         )
