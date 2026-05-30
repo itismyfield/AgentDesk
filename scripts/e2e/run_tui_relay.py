@@ -372,6 +372,24 @@ def poison_claude_tui_relay_offset(
     }
 
 
+def scenario_teardown_marker(scenario_id: str, *, cell: str, run_id: str) -> str:
+    return f"### E2E TEARDOWN {scenario_id} cell={cell} run={run_id}"
+
+
+def send_teardown_marker(
+    *,
+    client: discord.DiscordClient,
+    channel_id: str,
+    scenario_id: str,
+    cell: str,
+    run_id: str,
+) -> dict[str, Any]:
+    return client.send_control(
+        channel_id,
+        scenario_teardown_marker(scenario_id, cell=cell, run_id=run_id),
+    )
+
+
 def _read_api_json(base_url: str, path: str, *, timeout: float = 5.0) -> tuple[int, Any]:
     url = f"{base_url.rstrip('/')}{path}"
     request = urllib.request.Request(
@@ -396,6 +414,16 @@ def _read_api_json(base_url: str, path: str, *, timeout: float = 5.0) -> tuple[i
         ) from error
 
 
+def _payload_summary(payload: Any, *, max_chars: int = 500) -> str:
+    try:
+        text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        text = repr(payload)
+    if len(text) > max_chars:
+        return f"{text[:max_chars]}..."
+    return text
+
+
 def _read_health_detail(base_url: str, *, timeout: float = 5.0) -> dict[str, Any]:
     status, payload = _read_api_json(base_url, "/api/health/detail", timeout=timeout)
     if not isinstance(payload, dict):
@@ -407,7 +435,10 @@ def _read_health_detail(base_url: str, *, timeout: float = 5.0) -> dict[str, Any
             f"/api/health/detail unavailable HTTP {status}: {payload}"
         )
     if "mailboxes" not in payload:
-        raise assertions.AssertionError("/api/health/detail missing mailboxes")
+        raise assertions.AssertionError(
+            "/api/health/detail missing mailboxes "
+            f"(HTTP {status}, payload={_payload_summary(payload)})"
+        )
     return payload
 
 
@@ -458,9 +489,11 @@ def _health_summary(
     http_status: int | None,
     payload: dict[str, Any] | None,
     violations: list[str] | None = None,
+    last_error: str | None = None,
 ) -> str:
     if payload is None:
-        return f"http={http_status or '<none>'} payload=<unavailable>"
+        suffix = f" error={last_error}" if last_error else ""
+        return f"http={http_status or '<none>'} payload=<unavailable>{suffix}"
     fields = {
         "http": http_status,
         "status": payload.get("status"),
@@ -470,6 +503,8 @@ def _health_summary(
         "degraded_reasons": payload.get("degraded_reasons"),
         "violations": violations or [],
     }
+    if last_error:
+        fields["last_error"] = last_error
     return json.dumps(fields, ensure_ascii=False, sort_keys=True)
 
 
@@ -610,13 +645,23 @@ def assert_cell_idle(
     provider = cell_provider(cell)
     deadline = time.monotonic() + timeout_s
     last_violations: list[str] = []
+    last_error: str | None = None
     last_mailbox_count = 0
 
     while time.monotonic() < deadline:
-        detail = _read_health_detail(base_url)
-        mailboxes = detail.get("mailboxes")
-        if not isinstance(mailboxes, list):
-            raise assertions.AssertionError("/api/health/detail mailboxes is not a list")
+        try:
+            detail = _read_health_detail(base_url)
+            mailboxes = detail.get("mailboxes")
+            if not isinstance(mailboxes, list):
+                raise assertions.AssertionError(
+                    "/api/health/detail mailboxes is not a list "
+                    f"(payload={_payload_summary(detail)})"
+                )
+            last_error = None
+        except Exception as error:  # noqa: BLE001 - poll through transient health errors
+            last_error = f"{type(error).__name__}: {error}"
+            time.sleep(poll_interval_s)
+            continue
 
         target_mailboxes = [
             mailbox
@@ -627,6 +672,10 @@ def assert_cell_idle(
         ]
         last_mailbox_count = len(target_mailboxes)
         last_violations = []
+        if not target_mailboxes:
+            last_violations.append(
+                f"no matching mailbox for provider={provider} channel={channel_id}"
+            )
         for mailbox in target_mailboxes:
             for reason in _mailbox_busy_reasons(mailbox):
                 last_violations.append(f"{_mailbox_label(mailbox)} {reason}")
@@ -649,7 +698,8 @@ def assert_cell_idle(
 
     raise assertions.AssertionError(
         f"post-scenario idle check failed for {cell} channel={channel_id}: "
-        f"{last_violations}"
+        f"{last_violations}; mailboxes_seen={last_mailbox_count}; "
+        f"last_error={last_error or '<none>'}"
     )
 
 
@@ -736,9 +786,35 @@ def run_scenario(
     except assertions.AssertionError as error:
         result["status"] = "fail"
         result["reason"] = f"assertion: {error}"
+        if not args.dry_run:
+            try:
+                send_teardown_marker(
+                    client=client,
+                    channel_id=target_channel_id,
+                    scenario_id=scenario_id,
+                    cell=cell,
+                    run_id=run_id,
+                )
+            except Exception as teardown_error:  # noqa: BLE001 - report without masking failure
+                result["teardown_error"] = (
+                    f"{type(teardown_error).__name__}: {teardown_error}"
+                )
     except Exception as error:  # noqa: BLE001 — surfaced in report
         result["status"] = "fail"
         result["reason"] = f"{type(error).__name__}: {error}"
+        if not args.dry_run:
+            try:
+                send_teardown_marker(
+                    client=client,
+                    channel_id=target_channel_id,
+                    scenario_id=scenario_id,
+                    cell=cell,
+                    run_id=run_id,
+                )
+            except Exception as teardown_error:  # noqa: BLE001 - report without masking failure
+                result["teardown_error"] = (
+                    f"{type(teardown_error).__name__}: {teardown_error}"
+                )
 
     result["completed_at"] = dt.datetime.now().isoformat(timespec="seconds")
     return result
@@ -756,7 +832,6 @@ def run_one_cell(
 ) -> dict[str, Any]:
     scenario_id = scenario.get("id")
     setup_marker = f"### E2E SETUP {scenario_id} cell={cell} run={run_id}"
-    teardown_marker = f"### E2E TEARDOWN {scenario_id} cell={cell} run={run_id}"
     record: dict[str, Any] = {"assertions": []}
 
     if dry_run:
@@ -924,7 +999,13 @@ def run_one_cell(
         {"spec": {"post_scenario_cell_idle": True}, "passed": True, "details": idle_check}
     )
 
-    client.send_control(channel_id, teardown_marker)
+    send_teardown_marker(
+        client=client,
+        channel_id=channel_id,
+        scenario_id=str(scenario_id),
+        cell=cell,
+        run_id=run_id,
+    )
     return record
 
 
@@ -940,6 +1021,7 @@ def wait_for_health(
     last_http_status: int | None = None
     last_payload: dict[str, Any] | None = None
     last_violations: list[str] = []
+    last_error: str | None = None
     while time.monotonic() < deadline:
         try:
             http_status, payload = _read_api_json(base_url, "/api/health", timeout=5)
@@ -956,12 +1038,13 @@ def wait_for_health(
             else:
                 last_payload = None
                 last_violations = [f"non-object health payload: {payload!r}"]
-        except Exception:  # noqa: BLE001
-            pass
+            last_error = None
+        except Exception as error:  # noqa: BLE001 - preserve last transport/parse failure
+            last_error = f"{type(error).__name__}: {error}"
         time.sleep(poll_interval_s)
     raise assertions.AssertionError(
         f"dcserver did not become healthy within {timeout_s}s; last="
-        f"{_health_summary(http_status=last_http_status, payload=last_payload, violations=last_violations)}"
+        f"{_health_summary(http_status=last_http_status, payload=last_payload, violations=last_violations, last_error=last_error)}"
     )
 
 
@@ -972,10 +1055,20 @@ def _guard_no_foreign_active_turns(
     e2e_channel_ids = {channel_id} if channel_id else set()
     if not e2e_channel_ids:
         return
-    detail = _read_health_detail(base_url)
+    try:
+        detail = _read_health_detail(base_url)
+    except Exception as error:  # noqa: BLE001 - fail closed before destructive restart
+        raise assertions.AssertionError(
+            "refusing to restart dcserver: unable to read /api/health/detail "
+            f"for foreign mailbox guard (cell={cell}, channel={channel_id}): "
+            f"{type(error).__name__}: {error}"
+        ) from error
     mailboxes = detail.get("mailboxes")
     if not isinstance(mailboxes, list):
-        raise assertions.AssertionError("/api/health/detail mailboxes is not a list")
+        raise assertions.AssertionError(
+            "refusing to restart dcserver: /api/health/detail mailboxes is not a list "
+            f"(payload={_payload_summary(detail)})"
+        )
 
     busy: list[str] = []
     current_provider = cell_provider(cell)
