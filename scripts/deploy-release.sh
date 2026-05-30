@@ -1105,7 +1105,8 @@ if status in {"pass", "ok", "info"} and not drift:
 detail = postgres.get("detail") or "no detail"
 actual = postgres.get("actual") or "unknown"
 if drift:
-    print(f"✗ Doctor postgres preflight failed: status={status}, drift={drift}, detail={detail}, actual={actual}")
+    drift_json = json.dumps(drift, sort_keys=True)
+    print(f"✗ Doctor postgres preflight failed: status={status}, drift={drift_json}, detail={detail}, actual={actual}")
 else:
     print(f"✗ Doctor postgres preflight failed: status={status}, detail={detail}, actual={actual}")
 raise SystemExit(1)

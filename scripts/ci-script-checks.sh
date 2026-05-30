@@ -17,6 +17,9 @@ fi
 echo "=== PG audit guard ==="
 ./scripts/pg-audit.sh
 
+echo "=== Postgres migration checksum guard ==="
+python3 scripts/check_postgres_migration_checksums.py
+
 echo "=== State/lint hardening guard ==="
 python3 scripts/audit_state_lint_hardening.py
 

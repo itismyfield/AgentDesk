@@ -256,6 +256,13 @@ pub struct MigrationStatus {
     pub pending_versions: Vec<i64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MigrationChecksumMismatch {
+    pub version: i64,
+    pub applied_checksum: String,
+    pub resolved_checksum: String,
+}
+
 pub async fn query_applied_migrations(pool: &PgPool) -> Result<Vec<AppliedMigrationInfo>, String> {
     let rows = sqlx::query(
         "SELECT version, description, success
@@ -303,7 +310,9 @@ pub async fn migration_status(pool: &PgPool) -> Result<MigrationStatus, String> 
     })
 }
 
-pub async fn applied_migration_checksum_mismatches(pool: &PgPool) -> Result<Vec<i64>, String> {
+pub async fn applied_migration_checksum_mismatch_details(
+    pool: &PgPool,
+) -> Result<Vec<MigrationChecksumMismatch>, String> {
     let rows = sqlx::query(
         "SELECT version, checksum, success
          FROM _sqlx_migrations
@@ -338,11 +347,33 @@ pub async fn applied_migration_checksum_mismatches(pool: &PgPool) -> Result<Vec<
         };
         let applied_checksum = row.get::<Vec<u8>, _>("checksum");
         if applied_checksum.as_slice() != *expected_checksum {
-            mismatches.push(version);
+            mismatches.push(MigrationChecksumMismatch {
+                version,
+                applied_checksum: checksum_hex(&applied_checksum),
+                resolved_checksum: checksum_hex(*expected_checksum),
+            });
         }
     }
 
     Ok(mismatches)
+}
+
+pub async fn applied_migration_checksum_mismatches(pool: &PgPool) -> Result<Vec<i64>, String> {
+    Ok(applied_migration_checksum_mismatch_details(pool)
+        .await?
+        .into_iter()
+        .map(|mismatch| mismatch.version)
+        .collect())
+}
+
+fn checksum_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 async fn apply_kv_seed_actions(pool: &PgPool, actions: &[KvSeedAction]) -> Result<(), String> {
@@ -976,11 +1007,11 @@ pub(crate) async fn close_test_pool(pool: PgPool, label: &str) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::{
-        AdvisoryLockLease, POSTGRES_MIGRATOR, STARTUP_PG_ACQUIRE_TIMEOUT_SECS, close_test_pool,
-        config_database_summary, connect_options, connect_test_pool_and_migrate_config,
-        create_test_database, database_enabled, database_summary, health_check,
-        run_test_postgres_sqlx_op_with_timeout, runtime_pool_settings, startup_pool_settings,
-        startup_reseed,
+        AdvisoryLockLease, POSTGRES_MIGRATOR, STARTUP_PG_ACQUIRE_TIMEOUT_SECS, checksum_hex,
+        close_test_pool, config_database_summary, connect_options,
+        connect_test_pool_and_migrate_config, create_test_database, database_enabled,
+        database_summary, health_check, run_test_postgres_sqlx_op_with_timeout,
+        runtime_pool_settings, startup_pool_settings, startup_reseed,
     };
     use sqlx::Row;
     use std::collections::BTreeMap;
@@ -1100,6 +1131,11 @@ mod tests {
             avatar_emoji: Some(":gear:".to_string()),
         }];
         config
+    }
+
+    #[test]
+    fn checksum_hex_formats_lowercase_byte_pairs() {
+        assert_eq!(checksum_hex(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
     }
 
     #[test]
