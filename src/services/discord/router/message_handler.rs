@@ -10691,6 +10691,7 @@ mod tests {
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: false,
+            pending_uploads: Vec::new(),
             channel_id: Some(42),
             channel_name: None,
             override_channel_id: None,
@@ -11039,6 +11040,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                pending_uploads: Vec::new(),
                 voice_announcement: None,
             },
         )
@@ -11112,6 +11114,7 @@ mod tests {
             None,
             false,
             false,
+            Vec::new(),
             None,
         )
         .await;
@@ -11263,6 +11266,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                pending_uploads: Vec::new(),
                 voice_announcement: None,
             },
         )

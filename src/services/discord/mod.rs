@@ -5120,6 +5120,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                pending_uploads: Vec::new(),
                 voice_announcement: None,
             }],
             ..Default::default()
@@ -5209,6 +5210,7 @@ mod tests {
                     reply_context: None,
                     has_reply_boundary: false,
                     merge_consecutive: false,
+                    pending_uploads: Vec::new(),
                     voice_announcement: None,
                 },
             )
@@ -5417,6 +5419,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                pending_uploads: Vec::new(),
                 voice_announcement: None,
             }],
             ..Default::default()
@@ -5444,6 +5447,7 @@ mod tests {
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: false,
+            pending_uploads: Vec::new(),
             voice_announcement: None,
         };
 
@@ -5520,6 +5524,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                pending_uploads: Vec::new(),
                 voice_announcement: None,
             },
         )
@@ -5928,6 +5933,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                pending_uploads: Vec::new(),
                 voice_announcement: None,
             },
             kind: QueueExitKind::Cancelled,
@@ -5996,6 +6002,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                pending_uploads: Vec::new(),
                 voice_announcement: None,
             },
             kind,
@@ -6093,6 +6100,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: true,
+                pending_uploads: Vec::new(),
                 voice_announcement: None,
             },
             kind: QueueExitKind::Superseded,
@@ -6180,6 +6188,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: true,
+                pending_uploads: Vec::new(),
                 voice_announcement: None,
             },
             kind: QueueExitKind::Cancelled,

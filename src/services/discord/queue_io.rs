@@ -206,6 +206,7 @@ mod tests {
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: false,
+            pending_uploads: Vec::new(),
             voice_announcement: None,
         }
     }
@@ -257,6 +258,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                pending_uploads: Vec::new(),
                 voice_announcement: None,
             }],
         );
@@ -287,6 +289,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                pending_uploads: Vec::new(),
                 voice_announcement: None,
             }],
         );
@@ -316,6 +319,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                pending_uploads: Vec::new(),
                 voice_announcement: None,
             }],
         );
@@ -546,6 +550,7 @@ mod tests {
             reply_context: Some("[Reply context]".to_string()),
             has_reply_boundary: true,
             merge_consecutive: true,
+            pending_uploads: Vec::new(),
             channel_id: Some(42),
             channel_name: Some("test-channel".to_string()),
             override_channel_id: None,
@@ -678,6 +683,7 @@ mod tests {
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: false,
+            pending_uploads: Vec::new(),
             channel_id: None,
             channel_name: None,
             override_channel_id: None,

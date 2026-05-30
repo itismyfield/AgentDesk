@@ -527,6 +527,7 @@ async fn replace_fallback_preserves_cleanup_inflight_and_defers_queued_dispatch(
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: false,
+            pending_uploads: Vec::new(),
             voice_announcement: None,
         },
     )
@@ -3750,6 +3751,7 @@ async fn watcher_does_not_kickoff_queue_when_dispatch_failed() {
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: false,
+            pending_uploads: Vec::new(),
             voice_announcement: None,
         },
     )

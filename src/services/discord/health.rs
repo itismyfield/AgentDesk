@@ -535,6 +535,7 @@ impl TestHealthHarness {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                pending_uploads: Vec::new(),
                 voice_announcement: None,
             })
             .collect::<Vec<_>>();
@@ -640,6 +641,7 @@ impl TestHealthHarness {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                pending_uploads: Vec::new(),
                 voice_announcement: None,
             })
             .collect::<Vec<_>>();
@@ -5409,6 +5411,7 @@ mod tests {
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: false,
+            pending_uploads: Vec::new(),
             voice_announcement: None,
         };
         save_channel_queue(
@@ -5513,6 +5516,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                pending_uploads: Vec::new(),
                 voice_announcement: None,
             },
             super::super::Intervention {
@@ -5526,6 +5530,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                pending_uploads: Vec::new(),
                 voice_announcement: None,
             },
         ];
@@ -5617,6 +5622,7 @@ mod tests {
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: false,
+            pending_uploads: Vec::new(),
             voice_announcement: None,
         };
         save_channel_queue(
