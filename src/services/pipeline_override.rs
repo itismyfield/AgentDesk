@@ -175,10 +175,12 @@ impl<'a> PipelineOverrideService<'a> {
     /// agent at runtime — i.e. every repo referenced by
     /// `kanban_cards.assigned_agent_id = $1` via `kanban_cards.repo_id` — and
     /// validate the merged repo+agent effective pipeline. Assigned standalone
-    /// cards (`repo_id IS NULL`) validate the default+agent merge in addition
-    /// to any repo-backed contexts. If the agent is not currently paired with
-    /// any repo, validate the default+agent merge so standalone agent configs
-    /// remain guarded. Reject the write if any actual card context is invalid.
+    /// cards (`repo_id IS NULL`) and dangling repo references (`repo_id` with
+    /// no matching `github_repos` row) validate the default+agent merge in
+    /// addition to any repo-backed contexts. If the agent is not currently
+    /// paired with any repo, validate the default+agent merge so standalone
+    /// agent configs remain guarded. Reject the write if any actual card
+    /// context is invalid.
     ///
     /// The runtime resolver `crate::pipeline::resolve(repo_override,
     /// agent_override)` is invoked per-card with `(kanban_cards.repo_id,
@@ -200,12 +202,13 @@ impl<'a> PipelineOverrideService<'a> {
         .await
         .map_err(database_error)?;
 
-        let has_standalone_assigned_card = sqlx::query_scalar::<_, bool>(
+        let has_default_agent_assigned_card = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(
                 SELECT 1
-                  FROM kanban_cards
-                 WHERE assigned_agent_id = $1
-                   AND repo_id IS NULL
+                  FROM kanban_cards c
+                  LEFT JOIN github_repos r ON r.id = c.repo_id
+                 WHERE c.assigned_agent_id = $1
+                   AND (c.repo_id IS NULL OR r.id IS NULL)
              )",
         )
         .bind(agent_id)
@@ -218,12 +221,12 @@ impl<'a> PipelineOverrideService<'a> {
             return Ok(());
         }
 
-        if has_standalone_assigned_card {
+        if has_default_agent_assigned_card {
             if let Err(PipelineOverrideError::BadRequest(message)) =
                 validate_pipeline_override(None, new_agent_override)
             {
                 return Err(PipelineOverrideError::BadRequest(format!(
-                    "merged pipeline invalid for standalone assigned card (agent={agent_id}): {message}"
+                    "merged pipeline invalid for standalone assigned card or dangling repo assigned card (agent={agent_id}): {message}"
                 )));
             }
         }
@@ -741,6 +744,79 @@ mod tests {
         assert!(
             stored.is_none(),
             "agent pipeline_config must remain NULL after rejected standalone validation; got {stored:?}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_write_rejects_dangling_repo_assigned_card_context_when_repo_pair_valid() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.connect_with_minimal_schema().await else {
+            pg_db.drop().await;
+            return;
+        };
+        crate::pipeline::ensure_loaded();
+        seed_agent(&pool, "agent-dangling-repo-context", None).await;
+        seed_repo_with_default_agent(
+            &pool,
+            "repo-provides-staging-review-for-dangling",
+            "agent-dangling-repo-context",
+            Some(&repo_override_with_staging_review_state().to_string()),
+        )
+        .await;
+        seed_card(
+            &pool,
+            "card-valid-repo-agent-context",
+            Some("repo-provides-staging-review-for-dangling"),
+            Some("agent-dangling-repo-context"),
+        )
+        .await;
+        seed_card(
+            &pool,
+            "card-dangling-repo-agent-context",
+            Some("repo-missing-staging-review"),
+            Some("agent-dangling-repo-context"),
+        )
+        .await;
+
+        let service = PipelineOverrideService::new(&pool);
+        let result = service
+            .set_agent_pipeline(
+                "agent-dangling-repo-context",
+                Some(&agent_override_to_staging_review()),
+            )
+            .await;
+
+        match result {
+            Err(PipelineOverrideError::BadRequest(message)) => {
+                assert!(
+                    message.contains("dangling repo assigned card"),
+                    "BadRequest must explain dangling repo default+agent validation, got: {message}"
+                );
+                assert!(
+                    message.contains("staging_review"),
+                    "BadRequest must include the missing dangling repo state context, got: {message}"
+                );
+            }
+            other => panic!(
+                "expected BadRequest for dangling repo assigned card context, got: {:?}",
+                other.map(|()| "Ok").unwrap_or("non-BadRequest err")
+            ),
+        }
+
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT pipeline_config::text FROM agents WHERE id = 'agent-dangling-repo-context'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("agent pipeline_config lookup");
+        assert!(
+            stored.is_none(),
+            "agent pipeline_config must remain NULL after rejected dangling repo validation; got {stored:?}"
         );
 
         pool.close().await;
