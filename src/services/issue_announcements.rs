@@ -1,13 +1,49 @@
 use chrono::{DateTime, Utc};
-use poise::serenity_prelude::{ChannelId, MessageId};
+use poise::serenity_prelude::ChannelId;
 use sqlx::{PgPool, Row};
 
+use crate::server::routes::dispatches::discord_delivery::DispatchMessagePostError;
 use crate::services::discord::outbound::delivery::{deliver_outbound, first_raw_message_id};
-use crate::services::discord::outbound::message::{OutboundOperation, OutboundTarget};
+use crate::services::discord::outbound::message::OutboundTarget;
 use crate::services::discord::outbound::{
-    DeliveryResult, DiscordOutboundMessage, DiscordOutboundPolicy, HttpOutboundClient,
-    shared_outbound_deduper,
+    DeliveryResult, DiscordOutboundClient, DiscordOutboundMessage, DiscordOutboundPolicy,
+    HttpOutboundClient, shared_outbound_deduper,
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IssueAnnouncementDeliveryError {
+    detail: String,
+    http_status: Option<reqwest::StatusCode>,
+    discord_error_code: Option<i64>,
+}
+
+impl IssueAnnouncementDeliveryError {
+    fn new(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+            http_status: None,
+            discord_error_code: None,
+        }
+    }
+}
+
+impl From<DispatchMessagePostError> for IssueAnnouncementDeliveryError {
+    fn from(error: DispatchMessagePostError) -> Self {
+        Self {
+            detail: error.to_string(),
+            http_status: error.http_status(),
+            discord_error_code: error.discord_error_code(),
+        }
+    }
+}
+
+impl std::fmt::Display for IssueAnnouncementDeliveryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for IssueAnnouncementDeliveryError {}
 
 #[derive(Clone, Debug)]
 pub struct IssueAnnouncementCreate {
@@ -89,7 +125,8 @@ pub async fn create_issue_announcement_pg(
         &format!("issue_announcement:{}:{}", input.repo, input.issue_number),
         "created",
     )
-    .await?;
+    .await
+    .map_err(|error| error.to_string())?;
 
     sqlx::query(
         "INSERT INTO issue_announcements (
@@ -212,8 +249,8 @@ pub async fn complete_issue_announcement_pg(
 /// - `notify` token is not configured (deployment hasn't seeded notify yet)
 /// - `notify` PATCH returns Discord 50005 (cross-bot edit on a message
 ///   authored by announce-bot)
-/// - `notify` PATCH returns 50001 / 403 / "missing access" (notify bot
-///   doesn't yet have access to the legacy announcement channel)
+/// - `notify` PATCH returns Discord 50001 or HTTP 403 (notify bot doesn't
+///   yet have access to the legacy announcement channel)
 ///
 /// Once all legacy announce-authored rows have closed and notify-bot has
 /// permissions on every announcement channel, both this fallback and the
@@ -244,7 +281,7 @@ async fn edit_announcement_with_legacy_fallback(
                     "{log_key}: notify edit failed with `{error}`, retrying with announce token"
                 );
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.to_string()),
         }
     }
     let Some(announce_token) = crate::credential::read_bot_token("announce") else {
@@ -264,20 +301,16 @@ async fn edit_announcement_with_legacy_fallback(
         "completed-legacy-fallback",
     )
     .await
+    .map_err(|error| error.to_string())
 }
 
 /// Decides whether a notify-side PATCH failure should trigger the
-/// announce-token fallback. Cross-bot (50005) and missing-access (50001 /
-/// 403) errors all indicate the message was originally authored by
-/// announce-bot or that notify-bot has no permission on the legacy
-/// channel — both correctable by retrying with announce.
-fn should_try_legacy_announce_fallback(error: &str) -> bool {
-    let lowered = error.to_ascii_lowercase();
-    error.contains("50005")
-        || error.contains("50001")
-        || lowered.contains("cannot edit a message authored by another user")
-        || lowered.contains("missing access")
-        || lowered.contains("403 forbidden")
+/// announce-token fallback. The classifier intentionally uses Discord's
+/// typed JSON error code plus HTTP status instead of matching localized or
+/// formatting-sensitive message text.
+fn should_try_legacy_announce_fallback(error: &IssueAnnouncementDeliveryError) -> bool {
+    matches!(error.discord_error_code, Some(50005 | 50001))
+        || error.http_status == Some(reqwest::StatusCode::FORBIDDEN)
 }
 
 async fn resolve_announcement_channel_pg(
@@ -396,43 +429,57 @@ async fn send_issue_announcement_message(
     content: &str,
     correlation_id: &str,
     event_id: &str,
-) -> Result<String, String> {
+) -> Result<String, IssueAnnouncementDeliveryError> {
     let client = HttpOutboundClient::new(
         reqwest::Client::new(),
         token.to_string(),
         crate::server::routes::dispatches::discord_delivery::discord_api_base_url(),
     );
-    let channel_id = channel_id
-        .parse::<u64>()
-        .map(ChannelId::new)
-        .map_err(|error| format!("invalid issue announcement channel id {channel_id}: {error}"))?;
-    let mut message = DiscordOutboundMessage::new(
+    let channel_id = channel_id.trim();
+    let channel_id_num = channel_id.parse::<u64>().map_err(|error| {
+        IssueAnnouncementDeliveryError::new(format!(
+            "invalid issue announcement channel id {channel_id}: {error}"
+        ))
+    })?;
+    if let Some(message_id) = edit_message_id {
+        let message_id = message_id.trim();
+        message_id.parse::<u64>().map_err(|error| {
+            IssueAnnouncementDeliveryError::new(format!(
+                "invalid issue announcement edit message id {message_id}: {error}"
+            ))
+        })?;
+        return client
+            .edit_message(channel_id, message_id, content)
+            .await
+            .map_err(IssueAnnouncementDeliveryError::from);
+    }
+
+    let message = DiscordOutboundMessage::new(
         correlation_id.to_string(),
         event_id.to_string(),
         content.to_string(),
-        OutboundTarget::Channel(channel_id),
+        OutboundTarget::Channel(ChannelId::new(channel_id_num)),
         DiscordOutboundPolicy::review_notification(),
     );
-    if let Some(message_id) = edit_message_id {
-        let message_id = message_id
-            .parse::<u64>()
-            .map(MessageId::new)
-            .map_err(|error| {
-                format!("invalid issue announcement edit message id {message_id}: {error}")
-            })?;
-        message = message.with_operation(OutboundOperation::Edit { message_id });
-    }
     match deliver_outbound(&client, shared_outbound_deduper(), message, None).await {
         DeliveryResult::Sent { messages, .. } | DeliveryResult::Fallback { messages, .. } => {
-            first_raw_message_id(&messages)
-                .ok_or_else(|| "issue announcement delivery returned no message id".to_string())
+            first_raw_message_id(&messages).ok_or_else(|| {
+                IssueAnnouncementDeliveryError::new(
+                    "issue announcement delivery returned no message id",
+                )
+            })
         }
         DeliveryResult::Duplicate {
             existing_messages, ..
-        } => first_raw_message_id(&existing_messages)
-            .ok_or_else(|| "duplicate issue announcement without message id".to_string()),
-        DeliveryResult::Skip { .. } => Err("issue announcement delivery skipped".to_string()),
-        DeliveryResult::PermanentFailure { reason } => Err(reason),
+        } => first_raw_message_id(&existing_messages).ok_or_else(|| {
+            IssueAnnouncementDeliveryError::new("duplicate issue announcement without message id")
+        }),
+        DeliveryResult::Skip { .. } => Err(IssueAnnouncementDeliveryError::new(
+            "issue announcement delivery skipped",
+        )),
+        DeliveryResult::PermanentFailure { reason } => {
+            Err(IssueAnnouncementDeliveryError::new(reason))
+        }
     }
 }
 
@@ -451,7 +498,7 @@ fn trim_non_empty(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -493,5 +540,39 @@ mod tests {
 
         assert!(rendered.contains("✅ **#1331 완료** — Lifecycle"));
         assert!(rendered.contains("> 머지: PR #1410 https://github.com/owner/repo/pull/1410"));
+    }
+
+    #[test]
+    fn legacy_fallback_classifier_uses_typed_http_status_and_discord_code() {
+        let cross_bot = IssueAnnouncementDeliveryError {
+            detail: "cannot edit message".to_string(),
+            http_status: Some(reqwest::StatusCode::BAD_REQUEST),
+            discord_error_code: Some(50005),
+        };
+        assert!(should_try_legacy_announce_fallback(&cross_bot));
+
+        let missing_access = IssueAnnouncementDeliveryError {
+            detail: "missing access".to_string(),
+            http_status: Some(reqwest::StatusCode::BAD_REQUEST),
+            discord_error_code: Some(50001),
+        };
+        assert!(should_try_legacy_announce_fallback(&missing_access));
+
+        let forbidden = IssueAnnouncementDeliveryError {
+            detail: "localized forbidden text".to_string(),
+            http_status: Some(reqwest::StatusCode::FORBIDDEN),
+            discord_error_code: None,
+        };
+        assert!(should_try_legacy_announce_fallback(&forbidden));
+    }
+
+    #[test]
+    fn legacy_fallback_classifier_ignores_detail_text_without_typed_signal() {
+        let string_only = IssueAnnouncementDeliveryError {
+            detail: "Discord 50005 cannot edit a message authored by another user".to_string(),
+            http_status: Some(reqwest::StatusCode::BAD_REQUEST),
+            discord_error_code: None,
+        };
+        assert!(!should_try_legacy_announce_fallback(&string_only));
     }
 }

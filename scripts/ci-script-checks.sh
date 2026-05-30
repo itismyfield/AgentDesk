@@ -17,6 +17,9 @@ fi
 echo "=== PG audit guard ==="
 ./scripts/pg-audit.sh
 
+echo "=== State/lint hardening guard ==="
+python3 scripts/audit_state_lint_hardening.py
+
 echo "=== CI runner hardening guard ==="
 ./scripts/check-ci-runner-hardening.sh
 

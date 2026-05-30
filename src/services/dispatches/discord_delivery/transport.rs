@@ -104,6 +104,12 @@ pub(crate) fn is_discord_length_error(status: reqwest::StatusCode, body: &str) -
         || (body.contains("50035") && lowered.contains("length"))
 }
 
+fn discord_error_code_from_body(body: &str) -> Option<i64> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("code").and_then(|code| code.as_i64()))
+}
+
 /// Pure POST helper with no pre-truncation. The shared outbound layer owns
 /// length policy and fallback decisions.
 pub(crate) async fn post_raw_message_once(
@@ -135,8 +141,10 @@ pub(crate) async fn post_raw_message_once(
         } else {
             DispatchMessagePostErrorKind::Other
         };
-        return Err(DispatchMessagePostError::new(
+        return Err(DispatchMessagePostError::http(
             kind,
+            status,
+            discord_error_code_from_body(&body),
             format!("failed to post dispatch message to {channel_id}: {status} {body}"),
         ));
     }
@@ -197,8 +205,10 @@ pub(crate) async fn edit_raw_message_once(
         } else {
             DispatchMessagePostErrorKind::Other
         };
-        return Err(DispatchMessagePostError::new(
+        return Err(DispatchMessagePostError::http(
             kind,
+            status,
+            discord_error_code_from_body(&body),
             format!("Discord edit failed for message {message_id}: {status} {body}"),
         ));
     }
@@ -730,6 +740,15 @@ mod tests {
             reqwest::StatusCode::FORBIDDEN,
             "BASE_TYPE_MAX_LENGTH",
         ));
+    }
+
+    #[test]
+    fn discord_error_code_from_body_reads_typed_json_code() {
+        assert_eq!(
+            discord_error_code_from_body(r#"{"message":"Missing Access","code":50001}"#),
+            Some(50001)
+        );
+        assert_eq!(discord_error_code_from_body("Missing Access 50001"), None);
     }
 
     #[test]

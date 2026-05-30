@@ -1350,6 +1350,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn core_status_constraints_reject_invalid_values_and_allow_valid_states() {
+        let test_db = TestDatabase::create().await;
+        let config = postgres_test_config(&test_db);
+
+        let pool =
+            connect_test_pool_and_migrate_config(&config, "db::postgres status check test pool")
+                .await
+                .expect("connect and migrate postgres")
+                .expect("postgres pool");
+
+        let agent_error = sqlx::query(
+            "INSERT INTO agents (id, name, provider, status)
+             VALUES ('agent-bad-status', 'Bad Status', 'claude', 'busy-now')",
+        )
+        .execute(&pool)
+        .await
+        .expect_err("unknown agents.status must be rejected");
+        assert!(
+            agent_error
+                .to_string()
+                .contains("agents_status_known_check"),
+            "expected agents.status CHECK violation, got: {agent_error}"
+        );
+
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, status)
+             VALUES ('agent-valid-status', 'Valid Status', 'claude', 'working')",
+        )
+        .execute(&pool)
+        .await
+        .expect("valid agents.status should insert");
+
+        let kanban_error = sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status)
+             VALUES ('card-bad-status', 'Bad Status', 'in progress')",
+        )
+        .execute(&pool)
+        .await
+        .expect_err("non-slug kanban_cards.status must be rejected");
+        assert!(
+            kanban_error
+                .to_string()
+                .contains("kanban_cards_status_slug_check"),
+            "expected kanban status CHECK violation, got: {kanban_error}"
+        );
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status)
+             VALUES ('card-valid-status', 'Valid Status', 'qa_test')",
+        )
+        .execute(&pool)
+        .await
+        .expect("valid custom kanban slug should insert");
+
+        close_test_pool(pool, "db::postgres status check test pool")
+            .await
+            .expect("close postgres pool");
+        test_db.drop().await;
+    }
+
+    #[tokio::test]
     async fn postgres_json_extract_0058_up_and_down_preserve_array_path_behavior() {
         let test_db = TestDatabase::create().await;
         let config = postgres_test_config(&test_db);

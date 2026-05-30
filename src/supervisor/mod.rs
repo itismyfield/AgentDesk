@@ -9,6 +9,7 @@ use crate::error::{AppError, ErrorCode};
 
 const SUPERVISOR_ACTOR: &str = "runtime_supervisor";
 const ORPHAN_CONFIRM_KEY_PREFIX: &str = "runtime_supervisor:orphan_confirm:";
+const ACTIVE_DISPATCH_STATUSES: &[&str] = &["pending", "dispatched"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SupervisorSignal {
@@ -431,40 +432,17 @@ impl RuntimeSupervisor {
         crate::utils::async_bridge::block_on_pg_result(
             pool,
             move |bridge_pool| async move {
-                let payload = result.to_string();
-                let mut tx = bridge_pool
-                    .begin()
-                    .await
-                    .map_err(|error| format!("begin orphan completion transaction: {error}"))?;
-                let changed = sqlx::query(
-                    "UPDATE task_dispatches
-                     SET status = 'completed',
-                         result = $1,
-                         updated_at = NOW(),
-                         completed_at = COALESCE(completed_at, NOW())
-                     WHERE id = $2
-                       AND status IN ('pending', 'dispatched')",
+                crate::dispatch::set_dispatch_status_on_pg_async(
+                    &bridge_pool,
+                    &dispatch_id,
+                    "completed",
+                    Some(&result),
+                    "orphan_recovery",
+                    Some(ACTIVE_DISPATCH_STATUSES),
+                    true,
                 )
-                .bind(&payload)
-                .bind(&dispatch_id)
-                .execute(&mut *tx)
                 .await
-                .map_err(|error| format!("mark dispatch completed {dispatch_id}: {error}"))?
-                .rows_affected() as usize;
-                if changed > 0 {
-                    crate::db::auto_queue::sync_dispatch_terminal_entries_on_pg_tx(
-                        &mut tx,
-                        &dispatch_id,
-                        crate::db::auto_queue::ENTRY_STATUS_DONE,
-                        "orphan_recovery",
-                        true,
-                    )
-                    .await?;
-                }
-                tx.commit()
-                    .await
-                    .map_err(|error| format!("commit orphan completion transaction: {error}"))?;
-                Ok(changed)
+                .map_err(|error| format!("mark dispatch completed {dispatch_id}: {error}"))
             },
             |error| error,
         )
@@ -482,117 +460,17 @@ impl RuntimeSupervisor {
         crate::utils::async_bridge::block_on_pg_result(
             pool,
             move |bridge_pool| async move {
-                let payload = result.to_string();
-                let mut tx = bridge_pool
-                    .begin()
-                    .await
-                    .map_err(|error| format!("begin orphan rollback transaction: {error}"))?;
-                let current = sqlx::query(
-                    "SELECT status, kanban_card_id, dispatch_type
-                     FROM task_dispatches
-                     WHERE id = $1",
-                )
-                .bind(&dispatch_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|error| format!("load dispatch {dispatch_id}: {error}"))?;
-                let Some(current) = current else {
-                    tx.commit()
-                        .await
-                        .map_err(|error| format!("commit orphan rollback no-op: {error}"))?;
-                    return Ok(0);
-                };
-                let status = current
-                    .try_get::<Option<String>, _>("status")
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default();
-                if !matches!(status.as_str(), "pending" | "dispatched") {
-                    tx.commit()
-                        .await
-                        .map_err(|error| format!("commit orphan rollback no-op: {error}"))?;
-                    return Ok(0);
-                }
-                let changed = sqlx::query(
-                    "UPDATE task_dispatches
-                     SET status = 'failed',
-                         result = $1,
-                         updated_at = NOW(),
-                         last_stuck_alert_at = NULL
-                     WHERE id = $2
-                       AND status = $3",
-                )
-                .bind(&payload)
-                .bind(&dispatch_id)
-                .bind(&status)
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| format!("mark dispatch failed {dispatch_id}: {error}"))?
-                .rows_affected() as usize;
-                if changed == 0 {
-                    tx.commit()
-                        .await
-                        .map_err(|error| format!("commit orphan rollback no-op: {error}"))?;
-                    return Ok(0);
-                }
-                sqlx::query(
-                    "INSERT INTO dispatch_events (
-                        dispatch_id,
-                        kanban_card_id,
-                        dispatch_type,
-                        from_status,
-                        to_status,
-                        transition_source,
-                        payload_json
-                     ) VALUES ($1, $2, $3, $4, 'failed', 'orphan_recovery_rollback', $5)",
-                )
-                .bind(&dispatch_id)
-                .bind(
-                    current
-                        .try_get::<Option<String>, _>("kanban_card_id")
-                        .ok()
-                        .flatten(),
-                )
-                .bind(
-                    current
-                        .try_get::<Option<String>, _>("dispatch_type")
-                        .ok()
-                        .flatten(),
-                )
-                .bind(&status)
-                .bind(result.clone())
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| format!("record orphan rollback event {dispatch_id}: {error}"))?;
-                crate::db::auto_queue::sync_dispatch_terminal_entries_on_pg_tx(
-                    &mut tx,
+                crate::dispatch::set_dispatch_status_on_pg_async(
+                    &bridge_pool,
                     &dispatch_id,
-                    crate::db::auto_queue::ENTRY_STATUS_FAILED,
+                    "failed",
+                    Some(&result),
                     "orphan_recovery_rollback",
-                    true,
+                    Some(ACTIVE_DISPATCH_STATUSES),
+                    false,
                 )
-                .await?;
-                sqlx::query(
-                    "INSERT INTO dispatch_outbox (dispatch_id, action)
-                     SELECT $1, 'status_reaction'
-                     WHERE NOT EXISTS (
-                         SELECT 1
-                         FROM dispatch_outbox
-                         WHERE dispatch_id = $1
-                           AND action = 'status_reaction'
-                           AND status IN ('pending', 'processing')
-                     )",
-                )
-                .bind(&dispatch_id)
-                .execute(&mut *tx)
                 .await
-                .map_err(|error| {
-                    format!("enqueue orphan rollback reaction {dispatch_id}: {error}")
-                })?;
-                tx.commit()
-                    .await
-                    .map_err(|error| format!("commit orphan rollback transaction: {error}"))?;
-                Ok(changed)
+                .map_err(|error| format!("mark dispatch failed {dispatch_id}: {error}"))
             },
             |error| error,
         )
