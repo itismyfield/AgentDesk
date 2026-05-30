@@ -586,7 +586,9 @@ fn transcript_mtime(path: &Path) -> std::time::SystemTime {
 /// discriminates this session's transcripts from older sessions' that share the
 /// same cwd.
 #[cfg(unix)]
-fn claude_tui_launch_context(tmux_session_name: &str) -> Option<(PathBuf, std::time::SystemTime)> {
+pub(in crate::services::discord) fn claude_tui_launch_context(
+    tmux_session_name: &str,
+) -> Option<(PathBuf, std::time::SystemTime)> {
     let launch_script_path = crate::services::tmux_common::resolve_session_temp_path(
         tmux_session_name,
         crate::services::tmux_common::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
@@ -610,7 +612,7 @@ fn claude_tui_launch_context(tmux_session_name: &str) -> Option<(PathBuf, std::t
 ///      relay watcher.
 ///   3. Other sessions' registered runtime bindings — belt-and-suspenders.
 #[cfg(unix)]
-fn other_session_claimed_transcripts(
+pub(in crate::services::discord) fn other_session_claimed_transcripts(
     shared: &Arc<SharedData>,
     tmux_session_name: &str,
 ) -> std::collections::HashSet<PathBuf> {

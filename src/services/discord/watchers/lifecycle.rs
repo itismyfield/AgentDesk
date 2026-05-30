@@ -43,30 +43,147 @@ fn codex_tui_rollout_fallback_for_session(
 /// on disk (claude TUI writes its rollout to `~/.claude/projects/<cwd>/<uuid>.jsonl`
 /// and tails it via the relay-offset, not the wrapper JSONL the codex/pipe path
 /// emits), fall back to the freshest Claude rollout transcript under the
-/// channel's configured workspace. Without this, restart recovery hits the
+/// actual launched session cwd. Without this, restart recovery hits the
 /// `no output file` branch and never re-attaches a watcher to a live claude_tui
 /// pane, so direct-TUI (and any) output stops relaying after a dcserver restart.
 ///
 /// Unlike the codex fallback, the Discord turn registers a claude_tui inflight
 /// with `session_id = None` (see `transcript_tail` #2843), so the rollout is
-/// resolved by cwd + freshest-transcript rather than by session_id. Returns
-/// `None` for non-Claude providers, when no workspace is configured, or when no
-/// transcript exists yet. The caller still de-dupes against an existing watcher.
+/// resolved by cwd + freshest-transcript rather than by session_id. The restore
+/// path still has to honor #2843's anti-stealing constraints: use the tmux
+/// launch-script mtime as a session floor and exclude transcripts claimed by
+/// other live Claude TUI sessions.
 fn claude_tui_transcript_fallback_path(
     provider: &crate::services::provider::ProviderKind,
+    tmux_session_name: &str,
     workspace: Option<&str>,
+    restored_cwd: Option<&str>,
+    shared: &Arc<SharedData>,
     claude_home: Option<&std::path::Path>,
+    restore_claimed_transcripts: &std::collections::HashSet<std::path::PathBuf>,
 ) -> Option<String> {
     if *provider != crate::services::provider::ProviderKind::Claude {
         return None;
     }
-    let workspace = workspace?;
+    let scan_context = claude_tui_restore_scan_context(tmux_session_name, restored_cwd, workspace)?;
+    let mut claimed_by_other_sessions =
+        super::super::tui_prompt_relay::other_session_claimed_transcripts(
+            shared,
+            tmux_session_name,
+        );
+    claimed_by_other_sessions.extend(restore_claimed_transcripts.iter().cloned());
+    claude_tui_transcript_fallback_path_for_context(
+        provider,
+        &scan_context.cwd,
+        scan_context.modified_since,
+        claude_home,
+        &claimed_by_other_sessions,
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClaudeTuiRestoreScanContext {
+    cwd: std::path::PathBuf,
+    modified_since: std::time::SystemTime,
+}
+
+fn claude_tui_restore_scan_context(
+    tmux_session_name: &str,
+    restored_cwd: Option<&str>,
+    workspace: Option<&str>,
+) -> Option<ClaudeTuiRestoreScanContext> {
+    let launch_context =
+        super::super::tui_prompt_relay::claude_tui_launch_context(tmux_session_name);
+    let fallback_modified_since = if launch_context.is_none() {
+        claude_tui_restore_fallback_modified_since(tmux_session_name)
+    } else {
+        None
+    };
+    select_claude_tui_restore_scan_context(
+        launch_context,
+        fallback_modified_since,
+        restored_cwd,
+        workspace,
+    )
+}
+
+fn select_claude_tui_restore_scan_context(
+    launch_context: Option<(std::path::PathBuf, std::time::SystemTime)>,
+    fallback_modified_since: Option<std::time::SystemTime>,
+    restored_cwd: Option<&str>,
+    workspace: Option<&str>,
+) -> Option<ClaudeTuiRestoreScanContext> {
+    if let Some((launch_cwd, launch_mtime)) = launch_context {
+        let cwd = select_claude_tui_restore_scan_cwd(Some(launch_cwd), restored_cwd, workspace)?;
+        return Some(ClaudeTuiRestoreScanContext {
+            cwd,
+            modified_since: launch_mtime,
+        });
+    }
+    let cwd = select_claude_tui_restore_scan_cwd(None, restored_cwd, workspace)?;
+    Some(ClaudeTuiRestoreScanContext {
+        cwd,
+        modified_since: fallback_modified_since?,
+    })
+}
+
+fn claude_tui_restore_fallback_modified_since(
+    tmux_session_name: &str,
+) -> Option<std::time::SystemTime> {
+    [
+        crate::services::tmux_common::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
+        "generation",
+        crate::services::tmux_common::TMUX_RUNTIME_KIND_TEMP_EXT,
+    ]
+    .into_iter()
+    .filter_map(|ext| {
+        crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, ext)
+    })
+    .filter_map(|path| {
+        std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    })
+    .next()
+}
+
+fn select_claude_tui_restore_scan_cwd(
+    launch_cwd: Option<std::path::PathBuf>,
+    restored_cwd: Option<&str>,
+    workspace: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    launch_cwd
+        .filter(|path| !path.as_os_str().is_empty())
+        .or_else(|| {
+            restored_cwd
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(std::path::PathBuf::from)
+        })
+        .or_else(|| {
+            workspace
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(std::path::PathBuf::from)
+        })
+}
+
+fn claude_tui_transcript_fallback_path_for_context(
+    provider: &crate::services::provider::ProviderKind,
+    cwd: &std::path::Path,
+    launch_mtime: std::time::SystemTime,
+    claude_home: Option<&std::path::Path>,
+    exclude: &std::collections::HashSet<std::path::PathBuf>,
+) -> Option<String> {
+    if *provider != crate::services::provider::ProviderKind::Claude {
+        return None;
+    }
     let transcript =
         crate::services::claude_tui::transcript_tail::latest_claude_transcript_for_cwd(
-            std::path::Path::new(workspace),
-            std::time::SystemTime::UNIX_EPOCH,
+            cwd,
+            launch_mtime,
             claude_home,
-            &std::collections::HashSet::new(),
+            exclude,
         )?;
     Some(transcript.display().to_string())
 }
@@ -74,27 +191,40 @@ fn claude_tui_transcript_fallback_path(
 #[cfg(test)]
 mod claude_tui_transcript_fallback_tests {
     use crate::services::provider::ProviderKind;
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, SystemTime};
+
+    fn write_transcript(home: &Path, cwd: &Path, session_id: &str, body: &[u8]) -> PathBuf {
+        let transcript = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            cwd,
+            session_id,
+            Some(home),
+        )
+        .unwrap();
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, body).unwrap();
+        transcript
+    }
 
     #[test]
     fn resolves_freshest_claude_transcript_when_wrapper_jsonl_absent() {
         let home = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
         let session_id = "11111111-1111-4111-8111-111111111111";
-
-        // Build the transcript path the resolver will scan for, then land it.
-        let transcript = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        let transcript = write_transcript(
+            home.path(),
             cwd.path(),
             session_id,
-            Some(home.path()),
-        )
-        .unwrap();
-        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-        std::fs::write(&transcript, b"{\"type\":\"assistant\"}\n").unwrap();
+            b"{\"type\":\"assistant\"}\n",
+        );
 
-        let resolved = super::claude_tui_transcript_fallback_path(
+        let resolved = super::claude_tui_transcript_fallback_path_for_context(
             &ProviderKind::Claude,
-            Some(cwd.path().to_str().unwrap()),
+            cwd.path(),
+            SystemTime::UNIX_EPOCH,
             Some(home.path()),
+            &HashSet::new(),
         );
         assert_eq!(
             resolved.as_deref(),
@@ -108,10 +238,12 @@ mod claude_tui_transcript_fallback_tests {
         let home = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
         assert!(
-            super::claude_tui_transcript_fallback_path(
+            super::claude_tui_transcript_fallback_path_for_context(
                 &ProviderKind::Codex,
-                Some(cwd.path().to_str().unwrap()),
+                cwd.path(),
+                SystemTime::UNIX_EPOCH,
                 Some(home.path()),
+                &HashSet::new(),
             )
             .is_none(),
             "codex uses its own rollout fallback, not the claude transcript path"
@@ -119,26 +251,217 @@ mod claude_tui_transcript_fallback_tests {
     }
 
     #[test]
-    fn returns_none_without_workspace_or_transcript() {
+    fn returns_none_without_transcript() {
         let home = tempfile::tempdir().unwrap();
         let empty_cwd = tempfile::tempdir().unwrap();
-        // No configured workspace.
         assert!(
-            super::claude_tui_transcript_fallback_path(
+            super::claude_tui_transcript_fallback_path_for_context(
                 &ProviderKind::Claude,
-                None,
+                empty_cwd.path(),
+                SystemTime::UNIX_EPOCH,
                 Some(home.path()),
+                &HashSet::new(),
             )
             .is_none()
         );
-        // Workspace configured but no transcript on disk yet.
-        assert!(
-            super::claude_tui_transcript_fallback_path(
-                &ProviderKind::Claude,
-                Some(empty_cwd.path().to_str().unwrap()),
-                Some(home.path()),
+    }
+
+    #[test]
+    fn excludes_transcripts_claimed_by_other_shared_workspace_sessions() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let own_transcript = write_transcript(
+            home.path(),
+            cwd.path(),
+            "22222222-2222-4222-8222-222222222222",
+            b"{\"type\":\"assistant\",\"session\":\"own\"}\n",
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        let other_transcript = write_transcript(
+            home.path(),
+            cwd.path(),
+            "33333333-3333-4333-8333-333333333333",
+            b"{\"type\":\"assistant\",\"session\":\"other\"}\n",
+        );
+        let exclude = HashSet::from([other_transcript]);
+
+        let resolved = super::claude_tui_transcript_fallback_path_for_context(
+            &ProviderKind::Claude,
+            cwd.path(),
+            SystemTime::UNIX_EPOCH,
+            Some(home.path()),
+            &exclude,
+        );
+
+        assert_eq!(
+            resolved.as_deref(),
+            own_transcript.to_str(),
+            "shared-workspace restore must not steal another live session transcript"
+        );
+    }
+
+    #[test]
+    fn applies_launch_time_floor_to_skip_prior_session_transcripts() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        write_transcript(
+            home.path(),
+            cwd.path(),
+            "44444444-4444-4444-8444-444444444444",
+            b"{\"type\":\"assistant\",\"session\":\"old\"}\n",
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        let launch_mtime = SystemTime::now();
+        std::thread::sleep(Duration::from_millis(20));
+        let current_transcript = write_transcript(
+            home.path(),
+            cwd.path(),
+            "55555555-5555-4555-8555-555555555555",
+            b"{\"type\":\"assistant\",\"session\":\"current\"}\n",
+        );
+
+        let resolved = super::claude_tui_transcript_fallback_path_for_context(
+            &ProviderKind::Claude,
+            cwd.path(),
+            launch_mtime,
+            Some(home.path()),
+            &HashSet::new(),
+        );
+
+        assert_eq!(
+            resolved.as_deref(),
+            current_transcript.to_str(),
+            "restart restore must ignore transcripts older than the tmux launch"
+        );
+    }
+
+    #[test]
+    fn restore_allocation_excludes_already_selected_rotated_transcript_for_same_cwd_sessions() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let first_rotated = write_transcript(
+            home.path(),
+            cwd.path(),
+            "66666666-6666-4666-8666-666666666666",
+            b"{\"type\":\"assistant\",\"session\":\"rotated-a\"}\n",
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        let second_rotated = write_transcript(
+            home.path(),
+            cwd.path(),
+            "77777777-7777-4777-8777-777777777777",
+            b"{\"type\":\"assistant\",\"session\":\"rotated-b\"}\n",
+        );
+        let launch_mtime = SystemTime::UNIX_EPOCH;
+        let mut restore_claims = HashSet::new();
+
+        let first = super::claude_tui_transcript_fallback_path_for_context(
+            &ProviderKind::Claude,
+            cwd.path(),
+            launch_mtime,
+            Some(home.path()),
+            &restore_claims,
+        )
+        .expect("first restore selection");
+        restore_claims.insert(PathBuf::from(&first));
+        let second = super::claude_tui_transcript_fallback_path_for_context(
+            &ProviderKind::Claude,
+            cwd.path(),
+            launch_mtime,
+            Some(home.path()),
+            &restore_claims,
+        )
+        .expect("second restore selection");
+
+        assert_eq!(first, second_rotated.to_string_lossy());
+        assert_eq!(second, first_rotated.to_string_lossy());
+        assert_ne!(
+            first, second,
+            "same restore scan must allocate distinct rotated transcripts"
+        );
+    }
+
+    #[test]
+    fn missing_launch_context_uses_restored_cwd_with_marker_mtime_floor() {
+        let home = tempfile::tempdir().unwrap();
+        let restored_cwd = tempfile::tempdir().unwrap();
+        let configured_cwd = tempfile::tempdir().unwrap();
+        write_transcript(
+            home.path(),
+            restored_cwd.path(),
+            "88888888-8888-4888-8888-888888888888",
+            b"{\"type\":\"assistant\",\"session\":\"old\"}\n",
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        let marker_mtime = SystemTime::now();
+        std::thread::sleep(Duration::from_millis(20));
+        let current_transcript = write_transcript(
+            home.path(),
+            restored_cwd.path(),
+            "99999999-9999-4999-8999-999999999999",
+            b"{\"type\":\"assistant\",\"session\":\"current\"}\n",
+        );
+        let configured_transcript = write_transcript(
+            home.path(),
+            configured_cwd.path(),
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            b"{\"type\":\"assistant\",\"session\":\"configured\"}\n",
+        );
+
+        let context = super::select_claude_tui_restore_scan_context(
+            None,
+            Some(marker_mtime),
+            Some(restored_cwd.path().to_str().unwrap()),
+            Some(configured_cwd.path().to_str().unwrap()),
+        )
+        .expect("missing launch script should still scan with marker floor");
+
+        assert_eq!(context.cwd, restored_cwd.path());
+        assert_eq!(context.modified_since, marker_mtime);
+        let resolved = super::claude_tui_transcript_fallback_path_for_context(
+            &ProviderKind::Claude,
+            &context.cwd,
+            context.modified_since,
+            Some(home.path()),
+            &HashSet::new(),
+        );
+
+        assert_eq!(resolved.as_deref(), current_transcript.to_str());
+        assert_ne!(resolved.as_deref(), configured_transcript.to_str());
+    }
+
+    #[test]
+    fn restore_scan_cwd_prefers_actual_launch_worktree_then_db_then_configured_workspace() {
+        let configured = tempfile::tempdir().unwrap();
+        let db_worktree = tempfile::tempdir().unwrap();
+        let launch_worktree = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            super::select_claude_tui_restore_scan_cwd(
+                Some(launch_worktree.path().to_path_buf()),
+                Some(db_worktree.path().to_str().unwrap()),
+                Some(configured.path().to_str().unwrap()),
             )
-            .is_none()
+            .as_deref(),
+            Some(launch_worktree.path())
+        );
+        assert_eq!(
+            super::select_claude_tui_restore_scan_cwd(
+                None,
+                Some(db_worktree.path().to_str().unwrap()),
+                Some(configured.path().to_str().unwrap()),
+            )
+            .as_deref(),
+            Some(db_worktree.path())
+        );
+        assert_eq!(
+            super::select_claude_tui_restore_scan_cwd(
+                None,
+                Some("   "),
+                Some(configured.path().to_str().unwrap()),
+            )
+            .as_deref(),
+            Some(configured.path())
         );
     }
 }
@@ -1722,6 +2045,8 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
     let mut dead_cleanups: Vec<DeadSessionCleanup> = Vec::new();
     let mut owned_sessions: std::collections::HashMap<ChannelId, String> =
         std::collections::HashMap::new();
+    let mut restore_claimed_claude_tui_transcripts: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
 
     for session_name in &agent_sessions {
         let Some((channel_id, channel_name)) = name_to_channel.get(*session_name) else {
@@ -1841,6 +2166,20 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         // codex rollout looked up by the inflight `session_id` so the
         // restore loop can still attach a watcher and keep the live pane
         // relayed.
+        let configured_workspace =
+            super::super::settings::resolve_workspace(*channel_id, Some(channel_name.as_str()));
+        let session_keys = super::super::adk_session::build_session_key_candidates(
+            &shared.token_hash,
+            &provider,
+            session_name,
+        );
+        let restored_cwd = load_restored_session_cwd(
+            None::<&crate::db::Db>,
+            shared.pg_pool.as_ref(),
+            &session_keys,
+        );
+
+        let mut selected_claude_tui_fallback_transcript: Option<std::path::PathBuf> = None;
         let output_path =
             match crate::services::tmux_common::resolve_session_temp_path(session_name, "jsonl") {
                 Some(path) => path,
@@ -1857,18 +2196,19 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                         path
                     } else if let Some(path) = claude_tui_transcript_fallback_path(
                         &provider,
-                        super::super::settings::resolve_workspace(
-                            *channel_id,
-                            Some(channel_name.as_str()),
-                        )
-                        .as_deref(),
+                        session_name,
+                        configured_workspace.as_deref(),
+                        restored_cwd.as_deref(),
+                        shared,
                         None,
+                        &restore_claimed_claude_tui_transcripts,
                     ) {
                         // #2853: claude_tui never lands the wrapper JSONL, so
-                        // recover the watcher onto the freshest Claude rollout
-                        // transcript for the channel's workspace instead of
-                        // skipping (which previously stranded direct-TUI output
-                        // relay after a dcserver restart).
+                        // recover the watcher onto the freshest safe Claude
+                        // rollout transcript for the actual launched cwd,
+                        // bounded by launch time and other live-session claims.
+                        selected_claude_tui_fallback_transcript =
+                            Some(std::path::PathBuf::from(&path));
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::info!(
                             "  [{ts}] ↻ watcher restore for {} — claude transcript fallback {}",
@@ -2032,6 +2372,9 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             initial_offset,
             restored_turn,
         });
+        if let Some(path) = selected_claude_tui_fallback_transcript {
+            restore_claimed_claude_tui_transcripts.insert(path);
+        }
     }
 
     // Register sessions in CoreState so cleanup_orphan_tmux_sessions recognizes them
