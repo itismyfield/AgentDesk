@@ -7096,19 +7096,31 @@ pub(super) fn spawn_turn_bridge(
                     )
                 };
                 if can_chain_locally {
+                    let replace_outcome = gateway
+                        .replace_message_with_outcome(
+                            channel_id,
+                            current_msg_id,
+                            &delivery_response,
+                        )
+                        .await;
+                    // #2860: the answer reached the channel if the placeholder was
+                    // edited OR a fallback message was posted. A fallback posts the
+                    // full delivery_response as a fresh message and reports the
+                    // placeholder edit as non-committed; record it as delivered
+                    // (advance the offset) so this turn does not later present as a
+                    // never-delivered completed-stale leak and get re-delivered by
+                    // the stall-watchdog recovery.
+                    let fallback_delivered = matches!(
+                        replace_outcome,
+                        Ok(super::formatting::ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. })
+                    );
                     let replace_committed = turn_bridge_replace_outcome_committed(
                         shared_owned.as_ref(),
                         &provider,
                         channel_id,
                         current_msg_id,
                         inflight_state.tmux_session_name.as_deref(),
-                        gateway
-                            .replace_message_with_outcome(
-                                channel_id,
-                                current_msg_id,
-                                &delivery_response,
-                            )
-                            .await,
+                        replace_outcome,
                         "turn_bridge_terminal_replace",
                     );
                     if replace_committed {
@@ -7121,6 +7133,14 @@ pub(super) fn spawn_turn_bridge(
                         terminal_delivery_committed = true;
                     } else {
                         preserve_inflight_for_cleanup_retry = true;
+                        if fallback_delivered {
+                            // Mark the whole response delivered: the fallback
+                            // message carried it. Keep the inflight preserved for
+                            // orphan-placeholder cleanup, but never let recovery
+                            // re-send it.
+                            inflight_state.response_sent_offset = full_response.len();
+                            let _ = save_inflight_state(&inflight_state);
+                        }
                     }
                 } else {
                     match enqueue_headless_delivery(

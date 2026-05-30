@@ -1471,6 +1471,19 @@ async fn maybe_recover_completed_stale_leak(
     ) else {
         return false;
     };
+    // Recovery delivers by editing a SINGLE placeholder message. Skip answers
+    // that would chunk into continuation messages so we never hit a partial
+    // multi-chunk delivery (which could strand the tail or duplicate chunks on a
+    // re-fire). `len()` (UTF-8 bytes) <= 2000 guarantees a single Discord message.
+    if delivery_text.len() > 2000 {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ leak too large to auto-recover ({} bytes) on channel {}; left for manual follow-up",
+            delivery_text.len(),
+            channel_id
+        );
+        return false;
+    }
 
     let http = match super::resolve_bot_http(registry, provider.as_str()).await {
         Ok(http) => http,
@@ -1491,16 +1504,12 @@ async fn maybe_recover_completed_stale_leak(
         _ => return false,
     }
 
-    // Deliver by editing the placeholder in place (bridge parity).
-    //   EditedOriginal               -> the placeholder now holds the answer.
-    //   SentFallbackAfterEditFailure -> our edit failed but the full answer was
-    //                                   posted as a fresh message; delivered.
-    //   PartialContinuationFailure   -> delivered only if >=1 chunk landed;
-    //                                   sent_chunks == 0 means nothing reached the
-    //                                   channel, so fail-closed and retry next pass.
-    //   Err                          -> nothing delivered; retry next pass.
-    // We advance the offset on every *delivered* outcome so a re-fire cannot
-    // re-send a fallback/partial message.
+    // Deliver by editing the placeholder in place (bridge parity). The single-
+    // message gate above means the answer fits one Discord message, so the only
+    // delivered outcomes are EditedOriginal (placeholder now holds the answer) and
+    // SentFallbackAfterEditFailure (our edit failed but the full answer was posted
+    // as a fresh message). PartialContinuationFailure (multi-chunk) cannot occur
+    // here, and Err means nothing reached the user; both fail closed and retry.
     use discord::formatting::ReplaceLongMessageOutcome;
     let (delivery_detail, op) = match discord::formatting::replace_long_message_raw_with_outcome(
         &http,
@@ -1514,11 +1523,6 @@ async fn maybe_recover_completed_stale_leak(
         Ok(ReplaceLongMessageOutcome::EditedOriginal) => ("edited", "edit"),
         Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. }) => {
             ("fallback_post", "send")
-        }
-        Ok(ReplaceLongMessageOutcome::PartialContinuationFailure { sent_chunks, .. })
-            if sent_chunks > 0 =>
-        {
-            ("partial", "send")
         }
         _ => return false,
     };
