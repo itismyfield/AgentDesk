@@ -810,6 +810,98 @@ fn status_panel_tracks_one_level_subagents() {
 }
 
 #[test]
+fn status_events_from_json_captures_workflow_progress_array() {
+    let events = status_events_from_json(&json!({
+        "type": "system",
+        "subtype": "task_progress",
+        "task_id": "wf-1",
+        "summary": "probe",
+        "workflow_progress": [
+            {"type": "workflow_phase", "index": 1, "title": "P1"},
+            {
+                "type": "workflow_agent",
+                "index": 1,
+                "label": "pinger",
+                "phaseIndex": 1,
+                "phaseTitle": "P1",
+                "state": "progress"
+            }
+        ]
+    }));
+
+    assert_eq!(
+        events,
+        vec![
+            StatusEvent::WorkflowPhase {
+                task_id: Some("wf-1".to_string()),
+                index: 1,
+                title: "P1".to_string()
+            },
+            StatusEvent::WorkflowAgent {
+                task_id: Some("wf-1".to_string()),
+                index: 1,
+                label: "pinger".to_string(),
+                phase_index: Some(1),
+                phase_title: Some("P1".to_string()),
+                state: "progress".to_string()
+            }
+        ]
+    );
+}
+
+#[test]
+fn status_panel_tracks_workflow_phase_agents() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(2894);
+    events.push_status_events(
+        channel_id,
+        status_events_from_json(&json!({
+            "type": "system",
+            "subtype": "task_started",
+            "task_id": "wf-1",
+            "task_type": "local_workflow",
+            "workflow_name": "probe"
+        })),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_json(&json!({
+            "type": "system",
+            "subtype": "task_progress",
+            "task_id": "wf-1",
+            "workflow_progress": [
+                {"type": "workflow_phase", "index": 1, "title": "P1"},
+                {
+                    "type": "workflow_agent",
+                    "index": 1,
+                    "label": "pinger",
+                    "phaseIndex": 1,
+                    "phaseTitle": "P1",
+                    "state": "done"
+                }
+            ]
+        })),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_json(&json!({
+            "type": "system",
+            "subtype": "task_notification",
+            "task_id": "wf-1",
+            "status": "completed",
+            "summary": "Dynamic workflow \"probe\" completed"
+        })),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(rendered.contains("Workflow"));
+    assert!(rendered.contains("probe"));
+    assert!(rendered.contains("P1: pinger ✓"));
+    assert!(rendered.contains("Dynamic workflow"));
+    assert!(rendered.chars().count() <= STATUS_PANEL_MAX_CHARS);
+}
+
+#[test]
 fn status_panel_keeps_latest_ten_subagents() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(180);

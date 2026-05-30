@@ -1,6 +1,8 @@
 use serde_json::Value;
 
-use crate::services::agent_protocol::{StatusEvent, StatusTodoItem, StatusTodoStatus};
+use crate::services::agent_protocol::{
+    StatusEvent, StatusTodoItem, StatusTodoStatus, status_events_from_workflow_json,
+};
 
 use super::super::formatting::format_tool_input;
 use super::common::{
@@ -111,6 +113,13 @@ pub(in crate::services::discord) fn status_events_from_task_notification(
             if !summary.is_empty() {
                 events.push(StatusEvent::Heartbeat);
             }
+        }
+        "workflow" => {
+            events.push(StatusEvent::WorkflowEnd {
+                task_id: None,
+                success: !task_notification_is_error(status),
+                summary: Some(first_content_line(summary)).filter(|value| !value.is_empty()),
+            });
         }
         _ => {}
     }
@@ -356,6 +365,11 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
 }
 
 fn system_status_events(value: &Value) -> Vec<StatusEvent> {
+    let workflow_events = status_events_from_workflow_json(value);
+    if !workflow_events.is_empty() {
+        return workflow_events;
+    }
+
     if value.get("subtype").and_then(Value::as_str) != Some("task_notification") {
         return Vec::new();
     }

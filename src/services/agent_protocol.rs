@@ -1,5 +1,6 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::OnceLock;
 
 /// Reference list of known Claude Code tools.
@@ -180,6 +181,8 @@ pub enum StreamMessage {
         summary: String,
         kind: TaskNotificationKind,
     },
+    /// Provider-normalized status-panel events observed in raw stream JSON.
+    StatusEvents { events: Vec<StatusEvent> },
     /// Completion
     Done {
         result: String,
@@ -273,6 +276,32 @@ pub enum StatusEvent {
     ScheduleWakeup {
         eta_secs: Option<u64>,
     },
+    WorkflowStart {
+        task_id: Option<String>,
+        name: Option<String>,
+    },
+    WorkflowPhase {
+        task_id: Option<String>,
+        index: u64,
+        title: String,
+    },
+    WorkflowAgent {
+        task_id: Option<String>,
+        index: u64,
+        label: String,
+        phase_index: Option<u64>,
+        phase_title: Option<String>,
+        state: String,
+    },
+    WorkflowLog {
+        task_id: Option<String>,
+        summary: String,
+    },
+    WorkflowEnd {
+        task_id: Option<String>,
+        success: bool,
+        summary: Option<String>,
+    },
     TurnCompleted {
         background: bool,
     },
@@ -310,6 +339,153 @@ impl StatusTodoStatus {
             Self::Pending | Self::InProgress => "[ ]",
         }
     }
+}
+
+pub(crate) fn status_events_from_workflow_json(value: &Value) -> Vec<StatusEvent> {
+    match value.get("type").and_then(Value::as_str).unwrap_or("") {
+        "system" => workflow_system_status_events(value),
+        "workflow_phase" => workflow_phase_status_event(value, workflow_task_id(value))
+            .into_iter()
+            .collect(),
+        "workflow_agent" => workflow_agent_status_event(value, workflow_task_id(value))
+            .into_iter()
+            .collect(),
+        "workflow_log" => workflow_log_status_event(value, workflow_task_id(value))
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn workflow_system_status_events(value: &Value) -> Vec<StatusEvent> {
+    match value.get("subtype").and_then(Value::as_str).unwrap_or("") {
+        "task_started" if workflow_task_started(value) => vec![StatusEvent::WorkflowStart {
+            task_id: workflow_task_id(value),
+            name: first_workflow_string(value, &["workflow_name", "summary", "description"]),
+        }],
+        "task_progress" => workflow_progress_status_events(value),
+        "task_notification" if workflow_task_notification(value) => {
+            vec![StatusEvent::WorkflowEnd {
+                task_id: workflow_task_id(value),
+                success: !workflow_status_is_error(
+                    value.get("status").and_then(Value::as_str).unwrap_or(""),
+                ),
+                summary: first_workflow_string(value, &["summary", "description"]),
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn workflow_task_started(value: &Value) -> bool {
+    value
+        .get("task_type")
+        .and_then(Value::as_str)
+        .is_some_and(|task_type| task_type == "local_workflow")
+}
+
+fn workflow_task_notification(value: &Value) -> bool {
+    if value
+        .get("task_notification_kind")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind == "workflow")
+        || workflow_task_started(value)
+    {
+        return true;
+    }
+
+    value
+        .get("summary")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|summary| {
+            let lower = summary.to_ascii_lowercase();
+            lower.starts_with("dynamic workflow ") || lower.starts_with("workflow ")
+        })
+}
+
+fn workflow_progress_status_events(value: &Value) -> Vec<StatusEvent> {
+    let task_id = workflow_task_id(value);
+    value
+        .get("workflow_progress")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(
+            |item| match item.get("type").and_then(Value::as_str).unwrap_or("") {
+                "workflow_phase" => workflow_phase_status_event(item, task_id.clone()),
+                "workflow_agent" => workflow_agent_status_event(item, task_id.clone()),
+                "workflow_log" => workflow_log_status_event(item, task_id.clone()),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+fn workflow_phase_status_event(value: &Value, task_id: Option<String>) -> Option<StatusEvent> {
+    let index = workflow_u64(value, &["index"])?;
+    let title = first_workflow_string(value, &["title", "name", "phaseTitle", "phase_title"])?;
+    Some(StatusEvent::WorkflowPhase {
+        task_id,
+        index,
+        title,
+    })
+}
+
+fn workflow_agent_status_event(value: &Value, task_id: Option<String>) -> Option<StatusEvent> {
+    let index = workflow_u64(value, &["index"])?;
+    let label = first_workflow_string(value, &["label", "name", "agentId", "agent_id"])?;
+    Some(StatusEvent::WorkflowAgent {
+        task_id,
+        index,
+        label,
+        phase_index: workflow_u64(value, &["phaseIndex", "phase_index"]),
+        phase_title: first_workflow_string(value, &["phaseTitle", "phase_title"]),
+        state: first_workflow_string(value, &["state", "status"])
+            .unwrap_or_else(|| "progress".to_string()),
+    })
+}
+
+fn workflow_log_status_event(value: &Value, task_id: Option<String>) -> Option<StatusEvent> {
+    let summary = first_workflow_string(value, &["summary", "message", "text", "content", "log"])?;
+    Some(StatusEvent::WorkflowLog { task_id, summary })
+}
+
+fn workflow_task_id(value: &Value) -> Option<String> {
+    first_workflow_string(
+        value,
+        &["task_id", "taskId", "workflowRunId", "workflow_run_id"],
+    )
+}
+
+fn first_workflow_string(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn workflow_u64(value: &Value, keys: &[&str]) -> Option<u64> {
+    keys.iter().find_map(|key| {
+        value.get(*key).and_then(|raw| match raw {
+            Value::Number(number) => number.as_u64().or_else(|| {
+                number
+                    .as_i64()
+                    .filter(|value| *value >= 0)
+                    .map(|value| value as u64)
+            }),
+            Value::String(text) => text.trim().parse::<u64>().ok(),
+            _ => None,
+        })
+    })
+}
+
+fn workflow_status_is_error(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "failed" | "error" | "aborted" | "cancelled" | "canceled" | "stopped"
+    )
 }
 
 /// Cached regex pattern for session ID validation.

@@ -20,6 +20,7 @@ mod tests;
 use common::{
     CHANNEL_EVENT_CAPACITY, EVENT_LINE_MAX_CHARS, STATUS_PANEL_MAX_CHARS,
     STATUS_PANEL_SUBAGENT_LIMIT, STATUS_PANEL_TASK_LIMIT, STATUS_PANEL_TODO_LIMIT,
+    STATUS_PANEL_WORKFLOW_LIMIT,
     escape_status_panel_markdown, normalize_summary, sanitized_tool_name, tool_prefix,
     truncate_chars,
 };
@@ -323,6 +324,31 @@ struct SubagentSlot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkflowSlot {
+    task_id: Option<String>,
+    name: Option<String>,
+    phases: Vec<WorkflowPhaseSlot>,
+    agents: Vec<WorkflowAgentSlot>,
+    recent: Option<String>,
+    finished: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkflowPhaseSlot {
+    index: u64,
+    title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkflowAgentSlot {
+    index: u64,
+    label: String,
+    phase_index: Option<u64>,
+    phase_title: Option<String>,
+    state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum DerivedStatus {
     Running,
     MonitorWait,
@@ -336,6 +362,9 @@ enum DerivedStatus {
     },
     SubagentRunning {
         desc: String,
+    },
+    WorkflowRunning {
+        label: String,
     },
 }
 
@@ -370,6 +399,7 @@ struct StatusPanelState {
     todos: Vec<StatusTodoItem>,
     tasks: Vec<TaskToolSlot>,
     subagents: Vec<SubagentSlot>,
+    workflows: Vec<WorkflowSlot>,
 }
 
 impl StatusPanelState {
@@ -453,6 +483,71 @@ impl StatusPanelState {
             StatusEvent::ScheduleWakeup { eta_secs } => {
                 self.status = DerivedStatus::ScheduleWakeup(eta_secs);
             }
+            StatusEvent::WorkflowStart { task_id, name } => {
+                let slot = self.workflow_slot_mut(task_id.clone());
+                if let Some(name) = name.filter(|value| !value.trim().is_empty()) {
+                    slot.name = Some(normalize_summary(&name));
+                }
+                self.status = DerivedStatus::WorkflowRunning {
+                    label: workflow_status_label(slot),
+                };
+                trim_workflows(&mut self.workflows);
+            }
+            StatusEvent::WorkflowPhase {
+                task_id,
+                index,
+                title,
+            } => {
+                let slot = self.workflow_slot_mut(task_id);
+                upsert_workflow_phase(&mut slot.phases, index, title);
+                self.status = DerivedStatus::WorkflowRunning {
+                    label: workflow_status_label(slot),
+                };
+            }
+            StatusEvent::WorkflowAgent {
+                task_id,
+                index,
+                label,
+                phase_index,
+                phase_title,
+                state,
+            } => {
+                let slot = self.workflow_slot_mut(task_id);
+                upsert_workflow_agent(
+                    &mut slot.agents,
+                    WorkflowAgentSlot {
+                        index,
+                        label,
+                        phase_index,
+                        phase_title,
+                        state,
+                    },
+                );
+                self.status = DerivedStatus::WorkflowRunning {
+                    label: workflow_status_label(slot),
+                };
+            }
+            StatusEvent::WorkflowLog { task_id, summary } => {
+                let slot = self.workflow_slot_mut(task_id);
+                let summary = normalize_summary(&summary);
+                if !summary.is_empty() {
+                    slot.recent = Some(summary);
+                }
+            }
+            StatusEvent::WorkflowEnd {
+                task_id,
+                success,
+                summary,
+            } => {
+                let slot = self.workflow_slot_mut(task_id);
+                if let Some(summary) = summary.filter(|value| !value.trim().is_empty()) {
+                    slot.recent = Some(normalize_summary(&summary));
+                }
+                slot.finished = Some(success);
+                if matches!(self.status, DerivedStatus::WorkflowRunning { .. }) {
+                    self.status = DerivedStatus::Running;
+                }
+            }
             StatusEvent::TurnCompleted { background } => {
                 self.status = DerivedStatus::Completed {
                     kind: CompletedKind::from_background(background),
@@ -500,6 +595,29 @@ impl StatusPanelState {
             status,
         });
         trim_tasks(&mut self.tasks);
+    }
+
+    fn workflow_slot_mut(&mut self, task_id: Option<String>) -> &mut WorkflowSlot {
+        let index = task_id
+            .as_deref()
+            .and_then(|task_id| {
+                self.workflows
+                    .iter()
+                    .position(|slot| slot.task_id.as_deref() == Some(task_id))
+            })
+            .or_else(|| (task_id.is_none() && self.workflows.len() == 1).then_some(0));
+        if let Some(index) = index {
+            return &mut self.workflows[index];
+        }
+        self.workflows.push(WorkflowSlot {
+            task_id,
+            name: None,
+            phases: Vec::new(),
+            agents: Vec::new(),
+            recent: None,
+            finished: None,
+        });
+        self.workflows.last_mut().expect("workflow just pushed")
     }
 }
 
@@ -576,6 +694,19 @@ fn render_status_panel(
             .map(render_subagent_slot)
             .collect::<Vec<_>>();
         sections.push(format!("Subagents\n{}", lines.join("\n")));
+    }
+
+    if !matches!(provider, ProviderKind::Codex) && !snapshot.workflows.is_empty() {
+        let lines = snapshot
+            .workflows
+            .iter()
+            .rev()
+            .take(STATUS_PANEL_WORKFLOW_LIMIT)
+            .flat_map(render_workflow_slot)
+            .collect::<Vec<_>>();
+        if !lines.is_empty() {
+            sections.push(format!("Workflow\n{}", lines.join("\n")));
+        }
     }
 
     let cluster_config = &crate::config::load_graceful().cluster;
@@ -666,6 +797,10 @@ fn render_derived_status(status: &DerivedStatus) -> String {
             let desc = escape_status_panel_markdown(desc);
             format!("🧵 subagent 실행 중 ({})", truncate_chars(&desc, 120))
         }
+        DerivedStatus::WorkflowRunning { label } => {
+            let label = escape_status_panel_markdown(label);
+            format!("🧬 workflow 실행 중 ({})", truncate_chars(&label, 120))
+        }
     }
 }
 
@@ -699,6 +834,136 @@ fn sanitize_label(raw: &str) -> String {
     sanitized_tool_name(raw).unwrap_or_else(|| "Task".to_string())
 }
 
+fn upsert_workflow_phase(phases: &mut Vec<WorkflowPhaseSlot>, index: u64, title: String) {
+    let title = normalize_summary(&title);
+    if title.is_empty() {
+        return;
+    }
+    if let Some(phase) = phases.iter_mut().find(|phase| phase.index == index) {
+        phase.title = title;
+    } else {
+        phases.push(WorkflowPhaseSlot { index, title });
+        phases.sort_by_key(|phase| phase.index);
+    }
+}
+
+fn upsert_workflow_agent(agents: &mut Vec<WorkflowAgentSlot>, mut next: WorkflowAgentSlot) {
+    next.label = normalize_summary(&next.label);
+    next.phase_title = next
+        .phase_title
+        .map(|title| normalize_summary(&title))
+        .filter(|title| !title.is_empty());
+    next.state = normalize_summary(&next.state);
+    if next.label.is_empty() {
+        return;
+    }
+    if let Some(agent) = agents.iter_mut().find(|agent| {
+        agent.index == next.index
+            && agent.phase_index == next.phase_index
+            && agent.label == next.label
+    }) {
+        *agent = next;
+    } else {
+        agents.push(next);
+        agents.sort_by_key(|agent| (agent.phase_index.unwrap_or(u64::MAX), agent.index));
+    }
+}
+
+fn workflow_status_label(slot: &WorkflowSlot) -> String {
+    slot.agents
+        .iter()
+        .rev()
+        .find(|agent| !workflow_agent_is_terminal(&agent.state))
+        .map(workflow_agent_label)
+        .or_else(|| slot.agents.last().map(workflow_agent_label))
+        .or_else(|| slot.name.clone())
+        .unwrap_or_else(|| "workflow".to_string())
+}
+
+fn workflow_agent_label(agent: &WorkflowAgentSlot) -> String {
+    agent
+        .phase_title
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|phase| format!("{phase}: {}", agent.label))
+        .unwrap_or_else(|| agent.label.clone())
+}
+
+fn render_workflow_slot(slot: &WorkflowSlot) -> Vec<String> {
+    let mut lines = Vec::new();
+    let marker = workflow_finished_marker(slot.finished);
+    let name = slot
+        .name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("workflow");
+    let mut header = format!("└ {}", escape_status_panel_markdown(name));
+    if let Some(recent) = slot
+        .recent
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        header.push_str(" — ");
+        header.push_str(&escape_status_panel_markdown(&normalize_summary(recent)));
+    }
+    if !marker.is_empty() {
+        header.push(' ');
+        header.push_str(marker);
+    }
+    lines.push(truncate_chars(&header, EVENT_LINE_MAX_CHARS));
+
+    for agent in slot.agents.iter().take(STATUS_PANEL_SUBAGENT_LIMIT) {
+        let mut line = String::from("  ");
+        line.push_str(&escape_status_panel_markdown(&workflow_agent_label(agent)));
+        let marker = workflow_agent_marker(&agent.state);
+        if !marker.is_empty() {
+            line.push(' ');
+            line.push_str(marker);
+        }
+        lines.push(truncate_chars(&line, EVENT_LINE_MAX_CHARS));
+    }
+
+    if slot.agents.is_empty() {
+        for phase in &slot.phases {
+            let line = format!("  {}", escape_status_panel_markdown(&phase.title));
+            lines.push(truncate_chars(&line, EVENT_LINE_MAX_CHARS));
+        }
+    }
+
+    lines
+}
+
+fn workflow_finished_marker(finished: Option<bool>) -> &'static str {
+    match finished {
+        Some(true) => "✓",
+        Some(false) => "✗",
+        None => "",
+    }
+}
+
+fn workflow_agent_marker(state: &str) -> &'static str {
+    let state = state.trim().to_ascii_lowercase();
+    if matches!(
+        state.as_str(),
+        "done" | "completed" | "success" | "succeeded"
+    ) {
+        "✓"
+    } else if matches!(
+        state.as_str(),
+        "failed" | "error" | "aborted" | "cancelled" | "canceled" | "stopped"
+    ) {
+        "✗"
+    } else if matches!(state.as_str(), "progress" | "running" | "active") {
+        "…"
+    } else {
+        ""
+    }
+}
+
+fn workflow_agent_is_terminal(state: &str) -> bool {
+    matches!(workflow_agent_marker(state), "✓" | "✗")
+}
+
 fn trim_subagents(slots: &mut Vec<SubagentSlot>) {
     if slots.len() > STATUS_PANEL_SUBAGENT_LIMIT {
         let excess = slots.len() - STATUS_PANEL_SUBAGENT_LIMIT;
@@ -709,6 +974,13 @@ fn trim_subagents(slots: &mut Vec<SubagentSlot>) {
 fn trim_tasks(slots: &mut Vec<TaskToolSlot>) {
     if slots.len() > STATUS_PANEL_TASK_LIMIT {
         let excess = slots.len() - STATUS_PANEL_TASK_LIMIT;
+        slots.drain(0..excess);
+    }
+}
+
+fn trim_workflows(slots: &mut Vec<WorkflowSlot>) {
+    if slots.len() > STATUS_PANEL_WORKFLOW_LIMIT {
+        let excess = slots.len() - STATUS_PANEL_WORKFLOW_LIMIT;
         slots.drain(0..excess);
     }
 }

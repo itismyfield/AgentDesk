@@ -20,8 +20,8 @@ use crate::services::provider::{
     CancelToken, ProviderKind, cancel_requested, register_child_pid, spawn_cancel_watchdog,
 };
 use crate::services::session_backend::{
-    StreamLineState, observe_stream_context, parse_assistant_extra_tool_uses,
-    parse_stream_message_with_state,
+    StreamLineState, emit_status_events_from_stream_json, observe_stream_context,
+    parse_assistant_extra_tool_uses, parse_stream_message_with_state,
 };
 
 /// Phase 1 entry point. The signature matches the subset of
@@ -269,6 +269,10 @@ pub fn execute_streaming(
         }
 
         observe_stream_context(&json, &mut stream_state);
+        if !emit_status_events_from_stream_json(&json, &sender) {
+            kill_child_tree(&mut child);
+            return Ok(());
+        }
 
         let Some(msg) = parse_stream_message_with_state(&json, &stream_state) else {
             continue;
