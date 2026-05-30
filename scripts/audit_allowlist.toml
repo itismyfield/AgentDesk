@@ -46,6 +46,10 @@ direct_discord_sends = [
   "src/services/discord/monitoring_status.rs#direct_discord_sends:6911fe26869c481d",
   "src/services/discord/monitoring_status.rs#direct_discord_sends:9ea6e87eaf2dcfcb",
   "src/services/discord/placeholder_controller.rs#direct_discord_sends:94892504c53d1b42",
+  # issue announcements keep this typed PATCH until the #1448 legacy
+  # announce-token fallback is removed; deliver_outbound currently collapses
+  # HTTP status / Discord error code into a string on edit failures.
+  "src/services/issue_announcements.rs#direct_discord_sends:c953e696eec38deb",
   "src/services/discord/router/intake_gate.rs#direct_discord_sends:0a2beaabe9619b4f",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:403e086784912951",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:360a790ca3e3dbc3",

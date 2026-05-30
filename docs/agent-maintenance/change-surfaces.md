@@ -435,6 +435,9 @@ The remaining giant-file modules under `src/services/` not covered above:
 - `src/services/settings.rs` (1015) — settings domain service extracted from
   the route layer in #1519. Keep follow-up changes bugfix-only unless the file
   is split further.
+- `src/services/pipeline_override.rs` (1001) — repo/agent pipeline override
+  persistence and cross-context validation surface. Split focused validation
+  helpers before adding non-bugfix behavior.
 - `src/services/routines/loader.rs` (1753),
   `src/services/routines/store.rs` (2755),
   `src/services/routines/migrated.rs` (1286), and
