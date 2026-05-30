@@ -1,3 +1,5 @@
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1426,8 +1428,171 @@ fn leak_recovery_chunk_fingerprints(chunks: &[String]) -> Vec<String> {
         .collect()
 }
 
-const LEAK_RECOVERY_MAX_SAFE_CHUNKS: usize = 20;
 const LEAK_RECOVERY_CONTINUATION_SCAN_LIMIT: u8 = 100;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LeakRecoveryLedgerIdentity {
+    provider: String,
+    channel_id: u64,
+    current_msg_id: u64,
+    user_msg_id: u64,
+    byte_start: usize,
+    byte_end: usize,
+    chunk_fingerprints: Vec<String>,
+}
+
+impl LeakRecoveryLedgerIdentity {
+    fn new(
+        provider: &ProviderKind,
+        state: &discord::inflight::InflightTurnState,
+        start: usize,
+        end: usize,
+        chunks: &[String],
+    ) -> Self {
+        Self {
+            provider: provider.as_str().to_string(),
+            channel_id: state.channel_id,
+            current_msg_id: state.current_msg_id,
+            user_msg_id: state.user_msg_id,
+            byte_start: start,
+            byte_end: end,
+            chunk_fingerprints: leak_recovery_chunk_fingerprints(chunks),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+struct LeakRecoveryChunkLedger {
+    version: u32,
+    provider: String,
+    channel_id: u64,
+    current_msg_id: u64,
+    user_msg_id: u64,
+    byte_start: usize,
+    byte_end: usize,
+    chunk_fingerprints: Vec<String>,
+    confirmed_chunks: Vec<LeakRecoveryConfirmedChunk>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+struct LeakRecoveryConfirmedChunk {
+    index: usize,
+    message_id: u64,
+}
+
+fn leak_recovery_chunk_ledger_root() -> Option<PathBuf> {
+    crate::config::runtime_root().map(|root| {
+        root.join("runtime")
+            .join("discord_leak_recovery_chunk_ledgers")
+    })
+}
+
+fn leak_recovery_chunk_ledger_path(identity: &LeakRecoveryLedgerIdentity) -> Option<PathBuf> {
+    leak_recovery_chunk_ledger_root().map(|root| {
+        root.join(&identity.provider)
+            .join(identity.channel_id.to_string())
+            .join(format!("{}.json", identity.current_msg_id))
+    })
+}
+
+fn leak_recovery_ledger_matches(
+    ledger: &LeakRecoveryChunkLedger,
+    identity: &LeakRecoveryLedgerIdentity,
+) -> bool {
+    ledger.version == 1
+        && ledger.provider == identity.provider
+        && ledger.channel_id == identity.channel_id
+        && ledger.current_msg_id == identity.current_msg_id
+        && ledger.user_msg_id == identity.user_msg_id
+        && ledger.byte_start == identity.byte_start
+        && ledger.byte_end == identity.byte_end
+        && ledger.chunk_fingerprints == identity.chunk_fingerprints
+}
+
+fn leak_recovery_confirmed_prefix_from_ledger(
+    identity: &LeakRecoveryLedgerIdentity,
+) -> Option<usize> {
+    let path = leak_recovery_chunk_ledger_path(identity)?;
+    let content = fs::read_to_string(path).ok()?;
+    let ledger: LeakRecoveryChunkLedger = serde_json::from_str(&content).ok()?;
+    if !leak_recovery_ledger_matches(&ledger, identity) {
+        return None;
+    }
+    let mut expected = 0usize;
+    for confirmed in &ledger.confirmed_chunks {
+        if confirmed.index != expected || confirmed.message_id == 0 {
+            break;
+        }
+        expected += 1;
+    }
+    Some(expected.min(identity.chunk_fingerprints.len()))
+}
+
+fn leak_recovery_record_confirmed_chunk(
+    identity: &LeakRecoveryLedgerIdentity,
+    chunk_index: usize,
+    message_id: u64,
+) -> Result<(), String> {
+    if chunk_index >= identity.chunk_fingerprints.len() || message_id == 0 {
+        return Err(format!(
+            "invalid confirmed chunk index={chunk_index} message_id={message_id}"
+        ));
+    }
+    let Some(path) = leak_recovery_chunk_ledger_path(identity) else {
+        return Err("runtime root unavailable for leak recovery chunk ledger".to_string());
+    };
+    let mut confirmed_chunks = Vec::new();
+    if let Ok(content) = fs::read_to_string(&path)
+        && let Ok(existing) = serde_json::from_str::<LeakRecoveryChunkLedger>(&content)
+        && leak_recovery_ledger_matches(&existing, identity)
+    {
+        confirmed_chunks = existing.confirmed_chunks;
+    }
+
+    confirmed_chunks.retain(|chunk| chunk.index < chunk_index);
+    if confirmed_chunks.len() != chunk_index
+        || confirmed_chunks
+            .iter()
+            .enumerate()
+            .any(|(index, chunk)| chunk.index != index || chunk.message_id == 0)
+    {
+        return Err(format!(
+            "cannot record non-contiguous leak recovery chunk {chunk_index}"
+        ));
+    }
+    confirmed_chunks.push(LeakRecoveryConfirmedChunk {
+        index: chunk_index,
+        message_id,
+    });
+    let ledger = LeakRecoveryChunkLedger {
+        version: 1,
+        provider: identity.provider.clone(),
+        channel_id: identity.channel_id,
+        current_msg_id: identity.current_msg_id,
+        user_msg_id: identity.user_msg_id,
+        byte_start: identity.byte_start,
+        byte_end: identity.byte_end,
+        chunk_fingerprints: identity.chunk_fingerprints.clone(),
+        confirmed_chunks,
+    };
+    let json = serde_json::to_string_pretty(&ledger)
+        .map_err(|error| format!("serialize leak recovery chunk ledger: {error}"))?;
+    discord::runtime_store::atomic_write(&path, &json)
+}
+
+fn leak_recovery_clear_chunk_ledger(identity: &LeakRecoveryLedgerIdentity) -> Result<(), String> {
+    let Some(path) = leak_recovery_chunk_ledger_path(identity) else {
+        return Ok(());
+    };
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "remove leak recovery chunk ledger {}: {error}",
+            path.display()
+        )),
+    }
+}
 
 fn leak_recovery_confirmed_chunk_count<'a>(
     current_message_content: &str,
@@ -1456,7 +1621,7 @@ async fn leak_recovery_fetch_continuation_contents(
     channel_id: ChannelId,
     current_msg_id: MessageId,
     current_bot_user_id: u64,
-) -> Option<Vec<String>> {
+) -> Option<Vec<(u64, String)>> {
     let messages = channel_id
         .messages(
             http.as_ref(),
@@ -1471,7 +1636,7 @@ async fn leak_recovery_fetch_continuation_contents(
         messages
             .into_iter()
             .filter(|msg| msg.author.id.get() == current_bot_user_id)
-            .map(|msg| msg.content)
+            .map(|msg| (msg.id.get(), msg.content))
             .collect(),
     )
 }
@@ -1548,41 +1713,16 @@ async fn maybe_recover_completed_stale_leak(
         return false;
     };
     // `split_message` is the authoritative limit (its effective cap is below
-    // Discord's 2000). For multi-chunk recovery we derive an idempotency ledger
-    // from live Discord state: the original message must contain chunk 0, and
-    // same-bot messages after it must contain chunks 1..N in order. If a retry
-    // fires after an edit/send succeeded but before the offset was persisted, it
-    // resumes after the confirmed prefix instead of posting duplicates.
+    // Discord's 2000). For multi-chunk recovery we first consult the durable
+    // per-chunk ledger. Legacy/pre-ledger retries can still derive a prefix
+    // from live Discord state, then seed the ledger before continuing.
     let chunks = discord::formatting::split_message(&delivery_text);
     if chunks.is_empty() {
         return false;
     }
-    if chunks.len() > LEAK_RECOVERY_MAX_SAFE_CHUNKS {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⚠ leak too large to auto-recover safely ({} bytes, {} chunks) on channel {}; escalating for manual follow-up",
-            delivery_text.len(),
-            chunks.len(),
-            channel_id
-        );
-        let turn_id = (state.user_msg_id != 0)
-            .then(|| format!("discord:{}:{}", state.channel_id, state.user_msg_id));
-        crate::services::observability::emit_inflight_lifecycle_event(
-            provider.as_str(),
-            channel_id.get(),
-            state.dispatch_id.as_deref(),
-            state.session_key.as_deref(),
-            turn_id.as_deref(),
-            "leak_recovery_skipped_too_large",
-            serde_json::json!({
-                "byte_len": delivery_text.len(),
-                "chunks": chunks.len(),
-                "max_safe_chunks": LEAK_RECOVERY_MAX_SAFE_CHUNKS,
-                "chunk_fingerprints": leak_recovery_chunk_fingerprints(&chunks),
-            }),
-        );
-        return false;
-    }
+    let ledger_identity = LeakRecoveryLedgerIdentity::new(provider, &state, start, end, &chunks);
+    let mut confirmed_chunks =
+        leak_recovery_confirmed_prefix_from_ledger(&ledger_identity).unwrap_or(0);
 
     let http = match super::resolve_bot_http(registry, provider.as_str()).await {
         Ok(http) => http,
@@ -1590,61 +1730,108 @@ async fn maybe_recover_completed_stale_leak(
     };
 
     let current_msg_id = MessageId::new(state.current_msg_id);
-    let current_bot_user_id = match http.get_current_user().await {
-        Ok(user) => user.id.get(),
-        Err(error) => {
-            tracing::warn!(
-                "[leak-recover] failed to resolve current bot id for channel {}: {error}",
-                channel_id
-            );
-            return false;
-        }
-    };
-    let current_message = match http.get_message(channel_id, current_msg_id).await {
-        Ok(message) => message,
-        Err(error) => {
-            tracing::warn!(
-                "[leak-recover] failed to fetch placeholder message {} in channel {}: {error}",
-                current_msg_id,
-                channel_id
-            );
-            return false;
-        }
-    };
-    if current_message.author.id.get() != current_bot_user_id {
-        tracing::warn!(
-            "[leak-recover] refusing recovery for channel {} msg {}: message author is not current bot",
-            channel_id,
-            current_msg_id
-        );
-        return false;
-    }
-
-    let continuation_contents = if chunks.len() > 1 && current_message.content == chunks[0] {
-        let Some(contents) = leak_recovery_fetch_continuation_contents(
-            &http,
-            channel_id,
-            current_msg_id,
-            current_bot_user_id,
-        )
-        .await
-        else {
-            return false;
+    let current_message = if confirmed_chunks == 0 {
+        let current_bot_user_id = match http.get_current_user().await {
+            Ok(user) => user.id.get(),
+            Err(error) => {
+                tracing::warn!(
+                    "[leak-recover] failed to resolve current bot id for channel {}: {error}",
+                    channel_id
+                );
+                return false;
+            }
         };
-        contents
-    } else {
-        Vec::new()
-    };
+        let current_message = match http.get_message(channel_id, current_msg_id).await {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::warn!(
+                    "[leak-recover] failed to fetch placeholder message {} in channel {}: {error}",
+                    current_msg_id,
+                    channel_id
+                );
+                return false;
+            }
+        };
+        if current_message.author.id.get() != current_bot_user_id {
+            tracing::warn!(
+                "[leak-recover] refusing recovery for channel {} msg {}: message author is not current bot",
+                channel_id,
+                current_msg_id
+            );
+            return false;
+        }
 
-    let mut confirmed_chunks = leak_recovery_confirmed_chunk_count(
-        &current_message.content,
-        continuation_contents.iter().map(String::as_str),
-        &chunks,
-    )
-    .unwrap_or(0);
+        let continuation_messages = if chunks.len() > 1 && current_message.content == chunks[0] {
+            let Some(messages) = leak_recovery_fetch_continuation_contents(
+                &http,
+                channel_id,
+                current_msg_id,
+                current_bot_user_id,
+            )
+            .await
+            else {
+                return false;
+            };
+            messages
+        } else {
+            Vec::new()
+        };
+
+        confirmed_chunks = leak_recovery_confirmed_chunk_count(
+            &current_message.content,
+            continuation_messages
+                .iter()
+                .map(|(_, content)| content.as_str()),
+            &chunks,
+        )
+        .unwrap_or(0);
+        if confirmed_chunks > 0 {
+            if let Err(error) =
+                leak_recovery_record_confirmed_chunk(&ledger_identity, 0, state.current_msg_id)
+            {
+                tracing::warn!(
+                    "[leak-recover] failed to persist confirmed chunk 1/{} for channel {}: {error}",
+                    chunks.len(),
+                    channel_id
+                );
+                return false;
+            }
+            let mut chunk_index = 1usize;
+            for (message_id, content) in &continuation_messages {
+                if chunk_index >= confirmed_chunks {
+                    break;
+                }
+                if content != &chunks[chunk_index] {
+                    continue;
+                }
+                if let Err(error) =
+                    leak_recovery_record_confirmed_chunk(&ledger_identity, chunk_index, *message_id)
+                {
+                    tracing::warn!(
+                        "[leak-recover] failed to persist confirmed chunk {}/{} for channel {}: {error}",
+                        chunk_index + 1,
+                        chunks.len(),
+                        channel_id
+                    );
+                    return false;
+                }
+                chunk_index += 1;
+            }
+        }
+        Some(current_message)
+    } else {
+        None
+    };
 
     let mut wrote_any_chunk = false;
     if confirmed_chunks == 0 {
+        let Some(current_message) = current_message.as_ref() else {
+            tracing::warn!(
+                "[leak-recover] missing live placeholder probe for channel {} despite empty ledger",
+                channel_id
+            );
+            return false;
+        };
         if !discord::placeholder_sweeper::is_message_still_placeholder(&current_message.content) {
             let turn_id = (state.user_msg_id != 0)
                 .then(|| format!("discord:{}:{}", state.channel_id, state.user_msg_id));
@@ -1679,14 +1866,38 @@ async fn maybe_recover_completed_stale_leak(
         {
             return false;
         }
+        if let Err(error) =
+            leak_recovery_record_confirmed_chunk(&ledger_identity, 0, state.current_msg_id)
+        {
+            tracing::warn!(
+                "[leak-recover] edited chunk 1/{} on channel {} but failed to persist chunk ledger: {error}",
+                chunks.len(),
+                channel_id
+            );
+            return true;
+        }
         wrote_any_chunk = true;
         confirmed_chunks = 1;
     }
 
     for (chunk_index, chunk) in chunks.iter().enumerate().skip(confirmed_chunks) {
         match discord::http::send_channel_message(http.as_ref(), channel_id, chunk).await {
-            Ok(_) => {
+            Ok(message) => {
+                if let Err(error) = leak_recovery_record_confirmed_chunk(
+                    &ledger_identity,
+                    chunk_index,
+                    message.id.get(),
+                ) {
+                    tracing::warn!(
+                        "[leak-recover] sent continuation chunk {}/{} on channel {} but failed to persist chunk ledger: {error}",
+                        chunk_index + 1,
+                        chunks.len(),
+                        channel_id
+                    );
+                    return true;
+                }
                 wrote_any_chunk = true;
+                confirmed_chunks = chunk_index + 1;
                 tracing::debug!(
                     "[leak-recover] sent continuation chunk {}/{} on channel {}",
                     chunk_index + 1,
@@ -1771,6 +1982,12 @@ async fn maybe_recover_completed_stale_leak(
             );
         }
     }
+    if let Err(error) = leak_recovery_clear_chunk_ledger(&ledger_identity) {
+        tracing::warn!(
+            "[leak-recover] recovered answer on channel {} but failed to clear chunk ledger: {error}",
+            channel_id
+        );
+    }
 
     let turn_id = (state.user_msg_id != 0)
         .then(|| format!("discord:{}:{}", state.channel_id, state.user_msg_id));
@@ -1820,13 +2037,50 @@ async fn maybe_recover_completed_stale_leak(
 #[cfg(test)]
 mod stall_watchdog_pure_tests {
     use super::{
-        STALL_WATCHDOG_THRESHOLD_SECS, inflight_completed_stale_leak_detected,
-        leak_recovery_chunk_fingerprints, leak_recovery_confirmed_chunk_count,
+        LeakRecoveryLedgerIdentity, STALL_WATCHDOG_THRESHOLD_SECS,
+        inflight_completed_stale_leak_detected, leak_recovery_chunk_fingerprints,
+        leak_recovery_clear_chunk_ledger, leak_recovery_confirmed_chunk_count,
+        leak_recovery_confirmed_prefix_from_ledger, leak_recovery_record_confirmed_chunk,
         leak_recovery_unrelayed_range, render_leak_recovery_delivery,
         stall_watchdog_should_force_clean,
     };
     use crate::services::provider::ProviderKind;
     use chrono::TimeZone;
+    use std::ffi::OsString;
+
+    struct EnvVarReset {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarReset {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarReset {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    fn test_ledger_identity(chunks: &[String]) -> LeakRecoveryLedgerIdentity {
+        LeakRecoveryLedgerIdentity {
+            provider: ProviderKind::Codex.as_str().to_string(),
+            channel_id: 42,
+            current_msg_id: 9001,
+            user_msg_id: 7001,
+            byte_start: 0,
+            byte_end: 12345,
+            chunk_fingerprints: leak_recovery_chunk_fingerprints(chunks),
+        }
+    }
 
     #[test]
     fn leak_range_whole_response_when_nothing_relayed() {
@@ -1948,6 +2202,91 @@ mod stall_watchdog_pure_tests {
                 &chunks,
             ),
             Some(2)
+        );
+    }
+
+    #[test]
+    fn chunk_ledger_survives_restart_and_resumes_tail_without_live_fetch() {
+        let _guard = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let tempdir = tempfile::tempdir().expect("temp runtime root");
+        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let chunks: Vec<String> = (0..64).map(|index| format!("chunk-{index}")).collect();
+        let identity = test_ledger_identity(&chunks);
+
+        leak_recovery_clear_chunk_ledger(&identity).expect("clear ledger");
+        for index in 0..37 {
+            leak_recovery_record_confirmed_chunk(&identity, index, 10_000 + index as u64)
+                .expect("record chunk");
+        }
+
+        assert_eq!(
+            leak_recovery_confirmed_prefix_from_ledger(&identity),
+            Some(37),
+            "fresh process can resume from persisted prefix without scanning Discord messages"
+        );
+
+        leak_recovery_clear_chunk_ledger(&identity).expect("clear ledger");
+        assert_eq!(leak_recovery_confirmed_prefix_from_ledger(&identity), None);
+    }
+
+    #[test]
+    fn chunk_ledger_records_send_failure_boundary_without_offset_loss() {
+        let _guard = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let tempdir = tempfile::tempdir().expect("temp runtime root");
+        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let chunks: Vec<String> = (0..5).map(|index| format!("chunk-{index}")).collect();
+        let identity = test_ledger_identity(&chunks);
+
+        leak_recovery_clear_chunk_ledger(&identity).expect("clear ledger");
+        leak_recovery_record_confirmed_chunk(&identity, 0, identity.current_msg_id)
+            .expect("record edited first chunk");
+        leak_recovery_record_confirmed_chunk(&identity, 1, 10_001)
+            .expect("record sent continuation");
+        // Simulate Discord send failure on chunk 2: no record is written. A retry
+        // must skip exactly chunks 0..1 and resume at the missing tail.
+        assert_eq!(
+            leak_recovery_confirmed_prefix_from_ledger(&identity),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn chunk_ledger_ignores_stale_identity_or_changed_chunks() {
+        let _guard = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let tempdir = tempfile::tempdir().expect("temp runtime root");
+        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let chunks = vec!["chunk-0".to_string(), "chunk-1".to_string()];
+        let identity = test_ledger_identity(&chunks);
+
+        leak_recovery_clear_chunk_ledger(&identity).expect("clear ledger");
+        leak_recovery_record_confirmed_chunk(&identity, 0, identity.current_msg_id)
+            .expect("record chunk");
+
+        let changed_chunks = vec!["chunk-0".to_string(), "changed-tail".to_string()];
+        let changed_identity = LeakRecoveryLedgerIdentity {
+            chunk_fingerprints: leak_recovery_chunk_fingerprints(&changed_chunks),
+            ..identity.clone()
+        };
+        assert_eq!(
+            leak_recovery_confirmed_prefix_from_ledger(&changed_identity),
+            None,
+            "formatting/content changes must not reuse stale chunk confirmations"
+        );
+
+        let other_turn = LeakRecoveryLedgerIdentity {
+            user_msg_id: identity.user_msg_id + 1,
+            ..identity.clone()
+        };
+        assert_eq!(
+            leak_recovery_confirmed_prefix_from_ledger(&other_turn),
+            None,
+            "another turn using the same channel/message id must not inherit confirmations"
         );
     }
 
