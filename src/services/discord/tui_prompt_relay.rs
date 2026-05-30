@@ -224,9 +224,26 @@ fn record_observed_external_turn_lease(
         &prompt.tmux_session_name,
     );
     let runtime_kind = binding.as_ref().map(|binding| binding.runtime_kind);
-    let relay_output_path = binding
-        .as_ref()
-        .map(|binding| PathBuf::from(binding.relay_output_path()));
+    let relay_output_path = binding.as_ref().map(|binding| {
+        #[cfg(unix)]
+        {
+            if prompt
+                .provider
+                .trim()
+                .eq_ignore_ascii_case(ProviderKind::Claude.as_str())
+                && binding.runtime_kind == RuntimeHandoffKind::ClaudeTui
+                && let Some(transcript_path) = resolved_claude_idle_relay_transcript_path(
+                    shared,
+                    &prompt.tmux_session_name,
+                    channel_id,
+                    binding,
+                )
+            {
+                return transcript_path;
+            }
+        }
+        PathBuf::from(binding.relay_output_path())
+    });
     let relay_owner = external_input_relay_owner_for_output(
         shared,
         &prompt.tmux_session_name,
@@ -324,8 +341,21 @@ fn external_input_relay_owner_for_output(
     tmux_session_name: &str,
     output_path: Option<&Path>,
 ) -> ExternalInputRelayOwner {
-    let watcher_alive = shared
-        .tmux_watchers
+    external_input_relay_owner_for_watchers(
+        &shared.tmux_watchers,
+        tmux_session_name,
+        output_path,
+        super::session_relay_sink::session_bound_discord_delivery_enabled(),
+    )
+}
+
+fn external_input_relay_owner_for_watchers(
+    watchers: &super::TmuxWatcherRegistry,
+    tmux_session_name: &str,
+    output_path: Option<&Path>,
+    session_bound_discord_delivery_enabled: bool,
+) -> ExternalInputRelayOwner {
+    let watcher_alive = watchers
         .tmux_session_is_stale(tmux_session_name)
         .is_some_and(|stale| !stale);
     if !watcher_alive {
@@ -333,8 +363,7 @@ fn external_input_relay_owner_for_output(
     }
 
     let watcher_covers_output = match output_path {
-        Some(output_path) => shared
-            .tmux_watchers
+        Some(output_path) => watchers
             .watcher_output_path(tmux_session_name)
             .is_some_and(|watcher_path| Path::new(&watcher_path) == output_path),
         None => true,
@@ -343,7 +372,7 @@ fn external_input_relay_owner_for_output(
         return ExternalInputRelayOwner::TuiPromptRelay;
     }
 
-    if super::session_relay_sink::session_bound_discord_delivery_enabled() {
+    if session_bound_discord_delivery_enabled {
         ExternalInputRelayOwner::SessionBoundRelay
     } else {
         ExternalInputRelayOwner::TmuxWatcher
@@ -951,6 +980,34 @@ fn refresh_claude_runtime_binding(
     );
 }
 
+#[cfg(unix)]
+fn resolved_claude_idle_relay_transcript_path(
+    shared: &Arc<SharedData>,
+    tmux_session_name: &str,
+    channel_id: ChannelId,
+    binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+) -> Option<PathBuf> {
+    let (transcript_path, resolved_session_id) =
+        freshest_claude_transcript_for_session(shared, tmux_session_name, binding).unwrap_or_else(
+            || {
+                (
+                    PathBuf::from(&binding.output_path),
+                    binding.session_id.clone(),
+                )
+            },
+        );
+
+    if Path::new(&binding.output_path) != transcript_path {
+        refresh_claude_runtime_binding(
+            tmux_session_name,
+            channel_id,
+            &transcript_path,
+            resolved_session_id,
+        );
+    }
+    Some(transcript_path)
+}
+
 /// #2843: decide whether the Claude idle relay should tail this session and on
 /// which transcript. Returns `Some(path)` to tail, or `None` to skip because a
 /// heartbeat-fresh watcher already covers the current transcript. Side effect:
@@ -967,15 +1024,8 @@ fn resolve_idle_relay_transcript(
     channel_id: ChannelId,
     binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
 ) -> Option<PathBuf> {
-    let (transcript_path, resolved_session_id) =
-        freshest_claude_transcript_for_session(shared, tmux_session_name, binding).unwrap_or_else(
-            || {
-                (
-                    PathBuf::from(&binding.output_path),
-                    binding.session_id.clone(),
-                )
-            },
-        );
+    let transcript_path =
+        resolved_claude_idle_relay_transcript_path(shared, tmux_session_name, channel_id, binding)?;
 
     // #2843 (codex P0): a non-stale watcher may suppress the idle tail ONLY when
     // the watcher itself is tailing the freshest transcript. Comparing the
@@ -997,14 +1047,6 @@ fn resolve_idle_relay_transcript(
         return None;
     }
 
-    if Path::new(&binding.output_path) != transcript_path {
-        refresh_claude_runtime_binding(
-            tmux_session_name,
-            channel_id,
-            &transcript_path,
-            resolved_session_id,
-        );
-    }
     Some(transcript_path)
 }
 
@@ -2320,6 +2362,61 @@ mod tests {
             );
         }
         assert!(output.contains("ringpagedelc1\n\tkeep"));
+    }
+
+    #[cfg(unix)]
+    fn test_watcher_handle(
+        tmux_session_name: &str,
+        output_path: &Path,
+    ) -> super::super::TmuxWatcherHandle {
+        super::super::TmuxWatcherHandle {
+            tmux_session_name: tmux_session_name.to_string(),
+            output_path: output_path.display().to_string(),
+            paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                super::super::tmux_watcher_now_ms(),
+            )),
+            mailbox_finalize_owed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_input_owner_uses_resolved_claude_transcript_before_session_bound_owner() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let stale_binding_path = dir.path().join("stale-binding.jsonl");
+        let resolved_fresh_path = dir.path().join("resolved-fresh.jsonl");
+        let tmux_session_name = "AgentDesk-claude-stale-binding-owner";
+        let watchers = super::super::TmuxWatcherRegistry::new();
+        watchers.insert(
+            ChannelId::new(940_000_000_000_001),
+            test_watcher_handle(tmux_session_name, &stale_binding_path),
+        );
+
+        assert_eq!(
+            external_input_relay_owner_for_watchers(
+                &watchers,
+                tmux_session_name,
+                Some(&stale_binding_path),
+                true,
+            ),
+            ExternalInputRelayOwner::SessionBoundRelay,
+            "the stale binding path is what caused the hook-observed regression"
+        );
+        assert_eq!(
+            external_input_relay_owner_for_watchers(
+                &watchers,
+                tmux_session_name,
+                Some(&resolved_fresh_path),
+                true,
+            ),
+            ExternalInputRelayOwner::TuiPromptRelay,
+            "a heartbeat-fresh watcher may not own output for a different resolved transcript"
+        );
     }
 
     #[cfg(unix)]
