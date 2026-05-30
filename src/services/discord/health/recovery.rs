@@ -1227,6 +1227,17 @@ pub(crate) async fn run_stall_watchdog_pass(
                     .map(|s| format!("discord:{}:{}", s.channel_id, s.user_msg_id));
                 let leak_dispatch_id = leak_inflight.as_ref().and_then(|s| s.dispatch_id.clone());
                 let leak_session_key = leak_inflight.as_ref().and_then(|s| s.session_key.clone());
+                // Only a genuinely unrelayed answer is a leak. A stale-but-
+                // delivered turn — e.g. one whose answer went out as a bridge
+                // fallback message, which advances response_sent_offset to len —
+                // must NOT raise the leaked-answer alarm or trigger recovery.
+                let has_unrelayed_answer = leak_inflight.as_ref().is_some_and(|s| {
+                    leak_recovery_unrelayed_range(&s.full_response, s.response_sent_offset)
+                        .is_some()
+                });
+                if !has_unrelayed_answer {
+                    continue;
+                }
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
                     "  [{ts}] 🔎 inflight leak suspected on channel {} (provider={}): completed-stale + healthy watcher; emitting telemetry only",
