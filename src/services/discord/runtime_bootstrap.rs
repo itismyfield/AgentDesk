@@ -1339,6 +1339,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         commands::cmd_allowall(),
         commands::cmd_adduser(),
         commands::cmd_removeuser(),
+        commands::cmd_usage(),
         commands::cmd_receipt(),
         commands::cmd_help(),
         commands::cmd_meeting(),

@@ -71,7 +71,7 @@ fn load_file(path: &std::path::Path) -> Vec<TurnMetric> {
 /// Build a summary report for Discord.
 pub(super) fn build_metrics_report(metrics: &[TurnMetric], label: &str) -> String {
     if metrics.is_empty() {
-        return format!("**📊 Metrics ({label})**\n  (no data)");
+        return format!("**📊 Local Turn Metrics ({label})**\n  (no data)");
     }
 
     let total_turns = metrics.len();
@@ -90,7 +90,7 @@ pub(super) fn build_metrics_report(metrics: &[TurnMetric], label: &str) -> Strin
     }
 
     let mut lines = vec![
-        format!("**📊 Metrics ({label})**"),
+        format!("**📊 Local Turn Metrics ({label})**"),
         format!(
             "  Turns: {} | Avg: {:.0}s | Total: {:.0}s",
             total_turns, avg_duration, total_duration
@@ -99,6 +99,7 @@ pub(super) fn build_metrics_report(metrics: &[TurnMetric], label: &str) -> Strin
             "  Tokens: model {}↓ {}↑ | memory {}↓ {}↑",
             total_input, total_output, total_memory_input, total_memory_output
         ),
+        "  Scope: AgentDesk-recorded turns grouped by channel for this date.".to_string(),
     ];
 
     let mut channels: Vec<_> = by_channel.iter().collect();
@@ -141,7 +142,11 @@ mod tests {
             "today",
         );
 
+        assert!(report.contains("Local Turn Metrics (today)"));
         assert!(report.contains("Tokens: model 100↓ 40↑ | memory 15↓ 5↑"));
+        assert!(
+            report.contains("Scope: AgentDesk-recorded turns grouped by channel for this date.")
+        );
         assert!(report.contains("#42"));
         assert!(report.contains("model 100↓ 40↑, memory 15↓ 5↑"));
     }

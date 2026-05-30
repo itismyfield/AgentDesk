@@ -64,7 +64,7 @@ pub(in crate::services::discord) fn command_risk(cmd: &str, _arg1: &str) -> Comm
     match cmd {
         // Pure inspection.
         "!help" | "!pwd" | "!health" | "!status" | "!inflight" | "!queue" | "!metrics"
-        | "!allowedtools" | "!sessions" | "!receipt" => CommandRisk::ReadOnly,
+        | "!allowedtools" | "!sessions" | "!receipt" | "!usage" => CommandRisk::ReadOnly,
 
         // Session-shaping. All scoped to the current channel: `!clear` /
         // `!deletesession` reset that channel's conversation memory; `!stop`
@@ -165,7 +165,7 @@ pub(in crate::services::discord) fn slash_command_risk(slash_cmd: &str) -> Comma
     match slash_cmd {
         // Inspection only.
         "/help" | "/pwd" | "/health" | "/status" | "/inflight" | "/queue" | "/metrics"
-        | "/allowedtools" | "/sessions" | "/receipt" | "/adk" => CommandRisk::ReadOnly,
+        | "/allowedtools" | "/sessions" | "/receipt" | "/usage" | "/adk" => CommandRisk::ReadOnly,
 
         // Per-channel session shaping (mirrors text-command tiers).
         "/start" | "/down" | "/cc" | "/meeting" | "/model" | "/fast" | "/goals" | "/clear"
@@ -196,7 +196,7 @@ pub(in crate::services::discord) fn risk_tier_summary_for_help(high_risk_enabled
     };
     format!(
         "**Command Risk Tiers** (issue #1005)\n\
-         `read-only` — help/status/metrics/allowedtools: any authorized user\n\
+         `read-only` — help/status/usage/receipt/metrics/allowedtools: any authorized user\n\
          `mutating` — start/down/cc/meeting/model/clear/deletesession/stop/restart/debug: any authorized user\n\
          `shell/tool-grant` — shell/allowed: {shell_state}\n\
          `credential/system` — allowall/adduser/removeuser/escalation: owner-only"

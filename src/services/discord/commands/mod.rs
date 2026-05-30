@@ -53,7 +53,7 @@ pub(super) use help::cmd_help;
 pub(super) use inspect::cmd_adk;
 pub(super) use meeting_cmd::cmd_meeting;
 pub(super) use model_picker::cmd_model;
-pub(super) use receipt::cmd_receipt;
+pub(super) use receipt::{cmd_receipt, cmd_usage};
 pub(super) use recovery_ops::{cmd_deadlock_recover, cmd_machine_flip, cmd_stuck_pr_rebase};
 pub(super) use restart::cmd_restart;
 pub(super) use session::{cmd_pwd, cmd_start};
