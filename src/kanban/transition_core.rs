@@ -250,7 +250,18 @@ async fn transition_status_with_opts_pg_inner(
         .try_get("blocked_reason")
         .map_err(|error| anyhow::anyhow!("decode blocked_reason for {card_id}: {error}"))?;
 
+    crate::pipeline::ensure_loaded();
+    let effective =
+        resolve_pipeline_with_pg(pg_pool, card_repo_id.as_deref(), card_agent_id.as_deref())
+            .await?;
+
     if old_status == new_status {
+        if force_intent.is_forced() && !effective.is_valid_state(new_status) {
+            return Err(anyhow::anyhow!(
+                "target status '{}' is not defined in the effective pipeline",
+                new_status
+            ));
+        }
         return Ok((
             TransitionResult {
                 changed: false,
@@ -260,11 +271,6 @@ async fn transition_status_with_opts_pg_inner(
             PgTransitionCleanupCounts::default(),
         ));
     }
-
-    crate::pipeline::ensure_loaded();
-    let effective =
-        resolve_pipeline_with_pg(pg_pool, card_repo_id.as_deref(), card_agent_id.as_deref())
-            .await?;
 
     let transition_rule = effective.find_transition(&old_status, new_status);
     let is_review_enter = state_enters_review(&effective, new_status);
@@ -1092,6 +1098,132 @@ mod tests {
             status, "requested",
             "cleanup failure must roll back the card status change"
         );
+        pg_db.close_pool_and_drop(pool).await;
+    }
+
+    #[tokio::test]
+    async fn forced_transition_rejects_slug_valid_unknown_state_pg() {
+        let pg_db = KanbanPgDatabase::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_card_pg(&pool, "card-force-unknown-state", "qa_test").await;
+
+        let result = transition_status_with_opts_pg_only(
+            &pool,
+            &engine,
+            "card-force-unknown-state",
+            "qa_test",
+            "pmd",
+            crate::engine::transition::ForceIntent::OperatorOverride,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "force no-op must reject a slug-valid status missing from the effective pipeline"
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("target status 'qa_test' is not defined in the effective pipeline"),
+            "error must identify the unknown semantic state, got: {error}"
+        );
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM kanban_cards WHERE id = 'card-force-unknown-state'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "qa_test");
+        pg_db.close_pool_and_drop(pool).await;
+    }
+
+    #[tokio::test]
+    async fn forced_transition_accepts_custom_valid_state_without_rule_pg() {
+        let pg_db = KanbanPgDatabase::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_card_pg(&pool, "card-force-custom-state", "ready").await;
+        sqlx::query("UPDATE agents SET pipeline_config = $1::jsonb WHERE id = 'agent-1'")
+            .bind(
+                json!({
+                    "states": [
+                        {"id": "ready", "label": "Ready"},
+                        {"id": "qa_test", "label": "QA Test"},
+                        {"id": "done", "label": "Done", "terminal": true}
+                    ],
+                    "transitions": [],
+                    "hooks": {},
+                    "clocks": {},
+                    "timeouts": {}
+                })
+                .to_string(),
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let result = transition_status_with_opts_pg_only(
+            &pool,
+            &engine,
+            "card-force-custom-state",
+            "qa_test",
+            "pmd",
+            crate::engine::transition::ForceIntent::OperatorOverride,
+        )
+        .await
+        .expect("force may bypass missing edges but not missing target states");
+
+        assert_eq!(result.from, "ready");
+        assert_eq!(result.to, "qa_test");
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM kanban_cards WHERE id = 'card-force-custom-state'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "qa_test");
+        pg_db.close_pool_and_drop(pool).await;
+    }
+
+    #[tokio::test]
+    async fn forced_noop_accepts_custom_valid_state_pg() {
+        let pg_db = KanbanPgDatabase::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_card_pg(&pool, "card-force-valid-noop", "qa_test").await;
+        sqlx::query("UPDATE agents SET pipeline_config = $1::jsonb WHERE id = 'agent-1'")
+            .bind(
+                json!({
+                    "states": [
+                        {"id": "ready", "label": "Ready"},
+                        {"id": "qa_test", "label": "QA Test"},
+                        {"id": "done", "label": "Done", "terminal": true}
+                    ],
+                    "transitions": [],
+                    "hooks": {},
+                    "clocks": {},
+                    "timeouts": {}
+                })
+                .to_string(),
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let result = transition_status_with_opts_pg_only(
+            &pool,
+            &engine,
+            "card-force-valid-noop",
+            "qa_test",
+            "pmd",
+            crate::engine::transition::ForceIntent::OperatorOverride,
+        )
+        .await
+        .expect("force no-op should remain compatible when the state is valid");
+
+        assert!(!result.changed);
+        assert_eq!(result.from, "qa_test");
+        assert_eq!(result.to, "qa_test");
         pg_db.close_pool_and_drop(pool).await;
     }
 

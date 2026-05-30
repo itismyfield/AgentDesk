@@ -64,15 +64,27 @@ impl<'a> PipelineOverrideService<'a> {
         agent_id: &str,
         config: Option<&Value>,
     ) -> Result<(), PipelineOverrideError> {
-        let (config_str, agent_override) = parse_pipeline_override_config(config)?;
-        self.ensure_agent_exists(agent_id).await?;
-        validate_pipeline_override(None, agent_override.as_ref())?;
-        self.validate_against_existing_repo_overrides(agent_id, agent_override.as_ref())
+        let (config_str, _) = self
+            .validate_agent_pipeline_config(agent_id, config)
             .await?;
         self.write_agent_pipeline(agent_id, config_str.as_deref())
             .await?;
         crate::pipeline::refresh_override_health_report(Some(self.pool)).await;
         Ok(())
+    }
+
+    pub async fn validate_agent_pipeline_config(
+        &self,
+        agent_id: &str,
+        config: Option<&Value>,
+    ) -> Result<(Option<String>, Option<crate::pipeline::PipelineOverride>), PipelineOverrideError>
+    {
+        let (config_str, agent_override) = parse_pipeline_override_config(config)?;
+        self.ensure_agent_exists(agent_id).await?;
+        crate::pipeline::ensure_loaded();
+        self.validate_against_existing_repo_overrides(agent_id, agent_override.as_ref())
+            .await?;
+        Ok((config_str, agent_override))
     }
 
     async fn ensure_repo_exists(&self, repo_id: &str) -> Result<(), PipelineOverrideError> {
@@ -106,11 +118,11 @@ impl<'a> PipelineOverrideService<'a> {
 
     /// When writing a repo override, fetch every agent that pairs with this
     /// repo at runtime — i.e. every agent referenced by `kanban_cards.repo_id
-    /// = $1` via `kanban_cards.assigned_agent_id`, plus the
-    /// `github_repos.default_agent_id` fallback for unassigned cards — that
-    /// carries its own non-null pipeline override, and validate the merged
-    /// repo+agent effective pipeline. Reject the write if any combination is
-    /// invalid.
+    /// = $1` via `kanban_cards.assigned_agent_id` — that carries its own
+    /// non-null pipeline override, and validate the merged repo+agent
+    /// effective pipeline. Unassigned repo cards use the default+repo context,
+    /// already covered by validating `new_repo_override` without an agent.
+    /// Reject the write if any actual card context is invalid.
     ///
     /// The runtime resolver `crate::pipeline::resolve(repo_override,
     /// agent_override)` is invoked per-card with `(kanban_cards.repo_id,
@@ -126,13 +138,6 @@ impl<'a> PipelineOverrideService<'a> {
                FROM kanban_cards c \
                JOIN agents a ON a.id = c.assigned_agent_id \
               WHERE c.repo_id = $1 \
-                AND a.pipeline_config IS NOT NULL \
-                AND TRIM(a.pipeline_config::text) <> '' \
-             UNION \
-             SELECT a.id, a.pipeline_config::text \
-               FROM github_repos r \
-               JOIN agents a ON a.id = r.default_agent_id \
-              WHERE r.id = $1 \
                 AND a.pipeline_config IS NOT NULL \
                 AND TRIM(a.pipeline_config::text) <> ''",
         )
@@ -168,11 +173,14 @@ impl<'a> PipelineOverrideService<'a> {
 
     /// When writing an agent override, fetch every repo that pairs with this
     /// agent at runtime — i.e. every repo referenced by
-    /// `kanban_cards.assigned_agent_id = $1` via `kanban_cards.repo_id`, plus
-    /// the `github_repos.default_agent_id = $1` fallback for unassigned
-    /// cards — that carries its own non-null pipeline override, and validate
-    /// the merged repo+agent effective pipeline. Reject the write if any
-    /// combination is invalid.
+    /// `kanban_cards.assigned_agent_id = $1` via `kanban_cards.repo_id` — and
+    /// validate the merged repo+agent effective pipeline. Assigned standalone
+    /// cards (`repo_id IS NULL`) and dangling repo references (`repo_id` with
+    /// no matching `github_repos` row) validate the default+agent merge in
+    /// addition to any repo-backed contexts. If the agent is not currently
+    /// paired with any repo, validate the default+agent merge so standalone
+    /// agent configs remain guarded. Reject the write if any actual card
+    /// context is invalid.
     ///
     /// The runtime resolver `crate::pipeline::resolve(repo_override,
     /// agent_override)` is invoked per-card with `(kanban_cards.repo_id,
@@ -187,37 +195,58 @@ impl<'a> PipelineOverrideService<'a> {
             "SELECT DISTINCT r.id, r.pipeline_config::text \
                FROM kanban_cards c \
                JOIN github_repos r ON r.id = c.repo_id \
-              WHERE c.assigned_agent_id = $1 \
-                AND r.pipeline_config IS NOT NULL \
-                AND TRIM(r.pipeline_config::text) <> '' \
-             UNION \
-             SELECT r.id, r.pipeline_config::text \
-               FROM github_repos r \
-              WHERE r.default_agent_id = $1 \
-                AND r.pipeline_config IS NOT NULL \
-                AND TRIM(r.pipeline_config::text) <> ''",
+              WHERE c.assigned_agent_id = $1",
         )
         .bind(agent_id)
         .fetch_all(self.pool)
         .await
         .map_err(database_error)?;
 
+        let has_default_agent_assigned_card = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                SELECT 1
+                  FROM kanban_cards c
+                  LEFT JOIN github_repos r ON r.id = c.repo_id
+                 WHERE c.assigned_agent_id = $1
+                   AND (c.repo_id IS NULL OR r.id IS NULL)
+             )",
+        )
+        .bind(agent_id)
+        .fetch_one(self.pool)
+        .await
+        .map_err(database_error)?;
+
+        if rows.is_empty() {
+            validate_pipeline_override(None, new_agent_override)?;
+            return Ok(());
+        }
+
+        if has_default_agent_assigned_card {
+            if let Err(PipelineOverrideError::BadRequest(message)) =
+                validate_pipeline_override(None, new_agent_override)
+            {
+                return Err(PipelineOverrideError::BadRequest(format!(
+                    "merged pipeline invalid for standalone assigned card or dangling repo assigned card (agent={agent_id}): {message}"
+                )));
+            }
+        }
+
         for (repo_id, raw) in rows {
-            let raw = match raw {
-                Some(value) => value,
-                None => continue,
-            };
-            let existing = match crate::pipeline::parse_override(&raw) {
-                Ok(Some(parsed)) => parsed,
-                Ok(None) => continue,
-                Err(error) => {
-                    return Err(PipelineOverrideError::BadRequest(format!(
-                        "malformed existing repo override (repo={repo_id}) blocks pipeline override write: {error}"
-                    )));
+            let existing = match raw.as_deref() {
+                Some(value) if !value.trim().is_empty() => {
+                    match crate::pipeline::parse_override(value) {
+                        Ok(parsed) => parsed,
+                        Err(error) => {
+                            return Err(PipelineOverrideError::BadRequest(format!(
+                                "malformed existing repo override (repo={repo_id}) blocks pipeline override write: {error}"
+                            )));
+                        }
+                    }
                 }
+                _ => None,
             };
             if let Err(PipelineOverrideError::BadRequest(message)) =
-                validate_pipeline_override(Some(&existing), new_agent_override)
+                validate_pipeline_override(existing.as_ref(), new_agent_override)
             {
                 return Err(PipelineOverrideError::BadRequest(format!(
                     "merged pipeline invalid when combined with existing repo override (repo={repo_id}): {message}"
@@ -500,6 +529,356 @@ mod tests {
         })
     }
 
+    fn invalid_slug_state_override() -> Value {
+        serde_json::json!({
+            "states": [
+                {"id": "backlog", "label": "Backlog"},
+                {"id": "qa-test", "label": "QA Test"},
+                {"id": "done", "label": "Done", "terminal": true}
+            ],
+            "transitions": [
+                {"from": "backlog", "to": "qa-test", "type": "free"},
+                {"from": "qa-test", "to": "done", "type": "gated", "gates": ["review_passed"]}
+            ],
+            "gates": {
+                "review_passed": {"type": "builtin", "check": "review_verdict_pass"}
+            }
+        })
+    }
+
+    fn repo_override_with_staging_review_state() -> Value {
+        serde_json::json!({
+            "states": [
+                {"id": "backlog", "label": "Backlog"},
+                {"id": "ready", "label": "Ready"},
+                {"id": "requested", "label": "Requested"},
+                {"id": "in_progress", "label": "In Progress"},
+                {"id": "review", "label": "Review"},
+                {"id": "staging_review", "label": "Staging Review"},
+                {"id": "done", "label": "Done", "terminal": true}
+            ]
+        })
+    }
+
+    fn repo_override_strips_in_progress() -> Value {
+        serde_json::json!({
+            "states": [
+                {"id": "backlog", "label": "Backlog"},
+                {"id": "ready", "label": "Ready"},
+                {"id": "requested", "label": "Requested"},
+                {"id": "done", "label": "Done", "terminal": true}
+            ],
+            "transitions": [
+                {"from": "backlog", "to": "ready", "type": "free"},
+                {"from": "ready", "to": "requested", "type": "free"},
+                {"from": "requested", "to": "done", "type": "free"}
+            ],
+            "hooks": {
+                "requested": {"on_enter": ["OnCardTransition"], "on_exit": []},
+                "done": {"on_enter": ["OnCardTransition", "OnCardTerminal"], "on_exit": []}
+            },
+            "clocks": {
+                "requested": {"set": "requested_at"},
+                "done": {"set": "completed_at"}
+            },
+            "timeouts": {
+                "requested": {
+                    "duration": "45m",
+                    "clock": "requested_at",
+                    "max_retries": 1,
+                    "backoff": "exponential",
+                    "on_exhaust": "requested",
+                    "on_exhaust_policy": "escalate"
+                }
+            }
+        })
+    }
+
+    fn agent_override_to_staging_review() -> Value {
+        serde_json::json!({
+            "transitions": [
+                {"from": "in_progress", "to": "staging_review", "type": "free"}
+            ],
+            "hooks": {
+                "staging_review": {"on_enter": ["OnReviewEnter"], "on_exit": []}
+            }
+        })
+    }
+
+    fn agent_override_uses_in_progress() -> Value {
+        serde_json::json!({
+            "transitions": [
+                {"from": "backlog", "to": "in_progress", "type": "free"}
+            ]
+        })
+    }
+
+    async fn seed_card(
+        pool: &PgPool,
+        card_id: &str,
+        repo_id: Option<&str>,
+        assigned_agent_id: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, repo_id, assigned_agent_id)
+             VALUES ($1, $2, $3)",
+        )
+        .bind(card_id)
+        .bind(repo_id)
+        .bind(assigned_agent_id)
+        .execute(pool)
+        .await
+        .expect("seed kanban_cards");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repo_write_rejects_state_id_that_would_fail_kanban_status_check() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.connect_with_minimal_schema().await else {
+            pg_db.drop().await;
+            return;
+        };
+        crate::pipeline::ensure_loaded();
+        seed_agent(&pool, "agent-slug-a", None).await;
+        seed_repo_with_default_agent(&pool, "repo-slug-a", "agent-slug-a", None).await;
+
+        let service = PipelineOverrideService::new(&pool);
+        let result = service
+            .set_repo_pipeline("repo-slug-a", Some(&invalid_slug_state_override()))
+            .await;
+
+        match result {
+            Err(PipelineOverrideError::BadRequest(message)) => {
+                assert!(
+                    message.contains("kanban status slug contract ^[a-z][a-z0-9_]*$"),
+                    "BadRequest must explain kanban status slug contract, got: {message}"
+                );
+            }
+            other => panic!(
+                "expected BadRequest for invalid state id, got: {:?}",
+                other.map(|()| "Ok").unwrap_or("non-BadRequest err")
+            ),
+        }
+
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT pipeline_config::text FROM github_repos WHERE id = 'repo-slug-a'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("repo pipeline_config lookup");
+        assert!(
+            stored.is_none(),
+            "repo pipeline_config must remain NULL after rejected write; got {stored:?}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_write_rejects_standalone_assigned_card_context_when_repo_pair_valid() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.connect_with_minimal_schema().await else {
+            pg_db.drop().await;
+            return;
+        };
+        crate::pipeline::ensure_loaded();
+        seed_agent(&pool, "agent-standalone-context", None).await;
+        seed_repo_with_default_agent(
+            &pool,
+            "repo-provides-staging-review",
+            "agent-standalone-context",
+            Some(&repo_override_with_staging_review_state().to_string()),
+        )
+        .await;
+        seed_card(
+            &pool,
+            "card-repo-agent-context",
+            Some("repo-provides-staging-review"),
+            Some("agent-standalone-context"),
+        )
+        .await;
+        seed_card(
+            &pool,
+            "card-standalone-agent-context",
+            None,
+            Some("agent-standalone-context"),
+        )
+        .await;
+
+        let service = PipelineOverrideService::new(&pool);
+        let result = service
+            .set_agent_pipeline(
+                "agent-standalone-context",
+                Some(&agent_override_to_staging_review()),
+            )
+            .await;
+
+        match result {
+            Err(PipelineOverrideError::BadRequest(message)) => {
+                assert!(
+                    message.contains("standalone assigned card"),
+                    "BadRequest must explain standalone default+agent validation, got: {message}"
+                );
+                assert!(
+                    message.contains("staging_review"),
+                    "BadRequest must include the missing standalone state context, got: {message}"
+                );
+            }
+            other => panic!(
+                "expected BadRequest for standalone assigned card context, got: {:?}",
+                other.map(|()| "Ok").unwrap_or("non-BadRequest err")
+            ),
+        }
+
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT pipeline_config::text FROM agents WHERE id = 'agent-standalone-context'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("agent pipeline_config lookup");
+        assert!(
+            stored.is_none(),
+            "agent pipeline_config must remain NULL after rejected standalone validation; got {stored:?}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_write_rejects_dangling_repo_assigned_card_context_when_repo_pair_valid() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.connect_with_minimal_schema().await else {
+            pg_db.drop().await;
+            return;
+        };
+        crate::pipeline::ensure_loaded();
+        seed_agent(&pool, "agent-dangling-repo-context", None).await;
+        seed_repo_with_default_agent(
+            &pool,
+            "repo-provides-staging-review-for-dangling",
+            "agent-dangling-repo-context",
+            Some(&repo_override_with_staging_review_state().to_string()),
+        )
+        .await;
+        seed_card(
+            &pool,
+            "card-valid-repo-agent-context",
+            Some("repo-provides-staging-review-for-dangling"),
+            Some("agent-dangling-repo-context"),
+        )
+        .await;
+        seed_card(
+            &pool,
+            "card-dangling-repo-agent-context",
+            Some("repo-missing-staging-review"),
+            Some("agent-dangling-repo-context"),
+        )
+        .await;
+
+        let service = PipelineOverrideService::new(&pool);
+        let result = service
+            .set_agent_pipeline(
+                "agent-dangling-repo-context",
+                Some(&agent_override_to_staging_review()),
+            )
+            .await;
+
+        match result {
+            Err(PipelineOverrideError::BadRequest(message)) => {
+                assert!(
+                    message.contains("dangling repo assigned card"),
+                    "BadRequest must explain dangling repo default+agent validation, got: {message}"
+                );
+                assert!(
+                    message.contains("staging_review"),
+                    "BadRequest must include the missing dangling repo state context, got: {message}"
+                );
+            }
+            other => panic!(
+                "expected BadRequest for dangling repo assigned card context, got: {:?}",
+                other.map(|()| "Ok").unwrap_or("non-BadRequest err")
+            ),
+        }
+
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT pipeline_config::text FROM agents WHERE id = 'agent-dangling-repo-context'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("agent pipeline_config lookup");
+        assert!(
+            stored.is_none(),
+            "agent pipeline_config must remain NULL after rejected dangling repo validation; got {stored:?}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repo_write_accepts_unassigned_repo_card_without_default_agent_fallback() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.connect_with_minimal_schema().await else {
+            pg_db.drop().await;
+            return;
+        };
+        crate::pipeline::ensure_loaded();
+        seed_agent(
+            &pool,
+            "agent-default-fallback-only",
+            Some(&agent_override_uses_in_progress().to_string()),
+        )
+        .await;
+        seed_repo_with_default_agent(
+            &pool,
+            "repo-unassigned-card",
+            "agent-default-fallback-only",
+            None,
+        )
+        .await;
+        seed_card(
+            &pool,
+            "card-unassigned-repo-context",
+            Some("repo-unassigned-card"),
+            None,
+        )
+        .await;
+
+        let service = PipelineOverrideService::new(&pool);
+        service
+            .set_repo_pipeline(
+                "repo-unassigned-card",
+                Some(&repo_override_strips_in_progress()),
+            )
+            .await
+            .expect("unassigned repo cards validate default+repo, not default_agent fallback");
+
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT pipeline_config::text FROM github_repos WHERE id = 'repo-unassigned-card'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("repo pipeline_config lookup");
+        let stored = stored.expect("repo pipeline_config should be stored");
+        assert!(
+            stored.contains("ready"),
+            "repo pipeline_config should contain the accepted repo override; got {stored}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn repo_write_rejects_malformed_existing_agent_override() {
         let Some(pg_db) = TestPostgresDb::create().await else {
@@ -512,6 +891,13 @@ mod tests {
         crate::pipeline::ensure_loaded();
         seed_agent(&pool, "agent-1720-a", Some(r#"{"states":["broken"]}"#)).await;
         seed_repo_with_default_agent(&pool, "repo-1720-a", "agent-1720-a", None).await;
+        seed_card(
+            &pool,
+            "card-1720-a",
+            Some("repo-1720-a"),
+            Some("agent-1720-a"),
+        )
+        .await;
 
         let service = PipelineOverrideService::new(&pool);
         let result = service
@@ -566,6 +952,13 @@ mod tests {
             "repo-1720-b",
             "agent-1720-b",
             Some(r#"{"states":["broken"]}"#),
+        )
+        .await;
+        seed_card(
+            &pool,
+            "card-1720-b",
+            Some("repo-1720-b"),
+            Some("agent-1720-b"),
         )
         .await;
 

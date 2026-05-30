@@ -24,15 +24,44 @@ pub(crate) enum DispatchMessagePostErrorKind {
 pub(crate) struct DispatchMessagePostError {
     kind: DispatchMessagePostErrorKind,
     detail: String,
+    http_status: Option<reqwest::StatusCode>,
+    discord_error_code: Option<i64>,
 }
 
 impl DispatchMessagePostError {
     pub(crate) fn new(kind: DispatchMessagePostErrorKind, detail: String) -> Self {
-        Self { kind, detail }
+        Self {
+            kind,
+            detail,
+            http_status: None,
+            discord_error_code: None,
+        }
+    }
+
+    pub(crate) fn http(
+        kind: DispatchMessagePostErrorKind,
+        status: reqwest::StatusCode,
+        discord_error_code: Option<i64>,
+        detail: String,
+    ) -> Self {
+        Self {
+            kind,
+            detail,
+            http_status: Some(status),
+            discord_error_code,
+        }
     }
 
     pub(crate) fn kind(&self) -> DispatchMessagePostErrorKind {
         self.kind
+    }
+
+    pub(crate) fn http_status(&self) -> Option<reqwest::StatusCode> {
+        self.http_status
+    }
+
+    pub(crate) fn discord_error_code(&self) -> Option<i64> {
+        self.discord_error_code
     }
 
     pub(crate) fn is_length_error(&self) -> bool {
