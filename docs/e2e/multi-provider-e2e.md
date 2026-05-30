@@ -41,8 +41,11 @@ scheduled wakeup/monitor path: the first turn must call `ScheduleWakeup`, and
 the automatic wake turn must relay `[E2E:E13:WAKE]` to Discord. It intentionally
 runs only on `claude-pipe`; `claude-tui` and `claude-e` keep normal relay
 coverage because this matrix does not create a persistent Claude Code wake
-session for those cells. `E-11` (cross-cell concurrency) is `cells: []` — the
-orchestrator owns that scenario.
+session for those cells. `E-16` and `E-17` are #2935 regression stubs: they are
+loaded by the relevant cells but skipped until the runtime/orchestrator exposes
+hooks to force Claude TUI completion-quiescence timeout and to hold a foreign
+active mailbox during a destructive restart attempt. `E-11` (cross-cell
+concurrency) is `cells: []` — the orchestrator owns that scenario.
 
 ## Driver
 
@@ -77,6 +80,23 @@ separate operator sessions.
 
 Destructive steps (`restart_dcserver`, `kill_pane`, `send_keys_no_enter`) are
 gated by both `--allow-destructive` and `AGENTDESK_E2E_ALLOW_DESTRUCTIVE=1`.
+Before a destructive restart, the driver now fails closed if
+`/api/health/detail.mailboxes` shows any foreign channel/provider with active
+mailbox state, cancel token, inflight state, queue depth, recovery/finalizing
+state, pending Discord callback, stale thread proof, or relay stall state.
+
+Health waits parse the JSON payload, not just HTTP 2xx. A run is considered
+ready only when the health body is healthy (`status: healthy`, `ok` not false,
+`fully_recovered` not false, and no unallowed degraded reasons). Degraded or
+unhealthy bodies keep polling until timeout and then fail with the last health
+summary.
+
+After every executed scenario, the driver also asserts the tested cell's
+mailbox is idle via `/api/health/detail`: `agent_turn_status=idle`,
+`queue_depth=0`, no cancel token, no inflight state, no active user message, no
+pending Discord callback, and no stale/relay-stall proof. It also checks the
+tested provider/channel's on-disk pending queue and queued placeholder files
+under the runtime root are empty.
 
 ## Orchestrator (`adk-e2e-orchestrator`)
 

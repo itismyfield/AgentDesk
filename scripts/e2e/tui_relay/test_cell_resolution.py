@@ -90,10 +90,14 @@ class ScenarioFilter(unittest.TestCase):
         scenarios = driver.load_scenarios(self.scenarios_dir, cell="claude-tui")
         ids = {str(s.get("id")) for s in scenarios}
         self.assertIn("E-1", ids)
+        self.assertIn("E-16", ids)
         self.assertNotIn("E-13", ids)
         self.assertIn("E-4", ids)
         self.assertIn("E-10", ids)
         self.assertIn("E-12", ids)
+        e16 = next(s for s in scenarios if s.get("id") == "E-16")
+        self.assertIn("skip_reason", e16)
+        self.assertIn("acceptance_criteria", e16)
         self.assertNotIn("E-7", ids)
 
     def test_claude_e_scenarios(self):
@@ -117,6 +121,10 @@ class ScenarioFilter(unittest.TestCase):
         ids = {str(s.get("id")) for s in scenarios}
         self.assertIn("E-7", ids)
         self.assertIn("E-4", ids)
+        self.assertIn("E-17", ids)
+        e17 = next(s for s in scenarios if s.get("id") == "E-17")
+        self.assertIn("skip_reason", e17)
+        self.assertIn("acceptance_criteria", e17)
 
     def test_e11_excluded_everywhere(self):
         for cell in driver.SUPPORTED_CELLS:

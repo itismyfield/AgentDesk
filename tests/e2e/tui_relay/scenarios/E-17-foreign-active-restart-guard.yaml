@@ -1,0 +1,17 @@
+id: E-17
+title: Destructive restart refuses foreign active mailbox
+cells: [codex-tui]
+isolation: required
+destructive: true
+skip_reason: >
+  Stub for #2935. The destructive guard is implemented and unit-tested against
+  synthetic /api/health/detail mailbox evidence. A full live scenario needs the
+  orchestrator to hold a separate claude-tui turn active while this codex-tui
+  cell attempts restart.
+acceptance_criteria:
+  - Start or hold a claude-tui turn on a different channel.
+  - Verify /api/health/detail mailboxes reports foreign active/cancel/inflight/queue or relay stall state.
+  - Attempt a codex-tui destructive restart scenario.
+  - Assert the harness refuses before restart and names the foreign mailbox evidence.
+steps: []
+assertions: []

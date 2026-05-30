@@ -1,0 +1,16 @@
+id: E-16
+title: Claude TUI quiescence timeout still releases mailbox
+cells: [claude-tui]
+isolation: required
+skip_reason: >
+  Stub for #2935. Full live simulation needs a runtime hook that forces the
+  TUI completion-quiescence gate to time out after response delivery. The
+  harness pieces are in place: every executed scenario now asserts the tested
+  mailbox returns idle with queue/inflight/cancel/pending-callback state clear.
+acceptance_criteria:
+  - Force or simulate tui_completion_quiescence timeout after a delivered Claude TUI response.
+  - Send a second prompt immediately after the first response marker arrives.
+  - Assert the second prompt starts and replies without an indefinite queued placeholder.
+  - Assert /api/health/detail mailboxes shows idle, queue_depth=0, inflight_state_present=false, has_cancel_token=false.
+steps: []
+assertions: []

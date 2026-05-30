@@ -33,6 +33,7 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,13 @@ SUPPORTED_CELLS: tuple[str, ...] = (
     "claude-e",
     "codex-pipe",
     "codex-tui",
+)
+
+IDLE_MAILBOX_STATUSES = {"", "idle", "none"}
+IDLE_RELAY_STALL_STATES = {"", "healthy"}
+RUNTIME_QUEUE_DIRS: tuple[tuple[str, str], ...] = (
+    ("pending_queue", "discord_pending_queue"),
+    ("queued_placeholders", "discord_queued_placeholders"),
 )
 
 
@@ -364,6 +372,287 @@ def poison_claude_tui_relay_offset(
     }
 
 
+def _read_api_json(base_url: str, path: str, *, timeout: float = 5.0) -> tuple[int, Any]:
+    url = f"{base_url.rstrip('/')}{path}"
+    request = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"Connection": "close"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8", "replace")
+            status = int(getattr(response, "status", 200))
+    except urllib.error.HTTPError as error:
+        raw = error.read().decode("utf-8", "replace")
+        status = int(error.code)
+    if not raw.strip():
+        return status, {}
+    try:
+        return status, json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise assertions.AssertionError(
+            f"{path} returned non-JSON HTTP {status}: {raw[:240]!r}"
+        ) from error
+
+
+def _read_health_detail(base_url: str, *, timeout: float = 5.0) -> dict[str, Any]:
+    status, payload = _read_api_json(base_url, "/api/health/detail", timeout=timeout)
+    if not isinstance(payload, dict):
+        raise assertions.AssertionError(
+            f"/api/health/detail returned non-object HTTP {status}: {payload!r}"
+        )
+    if status in {401, 403}:
+        raise assertions.AssertionError(
+            f"/api/health/detail unavailable HTTP {status}: {payload}"
+        )
+    if "mailboxes" not in payload:
+        raise assertions.AssertionError("/api/health/detail missing mailboxes")
+    return payload
+
+
+def _health_reason_allowed(reason: str, allowed: tuple[str, ...]) -> bool:
+    for pattern in allowed:
+        if pattern.endswith("*") and reason.startswith(pattern[:-1]):
+            return True
+        if reason == pattern:
+            return True
+    return False
+
+
+def _health_ready_violations(
+    payload: dict[str, Any],
+    *,
+    allowed_statuses: tuple[str, ...] = ("healthy",),
+    allowed_degraded_reasons: tuple[str, ...] = (),
+) -> list[str]:
+    status = str(payload.get("status") or "").lower()
+    allowed_status_set = {s.lower() for s in allowed_statuses}
+    strict_healthy = allowed_status_set == {"healthy"}
+    violations: list[str] = []
+    if status not in allowed_status_set:
+        violations.append(f"status={status or '<missing>'}")
+    if strict_healthy and payload.get("ok") is False:
+        violations.append("ok=false")
+    if strict_healthy and payload.get("degraded") is True:
+        violations.append("degraded=true")
+    if strict_healthy and payload.get("fully_recovered") is False:
+        violations.append("fully_recovered=false")
+
+    degraded_reasons = payload.get("degraded_reasons") or []
+    if isinstance(degraded_reasons, list):
+        blocked = [
+            str(reason)
+            for reason in degraded_reasons
+            if not _health_reason_allowed(str(reason), allowed_degraded_reasons)
+        ]
+        if blocked:
+            violations.append(f"degraded_reasons={blocked}")
+    elif degraded_reasons:
+        violations.append(f"degraded_reasons={degraded_reasons!r}")
+    return violations
+
+
+def _health_summary(
+    *,
+    http_status: int | None,
+    payload: dict[str, Any] | None,
+    violations: list[str] | None = None,
+) -> str:
+    if payload is None:
+        return f"http={http_status or '<none>'} payload=<unavailable>"
+    fields = {
+        "http": http_status,
+        "status": payload.get("status"),
+        "ok": payload.get("ok"),
+        "fully_recovered": payload.get("fully_recovered"),
+        "degraded": payload.get("degraded"),
+        "degraded_reasons": payload.get("degraded_reasons"),
+        "violations": violations or [],
+    }
+    return json.dumps(fields, ensure_ascii=False, sort_keys=True)
+
+
+def _as_nonnegative_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return max(value, 0)
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return 0
+
+
+def _truthy_identity(value: Any) -> bool:
+    if value is None or value is False:
+        return False
+    if isinstance(value, (int, float)) and value == 0:
+        return False
+    if isinstance(value, str) and value.strip() in {"", "0", "none", "null"}:
+        return False
+    return True
+
+
+def _mailbox_channel_id(mailbox: dict[str, Any]) -> str:
+    value = mailbox.get("channel_id") or mailbox.get("channelId")
+    return str(value or "")
+
+
+def _mailbox_provider(mailbox: dict[str, Any]) -> str:
+    return str(mailbox.get("provider") or mailbox.get("session_provider") or "").lower()
+
+
+def _relay_health(mailbox: dict[str, Any]) -> dict[str, Any]:
+    relay = mailbox.get("relay_health")
+    return relay if isinstance(relay, dict) else {}
+
+
+def _mailbox_busy_reasons(mailbox: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    relay = _relay_health(mailbox)
+
+    status = str(mailbox.get("agent_turn_status") or "").lower()
+    if status not in IDLE_MAILBOX_STATUSES:
+        reasons.append(f"agent_turn_status={status}")
+    if mailbox.get("has_cancel_token") is True:
+        reasons.append("has_cancel_token=true")
+    if mailbox.get("inflight_state_present") is True:
+        reasons.append("inflight_state_present=true")
+    if _as_nonnegative_int(mailbox.get("queue_depth")) > 0:
+        reasons.append(f"queue_depth={mailbox.get('queue_depth')}")
+    if mailbox.get("recovery_started") is True:
+        reasons.append("recovery_started=true")
+    if mailbox.get("active_dispatch_present") is True:
+        reasons.append("active_dispatch_present=true")
+    if _truthy_identity(mailbox.get("active_user_message_id")):
+        reasons.append(f"active_user_message_id={mailbox.get('active_user_message_id')}")
+
+    relay_active_turn = str(relay.get("active_turn") or "").lower()
+    if relay_active_turn not in {"", "none"}:
+        reasons.append(f"relay_health.active_turn={relay_active_turn}")
+    if relay.get("bridge_inflight_present") is True:
+        reasons.append("relay_health.bridge_inflight_present=true")
+    if relay.get("mailbox_has_cancel_token") is True:
+        reasons.append("relay_health.mailbox_has_cancel_token=true")
+    if _truthy_identity(relay.get("mailbox_active_user_msg_id")):
+        reasons.append(
+            f"relay_health.mailbox_active_user_msg_id={relay.get('mailbox_active_user_msg_id')}"
+        )
+    if _as_nonnegative_int(relay.get("queue_depth")) > 0:
+        reasons.append(f"relay_health.queue_depth={relay.get('queue_depth')}")
+    if _truthy_identity(relay.get("pending_discord_callback_msg_id")):
+        reasons.append(
+            "relay_health.pending_discord_callback_msg_id="
+            f"{relay.get('pending_discord_callback_msg_id')}"
+        )
+    if relay.get("pending_thread_proof") is True:
+        reasons.append("relay_health.pending_thread_proof=true")
+    if relay.get("stale_thread_proof") is True:
+        reasons.append("relay_health.stale_thread_proof=true")
+    if relay.get("desynced") is True:
+        reasons.append("relay_health.desynced=true")
+
+    stall_state = str(mailbox.get("relay_stall_state") or "").lower()
+    if stall_state not in IDLE_RELAY_STALL_STATES:
+        reasons.append(f"relay_stall_state={stall_state}")
+    return reasons
+
+
+def _runtime_payload_has_entries(payload: Any) -> bool:
+    if payload in (None, False, "", [], {}):
+        return False
+    if isinstance(payload, list):
+        return len(payload) > 0
+    if isinstance(payload, dict):
+        return any(_runtime_payload_has_entries(value) for value in payload.values())
+    return True
+
+
+def _runtime_queue_violations(
+    *, runtime_root: Path, provider: str, channel_id: str
+) -> list[str]:
+    violations: list[str] = []
+    for label, subdir in RUNTIME_QUEUE_DIRS:
+        provider_dir = runtime_root / subdir / provider
+        if not provider_dir.is_dir():
+            continue
+        for token_dir in provider_dir.iterdir():
+            target = token_dir / f"{channel_id}.json"
+            if not target.exists():
+                continue
+            try:
+                raw = target.read_text(encoding="utf-8").strip()
+                payload = json.loads(raw) if raw else []
+            except (OSError, json.JSONDecodeError) as error:
+                violations.append(f"{label}:{target}: unreadable:{error}")
+                continue
+            if _runtime_payload_has_entries(payload):
+                violations.append(f"{label}:{target}: nonempty")
+    return violations
+
+
+def _mailbox_label(mailbox: dict[str, Any]) -> str:
+    return (
+        f"{_mailbox_provider(mailbox) or '<provider?>'}:"
+        f"{_mailbox_channel_id(mailbox) or '<channel?>'}"
+    )
+
+
+def assert_cell_idle(
+    *,
+    base_url: str,
+    channel_id: str,
+    cell: str,
+    runtime_root: Path,
+    timeout_s: float = 45.0,
+    poll_interval_s: float = 2.0,
+) -> dict[str, Any]:
+    provider = cell_provider(cell)
+    deadline = time.monotonic() + timeout_s
+    last_violations: list[str] = []
+    last_mailbox_count = 0
+
+    while time.monotonic() < deadline:
+        detail = _read_health_detail(base_url)
+        mailboxes = detail.get("mailboxes")
+        if not isinstance(mailboxes, list):
+            raise assertions.AssertionError("/api/health/detail mailboxes is not a list")
+
+        target_mailboxes = [
+            mailbox
+            for mailbox in mailboxes
+            if isinstance(mailbox, dict)
+            and _mailbox_channel_id(mailbox) == str(channel_id)
+            and _mailbox_provider(mailbox) == provider
+        ]
+        last_mailbox_count = len(target_mailboxes)
+        last_violations = []
+        for mailbox in target_mailboxes:
+            for reason in _mailbox_busy_reasons(mailbox):
+                last_violations.append(f"{_mailbox_label(mailbox)} {reason}")
+        last_violations.extend(
+            _runtime_queue_violations(
+                runtime_root=runtime_root,
+                provider=provider,
+                channel_id=str(channel_id),
+            )
+        )
+
+        if not last_violations:
+            return {
+                "channel_id": str(channel_id),
+                "provider": provider,
+                "mailboxes_seen": last_mailbox_count,
+                "status": "idle",
+            }
+        time.sleep(poll_interval_s)
+
+    raise assertions.AssertionError(
+        f"post-scenario idle check failed for {cell} channel={channel_id}: "
+        f"{last_violations}"
+    )
+
+
 def run_scenario(
     scenario: dict[str, Any],
     *,
@@ -389,6 +678,11 @@ def run_scenario(
         result["reason"] = "requires --thread-channel-id or AGENTDESK_E2E_THREAD_CHANNEL_ID"
         return result
     result["channel_id"] = target_channel_id
+
+    if scenario.get("skip_reason"):
+        result["reason"] = str(scenario["skip_reason"])
+        result["acceptance_criteria"] = scenario.get("acceptance_criteria")
+        return result
 
     destructive = is_destructive(scenario)
     if destructive and not (
@@ -550,7 +844,11 @@ def run_one_cell(
                 "target", "release"
             )
             restart_dcserver_for_e2e(
-                target=target, args=args, base_url=client.base_url, cell=cell
+                target=target,
+                args=args,
+                base_url=client.base_url,
+                cell=cell,
+                channel_id=channel_id,
             )
         elif "poison_claude_tui_relay_offset" in step:
             record.setdefault("poisoned_offsets", []).append(
@@ -615,21 +913,56 @@ def run_one_cell(
         run_assertion(assertion_spec, window=window)
         record["assertions"].append({"spec": assertion_spec, "passed": True})
 
+    idle_check = assert_cell_idle(
+        base_url=client.base_url,
+        channel_id=channel_id,
+        cell=cell,
+        runtime_root=Path(args.queue_runtime_root),
+    )
+    record["post_scenario_idle"] = idle_check
+    record["assertions"].append(
+        {"spec": {"post_scenario_cell_idle": True}, "passed": True, "details": idle_check}
+    )
+
     client.send_control(channel_id, teardown_marker)
     return record
 
 
-def wait_for_health(base_url: str, *, timeout_s: float = 90.0, poll_interval_s: float = 2.0) -> None:
+def wait_for_health(
+    base_url: str,
+    *,
+    timeout_s: float = 90.0,
+    poll_interval_s: float = 2.0,
+    allowed_statuses: tuple[str, ...] = ("healthy",),
+    allowed_degraded_reasons: tuple[str, ...] = (),
+) -> None:
     deadline = time.monotonic() + timeout_s
+    last_http_status: int | None = None
+    last_payload: dict[str, Any] | None = None
+    last_violations: list[str] = []
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(f"{base_url}/api/health", timeout=5) as response:
-                if 200 <= response.status < 300:
+            http_status, payload = _read_api_json(base_url, "/api/health", timeout=5)
+            last_http_status = http_status
+            if isinstance(payload, dict):
+                last_payload = payload
+                last_violations = _health_ready_violations(
+                    payload,
+                    allowed_statuses=allowed_statuses,
+                    allowed_degraded_reasons=allowed_degraded_reasons,
+                )
+                if 200 <= http_status < 300 and not last_violations:
                     return
+            else:
+                last_payload = None
+                last_violations = [f"non-object health payload: {payload!r}"]
         except Exception:  # noqa: BLE001
             pass
         time.sleep(poll_interval_s)
-    raise assertions.AssertionError(f"dcserver did not become healthy within {timeout_s}s")
+    raise assertions.AssertionError(
+        f"dcserver did not become healthy within {timeout_s}s; last="
+        f"{_health_summary(http_status=last_http_status, payload=last_payload, violations=last_violations)}"
+    )
 
 
 def _guard_no_foreign_active_turns(
@@ -639,6 +972,34 @@ def _guard_no_foreign_active_turns(
     e2e_channel_ids = {channel_id} if channel_id else set()
     if not e2e_channel_ids:
         return
+    detail = _read_health_detail(base_url)
+    mailboxes = detail.get("mailboxes")
+    if not isinstance(mailboxes, list):
+        raise assertions.AssertionError("/api/health/detail mailboxes is not a list")
+
+    busy: list[str] = []
+    current_provider = cell_provider(cell)
+    for mailbox in mailboxes:
+        if not isinstance(mailbox, dict):
+            continue
+        channel = _mailbox_channel_id(mailbox)
+        provider = _mailbox_provider(mailbox)
+        if channel in e2e_channel_ids and provider == current_provider:
+            continue
+        reasons = _mailbox_busy_reasons(mailbox)
+        if reasons:
+            busy.append(f"{_mailbox_label(mailbox)} [{', '.join(reasons)}]")
+
+    global_finalizing = _as_nonnegative_int(detail.get("global_finalizing"))
+    if global_finalizing > 0:
+        busy.append(f"global_finalizing={global_finalizing}")
+
+    if busy:
+        raise assertions.AssertionError(
+            f"refusing to restart dcserver: live mailbox state outside cell {cell} "
+            f"(channel={channel_id}). Active: {busy}."
+        )
+
     try:
         with urllib.request.urlopen(f"{base_url}/api/sessions", timeout=5) as response:
             payload = json.loads(response.read())
@@ -652,7 +1013,6 @@ def _guard_no_foreign_active_turns(
         if isinstance(payload, list)
         else []
     )
-    busy: list[str] = []
     workspace_substring = cell_workspace_substring(cell)
     for session in sessions or []:
         status = str(session.get("status", "")).lower()
@@ -678,10 +1038,11 @@ def restart_dcserver_for_e2e(
     args: argparse.Namespace,
     base_url: str,
     cell: str,
+    channel_id: str,
 ) -> None:
     if target not in ("dev", "release"):
         raise assertions.AssertionError(f"unsupported restart target: {target!r}")
-    _guard_no_foreign_active_turns(base_url, args.channel_id, cell)
+    _guard_no_foreign_active_turns(base_url, channel_id, cell)
 
     if args.restart_script:
         script = Path(args.restart_script).expanduser()
