@@ -60,7 +60,8 @@ pub(super) async fn send_ordered_long_terminal_response(
     turn_id: Option<&str>,
 ) -> Result<MessageId, String> {
     let (first_msg_id, delete_result) =
-        send_ordered_long_terminal_chunks(gateway, channel_id, placeholder_msg_id, response).await?;
+        send_ordered_long_terminal_chunks(gateway, channel_id, placeholder_msg_id, response)
+            .await?;
     let cleanup_outcome = match delete_result {
         Ok(()) => super::super::placeholder_cleanup::PlaceholderCleanupOutcome::Succeeded,
         Err(error) => super::super::placeholder_cleanup::classify_delete_error(&error),
@@ -71,7 +72,8 @@ pub(super) async fn send_ordered_long_terminal_response(
             channel_id,
             message_id: placeholder_msg_id,
             tmux_session_name: tmux_session_name.map(str::to_string),
-            operation: super::super::placeholder_cleanup::PlaceholderCleanupOperation::DeleteTerminal,
+            operation:
+                super::super::placeholder_cleanup::PlaceholderCleanupOperation::DeleteTerminal,
             outcome: cleanup_outcome,
             source: "turn_bridge_terminal_long_send_cleanup",
         },
@@ -233,14 +235,13 @@ pub(super) fn should_fail_dispatch_after_terminal_delivery(
 #[cfg(test)]
 mod tests {
     use super::{
-        replace_outcome_commits_terminal_delivery,
-        send_ordered_long_terminal_chunks,
+        replace_outcome_commits_terminal_delivery, send_ordered_long_terminal_chunks,
         should_complete_work_dispatch_after_terminal_delivery,
         should_fail_dispatch_after_terminal_delivery, terminal_delivery_should_send_new_chunks,
     };
+    use crate::services::discord::formatting;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
-    use crate::services::discord::formatting;
     use crate::services::provider::ProviderKind;
     use poise::serenity_prelude::{ChannelId, MessageId};
     use std::sync::{Arc, Mutex};
@@ -273,7 +274,10 @@ mod tests {
                 let chunks = formatting::split_message(content);
                 let mut message_ids = Vec::new();
                 for (index, chunk) in chunks.iter().enumerate() {
-                    sent_chunks.lock().expect("sent chunks lock").push(chunk.clone());
+                    sent_chunks
+                        .lock()
+                        .expect("sent chunks lock")
+                        .push(chunk.clone());
                     message_ids.push(MessageId::new(9000 + index as u64));
                     if fail_after_sent_chunks == Some(index + 1) {
                         sent_chunks.lock().expect("sent chunks lock").clear();
@@ -507,11 +511,17 @@ mod tests {
 
         assert_eq!(first_msg_id, MessageId::new(9000));
         assert!(delete_result.is_ok());
-        let chunks = gateway.sent_chunks.lock().expect("sent chunks lock").clone();
+        let chunks = gateway
+            .sent_chunks
+            .lock()
+            .expect("sent chunks lock")
+            .clone();
         assert!(chunks.len() > 1);
-        assert!(chunks
-            .iter()
-            .all(|chunk| chunk.len() <= crate::services::discord::DISCORD_MSG_LIMIT));
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.len() <= crate::services::discord::DISCORD_MSG_LIMIT)
+        );
         assert_eq!(chunks.concat(), body);
         assert_eq!(
             gateway

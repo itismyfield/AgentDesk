@@ -619,11 +619,7 @@ async fn deliver_response(
         Some(msg_id) => {
             if standby_should_send_new_chunks_for_placeholder(&formatted) {
                 if let Err(error) = formatting::send_long_message_raw_with_rollback(
-                    http,
-                    channel_id,
-                    msg_id,
-                    &formatted,
-                    shared,
+                    http, channel_id, msg_id, &formatted, shared,
                 )
                 .await
                 {

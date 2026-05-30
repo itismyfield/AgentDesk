@@ -2756,8 +2756,7 @@ pub(super) async fn send_long_message_raw_with_rollback(
                 if let Err(error) = record_replace_continuation_rollback(
                     rollback_key,
                     cleanup.failed_message_ids.clone(),
-                )
-                {
+                ) {
                     record_replace_continuation_rollback_memory_only(
                         rollback_key,
                         cleanup.failed_message_ids,
@@ -2825,7 +2824,8 @@ pub(super) async fn send_long_message_raw_with_rollback(
                     let mut errors = cleanup.errors;
                     errors.push(error.clone());
                     if cleanup.failed_message_ids.is_empty() {
-                        if let Err(clear_error) = clear_replace_continuation_rollback(rollback_key) {
+                        if let Err(clear_error) = clear_replace_continuation_rollback(rollback_key)
+                        {
                             errors.push(clear_error);
                         }
                     } else if let Err(record_error) = record_replace_continuation_rollback(

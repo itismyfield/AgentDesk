@@ -1413,8 +1413,7 @@ use stale_resume::{
     stream_error_requires_terminal_session_reset,
 };
 use terminal_delivery::{
-    send_ordered_long_terminal_response,
-    should_complete_work_dispatch_after_terminal_delivery,
+    send_ordered_long_terminal_response, should_complete_work_dispatch_after_terminal_delivery,
     should_fail_dispatch_after_terminal_delivery, terminal_delivery_should_send_new_chunks,
     turn_bridge_replace_outcome_committed,
 };
