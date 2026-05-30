@@ -417,6 +417,42 @@ class ScenarioHealthProbe(unittest.TestCase):
         self.assertIn("global_active=2 > 0", message)
         self.assertIn("global_finalizing=1 > 0", message)
 
+    def test_assert_health_fails_on_negative_global_counter(self):
+        payloads = {
+            "/api/health/detail": [
+                (
+                    200,
+                    {
+                        **_health_detail(_idle_mailbox("42", provider="codex")),
+                        "global_active": -1,
+                    },
+                )
+            ],
+            "/api/health": [
+                (
+                    200,
+                    {
+                        "status": "healthy",
+                        "ok": True,
+                        "fully_recovered": True,
+                        "degraded_reasons": [],
+                    },
+                )
+            ],
+        }
+
+        with patch("run_tui_relay.urllib.request.urlopen", _fake_urlopen_for(payloads)):
+            with self.assertRaises(assertions.AssertionError) as ctx:
+                driver.assert_health(
+                    "http://agentdesk.test",
+                    {
+                        "global_active_max": 0,
+                        "global_finalizing_max": 0,
+                    },
+                )
+
+        self.assertIn("global_active=-1 < 0", str(ctx.exception))
+
     def test_assert_health_forbid_only_allows_unrelated_transitional_reasons(self):
         payloads = {
             "/api/health": [

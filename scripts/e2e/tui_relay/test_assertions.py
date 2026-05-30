@@ -143,6 +143,17 @@ class RelayLatency(unittest.TestCase):
         with self.assertRaises(assertions.AssertionError):
             assertions.relay_latency_within(window, max_seconds=1)
 
+    def test_multi_turn_uses_each_prompt_start(self):
+        window = _window(
+            _relay_msg(1, "first", ts="2026-05-29T00:00:01Z"),
+            _relay_msg(2, "second", ts="2026-05-29T00:00:50Z"),
+        )
+        window.mark_prompt_sent(dt.datetime.fromisoformat("2026-05-29T00:00:00+00:00"))
+        window.mark_prompt_sent(dt.datetime.fromisoformat("2026-05-29T00:00:10+00:00"))
+        assertions.relay_latency_within(window, max_seconds=45)
+        with self.assertRaises(assertions.AssertionError):
+            assertions.relay_latency_within(window, max_seconds=30)
+
 
 class RawChromeAndEditAssertions(unittest.TestCase):
     def test_window_updates_same_message_id_to_final_body(self):
@@ -292,6 +303,10 @@ class RunAssertionDispatch(unittest.TestCase):
                 },
                 window=_window(_relay_msg(1, "body [BODY]")),
             )
+        with self.assertRaises(assertions.AssertionError):
+            self.run_assertion({"raw_text_absent": {"include_our_send": True}}, window=window)
+        with self.assertRaises(assertions.AssertionError):
+            self.run_assertion({"marker_absent": {"surface": "raw"}}, window=window)
         self.run_assertion({"body_not_overwritten": "[BODY]"}, window=window)
         self.run_assertion({"no_suppressed_label_chrome": True}, window=window)
 

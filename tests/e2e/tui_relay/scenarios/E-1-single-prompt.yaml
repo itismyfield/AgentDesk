@@ -17,6 +17,7 @@ assertions:
       max_seconds: 240
   - completion_chrome_after_body:
       body_marker: "[E2E:E1:OK]"
+      required: true
   - no_duplicate_content: true
   - no_control_chars: true
   - no_resume_prompt_chrome: true

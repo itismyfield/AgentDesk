@@ -101,10 +101,13 @@ class Window:
     raw_messages: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     message_updates: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     first_prompt_at: _dt.datetime | None = None
+    prompt_sent_at: list[_dt.datetime] = dataclasses.field(default_factory=list)
 
     def mark_prompt_sent(self, when: _dt.datetime | None = None) -> None:
+        sent_at = when or _dt.datetime.now(_dt.timezone.utc)
+        self.prompt_sent_at.append(sent_at)
         if self.first_prompt_at is None:
-            self.first_prompt_at = when or _dt.datetime.now(_dt.timezone.utc)
+            self.first_prompt_at = sent_at
 
     def add(self, message: dict[str, Any]) -> None:
         # Track every observed message for debug/forensics, but only keep
@@ -370,14 +373,25 @@ def relay_latency_within(window: Window, *, max_seconds: float) -> None:
         for message in window.messages
         if (parsed := _parse_discord_ts(str(message.get("timestamp") or ""))) is not None
     ]
-    if window.first_prompt_at is not None and times:
-        span = (min(times) - window.first_prompt_at).total_seconds()
-        if span > max_seconds:
-            raise AssertionError(
-                f"prompt→first relay latency {span:.1f}s exceeds budget "
-                f"{max_seconds:.1f}s ({len(times)} timestamped relay messages)"
+    if window.prompt_sent_at and times:
+        sorted_times = sorted(times)
+        spans: list[float] = []
+        for prompt_at in window.prompt_sent_at:
+            first_after_prompt = next(
+                (relay_at for relay_at in sorted_times if relay_at >= prompt_at),
+                None,
             )
-        return
+            if first_after_prompt is not None:
+                spans.append((first_after_prompt - prompt_at).total_seconds())
+        if spans and max(spans) > max_seconds:
+            span = max(spans)
+            raise AssertionError(
+                f"prompt→first relay latency max {span:.1f}s exceeds budget "
+                f"{max_seconds:.1f}s ({len(spans)} prompt/relay pairs, "
+                f"{len(times)} timestamped relay messages)"
+            )
+        if spans:
+            return
     if len(times) < 2:
         return
     span = (max(times) - min(times)).total_seconds()

@@ -569,12 +569,25 @@ def _reason_matches(pattern: str, reason: str) -> bool:
     return pattern == reason or pattern in reason
 
 
+def _as_counter_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
 def _counter_from_payloads(
     name: str, payloads: list[dict[str, Any]]
 ) -> tuple[int | None, str | None]:
     for payload in payloads:
         if name in payload:
-            return _as_nonnegative_int(payload.get(name)), name
+            return _as_counter_int(payload.get(name)), name
     return None, None
 
 
@@ -637,10 +650,15 @@ def assert_health(
         if option_name not in options:
             continue
         actual, source_key = _counter_from_payloads(counter_name, counter_payloads)
-        if actual is None:
+        if source_key is None:
             violations.append(f"{counter_name}=<missing>")
             continue
+        if actual is None:
+            violations.append(f"{source_key}=<invalid>")
+            continue
         counter_values[counter_name] = actual
+        if actual < 0:
+            violations.append(f"{source_key}={actual} < 0")
         maximum = int(options[option_name])
         if actual > maximum:
             violations.append(f"{source_key}={actual} > {maximum}")
@@ -1372,9 +1390,14 @@ def run_assertion(spec: dict[str, Any], *, window: assertions.Window) -> None:
     elif "raw_text_absent" in spec:
         params = spec["raw_text_absent"]
         if isinstance(params, dict):
+            needle = params.get("needle") or params.get("text")
+            if needle is None:
+                raise assertions.AssertionError(
+                    f"raw_text_absent requires needle/text: {spec!r}"
+                )
             assertions.raw_text_absent(
                 window,
-                needle=str(params["needle"]),
+                needle=str(needle),
                 include_our_send=bool(params.get("include_our_send", False)),
             )
         else:
@@ -1382,9 +1405,14 @@ def run_assertion(spec: dict[str, Any], *, window: assertions.Window) -> None:
     elif "marker_absent" in spec:
         params = spec["marker_absent"]
         if isinstance(params, dict):
+            marker = params.get("marker")
+            if marker is None:
+                raise assertions.AssertionError(
+                    f"marker_absent requires marker: {spec!r}"
+                )
             assertions.marker_absent(
                 window,
-                marker=str(params["marker"]),
+                marker=str(marker),
                 surface=str(params.get("surface", "relay")),
                 include_our_send=bool(params.get("include_our_send", False)),
             )
