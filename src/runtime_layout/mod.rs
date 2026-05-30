@@ -364,6 +364,10 @@ pub(crate) fn ensure_credential_layout(root: &Path) -> Result<(), String> {
     }
 
     if !path_exists(&legacy) {
+        if let Some(parent) = legacy.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create '{}': {e}", parent.display()))?;
+        }
         create_symlink_entry(&canonical, &legacy, true)?;
     }
 
@@ -693,6 +697,34 @@ fn remove_dir_all_idempotent(path: &Path) -> Result<(), String> {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("Failed to remove '{}': {error}", path.display())),
+    }
+}
+
+#[cfg(test)]
+mod credential_layout_tests {
+    use super::*;
+
+    #[test]
+    fn ensure_credential_layout_creates_legacy_parent_for_fresh_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+
+        assert!(!config_dir(root).exists());
+
+        ensure_credential_layout(root).unwrap();
+
+        assert!(credential_dir(root).is_dir());
+        assert!(config_dir(root).is_dir());
+        assert!(
+            fs::symlink_metadata(legacy_credential_dir(root))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(same_canonical_path(
+            &legacy_credential_dir(root),
+            &credential_dir(root)
+        ));
     }
 }
 
