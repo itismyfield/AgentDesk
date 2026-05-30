@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use poise::serenity_prelude as serenity;
 use serenity::CreateAttachment;
 
+use super::super::formatting::send_long_message_ctx;
 use super::super::{Context, Error, check_auth};
 use crate::receipt;
 use crate::services::platform;
@@ -189,7 +190,7 @@ pub(in crate::services::discord) async fn cmd_usage(
         .await
         .map_err(|e| format!("usage collection failed: {e}"))?;
 
-    ctx.say(build_usage_report(&data)).await?;
+    send_long_message_ctx(ctx, &build_usage_report(&data)).await?;
     Ok(())
 }
 
@@ -268,6 +269,7 @@ fn build_usage_report(data: &receipt::ReceiptData) -> String {
 mod tests {
     use super::build_usage_report;
     use crate::receipt::{AgentShare, ModelLineItem, ProviderShare, ReceiptData, ReceiptStats};
+    use crate::services::discord::{DISCORD_MSG_LIMIT, formatting::split_message};
     use std::collections::HashMap;
 
     #[test]
@@ -319,5 +321,66 @@ mod tests {
         assert!(report.contains("Estimated cost: $0.0150 (cache saved $0.0050)"));
         assert!(report.contains("`/usage` summarizes provider token/rate-limit usage."));
         assert!(report.contains("`/metrics` shows local AgentDesk turn metrics."));
+    }
+
+    #[test]
+    fn oversized_usage_report_splits_under_discord_limit() {
+        let long_suffix = "x".repeat(900);
+        let models = (0..3)
+            .map(|idx| ModelLineItem {
+                model: format!("model-{idx}-{long_suffix}"),
+                display_name: format!("display-model-{idx}-{long_suffix}"),
+                input_tokens: 1_000,
+                output_tokens: 500,
+                cache_read_tokens: 250,
+                cache_creation_tokens: 0,
+                total_tokens: 1_500,
+                cost: 0.010,
+                cost_without_cache: 0.012,
+                provider: format!("Provider-{idx}-{long_suffix}"),
+            })
+            .collect();
+        let providers = (0..3)
+            .map(|idx| ProviderShare {
+                provider: format!("Provider-{idx}-{long_suffix}"),
+                tokens: 1_500,
+                percentage: 33.3,
+            })
+            .collect();
+
+        let report = build_usage_report(&ReceiptData {
+            period_label: "Rate Limit Window".to_string(),
+            period_start: "2026-05-24".to_string(),
+            period_end: "2026-05-30".to_string(),
+            models,
+            subtotal: 0.036,
+            cache_discount: 0.006,
+            total: 0.030,
+            stats: ReceiptStats {
+                total_messages: 12,
+                total_sessions: 3,
+                per_provider: HashMap::new(),
+                per_provider_agents: HashMap::new(),
+            },
+            providers,
+            agents: vec![AgentShare {
+                agent: "codex".to_string(),
+                tokens: 4_500,
+                cost: 0.030,
+                cost_without_cache: 0.036,
+                input_tokens: 3_000,
+                cache_read_tokens: 750,
+                cache_creation_tokens: 0,
+                percentage: 100.0,
+            }],
+        });
+
+        assert!(report.len() > DISCORD_MSG_LIMIT);
+        let chunks = split_message(&report);
+        assert!(chunks.len() > 1);
+        assert!(
+            chunks.iter().all(|chunk| chunk.len() <= DISCORD_MSG_LIMIT),
+            "all chunks must fit Discord's 2000-byte message cap"
+        );
     }
 }
