@@ -39,7 +39,15 @@ fn record_leader_only_worker_started(spec: WorkerSpec) {
         worker = spec.name,
         target = spec.target,
         kind = spec.kind.as_doc_str(),
+        stage = spec.start_stage.as_doc_str(),
+        order = spec.start_order,
+        restart = spec.restart_policy.as_doc_str(),
+        shutdown = spec.shutdown_policy.as_doc_str(),
         execution_scope = spec.execution_scope.as_doc_str(),
+        owner = spec.owner,
+        health = spec.health_owner,
+        responsibility = spec.responsibility,
+        notes = spec.notes,
         "leader-only worker epoch started"
     );
 }
@@ -54,7 +62,15 @@ fn record_leader_only_worker_stopped(spec: WorkerSpec, reason: &str) {
         worker = spec.name,
         target = spec.target,
         kind = spec.kind.as_doc_str(),
+        stage = spec.start_stage.as_doc_str(),
+        order = spec.start_order,
+        restart = spec.restart_policy.as_doc_str(),
+        shutdown = spec.shutdown_policy.as_doc_str(),
         execution_scope = spec.execution_scope.as_doc_str(),
+        owner = spec.owner,
+        health = spec.health_owner,
+        responsibility = spec.responsibility,
+        notes = spec.notes,
         reason,
         "leader-only worker epoch stopped"
     );
@@ -856,7 +872,15 @@ impl SupervisedWorkerRegistry {
                         worker = spec.name,
                         target = spec.target,
                         kind = spec.kind.as_doc_str(),
+                        stage = spec.start_stage.as_doc_str(),
+                        order = spec.start_order,
+                        restart = spec.restart_policy.as_doc_str(),
+                        shutdown = spec.shutdown_policy.as_doc_str(),
                         execution_scope = spec.execution_scope.as_doc_str(),
+                        owner = spec.owner,
+                        health = spec.health_owner,
+                        responsibility = spec.responsibility,
+                        notes = spec.notes,
                         "leader-only worker future exited"
                     );
                 }
@@ -865,7 +889,15 @@ impl SupervisedWorkerRegistry {
                         worker = spec.name,
                         target = spec.target,
                         kind = spec.kind.as_doc_str(),
+                        stage = spec.start_stage.as_doc_str(),
+                        order = spec.start_order,
+                        restart = spec.restart_policy.as_doc_str(),
+                        shutdown = spec.shutdown_policy.as_doc_str(),
                         execution_scope = spec.execution_scope.as_doc_str(),
+                        owner = spec.owner,
+                        health = spec.health_owner,
+                        responsibility = spec.responsibility,
+                        notes = spec.notes,
                         instance_id = cluster_runtime.instance_id(),
                         "leader-only worker self-fenced after cluster leadership was lost"
                     );
@@ -875,7 +907,15 @@ impl SupervisedWorkerRegistry {
                         worker = spec.name,
                         target = spec.target,
                         kind = spec.kind.as_doc_str(),
+                        stage = spec.start_stage.as_doc_str(),
+                        order = spec.start_order,
+                        restart = spec.restart_policy.as_doc_str(),
+                        shutdown = spec.shutdown_policy.as_doc_str(),
                         execution_scope = spec.execution_scope.as_doc_str(),
+                        owner = spec.owner,
+                        health = spec.health_owner,
+                        responsibility = spec.responsibility,
+                        notes = spec.notes,
                         "leader-only worker supervisor shutting down"
                     );
                     break;
@@ -932,7 +972,14 @@ impl SupervisedWorkerRegistry {
             target = spec.target,
             kind = spec.kind.as_doc_str(),
             stage = spec.start_stage.as_doc_str(),
+            order = spec.start_order,
+            restart = spec.restart_policy.as_doc_str(),
+            shutdown = spec.shutdown_policy.as_doc_str(),
             execution_scope = spec.execution_scope.as_doc_str(),
+            owner = spec.owner,
+            health = spec.health_owner,
+            responsibility = spec.responsibility,
+            notes = spec.notes,
             reason,
             "skipping supervised worker"
         );
