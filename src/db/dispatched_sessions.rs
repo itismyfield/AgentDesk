@@ -1123,6 +1123,28 @@ mod selector_cleanup_tests {
         pg_db.drop().await;
     }
 
+    /// #2861 (review): `/kill-tmux` is a public route, so the reconcile must
+    /// only touch `idle` rows — never terminal (`aborted`) or other live-ish
+    /// states (`turn_active`/`awaiting_user`/`awaiting_bg`). Those must be left
+    /// for force-kill / the dispatch watchdog, not rewritten to `disconnected`.
+    #[tokio::test]
+    async fn reconcile_orphaned_tmuxless_session_pg_only_touches_idle_status() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        for non_idle in ["aborted", "turn_active", "awaiting_user", "awaiting_bg"] {
+            let session_key = format!("host:tmuxless-{non_idle}");
+            seed_session_with_selectors(&pool, &session_key, non_idle, None).await;
+
+            assert!(!reconcile_orphaned_tmuxless_session_pg(&pool, &session_key).await);
+            let (status, _, _, _) = session_state(&pool, &session_key).await;
+            assert_eq!(status, non_idle, "non-idle status must not be rewritten");
+        }
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     /// #2045 Finding 4 cancelled→failed guard:
     /// force-kill on a session whose active dispatch is already `cancelled`
     /// must NOT overwrite the dispatch status, and must NOT synthesize a retry.
@@ -1452,21 +1474,26 @@ pub async fn gc_stale_thread_sessions_pg(pool: &PgPool) -> Vec<String> {
     }
 }
 
-/// Reconcile a session row whose tmux session has already vanished.
+/// Reconcile an **idle** session row whose tmux session has already vanished.
 ///
-/// When `kill-tmux` discovers `tmux_was_alive == false`, the row claims a live
-/// provider process that no longer exists. Left as-is (status `idle`), such a
-/// row stays in the `idle-kill` candidate pool forever and — being among the
+/// When `kill-tmux` discovers `tmux_was_alive == false`, an idle row claims a
+/// live provider process that no longer exists. Left as-is (status `idle`), such
+/// a row stays in the `idle-kill` candidate pool forever and — being among the
 /// oldest — monopolizes the per-tick kill budget, starving genuinely-alive idle
 /// sessions behind it (#2861). Transition it to `disconnected` while preserving
 /// provider selectors (claude_session_id etc.) so resume on the next user
-/// message still works via the selector path. Only touches rows with no
-/// in-flight dispatch — sessions with an active dispatch are owned by force-kill
-/// / the stuck-dispatch watchdog, not this reconcile.
+/// message still works via the selector path.
+///
+/// The guard is deliberately tight: **only `status = 'idle'` rows with no
+/// in-flight dispatch are touched.** `kill-tmux` is a public API route, so a
+/// caller could hit a tmuxless `completed`/`failed`/`cancelled`/`aborted` row;
+/// those terminal/history states must NOT be rewritten to `disconnected`.
+/// Sessions with an active dispatch are owned by force-kill / the stuck-dispatch
+/// watchdog, not this reconcile.
 ///
 /// Sibling of `mark_session_disconnected_for_idle_cleanup` in the discord
 /// module (in-memory expiry path); both preserve selectors but guard differently.
-/// Returns true if a row transitioned (i.e. it was idle/working with no dispatch).
+/// Returns true if a row transitioned.
 pub(crate) async fn reconcile_orphaned_tmuxless_session_pg(
     pool: &PgPool,
     session_key: &str,
@@ -1475,8 +1502,8 @@ pub(crate) async fn reconcile_orphaned_tmuxless_session_pg(
         "UPDATE sessions
          SET status = 'disconnected'
          WHERE session_key = $1
-           AND active_dispatch_id IS NULL
-           AND status <> 'disconnected'",
+           AND status = 'idle'
+           AND active_dispatch_id IS NULL",
     )
     .bind(session_key)
     .execute(pool)

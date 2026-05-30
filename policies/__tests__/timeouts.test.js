@@ -713,10 +713,12 @@ test("timeouts idle-kill module does not let zombie (already-gone tmux) rows sta
       }
     ]),
     httpPost(url) {
-      // Zombie rows report the tmux was already gone (reconciled to
-      // disconnected by the handler); the live row is actually killed.
+      // Zombie rows report tmux_was_alive:false (handler reconciled the stale
+      // row to disconnected); the live row is actually killed.
       const tmuxGone = url.includes("live-4") === false;
-      return { ok: true, tmux_killed: !tmuxGone, session_row_disconnected: tmuxGone };
+      return tmuxGone
+        ? { ok: true, tmux_was_alive: false, tmux_killed: false, session_row_disconnected: true }
+        : { ok: true, tmux_was_alive: true, tmux_killed: true };
     }
   });
 
@@ -727,6 +729,44 @@ test("timeouts idle-kill module does not let zombie (already-gone tmux) rows sta
   // The live row was reached and actually killed.
   assert.ok(state.httpPosts.some((p) => p.url.includes("live-4")));
   assert.match(state.logs.info.join("\n"), /Killed idle tmux .*live-4/);
+});
+
+test("timeouts idle-kill module counts genuine kill failures (tmux alive but kill failed) toward budget", () => {
+  // A live session whose `tmux kill-session` fails (tmux_was_alive:true,
+  // tmux_killed:false) is NOT a zombie — it must consume the budget so a stuck
+  // session is not retried unbounded every tick, and must be logged as an error.
+  const failKeys = [
+    "provider:AgentDesk-claude-stuck-1",
+    "provider:AgentDesk-claude-stuck-2",
+    "provider:AgentDesk-claude-stuck-3",
+    "provider:AgentDesk-claude-stuck-4"
+  ];
+  function row(session_key) {
+    return {
+      session_key, agent_id: null, provider: "claude",
+      active_dispatch_id: null, thread_channel_id: null,
+      last_seen_at: "2000-01-01 00:00:00"
+    };
+  }
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { server_port: 8791 },
+    dbQuery: createSqlRouter([
+      { match: "SELECT id, name, name_ko, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx FROM agents", result: [] },
+      { match: "FROM sessions WHERE provider IN ('claude', 'codex', 'qwen') AND (agent_id IS NULL OR TRIM(agent_id) = '')", result: [] },
+      { match: (sql) => sql.includes("WHERE status = 'idle'") && sql.includes("active_dispatch_id IS NULL") && sql.includes("INTERVAL '6 hours'"), result: failKeys.map(row) },
+      { match: (sql) => sql.includes("WHERE status = 'idle'") && sql.includes("active_dispatch_id IS NULL") && sql.includes("INTERVAL '8 hours'"), result: [] },
+      { match: (sql) => sql.includes("WHERE status = 'idle'") && sql.includes("active_dispatch_id IS NOT NULL") && sql.includes("INTERVAL '24 hours'"), result: [] }
+    ]),
+    httpPost() {
+      return { ok: true, tmux_was_alive: true, tmux_killed: false };
+    }
+  });
+
+  policy._section_O();
+
+  // maxKills=3 for the main idle batch; failures count, so only 3 attempts.
+  assert.equal(state.httpPosts.length, 3);
+  assert.match(state.logs.error.join("\n"), /tmux was alive but kill failed/);
 });
 
 test("timeouts idle-kill module reaps thread-suffixed sessions after 8h idle", () => {
