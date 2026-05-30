@@ -592,7 +592,7 @@ async fn release_queue_blocked_stale_active_turn(
     super::super::clear_watchdog_deadline_override(channel_id.get()).await;
     let finish = mailbox_finish_turn(shared, provider, channel_id).await;
     // #2044 F7: `finalize_orphaned_clear` owns both `cancelled.store(true)`
-    // and `global_active.fetch_sub(1)` — do not duplicate them here.
+    // and the saturating `global_active` decrement — do not duplicate them here.
     super::super::stall_recovery::finalize_orphaned_clear(
         shared,
         channel_id,

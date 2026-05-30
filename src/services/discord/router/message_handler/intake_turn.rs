@@ -3209,9 +3209,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         );
         super::super::super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳')
             .await;
-        shared
-            .global_active
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        super::super::super::saturating_decrement_global_active(shared);
         shared.turn_start_times.remove(&channel_id);
         post_adk_session_status(
             adk_session_key.as_deref(),

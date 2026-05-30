@@ -11,6 +11,7 @@ use super::super::settings::save_bot_settings;
 use super::super::turn_bridge::stop_active_turn;
 use super::super::{
     Context, Error, SharedData, check_auth, mailbox_cancel_active_turn, mailbox_clear_channel,
+    saturating_decrement_global_active,
 };
 use super::config::{
     clear_codex_goals_reset_pending_for_channel, clear_fast_mode_reset_pending_for_channel,
@@ -351,9 +352,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
 
     let cleared = mailbox_clear_channel(shared, provider, channel_id).await;
     if cleared.removed_token.is_some() {
-        shared
-            .global_active
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        saturating_decrement_global_active(shared);
     }
 
     {

@@ -106,7 +106,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -894,6 +894,44 @@ pub(super) fn check_deferred_restart(shared: &SharedData) {
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!("  [{ts}] 🔄 Deferred restart quick-exit requested for v{version}");
     std::process::exit(0);
+}
+
+pub(in crate::services::discord) fn saturating_decrement_counter(counter: &AtomicUsize) -> bool {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_sub(1)
+        })
+        .is_ok()
+}
+
+/// Decrement `global_active` without allowing a stale/restored cleanup path
+/// to wrap the counter from 0 to `usize::MAX`.
+pub(in crate::services::discord) fn saturating_decrement_global_active(
+    shared: &SharedData,
+) -> bool {
+    saturating_decrement_counter(shared.global_active.as_ref())
+}
+
+#[cfg(test)]
+mod global_active_counter_tests {
+    use super::saturating_decrement_counter;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn saturating_decrement_counter_does_not_underflow_zero() {
+        let counter = AtomicUsize::new(0);
+
+        assert!(!saturating_decrement_counter(&counter));
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn saturating_decrement_counter_decrements_positive_value() {
+        let counter = AtomicUsize::new(2);
+
+        assert!(saturating_decrement_counter(&counter));
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+    }
 }
 
 use session_runtime::{
@@ -4539,9 +4577,7 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
     for expired_session in &expired {
         let cleared = mailbox_clear_channel(shared, &provider, expired_session.channel_id).await;
         if cleared.removed_token.is_some() {
-            shared
-                .global_active
-                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            saturating_decrement_global_active(shared);
         }
         shared.api_timestamps.remove(&expired_session.channel_id);
     }

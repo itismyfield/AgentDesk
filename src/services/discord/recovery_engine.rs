@@ -768,9 +768,7 @@ async fn finish_recovered_turn_mailbox(
         removed_token
             .cancelled
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        shared
-            .global_active
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        super::saturating_decrement_global_active(shared);
     }
 
     super::clear_watchdog_deadline_override(channel_id.get()).await;
