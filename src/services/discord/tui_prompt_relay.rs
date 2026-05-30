@@ -345,8 +345,19 @@ fn external_input_relay_owner_for_output(
         &shared.tmux_watchers,
         tmux_session_name,
         output_path,
-        super::session_relay_sink::session_bound_discord_delivery_enabled(),
+        session_bound_discord_delivery_enabled(),
     )
+}
+
+fn session_bound_discord_delivery_enabled() -> bool {
+    #[cfg(unix)]
+    {
+        super::session_relay_sink::session_bound_discord_delivery_enabled()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 fn external_input_relay_owner_for_watchers(
