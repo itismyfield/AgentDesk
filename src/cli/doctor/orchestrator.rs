@@ -3872,7 +3872,10 @@ fn check_postgres_connection(cfg: &config::Config) -> Check {
             "DATABASE_URL 또는 database 설정값(host/port/dbname/user/password)을 확인하세요.",
         )
         .with_expected_actual("postgres connection succeeds", error)
-        .with_next_steps(vec!["agentdesk doctor --json".to_string()]),
+        .with_next_steps(vec![
+            "agentdesk doctor --json".to_string(),
+            format!("tail -n 200 {}", dcserver_log_hint()),
+        ]),
     }
 }
 
