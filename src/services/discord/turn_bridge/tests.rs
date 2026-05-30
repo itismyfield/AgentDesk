@@ -458,6 +458,9 @@ fn replace_fallback_records_failed_cleanup_and_does_not_commit_delivery() {
         Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
             edit_error: "HTTP 403 Forbidden: Missing Permissions".to_string(),
         }),
+        None,
+        None,
+        None,
         "unit_test",
     );
 

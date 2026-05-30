@@ -3613,6 +3613,13 @@ pub(super) fn spawn_turn_bridge(
     bridge: TurnBridgeContext,
 ) {
     use tracing::Instrument;
+    let bridge_turn_id = discord_turn_id(
+        &bridge.provider,
+        bridge.channel_id,
+        bridge.user_msg_id,
+        bridge.adk_session_key.as_deref(),
+    );
+    let bridge_session_key = bridge.adk_session_key.clone();
     // Attach the span via `.instrument(..)` on the async block instead of
     // holding a sync `Span::enter()` guard across `.await`. The sync-guard
     // pattern leaks the span into unrelated tasks scheduled on the same
@@ -3623,6 +3630,8 @@ pub(super) fn spawn_turn_bridge(
         channel_id = bridge.channel_id.get(),
         provider = bridge.provider.as_str(),
         dispatch_id = tracing::field::debug(bridge.dispatch_id.as_deref()),
+        session_key = tracing::field::debug(bridge_session_key.as_deref()),
+        turn_id = %bridge_turn_id,
     );
     super::task_supervisor::spawn_observed("discord_turn_bridge", async move {
         const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -3713,6 +3722,7 @@ pub(super) fn spawn_turn_bridge(
         let mut standby_relay_owns_output = matches!(
             initial_relay_owner_kind,
             super::inflight::RelayOwnerKind::StandbyRelay
+                | super::inflight::RelayOwnerKind::SessionBoundRelay
                 | super::inflight::RelayOwnerKind::Unknown
         );
         // #1452 (Codex iter 3 P1): track whether THIS turn published a
@@ -6683,6 +6693,9 @@ pub(super) fn spawn_turn_bridge(
                 gateway
                     .replace_message_with_outcome(channel_id, current_msg_id, &terminal_response)
                     .await,
+                dispatch_id.as_deref(),
+                adk_session_key.as_deref(),
+                Some(turn_id.as_str()),
                 "turn_bridge_cancelled_terminal_replace",
             );
             if replace_committed {
@@ -6720,6 +6733,9 @@ pub(super) fn spawn_turn_bridge(
                 gateway
                     .replace_message_with_outcome(channel_id, current_msg_id, &full_response)
                     .await,
+                dispatch_id.as_deref(),
+                adk_session_key.as_deref(),
+                Some(turn_id.as_str()),
                 "turn_bridge_prompt_too_long_replace",
             );
             if replace_committed {
@@ -7121,6 +7137,9 @@ pub(super) fn spawn_turn_bridge(
                         current_msg_id,
                         inflight_state.tmux_session_name.as_deref(),
                         replace_outcome,
+                        dispatch_id.as_deref(),
+                        adk_session_key.as_deref(),
+                        Some(turn_id.as_str()),
                         "turn_bridge_terminal_replace",
                     );
                     if replace_committed {
@@ -8019,6 +8038,8 @@ pub(super) fn spawn_turn_bridge(
                 crate::services::observability::emit_relay_delivery(
                     provider.as_str(),
                     channel_id.get(),
+                    dispatch_id.as_deref(),
+                    adk_session_key.as_deref(),
                     Some(turn_id.as_str()),
                     Some(current_msg_id.get()),
                     "turn_bridge",

@@ -1,7 +1,12 @@
 # Discord / TUI-direct relay unification — design + open-incident root causes
 
 Tracking issue: **#2855**. Related incidents: **#2853**, **#2854**.
-Status: design / investigation. No behavioral code change shipped yet (see "What is safe to ship" below).
+Status: design / investigation plus first implementation step. Branch
+`feat/relay-unification-2855-2871` adds an explicit external-input relay lease
+with `turn_id` / `session_key` / runtime / owner metadata and a
+`SessionBoundRelay` owner label. It does **not** route TUI-direct prompts back
+through Discord intake and does **not** force every direct input into a
+synthetic inflight yet.
 
 This document is the code-grounded result of the #2855 discussion request
 ("how can Discord-input and TUI-direct-input relay share as much logic as
@@ -39,7 +44,8 @@ Relevant types (`inflight.rs`):
 - `TurnSource`: `Managed` (default) · `MonitorTriggered` · `ExternalInput`
   (already exists: "User typed directly into the tmux pane … detected by the
   watcher when rollout activity advances without a Discord-origin inflight").
-- `RelayOwnerKind`: `None` (default) · `Watcher` · `StandbyRelay` · `Unknown`.
+- `RelayOwnerKind`: `None` (default) · `Watcher` · `StandbyRelay` ·
+  `SessionBoundRelay` · `Unknown`.
 - `InflightTurnState.rebind_origin: bool`.
 
 Sink ownership gate (`session_relay_sink.rs:40`):
@@ -115,6 +121,13 @@ Add a dedicated `RelayOwnerKind` for sink ownership (e.g.
 This makes the sink the one owner for `ExternalInput` turns and the bridge the
 one owner for `Managed` turns. No provider resubmission occurs because the
 prompt was already in the rollout before the inflight was created.
+
+Implementation note for the first step: when a live tmux watcher covers the
+runtime output and session-bound delivery is enabled, TUI-direct observation
+records `relay_owner = session_bound_relay` and the idle-tail path yields. When
+no watcher/session-bound producer covers that output, the explicit transitional
+owner remains `tui_prompt_relay`; this is documented rather than pretending the
+session-bound sink can deliver bytes it will never receive.
 
 ### Stage 3 — bridge-compatible adapter (longer term)
 
