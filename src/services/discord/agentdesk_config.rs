@@ -535,8 +535,36 @@ pub(super) fn resolve_role_binding(
     channel_name: Option<&str>,
 ) -> Option<RoleBinding> {
     let config = load_agentdesk_config()?;
-    let (agent, provider_key, channel) = find_channel_binding(&config, channel_id, channel_name)?;
-    Some(role_binding_from_channel(agent, provider_key, channel))
+    if let Some((agent, provider_key, channel)) =
+        find_channel_binding(&config, channel_id, channel_name)
+    {
+        return Some(role_binding_from_channel(agent, provider_key, channel));
+    }
+    // Voice channels are configured via `agents[].voice.channel_id`, not
+    // `agents[].channels`, so `find_channel_binding` never matches them. Without
+    // a role-map entry the voice transcript announce to the voice channel is
+    // rejected with 403 `channel not in role-map`, which makes voice_barge_in
+    // refuse the direct voice turn fallback and the agent never replies. Treat a
+    // configured voice channel as role-mapped to its owning agent so the
+    // announce + dispatch path is authorized automatically when voice is set up.
+    resolve_voice_channel_role_binding(&config, channel_id)
+}
+
+/// Resolve a role binding for a Discord voice channel declared in any agent's
+/// `voice.channel_id`. Returns `None` when no agent owns the channel.
+fn resolve_voice_channel_role_binding(
+    config: &Config,
+    channel_id: ChannelId,
+) -> Option<RoleBinding> {
+    let target = channel_id.get().to_string();
+    config.agents.iter().find_map(|agent| {
+        let voice_channel_id = agent.voice.channel_id.as_deref()?.trim();
+        if voice_channel_id != target {
+            return None;
+        }
+        let provider = ProviderKind::from_str(&agent.provider)?;
+        Some(role_binding_from_agent(agent, provider))
+    })
 }
 
 pub(super) fn resolve_worktree_isolation_policy(
