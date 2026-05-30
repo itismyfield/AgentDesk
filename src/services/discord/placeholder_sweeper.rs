@@ -263,7 +263,7 @@ pub(in crate::services::discord) async fn probe_placeholder_state(
 ///
 /// Anything else (real prose, code blocks, embeds rendered as text) is
 /// treated as a delivered response and protected from sweeper overwrite.
-pub(super) fn is_message_still_placeholder(content: &str) -> bool {
+pub(in crate::services::discord) fn is_message_still_placeholder(content: &str) -> bool {
     const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
     // Exact canonical header strings produced by `monitor_handoff_header`
     // in `src/services/discord/formatting.rs`. Keep in lockstep with that

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use poise::serenity_prelude::{ChannelId, MessageId};
+use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
 use serde::Serialize;
 
 use crate::services::discord::{self as discord, SharedData};
@@ -1426,6 +1426,56 @@ fn leak_recovery_chunk_fingerprints(chunks: &[String]) -> Vec<String> {
         .collect()
 }
 
+const LEAK_RECOVERY_MAX_SAFE_CHUNKS: usize = 20;
+const LEAK_RECOVERY_CONTINUATION_SCAN_LIMIT: u8 = 100;
+
+fn leak_recovery_confirmed_chunk_count<'a>(
+    current_message_content: &str,
+    continuation_contents: impl IntoIterator<Item = &'a str>,
+    chunks: &[String],
+) -> Option<usize> {
+    let first_chunk = chunks.first()?;
+    if current_message_content != first_chunk {
+        return None;
+    }
+
+    let mut confirmed = 1usize;
+    for content in continuation_contents {
+        if confirmed >= chunks.len() {
+            break;
+        }
+        if content == chunks[confirmed] {
+            confirmed += 1;
+        }
+    }
+    Some(confirmed)
+}
+
+async fn leak_recovery_fetch_continuation_contents(
+    http: &Arc<serenity::Http>,
+    channel_id: ChannelId,
+    current_msg_id: MessageId,
+    current_bot_user_id: u64,
+) -> Option<Vec<String>> {
+    let messages = channel_id
+        .messages(
+            http.as_ref(),
+            serenity::builder::GetMessages::new()
+                .after(current_msg_id)
+                .limit(LEAK_RECOVERY_CONTINUATION_SCAN_LIMIT),
+        )
+        .await
+        .ok()?;
+
+    Some(
+        messages
+            .into_iter()
+            .filter(|msg| msg.author.id.get() == current_bot_user_id)
+            .map(|msg| msg.content)
+            .collect(),
+    )
+}
+
 /// #2860 — recover a completed-stale inflight leak by delivering the generated
 /// answer that never reached the user. Returns `true` only when an answer was
 /// actually delivered.
@@ -1440,9 +1490,13 @@ fn leak_recovery_chunk_fingerprints(chunks: &[String]) -> Vec<String> {
 ///      Requiring `Watcher` therefore excludes the fallback class entirely; for the
 ///      delegated class the bridge skipped its own delivery and the watcher (per the
 ///      null offset) never relayed, so the answer is provably nowhere.
-///   2. A live-message probe of `current_msg_id`: only `StillPlaceholder` proceeds.
-/// Recovery edits `current_msg_id` in place (bridge parity), which is idempotent
-/// across repeated watchdog passes (re-editing to the same content is a no-op).
+///   2. A live-message probe of `current_msg_id`: recovery either starts from a
+///      still-placeholder message, or derives an exact already-delivered chunk
+///      prefix from the original message + same-bot continuation messages. A
+///      non-placeholder body that does not match chunk 0 fails closed.
+/// Recovery edits `current_msg_id` in place for chunk 0 and sends only missing
+/// continuation chunks. Repeated watchdog passes resume after the confirmed
+/// prefix, so partial success is retryable without duplicate chunk sends.
 async fn maybe_recover_completed_stale_leak(
     registry: &HealthRegistry,
     provider: &ProviderKind,
@@ -1493,19 +1547,20 @@ async fn maybe_recover_completed_stale_leak(
     ) else {
         return false;
     };
-    // Recovery delivers via a raw, fallback-free single-message EDIT of the
-    // placeholder. Skip anything the chunker would split into continuation
-    // messages — a single chunk is the only shape we can edit in place without
-    // creating a separate message or risking a stranded tail. `split_message` is
-    // the authoritative limit (its effective cap is below Discord's 2000).
-    // Multi-chunk (long-answer) auto-recovery is a deliberate follow-up: this v1
-    // recovers the common small-answer case safely and ESCALATES the rare large
-    // case via telemetry rather than risking a multi-message double-delivery.
+    // `split_message` is the authoritative limit (its effective cap is below
+    // Discord's 2000). For multi-chunk recovery we derive an idempotency ledger
+    // from live Discord state: the original message must contain chunk 0, and
+    // same-bot messages after it must contain chunks 1..N in order. If a retry
+    // fires after an edit/send succeeded but before the offset was persisted, it
+    // resumes after the confirmed prefix instead of posting duplicates.
     let chunks = discord::formatting::split_message(&delivery_text);
-    let [delivery_chunk] = chunks.as_slice() else {
+    if chunks.is_empty() {
+        return false;
+    }
+    if chunks.len() > LEAK_RECOVERY_MAX_SAFE_CHUNKS {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
-            "  [{ts}] ⚠ leak too large to auto-recover ({} bytes, {} chunks) on channel {}; escalating for manual follow-up",
+            "  [{ts}] ⚠ leak too large to auto-recover safely ({} bytes, {} chunks) on channel {}; escalating for manual follow-up",
             delivery_text.len(),
             chunks.len(),
             channel_id
@@ -1522,47 +1577,182 @@ async fn maybe_recover_completed_stale_leak(
             serde_json::json!({
                 "byte_len": delivery_text.len(),
                 "chunks": chunks.len(),
+                "max_safe_chunks": LEAK_RECOVERY_MAX_SAFE_CHUNKS,
                 "chunk_fingerprints": leak_recovery_chunk_fingerprints(&chunks),
             }),
         );
         return false;
-    };
+    }
 
     let http = match super::resolve_bot_http(registry, provider.as_str()).await {
         Ok(http) => http,
         Err(_) => return false,
     };
 
-    // AUTHORITATIVE guard: only deliver when the live message is still an
-    // undelivered placeholder. AlreadyDelivered / MessageGone / ProbeFailed all
-    // mean "do not touch".
-    match discord::placeholder_sweeper::probe_placeholder_state(
-        &http,
-        channel_id.get(),
-        state.current_msg_id,
-    )
-    .await
-    {
-        discord::placeholder_sweeper::PlaceholderProbe::StillPlaceholder => {}
-        _ => return false,
-    }
-
-    // Edit the placeholder in place with a raw, fallback-free edit. No new
-    // message is ever created, so a re-fire just re-edits the same message to the
-    // same content (idempotent) — no double-delivery, no stranded tail. On error
-    // nothing was delivered; fail closed and retry next pass.
-    if discord::http::edit_channel_message(
-        http.as_ref(),
-        channel_id,
-        MessageId::new(state.current_msg_id),
-        delivery_chunk,
-    )
-    .await
-    .is_err()
-    {
+    let current_msg_id = MessageId::new(state.current_msg_id);
+    let current_bot_user_id = match http.get_current_user().await {
+        Ok(user) => user.id.get(),
+        Err(error) => {
+            tracing::warn!(
+                "[leak-recover] failed to resolve current bot id for channel {}: {error}",
+                channel_id
+            );
+            return false;
+        }
+    };
+    let current_message = match http.get_message(channel_id, current_msg_id).await {
+        Ok(message) => message,
+        Err(error) => {
+            tracing::warn!(
+                "[leak-recover] failed to fetch placeholder message {} in channel {}: {error}",
+                current_msg_id,
+                channel_id
+            );
+            return false;
+        }
+    };
+    if current_message.author.id.get() != current_bot_user_id {
+        tracing::warn!(
+            "[leak-recover] refusing recovery for channel {} msg {}: message author is not current bot",
+            channel_id,
+            current_msg_id
+        );
         return false;
     }
-    let (delivery_detail, op) = ("edited", "edit");
+
+    let continuation_contents = if chunks.len() > 1 && current_message.content == chunks[0] {
+        let Some(contents) = leak_recovery_fetch_continuation_contents(
+            &http,
+            channel_id,
+            current_msg_id,
+            current_bot_user_id,
+        )
+        .await
+        else {
+            return false;
+        };
+        contents
+    } else {
+        Vec::new()
+    };
+
+    let mut confirmed_chunks = leak_recovery_confirmed_chunk_count(
+        &current_message.content,
+        continuation_contents.iter().map(String::as_str),
+        &chunks,
+    )
+    .unwrap_or(0);
+
+    let mut wrote_any_chunk = false;
+    if confirmed_chunks == 0 {
+        if !discord::placeholder_sweeper::is_message_still_placeholder(&current_message.content) {
+            let turn_id = (state.user_msg_id != 0)
+                .then(|| format!("discord:{}:{}", state.channel_id, state.user_msg_id));
+            crate::services::observability::emit_inflight_lifecycle_event(
+                provider.as_str(),
+                channel_id.get(),
+                state.dispatch_id.as_deref(),
+                state.session_key.as_deref(),
+                turn_id.as_deref(),
+                "leak_recovery_skipped_already_delivered",
+                serde_json::json!({
+                    "current_msg_id": state.current_msg_id,
+                    "byte_len": delivery_text.len(),
+                    "chunks": chunks.len(),
+                }),
+            );
+            return false;
+        }
+
+        // Edit the original placeholder to chunk 0. If Discord commits the edit
+        // but the client observes an error/crash, the next pass derives
+        // `confirmed_chunks == 1` from the live message and continues with chunk
+        // 1. No fallback send is used for the first chunk.
+        if discord::http::edit_channel_message(
+            http.as_ref(),
+            channel_id,
+            current_msg_id,
+            &chunks[0],
+        )
+        .await
+        .is_err()
+        {
+            return false;
+        }
+        wrote_any_chunk = true;
+        confirmed_chunks = 1;
+    }
+
+    for (chunk_index, chunk) in chunks.iter().enumerate().skip(confirmed_chunks) {
+        match discord::http::send_channel_message(http.as_ref(), channel_id, chunk).await {
+            Ok(_) => {
+                wrote_any_chunk = true;
+                tracing::debug!(
+                    "[leak-recover] sent continuation chunk {}/{} on channel {}",
+                    chunk_index + 1,
+                    chunks.len(),
+                    channel_id
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "[leak-recover] continuation chunk {}/{} failed on channel {}: {error}",
+                    chunk_index + 1,
+                    chunks.len(),
+                    channel_id
+                );
+                let turn_id = (state.user_msg_id != 0)
+                    .then(|| format!("discord:{}:{}", state.channel_id, state.user_msg_id));
+                crate::services::observability::emit_inflight_lifecycle_event(
+                    provider.as_str(),
+                    channel_id.get(),
+                    state.dispatch_id.as_deref(),
+                    state.session_key.as_deref(),
+                    turn_id.as_deref(),
+                    "leak_recovery_partial_retryable",
+                    serde_json::json!({
+                        "failed_chunk_index": chunk_index,
+                        "confirmed_chunks_before_attempt": confirmed_chunks,
+                        "chunks": chunks.len(),
+                    }),
+                );
+                return wrote_any_chunk;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    // If a prior attempt already delivered every chunk but crashed before
+    // persisting the offset, this pass reaches here with `wrote_any_chunk=false`;
+    // persist the terminal offset and emit only a confirmation event.
+    if confirmed_chunks >= chunks.len() && !wrote_any_chunk {
+        let turn_id = (state.user_msg_id != 0)
+            .then(|| format!("discord:{}:{}", state.channel_id, state.user_msg_id));
+        crate::services::observability::emit_inflight_lifecycle_event(
+            provider.as_str(),
+            channel_id.get(),
+            state.dispatch_id.as_deref(),
+            state.session_key.as_deref(),
+            turn_id.as_deref(),
+            "leak_recovery_confirmed_already_flushed",
+            serde_json::json!({
+                "chunks": chunks.len(),
+                "byte_start": start,
+                "byte_end": end,
+            }),
+        );
+    }
+
+    if confirmed_chunks < chunks.len() && !wrote_any_chunk {
+        return false;
+    }
+    let (delivery_detail, op) = if !wrote_any_chunk {
+        ("confirmed", "probe")
+    } else if chunks.len() == 1 {
+        ("edited", "edit")
+    } else {
+        ("edited+continued", "edit+send")
+    };
 
     // Advance the offset and persist so a later pass (even after a dcserver
     // restart) treats this tail as delivered and never re-sends it. Re-load and
@@ -1629,8 +1819,9 @@ async fn maybe_recover_completed_stale_leak(
 mod stall_watchdog_pure_tests {
     use super::{
         STALL_WATCHDOG_THRESHOLD_SECS, inflight_completed_stale_leak_detected,
-        leak_recovery_chunk_fingerprints, leak_recovery_unrelayed_range,
-        render_leak_recovery_delivery, stall_watchdog_should_force_clean,
+        leak_recovery_chunk_fingerprints, leak_recovery_confirmed_chunk_count,
+        leak_recovery_unrelayed_range, render_leak_recovery_delivery,
+        stall_watchdog_should_force_clean,
     };
     use crate::services::provider::ProviderKind;
     use chrono::TimeZone;
@@ -1708,6 +1899,54 @@ mod stall_watchdog_pure_tests {
         assert!(first[0].starts_with("0:"));
         assert!(first[1].starts_with("1:"));
         assert_ne!(first[0], first[1]);
+    }
+
+    #[test]
+    fn multi_chunk_progress_is_unknown_before_first_chunk_edit() {
+        let chunks = vec!["chunk-0".to_string(), "chunk-1".to_string()];
+
+        assert_eq!(
+            leak_recovery_confirmed_chunk_count("⠋ Processing...", std::iter::empty(), &chunks),
+            None
+        );
+    }
+
+    #[test]
+    fn multi_chunk_progress_derives_confirmed_prefix_from_live_messages() {
+        let chunks = vec![
+            "chunk-0".to_string(),
+            "chunk-1".to_string(),
+            "chunk-2".to_string(),
+        ];
+        let continuation_contents = ["unrelated bot notice", "chunk-1", "chunk-2"];
+
+        assert_eq!(
+            leak_recovery_confirmed_chunk_count(
+                "chunk-0",
+                continuation_contents.into_iter(),
+                &chunks,
+            ),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn multi_chunk_progress_stops_at_missing_tail_for_retry() {
+        let chunks = vec![
+            "chunk-0".to_string(),
+            "chunk-1".to_string(),
+            "chunk-2".to_string(),
+        ];
+        let continuation_contents = ["chunk-1"];
+
+        assert_eq!(
+            leak_recovery_confirmed_chunk_count(
+                "chunk-0",
+                continuation_contents.into_iter(),
+                &chunks,
+            ),
+            Some(2)
+        );
     }
 
     fn local_string(unix: i64) -> String {
