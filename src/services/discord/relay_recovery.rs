@@ -571,11 +571,7 @@ async fn apply_relay_recovery_decision(
                 let finish = mailbox_finish_turn(shared, provider, channel).await;
                 if let Some(token) = finish.removed_token.as_ref() {
                     token.cancelled.store(true, Ordering::Relaxed);
-                    let _ = shared.global_active.fetch_update(
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                        |current| current.checked_sub(1),
-                    );
+                    super::saturating_decrement_global_active(shared);
                 }
                 super::clear_watchdog_deadline_override(channel.get()).await;
                 shared

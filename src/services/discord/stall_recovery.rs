@@ -6,7 +6,7 @@
 //! turn task has already died. `mailbox_clear_channel` returns the
 //! orphaned `cancel_token` in `ClearChannelResult.removed_token`, but the
 //! normal turn-finish lifecycle (`finalize_turn_state` →
-//! `cancel_active_token` → `global_active.fetch_sub(1)`) was never run,
+//! `cancel_active_token` → saturating `global_active` decrement) was never run,
 //! so without this helper:
 //!   - `global_active` stays > 0 forever, blocking deferred-restart
 //!     drain (`/api/restart-deferred`) and confusing health-status
@@ -21,7 +21,6 @@
 //! as every other turn-end path in the system.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use poise::serenity_prelude as serenity;
 
@@ -36,12 +35,7 @@ use crate::services::provider::CancelToken;
 /// with the previous process. A wrapped counter convinces health /
 /// deferred-restart that an active turn exists forever.
 fn saturating_decrement_global_active(shared: &SharedData) -> bool {
-    shared
-        .global_active
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            current.checked_sub(1)
-        })
-        .is_ok()
+    super::saturating_decrement_global_active(shared)
 }
 
 /// Finalize the bookkeeping that `mailbox_clear_channel` does **not**

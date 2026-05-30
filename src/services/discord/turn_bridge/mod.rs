@@ -6400,11 +6400,7 @@ pub(super) fn spawn_turn_bridge(
                     removed_token
                         .cancelled
                         .store(true, std::sync::atomic::Ordering::Relaxed);
-                    let _ = shared_owned.global_active.fetch_update(
-                        std::sync::atomic::Ordering::Relaxed,
-                        std::sync::atomic::Ordering::Relaxed,
-                        |current| current.checked_sub(1),
-                    );
+                    super::saturating_decrement_global_active(&shared_owned);
                 }
                 super::clear_watchdog_deadline_override(channel_id.get()).await;
                 shared_owned
@@ -6509,9 +6505,7 @@ pub(super) fn spawn_turn_bridge(
                     removed_token
                         .cancelled
                         .store(true, std::sync::atomic::Ordering::Relaxed);
-                    shared_owned
-                        .global_active
-                        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    super::saturating_decrement_global_active(&shared_owned);
                 }
                 // Clean up any pending watchdog deadline override for this channel
                 super::clear_watchdog_deadline_override(channel_id.get()).await;

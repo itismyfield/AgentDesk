@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
 use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
 use serde::Serialize;
@@ -34,12 +34,6 @@ pub struct ProviderMailboxState {
     pub has_cancel_token: bool,
     pub queue_depth: usize,
     pub recovery_started: bool,
-}
-
-fn decrement_counter(counter: &AtomicUsize) {
-    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-        current.checked_sub(1)
-    });
 }
 
 /// Resolve the runtime that owns `channel_id` for `provider`. Channel-aware
@@ -520,7 +514,7 @@ async fn apply_runtime_hard_stop_cleanup(
 ) -> bool {
     if let Some(token) = finish.removed_token.as_ref() {
         token.cancelled.store(true, Ordering::Relaxed);
-        decrement_counter(shared.global_active.as_ref());
+        discord::saturating_decrement_global_active(shared);
     }
 
     discord::clear_watchdog_deadline_override(channel_id.get()).await;
@@ -745,7 +739,7 @@ pub async fn clear_provider_channel_runtime(
             "auto-queue slot clear",
         )
         .await;
-        decrement_counter(shared.global_active.as_ref());
+        discord::saturating_decrement_global_active(&shared);
     }
 
     {
@@ -2033,6 +2027,50 @@ async fn maybe_recover_completed_stale_leak(
 /// Always-on (`#[cfg(test)]`) because the helper has no filesystem/runtime
 /// dependencies; the legacy-sqlite-tests gate would prevent these from
 /// running in normal `cargo test --bin agentdesk` invocations.
+
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+mod global_active_cleanup_tests {
+    use super::apply_runtime_hard_stop_cleanup;
+    use crate::services::discord;
+    use crate::services::provider::{CancelToken, ProviderKind};
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn hard_stop_cleanup_does_not_underflow_global_active_for_restored_mailbox() {
+        let shared = super::super::super::make_shared_data_for_tests();
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(1485506232256984);
+        let token = Arc::new(CancelToken::new());
+
+        assert!(
+            discord::mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                token,
+                UserId::new(343742347365974026),
+                MessageId::new(1487795113240559704),
+            )
+            .await
+        );
+        let finish = discord::mailbox_finish_turn(&shared, &provider, channel_id).await;
+        assert!(finish.removed_token.is_some());
+        assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+
+        apply_runtime_hard_stop_cleanup(
+            &shared,
+            &provider,
+            channel_id,
+            &finish,
+            "hard_stop_cleanup_does_not_underflow_global_active_for_restored_mailbox",
+            true,
+        )
+        .await;
+
+        assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+    }
+}
 
 #[cfg(test)]
 mod stall_watchdog_pure_tests {

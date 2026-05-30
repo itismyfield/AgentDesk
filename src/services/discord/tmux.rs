@@ -1182,11 +1182,7 @@ async fn finish_monitor_auto_turn(
         token
             .cancelled
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        let _ = shared.global_active.fetch_update(
-            std::sync::atomic::Ordering::Relaxed,
-            std::sync::atomic::Ordering::Relaxed,
-            |current| current.checked_sub(1),
-        );
+        super::saturating_decrement_global_active(shared);
     }
     shared.turn_start_times.remove(&channel_id);
     if let Ok(mut last) = shared.last_turn_at.lock() {
@@ -2352,11 +2348,7 @@ async fn finish_restored_watcher_active_turn(
         token
             .cancelled
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        let _ = shared.global_active.fetch_update(
-            std::sync::atomic::Ordering::Relaxed,
-            std::sync::atomic::Ordering::Relaxed,
-            |current| current.checked_sub(1),
-        );
+        super::saturating_decrement_global_active(shared);
     }
     super::clear_watchdog_deadline_override(channel_id.get()).await;
     shared
@@ -4481,6 +4473,61 @@ mod tests {
             "restored_watcher_finish_does_not_underflow_global_active",
         )
         .await;
+
+        assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn delegated_watcher_finish_does_not_underflow_global_active() {
+        let shared = super::super::make_shared_data_for_tests();
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(1485506232256982);
+        let token = Arc::new(CancelToken::new());
+        assert!(
+            super::super::mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                token,
+                UserId::new(343742347365974026),
+                MessageId::new(1487795113240559702),
+            )
+            .await
+        );
+        assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+
+        finish_restored_watcher_active_turn(
+            &shared,
+            &provider,
+            channel_id,
+            false,
+            true,
+            true,
+            "delegated_watcher_finish_does_not_underflow_global_active",
+        )
+        .await;
+
+        assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn monitor_auto_turn_finish_does_not_underflow_global_active() {
+        let shared = super::super::make_shared_data_for_tests();
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(1485506232256983);
+        let token = Arc::new(CancelToken::new());
+        assert!(
+            super::super::mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                token,
+                UserId::new(343742347365974026),
+                MessageId::new(1487795113240559703),
+            )
+            .await
+        );
+        assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+
+        finish_monitor_auto_turn(&shared, &provider, channel_id).await;
 
         assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
     }

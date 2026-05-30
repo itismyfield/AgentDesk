@@ -20,7 +20,6 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use poise::serenity_prelude as serenity;
 
@@ -702,12 +701,7 @@ async fn finalize_abandoned_mailbox(
             },
             "placeholder_sweeper abandoned",
         );
-        let _ =
-            shared
-                .global_active
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                    current.checked_sub(1)
-                });
+        super::saturating_decrement_global_active(shared);
     }
     if finish.has_pending {
         super::schedule_deferred_idle_queue_kickoff(
