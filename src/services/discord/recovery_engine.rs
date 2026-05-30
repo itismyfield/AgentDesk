@@ -334,7 +334,7 @@ async fn complete_recovery_visible_turn(
                 provider = %provider.as_str(),
                 channel = channel_id.get(),
                 source = source,
-                "[{ts}] ⚠ #2935 recovery visible completion suppressed — TUI quiescence gate timed out; continuing dispatch / analytics / mailbox cleanup because terminal delivery already committed"
+                "[{ts}] ⚠ #2935 recovery visible completion suppressed — TUI quiescence gate timed out; continuing dispatch / analytics / mailbox cleanup because recovery already has terminal response delivery evidence"
             );
             return RecoveryCompletionOutcome::VisibleCompletionSuppressed;
         }
@@ -659,6 +659,9 @@ fn recovery_ready_without_output_has_captured_response(
 }
 
 fn recovery_terminal_delivery_already_committed(state: &inflight::InflightTurnState) -> bool {
+    // Planned restart and rebind-origin rows carry their own lifecycle owners:
+    // this fast path is only for stale ordinary turns whose Discord terminal
+    // response was already delivered before recovery tried to re-register them.
     state.terminal_delivery_completed() && state.restart_mode.is_none() && !state.rebind_origin
 }
 
