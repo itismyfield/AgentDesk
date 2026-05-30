@@ -1185,7 +1185,7 @@ mod tests {
             &ProviderKind::Claude,
             None,
             Some("claude-sonnet-4-6"),
-            "claude-opus-4-6",
+            "claude-opus-4-8",
             ROLE_MAP_SOURCE,
             None,
         );
@@ -1812,11 +1812,11 @@ agents:
             && entry.label == "Sonnet 4.6 1M"
             && entry.description == "1M context window | Sonnet 4.6 alias"));
         assert!(options.iter().any(|entry| entry.value == "opus[1m]"
-            && entry.label == "Opus 4.6 1M"
-            && entry.description == "1M context window | Opus 4.6 alias"));
+            && entry.label == "Opus 4.8 1M"
+            && entry.description == "1M context window | Opus 4.8 alias"));
         assert!(options.iter().any(|entry| entry.value == "opusplan"
-            && entry.label == "Opus Plan 4.6"
-            && entry.description == "Opus 4.6 planning | Sonnet 4.6 executes"));
+            && entry.label == "Opus Plan 4.8"
+            && entry.description == "Opus 4.8 planning | Sonnet 4.6 executes"));
     }
 
     #[test]

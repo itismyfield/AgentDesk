@@ -9,7 +9,8 @@ use super::super::{
 };
 use crate::services::provider::ProviderKind;
 
-// Keep provider-specific skill wording in one helper so /cc and !cc stay aligned.
+// Keep provider-specific skill wording in one helper so /skill, /cc, !skill,
+// and !cc stay aligned.
 
 pub(in crate::services::discord) fn build_provider_skill_prompt(
     provider: &ProviderKind,
@@ -91,7 +92,7 @@ pub(in crate::services::discord) fn build_provider_skill_prompt(
     }
 }
 
-/// Autocomplete handler for /cc skill names
+/// Autocomplete handler for /skill and /cc skill names
 async fn autocomplete_skill<'a>(
     ctx: Context<'a>,
     partial: &'a str,
@@ -128,14 +129,11 @@ async fn autocomplete_skill<'a>(
     choices
 }
 
-/// /cc <skill> [args] — Run a provider skill
-#[poise::command(slash_command, rename = "cc")]
-pub(in crate::services::discord) async fn cmd_cc(
+async fn run_skill_slash_command(
     ctx: Context<'_>,
-    #[description = "Skill name"]
-    #[autocomplete = "autocomplete_skill"]
+    invoked_as: &'static str,
     skill: String,
-    #[description = "Additional arguments for the skill"] args: Option<String>,
+    args: Option<String>,
 ) -> Result<(), Error> {
     let user_id = ctx.author().id;
     let user_name = &ctx.author().name;
@@ -145,7 +143,7 @@ pub(in crate::services::discord) async fn cmd_cc(
 
     let ts = chrono::Local::now().format("%H:%M:%S");
     let args_str = args.as_deref().unwrap_or("");
-    tracing::info!("  [{ts}] ◀ [{user_name}] /cc {skill} {args_str}");
+    tracing::info!("  [{ts}] ◀ [{user_name}] {invoked_as} {skill} {args_str}");
 
     // Handle built-in commands directly instead of sending to AI
     match skill.as_str() {
@@ -154,11 +152,12 @@ pub(in crate::services::discord) async fn cmd_cc(
             return Ok(());
         }
         "stop" => {
-            // Issue #1005: `/cc stop` is a runtime-control alias for `/stop`
+            // Issue #1005: `/skill stop` and `/cc stop` are runtime-control
+            // aliases for `/stop`
             // — it cancels the live turn — so it must obey the same
             // owner-only policy as `/stop` itself. Without this gate a
             // non-owner allowed in via `allow_all_users=true` could drop
-            // active turns by routing through `/cc stop`.
+            // active turns by routing through an alias.
             if !super::enforce_slash_command_policy(&ctx, "/stop").await? {
                 return Ok(());
             }
@@ -175,7 +174,7 @@ pub(in crate::services::discord) async fn cmd_cc(
                         &ctx.data().provider,
                         &token,
                         super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
-                        "/cc stop",
+                        &format!("{invoked_as} stop"),
                     )
                     .await;
                     super::control::notify_turn_stop(
@@ -183,7 +182,7 @@ pub(in crate::services::discord) async fn cmd_cc(
                         &ctx.data().shared,
                         &ctx.data().provider,
                         channel_id,
-                        "/cc stop",
+                        &format!("{invoked_as} stop"),
                     )
                     .await;
                     tracing::info!("  [{ts}] ■ Cancel signal sent");
@@ -376,6 +375,30 @@ pub(in crate::services::discord) async fn cmd_cc(
     .await?;
 
     Ok(())
+}
+
+/// /skill <skill> [args] — Run a provider skill
+#[poise::command(slash_command, rename = "skill")]
+pub(in crate::services::discord) async fn cmd_skill(
+    ctx: Context<'_>,
+    #[description = "Skill name"]
+    #[autocomplete = "autocomplete_skill"]
+    skill: String,
+    #[description = "Additional arguments for the skill"] args: Option<String>,
+) -> Result<(), Error> {
+    run_skill_slash_command(ctx, "/skill", skill, args).await
+}
+
+/// /cc <skill> [args] — Legacy alias for /skill
+#[poise::command(slash_command, rename = "cc")]
+pub(in crate::services::discord) async fn cmd_cc(
+    ctx: Context<'_>,
+    #[description = "Skill name"]
+    #[autocomplete = "autocomplete_skill"]
+    skill: String,
+    #[description = "Additional arguments for the skill"] args: Option<String>,
+) -> Result<(), Error> {
+    run_skill_slash_command(ctx, "/cc", skill, args).await
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]

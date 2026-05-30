@@ -55,7 +55,8 @@ AI can read, edit, and run commands in your session.
 `/metrics [date]` — Local turn metrics by date/channel
 
 **Skills**
-`/cc <skill>` — Run a provider skill (autocomplete)
+`/skill <skill>` — Run a provider skill (autocomplete)
+`/cc <skill>` — Legacy alias for `/skill`
 
 **Restart**
 `/restart` — Restart this provider session immediately (preserves conversation via --resume when supported)

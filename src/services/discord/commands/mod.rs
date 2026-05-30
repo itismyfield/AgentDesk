@@ -59,7 +59,7 @@ pub(super) use recovery_ops::{cmd_deadlock_recover, cmd_machine_flip, cmd_stuck_
 pub(super) use restart::cmd_restart;
 pub(super) use session::{cmd_pwd, cmd_start};
 pub(in crate::services::discord) use skill::build_provider_skill_prompt;
-pub(super) use skill::cmd_cc;
+pub(super) use skill::{cmd_cc, cmd_skill};
 pub(in crate::services::discord) use text_commands::handle_text_command;
 pub(super) use tui_passthrough::{cmd_compact, cmd_context, cmd_cost, cmd_effort};
 pub(in crate::services::discord) use voice::{

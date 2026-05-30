@@ -53,8 +53,8 @@ const CLAUDE_MODEL_CATALOG: &[ModelCatalogEntry] = &[
     },
     ModelCatalogEntry {
         value: "opus",
-        label: "Opus 4.6",
-        primary_summary: "Highest quality 4.6 alias",
+        label: "Opus 4.8",
+        primary_summary: "Highest quality 4.8 alias",
         secondary_summary: "Claude Code plan",
     },
     ModelCatalogEntry {
@@ -71,14 +71,14 @@ const CLAUDE_MODEL_CATALOG: &[ModelCatalogEntry] = &[
     },
     ModelCatalogEntry {
         value: "opus[1m]",
-        label: "Opus 4.6 1M",
+        label: "Opus 4.8 1M",
         primary_summary: "1M context window",
-        secondary_summary: "Opus 4.6 alias",
+        secondary_summary: "Opus 4.8 alias",
     },
     ModelCatalogEntry {
         value: "opusplan",
-        label: "Opus Plan 4.6",
-        primary_summary: "Opus 4.6 planning",
+        label: "Opus Plan 4.8",
+        primary_summary: "Opus 4.8 planning",
         secondary_summary: "Sonnet 4.6 executes",
     },
 ];
@@ -570,7 +570,7 @@ fn build_gemini_model_catalog_from_models_js(raw: &str) -> Option<Vec<ModelCatal
 }
 
 const CLAUDE_MODEL_ALIASES: &[(&str, &str)] = &[
-    ("opus", "claude-opus-4-6"),
+    ("opus", "claude-opus-4-8"),
     ("sonnet", "claude-sonnet-4-6"),
     ("haiku", "claude-haiku-4-5-20251001"),
 ];

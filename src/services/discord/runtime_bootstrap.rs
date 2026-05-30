@@ -1318,6 +1318,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         commands::cmd_stop(),
         commands::cmd_down(),
         commands::cmd_shell(),
+        commands::cmd_skill(),
         commands::cmd_cc(),
         commands::cmd_metrics(),
         commands::cmd_model(),

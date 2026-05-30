@@ -85,7 +85,9 @@ impl FinalizeTurnCancelRequest {
 }
 
 fn text_stop_surface(command: &str) -> &'static str {
-    if command.trim().eq_ignore_ascii_case("!cc stop") {
+    if command.trim().eq_ignore_ascii_case("!cc stop")
+        || command.trim().eq_ignore_ascii_case("!skill stop")
+    {
         "text_cc_stop"
     } else {
         "text_stop"
@@ -235,6 +237,12 @@ mod tests {
             "!cc stop",
             false,
         ));
+        let skill_stop = finalize_turn_cancel(FinalizeTurnCancelRequest::from_text_stop(
+            ProviderKind::Claude,
+            ChannelId::new(42),
+            "!skill stop",
+            false,
+        ));
 
         assert_eq!(stop.status, CANCELLED_TURN_STATUS);
         assert_eq!(stop.details.surface, "text_stop");
@@ -242,6 +250,8 @@ mod tests {
         assert!(stop.details.termination_recorded);
         assert_eq!(cc_stop.details.surface, "text_cc_stop");
         assert!(!cc_stop.details.termination_recorded);
+        assert_eq!(skill_stop.details.surface, "text_cc_stop");
+        assert!(!skill_stop.details.termination_recorded);
     }
 
     #[tokio::test]
