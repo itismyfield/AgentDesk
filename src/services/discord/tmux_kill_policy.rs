@@ -317,6 +317,16 @@ fn recent_turn_stop_matches_watcher_death(
     if !session_matches {
         return false;
     }
+    if let (Some(_entry_tmux), Some(_stop_offset), Some(stop_generation_mtime_ns)) = (
+        entry.tmux_session_name.as_deref(),
+        entry.stop_output_offset,
+        entry.stop_generation_mtime_ns,
+    ) {
+        let current_generation_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
+        if current_generation_mtime_ns != stop_generation_mtime_ns {
+            return false;
+        }
+    }
     // codex P2 round 3: when both offsets are known, only consume the
     // tombstone if the watcher has not moved past the cancel boundary
     // (with a small grace for the wrapper's teardown bytes between cancel
@@ -556,6 +566,35 @@ mod tests {
         assert!(
             !recent_turn_stop_matches_watcher_range(&entry, channel, tmux_name, 681, now),
             "a cancel tombstone from an older wrapper generation must not suppress the new session"
+        );
+    }
+
+    #[test]
+    fn recent_turn_stop_generation_mismatch_does_not_match_watcher_death() {
+        let now = std::time::Instant::now();
+        let channel = ChannelId::new(987_2929_001);
+        let tmux_name = "AgentDesk-codex-generation-mismatch-death";
+        let stop_offset = 571_162;
+        let entry = RecentTurnStop {
+            id: uuid::Uuid::new_v4(),
+            channel_id: channel,
+            tmux_session_name: Some(tmux_name.to_string()),
+            stop_output_offset: Some(stop_offset),
+            stop_generation_mtime_ns: Some(123_456),
+            reason: "user-cancel".to_string(),
+            recorded_at: now,
+            pg_persistence: None,
+        };
+
+        assert!(
+            !recent_turn_stop_matches_watcher_death(
+                &entry,
+                channel,
+                tmux_name,
+                Some(stop_offset + (CANCEL_TEARDOWN_GRACE_BYTES / 2)),
+                now
+            ),
+            "a stale cancel tombstone from an older wrapper generation must not suppress a later session death"
         );
     }
 
