@@ -1,6 +1,6 @@
 """Unit tests for scripts/audit_maintainability.py and its check modules.
 
-Each of the 9 checks gets a focused fixture: a temporary ``src/`` tree is
+Each of the 10 checks gets a focused fixture: a temporary ``src/`` tree is
 created with files designed to trigger (or specifically not trigger) the
 rule, and we assert the harness emits the expected findings.
 """
@@ -43,6 +43,7 @@ from audit_maintainability.checks import (  # noqa: E402
     manual_json_mapping,
     namespace_size_caps,
     route_srp,
+    service_server_backflow,
     source_of_truth_alias,
 )
 from audit_maintainability.checks import giant_files  # noqa: E402
@@ -298,6 +299,78 @@ class RouteSrpCheck(unittest.TestCase):
         self.assertEqual(_files(failures), {"src/server/routes/new.rs"})
 
 
+class ServiceServerBackflowCheck(unittest.TestCase):
+    def test_flags_service_references_to_server_layer(self) -> None:
+        body = """
+        use crate::server::routes::AppState;
+        async fn handler() {
+            super::server::routes::dispatches::resolve_channel_alias("ops");
+        }
+        """
+        comments_only = """
+        // use crate::server::routes::AppState;
+        /* super::server::routes::dispatches */
+        pub fn clean() {}
+        """
+        with _FakeSrcTree(
+            {
+                "src/services/dirty.rs": body,
+                "src/services/comments.rs": comments_only,
+                "src/server/routes/dirty.rs": body,
+                "src/services/dirty_tests.rs": body,
+            }
+        ):
+            hits = list(service_server_backflow.CHECK.runner(set()))
+        self.assertEqual(_files(hits), {"src/services/dirty.rs"})
+        self.assertEqual(len(hits), 2)
+
+    def test_baseline_gate_allows_committed_file_counts(self) -> None:
+        body = """
+        use crate::server::routes::AppState;
+        """
+        with _FakeSrcTree({"src/services/legacy.rs": body}) as root:
+            _write(
+                root,
+                service_server_backflow.BASELINE_REL_PATH,
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "rule": "service_server_backflow",
+                        "total_count": 1,
+                        "files": {"src/services/legacy.rs": {"count": 1}},
+                    }
+                ),
+            )
+            hits = list(service_server_backflow.CHECK.runner(set()))
+            baseline_gate = service_server_backflow.CHECK.baseline_gate
+            self.assertIsNotNone(baseline_gate)
+            failures = list(baseline_gate(hits)) if baseline_gate else []
+        self.assertEqual(failures, [])
+
+    def test_baseline_gate_flags_new_service_backflow_file(self) -> None:
+        body = """
+        use crate::server::routes::AppState;
+        """
+        with _FakeSrcTree({"src/services/new.rs": body}) as root:
+            _write(
+                root,
+                service_server_backflow.BASELINE_REL_PATH,
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "rule": "service_server_backflow",
+                        "total_count": 1,
+                        "files": {"src/services/old.rs": {"count": 1}},
+                    }
+                ),
+            )
+            hits = list(service_server_backflow.CHECK.runner(set()))
+            baseline_gate = service_server_backflow.CHECK.baseline_gate
+            self.assertIsNotNone(baseline_gate)
+            failures = list(baseline_gate(hits)) if baseline_gate else []
+        self.assertEqual(_files(failures), {"src/services/new.rs"})
+
+
 class DirectDiscordSendsCheck(unittest.TestCase):
     def test_flags_direct_send_outside_outbound(self) -> None:
         outside = """
@@ -489,7 +562,7 @@ class SourceOfTruthAliasCheck(unittest.TestCase):
 
 
 class HarnessCli(unittest.TestCase):
-    def test_runs_all_nine_checks_and_emits_yaml_keys(self) -> None:
+    def test_runs_all_ten_checks_and_emits_yaml_keys(self) -> None:
         with _FakeSrcTree({"src/main.rs": "fn main() {}\n"}):
             specs = HARNESS.load_check_specs()
             findings = HARNESS.run_all(specs, {})
@@ -500,6 +573,7 @@ class HarnessCli(unittest.TestCase):
             "giant_files",
             "namespace_size_caps",
             "route_srp_violations",
+            "service_server_backflow",
             "direct_discord_sends",
             "manual_json_row_mapping",
             "limit_clamp_duplication",
@@ -540,15 +614,19 @@ class HarnessCli(unittest.TestCase):
                 "giant_files",
                 "namespace_size_caps",
                 "direct_discord_sends",
+                "manual_json_row_mapping",
                 "legacy_sqlite_refs",
                 "source_of_truth_alias_writes",
                 "git_subprocess_callsites",
             },
         )
-        self.assertEqual(baseline_gated, {"route_srp_violations"})
+        self.assertEqual(
+            baseline_gated,
+            {"route_srp_violations", "service_server_backflow"},
+        )
         warning_only = {
             "route_srp_violations",
-            "manual_json_row_mapping",
+            "service_server_backflow",
             "limit_clamp_duplication",
         }
         self.assertTrue(all(not spec.hard_gate for spec in specs if spec.key in warning_only))
@@ -560,11 +638,11 @@ class HarnessCli(unittest.TestCase):
             yaml_text = HARNESS.render_yaml(specs, findings)
             json_payload = json.loads(HARNESS.render_json(specs, findings))
         self.assertIn("hard_gate_enabled: true", yaml_text)
-        self.assertIn("hard_gate_count: 6", yaml_text)
-        self.assertIn("baseline_gate_count: 1", yaml_text)
+        self.assertIn("hard_gate_count: 7", yaml_text)
+        self.assertIn("baseline_gate_count: 2", yaml_text)
         self.assertIs(json_payload["hard_gate_enabled"], True)
-        self.assertEqual(json_payload["hard_gate_count"], 6)
-        self.assertEqual(json_payload["baseline_gate_count"], 1)
+        self.assertEqual(json_payload["hard_gate_count"], 7)
+        self.assertEqual(json_payload["baseline_gate_count"], 2)
 
     def test_check_mode_returns_zero_with_no_findings(self) -> None:
         with _FakeSrcTree({"src/main.rs": "fn main() {}\n"}):
@@ -603,6 +681,29 @@ class HarnessCli(unittest.TestCase):
                     {
                         "schema_version": 1,
                         "rule": "route_srp_violations",
+                        "total_count": 0,
+                        "files": {},
+                    }
+                ),
+            )
+            allowlist = root / "empty.toml"
+            allowlist.write_text("", encoding="utf-8")
+            with mock.patch.object(sys, "stdout", new=mock.MagicMock()), mock.patch.object(
+                sys, "stderr", new=mock.MagicMock()
+            ):
+                rc = HARNESS.main(["--check", "--format", "json", "--allowlist", str(allowlist)])
+        self.assertEqual(rc, 1)
+
+    def test_check_mode_fails_on_service_server_backflow_regression(self) -> None:
+        body = "use crate::server::routes::AppState;\n"
+        with _FakeSrcTree({"src/services/new.rs": body}) as root:
+            _write(
+                root,
+                service_server_backflow.BASELINE_REL_PATH,
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "rule": "service_server_backflow",
                         "total_count": 0,
                         "files": {},
                     }

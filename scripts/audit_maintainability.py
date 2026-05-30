@@ -11,11 +11,11 @@ Stdlib only; Python 3.11+.
 
 Hard and baseline gates
 -----------------------
-Six checks are blocking in ``--check`` mode: direct Discord send regressions,
+Seven checks are blocking in ``--check`` mode: direct Discord send regressions,
 direct git subprocess regressions, runtime SQLite/legacy DB references,
-source-of-truth alias writes, giant files missing from
-``docs/agent-maintenance/change-surfaces.md``, and configured namespace size
-cap regressions. Existing findings from the enablement commit are captured in
+source-of-truth alias writes, manual JSON row mapping, giant files missing from
+``docs/agent-maintenance/change-surfaces.md``, and configured namespace size cap
+regressions. Existing findings from the enablement commit are captured in
 ``scripts/audit_allowlist.toml``.
 
 Some warning-only checks also define no-regression baseline gates. These keep
@@ -46,6 +46,7 @@ CHECK_MODULES = (
     "audit_maintainability.checks.giant_files",
     "audit_maintainability.checks.namespace_size_caps",
     "audit_maintainability.checks.route_srp",
+    "audit_maintainability.checks.service_server_backflow",
     "audit_maintainability.checks.direct_discord_sends",
     "audit_maintainability.checks.manual_json_mapping",
     "audit_maintainability.checks.limit_clamp_duplication",
@@ -242,9 +243,10 @@ def render_markdown(specs: list[CheckSpec], findings: dict[str, list[Finding]]) 
     )
     buf.write(
         "Automated audit of giant files, route SRP violations, direct Discord "
-        "sends, manual JSON row mapping, limit/days clamp duplication, git "
-        "subprocess callsites, legacy SQLite references, source-of-truth "
-        "alias writes, and namespace size caps. See "
+        "sends, service-to-server backflow, manual JSON row mapping, "
+        "limit/days clamp duplication, git subprocess callsites, legacy "
+        "SQLite references, source-of-truth alias writes, and namespace size "
+        "caps. See "
         "`scripts/audit_maintainability.py` (#1282).\n\n"
     )
     if hard_gate_keys:
