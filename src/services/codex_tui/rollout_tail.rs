@@ -1251,18 +1251,7 @@ fn explicit_finalize_path(
         return None;
     }
 
-    // Recover the assistant text from `last_agent_message` when the turn
-    // produced no `response_item/message` (tool-only turns or rollouts where
-    // the assistant text is only carried on `task_complete`).
-    if !state.saw_assistant_text
-        && let Some(text) = state.task_complete_fallback_text.take()
-    {
-        if !state.final_text.is_empty() {
-            state.final_text.push_str("\n\n");
-        }
-        state.final_text.push_str(&text);
-        state.saw_assistant_text = true;
-    }
+    promote_task_complete_fallback_text(state);
 
     // Schema-drift guard: an explicit terminal signal without any assistant
     // text is not enough to emit an empty Done. Fall through to the heuristic
@@ -1281,6 +1270,54 @@ fn explicit_finalize_path(
     }
 
     Some(RolloutFinalizePath::Envelope)
+}
+
+fn promote_task_complete_fallback_text(state: &mut RolloutParseState) {
+    let Some(text) = state.task_complete_fallback_text.as_deref() else {
+        return;
+    };
+
+    // Recover the assistant text from `last_agent_message` when the turn
+    // produced no `response_item/message` (tool-only turns or rollouts where
+    // the assistant text is only carried on `task_complete`).
+    if !state.saw_assistant_text {
+        let text = state
+            .task_complete_fallback_text
+            .take()
+            .expect("task_complete fallback checked above");
+        if !state.final_text.is_empty() {
+            state.final_text.push_str("\n\n");
+        }
+        state.final_text.push_str(&text);
+        state.saw_assistant_text = true;
+        return;
+    }
+
+    // Codex TUI rollout can stream only the visible tail through
+    // response_item/message while task_complete.last_agent_message carries the
+    // full provider terminal body. Promote that authoritative body before
+    // Done.result is emitted so turn_bridge and session-bound relay receive the
+    // same complete BEGIN/MID/END response.
+    if task_complete_fallback_supersedes_final_text(&state.final_text, text) {
+        let previous_final_text_len = state.final_text.len();
+        let text = state
+            .task_complete_fallback_text
+            .take()
+            .expect("task_complete fallback checked above");
+        tracing::info!(
+            target: "agentdesk::codex_rollout_handoff",
+            previous_final_text_len,
+            task_complete_fallback_len = text.len(),
+            "codex rollout promoted task_complete last_agent_message over streamed tail"
+        );
+        state.final_text = text;
+    }
+}
+
+fn task_complete_fallback_supersedes_final_text(final_text: &str, fallback_text: &str) -> bool {
+    let streamed = final_text.trim();
+    let fallback = fallback_text.trim();
+    !streamed.is_empty() && fallback.len() > streamed.len() && fallback.ends_with(streamed)
 }
 
 fn heuristic_finalize_allowed(
@@ -1324,6 +1361,12 @@ fn emit_done(
         saw_assistant_text = state.saw_assistant_text,
         hook_completion_seen = state.hook_completion_seen,
         composer_ready_seen = state.composer_ready_seen,
+        final_text_len = state.final_text.len(),
+        task_complete_fallback_len = state
+            .task_complete_fallback_text
+            .as_deref()
+            .map(str::len)
+            .unwrap_or(0),
         "codex rollout tail emitting Done"
     );
     sender.send(StreamMessage::Done {
@@ -3103,6 +3146,59 @@ mod tests {
         assert!(matches!(
             messages.last(),
             Some(StreamMessage::Done { result, .. }) if result == "hello"
+        ));
+    }
+
+    #[test]
+    fn task_complete_last_agent_message_promotes_full_body_over_streamed_tail() {
+        let mut full_body = String::from("[E2E:E15:BEGIN]\n");
+        for line in 1..=160 {
+            full_body.push_str(&format!("E15-LINE-{line:03}\n"));
+            if line == 80 {
+                full_body.push_str("[E2E:E15:MID]\n");
+            }
+        }
+        full_body.push_str("[E2E:E15:END]");
+        let mut streamed_tail = String::new();
+        for line in 150..=160 {
+            streamed_tail.push_str(&format!("E15-LINE-{line:03}\n"));
+        }
+        streamed_tail.push_str("[E2E:E15:END]");
+        let body = [
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": streamed_tail.clone()}]
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "turn_id": "t1",
+                    "last_agent_message": full_body.clone()
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n")
+            + "\n";
+
+        let messages = collect_rollout(&body, 0);
+
+        assert!(
+            messages
+                .iter()
+                .any(|message| matches!(message, StreamMessage::Text { content } if content == &streamed_tail)),
+            "streamed handoff should still expose the raw tail text event: {messages:?}"
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, .. }) if result == &full_body
         ));
     }
 
