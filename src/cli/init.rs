@@ -153,6 +153,31 @@ fn cli_init_provider_from_index(index: usize) -> &'static str {
     }
 }
 
+fn cli_init_provider_readiness_line(provider: &str) -> Option<String> {
+    let kind = ProviderKind::from_str(provider)?;
+    let probe = kind.probe_runtime()?;
+    let installed = probe.resolution.resolved_path.is_some() && probe.version.is_some();
+    let binary_status = if installed {
+        "installed"
+    } else if probe.resolution.resolved_path.is_some() {
+        "installed(version probe failed)"
+    } else {
+        "not found"
+    };
+    let credential_status = if probe.credential_present {
+        probe
+            .credential_source
+            .as_deref()
+            .map(|source| format!("present ({source}; auth usability unverified)"))
+            .unwrap_or_else(|| "present (auth usability unverified)".to_string())
+    } else {
+        "not observed (auth usability unverified)".to_string()
+    };
+    Some(format!(
+        "Provider readiness: binary={binary_status}, credentials={credential_status}"
+    ))
+}
+
 fn prompt_multi_select(msg: &str, options: &[(String, String)]) -> Vec<usize> {
     println!("\n{}", msg);
     for (i, (name, id)) in options.iter().enumerate() {
@@ -971,6 +996,9 @@ pub fn handle_init(reconfigure: bool) {
     let provider_labels = cli_init_provider_labels();
     let provider_idx = prompt_select("AI 프로바이더를 선택하세요:", &provider_labels);
     let provider = cli_init_provider_from_index(provider_idx);
+    if let Some(readiness) = cli_init_provider_readiness_line(provider) {
+        println!("  {}", readiness);
+    }
 
     // Owner user ID (optional)
     println!("\nStep 4/6: 소유자 설정");

@@ -6,12 +6,12 @@
 #![allow(dead_code)]
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::runtime_layout::expand_user_path;
@@ -35,6 +35,77 @@ pub struct BinaryResolution {
     pub attempts: Vec<String>,
     pub failure_kind: Option<String>,
     pub exec_path: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BinaryVersionProbe {
+    pub resolution: BinaryResolution,
+    pub version_output: Option<String>,
+    pub probe_failure_kind: Option<String>,
+    pub skipped_candidate_failures: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BinaryCandidate {
+    resolved_path: PathBuf,
+    source: String,
+    discovery_index: usize,
+    priority: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct BinaryProbeCacheKey {
+    provider: String,
+    candidates: Vec<BinaryProbeCandidateKey>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct BinaryProbeCandidateKey {
+    resolved_path: Option<String>,
+    canonical_path: Option<String>,
+    source: Option<String>,
+    modified_ns: Option<u128>,
+    len: Option<u64>,
+}
+
+impl BinaryProbeCacheKey {
+    fn new(provider: &str, candidates: &[BinaryResolution]) -> Self {
+        Self {
+            provider: normalize_name(provider),
+            candidates: candidates
+                .iter()
+                .map(BinaryProbeCandidateKey::new)
+                .collect(),
+        }
+    }
+}
+
+impl BinaryProbeCandidateKey {
+    fn new(candidate: &BinaryResolution) -> Self {
+        let metadata = candidate
+            .resolved_path
+            .as_deref()
+            .and_then(|path| std::fs::metadata(path).ok());
+        let modified_ns = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos());
+        let len = metadata.as_ref().map(std::fs::Metadata::len);
+        Self {
+            resolved_path: candidate.resolved_path.clone(),
+            canonical_path: candidate.canonical_path.clone(),
+            source: candidate.source.clone(),
+            modified_ns,
+            len,
+        }
+    }
+}
+
+fn probed_binary_cache() -> &'static Mutex<HashMap<BinaryProbeCacheKey, BinaryVersionProbe>> {
+    static CACHE: OnceLock<Mutex<HashMap<BinaryProbeCacheKey, BinaryVersionProbe>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub fn resolve_binary(name: &str) -> Option<String> {
@@ -102,13 +173,185 @@ pub fn resolve_binary_with_login_shell(name: &str) -> Option<String> {
 }
 
 pub fn resolve_provider_binary(provider: &str) -> BinaryResolution {
-    if let Some(ctx) = active_provider_context(provider) {
-        return resolve_provider_binary_for_context(&ctx);
+    match resolve_provider_binary_set(provider) {
+        ProviderResolutionSet::Candidates(candidates) => match candidates.len() {
+            0 => unresolved_provider_binary(normalize_name(provider), Vec::new()),
+            1 => candidates.into_iter().next().unwrap(),
+            _ => cached_probe_provider_binary_candidates(provider, candidates).resolution,
+        },
+        ProviderResolutionSet::Failure(failure) => failure,
     }
-    resolve_provider_binary_legacy(provider)
+}
+
+pub fn resolve_provider_binary_candidates(provider: &str) -> Vec<BinaryResolution> {
+    match resolve_provider_binary_set(provider) {
+        ProviderResolutionSet::Candidates(candidates) => candidates,
+        ProviderResolutionSet::Failure(_) => Vec::new(),
+    }
+}
+
+enum ProviderResolutionSet {
+    Candidates(Vec<BinaryResolution>),
+    Failure(BinaryResolution),
+}
+
+fn resolve_provider_binary_set(provider: &str) -> ProviderResolutionSet {
+    if let Some(ctx) = active_provider_context(provider) {
+        let provider = normalize_name(provider);
+        let resolution = resolve_provider_binary_for_context(&ctx);
+        if resolution
+            .source
+            .as_deref()
+            .is_some_and(|source| source.starts_with("registry:"))
+        {
+            return ProviderResolutionSet::Candidates(vec![resolution]);
+        }
+        return match resolve_provider_binary_legacy_set(&provider) {
+            LegacyProviderResolution::Candidates(candidates) => {
+                ProviderResolutionSet::Candidates(candidates)
+            }
+            LegacyProviderResolution::Failure(failure) => ProviderResolutionSet::Failure(failure),
+        };
+    }
+
+    match resolve_provider_binary_legacy_set(provider) {
+        LegacyProviderResolution::Candidates(candidates) => {
+            ProviderResolutionSet::Candidates(candidates)
+        }
+        LegacyProviderResolution::Failure(failure) => ProviderResolutionSet::Failure(failure),
+    }
+}
+
+pub fn probe_provider_binary_version(provider: &str) -> BinaryVersionProbe {
+    match resolve_provider_binary_set(provider) {
+        ProviderResolutionSet::Candidates(candidates) => match candidates.len() {
+            0 => probe_single_provider_resolution(
+                unresolved_provider_binary(normalize_name(provider), Vec::new()),
+                Vec::new(),
+            ),
+            1 => {
+                probe_single_provider_resolution(candidates.into_iter().next().unwrap(), Vec::new())
+            }
+            _ => cached_probe_provider_binary_candidates(provider, candidates),
+        },
+        ProviderResolutionSet::Failure(failure) => {
+            probe_single_provider_resolution(failure, Vec::new())
+        }
+    }
+}
+
+fn cached_probe_provider_binary_candidates(
+    provider: &str,
+    candidates: Vec<BinaryResolution>,
+) -> BinaryVersionProbe {
+    let key = BinaryProbeCacheKey::new(provider, &candidates);
+    if let Some(cached) = probed_binary_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&key).cloned())
+    {
+        return cached;
+    }
+
+    let probe = probe_provider_binary_candidates(candidates);
+    if let Ok(mut cache) = probed_binary_cache().lock() {
+        cache.insert(key, probe.clone());
+    }
+    probe
+}
+
+fn probe_provider_binary_candidates(candidates: Vec<BinaryResolution>) -> BinaryVersionProbe {
+    let requested_binary = candidates
+        .first()
+        .map(|candidate| candidate.requested_binary.clone())
+        .unwrap_or_else(|| "provider".to_string());
+    let mut failed_candidates = Vec::new();
+    let mut first_failed_probe = None;
+    for resolution in candidates {
+        let Some(resolved_path) = resolution.resolved_path.clone() else {
+            continue;
+        };
+        let (version_output, probe_failure_kind) =
+            probe_resolved_binary_version(std::path::Path::new(&resolved_path), &resolution);
+        if version_output
+            .as_deref()
+            .is_some_and(|output| !output.lines().next().unwrap_or("").trim().is_empty())
+        {
+            let mut resolution = resolution;
+            for failure in &failed_candidates {
+                resolution
+                    .attempts
+                    .push(format!("skipped_candidate_failure:{failure}"));
+            }
+            return BinaryVersionProbe {
+                resolution,
+                version_output,
+                probe_failure_kind,
+                skipped_candidate_failures: failed_candidates,
+            };
+        }
+
+        let failure = format!(
+            "{}:{}",
+            resolved_path,
+            probe_failure_kind
+                .clone()
+                .unwrap_or_else(|| "version_probe_empty".to_string())
+        );
+        if first_failed_probe.is_none() {
+            first_failed_probe = Some(BinaryVersionProbe {
+                resolution,
+                version_output,
+                probe_failure_kind,
+                skipped_candidate_failures: Vec::new(),
+            });
+        }
+        failed_candidates.push(failure);
+    }
+
+    if let Some(probe) = first_failed_probe {
+        return probe;
+    }
+
+    probe_single_provider_resolution(
+        unresolved_provider_binary(requested_binary, Vec::new()),
+        Vec::new(),
+    )
+}
+
+fn probe_single_provider_resolution(
+    resolution: BinaryResolution,
+    skipped_candidate_failures: Vec<String>,
+) -> BinaryVersionProbe {
+    let (version_output, probe_failure_kind) = resolution
+        .resolved_path
+        .as_ref()
+        .map(|path| probe_resolved_binary_version(std::path::Path::new(path), &resolution))
+        .unwrap_or((None, None));
+    BinaryVersionProbe {
+        resolution,
+        version_output,
+        probe_failure_kind,
+        skipped_candidate_failures,
+    }
 }
 
 fn resolve_provider_binary_legacy(provider: &str) -> BinaryResolution {
+    match resolve_provider_binary_legacy_set(provider) {
+        LegacyProviderResolution::Candidates(mut candidates) => candidates
+            .drain(..)
+            .next()
+            .unwrap_or_else(|| unresolved_provider_binary(normalize_name(provider), Vec::new())),
+        LegacyProviderResolution::Failure(failure) => failure,
+    }
+}
+
+enum LegacyProviderResolution {
+    Candidates(Vec<BinaryResolution>),
+    Failure(BinaryResolution),
+}
+
+fn resolve_provider_binary_legacy_set(provider: &str) -> LegacyProviderResolution {
     let requested_binary = normalize_name(provider);
     let override_var = override_var_name(&requested_binary);
     let cwd = current_dir_fallback();
@@ -130,7 +373,8 @@ fn resolve_provider_binary_legacy(provider: &str) -> BinaryResolution {
                         path,
                         "env_override".to_string(),
                         attempts,
-                    );
+                    )
+                    .into();
                 }
                 Err(error) => {
                     attempts.push(format!(
@@ -139,85 +383,198 @@ fn resolve_provider_binary_legacy(provider: &str) -> BinaryResolution {
                         expanded.display(),
                         error
                     ));
-                    return BinaryResolution {
-                        requested_binary,
-                        resolved_path: None,
-                        canonical_path: None,
-                        source: None,
-                        attempts,
-                        failure_kind: Some(error),
-                        exec_path: merged_runtime_path(),
-                    };
+                    return LegacyProviderResolution::Failure(
+                        unresolved_provider_binary_with_error(requested_binary, attempts, error),
+                    );
                 }
             }
         }
         None => attempts.push(format!("env_override:{}=unset", override_var)),
     }
 
+    let mut candidates = Vec::new();
+    let mut discovery_index = 0;
     let current_path = std::env::var_os("PATH").filter(|value| !os_value_is_empty(value));
-    match resolve_in_paths(&requested_binary, current_path.clone(), &cwd) {
-        Some(path) => {
-            attempts.push(format!("current_path=found:{}", path.display()));
-            return finalize_resolution(
-                requested_binary,
-                path,
-                "current_path".to_string(),
-                attempts,
-            );
-        }
-        None => attempts.push(if current_path.is_some() {
-            "current_path=miss".to_string()
-        } else {
-            "current_path=unset".to_string()
-        }),
-    }
+    collect_candidate_source(
+        &requested_binary,
+        "current_path",
+        current_path,
+        "current_path=unset",
+        &cwd,
+        &mut attempts,
+        &mut candidates,
+        &mut discovery_index,
+    );
 
     let login_path = resolve_login_shell_path_os().filter(|value| !os_value_is_empty(value));
-    match resolve_in_paths(&requested_binary, login_path.clone(), &cwd) {
-        Some(path) => {
-            attempts.push(format!("login_shell_path=found:{}", path.display()));
-            return finalize_resolution(
-                requested_binary,
-                path,
-                "login_shell_path".to_string(),
-                attempts,
-            );
-        }
-        None => attempts.push(if login_path.is_some() {
-            "login_shell_path=miss".to_string()
-        } else {
-            "login_shell_path=unavailable".to_string()
-        }),
-    }
+    collect_candidate_source(
+        &requested_binary,
+        "login_shell_path",
+        login_path,
+        "login_shell_path=unavailable",
+        &cwd,
+        &mut attempts,
+        &mut candidates,
+        &mut discovery_index,
+    );
 
     let fallback_dirs = provider_fallback_dirs(&requested_binary);
-    match resolve_in_paths(
+    let fallback_paths = join_paths_lossy(fallback_dirs.clone());
+    let fallback_before = candidates.len();
+    collect_candidate_source(
         &requested_binary,
-        join_paths_lossy(fallback_dirs.clone()),
+        "fallback_path",
+        fallback_paths,
+        "fallback_path=unavailable",
         &cwd,
-    ) {
-        Some(path) => {
-            attempts.push(format!("fallback_path=found:{}", path.display()));
-            finalize_resolution(
-                requested_binary,
-                path,
-                "fallback_path".to_string(),
-                attempts,
-            )
-        }
-        None => {
-            attempts.push(format!("fallback_path=miss:{}dirs", fallback_dirs.len()));
-            BinaryResolution {
-                requested_binary,
-                resolved_path: None,
-                canonical_path: None,
-                source: None,
-                attempts,
-                failure_kind: Some("not_found".to_string()),
-                exec_path: merged_runtime_path(),
-            }
-        }
+        &mut attempts,
+        &mut candidates,
+        &mut discovery_index,
+    );
+    if candidates.len() == fallback_before {
+        attempts.push(format!("fallback_path=miss:{}dirs", fallback_dirs.len()));
     }
+
+    let candidates = sorted_unique_candidates(candidates);
+    if candidates.is_empty() {
+        return LegacyProviderResolution::Failure(unresolved_provider_binary_with_error(
+            requested_binary,
+            attempts,
+            "not_found".to_string(),
+        ));
+    }
+
+    let resolutions = candidates
+        .into_iter()
+        .map(|candidate| {
+            let mut candidate_attempts = attempts.clone();
+            candidate_attempts.push(format!(
+                "selected_candidate:{}:priority={}:{}",
+                candidate.source,
+                candidate.priority,
+                candidate.resolved_path.display()
+            ));
+            finalize_resolution(
+                requested_binary.clone(),
+                candidate.resolved_path,
+                candidate.source,
+                candidate_attempts,
+            )
+        })
+        .collect();
+    LegacyProviderResolution::Candidates(resolutions)
+}
+
+impl From<BinaryResolution> for LegacyProviderResolution {
+    fn from(value: BinaryResolution) -> Self {
+        LegacyProviderResolution::Candidates(vec![value])
+    }
+}
+
+fn unresolved_provider_binary(requested_binary: String, attempts: Vec<String>) -> BinaryResolution {
+    unresolved_provider_binary_with_error(requested_binary, attempts, "not_found".to_string())
+}
+
+fn unresolved_provider_binary_with_error(
+    requested_binary: String,
+    attempts: Vec<String>,
+    failure_kind: String,
+) -> BinaryResolution {
+    BinaryResolution {
+        requested_binary,
+        resolved_path: None,
+        canonical_path: None,
+        source: None,
+        attempts,
+        failure_kind: Some(failure_kind),
+        exec_path: merged_runtime_path(),
+    }
+}
+
+fn collect_candidate_source(
+    requested_binary: &str,
+    source: &str,
+    paths: Option<OsString>,
+    unavailable_attempt: &str,
+    cwd: &Path,
+    attempts: &mut Vec<String>,
+    candidates: &mut Vec<BinaryCandidate>,
+    discovery_index: &mut usize,
+) {
+    let Some(paths) = paths.filter(|value| !os_value_is_empty(value)) else {
+        attempts.push(unavailable_attempt.to_string());
+        return;
+    };
+
+    let found = resolve_all_in_paths(requested_binary, Some(paths), cwd);
+    if found.is_empty() {
+        attempts.push(format!("{source}=miss"));
+        return;
+    }
+
+    attempts.push(format!("{source}=candidates:{}", found.len()));
+    for path in found {
+        let priority = candidate_priority(requested_binary, &path);
+        attempts.push(format!(
+            "{source}=candidate:priority={priority}:{}",
+            path.display()
+        ));
+        candidates.push(BinaryCandidate {
+            resolved_path: path,
+            source: source.to_string(),
+            discovery_index: *discovery_index,
+            priority,
+        });
+        *discovery_index += 1;
+    }
+}
+
+fn sorted_unique_candidates(candidates: Vec<BinaryCandidate>) -> Vec<BinaryCandidate> {
+    let mut seen = BTreeSet::new();
+    let mut unique = candidates
+        .into_iter()
+        .filter(|candidate| seen.insert(candidate.resolved_path.to_string_lossy().to_string()))
+        .collect::<Vec<_>>();
+    unique.sort_by_key(|candidate| {
+        (
+            candidate.priority,
+            candidate.discovery_index,
+            candidate.resolved_path.to_string_lossy().to_string(),
+        )
+    });
+    unique
+}
+
+pub fn candidate_priority(provider: &str, path: impl AsRef<Path>) -> u8 {
+    let provider = normalize_name(provider);
+    let path = normalized_path_text(path.as_ref());
+
+    if path.contains("/.bun/bin/") || path.contains("/bun/bin/") {
+        return 90;
+    }
+    if provider == "claude" && path.contains("/.claude/local/") {
+        return 0;
+    }
+    if path.contains("/.volta/bin/")
+        || path.contains("/.asdf/shims/")
+        || path.contains("/.local/share/mise/shims/")
+        || path.contains("/.local/share/rtx/shims/")
+        || path.contains("/.npm-global/bin/")
+        || path.contains("/.nvm/")
+        || path.contains("/node_modules/.bin/")
+        || path.contains("/library/pnpm/")
+        || path.contains("/.local/share/pnpm/")
+        || path.contains("/pnpm/")
+    {
+        return 10;
+    }
+    50
+}
+
+fn normalized_path_text(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase()
 }
 
 struct ProviderContextScope;
@@ -418,6 +775,16 @@ fn resolve_in_paths(
     cwd: &Path,
 ) -> Option<PathBuf> {
     which::which_in(binary_name, paths, cwd).ok()
+}
+
+fn resolve_all_in_paths(
+    binary_name: impl AsRef<OsStr>,
+    paths: Option<OsString>,
+    cwd: &Path,
+) -> Vec<PathBuf> {
+    which::which_in_all(binary_name, paths, cwd)
+        .map(|iter| iter.collect())
+        .unwrap_or_default()
 }
 
 fn resolve_candidate_path(candidate: &Path, cwd: &Path) -> Result<PathBuf, String> {
@@ -1006,6 +1373,46 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn provider_registry_context_resolution_does_not_probe_on_execution_path() {
+        let _guard = env_guard();
+        let root = tempfile::tempdir().unwrap();
+        let _root_guard = RuntimeRootOverrideGuard::set(root.path());
+        let bin_dir = root.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        let provider = bin_dir.join("codex-current");
+        let probe_count = root.path().join("registry-probe-count");
+        write_executable_with_contents(
+            &provider,
+            &format!(
+                "#!/bin/sh\nprintf x >> '{}'\nprintf 'codex-registry 1.0\\n'\n",
+                probe_count.display()
+            ),
+        );
+
+        let mut registry = crate::services::provider_cli::registry::ProviderCliRegistry::default();
+        registry.providers.insert(
+            "codex".to_string(),
+            crate::services::provider_cli::registry::ProviderChannels {
+                current: Some(registry_channel(&provider)),
+                ..Default::default()
+            },
+        );
+        crate::services::provider_cli::io::save_registry(root.path(), &registry).unwrap();
+
+        let ctx = crate::services::provider_cli::ProviderExecutionContext::for_provider("codex");
+        let resolution = with_provider_execution_context(ctx, || resolve_provider_binary("codex"));
+
+        assert_eq!(resolution.source.as_deref(), Some("registry:current"));
+        assert_eq!(
+            resolution.resolved_path.as_deref(),
+            Some(provider.to_string_lossy().as_ref())
+        );
+        assert!(!probe_count.exists());
+    }
+
     #[test]
     fn resolve_binary_returns_none_for_missing() {
         assert!(resolve_binary("__nonexistent_binary_12345__").is_none());
@@ -1334,6 +1741,167 @@ mod tests {
             match original_path {
                 Some(value) => std::env::set_var("PATH", value),
                 None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_candidates_are_sorted_by_runtime_priority() {
+        let _guard = env_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let bun_dir = temp.path().join(".bun").join("bin");
+        let general_dir = temp.path().join("bin");
+        let volta_dir = temp.path().join(".volta").join("bin");
+        std::fs::create_dir_all(&bun_dir).unwrap();
+        std::fs::create_dir_all(&general_dir).unwrap();
+        std::fs::create_dir_all(&volta_dir).unwrap();
+
+        let provider = "agentdesk-test-provider-priority";
+        let bun = bun_dir.join(provider);
+        let general = general_dir.join(provider);
+        let volta = volta_dir.join(provider);
+        write_executable(&bun);
+        write_executable(&general);
+        write_executable(&volta);
+
+        let original_path = std::env::var_os("PATH");
+        let override_var = override_var_name(provider);
+        let original_override = std::env::var_os(&override_var);
+        let path = std::env::join_paths([&bun_dir, &general_dir, &volta_dir]).unwrap();
+        unsafe {
+            std::env::set_var("PATH", path);
+            std::env::remove_var(&override_var);
+        }
+
+        let candidates = resolve_provider_binary_candidates(provider);
+        let paths = candidates
+            .iter()
+            .filter_map(|candidate| candidate.resolved_path.as_deref())
+            .take(3)
+            .collect::<Vec<_>>();
+
+        assert_eq!(paths[0], volta.to_string_lossy().as_ref());
+        assert_eq!(paths[1], general.to_string_lossy().as_ref());
+        assert_eq!(paths[2], bun.to_string_lossy().as_ref());
+        assert_eq!(candidate_priority(provider, &bun), 90);
+        assert_eq!(candidate_priority(provider, &volta), 10);
+
+        unsafe {
+            match original_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+            match original_override {
+                Some(value) => std::env::set_var(&override_var, value),
+                None => std::env::remove_var(&override_var),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_probe_selection_is_cached_for_repeated_execution_resolution() {
+        let _guard = env_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let broken_dir = temp.path().join("broken");
+        let working_dir = temp.path().join("working");
+        std::fs::create_dir_all(&broken_dir).unwrap();
+        std::fs::create_dir_all(&working_dir).unwrap();
+
+        let provider = "agentdesk-test-provider-probe-cache";
+        let broken = broken_dir.join(provider);
+        let working = working_dir.join(provider);
+        let broken_count = temp.path().join("broken-count");
+        let working_count = temp.path().join("working-count");
+        write_executable_with_contents(
+            &broken,
+            &format!(
+                "#!/bin/sh\nprintf x >> '{}'\nexit 2\n",
+                broken_count.display()
+            ),
+        );
+        write_executable_with_contents(
+            &working,
+            &format!(
+                "#!/bin/sh\nprintf x >> '{}'\nprintf 'cache-provider 1.0\\n'\n",
+                working_count.display()
+            ),
+        );
+
+        let original_path = std::env::var_os("PATH");
+        let override_var = override_var_name(provider);
+        let original_override = std::env::var_os(&override_var);
+        let path = std::env::join_paths([&broken_dir, &working_dir]).unwrap();
+        unsafe {
+            std::env::set_var("PATH", path);
+            std::env::remove_var(&override_var);
+        }
+
+        let first = resolve_provider_binary(provider);
+        let second = resolve_provider_binary(provider);
+
+        assert_eq!(
+            first.resolved_path.as_deref(),
+            Some(working.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            second.resolved_path.as_deref(),
+            Some(working.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&broken_count).unwrap_or_default(),
+            "x"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&working_count).unwrap_or_default(),
+            "x"
+        );
+
+        unsafe {
+            match original_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+            match original_override {
+                Some(value) => std::env::set_var(&override_var, value),
+                None => std::env::remove_var(&override_var),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_env_override_resolution_does_not_probe_on_execution_path() {
+        let _guard = env_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let provider = temp.path().join("codex");
+        let probe_count = temp.path().join("probe-count");
+        write_executable_with_contents(
+            &provider,
+            &format!(
+                "#!/bin/sh\nprintf x >> '{}'\nprintf 'codex-override 1.0\\n'\n",
+                probe_count.display()
+            ),
+        );
+
+        let original_override = std::env::var_os("AGENTDESK_CODEX_PATH");
+        unsafe {
+            std::env::set_var("AGENTDESK_CODEX_PATH", &provider);
+        }
+
+        let resolution = resolve_provider_binary("codex");
+
+        assert_eq!(
+            resolution.resolved_path.as_deref(),
+            Some(provider.to_string_lossy().as_ref())
+        );
+        assert!(!probe_count.exists());
+
+        unsafe {
+            match original_override {
+                Some(value) => std::env::set_var("AGENTDESK_CODEX_PATH", value),
+                None => std::env::remove_var("AGENTDESK_CODEX_PATH"),
             }
         }
     }

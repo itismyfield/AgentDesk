@@ -1,4 +1,5 @@
 use crate::services::platform::BinaryResolution;
+use crate::services::provider_auth::ProviderAuthSpec;
 use crate::utils::format::safe_prefix;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -37,6 +38,9 @@ pub struct ProviderRuntimeProbe {
     pub resolution: BinaryResolution,
     pub version: Option<String>,
     pub probe_failure_kind: Option<String>,
+    pub skipped_candidate_failures: Vec<String>,
+    pub credential_present: bool,
+    pub credential_source: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +63,7 @@ pub struct ProviderRegistryEntry {
     pub default_context_window: u64,
     pub managed_tmux_backend: bool,
     pub managed_tmux_wrapper_subcommand: Option<&'static str>,
+    pub auth: ProviderAuthSpec,
 }
 
 const CLAUDE_COUNTERPARTS: &[&str] = &["codex", "gemini", "opencode", "qwen"];
@@ -66,6 +71,28 @@ const CODEX_COUNTERPARTS: &[&str] = &["claude", "gemini", "opencode", "qwen"];
 const GEMINI_COUNTERPARTS: &[&str] = &["codex", "claude", "opencode", "qwen"];
 const OPENCODE_COUNTERPARTS: &[&str] = &["codex", "claude", "gemini", "qwen"];
 const QWEN_COUNTERPARTS: &[&str] = &["codex", "claude", "gemini", "opencode"];
+
+const CLAUDE_AUTH_PATHS: &[&str] = &["~/.claude/.credentials.json"];
+const CLAUDE_AUTH_ENV: &[&str] = &["ANTHROPIC_API_KEY"];
+const CLAUDE_AUTH_CHECK: &[&str] = &["claude", "auth", "status"];
+const CODEX_AUTH_PATHS: &[&str] = &["~/.codex/auth.json"];
+const CODEX_AUTH_ENV: &[&str] = &["OPENAI_API_KEY"];
+const CODEX_AUTH_CHECK: &[&str] = &["codex", "auth", "status"];
+const GEMINI_AUTH_PATHS: &[&str] = &["~/.gemini/oauth_creds.json"];
+const GEMINI_AUTH_ENV: &[&str] = &["GEMINI_API_KEY", "GOOGLE_API_KEY"];
+const GEMINI_AUTH_CHECK: &[&str] = &["gemini", "auth", "status"];
+const OPENCODE_AUTH_PATHS: &[&str] = &[];
+const OPENCODE_AUTH_ENV: &[&str] = &[
+    "OPENCODE_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+];
+const OPENCODE_AUTH_CHECK: &[&str] = &["opencode", "auth", "list"];
+const QWEN_AUTH_PATHS: &[&str] = &["~/.qwen/oauth_creds.json", "./.qwen/.env", "./.env"];
+const QWEN_AUTH_ENV: &[&str] = &["DASHSCOPE_API_KEY", "QWEN_API_KEY", "OPENAI_API_KEY"];
+const QWEN_AUTH_CHECK: &[&str] = &["qwen", "auth", "status"];
 
 const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
     ProviderRegistryEntry {
@@ -89,6 +116,11 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
         default_context_window: 1_000_000,
         managed_tmux_backend: true,
         managed_tmux_wrapper_subcommand: Some("tmux-wrapper"),
+        auth: ProviderAuthSpec {
+            credential_paths: CLAUDE_AUTH_PATHS,
+            env_keys: CLAUDE_AUTH_ENV,
+            auth_check_argv: Some(CLAUDE_AUTH_CHECK),
+        },
     },
     ProviderRegistryEntry {
         id: "codex",
@@ -111,6 +143,11 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
         default_context_window: 200_000,
         managed_tmux_backend: true,
         managed_tmux_wrapper_subcommand: Some("codex-tmux-wrapper"),
+        auth: ProviderAuthSpec {
+            credential_paths: CODEX_AUTH_PATHS,
+            env_keys: CODEX_AUTH_ENV,
+            auth_check_argv: Some(CODEX_AUTH_CHECK),
+        },
     },
     ProviderRegistryEntry {
         id: "gemini",
@@ -133,6 +170,11 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
         default_context_window: 1_000_000,
         managed_tmux_backend: false,
         managed_tmux_wrapper_subcommand: None,
+        auth: ProviderAuthSpec {
+            credential_paths: GEMINI_AUTH_PATHS,
+            env_keys: GEMINI_AUTH_ENV,
+            auth_check_argv: Some(GEMINI_AUTH_CHECK),
+        },
     },
     ProviderRegistryEntry {
         id: "opencode",
@@ -155,6 +197,11 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
         default_context_window: 128_000,
         managed_tmux_backend: false,
         managed_tmux_wrapper_subcommand: None,
+        auth: ProviderAuthSpec {
+            credential_paths: OPENCODE_AUTH_PATHS,
+            env_keys: OPENCODE_AUTH_ENV,
+            auth_check_argv: Some(OPENCODE_AUTH_CHECK),
+        },
     },
     ProviderRegistryEntry {
         id: "qwen",
@@ -177,6 +224,11 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
         default_context_window: 128_000,
         managed_tmux_backend: true,
         managed_tmux_wrapper_subcommand: Some("qwen-tmux-wrapper"),
+        auth: ProviderAuthSpec {
+            credential_paths: QWEN_AUTH_PATHS,
+            env_keys: QWEN_AUTH_ENV,
+            auth_check_argv: Some(QWEN_AUTH_CHECK),
+        },
     },
 ];
 
@@ -294,19 +346,20 @@ impl ProviderKind {
     }
 
     pub fn probe_runtime(&self) -> Option<ProviderRuntimeProbe> {
-        let capabilities = self.capabilities()?;
-        let resolution = crate::services::platform::resolve_provider_binary(self.as_str());
-        let (version, probe_failure_kind) = resolution
-            .resolved_path
-            .as_ref()
-            .map(|path| crate::services::platform::probe_resolved_binary_version(path, &resolution))
-            .unwrap_or((None, None));
+        let entry = self.registry_entry()?;
+        let capabilities = entry.capabilities;
+        let binary_probe = crate::services::platform::probe_provider_binary_version(self.as_str());
+        let credentials =
+            crate::services::provider_auth::detect_provider_credentials(entry.id, &entry.auth);
         Some(ProviderRuntimeProbe {
             provider: self.clone(),
             capabilities,
-            resolution,
-            version,
-            probe_failure_kind,
+            resolution: binary_probe.resolution,
+            version: binary_probe.version_output,
+            probe_failure_kind: binary_probe.probe_failure_kind,
+            skipped_candidate_failures: binary_probe.skipped_candidate_failures,
+            credential_present: credentials.credential_present,
+            credential_source: credentials.source,
         })
     }
 
@@ -2809,6 +2862,22 @@ mod tests {
             supported_provider_ids(),
             vec!["claude", "codex", "gemini", "opencode", "qwen"]
         );
+    }
+
+    #[test]
+    fn test_provider_registry_exposes_auth_metadata_for_all_supported_providers() {
+        for entry in provider_registry() {
+            assert!(
+                !entry.auth.credential_paths.is_empty() || !entry.auth.env_keys.is_empty(),
+                "{} must expose credential path or env auth metadata",
+                entry.id
+            );
+            assert!(
+                entry.auth.auth_check_argv.is_some(),
+                "{} must expose auth check provenance command metadata",
+                entry.id
+            );
+        }
     }
 
     #[test]
