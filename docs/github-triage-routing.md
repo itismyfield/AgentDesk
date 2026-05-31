@@ -3,9 +3,11 @@
 GitHub issue triage uses a deterministic first stage before PMD fallback.
 
 1. If an issue already has an `agent:<id>` label, that explicit label wins.
-2. If no explicit agent label exists, `src/github/triage.rs` evaluates the declarative signal table.
-3. If exactly one owner is matched, the card is assigned to that agent and AgentDesk attempts to write back `agent:<id>` to GitHub.
+2. If no explicit agent label exists, `src/github/triage.rs` evaluates the declarative signal table only for newly-created cards or existing cards that are still unassigned.
+3. If exactly one owner is matched, the card is assigned to that agent and AgentDesk attempts to write back `agent:<id>` to GitHub after the local assignment succeeds.
 4. If no owner matches, or signals point at multiple owners, the card remains unassigned so the existing PMD classification path handles it.
+
+Keyword signals use bounded matching, path signals use exact path substrings, and label signals can match exact GitHub labels. This avoids broad false positives such as `intuitive` matching `tui`.
 
 Current routing signals:
 

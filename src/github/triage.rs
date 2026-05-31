@@ -74,19 +74,10 @@ enum AgentRoutingResolution {
         agent_id: &'static str,
         matches: Vec<AgentRoutingMatch>,
     },
-    PmdFallback {
-        reason: PmdFallbackReason,
+    Unrouted {
+        reason: UnroutedReason,
         matches: Vec<AgentRoutingMatch>,
     },
-}
-
-impl AgentRoutingResolution {
-    fn inferred_agent_id(&self) -> Option<&'static str> {
-        match self {
-            AgentRoutingResolution::Inferred { agent_id, .. } => Some(agent_id),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,9 +88,32 @@ struct AgentRoutingMatch {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PmdFallbackReason {
+enum UnroutedReason {
     NoMatch,
     Ambiguous,
+    ExistingCardAssigned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExistingIssueCardAssignment {
+    Missing,
+    Unassigned,
+    Assigned,
+}
+
+impl ExistingIssueCardAssignment {
+    fn allows_inferred_routing(self) -> bool {
+        matches!(
+            self,
+            ExistingIssueCardAssignment::Missing | ExistingIssueCardAssignment::Unassigned
+        )
+    }
+}
+
+#[derive(Debug, Default)]
+struct ValidatedAgentRouting {
+    assigned_agent_id: Option<String>,
+    unknown_agent_id: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -109,22 +123,20 @@ struct TriageRoutingStats {
     inferred_agent_label: usize,
     pmd_no_match: usize,
     pmd_ambiguous: usize,
+    skipped_existing_assigned: usize,
+    unknown_agent: usize,
 }
 
 impl TriageRoutingStats {
-    fn record(&mut self, resolution: &AgentRoutingResolution) {
+    fn record(&mut self, outcome: TriageRoutingOutcome) {
         self.open_issues += 1;
-        match resolution {
-            AgentRoutingResolution::Explicit(_) => self.explicit_agent_label += 1,
-            AgentRoutingResolution::Inferred { .. } => self.inferred_agent_label += 1,
-            AgentRoutingResolution::PmdFallback {
-                reason: PmdFallbackReason::NoMatch,
-                ..
-            } => self.pmd_no_match += 1,
-            AgentRoutingResolution::PmdFallback {
-                reason: PmdFallbackReason::Ambiguous,
-                ..
-            } => self.pmd_ambiguous += 1,
+        match outcome {
+            TriageRoutingOutcome::Explicit => self.explicit_agent_label += 1,
+            TriageRoutingOutcome::Inferred => self.inferred_agent_label += 1,
+            TriageRoutingOutcome::PmdNoMatch => self.pmd_no_match += 1,
+            TriageRoutingOutcome::PmdAmbiguous => self.pmd_ambiguous += 1,
+            TriageRoutingOutcome::SkippedExistingAssigned => self.skipped_existing_assigned += 1,
+            TriageRoutingOutcome::UnknownAgent => self.unknown_agent += 1,
         }
     }
 
@@ -135,6 +147,16 @@ impl TriageRoutingStats {
     fn deterministic_routes(&self) -> usize {
         self.explicit_agent_label + self.inferred_agent_label
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TriageRoutingOutcome {
+    Explicit,
+    Inferred,
+    PmdNoMatch,
+    PmdAmbiguous,
+    SkippedExistingAssigned,
+    UnknownAgent,
 }
 
 /// Find GitHub issues that don't have kanban cards yet and create backlog cards for them.
@@ -162,14 +184,15 @@ pub async fn triage_new_issues_pg(
             continue;
         }
 
-        let routing = resolve_agent_routing(issue);
-        routing_stats.record(&routing);
-        let assigned_agent_id = resolve_agent_label_pg(pool, repo, issue, &routing).await?;
-        let metadata = labels_metadata_json(
-            issue,
-            routing.inferred_agent_id(),
-            assigned_agent_id.as_deref(),
-        );
+        let existing_assignment =
+            existing_issue_card_assignment_pg(pool, repo, issue.number).await?;
+        let routing = resolve_agent_routing(issue, existing_assignment.allows_inferred_routing());
+        let validated = validate_agent_routing_pg(pool, repo, issue, &routing).await?;
+        let assigned_agent_id = match &routing {
+            AgentRoutingResolution::Explicit(_) => validated.assigned_agent_id.clone(),
+            _ => None,
+        };
+        let metadata = labels_metadata_json(issue, None);
         let github_url = format!("https://github.com/{repo}/issues/{}", issue.number);
         let upserted = upsert_card_from_issue_pg(
             pool,
@@ -187,6 +210,17 @@ pub async fn triage_new_issues_pg(
         )
         .await?;
 
+        let routing_outcome = finalize_inferred_routing_pg(
+            pool,
+            repo,
+            issue,
+            &upserted.card_id,
+            &routing,
+            &validated,
+        )
+        .await?;
+        routing_stats.record(routing_outcome);
+
         if upserted.created {
             tracing::info!(
                 "[triage] Created backlog card for {repo}#{}: {}",
@@ -202,11 +236,7 @@ pub async fn triage_new_issues_pg(
     Ok(created)
 }
 
-fn labels_metadata_json(
-    issue: &GhIssue,
-    inferred_agent_id: Option<&str>,
-    assigned_agent_id: Option<&str>,
-) -> Option<String> {
+fn labels_metadata_json(issue: &GhIssue, inferred_agent_id: Option<&str>) -> Option<String> {
     let mut labels = issue
         .labels
         .iter()
@@ -215,12 +245,10 @@ fn labels_metadata_json(
         .map(str::to_string)
         .collect::<Vec<_>>();
 
-    if inferred_agent_id.is_some() {
-        if let Some(agent_id) = assigned_agent_id {
-            let inferred_label = format!("{AGENT_LABEL_PREFIX}{agent_id}");
-            if !labels.iter().any(|label| label == &inferred_label) {
-                labels.push(inferred_label);
-            }
+    if let Some(agent_id) = inferred_agent_id {
+        let inferred_label = format!("{AGENT_LABEL_PREFIX}{agent_id}");
+        if !labels.iter().any(|label| label == &inferred_label) {
+            labels.push(inferred_label);
         }
     }
 
@@ -231,12 +259,38 @@ fn labels_metadata_json(
     }
 }
 
-async fn resolve_agent_label_pg(
+async fn existing_issue_card_assignment_pg(
+    pool: &PgPool,
+    repo: &str,
+    issue_number: i64,
+) -> Result<ExistingIssueCardAssignment, String> {
+    let assigned_agent_id = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT assigned_agent_id
+         FROM kanban_cards
+         WHERE repo_id = $1
+           AND github_issue_number = $2",
+    )
+    .bind(repo)
+    .bind(issue_number)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("read existing issue card {repo}#{issue_number}: {error}"))?;
+
+    Ok(match assigned_agent_id {
+        None => ExistingIssueCardAssignment::Missing,
+        Some(Some(agent_id)) if !agent_id.trim().is_empty() => {
+            ExistingIssueCardAssignment::Assigned
+        }
+        Some(_) => ExistingIssueCardAssignment::Unassigned,
+    })
+}
+
+async fn validate_agent_routing_pg(
     pool: &PgPool,
     repo: &str,
     issue: &GhIssue,
     routing: &AgentRoutingResolution,
-) -> Result<Option<String>, String> {
+) -> Result<ValidatedAgentRouting, String> {
     let (agent_id, source) = match routing {
         AgentRoutingResolution::Explicit(agent_id) => (agent_id.as_str(), "explicit label"),
         AgentRoutingResolution::Inferred { agent_id, matches } => {
@@ -248,18 +302,18 @@ async fn resolve_agent_label_pg(
             );
             (*agent_id, "inferred routing")
         }
-        AgentRoutingResolution::PmdFallback {
-            reason: PmdFallbackReason::NoMatch,
+        AgentRoutingResolution::Unrouted {
+            reason: UnroutedReason::NoMatch,
             ..
         } => {
             tracing::info!(
                 "[triage] PMD fallback for {repo}#{}: no agent routing signals matched",
                 issue.number
             );
-            return Ok(None);
+            return Ok(ValidatedAgentRouting::default());
         }
-        AgentRoutingResolution::PmdFallback {
-            reason: PmdFallbackReason::Ambiguous,
+        AgentRoutingResolution::Unrouted {
+            reason: UnroutedReason::Ambiguous,
             matches,
         } => {
             tracing::info!(
@@ -267,7 +321,17 @@ async fn resolve_agent_label_pg(
                 issue.number,
                 routing_matches_summary(matches)
             );
-            return Ok(None);
+            return Ok(ValidatedAgentRouting::default());
+        }
+        AgentRoutingResolution::Unrouted {
+            reason: UnroutedReason::ExistingCardAssigned,
+            ..
+        } => {
+            tracing::debug!(
+                "[triage] Skipping inferred routing for {repo}#{}: existing card already assigned",
+                issue.number
+            );
+            return Ok(ValidatedAgentRouting::default());
         }
     };
 
@@ -284,33 +348,141 @@ async fn resolve_agent_label_pg(
             source,
             issue.number
         );
+        return Ok(ValidatedAgentRouting {
+            assigned_agent_id: None,
+            unknown_agent_id: Some(agent_id.to_string()),
+        });
     }
 
-    if exists.is_some() && matches!(routing, AgentRoutingResolution::Inferred { .. }) {
-        if let Err(error) = write_back_inferred_agent_label(repo, issue.number, agent_id).await {
-            tracing::warn!(
-                "[triage] Failed to write back inferred agent:{} label for {repo}#{}: {error}",
-                agent_id,
-                issue.number
-            );
-        }
-    }
-
-    Ok(exists)
+    Ok(ValidatedAgentRouting {
+        assigned_agent_id: exists,
+        unknown_agent_id: None,
+    })
 }
 
-fn resolve_agent_routing(issue: &GhIssue) -> AgentRoutingResolution {
+async fn finalize_inferred_routing_pg(
+    pool: &PgPool,
+    repo: &str,
+    issue: &GhIssue,
+    card_id: &str,
+    routing: &AgentRoutingResolution,
+    validated: &ValidatedAgentRouting,
+) -> Result<TriageRoutingOutcome, String> {
+    if validated.unknown_agent_id.is_some() {
+        return Ok(TriageRoutingOutcome::UnknownAgent);
+    }
+
+    match routing {
+        AgentRoutingResolution::Explicit(_) => Ok(TriageRoutingOutcome::Explicit),
+        AgentRoutingResolution::Inferred { .. } => {
+            let Some(agent_id) = validated.assigned_agent_id.as_deref() else {
+                return Ok(TriageRoutingOutcome::UnknownAgent);
+            };
+            let assigned = assign_card_if_unassigned_pg(pool, card_id, agent_id).await?;
+            if !assigned {
+                tracing::info!(
+                    "[triage] Skipped inferred agent:{} for {repo}#{}: card {} is no longer unassigned",
+                    agent_id,
+                    issue.number,
+                    card_id
+                );
+                return Ok(TriageRoutingOutcome::SkippedExistingAssigned);
+            }
+
+            update_card_metadata_with_inferred_agent_label_pg(pool, card_id, issue, agent_id)
+                .await?;
+
+            // Source-of-truth write-back is deliberately after successful DB
+            // assignment so a GitHub label never advertises a route we did not
+            // persist locally.
+            if let Err(error) = write_back_inferred_agent_label(repo, issue.number, agent_id).await
+            {
+                tracing::warn!(
+                    "[triage] Failed to write back inferred agent:{} label for {repo}#{}: {error}",
+                    agent_id,
+                    issue.number
+                );
+            }
+
+            Ok(TriageRoutingOutcome::Inferred)
+        }
+        AgentRoutingResolution::Unrouted {
+            reason: UnroutedReason::NoMatch,
+            ..
+        } => Ok(TriageRoutingOutcome::PmdNoMatch),
+        AgentRoutingResolution::Unrouted {
+            reason: UnroutedReason::Ambiguous,
+            ..
+        } => Ok(TriageRoutingOutcome::PmdAmbiguous),
+        AgentRoutingResolution::Unrouted {
+            reason: UnroutedReason::ExistingCardAssigned,
+            ..
+        } => Ok(TriageRoutingOutcome::SkippedExistingAssigned),
+    }
+}
+
+async fn assign_card_if_unassigned_pg(
+    pool: &PgPool,
+    card_id: &str,
+    agent_id: &str,
+) -> Result<bool, String> {
+    let updated_id = sqlx::query_scalar::<_, String>(
+        "UPDATE kanban_cards
+         SET assigned_agent_id = $2,
+             updated_at = NOW()
+         WHERE id = $1
+           AND NULLIF(BTRIM(assigned_agent_id), '') IS NULL
+         RETURNING id",
+    )
+    .bind(card_id)
+    .bind(agent_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("assign inferred agent {agent_id} to card {card_id}: {error}"))?;
+
+    Ok(updated_id.is_some())
+}
+
+async fn update_card_metadata_with_inferred_agent_label_pg(
+    pool: &PgPool,
+    card_id: &str,
+    issue: &GhIssue,
+    agent_id: &str,
+) -> Result<(), String> {
+    let metadata = labels_metadata_json(issue, Some(agent_id));
+    sqlx::query(
+        "UPDATE kanban_cards
+         SET metadata = CAST($2 AS jsonb),
+             updated_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(card_id)
+    .bind(metadata.as_deref())
+    .execute(pool)
+    .await
+    .map_err(|error| format!("update inferred routing metadata for card {card_id}: {error}"))?;
+
+    Ok(())
+}
+
+fn resolve_agent_routing(issue: &GhIssue, allow_inferred_routing: bool) -> AgentRoutingResolution {
     if let Some(agent_id) = explicit_agent_label(issue) {
         return AgentRoutingResolution::Explicit(agent_id);
     }
 
-    let signal_text = issue_signal_text(issue);
+    if !allow_inferred_routing {
+        return AgentRoutingResolution::Unrouted {
+            reason: UnroutedReason::ExistingCardAssigned,
+            matches: Vec::new(),
+        };
+    }
+
     let mut matches = Vec::new();
     let mut owners = BTreeSet::new();
 
     for rule in AGENT_ROUTING_RULES {
         for signal in rule.signals {
-            if signal_text.contains(signal) {
+            if issue_matches_signal(issue, signal) {
                 matches.push(AgentRoutingMatch {
                     agent_id: rule.agent_id,
                     signal,
@@ -322,16 +494,16 @@ fn resolve_agent_routing(issue: &GhIssue) -> AgentRoutingResolution {
     }
 
     match owners.len() {
-        0 => AgentRoutingResolution::PmdFallback {
-            reason: PmdFallbackReason::NoMatch,
+        0 => AgentRoutingResolution::Unrouted {
+            reason: UnroutedReason::NoMatch,
             matches,
         },
         1 => AgentRoutingResolution::Inferred {
             agent_id: owners.into_iter().next().expect("one owner"),
             matches,
         },
-        _ => AgentRoutingResolution::PmdFallback {
-            reason: PmdFallbackReason::Ambiguous,
+        _ => AgentRoutingResolution::Unrouted {
+            reason: UnroutedReason::Ambiguous,
             matches,
         },
     }
@@ -347,16 +519,63 @@ fn explicit_agent_label(issue: &GhIssue) -> Option<String> {
     })
 }
 
+fn issue_matches_signal(issue: &GhIssue, signal: &str) -> bool {
+    let signal = signal.to_ascii_lowercase();
+    if issue
+        .labels
+        .iter()
+        .any(|label| label.name.trim().eq_ignore_ascii_case(&signal))
+    {
+        return true;
+    }
+
+    let text = issue_signal_text(issue);
+    if signal.contains('/') {
+        text.contains(&signal)
+    } else {
+        contains_bounded_signal(&text, &signal)
+    }
+}
+
+fn contains_bounded_signal(text: &str, signal: &str) -> bool {
+    if signal.is_empty() {
+        return false;
+    }
+
+    let mut search_from = 0;
+    while let Some(relative_start) = text[search_from..].find(signal) {
+        let start = search_from + relative_start;
+        let end = start + signal.len();
+        if is_signal_start_boundary(text.as_bytes(), start)
+            && is_signal_end_boundary(text.as_bytes(), end)
+        {
+            return true;
+        }
+        search_from = end;
+    }
+    false
+}
+
+fn is_signal_start_boundary(bytes: &[u8], index: usize) -> bool {
+    if index == 0 {
+        return true;
+    }
+    !matches!(bytes[index - 1], b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-')
+}
+
+fn is_signal_end_boundary(bytes: &[u8], index: usize) -> bool {
+    if index >= bytes.len() {
+        return true;
+    }
+    !matches!(bytes[index], b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-')
+}
+
 fn issue_signal_text(issue: &GhIssue) -> String {
     let mut text = String::new();
     text.push_str(&issue.title.to_ascii_lowercase());
     text.push('\n');
     if let Some(body) = issue.body.as_deref() {
         text.push_str(&body.to_ascii_lowercase());
-        text.push('\n');
-    }
-    for label in &issue.labels {
-        text.push_str(&label.name.to_ascii_lowercase());
         text.push('\n');
     }
     text
@@ -390,7 +609,7 @@ fn log_triage_routing_stats(repo: &str, stats: &TriageRoutingStats) {
     let pmd_fallback_pct = percentage(pmd_fallbacks, stats.open_issues);
 
     tracing::info!(
-        "[triage] Routing coverage for {repo}: open={}, deterministic={} ({:.1}%), explicit={}, inferred={}, pmd_fallback={} ({:.1}%), no_match={}, ambiguous={}",
+        "[triage] Routing coverage for {repo}: open={}, deterministic={} ({:.1}%), explicit={}, inferred={}, pmd_fallback={} ({:.1}%), no_match={}, ambiguous={}, skipped_existing_assigned={}, unknown_agent={}",
         stats.open_issues,
         deterministic,
         deterministic_pct,
@@ -399,7 +618,9 @@ fn log_triage_routing_stats(repo: &str, stats: &TriageRoutingStats) {
         pmd_fallbacks,
         pmd_fallback_pct,
         stats.pmd_no_match,
-        stats.pmd_ambiguous
+        stats.pmd_ambiguous,
+        stats.skipped_existing_assigned,
+        stats.unknown_agent
     );
 }
 
@@ -516,7 +737,7 @@ mod tests {
         );
 
         assert_eq!(
-            resolve_agent_routing(&issue),
+            resolve_agent_routing(&issue, true),
             AgentRoutingResolution::Explicit("project-agentdesk".to_string())
         );
     }
@@ -529,7 +750,7 @@ mod tests {
             &[],
         );
 
-        let resolution = resolve_agent_routing(&issue);
+        let resolution = resolve_agent_routing(&issue, true);
         match resolution {
             AgentRoutingResolution::Inferred { agent_id, matches } => {
                 assert_eq!(agent_id, "token-manager");
@@ -546,9 +767,9 @@ mod tests {
         let issue = issue("Clarify release note wording", Some("copy edit only"), &[]);
 
         assert_eq!(
-            resolve_agent_routing(&issue),
-            AgentRoutingResolution::PmdFallback {
-                reason: PmdFallbackReason::NoMatch,
+            resolve_agent_routing(&issue, true),
+            AgentRoutingResolution::Unrouted {
+                reason: UnroutedReason::NoMatch,
                 matches: Vec::new()
             }
         );
@@ -562,10 +783,10 @@ mod tests {
             &[],
         );
 
-        let resolution = resolve_agent_routing(&issue);
+        let resolution = resolve_agent_routing(&issue, true);
         match resolution {
-            AgentRoutingResolution::PmdFallback {
-                reason: PmdFallbackReason::Ambiguous,
+            AgentRoutingResolution::Unrouted {
+                reason: UnroutedReason::Ambiguous,
                 matches,
             } => {
                 let owners = matches
@@ -579,15 +800,78 @@ mod tests {
     }
 
     #[test]
-    fn inferred_agent_label_is_added_to_local_metadata_after_agent_validation() {
+    fn existing_assigned_card_disables_inference_without_agent_label() {
+        let issue = issue("Discord relay watcher", None, &[]);
+
+        assert_eq!(
+            resolve_agent_routing(&issue, false),
+            AgentRoutingResolution::Unrouted {
+                reason: UnroutedReason::ExistingCardAssigned,
+                matches: Vec::new()
+            }
+        );
+    }
+
+    #[test]
+    fn broad_signals_require_boundaries() {
+        let issue = issue(
+            "Improve intuitive onboarding",
+            Some("Polish tokenizer and usagebased copy."),
+            &[],
+        );
+
+        assert_eq!(
+            resolve_agent_routing(&issue, true),
+            AgentRoutingResolution::Unrouted {
+                reason: UnroutedReason::NoMatch,
+                matches: Vec::new()
+            }
+        );
+    }
+
+    #[test]
+    fn path_and_label_signals_still_route() {
+        let dashboard_issue = issue("Layout polish", Some("Touched dashboard/src/App.tsx"), &[]);
+        let security_issue = issue("Secret exposure", None, &["area:security"]);
+
+        assert!(matches!(
+            resolve_agent_routing(&dashboard_issue, true),
+            AgentRoutingResolution::Inferred {
+                agent_id: "adk-dashboard",
+                ..
+            }
+        ));
+        assert!(matches!(
+            resolve_agent_routing(&security_issue, true),
+            AgentRoutingResolution::Inferred {
+                agent_id: "project-agentdesk",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn unknown_agent_bucket_is_not_deterministic_coverage() {
+        let mut stats = TriageRoutingStats::default();
+
+        stats.record(TriageRoutingOutcome::UnknownAgent);
+        stats.record(TriageRoutingOutcome::Inferred);
+
+        assert_eq!(stats.open_issues, 2);
+        assert_eq!(stats.unknown_agent, 1);
+        assert_eq!(stats.deterministic_routes(), 1);
+    }
+
+    #[test]
+    fn inferred_agent_label_is_added_to_local_metadata_after_assignment() {
         let issue = issue("Discord relay watcher", None, &["bug"]);
 
         assert_eq!(
-            labels_metadata_json(&issue, Some("project-agentdesk"), Some("project-agentdesk")),
+            labels_metadata_json(&issue, Some("project-agentdesk")),
             Some(r#"{"labels":"bug,agent:project-agentdesk"}"#.to_string())
         );
         assert_eq!(
-            labels_metadata_json(&issue, Some("project-agentdesk"), None),
+            labels_metadata_json(&issue, None),
             Some(r#"{"labels":"bug"}"#.to_string())
         );
     }
