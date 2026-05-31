@@ -19,6 +19,19 @@ pub const ROUTINE_RUN_LEASE_SECS: u64 = 30 * 60;
 const RUN_LEASE_SECS: i64 = ROUTINE_RUN_LEASE_SECS as i64;
 const RESUME_NEXT_DUE_REQUIRED_MESSAGE: &str =
     "next_due_at required to resume schedule-less routine";
+const API_FRICTION_OBSERVATION_QUERY: &str = r#"
+            SELECT fingerprint,
+                   endpoint,
+                   friction_type,
+                   title,
+                   event_count,
+                   COALESCE(last_event_at, updated_at, created_at) AS last_seen_at
+            FROM api_friction_issues
+            WHERE COALESCE(last_event_at, updated_at, created_at) > NOW() - INTERVAL '30 days'
+              AND event_count >= 2
+            ORDER BY COALESCE(last_event_at, updated_at, created_at) DESC
+            LIMIT $1
+            "#;
 
 #[derive(Debug)]
 pub struct ResumeRoutineRequiresNextDueAt;
@@ -847,25 +860,10 @@ impl RoutineStore {
         }
 
         // --- Source 2: api_friction_issues (cap 20) ---
-        let api_rows = match sqlx::query(
-            r#"
-            SELECT fingerprint,
-                   endpoint,
-                   friction_type,
-                   docs_category,
-                   title,
-                   event_count,
-                   COALESCE(last_event_at, updated_at, created_at) AS last_seen_at
-            FROM api_friction_issues
-            WHERE COALESCE(last_event_at, updated_at, created_at) > NOW() - INTERVAL '30 days'
-              AND event_count >= 2
-            ORDER BY COALESCE(last_event_at, updated_at, created_at) DESC
-            LIMIT $1
-            "#,
-        )
-        .bind(CAP_API_FRICTION)
-        .fetch_all(&*self.pool)
-        .await
+        let api_rows = match sqlx::query(API_FRICTION_OBSERVATION_QUERY)
+            .bind(CAP_API_FRICTION)
+            .fetch_all(&*self.pool)
+            .await
         {
             Ok(rows) => rows,
             Err(error) => {
@@ -880,18 +878,12 @@ impl RoutineStore {
             let endpoint: String = row.try_get("endpoint").unwrap_or_default();
             let friction_type: String = row.try_get("friction_type").unwrap_or_default();
             let title: String = row.try_get("title").unwrap_or_default();
-            let docs_category: Option<String> = row.try_get("docs_category").ok().flatten();
             let event_count: i32 = row.try_get("event_count").unwrap_or(1);
             let last_seen_at: DateTime<Utc> =
                 row.try_get("last_seen_at").unwrap_or_else(|_| Utc::now());
-            let docs_suffix = docs_category
-                .as_deref()
-                .filter(|value| !value.is_empty())
-                .map(|value| format!(" docs={value}"))
-                .unwrap_or_default();
             let summary = truncate_chars(
                 &format!(
-                    "{endpoint} {friction_type}: {} ({event_count} reports{docs_suffix})",
+                    "{endpoint} {friction_type}: {} ({event_count} reports)",
                     title.trim()
                 ),
                 240,
@@ -2823,9 +2815,10 @@ struct CloseRun<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        include_automation_candidate_card_observations, next_due_after, next_due_after_anchor,
-        parse_schedule_interval, precomputed_observation_from_kv,
-        resume_without_next_due_is_invalid, truncate_chars, validate_routine_schedule,
+        API_FRICTION_OBSERVATION_QUERY, include_automation_candidate_card_observations,
+        next_due_after, next_due_after_anchor, parse_schedule_interval,
+        precomputed_observation_from_kv, resume_without_next_due_is_invalid, truncate_chars,
+        validate_routine_schedule,
     };
     use chrono::{TimeZone, Timelike, Utc};
     use serde_json::Value;
@@ -2950,6 +2943,15 @@ mod tests {
         let truncated = truncate_chars(&text, 120);
         assert!(truncated.ends_with("..."));
         assert_eq!(truncated.trim_end_matches("...").chars().count(), 120);
+    }
+
+    #[test]
+    fn api_friction_observation_query_uses_issue_columns_only() {
+        assert!(API_FRICTION_OBSERVATION_QUERY.contains("FROM api_friction_issues"));
+        assert!(
+            !API_FRICTION_OBSERVATION_QUERY.contains("docs_category"),
+            "api_friction_issues does not persist docs_category; routine ticks must not warn on a missing column"
+        );
     }
 
     #[test]
