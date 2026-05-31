@@ -1277,17 +1277,17 @@ mod tests {
     #[test]
     fn terminal_delivery_route_skips_bridge_owned_external_lease_without_inflight() {
         let tmux = "AgentDesk-codex-bridge-owned-direct";
+        let lease = crate::services::tui_prompt_dedupe::ExternalInputRelayLease {
+            channel_id: Some(4243),
+            turn_id: Some("external:codex:4243:trace:1".to_string()),
+            session_key: Some("host:AgentDesk-codex-bridge-owned-direct".to_string()),
+            relay_owner: crate::services::tui_prompt_dedupe::ExternalInputRelayOwner::BridgeAdapter,
+            runtime_kind: Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui),
+        };
         crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
             ProviderKind::Codex.as_str(),
             tmux,
-            crate::services::tui_prompt_dedupe::ExternalInputRelayLease {
-                channel_id: Some(4243),
-                turn_id: Some("external:codex:4243:trace:1".to_string()),
-                session_key: Some("host:AgentDesk-codex-bridge-owned-direct".to_string()),
-                relay_owner:
-                    crate::services::tui_prompt_dedupe::ExternalInputRelayOwner::BridgeAdapter,
-                runtime_kind: Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui),
-            },
+            lease.clone(),
         );
 
         assert_eq!(
@@ -1295,11 +1295,19 @@ mod tests {
             SessionBoundTerminalDeliveryRouteDecision::Skipped
         );
         assert!(
-            crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
+            crate::services::tui_prompt_dedupe::clear_external_input_relay_lease_if_matches(
                 ProviderKind::Codex.as_str(),
                 tmux,
                 4243,
+                &lease,
             )
+        );
+        assert_eq!(
+            session_bound_terminal_delivery_route_decision(None, tmux, &ProviderKind::Codex, 4243,),
+            SessionBoundTerminalDeliveryRouteDecision::Route(
+                SessionBoundTerminalDeliveryRoute::NewMessage
+            ),
+            "after a bridge terminal path clears its lease, later normal session-bound output in the same pane must not be blocked"
         );
     }
 

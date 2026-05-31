@@ -56,6 +56,46 @@ struct CodexIdleTailDoneGuard {
     done_tx: tokio::sync::mpsc::UnboundedSender<String>,
 }
 
+struct TuiDirectExternalInputLeaseGuard {
+    provider: ProviderKind,
+    tmux_session_name: String,
+    channel_id: ChannelId,
+    lease: ExternalInputRelayLease,
+}
+
+impl TuiDirectExternalInputLeaseGuard {
+    fn new(
+        provider: ProviderKind,
+        tmux_session_name: &str,
+        channel_id: ChannelId,
+        lease: &ExternalInputRelayLease,
+    ) -> Self {
+        Self {
+            provider,
+            tmux_session_name: tmux_session_name.to_string(),
+            channel_id,
+            lease: lease.clone(),
+        }
+    }
+
+    fn clear_if_current(&self) -> bool {
+        crate::services::tui_prompt_dedupe::clear_external_input_relay_lease_if_matches(
+            self.provider.as_str(),
+            &self.tmux_session_name,
+            self.channel_id.get(),
+            &self.lease,
+        )
+    }
+}
+
+impl Drop for TuiDirectExternalInputLeaseGuard {
+    fn drop(&mut self) {
+        // Match the exact lease so a slow timeout cannot clear a newer direct-input turn
+        // that reused the same provider/session/channel after this tail started.
+        self.clear_if_current();
+    }
+}
+
 struct TuiDirectBridgeGateway {
     http: Arc<serenity::Http>,
     shared: Arc<SharedData>,
@@ -1870,6 +1910,12 @@ async fn run_codex_idle_response_tail(
     prompt_text: String,
     lease: ExternalInputRelayLease,
 ) {
+    let _lease_guard = TuiDirectExternalInputLeaseGuard::new(
+        ProviderKind::Codex,
+        &tmux_session_name,
+        channel_id,
+        &lease,
+    );
     let tmux_for_tail = tmux_session_name.clone();
     let rollout_for_tail = rollout_path.clone();
     let tail_result = tokio::task::spawn_blocking(move || {
@@ -1993,6 +2039,12 @@ async fn run_claude_idle_response_tail(
     prompt_text: String,
     lease: ExternalInputRelayLease,
 ) {
+    let _lease_guard = TuiDirectExternalInputLeaseGuard::new(
+        ProviderKind::Claude,
+        &tmux_session_name,
+        channel_id,
+        &lease,
+    );
     let tmux_for_tail = tmux_session_name.clone();
     let transcript_for_tail = transcript_path.clone();
     let tail_result = tokio::task::spawn_blocking(move || {
@@ -2146,6 +2198,12 @@ async fn relay_tui_idle_response_through_bridge(
     response: &str,
     lease: &ExternalInputRelayLease,
 ) -> Result<(), String> {
+    let _lease_guard = TuiDirectExternalInputLeaseGuard::new(
+        provider.clone(),
+        tmux_session_name,
+        channel_id,
+        lease,
+    );
     let Some(http) = shared.serenity_http_or_token_fallback() else {
         tracing::warn!(
             channel_id = channel_id.get(),
@@ -2245,11 +2303,6 @@ async fn relay_tui_idle_response_through_bridge(
                     anchor,
                 );
             }
-            crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
-                provider.as_str(),
-                tmux_session_name,
-                channel_id.get(),
-            );
             tracing::info!(
                 channel_id = channel_id.get(),
                 tmux_session_name = %tmux_session_name,
@@ -2710,6 +2763,81 @@ mod tests {
         assert!(!bridge_adapter_owns_external_turn(
             ExternalInputRelayOwner::TuiPromptRelay
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_adapter_tail_guard_clears_only_current_external_lease() {
+        let tmux = "AgentDesk-codex-bridge-guard";
+        let channel_id = ChannelId::new(940_000_000_000_003);
+        let original = ExternalInputRelayLease {
+            channel_id: Some(channel_id.get()),
+            turn_id: Some("external:codex:940000000000003:bridge-guard:1".to_string()),
+            session_key: Some("host:AgentDesk-codex-bridge-guard".to_string()),
+            relay_owner: ExternalInputRelayOwner::BridgeAdapter,
+            runtime_kind: Some(RuntimeHandoffKind::CodexTui),
+        };
+        crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+            ProviderKind::Codex.as_str(),
+            tmux,
+            original.clone(),
+        );
+
+        {
+            let _guard = TuiDirectExternalInputLeaseGuard::new(
+                ProviderKind::Codex,
+                tmux,
+                channel_id,
+                &original,
+            );
+        }
+        assert!(
+            crate::services::tui_prompt_dedupe::external_input_relay_lease(
+                ProviderKind::Codex.as_str(),
+                tmux,
+                channel_id.get(),
+            )
+            .is_none()
+        );
+
+        let newer = ExternalInputRelayLease {
+            turn_id: Some("external:codex:940000000000003:bridge-guard:2".to_string()),
+            ..original.clone()
+        };
+        crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+            ProviderKind::Codex.as_str(),
+            tmux,
+            original.clone(),
+        );
+        {
+            let _guard = TuiDirectExternalInputLeaseGuard::new(
+                ProviderKind::Codex,
+                tmux,
+                channel_id,
+                &original,
+            );
+            crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+                ProviderKind::Codex.as_str(),
+                tmux,
+                newer.clone(),
+            );
+        }
+        assert_eq!(
+            crate::services::tui_prompt_dedupe::external_input_relay_lease(
+                ProviderKind::Codex.as_str(),
+                tmux,
+                channel_id.get(),
+            ),
+            Some(newer.clone())
+        );
+        assert!(
+            crate::services::tui_prompt_dedupe::clear_external_input_relay_lease_if_matches(
+                ProviderKind::Codex.as_str(),
+                tmux,
+                channel_id.get(),
+                &newer,
+            )
+        );
     }
 
     #[cfg(unix)]
