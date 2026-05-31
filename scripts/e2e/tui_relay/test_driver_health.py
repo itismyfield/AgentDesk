@@ -515,6 +515,60 @@ class ScenarioHealthProbe(unittest.TestCase):
 
         self.assertIn("global_active=-1 < 0", str(ctx.exception))
 
+    def test_assert_health_polls_until_global_counters_drain(self):
+        payloads = {
+            "/api/health/detail": [
+                (
+                    503,
+                    {
+                        **_health_detail(_idle_mailbox("42", provider="codex")),
+                        "global_active": 1,
+                        "global_finalizing": 1,
+                    },
+                ),
+                (200, _health_detail(_idle_mailbox("42", provider="codex"))),
+            ],
+            "/api/health": [
+                (
+                    503,
+                    {
+                        "status": "degraded",
+                        "ok": False,
+                        "fully_recovered": False,
+                        "degraded": True,
+                        "degraded_reasons": [],
+                    },
+                ),
+                (
+                    200,
+                    {
+                        "status": "healthy",
+                        "ok": True,
+                        "fully_recovered": True,
+                        "degraded_reasons": [],
+                    },
+                ),
+            ],
+        }
+
+        with (
+            patch("run_tui_relay.urllib.request.urlopen", _fake_urlopen_for(payloads)),
+            patch("run_tui_relay.time.sleep", return_value=None) as sleep,
+        ):
+            result = driver.assert_health(
+                "http://agentdesk.test",
+                {
+                    "timeout_s": 1,
+                    "poll_interval_s": 0,
+                    "global_active_max": 0,
+                    "global_finalizing_max": 0,
+                },
+            )
+
+        self.assertEqual(result["global_active"], 0)
+        self.assertEqual(result["global_finalizing"], 0)
+        sleep.assert_called_once_with(0.0)
+
     def test_assert_health_forbid_only_allows_unrelated_transitional_reasons(self):
         payloads = {
             "/api/health": [
@@ -607,6 +661,81 @@ class ScenarioHealthProbe(unittest.TestCase):
 
 
 class ControlFlowPrimitives(unittest.TestCase):
+    def test_send_provider_hold_prompt_builds_cancel_fixture(self):
+        prompt = driver.build_provider_hold_prompt(
+            {
+                "ok_marker": "[E2E:E18:OK]",
+                "late_marker": "[E2E:E18:LATE]",
+                "hold_seconds": 60,
+            },
+            scenario_id="E-18",
+        )
+
+        self.assertIn("[E2E:E18:OK]", prompt)
+        self.assertIn("[E2E:E18:LATE]", prompt)
+        self.assertIn("time.sleep(60)", prompt)
+        self.assertIn("cancel this turn while the command is sleeping", prompt)
+
+    def test_run_one_cell_dispatches_provider_hold_prompt(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def __init__(self):
+                self.sent: list[str] = []
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                return {"id": "1"}
+
+            def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
+                return []
+
+            def send_prompt(self, channel_id, content, *, channel_kind="cc"):  # noqa: ARG002
+                self.sent.append(content)
+                return {"id": "2"}
+
+        args = Namespace(
+            cell="codex-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+        )
+        scenario = {
+            "id": "E-18",
+            "steps": [
+                {
+                    "send_provider_hold_prompt": {
+                        "ok_marker": "[E2E:E18:OK]",
+                        "late_marker": "[E2E:E18:LATE]",
+                        "hold_seconds": 60,
+                    }
+                }
+            ],
+            "assertions": [],
+        }
+        client = FakeClient()
+
+        with (
+            patch("run_tui_relay.time.sleep", return_value=None),
+            patch(
+                "run_tui_relay.assert_cell_idle",
+                return_value={"status": "idle", "mailboxes_seen": 1},
+            ),
+        ):
+            record = driver.run_one_cell(
+                scenario=scenario,
+                cell="codex-tui",
+                channel_id="42",
+                client=client,  # type: ignore[arg-type]
+                run_id="run-1",
+                dry_run=False,
+                args=args,
+            )
+
+        self.assertEqual(len(client.sent), 1)
+        self.assertIn("[E2E:E18:OK]", client.sent[0])
+        self.assertIn("time.sleep(60)", client.sent[0])
+        self.assertEqual(record["provider_hold_prompts"][0]["hold_seconds"], 60)
+
     def test_send_prompts_concurrent_overlaps_dispatches(self):
         class FakeClient:
             base_url = "http://agentdesk.test"

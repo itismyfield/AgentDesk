@@ -3,35 +3,31 @@ title: cancel_turn 중단 후 late marker 미전송 보장
 cells: [claude-pipe, claude-tui, codex-pipe, codex-tui]
 isolation: required
 destructive: true
-skip_reason: >
-  Known-race coverage for #2937. The harness has cancel_turn and negative
-  marker assertions, but this live stop-mid-turn scenario still needs a
-  deterministic provider hold/throttle hook. A long prompt can finish and
-  relay [E2E:E18:LATE] before cancel_turn arrives, so this stays skipped to
-  avoid CI flakes.
 acceptance_criteria:
-  - Provide a deterministic hook or prompt fixture that holds the turn after [E2E:E18:OK].
+  - Use the deterministic provider hold prompt fixture after [E2E:E18:OK].
   - Execute cancel_turn while the turn is still active.
   - Assert [E2E:E18:LATE] is absent from relay output after cancellation.
   - Assert health counters drain to global_active=0 and global_finalizing=0.
 notes: |
-  Skipped #2937 coverage. This remains destructive-gated and intentionally omits
+  #2937 coverage. This remains destructive-gated and intentionally omits
   claude-e because the stop/cancel path under test is the relay-backed
-  pipe/TUI turn lifecycle. Enable only after a deterministic live hook can hold
-  the turn active between the early marker and cancellation.
+  pipe/TUI turn lifecycle. The send_provider_hold_prompt fixture asks the
+  provider to emit the early marker, block in a shell sleep, and emit the late
+  marker only if cancellation fails to stop the turn.
 steps:
-  - send_prompt: |
-      첫 줄에는 정확히 "[E2E:E18:OK]"만 출력해줘.
-      그 다음부터 900줄을 "E18-LINE-NNN" 형식의 번호와 함께 작성해줘.
-      900번째 마지막 줄에 도달하기 전에는 절대 "[E2E:E18:LATE]"를 출력하지 말고,
-      정말 마지막 줄에서만 "[E2E:E18:LATE]"를 출력해줘.
+  - send_provider_hold_prompt:
+      ok_marker: "[E2E:E18:OK]"
+      late_marker: "[E2E:E18:LATE]"
+      hold_seconds: 60
   - wait_for_discord_text: "[E2E:E18:OK]"
     timeout_s: 180
   - cancel_turn:
       force: true
       timeout_s: 15
-  - wait_idle_s: 15
+  - wait_idle_s: 70
   - assert_health:
+      timeout_s: 45
+      poll_interval_s: 2
       forbid_degraded_reasons:
         - global_active_counter_out_of_bounds
       global_active_max: 0

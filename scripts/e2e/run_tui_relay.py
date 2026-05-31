@@ -58,6 +58,7 @@ IDLE_MAILBOX_STATUSES = {"", "idle", "none"}
 IDLE_RELAY_STALL_STATES = {"", "healthy"}
 RESTART_GUARD_FINALIZING_DRAIN_TIMEOUT_S = 30.0
 RESTART_GUARD_POLL_INTERVAL_S = 1.0
+DEFAULT_PROVIDER_HOLD_SECONDS = 60
 RUNTIME_QUEUE_DIRS: tuple[tuple[str, str], ...] = (
     ("pending_queue", "discord_pending_queue"),
     ("queued_placeholders", "discord_queued_placeholders"),
@@ -551,6 +552,42 @@ def send_prompts_concurrent(
     return sorted(results, key=lambda item: int(item["index"]))
 
 
+def build_provider_hold_prompt(params: Any, *, scenario_id: str) -> str:
+    """Build a provider-agnostic stop-mid-turn prompt fixture.
+
+    The fixture asks the model to emit an early marker, then block in its normal
+    shell/terminal tool before any late marker can be produced. E-18 cancels
+    during that blocking window.
+    """
+
+    if not isinstance(params, dict):
+        raise assertions.AssertionError(
+            f"send_provider_hold_prompt requires a mapping: {params!r}"
+        )
+    ok_marker = str(params.get("ok_marker") or params.get("marker") or "").strip()
+    late_marker = str(params.get("late_marker") or "").strip()
+    if not ok_marker:
+        raise assertions.AssertionError("send_provider_hold_prompt requires ok_marker")
+    if not late_marker:
+        raise assertions.AssertionError("send_provider_hold_prompt requires late_marker")
+    hold_seconds = int(params.get("hold_seconds") or DEFAULT_PROVIDER_HOLD_SECONDS)
+    if hold_seconds <= 0:
+        raise assertions.AssertionError(
+            f"send_provider_hold_prompt hold_seconds must be positive: {hold_seconds}"
+        )
+
+    return (
+        f"E2E {scenario_id} stop-mid-turn cancellation fixture.\n\n"
+        "Follow these steps exactly:\n"
+        f"1. First, send a visible assistant response containing exactly one line: {ok_marker}\n"
+        "2. Immediately after that line, use your normal shell/terminal command tool to run:\n"
+        f"   python3 -c \"import time; time.sleep({hold_seconds})\"\n"
+        f"3. Do not write, echo, quote, or mention {late_marker} before the command returns.\n"
+        f"4. Only if the turn is still running after the command returns, send exactly: {late_marker}\n\n"
+        "The harness will cancel this turn while the command is sleeping. If cancellation arrives, stop without sending the late marker."
+    )
+
+
 def scenario_teardown_marker(scenario_id: str, *, cell: str, run_id: str) -> str:
     return f"### E2E TEARDOWN {scenario_id} cell={cell} run={run_id}"
 
@@ -732,6 +769,39 @@ def assert_health(
     """Scenario-level health probe with explicit status/reason/counter checks."""
 
     options = params or {}
+    timeout_s = float(options.get("timeout_s") or 0)
+    poll_interval_s = float(options.get("poll_interval_s", 1.0))
+    attempts = 0
+    max_attempts = (
+        max(1, int(timeout_s / max(poll_interval_s, 0.1)) + 2)
+        if timeout_s > 0
+        else 1
+    )
+    deadline = time.monotonic() + max(timeout_s, 0.0)
+    last_error: assertions.AssertionError | None = None
+    while attempts < max_attempts:
+        attempts += 1
+        try:
+            return _assert_health_once(base_url, options)
+        except assertions.AssertionError as error:
+            last_error = error
+            if timeout_s <= 0 or time.monotonic() >= deadline:
+                raise
+            time.sleep(poll_interval_s)
+
+    if last_error is not None:
+        raise assertions.AssertionError(
+            f"assert_health did not pass within {timeout_s}s: {last_error}"
+        ) from last_error
+    raise assertions.AssertionError("assert_health failed without a captured error")
+
+
+def _assert_health_once(
+    base_url: str,
+    options: dict[str, Any],
+) -> dict[str, Any]:
+    """Single health probe attempt for assert_health polling."""
+
     status_code, health = _read_api_json(base_url, "/api/health", timeout=5)
     if not isinstance(health, dict):
         raise assertions.AssertionError(
@@ -1190,6 +1260,29 @@ def run_one_cell(
                 channel_id,
                 step["send_prompt"],
                 channel_kind=cell_channel_kind(cell),
+            )
+            time.sleep(3)
+        elif "send_provider_hold_prompt" in step:
+            _prepare_first_prompt_window()
+            prompt = build_provider_hold_prompt(
+                step["send_provider_hold_prompt"],
+                scenario_id=str(scenario_id),
+            )
+            window.mark_prompt_sent()
+            client.send_prompt(
+                channel_id,
+                prompt,
+                channel_kind=cell_channel_kind(cell),
+            )
+            record.setdefault("provider_hold_prompts", []).append(
+                {
+                    "hold_seconds": int(
+                        (step["send_provider_hold_prompt"] or {}).get(
+                            "hold_seconds",
+                            DEFAULT_PROVIDER_HOLD_SECONDS,
+                        )
+                    )
+                }
             )
             time.sleep(3)
         elif "send_prompts_concurrent" in step:
