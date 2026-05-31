@@ -343,6 +343,71 @@ class RunAssertionDispatch(unittest.TestCase):
                 record=record,
             )
 
+    def test_fixture_assertion_dispatch_uses_record_state(self):
+        window = _window(_relay_msg(1, "[E2E:E25:FINAL]"))
+        record = {
+            "fixture_state": {
+                "task_notification_kind": "Background",
+                "task_notification_source": "CronCreate",
+                "task_notification_status": "completed",
+                "task_complete_seen": True,
+                "task_complete_turn_id": "turn-1",
+                "result_text_source": "task_complete.last_agent_message",
+                "finalized": True,
+                "active_turn": "none",
+                "followup_ready": True,
+                "followup_probe_accepted": True,
+                "queue_depth": 0,
+                "pending_discord_callback": False,
+            },
+            "fixture_health": {
+                "status": "healthy",
+                "degraded_reasons": [],
+                "active_turn": "none",
+                "queue_depth": 0,
+                "pending_discord_callback": False,
+                "stale_thread_proof": False,
+                "relay_stall_state": "healthy",
+            },
+        }
+
+        self.run_assertion(
+            {
+                "fixture_task_notification": {
+                    "kind": "Background",
+                    "source": "CronCreate",
+                    "status": "completed",
+                }
+            },
+            window=window,
+            record=record,
+        )
+        self.run_assertion({"fixture_finalized": {"active_turn": "none"}}, window=window, record=record)
+        self.run_assertion({"fixture_followup_ready": True}, window=window, record=record)
+        self.run_assertion({"fixture_no_health_degradation": True}, window=window, record=record)
+        self.run_assertion(
+            {
+                "fixture_task_complete_finalized": {
+                    "turn_id": "turn-1",
+                    "result_text_source": "task_complete.last_agent_message",
+                }
+            },
+            window=window,
+            record=record,
+        )
+        self.run_assertion(
+            {"fixture_state": {"followup_probe_accepted": True}},
+            window=window,
+            record=record,
+        )
+
+        with self.assertRaises(assertions.AssertionError):
+            self.run_assertion(
+                {"fixture_task_complete_finalized": {"turn_id": "other"}},
+                window=window,
+                record=record,
+            )
+
     def test_every_scenario_assertion_spec_is_dispatchable(self):
         import glob  # noqa: PLC0415
 

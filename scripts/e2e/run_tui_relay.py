@@ -43,7 +43,7 @@ import yaml  # type: ignore[import-untyped]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from tui_relay import assertions, discord, lease, tmux  # noqa: E402
+from tui_relay import assertions, discord, fixtures, lease, tmux  # noqa: E402
 
 
 SUPPORTED_CELLS: tuple[str, ...] = (
@@ -226,6 +226,20 @@ def is_destructive(scenario: dict[str, Any]) -> bool:
         ):
             if key in step:
                 return True
+    return False
+
+
+def is_local_fixture_scenario(scenario: dict[str, Any]) -> bool:
+    if str(scenario.get("execution") or "").strip().lower() in {
+        "fixture",
+        "local_fixture",
+    }:
+        return True
+    for step in scenario.get("steps") or []:
+        if isinstance(step, dict) and (
+            "replay_fixture" in step or "fixture_followup_probe" in step
+        ):
+            return True
     return False
 
 
@@ -1403,7 +1417,7 @@ def run_scenario(
         )
         return result
 
-    if args.reset_before_each and not args.dry_run:
+    if args.reset_before_each and not args.dry_run and not is_local_fixture_scenario(scenario):
         runtime_root = Path(args.queue_runtime_root)
         result["resets"] = [
             reset_channel_state(
@@ -1447,6 +1461,11 @@ def run_scenario(
             "cancel_turns",
             "health_assertions",
             "post_scenario_idle",
+            "fixture_steps",
+            "fixture_replays",
+            "fixture_state",
+            "fixture_health",
+            "fixture_followup_probes",
         ):
             if key in window:
                 result[key] = window[key]
@@ -1499,6 +1518,15 @@ def run_one_cell(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     scenario_id = scenario.get("id")
+    if is_local_fixture_scenario(scenario):
+        return run_local_fixture_scenario(
+            scenario=scenario,
+            cell=cell,
+            channel_id=channel_id,
+            run_id=run_id,
+            dry_run=dry_run,
+        )
+
     setup_marker = f"### E2E SETUP {scenario_id} cell={cell} run={run_id}"
     record: dict[str, Any] = {"assertions": []}
 
@@ -1828,6 +1856,90 @@ def run_one_cell(
     return record
 
 
+def run_local_fixture_scenario(
+    *,
+    scenario: dict[str, Any],
+    cell: str,
+    channel_id: str,
+    run_id: str,
+    dry_run: bool,
+) -> dict[str, Any]:
+    scenario_id = str(scenario.get("id"))
+    record: dict[str, Any] = {
+        "assertions": [],
+        "local_fixture": True,
+        "fixture_steps": [],
+    }
+    if dry_run:
+        print(f"[dry-run] {scenario_id} ({cell}): would replay local fixture")
+        return record
+
+    window = assertions.Window(setup_marker_id=f"fixture-setup-{scenario_id}")
+    for step in scenario.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        if "replay_fixture" in step:
+            result = fixtures.replay_fixture(
+                step["replay_fixture"],
+                cell=cell,
+                channel_id=channel_id,
+                scenario_id=scenario_id,
+                run_id=run_id,
+            )
+            for message in result["messages"]:
+                window.add(message)
+            record.setdefault("fixture_replays", []).append(result["replay"])
+            record["fixture_state"] = result["state"]
+            record["fixture_health"] = result["health"]
+            record["fixture_steps"].append(
+                {
+                    "step": "replay_fixture",
+                    "kind": result["replay"]["kind"],
+                    "deliveries": result["replay"]["deliveries"],
+                }
+            )
+        elif "fixture_followup_probe" in step:
+            probe = fixtures.probe_followup_ready(
+                record,
+                step["fixture_followup_probe"],
+            )
+            record.setdefault("fixture_followup_probes", []).append(probe)
+            record["fixture_steps"].append(
+                {"step": "fixture_followup_probe", "accepted": probe["accepted"]}
+            )
+        elif "wait_idle_s" in step:
+            time.sleep(float(step["wait_idle_s"]))
+        else:
+            raise assertions.AssertionError(f"unknown local fixture step shape: {step!r}")
+
+    record["relay_count"] = len(window.messages)
+    record["raw_count"] = len(window.raw_messages)
+    record["message_updates"] = len(window.message_updates)
+    record["sample_relay"] = [
+        (message.get("content") or "")[:120] for message in window.messages[:6]
+    ]
+
+    for assertion_spec in scenario.get("assertions") or []:
+        run_assertion(assertion_spec, window=window, record=record)
+        record["assertions"].append({"spec": assertion_spec, "passed": True})
+
+    idle_check = {
+        "channel_id": str(channel_id),
+        "provider": cell_provider(cell),
+        "status": "idle",
+        "source": "local_fixture",
+    }
+    record["post_scenario_idle"] = idle_check
+    record["assertions"].append(
+        {
+            "spec": {"post_scenario_fixture_idle": True},
+            "passed": True,
+            "details": idle_check,
+        }
+    )
+    return record
+
+
 def wait_for_health(
     base_url: str,
     *,
@@ -2151,6 +2263,26 @@ def run_assertion(
         assertions.no_control_chars(window)
     elif spec.get("no_resume_prompt_chrome"):
         assertions.no_resume_prompt_chrome(window)
+    elif "fixture_state" in spec:
+        fixtures.assert_fixture_state(record, spec["fixture_state"])
+    elif "fixture_task_notification" in spec:
+        params = spec["fixture_task_notification"]
+        if not isinstance(params, dict):
+            raise assertions.AssertionError(
+                f"fixture_task_notification requires mapping: {spec!r}"
+            )
+        fixtures.assert_fixture_task_notification(record, params)
+    elif "fixture_finalized" in spec:
+        fixtures.assert_fixture_finalized(record, spec["fixture_finalized"])
+    elif spec.get("fixture_followup_ready"):
+        fixtures.assert_fixture_followup_ready(record)
+    elif spec.get("fixture_no_health_degradation"):
+        fixtures.assert_fixture_no_health_degradation(record)
+    elif "fixture_task_complete_finalized" in spec:
+        fixtures.assert_fixture_task_complete_finalized(
+            record,
+            spec["fixture_task_complete_finalized"],
+        )
     else:
         raise assertions.AssertionError(f"unknown assertion: {spec!r}")
 

@@ -1,0 +1,62 @@
+id: E-24
+title: exact CronCreate Background relay fixture
+cells: [claude-pipe]
+execution: fixture
+isolation: local
+acceptance_criteria:
+  - Replay an exact CronCreate task notification classified as Background.
+  - Deliver result.result text even when no assistant text preceded the result.
+  - Assert the local fixture turn finalizes cleanly and leaves no stale queue/health state.
+notes: |
+  #2971 local/non-live coverage for the #2943 CronCreate gap. This does not
+  create a live cron job or require deploy; it pins the relay harness primitive
+  for the historical Background-classified CronCreate response-drop shape.
+steps:
+  - replay_fixture:
+      kind: cron_create_background
+      provider: claude
+      frames:
+        - type: assistant
+          message:
+            content:
+              - type: tool_use
+                id: toolu_e24_cron
+                name: CronCreate
+                input:
+                  schedule: "once in 1 minute"
+                  prompt: "emit [E2E:E24:CRON]"
+        - type: system
+          subtype: task_started
+          task_id: cron-e24
+          tool_use_id: toolu_e24_cron
+          task_type: cron
+        - type: system
+          subtype: task_notification
+          task_id: cron-e24
+          status: completed
+          summary: "CronCreate event: fixture wake fired"
+          source_tool: CronCreate
+          task_notification_kind: background
+        - type: result
+          subtype: success
+          result: "[E2E:E24:CRON] exact CronCreate Background response relayed"
+assertions:
+  - message_count_between_markers:
+      min: 1
+      max: 1
+  - raw_message_count_between_markers:
+      min: 2
+      max: 2
+  - text_present: "[E2E:E24:CRON]"
+  - fixture_task_notification:
+      kind: Background
+      source: CronCreate
+      status: completed
+  - fixture_finalized:
+      finalized: true
+      active_turn: none
+      result_text_source: result.result
+  - fixture_followup_ready: true
+  - fixture_no_health_degradation: true
+  - no_duplicate_marker: "[E2E:E24:CRON]"
+  - no_duplicate_content: true

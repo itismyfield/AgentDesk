@@ -60,7 +60,13 @@ while the stale marker and terminal controls stay absent. `E-11`
 waiting for a current-turn provider hold witness after a real tool call and
 then asserting the post-tool body remains complete. `E-23` is the dedicated
 premature-completion guard: completion chrome must exist and must not appear
-before the final body marker.
+before the final body marker. `E-24` and `E-25` are local fixture scenarios:
+they run through the YAML harness without Discord, tmux, or live dcserver state.
+`E-24` replays an exact `CronCreate`/`Background` task notification and asserts
+result-text relay plus clean finalization. `E-25` replays modern Codex
+`response_item` plus `event_msg/task_complete` frames and asserts final text
+relay, task-complete finalization, follow-up readiness, and no stale
+health/queue degradation.
 
 ## #2943 Scenario Coverage And Gaps
 
@@ -69,25 +75,24 @@ Covered P0/P1 backlog items:
 - `tool_use->text completeness`: `E-22`, relay-backed pipe/TUI cells.
 - `stop-mid-turn`: `E-18`, relay-backed pipe/TUI cells, destructive-gated.
 - `cron self-prompt relay`: `E-13` covers the available Claude Code
-  `ScheduleWakeup`/monitor self-prompt path on `claude-pipe`.
+  `ScheduleWakeup`/monitor self-prompt path on `claude-pipe`; `E-24` adds the
+  deterministic local `CronCreate`/`Background` fixture primitive.
 - `restart context continuity`: `E-19`, TUI cells, with tmux identity and
   pre-restart token recall.
 - `premature-completion guard`: `E-23`, all cells.
 - `followup-during-busy` / same-session pressure: `E-20`, all cells.
 - `direct-input body_complete + control-byte strip`: `E-21`, TUI cells.
+- `codex modern schema turn completeness + follow-up readiness`: `E-25`,
+  deterministic local fixture replay for Codex cells.
 
 Remaining exact gaps:
 
-- Exact `CronCreate` Background classification is not scenario-expressible yet:
-  the harness can exercise `ScheduleWakeup` (`E-13`) and unit coverage pins
-  Background result delivery, but there is no scenario step that injects or
-  creates a `CronCreate`/Background task-notification turn deterministically.
-  Follow-up needed if exact CronCreate live coverage is required.
-- Deterministic Codex modern-schema replay (`response_item` + `event_msg`
-  `task_complete`) is not scenario-expressible yet: normal Codex cells exercise
-  the live schema indirectly, but the harness has no JSONL/frame injection step
-  that can force that exact envelope sequence without production runtime state.
-  Follow-up needed for fixture-level schema replay.
+- Exact `CronCreate` live creation is still not claimed by `E-24`: the harness
+  now has deterministic local replay for the exact `CronCreate`/`Background`
+  classification and relay contract, but it does not create a live cron job.
+- Codex modern-schema live injection is still not claimed by `E-25`: the harness
+  now has fixture-level replay for `response_item` + `event_msg/task_complete`
+  frames, but normal Codex cells still provide only indirect live coverage.
 - `tool_use->text completeness` for `claude-e` is not claimed by `E-22`: the
   scenario relies on `wait_for_provider_hold_state`, and there is no current
   local/non-live fixture proving `claude-e` persists the same

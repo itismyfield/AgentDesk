@@ -84,6 +84,7 @@ class ScenarioFilter(unittest.TestCase):
         self.assertIn("E-20", ids)
         self.assertIn("E-22", ids)
         self.assertIn("E-23", ids)
+        self.assertIn("E-24", ids)
         self.assertNotIn("E-4", ids)
         self.assertNotIn("E-10", ids)
         self.assertNotIn("E-12", ids)
@@ -130,6 +131,7 @@ class ScenarioFilter(unittest.TestCase):
         self.assertIn("E-20", ids)
         self.assertIn("E-22", ids)
         self.assertIn("E-23", ids)
+        self.assertIn("E-25", ids)
         self.assertNotIn("E-13", ids)
         self.assertNotIn("E-6", ids)
         self.assertNotIn("E-4", ids)
@@ -146,6 +148,7 @@ class ScenarioFilter(unittest.TestCase):
         self.assertIn("E-21", ids)
         self.assertIn("E-22", ids)
         self.assertIn("E-23", ids)
+        self.assertIn("E-25", ids)
         e17 = next(s for s in scenarios if s.get("id") == "E-17")
         self.assertIn("skip_reason", e17)
         self.assertIn("acceptance_criteria", e17)
@@ -271,6 +274,49 @@ class ScenarioFilter(unittest.TestCase):
                 },
                 e23["assertions"],
             )
+
+    def test_e24_croncreate_fixture_scope_and_contract(self):
+        for cell in driver.SUPPORTED_CELLS:
+            scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
+            ids = {str(s.get("id")) for s in scenarios}
+            if cell == "claude-pipe":
+                self.assertIn("E-24", ids)
+                e24 = next(s for s in scenarios if s.get("id") == "E-24")
+                self.assertEqual(e24.get("execution"), "fixture")
+                self.assertIn(
+                    {
+                        "fixture_task_notification": {
+                            "kind": "Background",
+                            "source": "CronCreate",
+                            "status": "completed",
+                        }
+                    },
+                    e24["assertions"],
+                )
+                self.assertTrue(driver.is_local_fixture_scenario(e24))
+            else:
+                self.assertNotIn("E-24", ids)
+
+    def test_e25_codex_modern_schema_fixture_scope_and_contract(self):
+        for cell in driver.SUPPORTED_CELLS:
+            scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
+            ids = {str(s.get("id")) for s in scenarios}
+            if cell in {"codex-pipe", "codex-tui"}:
+                self.assertIn("E-25", ids)
+                e25 = next(s for s in scenarios if s.get("id") == "E-25")
+                self.assertEqual(e25.get("execution"), "fixture")
+                self.assertIn(
+                    {
+                        "fixture_task_complete_finalized": {
+                            "turn_id": "codex-modern-e25-turn",
+                            "result_text_source": "task_complete.last_agent_message",
+                        }
+                    },
+                    e25["assertions"],
+                )
+                self.assertTrue(driver.is_local_fixture_scenario(e25))
+            else:
+                self.assertNotIn("E-25", ids)
 
     def test_e11_excluded_everywhere(self):
         for cell in driver.SUPPORTED_CELLS:

@@ -1001,6 +1001,83 @@ class ControlFlowPrimitives(unittest.TestCase):
             "9100000000000000123",
         )
 
+    def test_run_one_cell_local_fixture_does_not_touch_client_or_health(self):
+        class ForbiddenClient:
+            base_url = "http://agentdesk.test"
+
+            def send_control(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                raise AssertionError("local fixture must not send control messages")
+
+            def fetch_messages(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                raise AssertionError("local fixture must not fetch Discord messages")
+
+            def send_prompt(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                raise AssertionError("local fixture must not send prompts")
+
+        args = Namespace(
+            cell="codex-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+        )
+        scenario = {
+            "id": "E-25",
+            "execution": "fixture",
+            "steps": [
+                {
+                    "replay_fixture": {
+                        "kind": "codex_modern_schema",
+                        "provider": "codex",
+                        "frames": [
+                            {"type": "thread.started", "thread_id": "thread-1"},
+                            {
+                                "type": "response_item",
+                                "payload": {
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [
+                                        {"type": "output_text", "text": "partial"}
+                                    ],
+                                },
+                            },
+                            {
+                                "type": "event_msg",
+                                "payload": {
+                                    "type": "task_complete",
+                                    "turn_id": "turn-1",
+                                    "last_agent_message": "[E2E:E25:FINAL]",
+                                },
+                            },
+                        ],
+                    }
+                },
+                {"fixture_followup_probe": {"prompt": "next"}},
+            ],
+            "assertions": [
+                {"text_present": "[E2E:E25:FINAL]"},
+                {"fixture_task_complete_finalized": {"turn_id": "turn-1"}},
+                {"fixture_followup_ready": True},
+                {"fixture_no_health_degradation": True},
+            ],
+        }
+
+        with patch("run_tui_relay.assert_cell_idle") as idle:
+            record = driver.run_one_cell(
+                scenario=scenario,
+                cell="codex-tui",
+                channel_id="42",
+                client=ForbiddenClient(),  # type: ignore[arg-type]
+                run_id="run-1",
+                dry_run=False,
+                args=args,
+            )
+
+        idle.assert_not_called()
+        self.assertTrue(record["local_fixture"])
+        self.assertEqual(record["relay_count"], 1)
+        self.assertEqual(record["post_scenario_idle"]["source"], "local_fixture")
+        self.assertTrue(record["fixture_state"]["followup_probe_accepted"])
+
     def test_run_one_cell_waits_for_hold_state_before_cancel(self):
         class FakeClient:
             base_url = "http://agentdesk.test"

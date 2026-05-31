@@ -1,0 +1,74 @@
+id: E-25
+title: Codex response_item plus task_complete replay fixture
+cells: [codex-pipe, codex-tui]
+execution: fixture
+isolation: local
+acceptance_criteria:
+  - Replay representative modern Codex response_item frames.
+  - Finalize from event_msg task_complete.last_agent_message.
+  - Assert final text relay, turn release, follow-up readiness, and clean fixture health.
+notes: |
+  #2972 local/non-live coverage for the #2943 Codex modern-schema replay gap.
+  The fixture models the #2895/#2899 blackhole class where visible output can
+  appear but task_complete finalization or follow-up readiness gets lost.
+steps:
+  - replay_fixture:
+      kind: codex_modern_schema
+      provider: codex
+      frames:
+        - type: thread.started
+          thread_id: codex-modern-e25
+        - type: response_item
+          payload:
+            type: message
+            role: assistant
+            content:
+              - type: output_text
+                text: "[E2E:E25:STREAM] response_item text observed"
+        - type: event_msg
+          payload:
+            type: token_count
+            info:
+              total_token_usage:
+                input_tokens: 120
+                output_tokens: 9
+        - type: event_msg
+          payload:
+            type: task_complete
+            turn_id: codex-modern-e25-turn
+            last_agent_message: |
+              [E2E:E25:FINAL-BEGIN]
+              Modern Codex task_complete final text relayed.
+              [E2E:E25:FINAL-END]
+  - fixture_followup_probe:
+      prompt: "[E2E:E25:FOLLOWUP] readiness probe"
+assertions:
+  - message_count_between_markers:
+      min: 1
+      max: 1
+  - raw_message_count_between_markers:
+      min: 2
+      max: 2
+  - text_present: "[E2E:E25:FINAL-BEGIN]"
+  - text_present: "Modern Codex task_complete final text relayed."
+  - text_present: "[E2E:E25:FINAL-END]"
+  - ordered_text_present:
+      - "[E2E:E25:FINAL-BEGIN]"
+      - "Modern Codex task_complete final text relayed."
+      - "[E2E:E25:FINAL-END]"
+  - body_complete:
+      head: "[E2E:E25:FINAL-BEGIN]"
+      tail: "[E2E:E25:FINAL-END]"
+  - fixture_task_complete_finalized:
+      turn_id: codex-modern-e25-turn
+      result_text_source: task_complete.last_agent_message
+  - fixture_finalized:
+      finalized: true
+      active_turn: none
+  - fixture_followup_ready: true
+  - fixture_state:
+      followup_probe_accepted: true
+  - fixture_no_health_degradation: true
+  - no_duplicate_marker: "[E2E:E25:FINAL-BEGIN]"
+  - no_duplicate_marker: "[E2E:E25:FINAL-END]"
+  - no_duplicate_content: true
