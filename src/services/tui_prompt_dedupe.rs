@@ -20,6 +20,8 @@ const OBSERVED_PROMPT_BUFFER: usize = 128;
 
 static STATE: LazyLock<Mutex<TuiPromptDedupeState>> =
     LazyLock::new(|| Mutex::new(TuiPromptDedupeState::default()));
+#[cfg(test)]
+pub(crate) static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static OBSERVED_PROMPTS: LazyLock<broadcast::Sender<ObservedTuiPrompt>> =
     LazyLock::new(|| broadcast::channel(OBSERVED_PROMPT_BUFFER).0);
 
@@ -1019,8 +1021,6 @@ impl TuiPromptDedupeState {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     fn reset_state() {
         let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());

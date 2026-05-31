@@ -2823,6 +2823,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bridge_adapter_tail_guard_clears_only_current_external_lease() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
         let tmux = "AgentDesk-codex-bridge-guard";
         let channel_id = ChannelId::new(940_000_000_000_003);
         let original = ExternalInputRelayLease {
@@ -2898,6 +2901,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn claude_bridge_lease_clears_when_tail_dedup_skips_spawn() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
         let tmux = "AgentDesk-claude-bridge-dedup-skip";
         let channel_id = ChannelId::new(940_000_000_000_004);
         let lease = ExternalInputRelayLease {
@@ -2957,6 +2963,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn claude_bridge_lease_guard_cleans_no_binding_precondition_skip() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
         let tmux = "AgentDesk-claude-bridge-no-binding";
         let channel_id = ChannelId::new(940_000_000_000_005);
         let prompt = ObservedTuiPrompt {

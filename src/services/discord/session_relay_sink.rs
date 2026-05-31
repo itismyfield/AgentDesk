@@ -1241,6 +1241,9 @@ mod tests {
 
     #[test]
     fn session_relay_trace_context_uses_external_input_lease_without_inflight() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
         let tmux = "AgentDesk-codex-external-trace";
         crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
             ProviderKind::Codex.as_str(),
@@ -1276,6 +1279,9 @@ mod tests {
 
     #[test]
     fn terminal_delivery_route_skips_bridge_owned_external_lease_without_inflight() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
         let tmux = "AgentDesk-codex-bridge-owned-direct";
         let lease = crate::services::tui_prompt_dedupe::ExternalInputRelayLease {
             channel_id: Some(4243),
