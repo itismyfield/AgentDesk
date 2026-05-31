@@ -526,6 +526,14 @@ impl Default for HardStopRuntimeResult {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FinishCancelledMailboxResult {
+    pub cleared_active_turn: bool,
+    pub global_active_decremented: bool,
+    pub has_pending_queue: bool,
+    pub runtime_session_cleared: bool,
+}
+
 struct RuntimeChannelMatch {
     provider: ProviderKind,
     shared: Arc<SharedData>,
@@ -733,6 +741,53 @@ pub async fn stop_runtime_turn_preserving_watcher(
         false,
     )
     .await
+}
+
+pub async fn finish_cancelled_provider_channel_mailbox(
+    registry: Option<&HealthRegistry>,
+    provider_name: Option<&str>,
+    channel_id: Option<u64>,
+    stop_source: &'static str,
+) -> FinishCancelledMailboxResult {
+    let Some(registry) = registry else {
+        return FinishCancelledMailboxResult::default();
+    };
+    let Some(channel_id) = channel_id.map(ChannelId::new) else {
+        return FinishCancelledMailboxResult::default();
+    };
+    let Some(runtime) =
+        find_runtime_channel_match(registry, provider_name, Some(channel_id), None).await
+    else {
+        return FinishCancelledMailboxResult::default();
+    };
+
+    let before = runtime.shared.global_active.load(Ordering::Acquire);
+    let finish = discord::mailbox_finish_cancelled_turn(&runtime.shared, channel_id).await;
+    if finish.removed_token.is_none() {
+        return FinishCancelledMailboxResult {
+            cleared_active_turn: false,
+            global_active_decremented: false,
+            has_pending_queue: finish.has_pending,
+            runtime_session_cleared: false,
+        };
+    }
+
+    let runtime_session_cleared = apply_runtime_hard_stop_cleanup(
+        &runtime.shared,
+        &runtime.provider,
+        channel_id,
+        &finish,
+        stop_source,
+        true,
+    )
+    .await;
+    let after = runtime.shared.global_active.load(Ordering::Acquire);
+    FinishCancelledMailboxResult {
+        cleared_active_turn: true,
+        global_active_decremented: after < before,
+        has_pending_queue: finish.has_pending,
+        runtime_session_cleared,
+    }
 }
 
 async fn runtime_turn_cleanup_by_lookup(

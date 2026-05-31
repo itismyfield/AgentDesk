@@ -3358,6 +3358,18 @@ async fn mailbox_finish_turn(
     result
 }
 
+async fn mailbox_finish_cancelled_turn(
+    shared: &SharedData,
+    channel_id: ChannelId,
+) -> FinishTurnResult {
+    let result = shared.mailbox(channel_id).finish_cancelled_turn().await;
+    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    if result.removed_token.is_some() {
+        shared.mailboxes.recovery_done(channel_id).mark_done();
+    }
+    result
+}
+
 async fn mailbox_clear_channel(
     shared: &SharedData,
     provider: &ProviderKind,

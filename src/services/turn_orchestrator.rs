@@ -1439,6 +1439,20 @@ impl ChannelMailboxHandle {
         .await
     }
 
+    pub(crate) async fn finish_cancelled_turn(&self) -> FinishTurnResult {
+        self.request(
+            |reply| ChannelMailboxMsg::FinishCancelledTurn { reply },
+            FinishTurnResult {
+                removed_token: None,
+                has_pending: false,
+                mailbox_online: false,
+                queue_exit_events: Vec::new(),
+                persistence_error: None,
+            },
+        )
+        .await
+    }
+
     pub(crate) async fn clear(&self, persistence: QueuePersistenceContext) -> ClearChannelResult {
         self.request(
             |reply| ChannelMailboxMsg::Clear { persistence, reply },
@@ -1914,6 +1928,9 @@ enum ChannelMailboxMsg {
         reply: oneshot::Sender<FinishTurnResult>,
     },
     HardStop {
+        reply: oneshot::Sender<FinishTurnResult>,
+    },
+    FinishCancelledTurn {
         reply: oneshot::Sender<FinishTurnResult>,
     },
     Clear {
@@ -2679,6 +2696,31 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         persistence.as_ref(),
                     ));
                     mark_turn_finished_signal_done(channel_id);
+                }
+                ChannelMailboxMsg::FinishCancelledTurn { reply } => {
+                    let should_finish = state.cancel_token.as_ref().is_some_and(|token| {
+                        token.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+                    });
+                    if should_finish {
+                        let persistence = state.last_persistence.clone();
+                        let _ = reply.send(finalize_turn_state(
+                            &mut state,
+                            channel_id,
+                            persistence.as_ref(),
+                        ));
+                        mark_turn_finished_signal_done(channel_id);
+                    } else {
+                        let _ = reply.send(FinishTurnResult {
+                            removed_token: None,
+                            has_pending: state
+                                .intervention_queue
+                                .iter()
+                                .any(|item| item.mode == InterventionMode::Soft),
+                            mailbox_online: true,
+                            queue_exit_events: Vec::new(),
+                            persistence_error: None,
+                        });
+                    }
                 }
                 ChannelMailboxMsg::Clear { persistence, reply } => {
                     state.last_persistence = Some(persistence.clone());
