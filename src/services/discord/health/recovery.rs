@@ -6,8 +6,9 @@ use std::sync::atomic::Ordering;
 use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
 use serde::Serialize;
 
+use crate::services::discord::relay_health::RelayActiveTurn;
 use crate::services::discord::{self as discord, SharedData};
-use crate::services::provider::ProviderKind;
+use crate::services::provider::{CancelToken, ProviderKind};
 
 use super::HealthRegistry;
 
@@ -76,6 +77,49 @@ fn idle_tmux_repair_ready_for_input(
         })
 }
 
+fn preserve_cancel_should_skip_provider_interrupt_for_idle_tui(
+    provider: &ProviderKind,
+    cleanup_policy: discord::TmuxCleanupPolicy,
+    tmux_ready_for_input: bool,
+    inflight_safe_to_clear: bool,
+) -> bool {
+    !cleanup_policy.should_cleanup_tmux()
+        && matches!(provider, ProviderKind::Claude)
+        && tmux_ready_for_input
+        && inflight_safe_to_clear
+}
+
+fn cancel_token_tmux_session(token: &Arc<CancelToken>) -> Option<String> {
+    token
+        .tmux_session
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .filter(|session| !session.trim().is_empty())
+}
+
+fn preserve_cancel_can_skip_provider_interrupt_for_idle_tui(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    token: &Arc<CancelToken>,
+    cleanup_policy: discord::TmuxCleanupPolicy,
+) -> bool {
+    let Some(tmux_session) = cancel_token_tmux_session(token) else {
+        return false;
+    };
+    let tmux_ready_for_input =
+        idle_tmux_repair_ready_for_input(provider, channel_id.get(), &tmux_session);
+    let inflight_safe_to_clear =
+        discord::inflight_state_allows_idle_tmux_repair_for_channel(provider, channel_id.get())
+            .unwrap_or(false);
+    preserve_cancel_should_skip_provider_interrupt_for_idle_tui(
+        provider,
+        cleanup_policy,
+        tmux_ready_for_input,
+        inflight_safe_to_clear,
+    )
+}
+
 async fn wait_for_turn_end(
     shared: &SharedData,
     channel_id: ChannelId,
@@ -127,25 +171,47 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
     let persistent_inflight_was_present = should_clear_persistent_inflight
         && discord::inflight::inflight_state_file_exists(&provider, channel_id.get());
     let result = discord::mailbox_cancel_active_turn(&shared, channel_id).await;
+    let mut skipped_idle_provider_interrupt = false;
 
     if let Some(token) = result.token.as_ref() {
-        let termination_recorded = if !result.already_stopping || cleanup_requested {
+        let skip_provider_interrupt = preserve_cancel_can_skip_provider_interrupt_for_idle_tui(
+            &provider,
+            channel_id,
+            token,
+            cleanup_policy,
+        );
+        let termination_recorded = if skip_provider_interrupt {
+            tracing::info!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                reason,
+                "preserve cancel skipped provider interrupt for idle Claude TUI turn"
+            );
+            skipped_idle_provider_interrupt = true;
+            false
+        } else if !result.already_stopping || cleanup_requested {
             discord::turn_bridge::stop_active_turn(&provider, token, cleanup_policy, reason).await
         } else {
             false
         };
         if wait_for_turn_end(&shared, channel_id, runtime_stop_wait_timeout()).await {
             let snapshot = shared.mailbox(channel_id).snapshot().await;
+            let idle_inflight_cleared = if skipped_idle_provider_interrupt {
+                discord::clear_inflight_state(&provider, channel_id.get())
+            } else {
+                false
+            };
             return Some(RuntimeTurnStopResult {
                 lifecycle_path: "canonical",
                 had_active_turn: true,
                 queue_depth: snapshot.intervention_queue.len(),
-                persistent_inflight_cleared: should_clear_persistent_inflight
-                    && clear_persistent_inflight_for_stop(
-                        &provider,
-                        channel_id,
-                        persistent_inflight_was_present,
-                    ),
+                persistent_inflight_cleared: idle_inflight_cleared
+                    || (should_clear_persistent_inflight
+                        && clear_persistent_inflight_for_stop(
+                            &provider,
+                            channel_id,
+                            persistent_inflight_was_present,
+                        )),
                 termination_recorded,
             });
         }
@@ -154,8 +220,26 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
     let finish = discord::mailbox_finish_turn(&shared, &provider, channel_id).await;
     let mut termination_recorded = false;
     if let Some(token) = finish.removed_token.as_ref() {
-        termination_recorded =
-            discord::turn_bridge::stop_active_turn(&provider, token, cleanup_policy, reason).await;
+        let skip_provider_interrupt = skipped_idle_provider_interrupt
+            || preserve_cancel_can_skip_provider_interrupt_for_idle_tui(
+                &provider,
+                channel_id,
+                token,
+                cleanup_policy,
+            );
+        if skip_provider_interrupt {
+            tracing::info!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                reason,
+                "runtime fallback skipped provider interrupt for idle Claude TUI turn"
+            );
+            skipped_idle_provider_interrupt = true;
+        } else {
+            termination_recorded =
+                discord::turn_bridge::stop_active_turn(&provider, token, cleanup_policy, reason)
+                    .await;
+        }
     }
     apply_runtime_hard_stop_cleanup(
         &shared,
@@ -173,11 +257,21 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
         .intervention_queue
         .len();
     discord::mailbox_clear_recovery_marker(&shared, channel_id).await;
-    let persistent_inflight_cleared = if should_clear_persistent_inflight {
-        clear_persistent_inflight_for_stop(&provider, channel_id, persistent_inflight_was_present)
+    let idle_inflight_cleared = if skipped_idle_provider_interrupt {
+        discord::clear_inflight_state(&provider, channel_id.get())
     } else {
         false
     };
+    let persistent_inflight_cleared = idle_inflight_cleared
+        || if should_clear_persistent_inflight {
+            clear_persistent_inflight_for_stop(
+                &provider,
+                channel_id,
+                persistent_inflight_was_present,
+            )
+        } else {
+            false
+        };
 
     Some(RuntimeTurnStopResult {
         lifecycle_path: "runtime-fallback",
@@ -587,9 +681,15 @@ pub async fn clear_idle_tmux_stale_turn(
     let channel_id = ChannelId::new(channel_id);
     let shared = shared_for_provider(registry, &provider, channel_id).await?;
     let finish = discord::mailbox_finish_turn(&shared, &provider, channel_id).await;
-    let runtime_session_cleared =
-        apply_runtime_hard_stop_cleanup(&shared, &provider, channel_id, &finish, stop_source, true)
-            .await;
+    let runtime_session_cleared = apply_runtime_hard_stop_cleanup(
+        &shared,
+        &provider,
+        channel_id,
+        &finish,
+        stop_source,
+        false,
+    )
+    .await;
     let persistent_inflight_cleared = discord::clear_inflight_state(&provider, channel_id.get());
 
     Some(IdleTmuxStaleTurnRepairResult {
@@ -1115,6 +1215,53 @@ pub(crate) fn inflight_completed_stale_leak_detected(
     age_secs >= 0 && (age_secs as u64) >= threshold_secs
 }
 
+fn outbound_activity_is_recent(
+    last_outbound_activity_ms: Option<i64>,
+    now_unix_secs: i64,
+    threshold_secs: u64,
+) -> bool {
+    let Some(last_outbound_activity_ms) = last_outbound_activity_ms else {
+        return false;
+    };
+    let now_ms = now_unix_secs.saturating_mul(1000);
+    if last_outbound_activity_ms >= now_ms {
+        return true;
+    }
+    let age_ms = now_ms.saturating_sub(last_outbound_activity_ms) as u64;
+    age_ms < threshold_secs.saturating_mul(1000)
+}
+
+pub(crate) fn stale_idle_foreground_queue_detected(
+    active_turn: RelayActiveTurn,
+    mailbox_has_cancel_token: bool,
+    _queue_depth: usize,
+    inflight_state_present: bool,
+    inflight_updated_at: Option<&str>,
+    tmux_session_alive: Option<bool>,
+    last_outbound_activity_ms: Option<i64>,
+    now_unix_secs: i64,
+    threshold_secs: u64,
+) -> bool {
+    // Queue depth is intentionally ignored: a stale foreground health anchor
+    // can strand health even when no user intervention is queued behind it.
+    if active_turn != RelayActiveTurn::Foreground
+        || !mailbox_has_cancel_token
+        || !inflight_state_present
+        || tmux_session_alive != Some(true)
+        || outbound_activity_is_recent(last_outbound_activity_ms, now_unix_secs, threshold_secs)
+    {
+        return false;
+    }
+    let Some(updated_at) = inflight_updated_at else {
+        return false;
+    };
+    let Some(updated_at_unix) = discord::inflight::parse_updated_at_unix(updated_at) else {
+        return false;
+    };
+    let age_secs = now_unix_secs.saturating_sub(updated_at_unix);
+    age_secs >= 0 && (age_secs as u64) >= threshold_secs
+}
+
 /// Watchdog tick interval. Picked to converge inside ~1 cycle once the
 /// `2x` staleness window has elapsed, while staying well below the
 /// gateway-lease keepalive cadence so we never starve the gateway loop.
@@ -1187,6 +1334,47 @@ pub(crate) async fn run_stall_watchdog_pass(
             Some(snapshot) => snapshot,
             None => continue,
         };
+        // #2965: a ready-for-input TUI can still look "desynced" when the
+        // capture file has bytes past relay offsets. Prefer the idle-safe
+        // anchor cleanup before the destructive desynced force-clean branch.
+        if stale_idle_foreground_queue_detected(
+            snapshot.relay_health.active_turn,
+            snapshot.relay_health.mailbox_has_cancel_token,
+            snapshot.relay_health.queue_depth,
+            snapshot.inflight_state_present,
+            snapshot.inflight_updated_at.as_deref(),
+            snapshot.tmux_session_alive,
+            snapshot.relay_health.last_outbound_activity_ms,
+            now_unix_secs,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+        ) && let Some(tmux_session) = snapshot.tmux_session.clone()
+            && idle_tmux_repair_ready_for_input(provider, channel_id.get(), &tmux_session)
+            && discord::inflight_state_allows_idle_tmux_repair_for_channel(
+                provider,
+                channel_id.get(),
+            )
+            .unwrap_or(false)
+            && let Some(result) = clear_idle_tmux_stale_turn(
+                registry,
+                provider.as_str(),
+                channel_id.get(),
+                &tmux_session,
+                "2965_stale_idle_foreground_queue_watchdog",
+            )
+            .await
+        {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚡ STALL-WATCHDOG: cleared idle foreground TUI turn for channel {} (provider={}, pending_queue={}, inflight_cleared={})",
+                channel_id,
+                provider.as_str(),
+                result.has_pending_queue,
+                result.persistent_inflight_cleared
+            );
+            cleaned += 1;
+            continue;
+        }
+
         let should_clean = stall_watchdog_should_force_clean(
             snapshot.attached,
             snapshot.desynced,
@@ -2079,9 +2267,12 @@ mod stall_watchdog_pure_tests {
         inflight_completed_stale_leak_detected, leak_recovery_chunk_fingerprints,
         leak_recovery_clear_chunk_ledger, leak_recovery_confirmed_chunk_count,
         leak_recovery_confirmed_prefix_from_ledger, leak_recovery_record_confirmed_chunk,
-        leak_recovery_unrelayed_range, render_leak_recovery_delivery,
+        leak_recovery_unrelayed_range, preserve_cancel_should_skip_provider_interrupt_for_idle_tui,
+        render_leak_recovery_delivery, stale_idle_foreground_queue_detected,
         stall_watchdog_should_force_clean,
     };
+    use crate::services::discord::relay_health::RelayActiveTurn;
+    use crate::services::discord::{InflightRestartMode, TmuxCleanupPolicy};
     use crate::services::provider::ProviderKind;
     use chrono::TimeZone;
     use std::ffi::OsString;
@@ -2443,6 +2634,187 @@ mod stall_watchdog_pure_tests {
             now_unix,
             STALL_WATCHDOG_THRESHOLD_SECS,
         ));
+    }
+
+    #[test]
+    fn stale_idle_foreground_queue_detected_requires_no_progress_stale_inflight() {
+        let now_unix = chrono::Utc::now().timestamp();
+        let stale = local_string(now_unix - (STALL_WATCHDOG_THRESHOLD_SECS as i64) - 1);
+        let fresh = local_string(now_unix - 5);
+
+        assert!(stale_idle_foreground_queue_detected(
+            RelayActiveTurn::Foreground,
+            true,
+            1,
+            true,
+            Some(stale.as_str()),
+            Some(true),
+            None,
+            now_unix,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+        ));
+        assert!(stale_idle_foreground_queue_detected(
+            RelayActiveTurn::Foreground,
+            true,
+            0,
+            true,
+            Some(stale.as_str()),
+            Some(true),
+            None,
+            now_unix,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+        ));
+        assert!(stale_idle_foreground_queue_detected(
+            RelayActiveTurn::Foreground,
+            true,
+            1,
+            true,
+            Some(stale.as_str()),
+            Some(true),
+            Some((now_unix - STALL_WATCHDOG_THRESHOLD_SECS as i64 - 1) * 1000),
+            now_unix,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+        ));
+
+        for (
+            name,
+            active_turn,
+            has_token,
+            queue_depth,
+            inflight,
+            updated_at,
+            tmux_alive,
+            outbound,
+        ) in [
+            (
+                "not foreground",
+                RelayActiveTurn::ExplicitBackground,
+                true,
+                1,
+                true,
+                Some(stale.as_str()),
+                Some(true),
+                None,
+            ),
+            (
+                "no mailbox token",
+                RelayActiveTurn::Foreground,
+                false,
+                1,
+                true,
+                Some(stale.as_str()),
+                Some(true),
+                None,
+            ),
+            (
+                "no inflight",
+                RelayActiveTurn::Foreground,
+                true,
+                1,
+                false,
+                Some(stale.as_str()),
+                Some(true),
+                None,
+            ),
+            (
+                "fresh inflight",
+                RelayActiveTurn::Foreground,
+                true,
+                1,
+                true,
+                Some(fresh.as_str()),
+                Some(true),
+                None,
+            ),
+            (
+                "tmux not live",
+                RelayActiveTurn::Foreground,
+                true,
+                1,
+                true,
+                Some(stale.as_str()),
+                Some(false),
+                None,
+            ),
+            (
+                "outbound progress exists",
+                RelayActiveTurn::Foreground,
+                true,
+                1,
+                true,
+                Some(stale.as_str()),
+                Some(true),
+                Some((now_unix - 60) * 1000),
+            ),
+        ] {
+            assert!(
+                !stale_idle_foreground_queue_detected(
+                    active_turn,
+                    has_token,
+                    queue_depth,
+                    inflight,
+                    updated_at,
+                    tmux_alive,
+                    outbound,
+                    now_unix,
+                    STALL_WATCHDOG_THRESHOLD_SECS,
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn preserve_cancel_skips_interrupt_only_for_idle_safe_claude_tui() {
+        assert!(preserve_cancel_should_skip_provider_interrupt_for_idle_tui(
+            &ProviderKind::Claude,
+            TmuxCleanupPolicy::PreserveSession,
+            true,
+            true,
+        ));
+        assert!(preserve_cancel_should_skip_provider_interrupt_for_idle_tui(
+            &ProviderKind::Claude,
+            TmuxCleanupPolicy::PreserveSessionAndInflight {
+                restart_mode: InflightRestartMode::HotSwapHandoff,
+            },
+            true,
+            true,
+        ));
+
+        assert!(
+            !preserve_cancel_should_skip_provider_interrupt_for_idle_tui(
+                &ProviderKind::Codex,
+                TmuxCleanupPolicy::PreserveSession,
+                true,
+                true,
+            )
+        );
+        assert!(
+            !preserve_cancel_should_skip_provider_interrupt_for_idle_tui(
+                &ProviderKind::Claude,
+                TmuxCleanupPolicy::PreserveSession,
+                false,
+                true,
+            )
+        );
+        assert!(
+            !preserve_cancel_should_skip_provider_interrupt_for_idle_tui(
+                &ProviderKind::Claude,
+                TmuxCleanupPolicy::PreserveSession,
+                true,
+                false,
+            )
+        );
+        assert!(
+            !preserve_cancel_should_skip_provider_interrupt_for_idle_tui(
+                &ProviderKind::Claude,
+                TmuxCleanupPolicy::CleanupSession {
+                    termination_reason_code: Some("force"),
+                },
+                true,
+                true,
+            )
+        );
     }
 
     /// All three signals (`attached`, `desynced`, stale `updated_at`) must

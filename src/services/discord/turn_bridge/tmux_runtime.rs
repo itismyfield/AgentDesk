@@ -468,6 +468,7 @@ async fn hard_stop_unresponsive_provider_cli_turn(
     };
 
     let Some(pid) = hard_stop_pid_for_unresponsive_provider(
+        provider,
         cleanup_policy,
         session_alive,
         ready_for_input,
@@ -489,6 +490,7 @@ async fn hard_stop_unresponsive_provider_cli_turn(
 }
 
 fn hard_stop_pid_for_unresponsive_provider(
+    provider: &ProviderKind,
     cleanup_policy: TmuxCleanupPolicy,
     session_alive: bool,
     ready_for_input: bool,
@@ -499,6 +501,16 @@ fn hard_stop_pid_for_unresponsive_provider(
     if cleanup_policy.should_cleanup_tmux() || !session_alive || ready_for_input {
         return None;
     }
+
+    // #2965: PreserveSession means "do not tear down the reusable TUI".
+    // Claude's CLI runs below the wrapper, so the candidate PID can be a
+    // child rather than the pane foreground. Killing that child can still
+    // make the wrapper exit and collapse the tmux session. Force=true keeps
+    // the explicit cleanup path; preserve paths stop at cooperative SIGINT.
+    if matches!(provider, ProviderKind::Claude) {
+        return None;
+    }
+
     let candidate = current_provider_pid.or(previous_provider_pid)?;
 
     // TUI mode regression guard: when the provider CLI is the tmux pane
@@ -1154,6 +1166,7 @@ mod tests {
         let wrapper_pane = Some(9999u32);
         assert_eq!(
             super::hard_stop_pid_for_unresponsive_provider(
+                &ProviderKind::Codex,
                 TmuxCleanupPolicy::PreserveSession,
                 true,
                 false,
@@ -1166,6 +1179,7 @@ mod tests {
         );
         assert_eq!(
             super::hard_stop_pid_for_unresponsive_provider(
+                &ProviderKind::Codex,
                 TmuxCleanupPolicy::PreserveSession,
                 true,
                 false,
@@ -1178,6 +1192,7 @@ mod tests {
         );
         assert_eq!(
             super::hard_stop_pid_for_unresponsive_provider(
+                &ProviderKind::Codex,
                 TmuxCleanupPolicy::PreserveSession,
                 true,
                 true,
@@ -1190,6 +1205,7 @@ mod tests {
         );
         assert_eq!(
             super::hard_stop_pid_for_unresponsive_provider(
+                &ProviderKind::Codex,
                 TmuxCleanupPolicy::CleanupSession {
                     termination_reason_code: Some("test")
                 },
@@ -1204,6 +1220,7 @@ mod tests {
         );
         assert_eq!(
             super::hard_stop_pid_for_unresponsive_provider(
+                &ProviderKind::Codex,
                 TmuxCleanupPolicy::PreserveSession,
                 false,
                 false,
@@ -1227,6 +1244,7 @@ mod tests {
         let pane_pid = Some(96964u32);
         assert_eq!(
             super::hard_stop_pid_for_unresponsive_provider(
+                &ProviderKind::Codex,
                 TmuxCleanupPolicy::PreserveSession,
                 true,
                 false,
@@ -1239,6 +1257,7 @@ mod tests {
         );
         assert_eq!(
             super::hard_stop_pid_for_unresponsive_provider(
+                &ProviderKind::Codex,
                 TmuxCleanupPolicy::PreserveSessionAndInflight {
                     restart_mode: InflightRestartMode::HotSwapHandoff,
                 },
@@ -1255,6 +1274,7 @@ mod tests {
         // the kill remains permitted.
         assert_eq!(
             super::hard_stop_pid_for_unresponsive_provider(
+                &ProviderKind::Codex,
                 TmuxCleanupPolicy::PreserveSession,
                 true,
                 false,
@@ -1264,6 +1284,38 @@ mod tests {
             ),
             Some(97458),
             "wrapper mode: candidate child PID kept; wrapper pane PID is not the target"
+        );
+    }
+
+    #[test]
+    fn hard_stop_skips_claude_child_pid_on_preserve_cancel() {
+        assert_eq!(
+            super::hard_stop_pid_for_unresponsive_provider(
+                &ProviderKind::Claude,
+                TmuxCleanupPolicy::PreserveSession,
+                true,
+                false,
+                Some(97458),
+                Some(97457),
+                Some(97437),
+            ),
+            None,
+            "Claude preserve cancel must not SIGKILL a child PID because wrapper exit can collapse the tmux session (#2965)"
+        );
+        assert_eq!(
+            super::hard_stop_pid_for_unresponsive_provider(
+                &ProviderKind::Claude,
+                TmuxCleanupPolicy::PreserveSessionAndInflight {
+                    restart_mode: InflightRestartMode::HotSwapHandoff,
+                },
+                true,
+                false,
+                Some(97458),
+                None,
+                Some(97437),
+            ),
+            None,
+            "queue cancel preserve keeps the same no-hard-kill guarantee for Claude (#2965)"
         );
     }
 

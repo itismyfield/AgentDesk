@@ -5527,6 +5527,131 @@ agents:
         );
     }
 
+    /// #2965 — an idle/no-progress Claude foreground turn can leave provider
+    /// health unhealthy even when the user queue is empty. The watchdog should
+    /// clear only the stale foreground health/inflight state once the TUI is
+    /// provably ready for input; the live tmux session must remain intact.
+    #[tokio::test]
+    async fn stall_watchdog_clears_queue_empty_idle_foreground_without_killing_tmux() {
+        let Some(tmux_guard) = start_test_tmux_session("watchdog-idle-fg-empty-queue") else {
+            return;
+        };
+        let _lock = crate::services::discord::runtime_store::lock_test_env();
+        let temp = tempfile::tempdir().expect("create temp runtime root");
+        let prev_override = crate::config::current_test_runtime_root_override();
+        crate::config::set_test_runtime_root_override(Some(temp.path().to_path_buf()));
+        struct OverrideGuard(Option<std::path::PathBuf>);
+        impl Drop for OverrideGuard {
+            fn drop(&mut self) {
+                crate::config::set_test_runtime_root_override(self.0.clone());
+            }
+        }
+        let _guard = OverrideGuard(prev_override);
+
+        let harness = TestHealthHarness::new_with_provider(ProviderKind::Claude).await;
+        let channel_id: u64 = 700_111_222_333_666_001;
+        harness.seed_watcher_for_tmux(channel_id, &tmux_guard.name);
+        harness
+            .start_active_turn(channel_id, 42, 8_021, Some(&tmux_guard.name))
+            .await;
+        assert_eq!(
+            harness.queue_depth_for_channel(channel_id).await,
+            0,
+            "test setup must exercise the empty-queue foreground case",
+        );
+
+        let output_path = temp.path().join("watchdog-idle-fg-empty-queue.jsonl");
+        std::fs::write(
+            &output_path,
+            b"{\"type\":\"system\",\"subtype\":\"turn_duration\",\"session_id\":\"s\"}\n",
+        )
+        .expect("seed ready-for-input Claude JSONL");
+        let consumed_offset = std::fs::metadata(&output_path)
+            .expect("ready JSONL metadata")
+            .len();
+
+        let mut inflight = super::super::inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            channel_id,
+            Some("watchdog-idle-fg-empty-queue".to_string()),
+            42,
+            8_021,
+            8_022,
+            String::new(),
+            Some("session-watchdog-idle-fg-empty-queue".to_string()),
+            Some(tmux_guard.name.clone()),
+            Some(output_path.to_string_lossy().into_owned()),
+            None,
+            consumed_offset,
+        );
+        inflight.runtime_kind =
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        let stale_unix =
+            chrono::Utc::now().timestamp() - (super::STALL_WATCHDOG_THRESHOLD_SECS as i64) - 60;
+        let stale_local = chrono::Local
+            .timestamp_opt(stale_unix, 0)
+            .single()
+            .expect("valid local time")
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        inflight.started_at = stale_local.clone();
+        inflight.updated_at = stale_local.clone();
+        super::super::inflight::save_inflight_state(&inflight)
+            .expect("write seeded stale foreground inflight JSON");
+        let json = serde_json::to_string_pretty(&inflight).expect("serialize stale inflight");
+        let inflight_path = super::super::inflight::inflight_runtime_root()
+            .expect("inflight root override")
+            .join("claude")
+            .join(format!("{channel_id}.json"));
+        std::fs::write(&inflight_path, json).expect("rewrite stale inflight on disk");
+
+        let pre_snapshot = harness
+            .registry()
+            .snapshot_watcher_state(channel_id)
+            .await
+            .expect("seeded foreground inflight should surface a snapshot");
+        assert_eq!(pre_snapshot.relay_health.queue_depth, 0);
+        assert_eq!(
+            pre_snapshot.relay_health.active_turn,
+            RelayActiveTurn::Foreground
+        );
+        assert!(
+            pre_snapshot.desynced,
+            "test setup should cover the destructive force-clean precedence risk",
+        );
+
+        let cleaned =
+            super::run_stall_watchdog_pass(&harness.registry(), &ProviderKind::Claude).await;
+        assert_eq!(
+            cleaned, 1,
+            "watchdog must recover the queue-empty idle foreground state"
+        );
+        assert!(
+            super::super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id)
+                .is_none(),
+            "watchdog must clear the stale foreground inflight state"
+        );
+        let (has_active_turn, queue_depth, _) = harness.mailbox_state(channel_id).await;
+        assert!(
+            !has_active_turn,
+            "stale foreground mailbox token must clear"
+        );
+        assert_eq!(queue_depth, 0, "empty queue must remain empty");
+        assert_eq!(
+            harness
+                .shared
+                .global_active
+                .load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "health active counter must clear with the stale foreground token",
+        );
+        let tmux_alive = crate::services::platform::tmux::has_session(&tmux_guard.name);
+        assert!(
+            tmux_alive,
+            "idle-safe cleanup must not kill the tmux session"
+        );
+    }
+
     /// codex review round-3 P2 (#1672): when the in-memory mailbox is
     /// empty but the disk-backed `discord_pending_queue/<provider>/<token>/<channel>.json`
     /// is still present, `schedule_pending_queue_drain_after_cancel` must

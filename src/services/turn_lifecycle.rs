@@ -277,14 +277,16 @@ async fn stop_turn_with_policy(
             && !crate::services::platform::tmux::has_session(&probe_session_owned)
     };
 
-    let inflight_cleared = if cleanup_policy.should_clear_inflight() {
+    let inflight_cleared = if runtime_persistent_inflight_cleared {
+        true
+    } else if cleanup_policy.should_clear_inflight() {
         target.provider.as_ref().is_some_and(|provider| {
             let cleared_by_tmux = clear_inflight_by_tmux_name(provider, &target.tmux_name);
             let cleared_by_channel = target
                 .channel_id
                 .is_some_and(|channel_id| clear_inflight_by_channel(provider, channel_id));
 
-            runtime_persistent_inflight_cleared || cleared_by_tmux || cleared_by_channel
+            cleared_by_tmux || cleared_by_channel
         })
     } else {
         false
