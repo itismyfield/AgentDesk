@@ -814,7 +814,10 @@ def wait_for_provider_hold_state(
                             "path": str(path),
                             "turn_identity": dict(expected_identity),
                             "full_response_len": len(full_response),
+                            "ok_marker": ok_marker,
                             "ok_marker_seen": True,
+                            "late_marker": late_marker,
+                            "late_marker_seen": False,
                             "any_tool_used": True,
                             "has_post_tool_text": bool(
                                 state.get("has_post_tool_text")
@@ -1401,9 +1404,19 @@ def run_scenario(
             args=args,
         )
         result["assertions"].extend(window["assertions"])
-        result["relay_count"] = window.get("relay_count")
-        result["raw_count"] = window.get("raw_count")
-        result["sample_relay"] = window.get("sample_relay")
+        for key in (
+            "relay_count",
+            "raw_count",
+            "message_updates",
+            "sample_relay",
+            "provider_hold_prompts",
+            "provider_hold_states",
+            "cancel_turns",
+            "health_assertions",
+            "post_scenario_idle",
+        ):
+            if key in window:
+                result[key] = window[key]
         result["status"] = "pass"
     except assertions.AssertionError as error:
         result["status"] = "fail"
@@ -1755,7 +1768,7 @@ def run_one_cell(
     ]
 
     for assertion_spec in scenario.get("assertions") or []:
-        run_assertion(assertion_spec, window=window)
+        run_assertion(assertion_spec, window=window, record=record)
         record["assertions"].append({"spec": assertion_spec, "passed": True})
 
     idle_check = assert_cell_idle(
@@ -1950,7 +1963,36 @@ def restart_dcserver_for_e2e(
     wait_for_health(base_url, timeout_s=90)
 
 
-def run_assertion(spec: dict[str, Any], *, window: assertions.Window) -> None:
+def _assert_provider_hold_marker_seen(
+    record: dict[str, Any] | None,
+    *,
+    marker: str,
+) -> None:
+    if not record:
+        raise assertions.AssertionError(
+            f"provider_hold_marker_seen requires provider_hold_states for {marker!r}"
+        )
+    states = record.get("provider_hold_states")
+    if not isinstance(states, list) or not states:
+        raise assertions.AssertionError(
+            f"provider_hold_marker_seen requires non-empty provider_hold_states for {marker!r}"
+        )
+    for state in states:
+        if not isinstance(state, dict):
+            continue
+        if state.get("ok_marker_seen") is True and state.get("ok_marker") == marker:
+            return
+    raise assertions.AssertionError(
+        f"expected provider hold state to observe {marker!r}; states={states!r}"
+    )
+
+
+def run_assertion(
+    spec: dict[str, Any],
+    *,
+    window: assertions.Window,
+    record: dict[str, Any] | None = None,
+) -> None:
     if not isinstance(spec, dict):
         raise assertions.AssertionError(f"bad assertion spec: {spec!r}")
     if "message_count_between_markers" in spec:
@@ -1970,6 +2012,15 @@ def run_assertion(spec: dict[str, Any], *, window: assertions.Window) -> None:
         assertions.no_duplicate_content(window)
     elif "text_present" in spec:
         assertions.text_present(window, needle=spec["text_present"])
+    elif "provider_hold_marker_seen" in spec:
+        marker = spec["provider_hold_marker_seen"]
+        if isinstance(marker, dict):
+            marker = marker.get("marker") or marker.get("ok_marker")
+        if marker is None:
+            raise assertions.AssertionError(
+                f"provider_hold_marker_seen requires marker: {spec!r}"
+            )
+        _assert_provider_hold_marker_seen(record, marker=str(marker))
     elif "raw_text_present" in spec:
         assertions.raw_text_present(window, needle=spec["raw_text_present"])
     elif "raw_text_absent" in spec:

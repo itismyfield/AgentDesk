@@ -5,6 +5,7 @@ isolation: required
 destructive: true
 acceptance_criteria:
   - Use the deterministic provider hold prompt fixture after [E2E:E18:OK].
+  - Observe [E2E:E18:OK] in the current turn's durable provider hold state.
   - Execute cancel_turn while the turn is still active.
   - Assert [E2E:E18:LATE] is absent from relay output after cancellation.
   - Assert health counters drain to global_active=0 and global_finalizing=0.
@@ -16,6 +17,8 @@ notes: |
   marker only if cancellation fails to stop the turn. The driver waits on the
   durable inflight row, not the Discord relay surface, because TUI relays can
   batch pre-tool and post-tool assistant text into one terminal replacement.
+  Since cancel happens as soon as the durable hold witness appears, relay
+  surface delivery of the OK marker is intentionally not required.
 steps:
   - send_provider_hold_prompt:
       ok_marker: "[E2E:E18:OK]"
@@ -43,7 +46,7 @@ assertions:
       max: 36
   - relay_latency_within:
       max_seconds: 180
-  - text_present: "[E2E:E18:OK]"
+  - provider_hold_marker_seen: "[E2E:E18:OK]"
   - marker_absent:
       marker: "[E2E:E18:LATE]"
       surface: relay

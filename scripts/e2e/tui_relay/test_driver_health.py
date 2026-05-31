@@ -1042,7 +1042,7 @@ class ControlFlowPrimitives(unittest.TestCase):
                 },
                 {"cancel_turn": {"force": True, "timeout_s": 15}},
             ],
-            "assertions": [],
+            "assertions": [{"provider_hold_marker_seen": "[E2E:E18:OK]"}],
         }
         events: list[str] = []
 
@@ -1054,7 +1054,12 @@ class ControlFlowPrimitives(unittest.TestCase):
                 kwargs["expected_identity"]["user_msg_id"],
                 "9100000000000000123",
             )
-            return {"ok_marker_seen": True}
+            return {
+                "ok_marker": "[E2E:E18:OK]",
+                "ok_marker_seen": True,
+                "late_marker": "[E2E:E18:LATE]",
+                "late_marker_seen": False,
+            }
 
         def fake_cancel(**kwargs):  # noqa: ANN003
             events.append("cancel")
@@ -1081,8 +1086,25 @@ class ControlFlowPrimitives(unittest.TestCase):
             )
 
         self.assertEqual(events, ["hold", "cancel"])
-        self.assertEqual(record["provider_hold_states"], [{"ok_marker_seen": True}])
+        self.assertEqual(
+            record["provider_hold_states"],
+            [
+                {
+                    "ok_marker": "[E2E:E18:OK]",
+                    "ok_marker_seen": True,
+                    "late_marker": "[E2E:E18:LATE]",
+                    "late_marker_seen": False,
+                }
+            ],
+        )
         self.assertEqual(record["cancel_turns"], [{"ok": True}])
+        self.assertEqual(
+            record["assertions"][0],
+            {
+                "spec": {"provider_hold_marker_seen": "[E2E:E18:OK]"},
+                "passed": True,
+            },
+        )
 
     def test_send_prompts_concurrent_overlaps_dispatches(self):
         class FakeClient:
@@ -1256,6 +1278,65 @@ class ControlFlowPrimitives(unittest.TestCase):
 
 
 class ScenarioTeardown(unittest.TestCase):
+    def test_run_scenario_includes_provider_hold_evidence_in_report_record(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                return {"id": "1"}
+
+        args = Namespace(
+            cell="claude-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            reset_before_each=False,
+            dry_run=False,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+            hard_reset_session_each=False,
+            allow_destructive=False,
+        )
+        scenario = {"id": "E-18", "steps": [], "assertions": []}
+        provider_hold_state = {
+            "ok_marker": "[E2E:E18:OK]",
+            "ok_marker_seen": True,
+            "late_marker": "[E2E:E18:LATE]",
+            "late_marker_seen": False,
+        }
+
+        with patch(
+            "run_tui_relay.run_one_cell",
+            return_value={
+                "assertions": [
+                    {
+                        "spec": {"provider_hold_marker_seen": "[E2E:E18:OK]"},
+                        "passed": True,
+                    }
+                ],
+                "relay_count": 0,
+                "raw_count": 1,
+                "message_updates": 0,
+                "sample_relay": [],
+                "provider_hold_prompts": [{"hold_seconds": 60}],
+                "provider_hold_states": [provider_hold_state],
+                "cancel_turns": [{"ok": True}],
+                "health_assertions": [{"status": "healthy"}],
+                "post_scenario_idle": {"status": "idle"},
+            },
+        ):
+            result = driver.run_scenario(
+                scenario,
+                args=args,
+                run_id="run-1",
+                client=FakeClient(),  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["provider_hold_states"], [provider_hold_state])
+        self.assertEqual(result["provider_hold_prompts"], [{"hold_seconds": 60}])
+        self.assertEqual(result["health_assertions"], [{"status": "healthy"}])
+        self.assertEqual(result["relay_count"], 0)
+        self.assertEqual(result["raw_count"], 1)
+
     def test_run_scenario_posts_teardown_when_idle_assertion_fails(self):
         class FakeClient:
             base_url = "http://agentdesk.test"
