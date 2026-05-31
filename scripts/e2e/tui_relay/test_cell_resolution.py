@@ -82,6 +82,8 @@ class ScenarioFilter(unittest.TestCase):
         self.assertIn("E-8", ids)
         self.assertIn("E-18", ids)
         self.assertIn("E-20", ids)
+        self.assertIn("E-22", ids)
+        self.assertIn("E-23", ids)
         self.assertNotIn("E-4", ids)
         self.assertNotIn("E-10", ids)
         self.assertNotIn("E-12", ids)
@@ -97,6 +99,8 @@ class ScenarioFilter(unittest.TestCase):
         self.assertIn("E-19", ids)
         self.assertIn("E-20", ids)
         self.assertIn("E-21", ids)
+        self.assertIn("E-22", ids)
+        self.assertIn("E-23", ids)
         self.assertNotIn("E-13", ids)
         self.assertIn("E-4", ids)
         self.assertIn("E-10", ids)
@@ -111,9 +115,11 @@ class ScenarioFilter(unittest.TestCase):
         ids = {str(s.get("id")) for s in scenarios}
         self.assertIn("E-1", ids)
         self.assertIn("E-20", ids)
+        self.assertIn("E-23", ids)
         self.assertNotIn("E-13", ids)
         self.assertNotIn("E-4", ids)
         self.assertNotIn("E-7", ids)
+        self.assertNotIn("E-22", ids)
         self.assertNotIn("E-18", ids)
 
     def test_codex_pipe_scenarios(self):
@@ -122,6 +128,8 @@ class ScenarioFilter(unittest.TestCase):
         self.assertIn("E-7", ids)
         self.assertIn("E-18", ids)
         self.assertIn("E-20", ids)
+        self.assertIn("E-22", ids)
+        self.assertIn("E-23", ids)
         self.assertNotIn("E-13", ids)
         self.assertNotIn("E-6", ids)
         self.assertNotIn("E-4", ids)
@@ -136,6 +144,8 @@ class ScenarioFilter(unittest.TestCase):
         self.assertIn("E-19", ids)
         self.assertIn("E-20", ids)
         self.assertIn("E-21", ids)
+        self.assertIn("E-22", ids)
+        self.assertIn("E-23", ids)
         e17 = next(s for s in scenarios if s.get("id") == "E-17")
         self.assertIn("skip_reason", e17)
         self.assertIn("acceptance_criteria", e17)
@@ -185,6 +195,17 @@ class ScenarioFilter(unittest.TestCase):
             ids = {str(s.get("id")) for s in scenarios}
             if cell in {"claude-tui", "codex-tui"}:
                 self.assertIn("E-19", ids)
+                e19 = next(s for s in scenarios if s.get("id") == "E-19")
+                prompt_text = "\n".join(
+                    str(step.get("send_prompt", ""))
+                    for step in e19["steps"]
+                    if "send_prompt" in step
+                )
+                self.assertIn("E19_SECRET_ALPHA_5AF3C2", prompt_text)
+                self.assertIn(
+                    {"text_present": "[E2E:E19:POST] E19_SECRET_ALPHA_5AF3C2"},
+                    e19["assertions"],
+                )
             else:
                 self.assertNotIn("E-19", ids)
 
@@ -205,6 +226,51 @@ class ScenarioFilter(unittest.TestCase):
                 self.assertNotIn("skip_reason", e21)
             else:
                 self.assertNotIn("E-21", ids)
+
+    def test_e22_tool_use_text_completeness_scope_is_relay_backed(self):
+        for cell in driver.SUPPORTED_CELLS:
+            scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
+            ids = {str(s.get("id")) for s in scenarios}
+            if cell == "claude-e":
+                self.assertNotIn("E-22", ids)
+                continue
+            e22 = next(s for s in scenarios if s.get("id") == "E-22")
+            self.assertIn("acceptance_criteria", e22)
+            self.assertNotIn("skip_reason", e22)
+            wait_steps = [
+                step["wait_for_provider_hold_state"]
+                for step in e22["steps"]
+                if "wait_for_provider_hold_state" in step
+            ]
+            self.assertEqual(len(wait_steps), 1)
+            self.assertEqual(wait_steps[0]["ok_marker"], "[E2E:E22:PRE]")
+            self.assertEqual(wait_steps[0]["late_marker"], "[E2E:E22:HEAD]")
+            self.assertIn({"provider_hold_marker_seen": "[E2E:E22:PRE]"}, e22["assertions"])
+            self.assertIn(
+                {
+                    "completion_chrome_after_body": {
+                        "body_marker": "[E2E:E22:TAIL]",
+                        "required": True,
+                    }
+                },
+                e22["assertions"],
+            )
+
+    def test_e23_premature_completion_guard_covers_all_cells(self):
+        for cell in driver.SUPPORTED_CELLS:
+            scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
+            e23 = next(s for s in scenarios if s.get("id") == "E-23")
+            self.assertIn("acceptance_criteria", e23)
+            self.assertNotIn("skip_reason", e23)
+            self.assertIn(
+                {
+                    "completion_chrome_after_body": {
+                        "body_marker": "[E2E:E23:BODY-END]",
+                        "required": True,
+                    }
+                },
+                e23["assertions"],
+            )
 
     def test_e11_excluded_everywhere(self):
         for cell in driver.SUPPORTED_CELLS:

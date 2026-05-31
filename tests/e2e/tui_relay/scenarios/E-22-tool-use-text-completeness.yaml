@@ -1,0 +1,66 @@
+id: E-22
+title: tool_use 이후 후속 텍스트 head-to-tail 완결성
+cells: [claude-pipe, claude-tui, codex-pipe, codex-tui]
+isolation: required
+acceptance_criteria:
+  - Emit visible pre-tool assistant text.
+  - Observe the current turn's durable provider state after a tool_use and before post-tool text.
+  - Relay the post-tool head/middle/tail body in order without truncation.
+  - Keep completion chrome after the user-visible body.
+notes: |
+  #2943 P0 coverage for #2749 Pattern A / #2836-style regressions where a
+  tool_use frame followed by additional text used to drop or overwrite earlier
+  assistant text. The wait_for_provider_hold_state primitive proves the current
+  turn saw pre-tool text and a real tool_use before the final post-tool body.
+  This intentionally omits claude-e until the harness has a non-live proof or
+  fixture that claude-e persists the same any_tool_used/has_post_tool_text
+  inflight witness used by wait_for_provider_hold_state.
+steps:
+  - send_prompt: |
+      E2E E-22 tool_use-to-text completeness fixture.
+
+      Follow these steps exactly:
+      1. First emit assistant text containing exactly one line: [E2E:E22:PRE]
+      2. Immediately after that line, use your normal shell/terminal command tool to run:
+         python3 -c "import time; time.sleep(20); print('E22_TOOL_DONE')"
+      3. Do not write, echo, quote, or mention [E2E:E22:HEAD], TOOL_USE_TEXT_E22_OK, or [E2E:E22:TAIL] before the command returns.
+      4. After the command returns, send exactly these three lines and no explanation:
+         [E2E:E22:HEAD]
+         TOOL_USE_TEXT_E22_OK
+         [E2E:E22:TAIL]
+  - wait_for_provider_hold_state:
+      ok_marker: "[E2E:E22:PRE]"
+      late_marker: "[E2E:E22:HEAD]"
+      timeout_s: 180
+      poll_interval_s: 1
+  - wait_for_discord_text: "[E2E:E22:TAIL]"
+    timeout_s: 300
+assertions:
+  - raw_message_count_between_markers:
+      min: 1
+      max: 36
+  - relay_latency_within:
+      max_seconds: 300
+  - provider_hold_marker_seen: "[E2E:E22:PRE]"
+  - text_present: "[E2E:E22:PRE]"
+  - text_present: "[E2E:E22:HEAD]"
+  - text_present: "TOOL_USE_TEXT_E22_OK"
+  - text_present: "[E2E:E22:TAIL]"
+  - ordered_text_present:
+      - "[E2E:E22:PRE]"
+      - "[E2E:E22:HEAD]"
+      - "TOOL_USE_TEXT_E22_OK"
+      - "[E2E:E22:TAIL]"
+  - body_complete:
+      head: "[E2E:E22:HEAD]"
+      tail: "[E2E:E22:TAIL]"
+  - completion_chrome_after_body:
+      body_marker: "[E2E:E22:TAIL]"
+      required: true
+  - no_duplicate_marker: "[E2E:E22:PRE]"
+  - no_duplicate_marker: "[E2E:E22:HEAD]"
+  - no_duplicate_marker: "[E2E:E22:TAIL]"
+  - no_duplicate_content: true
+  - no_control_chars: true
+  - no_resume_prompt_chrome: true
+  - no_suppressed_label_chrome: true

@@ -1,0 +1,51 @@
+id: E-23
+title: 본문 전/본문 없는 completion chrome 회귀 가드
+cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
+isolation: required
+acceptance_criteria:
+  - Delay the final body behind a real tool call.
+  - Assert completion chrome is present and ordered after the final body marker.
+  - Assert the body relays complete head-to-tail.
+notes: |
+  #2943 P0 coverage for #2161/#2757-style premature completion. The scenario
+  intentionally creates a short tool gap before the body so a relay that posts
+  "응답 완료" before user-visible content is visible to
+  completion_chrome_after_body.
+steps:
+  - send_prompt: |
+      E2E E-23 premature completion guard.
+
+      Use your normal shell/terminal command tool to run:
+      python3 -c "import time; time.sleep(10); print('E23_READY')"
+
+      Only after the command returns, reply with exactly these three lines and no explanation:
+      [E2E:E23:BODY-BEGIN]
+      PREMATURE_COMPLETION_GUARD_OK
+      [E2E:E23:BODY-END]
+  - wait_for_discord_text: "[E2E:E23:BODY-END]"
+    timeout_s: 300
+assertions:
+  - raw_message_count_between_markers:
+      min: 1
+      max: 24
+  - relay_latency_within:
+      max_seconds: 300
+  - text_present: "[E2E:E23:BODY-BEGIN]"
+  - text_present: "PREMATURE_COMPLETION_GUARD_OK"
+  - text_present: "[E2E:E23:BODY-END]"
+  - ordered_text_present:
+      - "[E2E:E23:BODY-BEGIN]"
+      - "PREMATURE_COMPLETION_GUARD_OK"
+      - "[E2E:E23:BODY-END]"
+  - body_complete:
+      head: "[E2E:E23:BODY-BEGIN]"
+      tail: "[E2E:E23:BODY-END]"
+  - completion_chrome_after_body:
+      body_marker: "[E2E:E23:BODY-END]"
+      required: true
+  - no_duplicate_marker: "[E2E:E23:BODY-BEGIN]"
+  - no_duplicate_marker: "[E2E:E23:BODY-END]"
+  - no_duplicate_content: true
+  - no_control_chars: true
+  - no_resume_prompt_chrome: true
+  - no_suppressed_label_chrome: true

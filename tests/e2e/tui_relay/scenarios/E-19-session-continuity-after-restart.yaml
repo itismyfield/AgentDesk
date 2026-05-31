@@ -4,16 +4,22 @@ cells: [claude-tui, codex-tui]
 isolation: required
 destructive: true
 acceptance_criteria:
+  - Give the live TUI session a secret token before restart without relaying it.
   - Capture the worker tmux session identity before restart.
   - Restart dcserver with the existing destructive guard.
   - Assert the tmux pane ids, pane pids, cwd, and session name are unchanged.
-  - Verify a post-restart prompt still relays and health counters drain.
+  - Verify a post-restart prompt recalls the secret token and health counters drain.
 notes: |
   Concrete #2942/#2943 coverage for #2800/#2854 class regressions. It fails
   if restart recovery kills and recreates the TUI session instead of rebinding
-  to the existing tmux pane.
+  to the existing tmux pane, and it fails if the post-restart turn loses
+  pre-restart conversation context.
 steps:
-  - send_prompt: "응답에 정확히 한 줄로 [E2E:E19:PRE] 만 출력해줘."
+  - send_prompt: |
+      E-19 restart continuity setup.
+      Remember this secret token for the next turn: E19_SECRET_ALPHA_5AF3C2.
+      Do not reveal or repeat the secret token yet.
+      Reply with exactly one line only: [E2E:E19:PRE]
   - wait_for_discord_text: "[E2E:E19:PRE]"
     timeout_s: 240
   - capture_session_identity:
@@ -21,8 +27,12 @@ steps:
   - restart_dcserver: {}
   - assert_session_preserved:
       label: before_restart
-  - send_prompt: "응답에 정확히 한 줄로 [E2E:E19:POST] 만 출력해줘."
-  - wait_for_discord_text: "[E2E:E19:POST]"
+  - send_prompt: |
+      Recall the E-19 secret token I asked you to remember before the restart.
+      Reply with exactly one line in this format and no explanation:
+      [E2E:E19:POST] <secret-token>
+      If you cannot recall it, reply exactly: [E2E:E19:MISSING]
+  - wait_for_discord_text: "[E2E:E19:POST] E19_SECRET_ALPHA_5AF3C2"
     timeout_s: 240
   - wait_idle_s: 5
   - assert_health:
@@ -33,5 +43,8 @@ steps:
 assertions:
   - no_duplicate_content: true
   - text_present: "[E2E:E19:PRE]"
-  - text_present: "[E2E:E19:POST]"
+  - text_present: "[E2E:E19:POST] E19_SECRET_ALPHA_5AF3C2"
+  - marker_absent:
+      marker: "[E2E:E19:MISSING]"
+      surface: relay
   - no_resume_prompt_chrome: true
