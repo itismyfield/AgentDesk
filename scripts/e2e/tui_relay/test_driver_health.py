@@ -335,6 +335,60 @@ class PostScenarioIdle(unittest.TestCase):
         self.assertEqual(result["status"], "idle")
         self.assertEqual(result["mailboxes_seen"], 1)
 
+    def test_claude_tui_idle_draft_guard_detects_stuck_prompt(self):
+        pane = "\n".join(
+            [
+                "✻ Baked for 10m 9s",
+                "────────────────────────────────────────────────────────────────────────────",
+                "❯\u00a0응답에 정확히 한 줄로 [E2E:E6:AFTER] 만 출력해줘.",
+                "────────────────────────────────────────────────────────────────────────────",
+                "  CLAUDE.md: 1, MCP: 2 │ Tools: 5 done",
+                "  ⏵⏵ bypass permissions on",
+            ]
+        )
+        payloads = {
+            "/api/health/detail": [
+                (200, _health_detail(_idle_mailbox("42", provider="claude")))
+            ]
+        }
+
+        with (
+            patch("run_tui_relay.urllib.request.urlopen", _fake_urlopen_for(payloads)),
+            patch("run_tui_relay.tmux.capture_pane", return_value=pane),
+        ):
+            with self.assertRaises(assertions.AssertionError) as ctx:
+                driver._raise_if_tui_prompt_stuck_while_idle(  # noqa: SLF001
+                    base_url="http://agentdesk.test",
+                    channel_id="42",
+                    cell="claude-tui",
+                    prompt="응답에 정확히 한 줄로 [E2E:E6:AFTER] 만 출력해줘.",
+                    thread_channel_id=None,
+                )
+
+        self.assertIn("prompt remained in Claude TUI input buffer", str(ctx.exception))
+        self.assertIn("mailbox", str(ctx.exception))
+
+    def test_claude_tui_idle_draft_guard_ignores_busy_mailbox(self):
+        payloads = {
+            "/api/health/detail": [
+                (503, _health_detail(_busy_mailbox("42", provider="claude")))
+            ]
+        }
+
+        with (
+            patch("run_tui_relay.urllib.request.urlopen", _fake_urlopen_for(payloads)),
+            patch("run_tui_relay.tmux.capture_pane") as capture,
+        ):
+            driver._raise_if_tui_prompt_stuck_while_idle(  # noqa: SLF001
+                base_url="http://agentdesk.test",
+                channel_id="42",
+                cell="claude-tui",
+                prompt="응답에 정확히 한 줄로 [E2E:E6:AFTER] 만 출력해줘.",
+                thread_channel_id=None,
+            )
+
+        capture.assert_not_called()
+
     def test_assert_cell_idle_requires_matching_mailbox(self):
         payloads = {"/api/health/detail": [(200, _health_detail())]}
 

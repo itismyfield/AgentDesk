@@ -1691,6 +1691,97 @@ fn claude_tui_snapshot_has_recoverable_prompt_draft(
 }
 
 #[cfg(unix)]
+fn claude_tui_prompt_remained_in_input_buffer(
+    snapshot: &crate::services::claude_tui::input::PromptReadinessSnapshot,
+    prompt: &str,
+) -> bool {
+    if !snapshot.tmux_pane_alive || !snapshot.capture_available {
+        return false;
+    }
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        return false;
+    }
+    snapshot.pane_tail.lines().rev().take(12).any(|line| {
+        let trimmed = line.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
+        let Some(rest) = trimmed.strip_prefix('\u{276f}') else {
+            return false;
+        };
+        let rest = rest.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
+        !rest
+            .get(..6)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("[User:"))
+            && rest.contains(prompt)
+    })
+}
+
+#[cfg(unix)]
+fn claude_tui_zero_advance_input_buffer_error(
+    tmux_session_name: &str,
+    transcript_path: &str,
+    start_offset: u64,
+    snapshot: &crate::services::claude_tui::input::PromptReadinessSnapshot,
+) -> String {
+    format!(
+        "claude tui follow-up produced no new transcript bytes and prompt remained in TUI input buffer; tmux_session={}; transcript_path={}; start_offset={}; capture_available={}; prompt_marker_detected={}; prompt_draft_detected={}; pane_tail={}",
+        tmux_session_name,
+        transcript_path,
+        start_offset,
+        snapshot.capture_available,
+        snapshot.prompt_marker_detected,
+        snapshot.prompt_draft_detected,
+        snapshot.pane_tail
+    )
+}
+
+#[cfg(all(test, unix))]
+mod claude_tui_prompt_buffer_tests {
+    use super::*;
+
+    #[test]
+    fn detects_stuck_followup_prompt_even_when_generic_draft_heuristic_ignores_footer() {
+        let snapshot = crate::services::claude_tui::input::PromptReadinessSnapshot {
+            prompt_marker_detected: true,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "\
+✻ Baked for 10m 9s
+────────────────────────────────────────────────────────────────────────────
+❯\u{00a0}응답에 정확히 한 줄로 [E2E:E6:AFTER] 만 출력해줘.
+────────────────────────────────────────────────────────────────────────────
+  CLAUDE.md: 1, MCP: 2 │ Tools: 5 done
+  ⏵⏵ bypass permissions on"
+                .to_string(),
+        };
+
+        assert!(claude_tui_prompt_remained_in_input_buffer(
+            &snapshot,
+            "응답에 정확히 한 줄로 [E2E:E6:AFTER] 만 출력해줘."
+        ));
+    }
+
+    #[test]
+    fn ignores_submitted_discord_history_prompt() {
+        let snapshot = crate::services::claude_tui::input::PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "\
+❯ [User: 명령봇 (ID: 1)] 응답에 정확히 한 줄로 [E2E:E6:AFTER] 만 출력해줘.
+⏺ [E2E:E6:AFTER]"
+                .to_string(),
+        };
+
+        assert!(!claude_tui_prompt_remained_in_input_buffer(
+            &snapshot,
+            "응답에 정확히 한 줄로 [E2E:E6:AFTER] 만 출력해줘."
+        ));
+    }
+}
+
+#[cfg(unix)]
 fn claude_tui_unknown_transcript_draft_recreate_allowed(
     snapshot: &crate::services::claude_tui::input::PromptReadinessSnapshot,
 ) -> bool {
@@ -2491,6 +2582,25 @@ fn execute_streaming_local_tui_tmux(
                 hook_rx,
                 hook_events_after,
             )?;
+            let zero_advance_terminal_result = match &read_result {
+                ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+                    *offset <= start_offset
+                }
+                ReadOutputResult::SessionDied { .. } => false,
+            };
+            if zero_advance_terminal_result {
+                let snapshot = crate::services::claude_tui::input::prompt_readiness_snapshot(
+                    tmux_session_name,
+                );
+                if claude_tui_prompt_remained_in_input_buffer(&snapshot, prompt) {
+                    return Err(claude_tui_zero_advance_input_buffer_error(
+                        tmux_session_name,
+                        &transcript_path_string,
+                        start_offset,
+                        &snapshot,
+                    ));
+                }
+            }
             match classify_followup_result(
                 read_result,
                 start_offset,

@@ -63,6 +63,12 @@ RUNTIME_QUEUE_DIRS: tuple[tuple[str, str], ...] = (
     ("pending_queue", "discord_pending_queue"),
     ("queued_placeholders", "discord_queued_placeholders"),
 )
+TUI_IDLE_DRAFT_GUARD_AFTER_S = float(
+    os.environ.get("AGENTDESK_E2E_TUI_IDLE_DRAFT_GUARD_AFTER_S", "15")
+)
+TUI_IDLE_DRAFT_GUARD_POLL_S = float(
+    os.environ.get("AGENTDESK_E2E_TUI_IDLE_DRAFT_GUARD_POLL_S", "2")
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -1383,6 +1389,141 @@ def assert_cell_idle(
     )
 
 
+def _target_mailbox_idle_snapshot(
+    *, base_url: str, channel_id: str, provider: str
+) -> dict[str, Any] | None:
+    try:
+        detail = _read_health_detail(base_url)
+    except Exception:  # noqa: BLE001 - marker wait should poll through transient health errors
+        return None
+    mailboxes = detail.get("mailboxes")
+    if not isinstance(mailboxes, list):
+        return None
+    target_mailboxes = [
+        mailbox
+        for mailbox in mailboxes
+        if isinstance(mailbox, dict)
+        and _mailbox_channel_id(mailbox) == str(channel_id)
+        and _mailbox_provider(mailbox) == provider
+    ]
+    if not target_mailboxes:
+        return None
+    violations: list[str] = []
+    for mailbox in target_mailboxes:
+        violations.extend(_mailbox_busy_reasons(mailbox))
+    if violations:
+        return None
+    return {
+        "provider": provider,
+        "channel_id": str(channel_id),
+        "mailboxes_seen": len(target_mailboxes),
+        "global_active": detail.get("global_active"),
+        "global_finalizing": detail.get("global_finalizing"),
+        "global_queue_depth": detail.get("global_queue_depth")
+        or detail.get("queue_depth"),
+        "status": "idle",
+    }
+
+
+def _pane_tail_contains_prompt_draft(pane: str, prompt: str) -> bool:
+    prompt = prompt.strip()
+    if not prompt:
+        return False
+    for line in reversed(pane.splitlines()[-40:]):
+        trimmed = line.strip().strip("\u00a0")
+        if not trimmed.startswith("\u276f"):
+            continue
+        rest = trimmed[1:].strip().strip("\u00a0")
+        if rest.lower().startswith("[user:"):
+            continue
+        if prompt in rest:
+            return True
+    return False
+
+
+def _raise_if_tui_prompt_stuck_while_idle(
+    *,
+    base_url: str,
+    channel_id: str,
+    cell: str,
+    prompt: str | None,
+    thread_channel_id: str | None,
+) -> None:
+    if cell != "claude-tui" or not prompt:
+        return
+    idle = _target_mailbox_idle_snapshot(
+        base_url=base_url,
+        channel_id=channel_id,
+        provider=cell_provider(cell),
+    )
+    if idle is None:
+        return
+    session_name = cell_session_name(cell, thread_channel_id=thread_channel_id)
+    pane = tmux.capture_pane(session_name, -80)
+    if not _pane_tail_contains_prompt_draft(pane, prompt):
+        return
+    pane_tail = "\n".join(pane.splitlines()[-24:])
+    raise assertions.AssertionError(
+        "Discord marker wait would stall: prompt remained in Claude TUI input "
+        "buffer while mailbox was idle; "
+        f"cell={cell}; channel_id={channel_id}; tmux_session={session_name}; "
+        f"mailbox={idle}; prompt={prompt!r}; pane_tail={pane_tail!r}"
+    )
+
+
+def wait_for_discord_text_with_tui_idle_draft_guard(
+    *,
+    client: discord.DiscordClient,
+    channel_id: str,
+    cell: str,
+    after_id: str,
+    needle: str,
+    prompt: str | None,
+    thread_channel_id: str | None,
+    timeout_s: float,
+    debug_label: str,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    deadline = time.monotonic() + timeout_s
+    guard_after_s = min(TUI_IDLE_DRAFT_GUARD_AFTER_S, max(timeout_s, 0.0))
+    next_guard_at = time.monotonic() + max(guard_after_s, 0.0)
+    observed: list[dict[str, Any]] = []
+    observed_by_id: dict[str, dict[str, Any]] = {}
+    predicate = lambda message: (  # noqa: E731
+        assertions.is_relay_response(message)
+        and needle in (message.get("content") or "")
+    )
+    while time.monotonic() < deadline:
+        messages = client.fetch_messages(channel_id, after_id=after_id, limit=100)
+        for message in sorted(messages, key=lambda m: int(m.get("id", "0"))):
+            mid = str(message.get("id") or "")
+            previous = observed_by_id.get(mid)
+            if mid and previous is not None and not discord._message_changed(previous, message):
+                continue
+            if mid:
+                observed_by_id[mid] = message
+            observed.append(message)
+            if predicate(message):
+                return message, observed
+
+        now = time.monotonic()
+        if now >= next_guard_at:
+            _raise_if_tui_prompt_stuck_while_idle(
+                base_url=client.base_url,
+                channel_id=channel_id,
+                cell=cell,
+                prompt=prompt,
+                thread_channel_id=thread_channel_id,
+            )
+            next_guard_at = now + max(TUI_IDLE_DRAFT_GUARD_POLL_S, 0.1)
+        time.sleep(min(5.0, max(0.1, deadline - time.monotonic())))
+    if os.environ.get("AGENTDESK_E2E_WAIT_DEBUG"):
+        print(
+            f"[wait_for_message] timeout label={debug_label!r} "
+            f"after_id={after_id!r} observed_total={len(observed)}"
+        )
+    return None, observed
+
+
 def run_scenario(
     scenario: dict[str, Any],
     *,
@@ -1574,6 +1715,7 @@ def run_one_cell(
             first_send_done = True
 
     last_turn_identity: dict[str, str] | None = None
+    last_sent_prompt: str | None = None
 
     for step in scenario.get("steps") or []:
         if not isinstance(step, dict):
@@ -1581,9 +1723,10 @@ def run_one_cell(
         if "send_prompt" in step:
             _prepare_first_prompt_window()
             window.mark_prompt_sent()
+            last_sent_prompt = str(step["send_prompt"])
             response = client.send_prompt(
                 channel_id,
-                step["send_prompt"],
+                last_sent_prompt,
                 channel_kind=cell_channel_kind(cell),
             )
             last_turn_identity = turn_identity_from_send_response(
@@ -1598,6 +1741,7 @@ def run_one_cell(
                 scenario_id=str(scenario_id),
             )
             window.mark_prompt_sent()
+            last_sent_prompt = prompt
             response = client.send_prompt(
                 channel_id,
                 prompt,
@@ -1635,14 +1779,16 @@ def run_one_cell(
             time.sleep(float(step["wait_idle_s"]))
         elif "wait_for_discord_text" in step:
             needle = step["wait_for_discord_text"]
-            predicate = lambda message: (  # noqa: E731
-                assertions.is_relay_response(message)
-                and needle in (message.get("content") or "")
-            )
-            found, observed = client.wait_for_message(
-                channel_id,
-                predicate=predicate,
+            found, observed = wait_for_discord_text_with_tui_idle_draft_guard(
+                client=client,
+                channel_id=channel_id,
+                cell=cell,
                 after_id=after_id,
+                needle=str(needle),
+                prompt=last_sent_prompt,
+                thread_channel_id=(
+                    channel_id if scenario.get("requires_thread_channel") else None
+                ),
                 timeout_s=float(step.get("timeout_s", 240)),
                 debug_label=f"{scenario.get('id')}::{cell}::wait_for_text:{needle[:32]}",
             )
