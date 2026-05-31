@@ -808,10 +808,17 @@ def wait_for_provider_hold_state(
     )
     deadline = time.monotonic() + timeout_s
     last_state = f"inflight state missing at {path}"
+    last_current_turn_state: str | None = None
     while time.monotonic() < deadline:
         try:
             raw = path.read_text(encoding="utf-8")
         except FileNotFoundError:
+            if last_current_turn_state is not None:
+                raise assertions.AssertionError(
+                    "provider hold state disappeared before cancel after "
+                    "the current turn was observed: "
+                    f"path={path} last_current_state={last_current_turn_state}"
+                )
             last_state = f"inflight state missing at {path}"
         except OSError as error:
             last_state = f"inflight state unreadable at {path}: {error}"
@@ -837,6 +844,7 @@ def wait_for_provider_hold_state(
                         last_state = f"identity_mismatch={identity_mismatch}; {summary}"
                         time.sleep(poll_interval_s)
                         continue
+                    last_current_turn_state = summary
                     full_response = str(state.get("full_response") or "")
                     if late_marker in full_response:
                         raise assertions.AssertionError(
