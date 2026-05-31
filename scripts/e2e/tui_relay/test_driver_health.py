@@ -1370,6 +1370,51 @@ class ControlFlowPrimitives(unittest.TestCase):
             },
         )
 
+    def test_e18_contract_allows_zero_relay_surface_messages_before_cancel(self):
+        scenarios_dir = ROOT / "tests" / "e2e" / "tui_relay" / "scenarios"
+        e18 = next(
+            scenario
+            for scenario in driver.load_scenarios(scenarios_dir, cell="claude-pipe")
+            if scenario.get("id") == "E-18"
+        )
+        window = assertions.Window(setup_marker_id="setup")
+        record = {
+            "provider_hold_states": [
+                {
+                    "ok_marker": "[E2E:E18:OK]",
+                    "ok_marker_seen": True,
+                    "late_marker": "[E2E:E18:LATE]",
+                    "late_marker_seen": False,
+                }
+            ]
+        }
+
+        for spec in e18["assertions"]:
+            driver.run_assertion(spec, window=window, record=record)
+
+    def test_e18_late_marker_absence_still_fails_on_relay_surface(self):
+        window = assertions.Window(setup_marker_id="setup")
+        window.add(
+            {
+                "id": "1",
+                "content": "[E2E:E18:LATE]",
+                "author": {"id": "agentdesk", "bot": True},
+                "type": 0,
+            }
+        )
+
+        with self.assertRaises(assertions.AssertionError):
+            driver.run_assertion(
+                {
+                    "marker_absent": {
+                        "marker": "[E2E:E18:LATE]",
+                        "surface": "relay",
+                    }
+                },
+                window=window,
+                record={"provider_hold_states": []},
+            )
+
     def test_send_prompts_concurrent_overlaps_dispatches(self):
         class FakeClient:
             base_url = "http://agentdesk.test"

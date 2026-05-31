@@ -191,6 +191,27 @@ class ScenarioFilter(unittest.TestCase):
             ]
             self.assertEqual(health_steps[0]["global_active_max"], 0)
             self.assertEqual(health_steps[0]["global_finalizing_max"], 0)
+            assertion_kinds = {
+                next(iter(assertion.keys())) for assertion in e18["assertions"]
+            }
+            self.assertNotIn("relay_latency_within", assertion_kinds)
+            self.assertIn(
+                {"raw_message_count_between_markers": {"min": 0, "max": 36}},
+                e18["assertions"],
+            )
+            self.assertIn(
+                {"provider_hold_marker_seen": "[E2E:E18:OK]"},
+                e18["assertions"],
+            )
+            self.assertIn(
+                {
+                    "marker_absent": {
+                        "marker": "[E2E:E18:LATE]",
+                        "surface": "relay",
+                    }
+                },
+                e18["assertions"],
+            )
 
     def test_e8_health_assertion_waits_for_restart_finalizing_drain(self):
         expected_e8_cells = {
