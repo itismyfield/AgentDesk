@@ -81,17 +81,17 @@ fn local_or_configured_control_endpoint_allowed(
     matches!(config.server.host.trim(), "127.0.0.1" | "localhost" | "::1")
 }
 
-/// #2049 Finding 2: ground truth `fully_recovered` predicate. The field must
-/// be `true` if and only if (a) no `degraded_reasons` were collected by the
-/// composed health pipeline AND (b) the final `HealthStatus` is HTTP-ready
-/// (Healthy/Degraded — *not* Unhealthy). Centralised here so any future
-/// degradation check appended to `health_response` automatically participates
-/// in the recovery signal.
+/// `fully_recovered` tracks startup/recovery completion, not whether the
+/// runtime is currently degraded. Runtime readiness lives in `status` and
+/// `degraded_reasons`; preserving this axis lets operators distinguish
+/// recovery-in-progress from ordinary live runtime degradation.
 fn compute_fully_recovered(
+    snapshot_fully_recovered: bool,
     status: health::HealthStatus,
     degraded_reasons: &[serde_json::Value],
 ) -> bool {
-    degraded_reasons.is_empty() && status.is_http_ready()
+    let _ = (status, degraded_reasons);
+    snapshot_fully_recovered
 }
 
 fn provider_deferred_hooks_backlog_recovered(
@@ -233,10 +233,10 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             )));
         }
 
-        // #2049 Finding 4: surface startup_doctor failed/warned counts in the
-        // top-level status + degraded_reasons so external health watchers see
-        // the boot-time damage. The doctor summary itself is still attached
-        // by `with_latest_startup_doctor` below.
+        // Startup doctor warnings are boot/recovery diagnostics, not proof
+        // that the current runtime is unhealthy. Keep them on a separate
+        // startup axis so deploy/restart gates that read runtime health do
+        // not block unrelated live-turn-safe operations.
         let live_deferred_hooks = json["deferred_hooks"].as_u64().unwrap_or(0);
         let suppress_recovered_provider_deferred_hooks_backlog =
             provider_deferred_hooks_backlog_recovered(live_deferred_hooks, &degraded_reasons);
@@ -244,20 +244,8 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             crate::cli::doctor::startup::latest_startup_doctor_effective_counts(
                 suppress_recovered_provider_deferred_hooks_backlog,
             );
-        if doctor_failed > 0 {
-            status = status.worsen(health::HealthStatus::Unhealthy);
-            degraded_reasons.push(serde_json::json!(format!(
-                "startup_doctor_failed:{}",
-                doctor_failed
-            )));
-        }
-        if doctor_warned > 0 {
-            status = status.worsen(health::HealthStatus::Degraded);
-            degraded_reasons.push(serde_json::json!(format!(
-                "startup_doctor_warned:{}",
-                doctor_warned
-            )));
-        }
+        json["startup_degraded_reasons"] =
+            startup_doctor_count_reasons(doctor_failed, doctor_warned);
 
         // #2049 Finding 3: now that every worsen check has run, lift status
         // to Healthy only when standby has *no other* degraded reasons.
@@ -265,12 +253,9 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             status = health::HealthStatus::Healthy;
         }
 
-        // #2049 Finding 2 (+ Finding 3): recompute `fully_recovered`
-        // from the final set of degraded reasons + final status so that
-        // DB/disk/outbox/pipeline/doctor regressions cannot leave the field
-        // stale-true. This also overrides the cluster_standby short-circuit
-        // above when later checks discover real degradation.
-        let fully_recovered = compute_fully_recovered(status, &degraded_reasons);
+        let snapshot_fully_recovered = json["fully_recovered"].as_bool().unwrap_or(false);
+        let fully_recovered =
+            compute_fully_recovered(snapshot_fully_recovered, status, &degraded_reasons);
         json["fully_recovered"] = serde_json::json!(fully_recovered);
 
         json["status"] =
@@ -354,9 +339,95 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
 }
 
 fn with_latest_startup_doctor(mut json: serde_json::Value, detailed: bool) -> serde_json::Value {
-    json["latest_startup_doctor"] =
-        crate::cli::doctor::startup::latest_startup_doctor_health_json(detailed);
+    let doctor = crate::cli::doctor::startup::latest_startup_doctor_health_json(detailed);
+    let startup_status = startup_status_from_doctor(&doctor);
+    let mut startup_degraded_reasons = json
+        .get("startup_degraded_reasons")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| startup_doctor_reasons_from_summary(&doctor));
+    ensure_startup_doctor_state_reason(&doctor, &mut startup_degraded_reasons);
+    let startup_degraded =
+        startup_status_is_degraded(startup_status) || !startup_degraded_reasons.is_empty();
+
+    json["startup_status"] = serde_json::json!(startup_status);
+    json["startup_degraded"] = serde_json::json!(startup_degraded);
+    json["startup_degraded_reasons"] = serde_json::Value::Array(startup_degraded_reasons);
+    json["latest_startup_doctor"] = doctor;
     json
+}
+
+fn startup_status_from_doctor(doctor: &serde_json::Value) -> &'static str {
+    match doctor
+        .get("doctor_status")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("pending") => "doctor_pending",
+        Some("missing") => "doctor_missing",
+        Some("error") => "doctor_error",
+        Some("failed") => "doctor_failed",
+        Some("warned") => "doctor_warned",
+        Some("passed") => "doctor_passed",
+        Some("skipped") => "doctor_skipped",
+        _ => "doctor_unknown",
+    }
+}
+
+fn startup_status_is_degraded(status: &str) -> bool {
+    matches!(
+        status,
+        "doctor_pending" | "doctor_error" | "doctor_failed" | "doctor_warned"
+    )
+}
+
+fn startup_doctor_count_reasons(failed_count: u64, warned_count: u64) -> serde_json::Value {
+    serde_json::Value::Array(startup_doctor_count_reason_vec(failed_count, warned_count))
+}
+
+fn startup_doctor_count_reason_vec(failed_count: u64, warned_count: u64) -> Vec<serde_json::Value> {
+    let mut reasons = Vec::new();
+    if failed_count > 0 {
+        reasons.push(serde_json::json!(format!(
+            "startup_doctor_failed:{}",
+            failed_count
+        )));
+    }
+    if warned_count > 0 {
+        reasons.push(serde_json::json!(format!(
+            "startup_doctor_warned:{}",
+            warned_count
+        )));
+    }
+    reasons
+}
+
+fn startup_doctor_reasons_from_summary(doctor: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut reasons = startup_doctor_count_reason_vec(
+        doctor["failed_count"].as_u64().unwrap_or(0),
+        doctor["warned_count"].as_u64().unwrap_or(0),
+    );
+    ensure_startup_doctor_state_reason(doctor, &mut reasons);
+    reasons
+}
+
+fn ensure_startup_doctor_state_reason(
+    doctor: &serde_json::Value,
+    reasons: &mut Vec<serde_json::Value>,
+) {
+    let reason = match doctor
+        .get("doctor_status")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("pending") => "startup_doctor_pending",
+        Some("error") => "startup_doctor_error",
+        _ => return,
+    };
+    if !reasons
+        .iter()
+        .any(|existing| existing.as_str() == Some(reason))
+    {
+        reasons.push(serde_json::json!(reason));
+    }
 }
 
 fn public_health_json(json: serde_json::Value) -> serde_json::Value {
@@ -385,8 +456,11 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
         .get("cluster_standby")
         .cloned()
         .unwrap_or_else(|| serde_json::json!(false));
+    let startup_status = json.get("startup_status").cloned();
+    let startup_degraded = json.get("startup_degraded").cloned();
+    let startup_degraded_reasons = json.get("startup_degraded_reasons").cloned();
     let degraded = status.as_str().is_some_and(|status| status != "healthy");
-    serde_json::json!({
+    let mut public = serde_json::json!({
         "ok": !degraded,
         "status": status,
         "version": version,
@@ -396,7 +470,17 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
         "fully_recovered": fully_recovered,
         "cluster_standby": cluster_standby,
         "degraded": degraded,
-    })
+    });
+    if let Some(startup_status) = startup_status {
+        public["startup_status"] = startup_status;
+    }
+    if let Some(startup_degraded) = startup_degraded {
+        public["startup_degraded"] = startup_degraded;
+    }
+    if let Some(startup_degraded_reasons) = startup_degraded_reasons {
+        public["startup_degraded_reasons"] = startup_degraded_reasons;
+    }
+    public
 }
 
 async fn cluster_standby_without_gateway(
@@ -1580,21 +1664,25 @@ mod tests {
         assert!(!stale_mailbox_repair_applied(false, false, 0));
     }
 
-    /// #2049 Finding 2 regression guard: any time the composed health
-    /// pipeline pushes a `degraded_reason`, `fully_recovered` must flip
-    /// to false even if Discord's per-provider snapshot reported true.
+    /// `fully_recovered` is the startup/recovery completion signal. Runtime
+    /// degradation is reported separately through status and degraded reasons.
     #[test]
-    fn compute_fully_recovered_flips_to_false_when_degraded_reasons_present() {
+    fn compute_fully_recovered_preserves_recovery_axis_when_runtime_degrades() {
         use super::compute_fully_recovered;
         use crate::services::discord::health;
 
         // Clean state — healthy + no reasons → fully_recovered=true.
-        assert!(compute_fully_recovered(health::HealthStatus::Healthy, &[]));
+        assert!(compute_fully_recovered(
+            true,
+            health::HealthStatus::Healthy,
+            &[]
+        ));
 
-        // Any reason flips the recovery signal off, even when the snapshot
-        // reported Healthy upstream.
+        // Runtime degradations are exposed through status/degraded_reasons,
+        // but do not rewrite the startup/recovery axis.
         let reasons_db = vec![json!("db_unavailable")];
-        assert!(!compute_fully_recovered(
+        assert!(compute_fully_recovered(
+            true,
             health::HealthStatus::Healthy,
             &reasons_db
         ));
@@ -1604,24 +1692,24 @@ mod tests {
             json!("dispatch_outbox_oldest_pending_age:120"),
             json!("disk_low_free_bytes:104857600"),
         ];
-        assert!(!compute_fully_recovered(
+        assert!(compute_fully_recovered(
+            true,
             health::HealthStatus::Degraded,
             &reasons_outbox_disk
         ));
 
-        // Unhealthy status → false even when (theoretically) reasons list
-        // is empty. Guards against future code paths that worsen status
-        // without pushing a reason string.
-        assert!(!compute_fully_recovered(
+        // Unhealthy runtime status also stays separate from recovery state.
+        assert!(compute_fully_recovered(
+            true,
             health::HealthStatus::Unhealthy,
             &[]
         ));
 
-        // Doctor failure reason → false.
-        let reasons_doctor = vec![json!("startup_doctor_failed:6")];
+        // Existing recovery-in-progress state remains false.
         assert!(!compute_fully_recovered(
-            health::HealthStatus::Unhealthy,
-            &reasons_doctor
+            false,
+            health::HealthStatus::Healthy,
+            &[]
         ));
     }
 }

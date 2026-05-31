@@ -24,6 +24,8 @@ set -euo pipefail
 #   AGENTDESK_DEPLOY_SKIP_FRESHNESS=1  skip both source-identity and remote
 #                                      freshness gates for an intentional
 #                                      offline/emergency deploy.
+#   AGENTDESK_DEPLOY_FAST=1            opt into the release-fast Cargo profile
+#                                      for lower-latency dev-loop deploys.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=_defaults.sh
@@ -70,6 +72,7 @@ DEPLOY_ALL_NODES="${AGENTDESK_DEPLOY_ALL_NODES:-0}"
 DEPLOY_PEERS_OVERRIDE=()
 DEPLOY_PEERS_FILE="${AGENTDESK_DEPLOY_PEERS_FILE:-$ADK_REL/config/deploy-peers.txt}"
 DEPLOY_PEER_INVOCATION="${AGENTDESK_DEPLOY_PEER_INVOCATION:-0}"
+DEPLOY_FAST="${AGENTDESK_DEPLOY_FAST:-0}"
 
 # Parse flags non-destructively into shell vars + env so that the lock-acquire
 # re-exec (lockf/flock pass-through) and the detached-helper tmux script both
@@ -81,6 +84,10 @@ while [ "$_idx" -lt "${#_args[@]}" ]; do
     case "${_args[$_idx]}" in
         --skip-review|--skip-health)
             PARSED_ARGS+=("${_args[$_idx]}") ;;
+        --fast)
+            DEPLOY_FAST=1
+            export AGENTDESK_DEPLOY_FAST=1
+            ;;
         --all-nodes|--cluster)
             DEPLOY_ALL_NODES=1
             export AGENTDESK_DEPLOY_ALL_NODES=1
@@ -106,6 +113,16 @@ if [ "${#PARSED_ARGS[@]}" -gt 0 ]; then
     set -- "${PARSED_ARGS[@]}"
 else
     set --
+fi
+
+case "$DEPLOY_FAST" in
+    1|true|TRUE|yes|YES) DEPLOY_FAST=1 ;;
+    *) DEPLOY_FAST=0 ;;
+esac
+DEPLOY_BUILD_PROFILE="release"
+if [ "$DEPLOY_FAST" = "1" ]; then
+    DEPLOY_BUILD_PROFILE="release-fast"
+    export AGENTDESK_DEPLOY_FAST=1
 fi
 
 if [ "${AGENTDESK_DEPLOY_LOCK_HELD:-0}" != "1" ]; then
@@ -288,6 +305,7 @@ _ensure_dashboard_dependencies() {
 }
 
 _resolve_default_release_binary() {
+    local profile_dir="${1:-release}"
     local target_dir
     target_dir="$(cd "$REPO" && cargo metadata --format-version 1 --no-deps 2>/dev/null | jq -r '.target_directory // empty' 2>/dev/null || true)"
     if [ -z "$target_dir" ]; then
@@ -297,7 +315,7 @@ _resolve_default_release_binary() {
         /*) ;;
         *) target_dir="$REPO/$target_dir" ;;
     esac
-    printf '%s/release/agentdesk\n' "$target_dir"
+    printf '%s/%s/agentdesk\n' "$target_dir" "$profile_dir"
 }
 
 _latest_postgres_migration_path() {
@@ -362,6 +380,7 @@ _write_release_source_manifest() {
     AGENTDESK_MANIFEST_REPO_UPSTREAM_SHA="$repo_upstream_sha" \
     AGENTDESK_MANIFEST_REPO_DIRTY="$repo_dirty" \
     AGENTDESK_MANIFEST_SOURCE_BINARY="${SOURCE_BINARY:-}" \
+    AGENTDESK_MANIFEST_BUILD_PROFILE="$DEPLOY_BUILD_PROFILE" \
     AGENTDESK_MANIFEST_LATEST_MIGRATION="$latest_migration_name" \
     AGENTDESK_MANIFEST_LATEST_MIGRATION_SHA="$latest_migration_sha" \
     AGENTDESK_MANIFEST_SIGNING_MODE="${RESOLVED_RELEASE_SIGNING_MODE:-unknown}" \
@@ -385,6 +404,7 @@ payload = {
     "repo_upstream_sha": os.environ.get("AGENTDESK_MANIFEST_REPO_UPSTREAM_SHA", ""),
     "repo_dirty": os.environ.get("AGENTDESK_MANIFEST_REPO_DIRTY", "unknown"),
     "source_binary": os.environ.get("AGENTDESK_MANIFEST_SOURCE_BINARY", ""),
+    "build_profile": os.environ.get("AGENTDESK_MANIFEST_BUILD_PROFILE", ""),
     "latest_postgres_migration": os.environ.get("AGENTDESK_MANIFEST_LATEST_MIGRATION", ""),
     "latest_postgres_migration_sha256": os.environ.get("AGENTDESK_MANIFEST_LATEST_MIGRATION_SHA", ""),
     "signing_mode": os.environ.get("AGENTDESK_MANIFEST_SIGNING_MODE", ""),
@@ -406,11 +426,17 @@ _clean_release_build_cache_after_staging() {
     [ "${AGENTDESK_DEPLOY_SKIP_BUILD_CACHE_CLEANUP:-0}" != "1" ] || return 0
     [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] || return 0
 
-    echo "▸ Cleaning release build cache after staging binary..."
-    if (cd "$REPO" && cargo clean --release); then
-        echo "  ✓ release build cache cleaned"
+    local -a clean_cmd
+    echo "▸ Cleaning ${DEPLOY_BUILD_PROFILE} build cache after staging binary..."
+    if [ "$DEPLOY_BUILD_PROFILE" = "release" ]; then
+        clean_cmd=(cargo clean --release)
     else
-        echo "⚠ cargo clean --release failed; continuing with staged release artifact"
+        clean_cmd=(cargo clean --profile "$DEPLOY_BUILD_PROFILE")
+    fi
+    if (cd "$REPO" && "${clean_cmd[@]}"); then
+        echo "  ✓ ${DEPLOY_BUILD_PROFILE} build cache cleaned"
+    else
+        echo "⚠ cargo clean for ${DEPLOY_BUILD_PROFILE} failed; continuing with staged release artifact"
     fi
 }
 
@@ -616,6 +642,7 @@ _deploy_peer_env_prelude() {
         AGENTDESK_DEPLOY_ALL_NODES \
         AGENTDESK_DEPLOY_BINARY \
         AGENTDESK_DEPLOY_DELAY_SECS \
+        AGENTDESK_DEPLOY_FAST \
         AGENTDESK_DEPLOY_HEALTH_DELAY_SECS \
         AGENTDESK_DEPLOY_HEALTH_RETRIES \
         AGENTDESK_DEPLOY_LOCK_FILE \
@@ -785,6 +812,7 @@ export AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN=$(printf '%q' "${AGENTDESK_ALLOW_ADHOC
 export AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE=$(printf '%q' "${AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE:-}")
 export AGENTDESK_CODESIGN_KEYCHAIN_NAME=$(printf '%q' "${AGENTDESK_CODESIGN_KEYCHAIN_NAME:-}")
 export AGENTDESK_DEPLOY_BINARY=$(printf '%q' "${AGENTDESK_DEPLOY_BINARY:-}")
+export AGENTDESK_DEPLOY_FAST=$(printf '%q' "${AGENTDESK_DEPLOY_FAST:-0}")
 export AGENTDESK_DEPLOY_SKIP_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}")
 export AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS:-0}")
 export AGENTDESK_DEPLOY_ALLOW_NON_MAIN=$(printf '%q' "${AGENTDESK_DEPLOY_ALLOW_NON_MAIN:-0}")
@@ -905,11 +933,16 @@ _check_repo_remote_freshness
 if [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
     SOURCE_BINARY="$AGENTDESK_DEPLOY_BINARY"
 else
-    SOURCE_BINARY="$(_resolve_default_release_binary)"
+    SOURCE_BINARY="$(_resolve_default_release_binary "$DEPLOY_BUILD_PROFILE")"
 fi
 if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
-    echo "▸ Building release binary..."
-    (cd "$REPO" && cargo build --release --bin agentdesk)
+    if [ "$DEPLOY_BUILD_PROFILE" = "release" ]; then
+        echo "▸ Building release binary..."
+        (cd "$REPO" && cargo build --release --bin agentdesk)
+    else
+        echo "▸ Building ${DEPLOY_BUILD_PROFILE} binary (opt-in fast deploy profile)..."
+        (cd "$REPO" && cargo build --profile "$DEPLOY_BUILD_PROFILE" --bin agentdesk)
+    fi
     # Cargo tracks embedded migration inputs via build.rs. The freshness gate
     # below is mtime-based, and a successful current-HEAD cargo build can still
     # reuse an existing artifact, so align the mtime after build.
@@ -1034,7 +1067,11 @@ fi
 # build aborts without leaving release down.
 if [ ! -x "$SOURCE_BINARY" ]; then
     echo "✗ Source binary missing or not executable: $SOURCE_BINARY"
-    echo "  Run 'cargo build --release' or './scripts/build-release.sh' first."
+    if [ "$DEPLOY_BUILD_PROFILE" = "release" ]; then
+        echo "  Run 'cargo build --release' or './scripts/build-release.sh' first."
+    else
+        echo "  Run 'cargo build --profile ${DEPLOY_BUILD_PROFILE} --bin agentdesk' first, or retry without --fast."
+    fi
     exit 1
 fi
 
@@ -1053,7 +1090,11 @@ if [ "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}" != "1" ] && [ -z "${AGENTDESK_DEPLO
         echo "✗ Binary is older than current HEAD (${HEAD_SHORT}):"
         echo "    binary mtime: ${BIN_MTIME_HUMAN}"
         echo "    HEAD commit:  ${HEAD_HUMAN}"
-        echo "  Rebuild with 'cargo build --release' before deploying, or override with"
+        if [ "$DEPLOY_BUILD_PROFILE" = "release" ]; then
+            echo "  Rebuild with 'cargo build --release' before deploying, or override with"
+        else
+            echo "  Rebuild with 'cargo build --profile ${DEPLOY_BUILD_PROFILE} --bin agentdesk' before deploying, or override with"
+        fi
         echo "  AGENTDESK_DEPLOY_SKIP_FRESHNESS=1 when intentional."
         exit 1
     fi

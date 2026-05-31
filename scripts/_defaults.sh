@@ -421,10 +421,21 @@ health_turn_snapshot() {
       return 1
     fi
     printf '%s\n' "$health_json" | jq -r '
+      def provider_active:
+        [(.providers // [])[] | (.active_turns // 0)] | add // 0;
+      def mailbox_active:
+        [(.mailboxes // [])[] | select(
+          (.has_cancel_token == true)
+          or (.inflight_state_present == true)
+          or (.relay_health.bridge_inflight_present == true)
+          or (.relay_health.mailbox_has_cancel_token == true)
+          or (.relay_stall_state == "active_foreground_stream")
+        )] | length;
       [
         (.global_active // 0),
         (.global_finalizing // 0),
-        (.queue_depth // 0)
+        (.queue_depth // 0),
+        (if (provider_active + mailbox_active) > 0 then 1 else 0 end)
       ] | @tsv
     ' 2>/dev/null | tr '\t' ' '
     return
@@ -432,17 +443,21 @@ health_turn_snapshot() {
 
   # jq-less fallback: require the field markers to be present in the body,
   # otherwise return 1 so callers do not silently default to "0 active".
-  if ! printf '%s' "$health_json" | grep -q '"global_active":[0-9]'; then
+  if ! printf '%s' "$health_json" | grep -Eq '"global_active"[[:space:]]*:[[:space:]]*[0-9]'; then
     return 1
   fi
-  if ! printf '%s' "$health_json" | grep -q '"global_finalizing":[0-9]'; then
+  if ! printf '%s' "$health_json" | grep -Eq '"global_finalizing"[[:space:]]*:[[:space:]]*[0-9]'; then
     return 1
   fi
-  local active finalizing queue_depth
-  active=$(printf '%s' "$health_json" | grep -o '"global_active":[0-9]*' | head -1 | cut -d: -f2)
-  finalizing=$(printf '%s' "$health_json" | grep -o '"global_finalizing":[0-9]*' | head -1 | cut -d: -f2)
-  queue_depth=$(printf '%s' "$health_json" | grep -o '"queue_depth":[0-9]*' | head -1 | cut -d: -f2)
-  echo "${active:-0} ${finalizing:-0} ${queue_depth:-0}"
+  local active finalizing queue_depth runtime_active
+  active=$(printf '%s' "$health_json" | grep -Eo '"global_active"[[:space:]]*:[[:space:]]*[0-9]*' | head -1 | cut -d: -f2 | tr -d '[:space:]')
+  finalizing=$(printf '%s' "$health_json" | grep -Eo '"global_finalizing"[[:space:]]*:[[:space:]]*[0-9]*' | head -1 | cut -d: -f2 | tr -d '[:space:]')
+  queue_depth=$(printf '%s' "$health_json" | grep -Eo '"queue_depth"[[:space:]]*:[[:space:]]*[0-9]*' | head -1 | cut -d: -f2 | tr -d '[:space:]')
+  runtime_active=0
+  if printf '%s' "$health_json" | grep -Eq '"active_turns"[[:space:]]*:[[:space:]]*[1-9][0-9]*|"has_cancel_token"[[:space:]]*:[[:space:]]*true|"inflight_state_present"[[:space:]]*:[[:space:]]*true|"bridge_inflight_present"[[:space:]]*:[[:space:]]*true|"mailbox_has_cancel_token"[[:space:]]*:[[:space:]]*true|"relay_stall_state"[[:space:]]*:[[:space:]]*"active_foreground_stream"'; then
+    runtime_active=1
+  fi
+  echo "${active:-0} ${finalizing:-0} ${queue_depth:-0} ${runtime_active:-0}"
 }
 
 assert_restart_helpers_loaded() {
@@ -688,9 +703,9 @@ wait_for_live_turns_to_drain_or_fail() {
   # maintenance window, post-incident strict mode).
   local skip_drain="${AGENTDESK_SKIP_TURN_DRAIN:-1}"
   local waited=0
-  local active=0 finalizing=0 queue_depth=0 live_turns=0 job_state=""
+  local active=0 finalizing=0 queue_depth=0 runtime_active=0 live_turns=0 job_state=""
 
-  if ! read -r active finalizing queue_depth <<EOF
+  if ! read -r active finalizing queue_depth runtime_active <<EOF
 $(health_turn_snapshot "$port")
 EOF
   then
@@ -725,6 +740,9 @@ EOF
   if [ "$effective_live" -lt 0 ]; then
     effective_live=0
   fi
+  if [ "$effective_live" -eq 0 ] && [ "$live_turns" -eq 0 ] && [ "${runtime_active:-0}" -gt 0 ]; then
+    effective_live="${runtime_active:-0}"
+  fi
 
   if [ "$effective_live" -eq 0 ]; then
     if [ "$live_turns" -gt 0 ]; then
@@ -741,15 +759,15 @@ EOF
   # waited the full max_wait before warning + proceeding, which wasted 120s
   # per self-hosted promote (the operator turn never drains in-process).
   if [ "$skip_drain" = "1" ]; then
-    echo "⚠ [gate] ${scope} has ${effective_live} active/finalizing turn(s) (live=${live_turns}, self=${self_hosted_self_turn}, queued=${queue_depth}) — proceeding due to AGENTDESK_SKIP_TURN_DRAIN=1; silent reattach will preserve turn state"
+    echo "⚠ [gate] ${scope} has ${effective_live} active/finalizing/runtime-evidence turn(s) (live=${live_turns}, runtime=${runtime_active:-0}, self=${self_hosted_self_turn}, queued=${queue_depth}) — proceeding due to AGENTDESK_SKIP_TURN_DRAIN=1; silent reattach will preserve turn state"
     return 0
   fi
 
-  echo "▸ [gate] Waiting for ${scope} active/finalizing turns to drain (${effective_live} live, self=${self_hosted_self_turn}; queued=${queue_depth})..."
+  echo "▸ [gate] Waiting for ${scope} active/finalizing turns to drain (${effective_live} live, runtime=${runtime_active:-0}, self=${self_hosted_self_turn}; queued=${queue_depth})..."
   while [ "$effective_live" -gt 0 ] && [ "$waited" -lt "$max_wait" ]; do
     sleep "$poll_secs"
     waited=$(( waited + poll_secs ))
-    if ! read -r active finalizing queue_depth <<EOF
+    if ! read -r active finalizing queue_depth runtime_active <<EOF
 $(health_turn_snapshot "$port")
 EOF
     then
@@ -765,10 +783,13 @@ EOF
     if [ "$effective_live" -lt 0 ]; then
       effective_live=0
     fi
+    if [ "$effective_live" -eq 0 ] && [ "$live_turns" -eq 0 ] && [ "${runtime_active:-0}" -gt 0 ]; then
+      effective_live="${runtime_active:-0}"
+    fi
   done
 
   if [ "$effective_live" -gt 0 ]; then
-    echo "✗ [gate] ${scope} still has ${effective_live} active/finalizing turn(s) after ${max_wait}s (live=${live_turns}, self=${self_hosted_self_turn}, queued=${queue_depth})"
+    echo "✗ [gate] ${scope} still has ${effective_live} active/finalizing/runtime-evidence turn(s) after ${max_wait}s (live=${live_turns}, runtime=${runtime_active:-0}, self=${self_hosted_self_turn}, queued=${queue_depth})"
     echo "  Refusing restart to avoid truncating mid-stream output."
     echo "  You opted into strict drain via AGENTDESK_SKIP_TURN_DRAIN=0;"
     echo "  retry after work finishes or remove that override (default=1) when a brief stream hiccup is acceptable."
