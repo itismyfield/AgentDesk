@@ -392,6 +392,10 @@ def relay_latency_within(window: Window, *, max_seconds: float) -> None:
             )
         if spans:
             return
+        raise AssertionError(
+            "relay latency could not be measured: no timestamped relay message "
+            "was observed at or after any recorded prompt send time"
+        )
     if len(times) < 2:
         return
     span = (max(times) - min(times)).total_seconds()

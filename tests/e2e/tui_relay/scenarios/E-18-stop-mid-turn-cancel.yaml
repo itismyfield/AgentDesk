@@ -1,28 +1,29 @@
 id: E-18
 title: cancel_turn 중단 후 late marker 미전송 보장
-cells: [codex-tui]
+cells: [claude-pipe, claude-tui, codex-pipe, codex-tui]
 isolation: required
 destructive: true
 skip_reason: >
-  Stub for #2937. The harness now has a reusable cancel_turn step and negative
-  marker assertions, but this live stop-mid-turn scenario needs a deterministic
-  provider throttle/hook. A long prompt only probabilistically leaves time for
-  cancel_turn, so running it by default would create timing flakes.
+  Known-race coverage for #2937. The harness has cancel_turn and negative
+  marker assertions, but this live stop-mid-turn scenario still needs a
+  deterministic provider hold/throttle hook. A long prompt can finish and
+  relay [E2E:E18:LATE] before cancel_turn arrives, so this stays skipped to
+  avoid CI flakes.
 acceptance_criteria:
   - Provide a deterministic hook or prompt fixture that holds the turn after [E2E:E18:OK].
   - Execute cancel_turn while the turn is still active.
   - Assert [E2E:E18:LATE] is absent from relay output after cancellation.
   - Assert health counters drain to global_active=0 and global_finalizing=0.
 notes: |
-  Phase 1 coverage for #2937. Scope is intentionally conservative: codex-tui
-  declares the reusable cancel_turn step without expanding the flaky live
-  matrix. Enable execution only after a deterministic provider throttle/hook
-  can hold the turn active between the early marker and cancellation.
+  Skipped #2937 coverage. This remains destructive-gated and intentionally omits
+  claude-e because the stop/cancel path under test is the relay-backed
+  pipe/TUI turn lifecycle. Enable only after a deterministic live hook can hold
+  the turn active between the early marker and cancellation.
 steps:
   - send_prompt: |
       첫 줄에는 정확히 "[E2E:E18:OK]"만 출력해줘.
-      그 다음부터 250줄을 번호와 함께 작성해줘.
-      250번째 마지막 줄에 도달하기 전에는 절대 "[E2E:E18:LATE]"를 출력하지 말고,
+      그 다음부터 900줄을 "E18-LINE-NNN" 형식의 번호와 함께 작성해줘.
+      900번째 마지막 줄에 도달하기 전에는 절대 "[E2E:E18:LATE]"를 출력하지 말고,
       정말 마지막 줄에서만 "[E2E:E18:LATE]"를 출력해줘.
   - wait_for_discord_text: "[E2E:E18:OK]"
     timeout_s: 180
@@ -36,6 +37,11 @@ steps:
       global_active_max: 0
       global_finalizing_max: 0
 assertions:
+  - raw_message_count_between_markers:
+      min: 1
+      max: 36
+  - relay_latency_within:
+      max_seconds: 180
   - text_present: "[E2E:E18:OK]"
   - marker_absent:
       marker: "[E2E:E18:LATE]"

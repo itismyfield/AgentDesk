@@ -94,6 +94,18 @@ fn compute_fully_recovered(
     degraded_reasons.is_empty() && status.is_http_ready()
 }
 
+fn provider_deferred_hooks_backlog_recovered(
+    live_deferred_hooks: u64,
+    degraded_reasons: &[serde_json::Value],
+) -> bool {
+    live_deferred_hooks == 0
+        && !degraded_reasons.iter().any(|reason| {
+            reason
+                .as_str()
+                .is_some_and(crate::cli::doctor::startup::is_provider_deferred_hooks_backlog_reason)
+        })
+}
+
 fn bearer_token_matches(config: &crate::config::Config, headers: &HeaderMap) -> bool {
     let Some(expected_token) = config.server.auth_token.as_deref() else {
         return false;
@@ -225,8 +237,13 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         // top-level status + degraded_reasons so external health watchers see
         // the boot-time damage. The doctor summary itself is still attached
         // by `with_latest_startup_doctor` below.
+        let live_deferred_hooks = json["deferred_hooks"].as_u64().unwrap_or(0);
+        let suppress_recovered_provider_deferred_hooks_backlog =
+            provider_deferred_hooks_backlog_recovered(live_deferred_hooks, &degraded_reasons);
         let (doctor_failed, doctor_warned) =
-            crate::cli::doctor::startup::latest_startup_doctor_counts();
+            crate::cli::doctor::startup::latest_startup_doctor_effective_counts(
+                suppress_recovered_provider_deferred_hooks_backlog,
+            );
         if doctor_failed > 0 {
             status = status.worsen(health::HealthStatus::Unhealthy);
             degraded_reasons.push(serde_json::json!(format!(

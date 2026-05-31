@@ -80,6 +80,8 @@ class ScenarioFilter(unittest.TestCase):
         self.assertIn("E-6", ids)
         self.assertIn("E-13", ids)
         self.assertIn("E-8", ids)
+        self.assertIn("E-18", ids)
+        self.assertIn("E-20", ids)
         self.assertNotIn("E-4", ids)
         self.assertNotIn("E-10", ids)
         self.assertNotIn("E-12", ids)
@@ -91,6 +93,9 @@ class ScenarioFilter(unittest.TestCase):
         ids = {str(s.get("id")) for s in scenarios}
         self.assertIn("E-1", ids)
         self.assertIn("E-16", ids)
+        self.assertIn("E-18", ids)
+        self.assertIn("E-19", ids)
+        self.assertIn("E-20", ids)
         self.assertNotIn("E-13", ids)
         self.assertIn("E-4", ids)
         self.assertIn("E-10", ids)
@@ -104,14 +109,18 @@ class ScenarioFilter(unittest.TestCase):
         scenarios = driver.load_scenarios(self.scenarios_dir, cell="claude-e")
         ids = {str(s.get("id")) for s in scenarios}
         self.assertIn("E-1", ids)
+        self.assertIn("E-20", ids)
         self.assertNotIn("E-13", ids)
         self.assertNotIn("E-4", ids)
         self.assertNotIn("E-7", ids)
+        self.assertNotIn("E-18", ids)
 
     def test_codex_pipe_scenarios(self):
         scenarios = driver.load_scenarios(self.scenarios_dir, cell="codex-pipe")
         ids = {str(s.get("id")) for s in scenarios}
         self.assertIn("E-7", ids)
+        self.assertIn("E-18", ids)
+        self.assertIn("E-20", ids)
         self.assertNotIn("E-13", ids)
         self.assertNotIn("E-6", ids)
         self.assertNotIn("E-4", ids)
@@ -123,6 +132,8 @@ class ScenarioFilter(unittest.TestCase):
         self.assertIn("E-4", ids)
         self.assertIn("E-17", ids)
         self.assertIn("E-18", ids)
+        self.assertIn("E-19", ids)
+        self.assertIn("E-20", ids)
         e17 = next(s for s in scenarios if s.get("id") == "E-17")
         self.assertIn("skip_reason", e17)
         self.assertIn("acceptance_criteria", e17)
@@ -130,14 +141,29 @@ class ScenarioFilter(unittest.TestCase):
         self.assertIn("skip_reason", e18)
         self.assertIn("acceptance_criteria", e18)
 
-    def test_e18_cancel_turn_scope_is_codex_tui_only(self):
+    def test_e18_cancel_turn_scope_is_relay_backed_non_claude_e(self):
         for cell in driver.SUPPORTED_CELLS:
             scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
             ids = {str(s.get("id")) for s in scenarios}
-            if cell == "codex-tui":
+            if cell in {"claude-pipe", "claude-tui", "codex-pipe", "codex-tui"}:
                 self.assertIn("E-18", ids)
             else:
                 self.assertNotIn("E-18", ids)
+
+    def test_e19_session_continuity_scope_is_tui_only(self):
+        for cell in driver.SUPPORTED_CELLS:
+            scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
+            ids = {str(s.get("id")) for s in scenarios}
+            if cell in {"claude-tui", "codex-tui"}:
+                self.assertIn("E-19", ids)
+            else:
+                self.assertNotIn("E-19", ids)
+
+    def test_e20_concurrent_dispatch_covers_all_cells(self):
+        for cell in driver.SUPPORTED_CELLS:
+            scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
+            ids = {str(s.get("id")) for s in scenarios}
+            self.assertIn("E-20", ids)
 
     def test_e11_excluded_everywhere(self):
         for cell in driver.SUPPORTED_CELLS:

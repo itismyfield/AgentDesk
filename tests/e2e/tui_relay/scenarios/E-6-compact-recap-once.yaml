@@ -13,5 +13,11 @@ steps:
   - wait_for_discord_text: "[E2E:E6:AFTER]"
     timeout_s: 240
 assertions:
+  - raw_message_count_between_markers:
+      min: 2
+      max: 50
+  - relay_latency_within:
+      max_seconds: 300
   - no_duplicate_content: true
   - text_present: "[E2E:E6:AFTER]"
+  - raw_text_absent: "Recap:"

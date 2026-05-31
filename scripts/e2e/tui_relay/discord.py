@@ -201,27 +201,34 @@ class DiscordClient:
         # See #2718 driver follow-up.
         deadline = time.monotonic() + timeout_s
         observed: list[dict[str, Any]] = []
-        observed_ids: set[str] = set()
+        observed_by_id: dict[str, dict[str, Any]] = {}
         found: dict[str, Any] | None = None
         poll = 0
         while time.monotonic() < deadline and found is None:
             poll += 1
             messages = self.fetch_messages(channel_id, after_id=after_id, limit=100)
             messages = sorted(messages, key=lambda m: int(m.get("id", "0")))
-            new_messages = [
-                m for m in messages if str(m.get("id") or "") not in observed_ids
-            ]
+            new_or_updated_messages: list[dict[str, Any]] = []
+            for message in messages:
+                mid = str(message.get("id") or "")
+                if not mid:
+                    new_or_updated_messages.append(message)
+                    continue
+                previous = observed_by_id.get(mid)
+                if previous is None or _message_changed(previous, message):
+                    observed_by_id[mid] = message
+                    new_or_updated_messages.append(message)
             if debug_enabled:
                 print(
                     f"[wait_for_message] poll={poll} label={debug_label!r} "
                     f"after_id={after_id!r} fetched={len(messages)} "
-                    f"new={len(new_messages)} observed_so_far={len(observed)}"
+                    f"new_or_updated={len(new_or_updated_messages)} "
+                    f"observed_so_far={len(observed)}"
                 )
-            for message in new_messages:
+            for message in new_or_updated_messages:
                 mid = str(message.get("id") or "")
                 if mid:
                     observed.append(message)
-                    observed_ids.add(mid)
                 if predicate(message):
                     found = message
                     break
@@ -234,3 +241,9 @@ class DiscordClient:
                 f"observed_total={len(observed)}"
             )
         return found, observed
+
+
+def _message_changed(old: dict[str, Any], new: dict[str, Any]) -> bool:
+    return (old.get("content") or "") != (new.get("content") or "") or old.get(
+        "edited_timestamp"
+    ) != new.get("edited_timestamp")

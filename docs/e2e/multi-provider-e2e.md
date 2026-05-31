@@ -44,11 +44,14 @@ coverage because this matrix does not create a persistent Claude Code wake
 session for those cells. `E-16` and `E-17` are #2935 regression stubs: they are
 loaded by the relevant cells but skipped until the runtime/orchestrator exposes
 hooks to force Claude TUI completion-quiescence timeout and to hold a foreign
-active mailbox during a destructive restart attempt. `E-18` is the conservative
-Phase 1 `cancel_turn` stop-mid-turn stub for `codex-tui`; it is skipped until a
-deterministic provider throttle/hook can hold the turn active between the early
-marker and cancellation. `E-11` (cross-cell concurrency) is `cells: []` — the
-orchestrator owns that scenario.
+active mailbox during a destructive restart attempt. `E-18` is a skipped
+destructive `cancel_turn` stop-mid-turn scenario for relay-backed pipe/TUI cells;
+it remains disabled until a deterministic provider hold hook can avoid the known
+late-sentinel race. `E-19` captures tmux pane identity across dcserver restart
+for TUI cells. `E-20` uses same-session near-concurrent prompt fan-out to
+pressure dispatch serialization while asserting both markers arrive once.
+`E-11` (cross-cell concurrency) is `cells: []` — the orchestrator owns that
+scenario.
 
 ## Driver
 
@@ -110,6 +113,12 @@ require `status: healthy`, forbid degraded reason substrings such as
 settled so counter underflow and stuck-finalizing regressions are visible in the
 E2E report.
 
+Control-flow steps include `cancel_turn` (POSTs
+`/api/turns/<channel_id>/cancel?force=<bool>` and remains destructive-gated),
+`send_prompts_concurrent` (starts multiple prompt dispatches without the normal
+per-step sleep), `capture_session_identity`, and `assert_session_preserved`
+(compares tmux session name, pane ids, pane pids, and cwd after restart).
+
 Observation assertions now include negative and edit-aware primitives:
 `raw_text_absent`, `marker_absent`, `chrome_count`,
 `completion_chrome_after_body`, `raw_message_count_between_markers`,
@@ -119,10 +128,14 @@ the final edited body rather than only the first placeholder/chrome body.
 `completion_chrome_after_body` checks ordering by default and can set
 `required: true` when a scenario wants to fail on missing completion chrome.
 Latency budgets use the first prompt timestamp to make
-`relay_latency_within` meaningful even for one-response scenarios. Current
-baselines are deliberately loose: simple/turn-separation cases use 240s
-latency, raw-message budgets count status chrome but exclude harness-sent
-control/prompt messages unless a scenario opts into `include_our_send`.
+`relay_latency_within` meaningful even for one-response scenarios. If a prompt
+timestamp exists but no later timestamped relay body is observed, the assertion
+fails instead of silently no-oping. Current baselines are deliberately loose:
+simple/turn-separation cases use 240s, restart/compact/long-response cases use
+300s, scheduled wakeup uses 360s, and the tmux-kill/cancel guards use 180s to
+bound the prompt-to-first-relay phase before the destructive step. Raw-message
+budgets count status chrome but exclude harness-sent control/prompt messages
+unless a scenario opts into `include_our_send`.
 
 ## Orchestrator (`adk-e2e-orchestrator`)
 

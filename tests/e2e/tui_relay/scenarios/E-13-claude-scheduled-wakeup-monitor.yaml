@@ -24,6 +24,11 @@ steps:
   - wait_for_discord_text: "[E2E:E13:WAKE]"
     timeout_s: 360
 assertions:
+  - raw_message_count_between_markers:
+      min: 2
+      max: 24
+  - relay_latency_within:
+      max_seconds: 360
   - raw_text_present: "ScheduleWakeup"
   - text_present: "[E2E:E13:WAKE]"
   - no_duplicate_content: true

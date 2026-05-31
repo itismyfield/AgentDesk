@@ -1,0 +1,37 @@
+id: E-19
+title: dcserver restart preserves live tmux session identity
+cells: [claude-tui, codex-tui]
+isolation: required
+destructive: true
+acceptance_criteria:
+  - Capture the worker tmux session identity before restart.
+  - Restart dcserver with the existing destructive guard.
+  - Assert the tmux pane ids, pane pids, cwd, and session name are unchanged.
+  - Verify a post-restart prompt still relays and health counters drain.
+notes: |
+  Concrete #2942/#2943 coverage for #2800/#2854 class regressions. It fails
+  if restart recovery kills and recreates the TUI session instead of rebinding
+  to the existing tmux pane.
+steps:
+  - send_prompt: "응답에 정확히 한 줄로 [E2E:E19:PRE] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E19:PRE]"
+    timeout_s: 240
+  - capture_session_identity:
+      label: before_restart
+  - restart_dcserver: {}
+  - assert_session_preserved:
+      label: before_restart
+  - send_prompt: "응답에 정확히 한 줄로 [E2E:E19:POST] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E19:POST]"
+    timeout_s: 240
+  - wait_idle_s: 5
+  - assert_health:
+      forbid_degraded_reasons:
+        - global_active_counter_out_of_bounds
+      global_active_max: 0
+      global_finalizing_max: 0
+assertions:
+  - no_duplicate_content: true
+  - text_present: "[E2E:E19:PRE]"
+  - text_present: "[E2E:E19:POST]"
+  - no_resume_prompt_chrome: true

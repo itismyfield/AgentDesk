@@ -143,6 +143,14 @@ class RelayLatency(unittest.TestCase):
         with self.assertRaises(assertions.AssertionError):
             assertions.relay_latency_within(window, max_seconds=1)
 
+    def test_prompt_start_without_post_prompt_relay_fails(self):
+        window = _window(_relay_msg(1, "old", ts="2026-05-29T00:00:00Z"))
+        window.mark_prompt_sent(dt.datetime.fromisoformat("2026-05-29T00:00:10+00:00"))
+        with self.assertRaisesRegex(
+            assertions.AssertionError, "could not be measured"
+        ):
+            assertions.relay_latency_within(window, max_seconds=30)
+
     def test_multi_turn_uses_each_prompt_start(self):
         window = _window(
             _relay_msg(1, "first", ts="2026-05-29T00:00:01Z"),

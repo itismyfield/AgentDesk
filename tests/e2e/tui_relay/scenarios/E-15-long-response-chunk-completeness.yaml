@@ -23,6 +23,11 @@ steps:
   - wait_for_discord_text: "[E2E:E15:END]"
     timeout_s: 300
 assertions:
+  - raw_message_count_between_markers:
+      min: 1
+      max: 40
+  - relay_latency_within:
+      max_seconds: 300
   - text_present: "[E2E:E15:BEGIN]"
   - text_present: "[E2E:E15:END]"
   - no_control_chars: true

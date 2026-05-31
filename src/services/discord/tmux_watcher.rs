@@ -4958,6 +4958,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             "relay flight recorder"
         );
         let mut watcher_direct_terminal_idle_committed = false;
+        let mut tui_direct_anchor_terminal_body_visible = false;
+        let mut tui_direct_anchor_or_lease_present_for_lifecycle =
+            prompt_anchor_present_before_relay || external_input_lease_before_relay;
         let relay_ok = if session_bound_relay_owns_terminal_delivery {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -4969,6 +4972,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     .unwrap_or("none")
             );
             if has_current_response {
+                tui_direct_anchor_terminal_body_visible = true;
                 last_relayed_offset = Some(turn_data_start_offset);
                 last_observed_generation_mtime_ns =
                     Some(read_generation_file_mtime_ns(&tmux_session_name));
@@ -5040,6 +5044,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             {
                                 Ok(_) => {
                                     direct_send_delivered = true;
+                                    tui_direct_anchor_terminal_body_visible = true;
                                     external_input_lease_consumed_by_relay =
                                         watcher_inflight_represents_external_input(
                                             inflight_before_relay.as_ref(),
@@ -5087,6 +5092,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             {
                                 Ok(ReplaceLongMessageOutcome::EditedOriginal) => {
                                     direct_send_delivered = true;
+                                    tui_direct_anchor_terminal_body_visible = true;
                                     external_input_lease_consumed_by_relay =
                                         watcher_inflight_represents_external_input(
                                             inflight_before_relay.as_ref(),
@@ -5116,6 +5122,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                     edit_error,
                                 }) => {
                                     direct_send_delivered = true;
+                                    tui_direct_anchor_terminal_body_visible = true;
                                     external_input_lease_consumed_by_relay =
                                         watcher_inflight_represents_external_input(
                                             inflight_before_relay.as_ref(),
@@ -5159,6 +5166,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                             }
                                             FallbackPlaceholderCleanupDecision::PreserveInflightForCleanupRetry => {
                                                 relay_ok = false;
+                                                tui_direct_anchor_terminal_body_visible = false;
                                                 let ts = chrono::Local::now().format("%H:%M:%S");
                                                 tracing::warn!(
                                                     "  [{ts}] ⚠ watcher: terminal response was delivered via fallback send, but stale placeholder cleanup did not commit for channel {} msg {}",
@@ -5267,16 +5275,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         .await
                         {
                             Ok(_) => {
+                                tui_direct_anchor_or_lease_present_for_lifecycle |=
+                                    prompt_anchor.is_some();
                                 external_input_lease_consumed_by_relay =
                                     external_input_lease_before_relay || prompt_anchor.is_some();
-                                if let Some(prompt_anchor) = prompt_anchor {
-                                    crate::services::tui_prompt_dedupe::clear_prompt_anchor_for_response(
-                                        watcher_provider.as_str(),
-                                        &tmux_session_name,
-                                        prompt_anchor,
-                                    );
-                                }
                                 direct_send_delivered = true;
+                                tui_direct_anchor_terminal_body_visible = true;
                                 let ts = chrono::Local::now().format("%H:%M:%S");
                                 tracing::info!(
                                     "  [{ts}] 👁 ✓ relayed terminal response (new message) channel {} ({} chars, prompt_anchor_message_id={:?})",
@@ -5710,6 +5714,27 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 "  [{ts}] ⚠ watcher: inflight state missing for channel {} — using DB dispatch fallback",
                 channel_id.get()
             );
+        }
+
+        if crate::services::discord::tui_prompt_relay::should_complete_tui_direct_anchor_lifecycle(
+            terminal_output_committed,
+            tui_direct_anchor_terminal_body_visible,
+            tui_direct_anchor_or_lease_present_for_lifecycle,
+            lifecycle_stage_paused,
+            inflight_state.is_some(),
+        ) {
+            let _ = crate::services::discord::tui_prompt_relay::complete_tui_direct_prompt_anchor_lifecycle_if_present(
+                &http,
+                watcher_provider.as_str(),
+                &tmux_session_name,
+                channel_id,
+                if lifecycle_stage_paused {
+                    "watcher_terminal_delivery_visible_completion_suppressed"
+                } else {
+                    "watcher_terminal_delivery_visible_without_inflight"
+                },
+            )
+            .await;
         }
 
         // Mark user message as completed: ⏳ → ✅ when inflight metadata is

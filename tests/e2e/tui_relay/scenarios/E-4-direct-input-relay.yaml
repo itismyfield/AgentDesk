@@ -17,6 +17,11 @@ steps:
   - wait_for_discord_text: "DIRECT_E4_OK"
     timeout_s: 240
 assertions:
+  - raw_message_count_between_markers:
+      min: 2
+      max: 24
+  - relay_latency_within:
+      max_seconds: 240
   - raw_text_present: "터미널에 직접 주입된 입력"
   - text_present: "DIRECT_E4_OK"
   - no_duplicate_content: true
