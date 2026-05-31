@@ -19,6 +19,12 @@ steps:
     timeout_s: 240
   - wait_for_discord_text: "[E2E:E20:B]"
     timeout_s: 240
+  - wait_idle_s: 5
+  - assert_health:
+      forbid_degraded_reasons:
+        - global_active_counter_out_of_bounds
+      global_active_max: 0
+      global_finalizing_max: 0
 assertions:
   - text_present: "[E2E:E20:A]"
   - text_present: "[E2E:E20:B]"

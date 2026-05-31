@@ -44,13 +44,14 @@ coverage because this matrix does not create a persistent Claude Code wake
 session for those cells. `E-16` and `E-17` are #2935 regression stubs: they are
 loaded by the relevant cells but skipped until the runtime/orchestrator exposes
 hooks to force Claude TUI completion-quiescence timeout and to hold a foreign
-active mailbox during a destructive restart attempt. `E-18` runs the destructive
-`cancel_turn` stop-mid-turn path for relay-backed pipe/TUI cells and asserts the
-late sentinel is absent after cancellation. `E-19` captures tmux pane identity
-across dcserver restart for TUI cells. `E-20` uses same-session near-concurrent
-prompt fan-out to pressure dispatch serialization while asserting both markers
-arrive once. `E-11` (cross-cell concurrency) is `cells: []` — the orchestrator
-owns that scenario.
+active mailbox during a destructive restart attempt. `E-18` is a skipped
+destructive `cancel_turn` stop-mid-turn scenario for relay-backed pipe/TUI cells;
+it remains disabled until a deterministic provider hold hook can avoid the known
+late-sentinel race. `E-19` captures tmux pane identity across dcserver restart
+for TUI cells. `E-20` uses same-session near-concurrent prompt fan-out to
+pressure dispatch serialization while asserting both markers arrive once.
+`E-11` (cross-cell concurrency) is `cells: []` — the orchestrator owns that
+scenario.
 
 ## Driver
 

@@ -138,7 +138,7 @@ class ScenarioFilter(unittest.TestCase):
         self.assertIn("skip_reason", e17)
         self.assertIn("acceptance_criteria", e17)
         e18 = next(s for s in scenarios if s.get("id") == "E-18")
-        self.assertNotIn("skip_reason", e18)
+        self.assertIn("skip_reason", e18)
         self.assertIn("acceptance_criteria", e18)
 
     def test_e18_cancel_turn_scope_is_relay_backed_non_claude_e(self):

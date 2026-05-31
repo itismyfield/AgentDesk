@@ -18,8 +18,7 @@ steps:
     timeout_s: 240
   - capture_session_identity:
       label: before_restart
-  - restart_dcserver:
-      target: dev
+  - restart_dcserver: {}
   - assert_session_preserved:
       label: before_restart
   - send_prompt: "응답에 정확히 한 줄로 [E2E:E19:POST] 만 출력해줘."

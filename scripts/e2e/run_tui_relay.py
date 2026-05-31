@@ -1193,21 +1193,15 @@ def run_one_cell(
         elif "send_prompts_concurrent" in step:
             _prepare_first_prompt_window()
             params = step["send_prompts_concurrent"]
-            prompt_specs = _normalize_concurrent_prompt_specs(
-                params,
+            batch = send_prompts_concurrent(
+                client=client,
                 channel_id=channel_id,
                 cell=cell,
+                params=params,
             )
-            for _ in prompt_specs:
+            for _ in batch:
                 window.mark_prompt_sent()
-            record.setdefault("concurrent_prompt_batches", []).append(
-                send_prompts_concurrent(
-                    client=client,
-                    channel_id=channel_id,
-                    cell=cell,
-                    params=params,
-                )
-            )
+            record.setdefault("concurrent_prompt_batches", []).append(batch)
         elif "wait_idle_s" in step:
             time.sleep(float(step["wait_idle_s"]))
         elif "wait_for_discord_text" in step:
