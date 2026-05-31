@@ -180,6 +180,36 @@ class HealthWait(unittest.TestCase):
         self.assertIn("non-JSON", message)
         self.assertIn("not-json-body", message)
 
+    def test_wait_for_discord_text_accepts_direct_input_reply_body(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def fetch_messages(self, channel_id, *, after_id=None, limit=100):  # noqa: ARG002
+                return [
+                    {
+                        "id": "2",
+                        "content": "[E2E:E21:HEAD]\nDIRECT_E21_OK\n[E2E:E21:TAIL]",
+                        "author": {"id": "999", "bot": True},
+                        "type": 19,
+                    }
+                ]
+
+        found, observed = driver.wait_for_discord_text_with_tui_idle_draft_guard(
+            client=FakeClient(),  # type: ignore[arg-type]
+            channel_id="42",
+            cell="claude-tui",
+            after_id="1",
+            needle="[E2E:E21:TAIL]",
+            prompt="direct input prompt",
+            thread_channel_id=None,
+            timeout_s=1,
+            debug_label="E-21::wait_for_tail",
+        )
+
+        self.assertIsNotNone(found)
+        self.assertEqual(found["type"], 19)
+        self.assertEqual(len(observed), 1)
+
 
 class RestartGuard(unittest.TestCase):
     def test_foreign_active_mailbox_blocks_restart_even_when_sessions_empty(self):

@@ -70,12 +70,12 @@ def is_status_chrome(message: dict[str, Any]) -> bool:
     body = message.get("content") or ""
     if not body:
         return True  # empty / reply-only messages are noise
-    msg_type = message.get("type")
-    if msg_type not in (None, 0):
-        return True  # only default messages count; replies/system are chrome
     for pat in _STATUS_PATTERNS:
         if pat.search(body):
             return True
+    msg_type = message.get("type")
+    if msg_type not in (None, 0, 19):
+        return True  # only default messages and reply bodies count; system is chrome
     return False
 
 
