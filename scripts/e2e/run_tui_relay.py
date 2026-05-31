@@ -594,11 +594,125 @@ def provider_inflight_state_path(
     return Path(runtime_root) / "discord_inflight" / provider / f"{channel_id}.json"
 
 
+def validate_provider_hold_runtime_root(runtime_root: str | Path) -> Path:
+    root = Path(runtime_root)
+    if not root.is_dir():
+        raise assertions.AssertionError(
+            f"queue_runtime_root does not exist or is not a directory: {root}"
+        )
+    known_runtime_children = ("discord_inflight", "sessions", "dcserver.lock")
+    if not any((root / child).exists() for child in known_runtime_children):
+        raise assertions.AssertionError(
+            "queue_runtime_root does not look like an AgentDesk runtime root: "
+            f"{root} (expected one of {', '.join(known_runtime_children)})"
+        )
+    return root
+
+
+def _parse_discord_turn_id(turn_id: str) -> dict[str, str] | None:
+    parts = turn_id.split(":")
+    if len(parts) != 3 or parts[0] != "discord":
+        return None
+    channel_id, user_msg_id = parts[1], parts[2]
+    if not channel_id.isdigit() or not user_msg_id.isdigit():
+        return None
+    return {"turn_id": turn_id, "channel_id": channel_id, "user_msg_id": user_msg_id}
+
+
+def turn_identity_from_send_response(
+    response: dict[str, Any], *, channel_id: str
+) -> dict[str, str]:
+    """Extract the current turn identity from a prompt send response."""
+
+    def _with_optional_fields(identity: dict[str, str]) -> dict[str, str]:
+        for key in ("dispatch_id", "started_at", "born_generation"):
+            value = str(response.get(key) or "").strip()
+            if value:
+                identity[key] = value
+        return identity
+
+    turn_id = str(response.get("turn_id") or "").strip()
+    if turn_id:
+        parsed = _parse_discord_turn_id(turn_id)
+        if parsed is None:
+            raise assertions.AssertionError(
+                f"turn/start returned malformed turn_id: {turn_id!r}"
+            )
+        if parsed["channel_id"] != str(channel_id):
+            raise assertions.AssertionError(
+                "turn/start channel mismatch: "
+                f"response={parsed['channel_id']} expected={channel_id}"
+            )
+        return _with_optional_fields(parsed)
+
+    message_id = str(response.get("message_id") or response.get("id") or "").strip()
+    if message_id.isdigit():
+        return _with_optional_fields(
+            {"channel_id": str(channel_id), "user_msg_id": message_id}
+        )
+
+    raise assertions.AssertionError(
+        "prompt send response did not include turn_id, message_id, or id; "
+        f"cannot bind provider hold witness to the current turn: {response!r}"
+    )
+
+
+def _state_identity_summary(state: dict[str, Any]) -> str:
+    return (
+        f"channel_id={state.get('channel_id')!r} "
+        f"user_msg_id={state.get('user_msg_id')!r} "
+        f"dispatch_id={state.get('dispatch_id')!r} "
+        f"started_at={state.get('started_at')!r} "
+        f"born_generation={state.get('born_generation')!r}"
+    )
+
+
+def _provider_hold_identity_mismatch(
+    state: dict[str, Any], expected_identity: dict[str, str]
+) -> str | None:
+    expected_channel = str(expected_identity.get("channel_id") or "")
+    expected_user_msg = str(expected_identity.get("user_msg_id") or "")
+    if not expected_channel or not expected_user_msg:
+        return "expected turn identity is missing channel_id or user_msg_id"
+
+    actual_channel = str(state.get("channel_id") or "")
+    actual_user_msg = str(state.get("user_msg_id") or "")
+    if actual_channel != expected_channel:
+        return f"channel_id {actual_channel!r} != expected {expected_channel!r}"
+    if actual_user_msg != expected_user_msg:
+        return f"user_msg_id {actual_user_msg!r} != expected {expected_user_msg!r}"
+
+    expected_dispatch = str(expected_identity.get("dispatch_id") or "").strip()
+    if expected_dispatch:
+        actual_dispatch = str(state.get("dispatch_id") or "").strip()
+        if actual_dispatch != expected_dispatch:
+            return (
+                f"dispatch_id {actual_dispatch!r} != expected {expected_dispatch!r}"
+            )
+    expected_started_at = str(expected_identity.get("started_at") or "").strip()
+    if expected_started_at:
+        actual_started_at = str(state.get("started_at") or "").strip()
+        if actual_started_at != expected_started_at:
+            return (
+                f"started_at {actual_started_at!r} != expected {expected_started_at!r}"
+            )
+    expected_generation = str(expected_identity.get("born_generation") or "").strip()
+    if expected_generation:
+        actual_generation = str(state.get("born_generation") or "").strip()
+        if actual_generation != expected_generation:
+            return (
+                f"born_generation {actual_generation!r} "
+                f"!= expected {expected_generation!r}"
+            )
+    return None
+
+
 def _provider_hold_state_summary(
     state: dict[str, Any], *, ok_marker: str, late_marker: str
 ) -> str:
     full_response = str(state.get("full_response") or "")
     return (
+        f"{_state_identity_summary(state)} "
         f"full_response_len={len(full_response)} "
         f"ok_seen={ok_marker in full_response} "
         f"late_seen={late_marker in full_response} "
@@ -613,6 +727,7 @@ def wait_for_provider_hold_state(
     runtime_root: str | Path,
     provider: str,
     channel_id: str,
+    expected_identity: dict[str, str],
     ok_marker: str,
     late_marker: str,
     timeout_s: float,
@@ -624,7 +739,9 @@ def wait_for_provider_hold_state(
     marker on Discord is too late for TUI relay paths because pre-tool and
     post-tool assistant text may be delivered in one terminal replacement.
     The durable inflight row is the stable witness that OK was captured before
-    the tool call and no post-tool text has been produced yet.
+    the tool call and no post-tool text has been produced yet. The row must
+    match the current prompt's turn identity so stale E-18 rows cannot satisfy
+    or fail the current run.
     """
 
     if timeout_s <= 0:
@@ -636,8 +753,9 @@ def wait_for_provider_hold_state(
             "wait_for_provider_hold_state poll_interval_s must be positive: "
             f"{poll_interval_s}"
         )
+    root = validate_provider_hold_runtime_root(runtime_root)
     path = provider_inflight_state_path(
-        runtime_root=runtime_root,
+        runtime_root=root,
         provider=provider,
         channel_id=channel_id,
     )
@@ -664,6 +782,14 @@ def wait_for_provider_hold_state(
                         ok_marker=ok_marker,
                         late_marker=late_marker,
                     )
+                    identity_mismatch = _provider_hold_identity_mismatch(
+                        state,
+                        expected_identity,
+                    )
+                    if identity_mismatch:
+                        last_state = f"identity_mismatch={identity_mismatch}; {summary}"
+                        time.sleep(poll_interval_s)
+                        continue
                     full_response = str(state.get("full_response") or "")
                     if late_marker in full_response:
                         raise assertions.AssertionError(
@@ -680,8 +806,13 @@ def wait_for_provider_hold_state(
                         and state.get("any_tool_used") is True
                         and state.get("has_post_tool_text") is False
                     ):
+                        # Both Claude and Codex relay parsers persist
+                        # `any_tool_used` from provider tool_use frames. If a
+                        # provider stops doing that, this current-turn witness
+                        # times out instead of matching stale content.
                         return {
                             "path": str(path),
+                            "turn_identity": dict(expected_identity),
                             "full_response_len": len(full_response),
                             "ok_marker_seen": True,
                             "any_tool_used": True,
@@ -1360,16 +1491,22 @@ def run_one_cell(
             _advance_window_past_setup_echo()
             first_send_done = True
 
+    last_turn_identity: dict[str, str] | None = None
+
     for step in scenario.get("steps") or []:
         if not isinstance(step, dict):
             continue
         if "send_prompt" in step:
             _prepare_first_prompt_window()
             window.mark_prompt_sent()
-            client.send_prompt(
+            response = client.send_prompt(
                 channel_id,
                 step["send_prompt"],
                 channel_kind=cell_channel_kind(cell),
+            )
+            last_turn_identity = turn_identity_from_send_response(
+                response,
+                channel_id=channel_id,
             )
             time.sleep(3)
         elif "send_provider_hold_prompt" in step:
@@ -1379,10 +1516,14 @@ def run_one_cell(
                 scenario_id=str(scenario_id),
             )
             window.mark_prompt_sent()
-            client.send_prompt(
+            response = client.send_prompt(
                 channel_id,
                 prompt,
                 channel_kind=cell_channel_kind(cell),
+            )
+            last_turn_identity = turn_identity_from_send_response(
+                response,
+                channel_id=channel_id,
             )
             record.setdefault("provider_hold_prompts", []).append(
                 {
@@ -1391,7 +1532,8 @@ def run_one_cell(
                             "hold_seconds",
                             DEFAULT_PROVIDER_HOLD_SECONDS,
                         )
-                    )
+                    ),
+                    "turn_identity": dict(last_turn_identity),
                 }
             )
             time.sleep(3)
@@ -1457,11 +1599,17 @@ def run_one_cell(
                 raise assertions.AssertionError(
                     "wait_for_provider_hold_state requires late_marker"
                 )
+            if last_turn_identity is None:
+                raise assertions.AssertionError(
+                    "wait_for_provider_hold_state requires a preceding prompt send "
+                    "with a turn identity"
+                )
             record.setdefault("provider_hold_states", []).append(
                 wait_for_provider_hold_state(
                     runtime_root=Path(args.queue_runtime_root),
                     provider=cell_provider(cell),
                     channel_id=channel_id,
+                    expected_identity=last_turn_identity,
                     ok_marker=ok_marker,
                     late_marker=late_marker,
                     timeout_s=float(params.get("timeout_s", 180)),
