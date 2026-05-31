@@ -25,6 +25,37 @@ use std::sync::Arc;
 use std::sync::MutexGuard;
 use tower::ServiceExt;
 
+fn startup_doctor_deferred_hooks_artifact() -> serde_json::Value {
+    json!({
+        "schema_version": 1,
+        "ok": false,
+        "boot_id": "4242-test",
+        "started_at": "2026-05-31T09:00:00+09:00",
+        "completed_at": "2026-05-31T09:00:01+09:00",
+        "run_context": "startup_once",
+        "non_fatal": true,
+        "summary": {"passed": 3, "warned": 0, "failed": 1, "total": 4},
+        "checks": [{
+            "id": "health_degraded_reasons",
+            "group": "core",
+            "name": "Health Reasons",
+            "status": "fail",
+            "severity": "error",
+            "subsystem": "provider_runtime",
+            "ok": false,
+            "detail": "provider claude has deferred hook backlog 1",
+            "evidence": {
+                "degraded_reasons": [{
+                    "raw": "provider:claude:deferred_hooks_backlog:1",
+                    "subsystem": "provider_runtime",
+                    "severity": "warning",
+                    "next_step": "inspect deferred hook backlog for provider claude"
+                }]
+            }
+        }]
+    })
+}
+
 #[tokio::test]
 async fn health_detail_and_stale_mailbox_repair_pg_require_bearer_when_auth_enabled() {
     let pg_db = TestPostgresDb::create().await;
@@ -255,6 +286,142 @@ async fn health_surfaces_latest_startup_doctor_summary_without_raw_checks() {
     assert!(doctor.get("failed_checks").is_none());
     assert!(doctor.get("warned_checks").is_none());
     assert!(doctor.get("checks").is_none());
+}
+
+#[tokio::test]
+async fn health_does_not_latch_unhealthy_for_recovered_startup_deferred_hooks() {
+    let _lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    seed_startup_doctor_artifact(
+        runtime_root.path(),
+        startup_doctor_deferred_hooks_artifact(),
+    );
+
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let db = test_db();
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let harness = crate::services::discord::health::TestHealthHarness::new().await;
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        Some(harness.registry()),
+        pool.clone(),
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "healthy");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["fully_recovered"], true);
+    assert_eq!(json["latest_startup_doctor"]["doctor_status"], "failed");
+    assert_eq!(json["latest_startup_doctor"]["failed_count"], 1);
+
+    let detail_response = app
+        .oneshot(local_get_request("/health/detail"))
+        .await
+        .unwrap();
+    assert_eq!(detail_response.status(), StatusCode::OK);
+    let detail_body = axum::body::to_bytes(detail_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let detail_json: serde_json::Value = serde_json::from_slice(&detail_body).unwrap();
+    assert_eq!(detail_json["status"], "healthy");
+    assert_eq!(
+        detail_json["degraded_reasons"]
+            .as_array()
+            .expect("degraded_reasons must be an array")
+            .len(),
+        0
+    );
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn health_keeps_startup_deferred_hook_failure_when_live_backlog_remains() {
+    let _lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    seed_startup_doctor_artifact(
+        runtime_root.path(),
+        startup_doctor_deferred_hooks_artifact(),
+    );
+
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let db = test_db();
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let harness = crate::services::discord::health::TestHealthHarness::new().await;
+    harness.set_deferred_hooks(1);
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        Some(harness.registry()),
+        pool.clone(),
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "unhealthy");
+
+    let detail_response = app
+        .oneshot(local_get_request("/health/detail"))
+        .await
+        .unwrap();
+    assert_eq!(detail_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let detail_body = axum::body::to_bytes(detail_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let detail_json: serde_json::Value = serde_json::from_slice(&detail_body).unwrap();
+    let reasons = detail_json["degraded_reasons"]
+        .as_array()
+        .expect("degraded_reasons must be an array");
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.as_str() == Some("provider:claude:deferred_hooks_backlog:1"))
+    );
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.as_str() == Some("startup_doctor_failed:1"))
+    );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
