@@ -569,6 +569,94 @@ class ScenarioHealthProbe(unittest.TestCase):
         self.assertEqual(result["global_finalizing"], 0)
         sleep.assert_called_once_with(0.0)
 
+    def test_assert_health_polls_healthy_status_until_same_cell_finalizing_drains(self):
+        payloads = {
+            "/api/health/detail": [
+                (
+                    200,
+                    {
+                        **_health_detail(_idle_mailbox("42", provider="codex")),
+                        "global_finalizing": 1,
+                    },
+                ),
+                (200, _health_detail(_idle_mailbox("42", provider="codex"))),
+            ],
+            "/api/health": [
+                (
+                    200,
+                    {
+                        "status": "healthy",
+                        "ok": True,
+                        "fully_recovered": True,
+                        "degraded_reasons": [],
+                    },
+                ),
+                (
+                    200,
+                    {
+                        "status": "healthy",
+                        "ok": True,
+                        "fully_recovered": True,
+                        "degraded_reasons": [],
+                    },
+                ),
+            ],
+        }
+
+        with (
+            patch("run_tui_relay.urllib.request.urlopen", _fake_urlopen_for(payloads)),
+            patch("run_tui_relay.time.sleep", return_value=None) as sleep,
+        ):
+            result = driver.assert_health(
+                "http://agentdesk.test",
+                {
+                    "timeout_s": 1,
+                    "poll_interval_s": 0,
+                    "global_active_max": 0,
+                    "global_finalizing_max": 0,
+                },
+            )
+
+        self.assertEqual(result["status"], "healthy")
+        self.assertEqual(result["global_active"], 0)
+        self.assertEqual(result["global_finalizing"], 0)
+        sleep.assert_called_once_with(0.0)
+
+    def test_assert_health_times_out_when_healthy_status_finalizing_persists(self):
+        healthy_payload = {
+            "status": "healthy",
+            "ok": True,
+            "fully_recovered": True,
+            "degraded_reasons": [],
+        }
+        stuck_detail = {
+            **_health_detail(_idle_mailbox("42", provider="codex")),
+            "global_finalizing": 1,
+        }
+        payloads = {
+            "/api/health/detail": [(200, stuck_detail) for _ in range(4)],
+            "/api/health": [(200, healthy_payload) for _ in range(4)],
+        }
+
+        with (
+            patch("run_tui_relay.urllib.request.urlopen", _fake_urlopen_for(payloads)),
+            patch("run_tui_relay.time.sleep", return_value=None),
+        ):
+            with self.assertRaises(assertions.AssertionError) as ctx:
+                driver.assert_health(
+                    "http://agentdesk.test",
+                    {
+                        "timeout_s": 0.2,
+                        "poll_interval_s": 0.1,
+                        "global_active_max": 0,
+                        "global_finalizing_max": 0,
+                    },
+                )
+
+        message = str(ctx.exception)
+        self.assertIn("assert_health did not pass within 0.2s", message)
+        self.assertIn("global_finalizing=1 > 0", message)
+
     def test_assert_health_forbid_only_allows_unrelated_transitional_reasons(self):
         payloads = {
             "/api/health": [
@@ -872,6 +960,51 @@ class ControlFlowPrimitives(unittest.TestCase):
                 )
 
         self.assertIn("dispatch_id", str(ctx.exception))
+
+    def test_wait_for_provider_hold_state_fails_if_current_turn_disappears(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "discord_inflight" / "claude" / "42.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "channel_id": 42,
+                        "user_msg_id": 222,
+                        "full_response": "[E2E:E18:OK]\n\n",
+                        "any_tool_used": False,
+                        "has_post_tool_text": False,
+                        "terminal_delivery_committed": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def remove_current_turn() -> None:
+                threading.Event().wait(0.03)
+                path.unlink(missing_ok=True)
+
+            remover = threading.Thread(target=remove_current_turn)
+            remover.start()
+            try:
+                with self.assertRaises(assertions.AssertionError) as ctx:
+                    driver.wait_for_provider_hold_state(
+                        runtime_root=tmp,
+                        provider="claude",
+                        channel_id="42",
+                        expected_identity={
+                            "channel_id": "42",
+                            "user_msg_id": "222",
+                        },
+                        ok_marker="[E2E:E18:OK]",
+                        late_marker="[E2E:E18:LATE]",
+                        timeout_s=0.5,
+                        poll_interval_s=0.01,
+                    )
+            finally:
+                remover.join(timeout=1.0)
+
+        self.assertIn("disappeared before cancel", str(ctx.exception))
+        self.assertIn("last_current_state=", str(ctx.exception))
 
     def test_wait_for_provider_hold_state_rejects_delivered_current_turn(self):
         with tempfile.TemporaryDirectory() as tmp:

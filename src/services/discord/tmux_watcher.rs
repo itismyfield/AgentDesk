@@ -3480,6 +3480,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                             tool_state.current_tool_line.as_deref(),
                                             tool_state.prev_tool_status.as_deref(),
                                             task_notification_kind,
+                                            tool_state.any_tool_used,
+                                            tool_state.has_post_tool_text,
                                         );
                                     }
                                     Err(error) => {
@@ -3581,6 +3583,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             tool_state.current_tool_line.as_deref(),
                             tool_state.prev_tool_status.as_deref(),
                             task_notification_kind,
+                            tool_state.any_tool_used,
+                            tool_state.has_post_tool_text,
                         );
                     }
                 }
