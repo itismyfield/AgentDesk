@@ -5,9 +5,9 @@ repository is already clippy-clean.
 
 ## Entrypoints
 
-- `just check`: local/CI aggregate for `cargo fmt --check`, staged clippy,
-  `cargo check --workspace --all-features`, and the existing non-Postgres test
-  subset.
+- `just check`: local/CI aggregate for `just fmt-check`, staged clippy,
+  `cargo check --workspace --all-features --all-targets`, and the existing
+  non-Postgres test subset.
 - `just test-postgres`: existing PostgreSQL test lane for CI jobs with a
   Postgres service.
 - `just lint-strict`: target end state, `cargo clippy --workspace --all-targets
@@ -17,9 +17,41 @@ repository is already clippy-clean.
 ## Current Staging
 
 The hard clippy gate currently denies `dbg_macro`, `todo`, and `unimplemented`
-through `Cargo.toml` plus the `just lint` command. This gives CI a passing
+through the root `Cargo.toml` `[lints.clippy]` table. `just lint` also passes
+`-W clippy::all` so CI exposes the remaining warning debt, but those warnings
+are informational until the zero-warning cleanup lands. This gives CI a passing
 Rust-native lint gate while the larger zero-warning cleanup is split into
 reviewable follow-ups.
+
+`unwrap`, `expect`, and `panic` lint gates are intentionally deferred. The
+current tree has many uses in tests, fixtures, and some existing runtime paths,
+so enabling those lints in stage 1 would mix a broad policy decision with the
+single-entrypoint work. A follow-up should decide whether the policy is
+production-only, test-aware, or repo-wide before adding hard gates.
+
+## Non-Postgres Test Scope
+
+`just test-non-pg` preserves the targeted non-Postgres subset already used by
+CI. A broader sweep was attempted with:
+
+`cargo test --workspace --all-features --all-targets -- --skip _pg --skip pg_ --skip postgres --test-threads=1`
+
+That sweep is not CI-safe yet: it fails existing legacy/full integration,
+route, config, dispatch, and engine tests that require additional environment
+or database setup beyond the current fast lane. Stage 1 therefore documents the
+known gap instead of silently pretending the broad sweep passes.
+
+Follow-up split: separate deterministic unit tests from environment-dependent
+integration tests, add explicit setup/feature boundaries for each group, then
+replace the staged subset with a broader non-PG command in `just check`.
+
+## Windows CI Scope
+
+The Windows PR lane intentionally remains inline cargo commands for stage 1
+instead of calling `just check`. The root `justfile` uses bash-oriented recipe
+semantics, while that lane is meant to provide cross-OS compile and targeted
+test signal. The Ubuntu `just check` and `lint` jobs are the authoritative
+format and clippy gates.
 
 ## Strict Clippy Debt
 

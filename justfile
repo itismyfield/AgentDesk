@@ -6,18 +6,22 @@ fmt:
 fmt-check:
     cargo fmt --all --check
 
+# `-W clippy::all` reports current warning debt; only `[lints.clippy]` deny
+# entries in Cargo.toml are hard gates for this staged check.
 lint:
-    cargo clippy --workspace --all-targets --all-features -- -W clippy::all -D clippy::dbg_macro -D clippy::todo -D clippy::unimplemented
+    cargo clippy --workspace --all-targets --all-features -- -W clippy::all
 
 # Expected-failing zero-warning target; see docs/ci/rust-quality-gates.md.
 lint-strict:
     cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 cargo-check:
-    cargo check --workspace --all-features
+    cargo check --workspace --all-features --all-targets
 
 test: test-non-pg
 
+# Stage 1 keeps the existing CI-safe subset. The broad non-PG sweep currently
+# fails legacy/full integration route tests; see docs/ci/rust-quality-gates.md.
 test-non-pg:
     cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1
     cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres

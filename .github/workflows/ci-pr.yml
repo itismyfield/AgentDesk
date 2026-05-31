@@ -281,8 +281,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      # Stage 1 keeps Windows inline instead of `just check`: the root
+      # justfile uses bash-oriented recipe semantics, while this lane's job is
+      # cross-OS compile and targeted test signal. fmt/staged clippy are
+      # authoritative in the Ubuntu `just check` and `lint` jobs above.
       - name: cargo check
-        run: cargo check --all-targets
+        run: cargo check --workspace --all-features --all-targets
 
       - name: cargo test (non-PG, targeted subset)
         shell: bash
