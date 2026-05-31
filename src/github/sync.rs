@@ -1497,6 +1497,55 @@ mod terminal_open_alert_tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct RecordingAdapter {
+        calls: std::sync::Mutex<Vec<Vec<String>>>,
+        async_responses: std::sync::Mutex<std::collections::VecDeque<Result<String, String>>>,
+    }
+
+    impl RecordingAdapter {
+        fn with_async_responses(async_responses: Vec<Result<String, String>>) -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+                async_responses: std::sync::Mutex::new(async_responses.into()),
+            }
+        }
+
+        fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::github::GitHubAdapter for RecordingAdapter {
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn run(&self, args: &[&str]) -> Result<String, String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(args.iter().map(|arg| (*arg).to_string()).collect());
+            Ok(String::new())
+        }
+
+        fn run_async<'a>(
+            &'a self,
+            args: Vec<String>,
+            _timeout: std::time::Duration,
+            _timeout_context: String,
+        ) -> crate::github::GitHubFuture<'a, Result<String, String>> {
+            self.calls.lock().unwrap().push(args);
+            let response = self
+                .async_responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Ok(String::new()));
+            Box::pin(async move { response })
+        }
+    }
+
     /// #1946: the alert message must surface enough context for an operator
     /// to find the offending card and issue at a glance, plus point them at
     /// the retro for the longer-form root-cause writeup.
@@ -1612,6 +1661,183 @@ mod terminal_open_alert_tests {
         assert_eq!(result.stale_card_issue_check_count, 3);
         assert_eq!(result.stale_card_issue_batch_count, 1);
         assert_eq!(result.stale_card_issue_error_count, 1);
+    }
+
+    #[test]
+    fn parses_batched_graphql_issue_response() {
+        let issues = parse_issue_number_batch_graphql_response(
+            r#"{
+                "data": {
+                    "repository": {
+                        "i0": {
+                            "number": 2945,
+                            "state": "CLOSED",
+                            "title": "Old closed issue",
+                            "body": null,
+                            "url": "https://github.com/owner/repo/issues/2945",
+                            "closedAt": "2026-03-23T00:00:00Z",
+                            "closedByPullRequestsReferences": {
+                                "nodes": [
+                                    {
+                                        "number": 3001,
+                                        "url": "https://github.com/owner/repo/pull/3001"
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }"#,
+            &[2945],
+        )
+        .unwrap();
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].number, 2945);
+        assert_eq!(issues[0].state, "CLOSED");
+        assert_eq!(issues[0].closed_at.as_deref(), Some("2026-03-23T00:00:00Z"));
+        assert_eq!(
+            issues[0].closed_by_pull_requests_references[0].number,
+            Some(3001)
+        );
+    }
+
+    #[tokio::test]
+    async fn pg_card_driven_reconcile_closes_old_closed_issue_missing_from_fetch_window() {
+        let test_pg = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = test_pg.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id,
+                title,
+                status,
+                repo_id,
+                github_issue_number,
+                github_issue_url,
+                created_at,
+                updated_at
+             ) VALUES (
+                'card-old-closed-2945',
+                'Old closed ghost card',
+                'backlog',
+                'owner/repo',
+                2945,
+                'https://github.com/owner/repo/issues/2945',
+                NOW() - INTERVAL '40 days',
+                NOW() - INTERVAL '40 days'
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let adapter = RecordingAdapter::with_async_responses(vec![Ok(r#"{
+                "data": {
+                    "repository": {
+                        "i0": {
+                            "number": 2945,
+                            "state": "CLOSED",
+                            "title": "Old closed ghost card",
+                            "body": null,
+                            "url": "https://github.com/owner/repo/issues/2945",
+                            "closedAt": "2026-03-23T00:00:00Z",
+                            "closedByPullRequestsReferences": {
+                                "nodes": []
+                            }
+                        }
+                    }
+                }
+            }"#
+        .to_string())]);
+
+        let result =
+            sync_github_issues_for_repo_pg_with_adapter(&pool, "owner/repo", &[], &adapter)
+                .await
+                .unwrap();
+
+        assert_eq!(result.closed_count, 1);
+        assert_eq!(result.stale_card_issue_check_count, 1);
+        assert_eq!(result.stale_card_issue_batch_count, 1);
+
+        let status: String = sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = $1")
+            .bind("card-old-closed-2945")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "done");
+
+        let calls = adapter.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0][0], "api");
+        assert_eq!(calls[0][1], "graphql");
+        assert!(
+            calls[0]
+                .iter()
+                .any(|arg| arg.contains("issue(number: 2945)")),
+            "expected GraphQL batch query to include issue #2945, got {calls:?}"
+        );
+
+        pool.close().await;
+        test_pg.drop().await;
+    }
+
+    #[tokio::test]
+    async fn pg_stale_candidate_selection_excludes_custom_terminal_status() {
+        let test_pg = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = test_pg.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO github_repos (id, display_name, sync_enabled, pipeline_config)
+             VALUES (
+                'owner/repo',
+                'owner/repo',
+                true,
+                $1::jsonb
+             )",
+        )
+        .bind(
+            serde_json::json!({
+                "states": [
+                    {"id": "backlog", "label": "Backlog"},
+                    {"id": "archived", "label": "Archived", "terminal": true}
+                ],
+                "transitions": []
+            })
+            .to_string(),
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, repo_id, github_issue_number, created_at, updated_at
+             ) VALUES
+                ('card-custom-terminal-2946', 'Archived terminal', 'archived', 'owner/repo', 2946, NOW(), NOW()),
+                ('card-open-backlog-2947', 'Backlog candidate', 'backlog', 'owner/repo', 2947, NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let repo_override = load_pg_repo_override(&pool, "owner/repo").await.unwrap();
+        let mut agent_overrides = HashMap::new();
+        let selection = stale_card_issue_numbers_for_reconcile(
+            &pool,
+            "owner/repo",
+            &HashSet::new(),
+            repo_override.as_ref(),
+            &mut agent_overrides,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(selection.issue_numbers, vec![2947]);
+        assert_eq!(selection.next_cursor, Some(2947));
+
+        pool.close().await;
+        test_pg.drop().await;
     }
 
     /// PG dedupe: re-running the alert enqueue for the same
@@ -1841,187 +2067,6 @@ mod tests {
                 ],
             ]
         );
-    }
-
-    #[test]
-    fn parses_batched_graphql_issue_response() {
-        let issues = parse_issue_number_batch_graphql_response(
-            r#"{
-                "data": {
-                    "repository": {
-                        "i0": {
-                            "number": 2945,
-                            "state": "CLOSED",
-                            "title": "Old closed issue",
-                            "body": null,
-                            "url": "https://github.com/owner/repo/issues/2945",
-                            "closedAt": "2026-03-23T00:00:00Z",
-                            "closedByPullRequestsReferences": {
-                                "nodes": [
-                                    {
-                                        "number": 3001,
-                                        "url": "https://github.com/owner/repo/pull/3001"
-                                    }
-                                ]
-                            }
-                        }
-                    }
-                }
-            }"#,
-            &[2945],
-        )
-        .unwrap();
-
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].number, 2945);
-        assert_eq!(issues[0].state, "CLOSED");
-        assert_eq!(issues[0].closed_at.as_deref(), Some("2026-03-23T00:00:00Z"));
-        assert_eq!(
-            issues[0].closed_by_pull_requests_references[0].number,
-            Some(3001)
-        );
-    }
-
-    #[tokio::test]
-    async fn pg_card_driven_reconcile_closes_old_closed_issue_missing_from_fetch_window() {
-        let test_pg = TestPostgresDb::create().await;
-        let pool = test_pg.connect_and_migrate().await;
-
-        sqlx::query(
-            "INSERT INTO kanban_cards (
-                id,
-                title,
-                status,
-                repo_id,
-                github_issue_number,
-                github_issue_url,
-                created_at,
-                updated_at
-             ) VALUES (
-                'card-old-closed-2945',
-                'Old closed ghost card',
-                'backlog',
-                'owner/repo',
-                2945,
-                'https://github.com/owner/repo/issues/2945',
-                NOW() - INTERVAL '40 days',
-                NOW() - INTERVAL '40 days'
-             )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let adapter = RecordingAdapter::with_async_responses(vec![Ok(r#"{
-                "data": {
-                    "repository": {
-                        "i0": {
-                            "number": 2945,
-                            "state": "CLOSED",
-                            "title": "Old closed ghost card",
-                            "body": null,
-                            "url": "https://github.com/owner/repo/issues/2945",
-                            "closedAt": "2026-03-23T00:00:00Z",
-                            "closedByPullRequestsReferences": {
-                                "nodes": []
-                            }
-                        }
-                    }
-                }
-            }"#
-        .to_string())]);
-
-        let result =
-            sync_github_issues_for_repo_pg_with_adapter(&pool, "owner/repo", &[], &adapter)
-                .await
-                .unwrap();
-
-        assert_eq!(result.closed_count, 1);
-        assert_eq!(result.stale_card_issue_check_count, 1);
-        assert_eq!(result.stale_card_issue_batch_count, 1);
-
-        let status: String = sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = $1")
-            .bind("card-old-closed-2945")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(status, "done");
-
-        let calls = adapter.calls();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0][0], "api");
-        assert_eq!(calls[0][1], "graphql");
-        assert!(
-            calls[0]
-                .iter()
-                .any(|arg| arg.contains("issue(number: 2945)")),
-            "expected GraphQL batch query to include issue #2945, got {calls:?}"
-        );
-
-        crate::db::postgres::close_test_pool(pool, "github sync tests")
-            .await
-            .unwrap();
-        test_pg.drop().await;
-    }
-
-    #[tokio::test]
-    async fn pg_stale_candidate_selection_excludes_custom_terminal_status() {
-        let test_pg = TestPostgresDb::create().await;
-        let pool = test_pg.connect_and_migrate().await;
-
-        sqlx::query(
-            "INSERT INTO github_repos (id, display_name, sync_enabled, pipeline_config)
-             VALUES (
-                'owner/repo',
-                'owner/repo',
-                true,
-                $1::jsonb
-             )",
-        )
-        .bind(
-            serde_json::json!({
-                "states": [
-                    {"id": "backlog", "label": "Backlog"},
-                    {"id": "archived", "label": "Archived", "terminal": true}
-                ],
-                "transitions": []
-            })
-            .to_string(),
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            "INSERT INTO kanban_cards (
-                id, title, status, repo_id, github_issue_number, created_at, updated_at
-             ) VALUES
-                ('card-custom-terminal-2946', 'Archived terminal', 'archived', 'owner/repo', 2946, NOW(), NOW()),
-                ('card-open-backlog-2947', 'Backlog candidate', 'backlog', 'owner/repo', 2947, NOW(), NOW())",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let repo_override = load_pg_repo_override(&pool, "owner/repo").await.unwrap();
-        let mut agent_overrides = HashMap::new();
-        let selection = stale_card_issue_numbers_for_reconcile(
-            &pool,
-            "owner/repo",
-            &HashSet::new(),
-            repo_override.as_ref(),
-            &mut agent_overrides,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(selection.issue_numbers, vec![2947]);
-        assert_eq!(selection.next_cursor, Some(2947));
-
-        crate::db::postgres::close_test_pool(pool, "github sync tests")
-            .await
-            .unwrap();
-        test_pg.drop().await;
     }
 
     #[tokio::test]
