@@ -676,6 +676,15 @@ fn codex_tmux_wrapper_session_uses_pipe_input(tmux_session_name: &str) -> bool {
 }
 
 #[cfg(unix)]
+fn codex_pipe_wrapper_session_usable(
+    has_live_pane: bool,
+    has_output_path: bool,
+    uses_pipe_input: bool,
+) -> bool {
+    has_live_pane && has_output_path && uses_pipe_input
+}
+
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CodexTmuxTerminationReason {
     reason_code: &'static str,
@@ -1979,10 +1988,12 @@ fn execute_streaming_local_tmux(
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "jsonl");
     let resolved_input =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "input");
-    let session_usable = has_live_pane
-        && resolved_output.is_some()
-        && resolved_input.is_some()
-        && codex_tmux_wrapper_session_uses_pipe_input(tmux_session_name);
+    let uses_pipe_input = codex_tmux_wrapper_session_uses_pipe_input(tmux_session_name);
+    let session_usable = codex_pipe_wrapper_session_usable(
+        has_live_pane,
+        resolved_output.is_some(),
+        uses_pipe_input,
+    );
 
     if should_reuse_existing_provider_session(session_usable, force_fresh_provider_session) {
         let output_path = resolved_output
@@ -2029,7 +2040,7 @@ fn execute_streaming_local_tmux(
             session_id = session_id.unwrap_or_default(),
             output_path_present = resolved_output.is_some(),
             input_path_present = resolved_input.is_some(),
-            pipe_input = codex_tmux_wrapper_session_uses_pipe_input(tmux_session_name),
+            pipe_input = uses_pipe_input,
             "refusing to kill live Codex tmux selected for provider-session reuse"
         );
         return Err(format!(
@@ -2806,7 +2817,7 @@ mod tui_hosting_tests {
     };
     #[cfg(unix)]
     use super::{
-        codex_tui_existing_session_termination_reason,
+        codex_pipe_wrapper_session_usable, codex_tui_existing_session_termination_reason,
         codex_wrapper_existing_session_termination_reason, codex_wrapper_script_uses_pipe_input,
     };
     use crate::services::discord::restart_report::{
@@ -3134,6 +3145,15 @@ mod tui_hosting_tests {
 
         assert!(codex_wrapper_script_uses_pipe_input(pipe_script));
         assert!(!codex_wrapper_script_uses_pipe_input(legacy_script));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_pipe_wrapper_reuse_does_not_require_fifo_input_file() {
+        assert!(codex_pipe_wrapper_session_usable(true, true, true));
+        assert!(!codex_pipe_wrapper_session_usable(false, true, true));
+        assert!(!codex_pipe_wrapper_session_usable(true, false, true));
+        assert!(!codex_pipe_wrapper_session_usable(true, true, false));
     }
 
     #[test]

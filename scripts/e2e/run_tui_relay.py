@@ -903,6 +903,34 @@ def _provider_hold_state_summary(
     )
 
 
+def _provider_hold_observation(
+    *,
+    path: Path,
+    expected_identity: dict[str, str],
+    full_response: str,
+    ok_marker: str,
+    late_marker: str,
+    any_tool_used: bool,
+    has_post_tool_text: bool,
+    terminal_delivery_committed: bool,
+    classification: str,
+) -> dict[str, Any]:
+    return {
+        "path": str(path),
+        "turn_identity": dict(expected_identity),
+        "classification": classification,
+        "provider_hold_observed": classification == "provider_hold_observed",
+        "full_response_len": len(full_response),
+        "ok_marker": ok_marker,
+        "ok_marker_seen": ok_marker in full_response,
+        "late_marker": late_marker,
+        "late_marker_seen": late_marker in full_response,
+        "any_tool_used": any_tool_used,
+        "has_post_tool_text": has_post_tool_text,
+        "terminal_delivery_committed": terminal_delivery_committed,
+    }
+
+
 def wait_for_provider_hold_state(
     *,
     runtime_root: str | Path,
@@ -922,7 +950,9 @@ def wait_for_provider_hold_state(
     The durable inflight row is the stable witness that OK was captured before
     the tool call and no post-tool text has been produced yet. The row must
     match the current prompt's turn identity so stale E-18 rows cannot satisfy
-    or fail the current run.
+    or fail the current run. Codex TUI can also complete the turn before a
+    durable tool hold exists; that is classified separately when it emitted OK
+    and did not emit the late marker.
     """
 
     if timeout_s <= 0:
@@ -980,38 +1010,55 @@ def wait_for_provider_hold_state(
                         continue
                     last_current_turn_state = summary
                     full_response = str(state.get("full_response") or "")
-                    if late_marker in full_response:
+                    ok_seen = ok_marker in full_response
+                    late_seen = late_marker in full_response
+                    any_tool_used = state.get("any_tool_used") is True
+                    has_post_tool_text = state.get("has_post_tool_text") is True
+                    terminal_delivery_committed = (
+                        state.get("terminal_delivery_committed") is True
+                    )
+                    if late_seen:
                         raise assertions.AssertionError(
                             "late marker appeared in provider response before "
                             f"the cancel step could observe a hold: {summary}"
                         )
-                    if state.get("terminal_delivery_committed") is True:
+                    if terminal_delivery_committed:
+                        if ok_seen and not any_tool_used and not has_post_tool_text:
+                            return _provider_hold_observation(
+                                path=path,
+                                expected_identity=expected_identity,
+                                full_response=full_response,
+                                ok_marker=ok_marker,
+                                late_marker=late_marker,
+                                any_tool_used=any_tool_used,
+                                has_post_tool_text=has_post_tool_text,
+                                terminal_delivery_committed=True,
+                                classification="fast_terminal_completion_before_hold",
+                            )
                         raise assertions.AssertionError(
                             "turn delivered before provider hold was observed: "
                             f"{summary}"
                         )
                     if (
-                        ok_marker in full_response
-                        and state.get("any_tool_used") is True
-                        and state.get("has_post_tool_text") is False
+                        ok_seen
+                        and any_tool_used
+                        and not has_post_tool_text
                     ):
                         # Both Claude and Codex relay parsers persist
                         # `any_tool_used` from provider tool_use frames. If a
                         # provider stops doing that, this current-turn witness
                         # times out instead of matching stale content.
-                        return {
-                            "path": str(path),
-                            "turn_identity": dict(expected_identity),
-                            "full_response_len": len(full_response),
-                            "ok_marker": ok_marker,
-                            "ok_marker_seen": True,
-                            "late_marker": late_marker,
-                            "late_marker_seen": False,
-                            "any_tool_used": True,
-                            "has_post_tool_text": bool(
-                                state.get("has_post_tool_text")
-                            ),
-                        }
+                        return _provider_hold_observation(
+                            path=path,
+                            expected_identity=expected_identity,
+                            full_response=full_response,
+                            ok_marker=ok_marker,
+                            late_marker=late_marker,
+                            any_tool_used=True,
+                            has_post_tool_text=has_post_tool_text,
+                            terminal_delivery_committed=False,
+                            classification="provider_hold_observed",
+                        )
                     last_state = summary
         time.sleep(poll_interval_s)
 

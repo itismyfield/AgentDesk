@@ -180,6 +180,36 @@ class HealthWait(unittest.TestCase):
         self.assertIn("non-JSON", message)
         self.assertIn("not-json-body", message)
 
+    def test_wait_for_discord_text_accepts_direct_input_reply_body(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def fetch_messages(self, channel_id, *, after_id=None, limit=100):  # noqa: ARG002
+                return [
+                    {
+                        "id": "2",
+                        "content": "[E2E:E21:HEAD]\nDIRECT_E21_OK\n[E2E:E21:TAIL]",
+                        "author": {"id": "999", "bot": True},
+                        "type": 19,
+                    }
+                ]
+
+        found, observed = driver.wait_for_discord_text_with_tui_idle_draft_guard(
+            client=FakeClient(),  # type: ignore[arg-type]
+            channel_id="42",
+            cell="claude-tui",
+            after_id="1",
+            needle="[E2E:E21:TAIL]",
+            prompt="direct input prompt",
+            thread_channel_id=None,
+            timeout_s=1,
+            debug_label="E-21::wait_for_tail",
+        )
+
+        self.assertIsNotNone(found)
+        self.assertEqual(found["type"], 19)
+        self.assertEqual(len(observed), 1)
+
 
 class RestartGuard(unittest.TestCase):
     def test_foreign_active_mailbox_blocks_restart_even_when_sessions_empty(self):
@@ -958,9 +988,53 @@ class ControlFlowPrimitives(unittest.TestCase):
             )
 
         self.assertEqual(result["path"], str(path))
+        self.assertEqual(result["classification"], "provider_hold_observed")
+        self.assertTrue(result["provider_hold_observed"])
         self.assertTrue(result["ok_marker_seen"])
         self.assertTrue(result["any_tool_used"])
         self.assertFalse(result["has_post_tool_text"])
+        self.assertFalse(result["terminal_delivery_committed"])
+
+    def test_wait_for_provider_hold_state_classifies_fast_terminal_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "discord_inflight" / "codex" / "42.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "channel_id": 42,
+                        "user_msg_id": 222,
+                        "full_response": "[E2E:E18:OK]\n\nfast terminal completion",
+                        "any_tool_used": False,
+                        "has_post_tool_text": False,
+                        "terminal_delivery_committed": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = driver.wait_for_provider_hold_state(
+                runtime_root=tmp,
+                provider="codex",
+                channel_id="42",
+                expected_identity={"channel_id": "42", "user_msg_id": "222"},
+                ok_marker="[E2E:E18:OK]",
+                late_marker="[E2E:E18:LATE]",
+                timeout_s=0.1,
+                poll_interval_s=0.01,
+            )
+
+        self.assertEqual(result["path"], str(path))
+        self.assertEqual(
+            result["classification"],
+            "fast_terminal_completion_before_hold",
+        )
+        self.assertFalse(result["provider_hold_observed"])
+        self.assertTrue(result["ok_marker_seen"])
+        self.assertFalse(result["late_marker_seen"])
+        self.assertFalse(result["any_tool_used"])
+        self.assertFalse(result["has_post_tool_text"])
+        self.assertTrue(result["terminal_delivery_committed"])
 
     def test_wait_for_provider_hold_state_ignores_stale_late_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1155,6 +1229,41 @@ class ControlFlowPrimitives(unittest.TestCase):
                 )
 
         self.assertIn("turn delivered before provider hold", str(ctx.exception))
+
+    def test_wait_for_provider_hold_state_rejects_late_fast_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "discord_inflight" / "codex" / "42.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "channel_id": 42,
+                        "user_msg_id": 222,
+                        "full_response": (
+                            "[E2E:E18:OK]\n\n"
+                            "[E2E:E18:LATE]"
+                        ),
+                        "any_tool_used": False,
+                        "has_post_tool_text": False,
+                        "terminal_delivery_committed": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(assertions.AssertionError) as ctx:
+                driver.wait_for_provider_hold_state(
+                    runtime_root=tmp,
+                    provider="codex",
+                    channel_id="42",
+                    expected_identity={"channel_id": "42", "user_msg_id": "222"},
+                    ok_marker="[E2E:E18:OK]",
+                    late_marker="[E2E:E18:LATE]",
+                    timeout_s=0.1,
+                    poll_interval_s=0.01,
+                )
+
+        self.assertIn("late marker appeared", str(ctx.exception))
 
     def test_wait_for_provider_hold_state_rejects_late_before_cancel(self):
         with tempfile.TemporaryDirectory() as tmp:
