@@ -6,8 +6,8 @@ import sys
 import tempfile
 import threading
 import unittest
-from pathlib import Path
 from argparse import Namespace
+from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -51,6 +51,20 @@ agents:
     def test_parse_cells_rejects_unknown_cell(self):
         with self.assertRaises(ValueError):
             matrix.parse_cells("claude-pipe,unknown")
+
+    def test_reset_before_each_boolean_flags(self):
+        with patch("run_multi_provider_matrix.sys.argv", ["matrix"]):
+            self.assertTrue(matrix.parse_args().reset_before_each)
+        with patch(
+            "run_multi_provider_matrix.sys.argv",
+            ["matrix", "--no-reset-before-each"],
+        ):
+            self.assertFalse(matrix.parse_args().reset_before_each)
+        with patch(
+            "run_multi_provider_matrix.sys.argv",
+            ["matrix", "--reset-before-each"],
+        ):
+            self.assertTrue(matrix.parse_args().reset_before_each)
 
 
 def _relay_msg(msg_id: int, content: str) -> dict:
@@ -203,6 +217,45 @@ class CrossChannelMatrix(unittest.TestCase):
         self.assertEqual(result["status"], "skipped")
         self.assertTrue(result["ok"])
         self.assertIn("codex-tui", result["reason"])
+
+    def test_cross_channel_non_leak_aggregates_bidirectional_failures(self):
+        participants = matrix.resolve_cross_channel_participants(
+            self.e11,
+            channel_ids=self.channel_ids,
+            selected_cells=["claude-tui", "codex-tui"],
+        )
+        windows = {}
+        for participant in participants:
+            key = matrix._participant_key(participant)  # noqa: SLF001
+            window = assertions.Window(setup_marker_id="setup")
+            sibling_marker = next(
+                sibling["marker"]
+                for sibling in participants
+                if sibling["cell"] != participant["cell"]
+            )
+            window.add(
+                _relay_msg(
+                    10 + int(participant["channel_id"][-1]),
+                    f"own {participant['marker']} sibling {sibling_marker}",
+                )
+            )
+            windows[key] = window
+
+        with self.assertRaises(matrix.CrossChannelAssertionError) as ctx:
+            matrix._assert_cross_channel_non_leak(  # noqa: SLF001
+                participants=participants,
+                windows=windows,
+            )
+
+        message = str(ctx.exception)
+        self.assertIn("claude-tui:111", message)
+        self.assertIn("codex-tui:222", message)
+        failed_by_channel = {
+            key: [record for record in records if not record["passed"]]
+            for key, records in ctx.exception.records.items()
+        }
+        self.assertGreaterEqual(len(failed_by_channel["claude-tui:111"]), 1)
+        self.assertGreaterEqual(len(failed_by_channel["codex-tui:222"]), 1)
 
     def test_cross_channel_dispatch_is_concurrent_and_asserts_non_leak(self):
         class FakeClient:
@@ -399,6 +452,13 @@ class CrossChannelMatrix(unittest.TestCase):
 
         self.assertEqual(result["status"], "fail")
         self.assertIn("unexpected marker", result["reason"])
+        failed_records = [
+            assertion
+            for channel in result["channels"]
+            for assertion in channel["assertions"]
+            if not assertion["passed"]
+        ]
+        self.assertTrue(failed_records)
 
 
 if __name__ == "__main__":

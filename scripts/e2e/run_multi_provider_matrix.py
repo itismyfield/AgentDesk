@@ -42,18 +42,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--twice", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--allow-destructive", action="store_true")
-    parser.add_argument(
-        "--reset-before-each",
-        action="store_true",
-        default=True,
-        help="Pass through to cell driver and cross-channel scenarios.",
-    )
-    parser.add_argument(
-        "--no-reset-before-each",
-        dest="reset_before_each",
-        action="store_false",
-        help="Skip cancel/reset before each scenario.",
-    )
+    if hasattr(argparse, "BooleanOptionalAction"):
+        parser.add_argument(
+            "--reset-before-each",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Reset each configured e2e channel before every scenario (default: true).",
+        )
+    else:
+        parser.set_defaults(reset_before_each=True)
+        reset_group = parser.add_mutually_exclusive_group()
+        reset_group.add_argument(
+            "--reset-before-each",
+            dest="reset_before_each",
+            action="store_true",
+            help="Reset each configured e2e channel before every scenario (default).",
+        )
+        reset_group.add_argument(
+            "--no-reset-before-each",
+            dest="reset_before_each",
+            action="store_false",
+            help="Skip cancel/reset before each scenario.",
+        )
     parser.add_argument(
         "--queue-runtime-root",
         default=str(Path.home() / ".adk" / "release" / "runtime"),
@@ -430,12 +440,19 @@ def _send_cross_channel_teardown(
     return errors
 
 
+class CrossChannelAssertionError(assertions.AssertionError):
+    def __init__(self, message: str, records: dict[str, list[dict[str, Any]]]):
+        super().__init__(message)
+        self.records = records
+
+
 def _assert_cross_channel_non_leak(
     *,
     participants: list[dict[str, Any]],
     windows: dict[str, assertions.Window],
 ) -> dict[str, list[dict[str, Any]]]:
     assertion_records: dict[str, list[dict[str, Any]]] = {}
+    failures: list[str] = []
     for participant in participants:
         key = _participant_key(participant)
         window = windows[key]
@@ -484,10 +501,48 @@ def _assert_cross_channel_non_leak(
             )
         records: list[dict[str, Any]] = []
         for spec, check in specs:
-            check()
+            try:
+                check()
+            except assertions.AssertionError as error:
+                message = str(error)
+                records.append({"spec": spec, "passed": False, "error": message})
+                failures.append(f"{key} {spec}: {message}")
+                continue
             records.append({"spec": spec, "passed": True})
         assertion_records[key] = records
+    if failures:
+        raise CrossChannelAssertionError(
+            "cross-channel non-leak assertion(s) failed: " + "; ".join(failures),
+            assertion_records,
+        )
     return assertion_records
+
+
+def _cross_channel_result_channels(
+    *,
+    participants: list[dict[str, Any]],
+    windows: dict[str, assertions.Window],
+    assertion_records: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    channels: list[dict[str, Any]] = []
+    for participant in participants:
+        key = _participant_key(participant)
+        window = windows[key]
+        channels.append(
+            {
+                "cell": participant["cell"],
+                "channel_id": participant["channel_id"],
+                "relay_count": len(window.messages),
+                "raw_count": len(window.raw_messages),
+                "message_updates": len(window.message_updates),
+                "sample_relay": [
+                    (message.get("content") or "")[:120]
+                    for message in window.messages[:6]
+                ],
+                "assertions": assertion_records.get(key, []),
+            }
+        )
+    return channels
 
 
 def run_cross_channel_scenario(
@@ -700,10 +755,19 @@ def run_cross_channel_scenario(
                     ),
                 )
 
-        assertion_records = _assert_cross_channel_non_leak(
-            participants=participants,
-            windows=windows,
-        )
+        assertion_records: dict[str, list[dict[str, Any]]] = {}
+        try:
+            assertion_records = _assert_cross_channel_non_leak(
+                participants=participants,
+                windows=windows,
+            )
+        except CrossChannelAssertionError as error:
+            result["channels"] = _cross_channel_result_channels(
+                participants=participants,
+                windows=windows,
+                assertion_records=error.records,
+            )
+            raise
 
         result["channels"] = []
         for participant in participants:
