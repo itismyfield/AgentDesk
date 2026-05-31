@@ -165,6 +165,14 @@ class ScenarioFilter(unittest.TestCase):
             self.assertEqual(len(hold_steps), 1)
             self.assertEqual(hold_steps[0]["ok_marker"], "[E2E:E18:OK]")
             self.assertEqual(hold_steps[0]["late_marker"], "[E2E:E18:LATE]")
+            wait_steps = [
+                step["wait_for_provider_hold_state"]
+                for step in e18["steps"]
+                if "wait_for_provider_hold_state" in step
+            ]
+            self.assertEqual(len(wait_steps), 1)
+            self.assertEqual(wait_steps[0]["ok_marker"], "[E2E:E18:OK]")
+            self.assertEqual(wait_steps[0]["late_marker"], "[E2E:E18:LATE]")
             health_steps = [
                 step["assert_health"] for step in e18["steps"] if "assert_health" in step
             ]

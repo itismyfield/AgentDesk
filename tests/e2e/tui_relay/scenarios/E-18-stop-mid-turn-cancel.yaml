@@ -13,14 +13,19 @@ notes: |
   claude-e because the stop/cancel path under test is the relay-backed
   pipe/TUI turn lifecycle. The send_provider_hold_prompt fixture asks the
   provider to emit the early marker, block in a shell sleep, and emit the late
-  marker only if cancellation fails to stop the turn.
+  marker only if cancellation fails to stop the turn. The driver waits on the
+  durable inflight row, not the Discord relay surface, because TUI relays can
+  batch pre-tool and post-tool assistant text into one terminal replacement.
 steps:
   - send_provider_hold_prompt:
       ok_marker: "[E2E:E18:OK]"
       late_marker: "[E2E:E18:LATE]"
       hold_seconds: 60
-  - wait_for_discord_text: "[E2E:E18:OK]"
-    timeout_s: 180
+  - wait_for_provider_hold_state:
+      ok_marker: "[E2E:E18:OK]"
+      late_marker: "[E2E:E18:LATE]"
+      timeout_s: 180
+      poll_interval_s: 1
   - cancel_turn:
       force: true
       timeout_s: 15

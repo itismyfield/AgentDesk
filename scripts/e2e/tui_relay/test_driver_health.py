@@ -676,6 +676,71 @@ class ControlFlowPrimitives(unittest.TestCase):
         self.assertIn("time.sleep(60)", prompt)
         self.assertIn("cancel this turn while the command is sleeping", prompt)
 
+    def test_wait_for_provider_hold_state_observes_pre_tool_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = (
+                Path(tmp)
+                / "discord_inflight"
+                / "claude"
+                / "1509350490461180105.json"
+            )
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "full_response": "[E2E:E18:OK]\n\n",
+                        "any_tool_used": True,
+                        "has_post_tool_text": False,
+                        "terminal_delivery_committed": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = driver.wait_for_provider_hold_state(
+                runtime_root=tmp,
+                provider="claude",
+                channel_id="1509350490461180105",
+                ok_marker="[E2E:E18:OK]",
+                late_marker="[E2E:E18:LATE]",
+                timeout_s=0.1,
+                poll_interval_s=0.01,
+            )
+
+        self.assertEqual(result["path"], str(path))
+        self.assertTrue(result["ok_marker_seen"])
+        self.assertTrue(result["any_tool_used"])
+        self.assertFalse(result["has_post_tool_text"])
+
+    def test_wait_for_provider_hold_state_rejects_late_before_cancel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "discord_inflight" / "claude" / "42.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "full_response": "[E2E:E18:OK]\n\n[E2E:E18:LATE]",
+                        "any_tool_used": True,
+                        "has_post_tool_text": True,
+                        "terminal_delivery_committed": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(assertions.AssertionError) as ctx:
+                driver.wait_for_provider_hold_state(
+                    runtime_root=tmp,
+                    provider="claude",
+                    channel_id="42",
+                    ok_marker="[E2E:E18:OK]",
+                    late_marker="[E2E:E18:LATE]",
+                    timeout_s=0.1,
+                    poll_interval_s=0.01,
+                )
+
+        self.assertIn("late marker appeared", str(ctx.exception))
+
     def test_run_one_cell_dispatches_provider_hold_prompt(self):
         class FakeClient:
             base_url = "http://agentdesk.test"
@@ -735,6 +800,85 @@ class ControlFlowPrimitives(unittest.TestCase):
         self.assertIn("[E2E:E18:OK]", client.sent[0])
         self.assertIn("time.sleep(60)", client.sent[0])
         self.assertEqual(record["provider_hold_prompts"][0]["hold_seconds"], 60)
+
+    def test_run_one_cell_waits_for_hold_state_before_cancel(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def __init__(self):
+                self.sent: list[str] = []
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                return {"id": "1"}
+
+            def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
+                return []
+
+            def send_prompt(self, channel_id, content, *, channel_kind="cc"):  # noqa: ARG002
+                self.sent.append(content)
+                return {"id": "2"}
+
+        args = Namespace(
+            cell="claude-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+        )
+        scenario = {
+            "id": "E-18",
+            "steps": [
+                {
+                    "send_provider_hold_prompt": {
+                        "ok_marker": "[E2E:E18:OK]",
+                        "late_marker": "[E2E:E18:LATE]",
+                        "hold_seconds": 60,
+                    }
+                },
+                {
+                    "wait_for_provider_hold_state": {
+                        "ok_marker": "[E2E:E18:OK]",
+                        "late_marker": "[E2E:E18:LATE]",
+                    }
+                },
+                {"cancel_turn": {"force": True, "timeout_s": 15}},
+            ],
+            "assertions": [],
+        }
+        events: list[str] = []
+
+        def fake_wait_for_hold(**kwargs):  # noqa: ANN003
+            events.append("hold")
+            self.assertEqual(kwargs["provider"], "claude")
+            self.assertEqual(kwargs["channel_id"], "42")
+            return {"ok_marker_seen": True}
+
+        def fake_cancel(**kwargs):  # noqa: ANN003
+            events.append("cancel")
+            self.assertTrue(kwargs["force"])
+            return {"ok": True}
+
+        with (
+            patch("run_tui_relay.time.sleep", return_value=None),
+            patch("run_tui_relay.wait_for_provider_hold_state", side_effect=fake_wait_for_hold),
+            patch("run_tui_relay.cancel_turn", side_effect=fake_cancel),
+            patch(
+                "run_tui_relay.assert_cell_idle",
+                return_value={"status": "idle", "mailboxes_seen": 1},
+            ),
+        ):
+            record = driver.run_one_cell(
+                scenario=scenario,
+                cell="claude-tui",
+                channel_id="42",
+                client=FakeClient(),  # type: ignore[arg-type]
+                run_id="run-1",
+                dry_run=False,
+                args=args,
+            )
+
+        self.assertEqual(events, ["hold", "cancel"])
+        self.assertEqual(record["provider_hold_states"], [{"ok_marker_seen": True}])
+        self.assertEqual(record["cancel_turns"], [{"ok": True}])
 
     def test_send_prompts_concurrent_overlaps_dispatches(self):
         class FakeClient:

@@ -579,12 +579,122 @@ def build_provider_hold_prompt(params: Any, *, scenario_id: str) -> str:
     return (
         f"E2E {scenario_id} stop-mid-turn cancellation fixture.\n\n"
         "Follow these steps exactly:\n"
-        f"1. First, send a visible assistant response containing exactly one line: {ok_marker}\n"
+        f"1. First, emit assistant text containing exactly one line: {ok_marker}\n"
         "2. Immediately after that line, use your normal shell/terminal command tool to run:\n"
         f"   python3 -c \"import time; time.sleep({hold_seconds})\"\n"
         f"3. Do not write, echo, quote, or mention {late_marker} before the command returns.\n"
         f"4. Only if the turn is still running after the command returns, send exactly: {late_marker}\n\n"
         "The harness will cancel this turn while the command is sleeping. If cancellation arrives, stop without sending the late marker."
+    )
+
+
+def provider_inflight_state_path(
+    *, runtime_root: str | Path, provider: str, channel_id: str
+) -> Path:
+    return Path(runtime_root) / "discord_inflight" / provider / f"{channel_id}.json"
+
+
+def _provider_hold_state_summary(
+    state: dict[str, Any], *, ok_marker: str, late_marker: str
+) -> str:
+    full_response = str(state.get("full_response") or "")
+    return (
+        f"full_response_len={len(full_response)} "
+        f"ok_seen={ok_marker in full_response} "
+        f"late_seen={late_marker in full_response} "
+        f"any_tool_used={state.get('any_tool_used') is True} "
+        f"has_post_tool_text={state.get('has_post_tool_text') is True} "
+        f"terminal_delivery_committed={state.get('terminal_delivery_committed') is True}"
+    )
+
+
+def wait_for_provider_hold_state(
+    *,
+    runtime_root: str | Path,
+    provider: str,
+    channel_id: str,
+    ok_marker: str,
+    late_marker: str,
+    timeout_s: float,
+    poll_interval_s: float,
+) -> dict[str, Any]:
+    """Wait until the provider has emitted pre-tool OK text and entered a tool hold.
+
+    E-18 must cancel while the provider is still active. Waiting for the OK
+    marker on Discord is too late for TUI relay paths because pre-tool and
+    post-tool assistant text may be delivered in one terminal replacement.
+    The durable inflight row is the stable witness that OK was captured before
+    the tool call and no post-tool text has been produced yet.
+    """
+
+    if timeout_s <= 0:
+        raise assertions.AssertionError(
+            f"wait_for_provider_hold_state timeout_s must be positive: {timeout_s}"
+        )
+    if poll_interval_s <= 0:
+        raise assertions.AssertionError(
+            "wait_for_provider_hold_state poll_interval_s must be positive: "
+            f"{poll_interval_s}"
+        )
+    path = provider_inflight_state_path(
+        runtime_root=runtime_root,
+        provider=provider,
+        channel_id=channel_id,
+    )
+    deadline = time.monotonic() + timeout_s
+    last_state = f"inflight state missing at {path}"
+    while time.monotonic() < deadline:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            last_state = f"inflight state missing at {path}"
+        except OSError as error:
+            last_state = f"inflight state unreadable at {path}: {error}"
+        else:
+            try:
+                state = json.loads(raw)
+            except json.JSONDecodeError as error:
+                last_state = f"inflight state invalid JSON at {path}: {error}"
+            else:
+                if not isinstance(state, dict):
+                    last_state = f"inflight state is not an object at {path}"
+                else:
+                    summary = _provider_hold_state_summary(
+                        state,
+                        ok_marker=ok_marker,
+                        late_marker=late_marker,
+                    )
+                    full_response = str(state.get("full_response") or "")
+                    if late_marker in full_response:
+                        raise assertions.AssertionError(
+                            "late marker appeared in provider response before "
+                            f"the cancel step could observe a hold: {summary}"
+                        )
+                    if state.get("terminal_delivery_committed") is True:
+                        raise assertions.AssertionError(
+                            "turn delivered before provider hold was observed: "
+                            f"{summary}"
+                        )
+                    if (
+                        ok_marker in full_response
+                        and state.get("any_tool_used") is True
+                        and state.get("has_post_tool_text") is False
+                    ):
+                        return {
+                            "path": str(path),
+                            "full_response_len": len(full_response),
+                            "ok_marker_seen": True,
+                            "any_tool_used": True,
+                            "has_post_tool_text": bool(
+                                state.get("has_post_tool_text")
+                            ),
+                        }
+                    last_state = summary
+        time.sleep(poll_interval_s)
+
+    raise assertions.AssertionError(
+        "timeout waiting for provider hold state before cancel: "
+        f"path={path} last_state={last_state}"
     )
 
 
@@ -1335,6 +1445,29 @@ def run_one_cell(
                 raise assertions.AssertionError(
                     f"timeout waiting for raw Discord text {needle!r}"
                 )
+        elif "wait_for_provider_hold_state" in step:
+            params = step["wait_for_provider_hold_state"] or {}
+            ok_marker = str(params.get("ok_marker") or params.get("marker") or "").strip()
+            late_marker = str(params.get("late_marker") or "").strip()
+            if not ok_marker:
+                raise assertions.AssertionError(
+                    "wait_for_provider_hold_state requires ok_marker"
+                )
+            if not late_marker:
+                raise assertions.AssertionError(
+                    "wait_for_provider_hold_state requires late_marker"
+                )
+            record.setdefault("provider_hold_states", []).append(
+                wait_for_provider_hold_state(
+                    runtime_root=Path(args.queue_runtime_root),
+                    provider=cell_provider(cell),
+                    channel_id=channel_id,
+                    ok_marker=ok_marker,
+                    late_marker=late_marker,
+                    timeout_s=float(params.get("timeout_s", 180)),
+                    poll_interval_s=float(params.get("poll_interval_s", 1)),
+                )
+            )
         elif "restart_dcserver" in step:
             target = args.restart_target_override or (step["restart_dcserver"] or {}).get(
                 "target", "release"
