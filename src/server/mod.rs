@@ -1073,13 +1073,14 @@ async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
 
         // --- Claude rate limits ---
         // Priority: 1) OAuth token (Claude Code subscription), 2) ANTHROPIC_API_KEY
-        let claude_result = if let Some(token) = get_claude_oauth_token() {
-            fetch_claude_oauth_usage(&token).await
-        } else if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
-            fetch_anthropic_rate_limits(&api_key).await
-        } else {
-            Err(anyhow::anyhow!("no Claude credentials found"))
-        };
+        let claude_result =
+            if let Some(token) = crate::services::provider_auth::claude_oauth_token() {
+                fetch_claude_oauth_usage(&token).await
+            } else if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
+                fetch_anthropic_rate_limits(&api_key).await
+            } else {
+                Err(anyhow::anyhow!("no Claude credentials found"))
+            };
         match claude_result {
             Ok(buckets) => {
                 let data = serde_json::json!({ "buckets": buckets }).to_string();
@@ -1094,7 +1095,8 @@ async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
 
         // --- Codex rate limits ---
         // Priority: 1) ~/.codex/auth.json (Codex CLI subscription), 2) OPENAI_API_KEY
-        let codex_result = if let Some(token) = load_codex_access_token() {
+        let codex_result = if let Some(token) = crate::services::provider_auth::codex_access_token()
+        {
             fetch_codex_oauth_usage(&token).await
         } else if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
             fetch_openai_rate_limits(&api_key).await
@@ -2713,45 +2715,6 @@ fn parse_header_reset(headers: &reqwest::header::HeaderMap, name: &str) -> i64 {
         .unwrap_or(0)
 }
 
-/// Read Claude Code OAuth token from macOS Keychain, falling back to ~/.claude/.credentials.json.
-fn get_claude_oauth_token() -> Option<String> {
-    // Try macOS Keychain first
-    if let Ok(output) = std::process::Command::new("security")
-        .args([
-            "find-generic-password",
-            "-s",
-            "Claude Code-credentials",
-            "-w",
-        ])
-        .output()
-    {
-        if output.status.success() {
-            if let Ok(raw) = String::from_utf8(output.stdout) {
-                let raw = raw.trim();
-                if let Ok(creds) = serde_json::from_str::<serde_json::Value>(raw) {
-                    if let Some(token) = creds
-                        .get("claudeAiOauth")
-                        .and_then(|o| o.get("accessToken"))
-                        .and_then(|v| v.as_str())
-                    {
-                        return Some(token.to_string());
-                    }
-                }
-            }
-        }
-    }
-    // Fallback: credentials file
-    let home = dirs::home_dir()?;
-    let cred_path = home.join(".claude").join(".credentials.json");
-    let raw = std::fs::read_to_string(cred_path).ok()?;
-    let creds: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    creds
-        .get("claudeAiOauth")
-        .and_then(|o| o.get("accessToken"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-}
-
 /// Fetch Claude usage via OAuth API (subscription-based, no API key needed).
 /// Returns utilization-based buckets (5h, 7d).
 async fn fetch_claude_oauth_usage(token: &str) -> Result<Vec<serde_json::Value>, anyhow::Error> {
@@ -2812,18 +2775,6 @@ async fn fetch_claude_oauth_usage(token: &str) -> Result<Vec<serde_json::Value>,
     }
 
     Ok(buckets)
-}
-
-/// Read Codex CLI access token from ~/.codex/auth.json.
-fn load_codex_access_token() -> Option<String> {
-    let home = dirs::home_dir()?;
-    let auth_path = home.join(".codex").join("auth.json");
-    let raw = std::fs::read_to_string(auth_path).ok()?;
-    let auth: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    auth.get("tokens")
-        .and_then(|t| t.get("access_token"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
 }
 
 /// Fetch Codex usage via chatgpt.com backend API (subscription-based, no API key needed).
@@ -2980,11 +2931,7 @@ fn extract_assigned_string(src: &str, key: &str) -> Option<String> {
 /// Read (and refresh if expired) the Gemini OAuth2 access token from
 /// `~/.gemini/oauth_creds.json`.  Writes back the new token on refresh.
 async fn load_gemini_access_token() -> Result<String, anyhow::Error> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
-    let creds_path = home.join(".gemini").join("oauth_creds.json");
-    let raw = std::fs::read_to_string(&creds_path)
-        .map_err(|e| anyhow::anyhow!("cannot read ~/.gemini/oauth_creds.json: {e}"))?;
-    let mut creds: serde_json::Value = serde_json::from_str(&raw)?;
+    let (creds_path, mut creds) = crate::services::provider_auth::read_gemini_oauth_creds()?;
 
     let now_ms = chrono::Utc::now().timestamp_millis();
     let expiry_ms = creds

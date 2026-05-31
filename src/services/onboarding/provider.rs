@@ -41,18 +41,19 @@ pub async fn check_provider(body: CheckProviderBody) -> (StatusCode, Json<serde_
     // Resolve binary using the exact same provider-specific resolver as the runtime,
     // including known-path fallbacks (~/bin, /opt/homebrew/bin, etc.).
     // This ensures onboarding and actual launch always agree on availability.
-    let resolution = {
+    let probe = {
         let provider = cmd.to_string();
         tokio::task::spawn_blocking(move || {
-            crate::services::platform::resolve_provider_binary(&provider)
+            crate::services::platform::probe_provider_binary_version(&provider)
         })
         .await
         .ok()
     }
-    .unwrap_or_else(|| crate::services::platform::resolve_provider_binary(cmd));
+    .unwrap_or_else(|| crate::services::platform::probe_provider_binary_version(cmd));
+    let resolution = probe.resolution;
     let mut failure_kind = resolution.failure_kind.clone();
 
-    let Some(bin_path) = resolution.resolved_path.clone() else {
+    if resolution.resolved_path.is_none() {
         return (
             StatusCode::OK,
             Json(json!({
@@ -66,20 +67,10 @@ pub async fn check_provider(body: CheckProviderBody) -> (StatusCode, Json<serde_
                 "attempts": resolution.attempts,
             })),
         );
-    };
+    }
 
-    // Get version using the resolved binary path (not bare command name)
-    // so it works even when PATH doesn't contain the provider.
-    let (version, probe_failure_kind) = {
-        let resolution = resolution.clone();
-        let bin_path = bin_path.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::services::platform::probe_resolved_binary_version(&bin_path, &resolution)
-        })
-        .await
-        .ok()
-        .unwrap_or((None, Some("version_probe_spawn_failed".to_string())))
-    };
+    let version = probe.version_output;
+    let probe_failure_kind = probe.probe_failure_kind;
     if failure_kind.is_none() {
         failure_kind = probe_failure_kind.clone();
     }

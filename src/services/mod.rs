@@ -48,6 +48,7 @@ pub mod platform;
 pub mod pr_summary;
 pub mod process;
 pub mod provider;
+pub mod provider_auth;
 pub mod provider_cli;
 pub mod provider_exec;
 pub mod provider_hosting;
