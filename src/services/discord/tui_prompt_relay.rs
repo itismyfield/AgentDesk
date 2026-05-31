@@ -26,6 +26,8 @@ use tracing::Instrument;
 const SSH_DIRECT_PROMPT_PREVIEW_LIMIT: usize = 1500;
 const CODEX_IDLE_ROLLOUT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const CLAUDE_IDLE_INFLIGHT_DRAIN_WAIT: Duration = Duration::from_secs(5);
+const CLAUDE_IDLE_INFLIGHT_DRAIN_POLL: Duration = Duration::from_millis(100);
 /// #2843: when the background idle relay loop discovers that a session's
 /// transcript path changed, scan this many bytes back from EOF (not from EOF
 /// itself) so a prompt already written to the freshly-resolved transcript is
@@ -675,7 +677,18 @@ async fn maybe_spawn_claude_idle_response_tail(
         );
         return false;
     }
-    if super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get()).is_some() {
+    if !wait_for_claude_inflight_to_clear(channel_id).await {
+        tracing::warn!(
+            provider = %prompt.provider,
+            channel_id = channel_id.get(),
+            tmux_session_name = %prompt.tmux_session_name,
+            turn_id = lease.turn_id.as_deref().unwrap_or(""),
+            session_key = lease.session_key.as_deref().unwrap_or(""),
+            relay_owner = lease.relay_owner.as_str(),
+            runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
+            wait_ms = CLAUDE_IDLE_INFLIGHT_DRAIN_WAIT.as_millis(),
+            "skipping Claude idle response tail; previous inflight did not drain"
+        );
         return false;
     }
     let Some(binding) = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
@@ -722,6 +735,58 @@ async fn maybe_spawn_claude_idle_response_tail(
         prompt.prompt.clone(),
         lease.clone(),
     )
+}
+
+#[cfg(unix)]
+async fn wait_for_claude_inflight_to_clear(channel_id: ChannelId) -> bool {
+    let mut observed_inflight = false;
+    let cleared = wait_for_transient_state_to_clear(
+        CLAUDE_IDLE_INFLIGHT_DRAIN_WAIT,
+        CLAUDE_IDLE_INFLIGHT_DRAIN_POLL,
+        || {
+            let present =
+                super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get())
+                    .is_some();
+            observed_inflight |= present;
+            present
+        },
+    )
+    .await;
+    if observed_inflight && cleared {
+        tracing::info!(
+            provider = ProviderKind::Claude.as_str(),
+            channel_id = channel_id.get(),
+            wait_ms = CLAUDE_IDLE_INFLIGHT_DRAIN_WAIT.as_millis(),
+            "Claude idle response tail waited for previous inflight to drain"
+        );
+    }
+    cleared
+}
+
+#[cfg(unix)]
+async fn wait_for_transient_state_to_clear<F>(
+    timeout: Duration,
+    poll_interval: Duration,
+    mut is_present: F,
+) -> bool
+where
+    F: FnMut() -> bool,
+{
+    if !is_present() {
+        return true;
+    }
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return !is_present();
+        }
+        tokio::time::sleep(poll_interval.min(deadline - now)).await;
+        if !is_present() {
+            return true;
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -2818,6 +2883,51 @@ mod tests {
         assert!(!bridge_adapter_owns_external_turn(
             ExternalInputRelayOwner::TuiPromptRelay
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_inflight_drain_wait_allows_transient_previous_turn() {
+        let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probe_ref = probes.clone();
+
+        assert!(
+            wait_for_transient_state_to_clear(
+                Duration::from_millis(50),
+                Duration::from_millis(1),
+                move || probe_ref.fetch_add(1, Ordering::SeqCst) < 2,
+            )
+            .await,
+            "a short-lived previous inflight should not make the direct-input bridge tail give up"
+        );
+        assert!(
+            probes.load(Ordering::SeqCst) >= 3,
+            "the helper should re-check until the transient state clears"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_inflight_drain_wait_times_out_when_previous_turn_stays_active() {
+        let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probe_ref = probes.clone();
+
+        assert!(
+            !wait_for_transient_state_to_clear(
+                Duration::from_millis(5),
+                Duration::from_millis(1),
+                move || {
+                    probe_ref.fetch_add(1, Ordering::SeqCst);
+                    true
+                },
+            )
+            .await,
+            "a persistent previous inflight should keep the guarded skip behavior"
+        );
+        assert!(
+            probes.load(Ordering::SeqCst) >= 2,
+            "timeout branch should poll instead of making a single stale decision"
+        );
     }
 
     #[cfg(unix)]
