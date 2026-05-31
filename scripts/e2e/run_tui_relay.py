@@ -56,6 +56,8 @@ SUPPORTED_CELLS: tuple[str, ...] = (
 
 IDLE_MAILBOX_STATUSES = {"", "idle", "none"}
 IDLE_RELAY_STALL_STATES = {"", "healthy"}
+RESTART_GUARD_FINALIZING_DRAIN_TIMEOUT_S = 30.0
+RESTART_GUARD_POLL_INTERVAL_S = 1.0
 RUNTIME_QUEUE_DIRS: tuple[tuple[str, str], ...] = (
     ("pending_queue", "discord_pending_queue"),
     ("queued_placeholders", "discord_queued_placeholders"),
@@ -1422,49 +1424,64 @@ def wait_for_health(
 
 
 def _guard_no_foreign_active_turns(
-    base_url: str, channel_id: str, cell: str
+    base_url: str,
+    channel_id: str,
+    cell: str,
+    *,
+    finalizing_drain_timeout_s: float = RESTART_GUARD_FINALIZING_DRAIN_TIMEOUT_S,
+    poll_interval_s: float = RESTART_GUARD_POLL_INTERVAL_S,
 ) -> None:
     """Refuse restart when a turn is active on a non-cell channel."""
     e2e_channel_ids = {channel_id} if channel_id else set()
     if not e2e_channel_ids:
         return
-    try:
-        detail = _read_health_detail(base_url)
-    except Exception as error:  # noqa: BLE001 - fail closed before destructive restart
-        raise assertions.AssertionError(
-            "refusing to restart dcserver: unable to read /api/health/detail "
-            f"for foreign mailbox guard (cell={cell}, channel={channel_id}): "
-            f"{type(error).__name__}: {error}"
-        ) from error
-    mailboxes = detail.get("mailboxes")
-    if not isinstance(mailboxes, list):
-        raise assertions.AssertionError(
-            "refusing to restart dcserver: /api/health/detail mailboxes is not a list "
-            f"(payload={_payload_summary(detail)})"
-        )
-
-    busy: list[str] = []
     current_provider = cell_provider(cell)
-    for mailbox in mailboxes:
-        if not isinstance(mailbox, dict):
-            continue
-        channel = _mailbox_channel_id(mailbox)
-        provider = _mailbox_provider(mailbox)
-        if channel in e2e_channel_ids and provider == current_provider:
-            continue
-        reasons = _mailbox_busy_reasons(mailbox)
-        if reasons:
-            busy.append(f"{_mailbox_label(mailbox)} [{', '.join(reasons)}]")
+    deadline = time.monotonic() + max(finalizing_drain_timeout_s, 0.0)
+    last_global_finalizing = 0
+    while True:
+        try:
+            detail = _read_health_detail(base_url)
+        except Exception as error:  # noqa: BLE001 - fail closed before destructive restart
+            raise assertions.AssertionError(
+                "refusing to restart dcserver: unable to read /api/health/detail "
+                f"for foreign mailbox guard (cell={cell}, channel={channel_id}): "
+                f"{type(error).__name__}: {error}"
+            ) from error
+        mailboxes = detail.get("mailboxes")
+        if not isinstance(mailboxes, list):
+            raise assertions.AssertionError(
+                "refusing to restart dcserver: /api/health/detail mailboxes is not a list "
+                f"(payload={_payload_summary(detail)})"
+            )
 
-    global_finalizing = _as_nonnegative_int(detail.get("global_finalizing"))
-    if global_finalizing > 0:
-        busy.append(f"global_finalizing={global_finalizing}")
+        busy: list[str] = []
+        for mailbox in mailboxes:
+            if not isinstance(mailbox, dict):
+                continue
+            channel = _mailbox_channel_id(mailbox)
+            provider = _mailbox_provider(mailbox)
+            if channel in e2e_channel_ids and provider == current_provider:
+                continue
+            reasons = _mailbox_busy_reasons(mailbox)
+            if reasons:
+                busy.append(f"{_mailbox_label(mailbox)} [{', '.join(reasons)}]")
 
-    if busy:
-        raise assertions.AssertionError(
-            f"refusing to restart dcserver: live mailbox state outside cell {cell} "
-            f"(channel={channel_id}). Active: {busy}."
-        )
+        if busy:
+            raise assertions.AssertionError(
+                f"refusing to restart dcserver: live mailbox state outside cell {cell} "
+                f"(channel={channel_id}). Active: {busy}."
+            )
+
+        global_finalizing = _as_nonnegative_int(detail.get("global_finalizing"))
+        last_global_finalizing = global_finalizing
+        if global_finalizing <= 0:
+            break
+        if time.monotonic() >= deadline:
+            raise assertions.AssertionError(
+                f"refusing to restart dcserver: live mailbox state outside cell {cell} "
+                f"(channel={channel_id}). Active: ['global_finalizing={global_finalizing}']."
+            )
+        time.sleep(poll_interval_s)
 
     try:
         with urllib.request.urlopen(f"{base_url}/api/sessions", timeout=5) as response:
@@ -1494,7 +1511,8 @@ def _guard_no_foreign_active_turns(
     if busy:
         raise assertions.AssertionError(
             f"refusing to restart dcserver: live turn(s) outside cell {cell} "
-            f"(channel={channel_id}). Active: {busy}."
+            f"(channel={channel_id}, global_finalizing={last_global_finalizing}). "
+            f"Active: {busy}."
         )
 
 

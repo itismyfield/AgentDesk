@@ -237,6 +237,67 @@ class RestartGuard(unittest.TestCase):
                 "codex-tui",
             )
 
+    def test_current_cell_transient_global_finalizing_is_polled_until_drained(self):
+        payloads = {
+            "/api/health/detail": [
+                (
+                    503,
+                    {
+                        **_health_detail(
+                            _idle_mailbox("42", provider="codex"),
+                            status="degraded",
+                        ),
+                        "global_finalizing": 1,
+                    },
+                ),
+                (200, _health_detail(_idle_mailbox("42", provider="codex"))),
+            ],
+            "/api/sessions": [(200, {"sessions": []})],
+        }
+
+        with (
+            patch("run_tui_relay.urllib.request.urlopen", _fake_urlopen_for(payloads)),
+            patch("run_tui_relay.time.sleep", return_value=None) as sleep,
+        ):
+            driver._guard_no_foreign_active_turns(  # noqa: SLF001
+                "http://agentdesk.test",
+                "42",
+                "codex-tui",
+                finalizing_drain_timeout_s=1,
+                poll_interval_s=0,
+            )
+
+        sleep.assert_called_once_with(0)
+
+    def test_global_finalizing_that_does_not_drain_blocks_restart(self):
+        payloads = {
+            "/api/health/detail": [
+                (
+                    503,
+                    {
+                        **_health_detail(
+                            _idle_mailbox("42", provider="codex"),
+                            status="degraded",
+                        ),
+                        "global_finalizing": 1,
+                    },
+                )
+            ],
+            "/api/sessions": [(200, {"sessions": []})],
+        }
+
+        with patch("run_tui_relay.urllib.request.urlopen", _fake_urlopen_for(payloads)):
+            with self.assertRaises(assertions.AssertionError) as ctx:
+                driver._guard_no_foreign_active_turns(  # noqa: SLF001
+                    "http://agentdesk.test",
+                    "42",
+                    "codex-tui",
+                    finalizing_drain_timeout_s=0,
+                    poll_interval_s=0,
+                )
+
+        self.assertIn("global_finalizing=1", str(ctx.exception))
+
     def test_health_detail_missing_mailboxes_includes_status_and_payload(self):
         payloads = {
             "/api/health/detail": [
