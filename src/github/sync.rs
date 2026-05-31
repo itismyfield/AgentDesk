@@ -1,14 +1,20 @@
 //! GitHub issue state sync: keep kanban cards consistent with GitHub issue state.
 
-use chrono::{Duration, NaiveDate, Utc};
+use chrono::{Duration as ChronoDuration, NaiveDate, Utc};
 use sqlx::{PgPool, Row};
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 const ISSUE_JSON_FIELDS: &str =
     "number,state,title,labels,body,url,closedAt,closedByPullRequestsReferences";
 const PRIMARY_FETCH_LIMIT: u32 = 100;
 const RECENTLY_CLOSED_FETCH_LIMIT: u32 = 50;
 const RECENTLY_CLOSED_LOOKBACK_DAYS: i64 = 30;
+const STALE_CARD_RECONCILE_ISSUE_SCAN_LIMIT: usize = 500;
+const STALE_CARD_RECONCILE_ISSUE_LIMIT: usize = 100;
+const STALE_CARD_RECONCILE_BATCH_SIZE: usize = 25;
+const STALE_CARD_RECONCILE_TIMEOUT_SECS: u64 = 30;
+const STALE_CARD_RECONCILE_CURSOR_KEY_PREFIX: &str = "github_sync.stale_card_reconcile_cursor:";
 
 /// Represents a GitHub issue as returned by `gh issue list --json`.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -100,7 +106,7 @@ fn fetch_issue_batch(
 }
 
 fn recent_closed_search_query(today: NaiveDate) -> String {
-    let cutoff = today - Duration::days(RECENTLY_CLOSED_LOOKBACK_DAYS);
+    let cutoff = today - ChronoDuration::days(RECENTLY_CLOSED_LOOKBACK_DAYS);
     format!("closed:>{} sort:updated-desc", cutoff.format("%Y-%m-%d"))
 }
 
@@ -174,13 +180,89 @@ pub async fn sync_github_issues_for_repo_pg(
     repo: &str,
     issues: &[GhIssue],
 ) -> Result<SyncResult, String> {
+    sync_github_issues_for_repo_pg_with_adapter(pool, repo, issues, super::adapter()).await
+}
+
+pub(crate) async fn sync_github_issues_for_repo_pg_with_adapter(
+    pool: &PgPool,
+    repo: &str,
+    issues: &[GhIssue],
+    adapter: &dyn super::GitHubAdapter,
+) -> Result<SyncResult, String> {
     crate::pipeline::ensure_loaded();
 
     let repo_override = load_pg_repo_override(pool, repo).await?;
     let mut agent_overrides: HashMap<String, Option<crate::pipeline::PipelineOverride>> =
         HashMap::new();
     let mut result = SyncResult::default();
+    let fetched_issue_numbers: HashSet<i64> = issues.iter().map(|issue| issue.number).collect();
+    let mut issues = issues.to_vec();
 
+    match stale_card_issue_numbers_for_reconcile(
+        pool,
+        repo,
+        &fetched_issue_numbers,
+        repo_override.as_ref(),
+        &mut agent_overrides,
+    )
+    .await
+    {
+        Ok(selection) => {
+            if let Some(next_cursor) = selection.next_cursor {
+                if let Err(error) = save_stale_reconcile_cursor(pool, repo, next_cursor).await {
+                    tracing::warn!(
+                        "[github-sync] {repo}: failed to persist stale reconcile cursor {next_cursor}: {error}"
+                    );
+                }
+            }
+            if selection.issue_numbers.is_empty() {
+                return sync_loaded_github_issues_for_repo_pg(
+                    pool,
+                    repo,
+                    &issues,
+                    repo_override.as_ref(),
+                    &mut agent_overrides,
+                    result,
+                )
+                .await;
+            }
+            let report =
+                fetch_issues_by_number_batches(adapter, repo, &selection.issue_numbers).await;
+            apply_stale_reconcile_fetch_report(
+                repo,
+                &mut result,
+                &mut issues,
+                selection.issue_numbers.len(),
+                report,
+            );
+        }
+        Err(error) => {
+            result.stale_card_issue_error_count += 1;
+            tracing::warn!(
+                "[github-sync] {repo}: stale card reconcile candidate selection failed: {error}"
+            );
+        }
+    }
+
+    sync_loaded_github_issues_for_repo_pg(
+        pool,
+        repo,
+        &issues,
+        repo_override.as_ref(),
+        &mut agent_overrides,
+        result,
+    )
+    .await
+}
+
+async fn sync_loaded_github_issues_for_repo_pg(
+    pool: &PgPool,
+    repo: &str,
+    issues: &[GhIssue],
+    repo_override: Option<&crate::pipeline::PipelineOverride>,
+    agent_overrides: &mut HashMap<String, Option<crate::pipeline::PipelineOverride>>,
+    mut result: SyncResult,
+) -> Result<SyncResult, String> {
     for issue in issues {
         let cards = load_pg_cards_for_issue(pool, repo, issue.number).await?;
 
@@ -202,9 +284,9 @@ pub async fn sync_github_issues_for_repo_pg(
             let pipeline = resolve_pg_pipeline(
                 pool,
                 repo,
-                repo_override.as_ref(),
+                repo_override,
                 card.assigned_agent_id.as_deref(),
-                &mut agent_overrides,
+                agent_overrides,
             )
             .await?;
             let is_terminal = pipeline.is_terminal(&card.status);
@@ -272,9 +354,9 @@ pub async fn sync_github_issues_for_repo_pg(
                 let pipeline = resolve_pg_pipeline(
                     pool,
                     repo,
-                    repo_override.as_ref(),
+                    repo_override,
                     card.assigned_agent_id.as_deref(),
-                    &mut agent_overrides,
+                    agent_overrides,
                 )
                 .await?;
                 close_pg_card_for_issue(pool, &card, &pipeline).await?;
@@ -380,6 +462,545 @@ async fn load_pg_cards_for_issue(
             })
         })
         .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StaleIssueSelection {
+    issue_numbers: Vec<i64>,
+    next_cursor: Option<i64>,
+}
+
+#[derive(Debug, Default)]
+struct StaleIssueFetchReport {
+    issues: Vec<GhIssue>,
+    batch_count: usize,
+    error_count: usize,
+    errors: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct StaleCardCandidate {
+    issue_number: i64,
+    card: PgCardRecord,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StaleIssueCandidate {
+    issue_number: i64,
+    is_terminal: bool,
+}
+
+fn select_stale_issue_numbers_from_candidates(
+    candidates: &[StaleIssueCandidate],
+    fetched_issue_numbers: &HashSet<i64>,
+    cursor: Option<i64>,
+    limit: usize,
+) -> StaleIssueSelection {
+    if limit == 0 {
+        return StaleIssueSelection {
+            issue_numbers: Vec::new(),
+            next_cursor: None,
+        };
+    }
+
+    let mut candidates_by_issue = std::collections::BTreeMap::<i64, bool>::new();
+    for candidate in candidates {
+        if candidate.issue_number <= 0 || fetched_issue_numbers.contains(&candidate.issue_number) {
+            continue;
+        }
+        candidates_by_issue
+            .entry(candidate.issue_number)
+            .and_modify(|all_terminal| *all_terminal &= candidate.is_terminal)
+            .or_insert(candidate.is_terminal);
+    }
+
+    let mut ordered = candidates_by_issue
+        .into_iter()
+        .map(|(issue_number, is_terminal)| StaleIssueCandidate {
+            issue_number,
+            is_terminal,
+        })
+        .collect::<Vec<_>>();
+    if let Some(cursor) = cursor {
+        ordered.sort_by_key(|candidate| (candidate.issue_number <= cursor, candidate.issue_number));
+    }
+
+    let mut issue_numbers = Vec::new();
+    let mut next_cursor = None;
+    for candidate in ordered {
+        next_cursor = Some(candidate.issue_number);
+        if candidate.is_terminal {
+            continue;
+        }
+        issue_numbers.push(candidate.issue_number);
+        if issue_numbers.len() >= limit {
+            break;
+        }
+    }
+
+    StaleIssueSelection {
+        issue_numbers,
+        next_cursor,
+    }
+}
+
+async fn stale_card_issue_numbers_for_reconcile(
+    pool: &PgPool,
+    repo: &str,
+    fetched_issue_numbers: &HashSet<i64>,
+    repo_override: Option<&crate::pipeline::PipelineOverride>,
+    agent_overrides: &mut HashMap<String, Option<crate::pipeline::PipelineOverride>>,
+) -> Result<StaleIssueSelection, String> {
+    crate::pipeline::ensure_loaded();
+
+    let fetched_issue_numbers: Vec<i64> = fetched_issue_numbers.iter().copied().collect();
+    let cursor = load_stale_reconcile_cursor(pool, repo).await?;
+    let mut stale_issue_numbers = load_stale_reconcile_issue_page(
+        pool,
+        repo,
+        &fetched_issue_numbers,
+        cursor,
+        false,
+        STALE_CARD_RECONCILE_ISSUE_SCAN_LIMIT,
+    )
+    .await?;
+
+    if cursor.is_some() && stale_issue_numbers.len() < STALE_CARD_RECONCILE_ISSUE_SCAN_LIMIT {
+        let mut wrapped = load_stale_reconcile_issue_page(
+            pool,
+            repo,
+            &fetched_issue_numbers,
+            cursor,
+            true,
+            STALE_CARD_RECONCILE_ISSUE_SCAN_LIMIT - stale_issue_numbers.len(),
+        )
+        .await?;
+        stale_issue_numbers.append(&mut wrapped);
+    }
+
+    let card_candidates =
+        load_stale_reconcile_cards_for_issues(pool, repo, &stale_issue_numbers).await?;
+    let mut candidates = Vec::with_capacity(card_candidates.len());
+    for candidate in card_candidates {
+        let pipeline = resolve_pg_pipeline(
+            pool,
+            repo,
+            repo_override,
+            candidate.card.assigned_agent_id.as_deref(),
+            agent_overrides,
+        )
+        .await?;
+        candidates.push(StaleIssueCandidate {
+            issue_number: candidate.issue_number,
+            is_terminal: pipeline.is_terminal(&candidate.card.status),
+        });
+    }
+
+    let selection = select_stale_issue_numbers_from_candidates(
+        &candidates,
+        &HashSet::new(),
+        cursor,
+        STALE_CARD_RECONCILE_ISSUE_LIMIT,
+    );
+
+    if !selection.issue_numbers.is_empty() {
+        tracing::info!(
+            "[github-sync] {repo}: card-driven stale reconcile selected {} missing non-terminal issue(s) after cursor {:?} (issue_limit={}, next_cursor={:?})",
+            selection.issue_numbers.len(),
+            cursor,
+            STALE_CARD_RECONCILE_ISSUE_LIMIT,
+            selection.next_cursor
+        );
+    }
+
+    Ok(selection)
+}
+
+async fn load_stale_reconcile_issue_page(
+    pool: &PgPool,
+    repo: &str,
+    fetched_issue_numbers: &[i64],
+    cursor: Option<i64>,
+    wrap: bool,
+    limit: usize,
+) -> Result<Vec<i64>, String> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let rows = if wrap {
+        sqlx::query(
+            "SELECT DISTINCT github_issue_number::BIGINT AS issue_number
+             FROM kanban_cards
+             WHERE repo_id = $1
+               AND github_issue_number IS NOT NULL
+               AND github_issue_number > 0
+               AND NOT (github_issue_number = ANY($2::BIGINT[]))
+               AND github_issue_number <= $3
+             ORDER BY issue_number ASC
+             LIMIT $4",
+        )
+        .bind(repo)
+        .bind(fetched_issue_numbers)
+        .bind(cursor.unwrap_or(i64::MAX))
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+    } else {
+        sqlx::query(
+            "SELECT DISTINCT github_issue_number::BIGINT AS issue_number
+             FROM kanban_cards
+             WHERE repo_id = $1
+               AND github_issue_number IS NOT NULL
+               AND github_issue_number > 0
+               AND NOT (github_issue_number = ANY($2::BIGINT[]))
+               AND ($3::BIGINT IS NULL OR github_issue_number > $3)
+             ORDER BY issue_number ASC
+             LIMIT $4",
+        )
+        .bind(repo)
+        .bind(fetched_issue_numbers)
+        .bind(cursor)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+    }
+    .map_err(|error| format!("load stale card reconcile candidates for {repo}: {error}"))?;
+
+    rows.into_iter()
+        .map(|row| {
+            row.try_get("issue_number")
+                .map_err(|error| format!("read stale reconcile issue number: {error}"))
+        })
+        .collect()
+}
+
+async fn load_stale_reconcile_cards_for_issues(
+    pool: &PgPool,
+    repo: &str,
+    issue_numbers: &[i64],
+) -> Result<Vec<StaleCardCandidate>, String> {
+    if issue_numbers.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        "SELECT id,
+                status,
+                review_status,
+                latest_dispatch_id,
+                assigned_agent_id,
+                github_issue_number::BIGINT AS issue_number
+         FROM kanban_cards
+         WHERE repo_id = $1
+           AND github_issue_number = ANY($2::BIGINT[])
+         ORDER BY issue_number ASC, id ASC",
+    )
+    .bind(repo)
+    .bind(issue_numbers)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("load stale card reconcile cards for {repo}: {error}"))?;
+
+    rows.into_iter()
+        .map(stale_card_candidate_from_row)
+        .collect()
+}
+
+fn stale_card_candidate_from_row(row: sqlx::postgres::PgRow) -> Result<StaleCardCandidate, String> {
+    Ok(StaleCardCandidate {
+        issue_number: row
+            .try_get("issue_number")
+            .map_err(|error| format!("read stale reconcile issue number: {error}"))?,
+        card: PgCardRecord {
+            id: row
+                .try_get("id")
+                .map_err(|error| format!("read stale reconcile card id: {error}"))?,
+            status: row
+                .try_get("status")
+                .map_err(|error| format!("read stale reconcile card status: {error}"))?,
+            review_status: row
+                .try_get("review_status")
+                .map_err(|error| format!("read stale reconcile review_status: {error}"))?,
+            latest_dispatch_id: row
+                .try_get("latest_dispatch_id")
+                .map_err(|error| format!("read stale reconcile latest_dispatch_id: {error}"))?,
+            assigned_agent_id: row
+                .try_get("assigned_agent_id")
+                .map_err(|error| format!("read stale reconcile assigned_agent_id: {error}"))?,
+        },
+    })
+}
+
+fn stale_reconcile_cursor_key(repo: &str) -> String {
+    format!("{STALE_CARD_RECONCILE_CURSOR_KEY_PREFIX}{repo}")
+}
+
+async fn load_stale_reconcile_cursor(pool: &PgPool, repo: &str) -> Result<Option<i64>, String> {
+    let key = stale_reconcile_cursor_key(repo);
+    let raw: Option<String> =
+        sqlx::query_scalar("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
+            .bind(&key)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| format!("load stale reconcile cursor for {repo}: {error}"))?;
+
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    match raw.trim().parse::<i64>() {
+        Ok(value) if value > 0 => Ok(Some(value)),
+        _ => {
+            tracing::warn!(
+                "[github-sync] {repo}: ignoring invalid stale reconcile cursor value {:?}",
+                raw
+            );
+            Ok(None)
+        }
+    }
+}
+
+async fn save_stale_reconcile_cursor(
+    pool: &PgPool,
+    repo: &str,
+    issue_number: i64,
+) -> Result<(), String> {
+    let key = stale_reconcile_cursor_key(repo);
+    sqlx::query(
+        "INSERT INTO kv_meta (key, value)
+         VALUES ($1, $2)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+    )
+    .bind(&key)
+    .bind(issue_number.to_string())
+    .execute(pool)
+    .await
+    .map_err(|error| format!("save stale reconcile cursor for {repo}: {error}"))?;
+    Ok(())
+}
+
+async fn fetch_issues_by_number_batches(
+    adapter: &dyn super::GitHubAdapter,
+    repo: &str,
+    issue_numbers: &[i64],
+) -> StaleIssueFetchReport {
+    let (owner, name) = match parse_repo_owner_name(repo) {
+        Ok(parts) => parts,
+        Err(error) => {
+            return StaleIssueFetchReport {
+                error_count: 1,
+                errors: vec![error],
+                ..StaleIssueFetchReport::default()
+            };
+        }
+    };
+    let mut report = StaleIssueFetchReport::default();
+
+    for batch in issue_numbers.chunks(STALE_CARD_RECONCILE_BATCH_SIZE) {
+        report.batch_count += 1;
+        let query = issue_number_batch_graphql_query(batch);
+        let args = vec![
+            "api".to_string(),
+            "graphql".to_string(),
+            "-f".to_string(),
+            format!("owner={owner}"),
+            "-f".to_string(),
+            format!("name={name}"),
+            "-f".to_string(),
+            format!("query={query}"),
+        ];
+        let output = match adapter
+            .run_async(
+                args,
+                Duration::from_secs(STALE_CARD_RECONCILE_TIMEOUT_SECS),
+                format!(
+                    "github stale card reconcile timed out for {repo} ({} issue(s))",
+                    batch.len()
+                ),
+            )
+            .await
+        {
+            Ok(output) => output,
+            Err(error) => {
+                report.error_count += 1;
+                report.errors.push(error);
+                continue;
+            }
+        };
+        match parse_issue_number_batch_graphql_response(&output, batch) {
+            Ok(mut batch_issues) => report.issues.append(&mut batch_issues),
+            Err(error) => {
+                report.error_count += 1;
+                report.errors.push(error);
+            }
+        }
+    }
+
+    report
+}
+
+fn apply_stale_reconcile_fetch_report(
+    repo: &str,
+    result: &mut SyncResult,
+    issues: &mut Vec<GhIssue>,
+    attempted_issue_count: usize,
+    report: StaleIssueFetchReport,
+) {
+    result.stale_card_issue_check_count += attempted_issue_count;
+    result.stale_card_issue_batch_count += report.batch_count;
+    result.stale_card_issue_error_count += report.error_count;
+
+    if report.error_count > 0 {
+        tracing::warn!(
+            "[github-sync] {repo}: stale card reconcile had {} non-fatal GraphQL error(s): {}",
+            report.error_count,
+            report.errors.join("; ")
+        );
+    }
+
+    let stale_closed_issue_count = report
+        .issues
+        .iter()
+        .filter(|issue| issue.state == "CLOSED")
+        .count();
+    tracing::info!(
+        "[github-sync] {repo}: card-driven stale reconcile checked {} issue(s) in {} GraphQL batch(es); fetched={}, closed={}, errors={}",
+        attempted_issue_count,
+        report.batch_count,
+        report.issues.len(),
+        stale_closed_issue_count,
+        report.error_count
+    );
+    merge_unique_issues(issues, report.issues);
+}
+
+fn parse_repo_owner_name(repo: &str) -> Result<(&str, &str), String> {
+    let (owner, name) = repo
+        .split_once('/')
+        .ok_or_else(|| format!("repo id '{repo}' is not in owner/name form"))?;
+    if owner.trim().is_empty() || name.trim().is_empty() || name.contains('/') {
+        return Err(format!("repo id '{repo}' is not in owner/name form"));
+    }
+    Ok((owner, name))
+}
+
+fn issue_number_batch_graphql_query(issue_numbers: &[i64]) -> String {
+    let fields = issue_numbers
+        .iter()
+        .enumerate()
+        .map(|(index, issue_number)| {
+            format!(
+                "i{index}: issue(number: {issue_number}) {{ number state title body url closedAt closedByPullRequestsReferences(first: 5) {{ nodes {{ number url }} }} }}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "query($owner: String!, $name: String!) {{ repository(owner: $owner, name: $name) {{ {fields} }} }}"
+    )
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GraphQlIssueBatchResponse {
+    data: Option<GraphQlIssueBatchData>,
+    #[serde(default)]
+    errors: Vec<GraphQlError>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GraphQlIssueBatchData {
+    repository: Option<HashMap<String, Option<GraphQlIssue>>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GraphQlError {
+    message: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GraphQlIssue {
+    number: i64,
+    state: String,
+    title: String,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default, rename = "closedAt")]
+    closed_at: Option<String>,
+    #[serde(default, rename = "closedByPullRequestsReferences")]
+    closed_by_pull_requests_references: Option<GraphQlPullRequestConnection>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GraphQlPullRequestConnection {
+    #[serde(default)]
+    nodes: Vec<GraphQlPullRequestReference>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GraphQlPullRequestReference {
+    number: Option<i64>,
+    url: Option<String>,
+}
+
+fn parse_issue_number_batch_graphql_response(
+    output: &str,
+    issue_numbers: &[i64],
+) -> Result<Vec<GhIssue>, String> {
+    let response: GraphQlIssueBatchResponse = serde_json::from_str(output)
+        .map_err(|error| format!("parse stale issue GraphQL response: {error}"))?;
+    if !response.errors.is_empty() {
+        let messages = response
+            .errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!("stale issue GraphQL query failed: {messages}"));
+    }
+
+    let repository = response
+        .data
+        .and_then(|data| data.repository)
+        .ok_or_else(|| "stale issue GraphQL response missing repository".to_string())?;
+
+    let mut issues = Vec::new();
+    for (index, issue_number) in issue_numbers.iter().enumerate() {
+        match repository.get(&format!("i{index}")) {
+            Some(Some(issue)) => issues.push(GhIssue {
+                number: issue.number,
+                state: issue.state.clone(),
+                title: issue.title.clone(),
+                labels: Vec::new(),
+                body: issue.body.clone(),
+                url: issue.url.clone(),
+                closed_at: issue.closed_at.clone(),
+                closed_by_pull_requests_references: issue
+                    .closed_by_pull_requests_references
+                    .as_ref()
+                    .map(|connection| {
+                        connection
+                            .nodes
+                            .iter()
+                            .map(|node| GhPullRequestReference {
+                                number: node.number,
+                                url: node.url.clone(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            }),
+            Some(None) | None => {
+                tracing::debug!(
+                    "[github-sync] stale reconcile: issue #{} missing from GraphQL response",
+                    issue_number
+                );
+            }
+        }
+    }
+
+    Ok(issues)
 }
 
 async fn load_pg_repo_override(
@@ -760,6 +1381,9 @@ pub fn sync_all_repos(
                 Ok(r) => {
                     total.closed_count += r.closed_count;
                     total.inconsistency_count += r.inconsistency_count;
+                    total.stale_card_issue_check_count += r.stale_card_issue_check_count;
+                    total.stale_card_issue_batch_count += r.stale_card_issue_batch_count;
+                    total.stale_card_issue_error_count += r.stale_card_issue_error_count;
                 }
                 Err(e) => {
                     tracing::error!("[github-sync] sync failed for {}: {e}", repo.id);
@@ -778,6 +1402,9 @@ pub fn sync_all_repos(
 pub struct SyncResult {
     pub closed_count: usize,
     pub inconsistency_count: usize,
+    pub stale_card_issue_check_count: usize,
+    pub stale_card_issue_batch_count: usize,
+    pub stale_card_issue_error_count: usize,
 }
 
 /// Reason code attached to terminal-card / OPEN-issue mismatch alerts so the
@@ -863,6 +1490,62 @@ async fn enqueue_terminal_open_alert_pg(
 mod terminal_open_alert_tests {
     use super::*;
 
+    fn stale_candidate(issue_number: i64, is_terminal: bool) -> StaleIssueCandidate {
+        StaleIssueCandidate {
+            issue_number,
+            is_terminal,
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingAdapter {
+        calls: std::sync::Mutex<Vec<Vec<String>>>,
+        async_responses: std::sync::Mutex<std::collections::VecDeque<Result<String, String>>>,
+    }
+
+    impl RecordingAdapter {
+        fn with_async_responses(async_responses: Vec<Result<String, String>>) -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+                async_responses: std::sync::Mutex::new(async_responses.into()),
+            }
+        }
+
+        fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::github::GitHubAdapter for RecordingAdapter {
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn run(&self, args: &[&str]) -> Result<String, String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(args.iter().map(|arg| (*arg).to_string()).collect());
+            Ok(String::new())
+        }
+
+        fn run_async<'a>(
+            &'a self,
+            args: Vec<String>,
+            _timeout: std::time::Duration,
+            _timeout_context: String,
+        ) -> crate::github::GitHubFuture<'a, Result<String, String>> {
+            self.calls.lock().unwrap().push(args);
+            let response = self
+                .async_responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Ok(String::new()));
+            Box::pin(async move { response })
+        }
+    }
+
     /// #1946: the alert message must surface enough context for an operator
     /// to find the offending card and issue at a glance, plus point them at
     /// the retro for the longer-form root-cause writeup.
@@ -874,6 +1557,287 @@ mod terminal_open_alert_tests {
         assert!(msg.contains("card-1812"), "msg: {msg}");
         assert!(msg.contains("done"), "msg: {msg}");
         assert!(msg.contains("#1946"), "msg should reference retro: {msg}");
+    }
+
+    #[test]
+    fn stale_candidate_selection_rotates_past_old_open_frontier() {
+        let candidates = (1..=150)
+            .map(|issue_number| stale_candidate(issue_number, false))
+            .collect::<Vec<_>>();
+        let fetched_issue_numbers = HashSet::new();
+
+        let first = select_stale_issue_numbers_from_candidates(
+            &candidates,
+            &fetched_issue_numbers,
+            None,
+            100,
+        );
+        assert_eq!(first.issue_numbers.first().copied(), Some(1));
+        assert_eq!(first.issue_numbers.last().copied(), Some(100));
+        assert_eq!(first.next_cursor, Some(100));
+
+        let second = select_stale_issue_numbers_from_candidates(
+            &candidates,
+            &fetched_issue_numbers,
+            first.next_cursor,
+            100,
+        );
+        assert_eq!(second.issue_numbers.first().copied(), Some(101));
+        assert!(
+            second.issue_numbers.contains(&125),
+            "closed ghost behind the first 100 candidates should be reached"
+        );
+        assert_eq!(second.issue_numbers.last().copied(), Some(50));
+        assert_eq!(second.next_cursor, Some(50));
+    }
+
+    #[test]
+    fn stale_candidate_selection_skips_normal_fetch_window() {
+        let candidates = [10, 11, 12, 13, 14]
+            .into_iter()
+            .map(|issue_number| stale_candidate(issue_number, false))
+            .collect::<Vec<_>>();
+        let fetched_issue_numbers = [12, 13].into_iter().collect::<HashSet<_>>();
+
+        let selection = select_stale_issue_numbers_from_candidates(
+            &candidates,
+            &fetched_issue_numbers,
+            Some(11),
+            10,
+        );
+
+        assert_eq!(selection.issue_numbers, vec![14, 10, 11]);
+        assert_eq!(selection.next_cursor, Some(11));
+    }
+
+    #[test]
+    fn stale_candidate_selection_excludes_pipeline_terminal_statuses() {
+        let candidates = vec![
+            stale_candidate(41, false),
+            stale_candidate(42, true),
+            stale_candidate(43, false),
+        ];
+        let fetched_issue_numbers = HashSet::new();
+
+        let selection = select_stale_issue_numbers_from_candidates(
+            &candidates,
+            &fetched_issue_numbers,
+            None,
+            10,
+        );
+
+        assert_eq!(selection.issue_numbers, vec![41, 43]);
+        assert_eq!(
+            selection.next_cursor,
+            Some(43),
+            "cursor should still advance across terminal candidates"
+        );
+    }
+
+    #[test]
+    fn stale_fetch_failure_records_metric_without_dropping_normal_issues() {
+        let mut result = SyncResult::default();
+        let mut issues = vec![GhIssue {
+            number: 1,
+            state: "OPEN".to_string(),
+            title: "Normal fetched issue".to_string(),
+            labels: Vec::new(),
+            body: None,
+            url: None,
+            closed_at: None,
+            closed_by_pull_requests_references: Vec::new(),
+        }];
+        let report = StaleIssueFetchReport {
+            batch_count: 1,
+            error_count: 1,
+            errors: vec!["GraphQL unavailable".to_string()],
+            ..StaleIssueFetchReport::default()
+        };
+
+        apply_stale_reconcile_fetch_report("owner/repo", &mut result, &mut issues, 3, report);
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].number, 1);
+        assert_eq!(result.stale_card_issue_check_count, 3);
+        assert_eq!(result.stale_card_issue_batch_count, 1);
+        assert_eq!(result.stale_card_issue_error_count, 1);
+    }
+
+    #[test]
+    fn parses_batched_graphql_issue_response() {
+        let issues = parse_issue_number_batch_graphql_response(
+            r#"{
+                "data": {
+                    "repository": {
+                        "i0": {
+                            "number": 2945,
+                            "state": "CLOSED",
+                            "title": "Old closed issue",
+                            "body": null,
+                            "url": "https://github.com/owner/repo/issues/2945",
+                            "closedAt": "2026-03-23T00:00:00Z",
+                            "closedByPullRequestsReferences": {
+                                "nodes": [
+                                    {
+                                        "number": 3001,
+                                        "url": "https://github.com/owner/repo/pull/3001"
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }"#,
+            &[2945],
+        )
+        .unwrap();
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].number, 2945);
+        assert_eq!(issues[0].state, "CLOSED");
+        assert_eq!(issues[0].closed_at.as_deref(), Some("2026-03-23T00:00:00Z"));
+        assert_eq!(
+            issues[0].closed_by_pull_requests_references[0].number,
+            Some(3001)
+        );
+    }
+
+    #[tokio::test]
+    async fn pg_card_driven_reconcile_closes_old_closed_issue_missing_from_fetch_window() {
+        let test_pg = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = test_pg.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id,
+                title,
+                status,
+                repo_id,
+                github_issue_number,
+                github_issue_url,
+                created_at,
+                updated_at
+             ) VALUES (
+                'card-old-closed-2945',
+                'Old closed ghost card',
+                'backlog',
+                'owner/repo',
+                2945,
+                'https://github.com/owner/repo/issues/2945',
+                NOW() - INTERVAL '40 days',
+                NOW() - INTERVAL '40 days'
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let adapter = RecordingAdapter::with_async_responses(vec![Ok(r#"{
+                "data": {
+                    "repository": {
+                        "i0": {
+                            "number": 2945,
+                            "state": "CLOSED",
+                            "title": "Old closed ghost card",
+                            "body": null,
+                            "url": "https://github.com/owner/repo/issues/2945",
+                            "closedAt": "2026-03-23T00:00:00Z",
+                            "closedByPullRequestsReferences": {
+                                "nodes": []
+                            }
+                        }
+                    }
+                }
+            }"#
+        .to_string())]);
+
+        let result =
+            sync_github_issues_for_repo_pg_with_adapter(&pool, "owner/repo", &[], &adapter)
+                .await
+                .unwrap();
+
+        assert_eq!(result.closed_count, 1);
+        assert_eq!(result.stale_card_issue_check_count, 1);
+        assert_eq!(result.stale_card_issue_batch_count, 1);
+
+        let status: String = sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = $1")
+            .bind("card-old-closed-2945")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "done");
+
+        let calls = adapter.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0][0], "api");
+        assert_eq!(calls[0][1], "graphql");
+        assert!(
+            calls[0]
+                .iter()
+                .any(|arg| arg.contains("issue(number: 2945)")),
+            "expected GraphQL batch query to include issue #2945, got {calls:?}"
+        );
+
+        pool.close().await;
+        test_pg.drop().await;
+    }
+
+    #[tokio::test]
+    async fn pg_stale_candidate_selection_excludes_custom_terminal_status() {
+        let test_pg = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = test_pg.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO github_repos (id, display_name, sync_enabled, pipeline_config)
+             VALUES (
+                'owner/repo',
+                'owner/repo',
+                true,
+                $1::jsonb
+             )",
+        )
+        .bind(
+            serde_json::json!({
+                "states": [
+                    {"id": "backlog", "label": "Backlog"},
+                    {"id": "archived", "label": "Archived", "terminal": true}
+                ],
+                "transitions": []
+            })
+            .to_string(),
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, repo_id, github_issue_number, created_at, updated_at
+             ) VALUES
+                ('card-custom-terminal-2946', 'Archived terminal', 'archived', 'owner/repo', 2946, NOW(), NOW()),
+                ('card-open-backlog-2947', 'Backlog candidate', 'backlog', 'owner/repo', 2947, NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let repo_override = load_pg_repo_override(&pool, "owner/repo").await.unwrap();
+        let mut agent_overrides = HashMap::new();
+        let selection = stale_card_issue_numbers_for_reconcile(
+            &pool,
+            "owner/repo",
+            &HashSet::new(),
+            repo_override.as_ref(),
+            &mut agent_overrides,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(selection.issue_numbers, vec![2947]);
+        assert_eq!(selection.next_cursor, Some(2947));
+
+        pool.close().await;
+        test_pg.drop().await;
     }
 
     /// PG dedupe: re-running the alert enqueue for the same
@@ -1081,7 +2045,7 @@ mod tests {
                     "--repo".to_string(),
                     "owner/repo".to_string(),
                     "--json".to_string(),
-                    "number,state,title,labels,body".to_string(),
+                    ISSUE_JSON_FIELDS.to_string(),
                     "--limit".to_string(),
                     "100".to_string(),
                     "--state".to_string(),
@@ -1093,7 +2057,7 @@ mod tests {
                     "--repo".to_string(),
                     "owner/repo".to_string(),
                     "--json".to_string(),
-                    "number,state,title,labels,body".to_string(),
+                    ISSUE_JSON_FIELDS.to_string(),
                     "--limit".to_string(),
                     "50".to_string(),
                     "--state".to_string(),
