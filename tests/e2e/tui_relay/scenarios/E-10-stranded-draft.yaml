@@ -18,6 +18,8 @@ steps:
     timeout_s: 240
   - wait_idle_s: 5
   - assert_health:
+      timeout_s: 45
+      poll_interval_s: 2
       forbid_degraded_reasons:
         - global_active_counter_out_of_bounds
       global_active_max: 0
