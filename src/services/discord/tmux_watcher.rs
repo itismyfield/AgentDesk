@@ -1110,8 +1110,10 @@ async fn complete_watcher_status_panel_v2(
 /// The wait is bounded by `TUI_COMPLETION_QUIESCENCE_TIMEOUT`. On `TimedOut`
 /// the caller MUST suppress the `TurnCompleted` emit — promoting the panel
 /// to `✅ 응답 완료` on a still-busy pane reproduces the bug this gate
-/// exists to prevent (Codex review #2161 H2). The placeholder sweeper and
-/// next-turn intake reconcile the lingering Active panel.
+/// exists to prevent (Codex review #2161 H2). If terminal delivery is not
+/// yet durably mirrored, the placeholder sweeper and next-turn intake
+/// reconcile the lingering Active panel; already-committed delivery may still
+/// proceed with non-visual lifecycle cleanup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum TuiCompletionGateOutcome {
     NotGated,
@@ -1825,11 +1827,74 @@ mod matched_session_jsonl_gate_tests {
     }
 }
 
+fn watcher_tui_gate_blocks_lifecycle(
+    gate_outcome: TuiCompletionGateOutcome,
+    terminal_delivery_committed: bool,
+) -> bool {
+    matches!(gate_outcome, TuiCompletionGateOutcome::TimedOut) && !terminal_delivery_committed
+}
+
 fn watcher_commit_should_advance_runtime_binding(
     terminal_output_committed: bool,
     gate_outcome: TuiCompletionGateOutcome,
+    terminal_delivery_committed: bool,
 ) -> bool {
-    terminal_output_committed && !matches!(gate_outcome, TuiCompletionGateOutcome::TimedOut)
+    terminal_output_committed
+        && !watcher_tui_gate_blocks_lifecycle(gate_outcome, terminal_delivery_committed)
+}
+
+fn mark_watcher_terminal_delivery_committed(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    expected_identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+    full_response: &str,
+    turn_data_start_offset: u64,
+    generation_mtime_ns: Option<i64>,
+    last_offset: u64,
+) -> bool {
+    let Some(expected_identity) = expected_identity else {
+        return false;
+    };
+    if expected_identity.user_msg_id == 0 || full_response.trim().is_empty() {
+        return false;
+    }
+    let Some(mut inflight) =
+        crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
+    else {
+        return false;
+    };
+    if inflight.restart_mode.is_some() || inflight.rebind_origin {
+        return false;
+    }
+    if inflight.user_msg_id != expected_identity.user_msg_id
+        || inflight.started_at.as_str() != expected_identity.started_at.as_str()
+        || inflight.tmux_session_name.as_deref() != expected_identity.tmux_session_name.as_deref()
+        || inflight.tmux_session_name.as_deref() != Some(tmux_session_name)
+    {
+        return false;
+    }
+
+    inflight.terminal_delivery_committed = true;
+    inflight.full_response = full_response.to_string();
+    inflight.response_sent_offset = full_response.len();
+    inflight.last_offset = last_offset;
+    inflight.last_watcher_relayed_offset = Some(turn_data_start_offset);
+    inflight.last_watcher_relayed_generation_mtime_ns = generation_mtime_ns;
+
+    match crate::services::discord::inflight::save_inflight_state(&inflight) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                tmux_session = %tmux_session_name,
+                error = %error,
+                "watcher failed to mirror committed terminal delivery into inflight state"
+            );
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1846,13 +1911,15 @@ struct WatcherTerminalCommitSideEffects {
 fn watcher_terminal_commit_side_effects_for_test(
     terminal_output_committed: bool,
     gate_outcome: TuiCompletionGateOutcome,
+    terminal_delivery_committed: bool,
 ) -> WatcherTerminalCommitSideEffects {
-    let lifecycle_allowed =
-        terminal_output_committed && !matches!(gate_outcome, TuiCompletionGateOutcome::TimedOut);
+    let lifecycle_allowed = terminal_output_committed
+        && !watcher_tui_gate_blocks_lifecycle(gate_outcome, terminal_delivery_committed);
     WatcherTerminalCommitSideEffects {
         advance_runtime_binding: watcher_commit_should_advance_runtime_binding(
             terminal_output_committed,
             gate_outcome,
+            terminal_delivery_committed,
         ),
         advance_confirmed_end: lifecycle_allowed,
         clear_inflight: lifecycle_allowed,
@@ -1882,7 +1949,8 @@ mod runtime_binding_offset_tests {
     fn committed_watcher_output_advances_runtime_binding_even_without_inflight() {
         assert!(watcher_commit_should_advance_runtime_binding(
             true,
-            TuiCompletionGateOutcome::ConfirmedIdle
+            TuiCompletionGateOutcome::ConfirmedIdle,
+            false,
         ));
     }
 
@@ -1890,22 +1958,27 @@ mod runtime_binding_offset_tests {
     fn uncommitted_watcher_output_does_not_advance_runtime_binding() {
         assert!(!watcher_commit_should_advance_runtime_binding(
             false,
-            TuiCompletionGateOutcome::ConfirmedIdle
+            TuiCompletionGateOutcome::ConfirmedIdle,
+            false,
         ));
     }
 
     #[test]
-    fn tui_gate_timeout_keeps_runtime_binding_at_previous_committed_offset() {
+    fn tui_timeout_without_delivery_keeps_previous_runtime_binding() {
         assert!(!watcher_commit_should_advance_runtime_binding(
             true,
-            TuiCompletionGateOutcome::TimedOut
+            TuiCompletionGateOutcome::TimedOut,
+            false,
         ));
     }
 
     #[test]
-    fn tui_completion_gate_timeout_preserves_offsets_inflight_and_late_output_retry() {
-        let side_effects =
-            watcher_terminal_commit_side_effects_for_test(true, TuiCompletionGateOutcome::TimedOut);
+    fn tui_completion_gate_timeout_without_terminal_delivery_preserves_cleanup_for_retry() {
+        let side_effects = watcher_terminal_commit_side_effects_for_test(
+            true,
+            TuiCompletionGateOutcome::TimedOut,
+            false,
+        );
 
         assert!(!side_effects.advance_runtime_binding);
         assert!(!side_effects.advance_confirmed_end);
@@ -1916,12 +1989,28 @@ mod runtime_binding_offset_tests {
         let confirmed = watcher_terminal_commit_side_effects_for_test(
             true,
             TuiCompletionGateOutcome::ConfirmedIdle,
+            false,
         );
         assert!(confirmed.advance_runtime_binding);
         assert!(confirmed.advance_confirmed_end);
         assert!(confirmed.clear_inflight);
         assert!(confirmed.finish_restored_turn);
         assert!(!confirmed.late_output_retry_possible);
+    }
+
+    #[test]
+    fn tui_completion_gate_timeout_after_terminal_delivery_allows_lifecycle_cleanup() {
+        let side_effects = watcher_terminal_commit_side_effects_for_test(
+            true,
+            TuiCompletionGateOutcome::TimedOut,
+            true,
+        );
+
+        assert!(side_effects.advance_runtime_binding);
+        assert!(side_effects.advance_confirmed_end);
+        assert!(side_effects.clear_inflight);
+        assert!(side_effects.finish_restored_turn);
+        assert!(!side_effects.late_output_retry_possible);
     }
 
     #[test]
@@ -4586,6 +4675,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &watcher_provider,
             channel_id.get(),
         );
+        let inflight_identity_before_relay =
+            matching_watcher_turn_identity(inflight_before_relay.as_ref(), &tmux_session_name);
         let should_adopt_inflight_terminal_message_ids = !external_input_lease_before_relay
             || watcher_inflight_represents_external_input(inflight_before_relay.as_ref());
         if should_adopt_inflight_terminal_message_ids
@@ -5508,6 +5599,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         }
         let runtime_binding_candidate_offset = terminal_output_committed
             .then(|| terminal_event_consumed_offset(current_offset, &all_data));
+        let terminal_delivery_committed = relay_ok
+            && has_assistant_response
+            && mark_watcher_terminal_delivery_committed(
+                &watcher_provider,
+                channel_id,
+                &tmux_session_name,
+                inflight_identity_before_relay.as_ref(),
+                &full_response,
+                turn_data_start_offset,
+                last_observed_generation_mtime_ns,
+                runtime_binding_candidate_offset.unwrap_or(current_offset),
+            );
 
         // #2161 TUI completion gate: ClaudeTui sessions can land a
         // `result` JSONL event before the interactive pane is actually
@@ -5541,10 +5644,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             if watcher_commit_should_advance_runtime_binding(
                 terminal_output_committed,
                 watcher_tui_gate_outcome,
+                terminal_delivery_committed,
             ) {
                 // Keep the SSH-direct replay watermark in lockstep with bytes the
-                // watcher actually committed. TimedOut gates keep this as a
-                // candidate only so the next pass can still see tail output.
+                // watcher actually committed. TimedOut gates only keep this as
+                // a candidate when the terminal delivery has not been mirrored.
                 crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
                     &tmux_session_name,
                     &output_path,
@@ -5553,8 +5657,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
         }
         // #2293 H2 — single boolean threaded through every terminal side
-        // effect below. On `TimedOut` the pane is still busy past the bounded
-        // wait, so we must SKIP:
+        // effect below. On `TimedOut` before the terminal delivery is durably
+        // mirrored, the pane is still busy past the bounded wait, so we must SKIP:
         //   * ✅ reaction on the user message
         //   * session transcript / turn-analytics persist (writes a row that
         //     claims completion at this exact JSONL offset, which is wrong
@@ -5570,10 +5674,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         //     pane)
         //   * terminal-finalize stop decision (would stop the watcher while
         //     output is still flowing)
-        // The placeholder sweeper / next watcher pass reconciles when the
-        // pane finally reports idle, mirroring the bridge-side behaviour.
-        let lifecycle_stage_paused =
-            matches!(watcher_tui_gate_outcome, TuiCompletionGateOutcome::TimedOut);
+        // Once watcher delivery is durably mirrored, match the bridge path:
+        // suppress visible completion on timeout, but allow lifecycle cleanup
+        // to release inflight/mailbox state and drain queued follow-ups.
+        let lifecycle_stage_paused = watcher_tui_gate_blocks_lifecycle(
+            watcher_tui_gate_outcome,
+            terminal_delivery_committed,
+        );
         if lifecycle_stage_paused {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
@@ -5882,12 +5989,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         };
 
         // #2161 (Codex round-2 H1): if the TUI quiescence gate timed out
-        // above, treat the watcher dispatch finalization as "preserved":
-        // don't complete the dispatch, don't kick off queued work, and
-        // leave inflight alone so the next watcher pass / placeholder
-        // sweeper observes the still-busy pane and reconciles.
-        let dispatch_ok = if matches!(watcher_tui_gate_outcome, TuiCompletionGateOutcome::TimedOut)
-        {
+        // before terminal delivery was durably mirrored, treat the watcher
+        // dispatch finalization as "preserved": don't complete the dispatch,
+        // don't kick off queued work, and leave inflight alone so the next
+        // watcher pass / placeholder sweeper observes the still-busy pane and
+        // reconciles. Once delivery is mirrored, match the bridge path and
+        // allow cleanup while still suppressing visible completion.
+        let dispatch_ok = if lifecycle_stage_paused {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 provider = %watcher_provider.as_str(),
@@ -6556,25 +6664,54 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 #[cfg(test)]
 mod tests {
     use super::{
-        RelaySlotGuard, Utf8ChunkDecoder, adopt_watcher_terminal_message_ids_from_inflight,
-        build_watcher_streaming_edit_text,
+        RelaySlotGuard, TuiCompletionGateOutcome, Utf8ChunkDecoder,
+        adopt_watcher_terminal_message_ids_from_inflight, build_watcher_streaming_edit_text,
         discard_restored_response_seed_before_no_inflight_terminal_relay,
         discard_watcher_pending_buffer_after_suppressed_turn,
-        legacy_wrapper_prompt_candidates_from_pane, should_probe_tmux_liveness,
-        terminal_event_consumed_offset, watcher_batch_contains_assistant_event,
-        watcher_batch_contains_relayable_response,
+        legacy_wrapper_prompt_candidates_from_pane, mark_watcher_terminal_delivery_committed,
+        should_probe_tmux_liveness, terminal_event_consumed_offset,
+        watcher_batch_contains_assistant_event, watcher_batch_contains_relayable_response,
         watcher_direct_terminal_should_commit_session_idle,
         watcher_fallback_edit_failure_can_delete_original_placeholder,
         watcher_inflight_represents_external_input, watcher_jsonl_turn_state_ready_for_input,
         watcher_should_clear_stale_terminal_message_ids, watcher_should_defer_delegated_fresh_idle,
         watcher_should_delete_suppressed_placeholder,
         watcher_should_suppress_streaming_after_bridge_delivery,
-        watcher_terminal_edit_consumes_placeholder, watcher_terminal_token_update_status,
+        watcher_terminal_commit_side_effects_for_test, watcher_terminal_edit_consumes_placeholder,
+        watcher_terminal_token_update_status,
     };
+    use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::discord::InflightTurnState;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
-    use crate::services::provider::ProviderKind;
-    use serenity::all::MessageId;
+    use crate::services::discord::{
+        mailbox_enqueue_intervention, mailbox_snapshot, mailbox_take_next_soft_intervention,
+        mailbox_try_start_turn,
+    };
+    use crate::services::provider::{CancelToken, ProviderKind};
+    use crate::services::turn_orchestrator::{Intervention, InterventionMode};
+    use serenity::all::{ChannelId, MessageId, UserId};
+    use std::sync::{LazyLock, Mutex};
+
+    static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct AgentdeskRootGuard(Option<std::ffi::OsString>);
+
+    impl AgentdeskRootGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+            unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", path) };
+            Self(previous)
+        }
+    }
+
+    impl Drop for AgentdeskRootGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
 
     #[test]
     fn terminal_event_consumed_offset_excludes_buffered_tail() {
@@ -6597,6 +6734,167 @@ mod tests {
         // #2840: dropping without an explicit release (panic / `?` / abort) must
         // still free the slot so a replacement watcher is not wedged.
         assert_eq!(slot.load(Ordering::Acquire), 0, "Drop released the slot");
+    }
+
+    #[test]
+    fn watcher_terminal_delivery_commit_mirrors_bridge_inflight_fields() {
+        let _lock = match TEST_ENV_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(987_2999);
+        let tmux_session_name = "AgentDesk-claude-adk-cc";
+        let mut state = InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            Some("adk-cc".to_string()),
+            42,
+            1001,
+            1002,
+            "prompt".to_string(),
+            Some("session-2999".to_string()),
+            Some(tmux_session_name.to_string()),
+            Some("/tmp/agentdesk-2999-output.jsonl".to_string()),
+            None,
+            64,
+        );
+        state.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        state.turn_start_offset = Some(64);
+        crate::services::discord::inflight::save_inflight_state(&state).expect("save inflight");
+        let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(&state);
+
+        assert!(mark_watcher_terminal_delivery_committed(
+            &provider,
+            channel_id,
+            tmux_session_name,
+            Some(&identity),
+            "delivered response",
+            64,
+            Some(7),
+            128,
+        ));
+
+        let persisted =
+            crate::services::discord::inflight::load_inflight_state(&provider, channel_id.get())
+                .expect("load inflight");
+        assert!(persisted.terminal_delivery_committed);
+        assert_eq!(persisted.full_response, "delivered response");
+        assert_eq!(persisted.response_sent_offset, "delivered response".len());
+        assert_eq!(persisted.last_offset, 128);
+        assert_eq!(persisted.last_watcher_relayed_offset, Some(64));
+        assert_eq!(persisted.last_watcher_relayed_generation_mtime_ns, Some(7));
+    }
+
+    #[tokio::test]
+    async fn terminal_delivery_timeout_cleanup_releases_mailbox_and_preserves_followup_queue() {
+        let _lock = match TEST_ENV_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(987_3000);
+        let tmux_session_name = "AgentDesk-claude-adk-cc";
+        assert!(
+            mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                std::sync::Arc::new(CancelToken::new()),
+                UserId::new(42),
+                MessageId::new(1001),
+            )
+            .await
+        );
+
+        let enqueue = mailbox_enqueue_intervention(
+            &shared,
+            &provider,
+            channel_id,
+            Intervention {
+                author_id: UserId::new(99),
+                author_is_bot: false,
+                message_id: MessageId::new(2001),
+                source_message_ids: vec![MessageId::new(2001)],
+                text: "queued follow-up".to_string(),
+                mode: InterventionMode::Soft,
+                created_at: std::time::Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+                pending_uploads: Vec::new(),
+                voice_announcement: None,
+            },
+        )
+        .await;
+        assert!(enqueue.enqueued);
+
+        let mut state = InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            Some("adk-cc".to_string()),
+            42,
+            1001,
+            1002,
+            "prompt".to_string(),
+            Some("session-2999".to_string()),
+            Some(tmux_session_name.to_string()),
+            Some("/tmp/agentdesk-2999-output.jsonl".to_string()),
+            None,
+            64,
+        );
+        state.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        state.turn_start_offset = Some(64);
+        crate::services::discord::inflight::save_inflight_state(&state).expect("save inflight");
+        let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(&state);
+        assert!(mark_watcher_terminal_delivery_committed(
+            &provider,
+            channel_id,
+            tmux_session_name,
+            Some(&identity),
+            "delivered response",
+            64,
+            Some(7),
+            128,
+        ));
+
+        let side_effects = watcher_terminal_commit_side_effects_for_test(
+            true,
+            TuiCompletionGateOutcome::TimedOut,
+            true,
+        );
+        assert!(side_effects.clear_inflight);
+        assert!(side_effects.finish_restored_turn);
+        crate::services::discord::inflight::clear_inflight_state(&provider, channel_id.get());
+        super::finish_restored_watcher_active_turn(
+            &shared,
+            &provider,
+            channel_id,
+            true,
+            false,
+            false,
+            "terminal_delivery_timeout_cleanup_test",
+        )
+        .await;
+
+        assert!(
+            crate::services::discord::inflight::load_inflight_state(&provider, channel_id.get())
+                .is_none()
+        );
+        let snapshot = mailbox_snapshot(&shared, channel_id).await;
+        assert!(snapshot.cancel_token.is_none());
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+        let next = mailbox_take_next_soft_intervention(&shared, &provider, channel_id)
+            .await
+            .into_intervention()
+            .map(|(intervention, _)| intervention.text);
+        assert_eq!(next.as_deref(), Some("queued follow-up"));
     }
 
     #[test]
