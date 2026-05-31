@@ -125,6 +125,9 @@ fn session_bound_terminal_delivery_route_decision(
     provider: &ProviderKind,
     channel_id: u64,
 ) -> SessionBoundTerminalDeliveryRouteDecision {
+    if session_bound_external_lease_blocks_delivery(provider, channel_id, tmux_session_name) {
+        return SessionBoundTerminalDeliveryRouteDecision::Skipped;
+    }
     match session_bound_terminal_delivery_route_or_skip(
         inflight,
         tmux_session_name,
@@ -134,6 +137,25 @@ fn session_bound_terminal_delivery_route_decision(
         Ok(route) => SessionBoundTerminalDeliveryRouteDecision::Route(route),
         Err(_) => SessionBoundTerminalDeliveryRouteDecision::Skipped,
     }
+}
+
+fn session_bound_external_lease_blocks_delivery(
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_session_name: &str,
+) -> bool {
+    let Some(lease) = crate::services::tui_prompt_dedupe::external_input_relay_lease(
+        provider.as_str(),
+        tmux_session_name,
+        channel_id,
+    ) else {
+        return false;
+    };
+    !matches!(
+        lease.relay_owner,
+        crate::services::tui_prompt_dedupe::ExternalInputRelayOwner::Unassigned
+            | crate::services::tui_prompt_dedupe::ExternalInputRelayOwner::SessionBoundRelay
+    )
 }
 
 fn session_bound_should_send_new_chunks_for_placeholder(response_text: &str) -> bool {
@@ -1248,6 +1270,35 @@ mod tests {
                 ProviderKind::Codex.as_str(),
                 tmux,
                 4242,
+            )
+        );
+    }
+
+    #[test]
+    fn terminal_delivery_route_skips_bridge_owned_external_lease_without_inflight() {
+        let tmux = "AgentDesk-codex-bridge-owned-direct";
+        crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+            ProviderKind::Codex.as_str(),
+            tmux,
+            crate::services::tui_prompt_dedupe::ExternalInputRelayLease {
+                channel_id: Some(4243),
+                turn_id: Some("external:codex:4243:trace:1".to_string()),
+                session_key: Some("host:AgentDesk-codex-bridge-owned-direct".to_string()),
+                relay_owner:
+                    crate::services::tui_prompt_dedupe::ExternalInputRelayOwner::BridgeAdapter,
+                runtime_kind: Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui),
+            },
+        );
+
+        assert_eq!(
+            session_bound_terminal_delivery_route_decision(None, tmux, &ProviderKind::Codex, 4243,),
+            SessionBoundTerminalDeliveryRouteDecision::Skipped
+        );
+        assert!(
+            crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
+                ProviderKind::Codex.as_str(),
+                tmux,
+                4243,
             )
         );
     }

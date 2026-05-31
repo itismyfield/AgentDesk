@@ -121,9 +121,12 @@ Control-flow steps include `cancel_turn` (POSTs
 `send_prompts_concurrent` (starts multiple prompt dispatches without the normal
 per-step sleep), `capture_session_identity`, and `assert_session_preserved`
 (compares tmux session name, pane ids, pane pids, and cwd after restart).
-`send_keys_sequence` sends one tmux `send-keys` call with explicit key args such
-as `C-u` and `C-m`; `E-21` uses it to cover direct TUI input where a stale draft
-is cleared by a real control key before the submitted prompt is relayed.
+`send_keys_sequence` sends explicit tmux key args such as `C-u` and `C-m`.
+By default it uses one tmux `send-keys` call; scenarios can set
+`key_interval_s` to send the same ordered key list one key at a time when a TUI
+composer must process a control key before Enter. `E-21` uses that mode to
+cover direct TUI input where a stale draft is cleared by a real control key
+before the submitted prompt is relayed.
 
 Observation assertions now include negative and edit-aware primitives:
 `raw_text_absent`, `marker_absent`, `chrome_count`,

@@ -552,6 +552,39 @@ def send_prompts_concurrent(
     return sorted(results, key=lambda item: int(item["index"]))
 
 
+def send_tmux_key_sequence(
+    session_name: str,
+    keys: list[str],
+    *,
+    key_interval_s: float = 0.0,
+) -> dict[str, Any]:
+    if not keys:
+        raise assertions.AssertionError("send_tmux_key_sequence requires keys")
+    if key_interval_s <= 0:
+        if not tmux.send_keys(session_name, *keys):
+            raise assertions.AssertionError(
+                f"tmux send-keys sequence failed for session {session_name!r}"
+            )
+        return {"session": session_name, "count": len(keys), "mode": "single_call"}
+
+    sent = 0
+    for idx, key in enumerate(keys):
+        if not tmux.send_keys(session_name, key):
+            raise assertions.AssertionError(
+                "tmux send-keys sequence failed "
+                f"for session {session_name!r} at index={idx} key={key!r}"
+            )
+        sent += 1
+        if idx < len(keys) - 1:
+            time.sleep(key_interval_s)
+    return {
+        "session": session_name,
+        "count": sent,
+        "mode": "per_key",
+        "key_interval_s": key_interval_s,
+    }
+
+
 def build_provider_hold_prompt(params: Any, *, scenario_id: str) -> str:
     """Build a provider-agnostic stop-mid-turn prompt fixture.
 
@@ -1727,12 +1760,15 @@ def run_one_cell(
             if bool(params.get("mark_prompt_sent", True)):
                 window.mark_prompt_sent()
             key_args = [str(key) for key in keys]
-            if not tmux.send_keys(session_name, *key_args):
-                raise assertions.AssertionError(
-                    f"tmux send-keys sequence failed for session {session_name!r}"
-                )
+            key_interval_s = float(
+                params.get("key_interval_s", params.get("interval_s", 0.0))
+            )
             record.setdefault("tmux_key_sequences", []).append(
-                {"session": session_name, "count": len(key_args)}
+                send_tmux_key_sequence(
+                    session_name,
+                    key_args,
+                    key_interval_s=key_interval_s,
+                )
             )
             time.sleep(float(params.get("sleep_s", 0.2)))
         elif "send_keys" in step:

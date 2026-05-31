@@ -547,7 +547,11 @@ fn external_input_relay_owner_for_watchers(
     }
 
     if session_bound_discord_delivery_enabled {
-        ExternalInputRelayOwner::SessionBoundRelay
+        // TUI-direct observations do not create a foreground inflight row yet.
+        // A session-bound StreamRelay can only be the terminal owner for an
+        // external-input turn once such an inflight exists; otherwise the
+        // watcher can acknowledge frames without a Discord terminal commit.
+        ExternalInputRelayOwner::BridgeAdapter
     } else {
         ExternalInputRelayOwner::TmuxWatcher
     }
@@ -2624,8 +2628,8 @@ mod tests {
                 Some(&stale_binding_path),
                 true,
             ),
-            ExternalInputRelayOwner::SessionBoundRelay,
-            "the stale binding path is what caused the hook-observed regression"
+            ExternalInputRelayOwner::BridgeAdapter,
+            "TUI-direct external turns have no synthetic inflight, so bridge tail owns response delivery"
         );
         assert_eq!(
             external_input_relay_owner_for_watchers(
@@ -2669,7 +2673,7 @@ mod tests {
                 Some(&output_path),
                 true,
             ),
-            ExternalInputRelayOwner::SessionBoundRelay
+            ExternalInputRelayOwner::BridgeAdapter
         );
         assert_eq!(
             external_input_relay_owner_for_watchers(
