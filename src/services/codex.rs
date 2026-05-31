@@ -35,6 +35,8 @@ use crate::services::tmux_diagnostics::{
 const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
 const TMUX_PROMPT_B64_CHUNK_PREFIX: &str = "__AGENTDESK_B64_CHUNK__:";
 const TMUX_PROMPT_B64_CHUNK_SIZE: usize = 700;
+#[cfg(unix)]
+const CODEX_PIPE_TMUX_SUBMIT_KEYS: &[&str] = &["C-m"];
 pub(crate) const CODEX_BACKGROUND_TASK_NOTIFICATION_ID: &str = "codex-background-event";
 pub(crate) const CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS: &str = "completed";
 
@@ -2228,6 +2230,13 @@ fn codex_pipe_prompt_buffer_text(prompt: &str) -> String {
 }
 
 #[cfg(unix)]
+fn codex_pipe_tmux_submit_keys() -> &'static [&'static str] {
+    // Match the direct tmux input path: send an explicit carriage return after
+    // raw paste so the wrapper's terminal input loop submits the line.
+    CODEX_PIPE_TMUX_SUBMIT_KEYS
+}
+
+#[cfg(unix)]
 fn send_codex_pipe_prompt_to_tmux(tmux_session_name: &str, prompt: &str) -> Result<(), String> {
     let encoded = codex_pipe_prompt_buffer_text(prompt);
     let buffer_name = format!("agentdesk-codex-pipe-input-{}", uuid::Uuid::new_v4());
@@ -2256,7 +2265,10 @@ fn send_codex_pipe_prompt_to_tmux(tmux_session_name: &str, prompt: &str) -> Resu
         };
         return Err(format!("tmux paste-buffer failed: {detail}"));
     }
-    let enter_output = crate::services::platform::tmux::send_keys(tmux_session_name, &["Enter"])?;
+    let enter_output = crate::services::platform::tmux::send_keys(
+        tmux_session_name,
+        codex_pipe_tmux_submit_keys(),
+    )?;
     if !enter_output.status.success() {
         let stderr = String::from_utf8_lossy(&enter_output.stderr)
             .trim()
@@ -2266,7 +2278,7 @@ fn send_codex_pipe_prompt_to_tmux(tmux_session_name: &str, prompt: &str) -> Resu
         } else {
             stderr
         };
-        return Err(format!("tmux send Enter failed: {detail}"));
+        return Err(format!("tmux send C-m failed: {detail}"));
     }
     Ok(())
 }
@@ -3237,6 +3249,31 @@ mod tui_hosting_tests {
         assert!(!should_preserve_live_reused_provider_session(
             None, true, false
         ));
+    }
+}
+
+#[cfg(test)]
+mod codex_pipe_followup_transport_tests {
+    #[cfg(unix)]
+    #[test]
+    fn reused_pipe_wrapper_submit_key_is_carriage_return() {
+        assert_eq!(
+            super::codex_pipe_tmux_submit_keys(),
+            &["C-m"],
+            "reused codex-pipe tmux follow-ups must submit with the same C-m key used by direct tmux input"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reused_pipe_wrapper_buffer_keeps_protocol_line_terminated() {
+        let buffer = super::codex_pipe_prompt_buffer_text("[E2E:E2:TURN-2]\nreply json");
+
+        assert!(buffer.starts_with(super::TMUX_PROMPT_B64_PREFIX));
+        assert!(
+            buffer.ends_with('\n'),
+            "the raw paste buffer must still terminate the wrapper protocol line before C-m submit"
+        );
     }
 }
 
