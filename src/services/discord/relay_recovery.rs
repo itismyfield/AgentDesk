@@ -48,6 +48,8 @@ pub(in crate::services::discord) struct RelayRecoveryEvidence {
     pub tmux_session: Option<String>,
     pub tmux_alive: Option<bool>,
     pub watcher_attached: bool,
+    pub watcher_owner_channel_id: Option<u64>,
+    pub watcher_owns_live_relay: bool,
     pub bridge_inflight_present: bool,
     pub mailbox_has_cancel_token: bool,
     pub mailbox_active_user_msg_id: Option<u64>,
@@ -55,6 +57,8 @@ pub(in crate::services::discord) struct RelayRecoveryEvidence {
     pub pending_thread_proof: bool,
     pub stale_thread_proof: bool,
     pub desynced: bool,
+    pub last_capture_offset: Option<u64>,
+    pub last_relay_offset: u64,
     pub unread_bytes: Option<u64>,
     pub last_outbound_activity_ms: Option<i64>,
 }
@@ -223,6 +227,8 @@ fn evidence_from_snapshot(snapshot: &RelayHealthSnapshot) -> RelayRecoveryEviden
         tmux_session: snapshot.tmux_session.clone(),
         tmux_alive: snapshot.tmux_alive,
         watcher_attached: snapshot.watcher_attached,
+        watcher_owner_channel_id: snapshot.watcher_owner_channel_id,
+        watcher_owns_live_relay: snapshot.watcher_owns_live_relay,
         bridge_inflight_present: snapshot.bridge_inflight_present,
         mailbox_has_cancel_token: snapshot.mailbox_has_cancel_token,
         mailbox_active_user_msg_id: snapshot.mailbox_active_user_msg_id,
@@ -230,6 +236,8 @@ fn evidence_from_snapshot(snapshot: &RelayHealthSnapshot) -> RelayRecoveryEviden
         pending_thread_proof: snapshot.pending_thread_proof,
         stale_thread_proof: snapshot.stale_thread_proof,
         desynced: snapshot.desynced,
+        last_capture_offset: snapshot.last_capture_offset,
+        last_relay_offset: snapshot.last_relay_offset,
         unread_bytes: snapshot.unread_bytes,
         last_outbound_activity_ms: snapshot.last_outbound_activity_ms,
     }
@@ -697,6 +705,7 @@ fn clear_auto_heal_attempts_for_tests() {
 
 #[cfg(test)]
 mod tests {
+    use super::super::relay_health::RelayStallClassifier;
     use super::*;
 
     fn snapshot() -> RelayHealthSnapshot {
@@ -815,6 +824,54 @@ mod tests {
         assert_eq!(decision.action, RelayRecoveryActionKind::ReattachWatcher);
         assert!(decision.auto_heal.eligible);
         assert_eq!(decision.auto_heal.skipped_reason, None);
+    }
+
+    #[test]
+    fn watcher_owned_live_relay_with_unread_bytes_and_zero_relay_offset_is_actionable() {
+        let snapshot = RelayHealthSnapshot {
+            provider: "claude".to_string(),
+            channel_id: 1509350393350459434,
+            active_turn: RelayActiveTurn::Foreground,
+            tmux_session: Some("AgentDesk-claude-adk-claude-pipe-e2e".to_string()),
+            tmux_alive: Some(true),
+            watcher_attached: true,
+            watcher_owner_channel_id: Some(1509350393350459434),
+            watcher_owns_live_relay: true,
+            bridge_inflight_present: true,
+            mailbox_has_cancel_token: true,
+            mailbox_active_user_msg_id: Some(9001),
+            bridge_current_msg_id: Some(9002),
+            last_capture_offset: Some(7968),
+            last_relay_offset: 0,
+            unread_bytes: Some(7968),
+            desynced: true,
+            ..snapshot()
+        };
+        let relay_stall_state = RelayStallClassifier::classify(&snapshot);
+        let decision = plan_relay_recovery(&snapshot, relay_stall_state, 1_000);
+
+        assert_eq!(relay_stall_state, RelayStallState::TmuxAliveRelayDead);
+        assert_ne!(decision.action, RelayRecoveryActionKind::ObserveOnly);
+        assert_eq!(decision.action, RelayRecoveryActionKind::ReattachWatcher);
+        assert!(
+            decision.auto_heal.bounded,
+            "relay-dead foreground turns must surface bounded recovery metadata"
+        );
+        assert_eq!(decision.provider, "claude");
+        assert_eq!(decision.channel_id, 1509350393350459434);
+        assert_eq!(
+            decision.affected.tmux_session.as_deref(),
+            Some("AgentDesk-claude-adk-claude-pipe-e2e")
+        );
+        assert_eq!(decision.evidence.unread_bytes, Some(7968));
+        assert_eq!(decision.evidence.last_capture_offset, Some(7968));
+        assert_eq!(decision.evidence.last_relay_offset, 0);
+        assert_eq!(
+            decision.evidence.watcher_owner_channel_id,
+            Some(1509350393350459434)
+        );
+        assert!(decision.evidence.watcher_owns_live_relay);
+        assert_eq!(decision.evidence.active_turn, RelayActiveTurn::Foreground);
     }
 
     #[test]

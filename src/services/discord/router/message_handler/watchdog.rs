@@ -438,10 +438,21 @@ fn schedule_pending_paused_turn_watcher_attach(request: PausedTurnWatcherAttachR
         async move {
             for attempt in 1..=PAUSED_WATCHER_COLD_START_RETRY_ATTEMPTS {
                 tokio::time::sleep(PAUSED_WATCHER_COLD_START_RETRY_DELAY).await;
-                if paused_watcher_tmux_session_has_live_pane(&request.tmux_session_name)
-                    || active_watcher_owner_for_tmux(&request.shared, &request.tmux_session_name)
-                        .is_some()
+                if let Some(owner) =
+                    active_watcher_owner_for_tmux(&request.shared, &request.tmux_session_name)
                 {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] ↻ Skipping stale paused tmux watcher cold-start retry for channel {} via attempt {attempt}; tmux {} is already owned by {}",
+                        request.channel_id,
+                        request.tmux_session_name,
+                        owner
+                    );
+                    remove_pending_paused_watcher_attach(&key);
+                    return;
+                }
+
+                if paused_watcher_tmux_session_has_live_pane(&request.tmux_session_name) {
                     let owner = attach_paused_turn_watcher_inner(request.clone(), false);
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
@@ -644,16 +655,25 @@ fn attach_paused_turn_watcher_inner(
 #[cfg(all(test, unix))]
 mod cold_start_retry_tests {
     use super::*;
+    use crate::services::discord::{tmux, tmux_watcher_now_ms};
+    use std::sync::{LazyLock, Mutex, MutexGuard};
     use tokio::time::{Duration, sleep, timeout};
 
-    struct RetryTestGuard;
+    static RETRY_TEST_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct RetryTestGuard {
+        _lock: MutexGuard<'static, ()>,
+    }
 
     impl RetryTestGuard {
         fn new() -> Self {
+            let lock = RETRY_TEST_MUTEX
+                .lock()
+                .expect("paused watcher retry test lock poisoned");
             clear_pending_paused_watcher_attaches_for_tests();
             set_test_paused_watcher_tmux_live_override(Some(&[]));
             set_test_suppress_paused_watcher_task_spawn(true);
-            Self
+            Self { _lock: lock }
         }
     }
 
@@ -662,6 +682,26 @@ mod cold_start_retry_tests {
             set_test_paused_watcher_tmux_live_override(None);
             set_test_suppress_paused_watcher_task_spawn(false);
             clear_pending_paused_watcher_attaches_for_tests();
+        }
+    }
+
+    fn test_watcher_handle(
+        tmux_session_name: &str,
+        output_path: &str,
+        paused: bool,
+    ) -> TmuxWatcherHandle {
+        TmuxWatcherHandle {
+            tmux_session_name: tmux_session_name.to_string(),
+            output_path: output_path.to_string(),
+            paused: Arc::new(std::sync::atomic::AtomicBool::new(paused)),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_heartbeat_ts_ms: Arc::new(
+                std::sync::atomic::AtomicI64::new(tmux_watcher_now_ms()),
+            ),
+            mailbox_finalize_owed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -724,6 +764,68 @@ mod cold_start_retry_tests {
         assert!(
             watcher.paused.load(std::sync::atomic::Ordering::Relaxed),
             "reattached restored-turn watcher must stay paused until turn bridge hands off"
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_start_retry_does_not_repause_existing_live_handoff_watcher() {
+        let _guard = RetryTestGuard::new();
+        let shared = super::super::super::super::make_shared_data_for_tests();
+        let channel = serenity::ChannelId::new(1485506232256168201);
+        let tmux_name = format!(
+            "AgentDesk-claude-cold-start-active-owner-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let output_path = "/tmp/agentdesk-cold-start-active-owner-output.jsonl";
+
+        let owner = attach_paused_turn_watcher(
+            &shared,
+            Arc::new(poise::serenity_prelude::Http::new("Bot test-token")),
+            &ProviderKind::Claude,
+            channel,
+            Some(tmux_name.clone()),
+            Some(output_path.to_string()),
+            0,
+            "turn_start_headless",
+        );
+
+        assert_eq!(owner, channel);
+        assert!(
+            !shared.tmux_watchers.contains_key(&channel),
+            "cold-start attach must not create a dead-pane watcher immediately"
+        );
+        assert_eq!(
+            pending_paused_watcher_attach_count_for_tests(),
+            1,
+            "dead tmux attach should leave a bounded retry registered"
+        );
+
+        let active = test_watcher_handle(&tmux_name, output_path, false);
+        let paused_flag = active.paused.clone();
+        let claim = tmux::claim_or_reuse_watcher(
+            &shared.tmux_watchers,
+            channel,
+            active,
+            &ProviderKind::Claude,
+            "unit-test-tmux-ready-handoff",
+        );
+        assert_eq!(claim.owner_channel_id(), channel);
+        assert!(!paused_flag.load(std::sync::atomic::Ordering::Relaxed));
+
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if pending_paused_watcher_attach_count_for_tests() == 0 {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("retry should retire itself when a handoff watcher already owns the tmux");
+
+        assert!(
+            !paused_flag.load(std::sync::atomic::Ordering::Relaxed),
+            "stale cold-start retry must not pause a watcher already unpaused by turn bridge handoff"
         );
     }
 }
