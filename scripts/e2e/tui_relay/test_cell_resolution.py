@@ -129,9 +129,9 @@ class ScenarioFilter(unittest.TestCase):
         self.assertIn("E-7", ids)
         self.assertIn("E-18", ids)
         self.assertIn("E-20", ids)
-        self.assertIn("E-22", ids)
-        self.assertIn("E-23", ids)
         self.assertIn("E-25", ids)
+        self.assertNotIn("E-22", ids)
+        self.assertNotIn("E-23", ids)
         self.assertNotIn("E-13", ids)
         self.assertNotIn("E-6", ids)
         self.assertNotIn("E-4", ids)
@@ -146,9 +146,9 @@ class ScenarioFilter(unittest.TestCase):
         self.assertIn("E-19", ids)
         self.assertIn("E-20", ids)
         self.assertIn("E-21", ids)
-        self.assertIn("E-22", ids)
-        self.assertIn("E-23", ids)
         self.assertIn("E-25", ids)
+        self.assertNotIn("E-22", ids)
+        self.assertNotIn("E-23", ids)
         e17 = next(s for s in scenarios if s.get("id") == "E-17")
         self.assertIn("skip_reason", e17)
         self.assertIn("acceptance_criteria", e17)
@@ -209,6 +209,16 @@ class ScenarioFilter(unittest.TestCase):
                     {"text_present": "[E2E:E19:POST] E19_SECRET_ALPHA_5AF3C2"},
                     e19["assertions"],
                 )
+                health_steps = [
+                    step["assert_health"]
+                    for step in e19["steps"]
+                    if "assert_health" in step
+                ]
+                self.assertEqual(len(health_steps), 1)
+                self.assertGreaterEqual(health_steps[0]["timeout_s"], 60)
+                self.assertLessEqual(health_steps[0]["poll_interval_s"], 2)
+                self.assertEqual(health_steps[0]["global_active_max"], 0)
+                self.assertEqual(health_steps[0]["global_finalizing_max"], 0)
             else:
                 self.assertNotIn("E-19", ids)
 
@@ -230,11 +240,11 @@ class ScenarioFilter(unittest.TestCase):
             else:
                 self.assertNotIn("E-21", ids)
 
-    def test_e22_tool_use_text_completeness_scope_is_relay_backed(self):
+    def test_e22_tool_use_text_completeness_scope_is_claude_relay_backed(self):
         for cell in driver.SUPPORTED_CELLS:
             scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
             ids = {str(s.get("id")) for s in scenarios}
-            if cell == "claude-e":
+            if cell not in {"claude-pipe", "claude-tui"}:
                 self.assertNotIn("E-22", ids)
                 continue
             e22 = next(s for s in scenarios if s.get("id") == "E-22")
@@ -259,9 +269,13 @@ class ScenarioFilter(unittest.TestCase):
                 e22["assertions"],
             )
 
-    def test_e23_premature_completion_guard_covers_all_cells(self):
+    def test_e23_premature_completion_guard_covers_claude_tool_capable_cells(self):
         for cell in driver.SUPPORTED_CELLS:
             scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
+            ids = {str(s.get("id")) for s in scenarios}
+            if cell not in {"claude-pipe", "claude-tui", "claude-e"}:
+                self.assertNotIn("E-23", ids)
+                continue
             e23 = next(s for s in scenarios if s.get("id") == "E-23")
             self.assertIn("acceptance_criteria", e23)
             self.assertNotIn("skip_reason", e23)
