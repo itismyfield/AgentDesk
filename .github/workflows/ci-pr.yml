@@ -68,6 +68,7 @@ jobs:
               - 'src/services/tmux_common.rs'
             pg_db:
               - '.github/workflows/**'
+              - 'justfile'
               - 'migrations/**'
               - 'src/db/**'
               - 'src/dispatch/**'
@@ -98,6 +99,7 @@ jobs:
               - 'src/**'
               - 'tests/**'
               - 'migrations/**'
+              - 'justfile'
               - 'policies/**'
               - 'scripts/**'
               - '.github/workflows/**'
@@ -119,10 +121,11 @@ jobs:
             # rust_compile is a narrower subset of rust_or_policy: only paths
             # whose change can plausibly alter Rust binary output (and therefore
             # require cross-OS verification on macOS/Windows). Pure JS policy,
-            # shell script, CI metadata, and Node package changes are excluded —
-            # those are still verified by the ubuntu Rust lane plus Lint/Script
-            # checks, and the nightly workflow continues to run the full
-            # macOS/Windows matrix daily.
+            # shell script, most CI metadata, and Node package changes are
+            # excluded — those are still verified by the ubuntu Rust lane plus
+            # Lint/Script checks, and the nightly workflow continues to run
+            # the full macOS/Windows matrix daily. ci-pr.yml itself is included
+            # so edits to this Rust CI lane exercise its own Windows job.
             #
             # Must include every compile-time Rust input. Audit before adding
             # new `include_str!`/`include_bytes!`/`sqlx::migrate!`/`build.rs`
@@ -137,6 +140,7 @@ jobs:
               - '.cargo/**'
               - 'rust-toolchain*'
               - 'build.rs'
+              - '.github/workflows/ci-pr.yml'
               # defaults.json is embedded into the Rust binary via
               # `include_str!("../defaults.json")` in src/config.rs.
               - 'defaults.json'
@@ -183,6 +187,12 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.1"
+          components: clippy, rustfmt
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@1.51.0
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -206,18 +216,8 @@ jobs:
       - name: Policy JS unit tests
         run: npm run test:policies
 
-      - name: cargo check
-        run: cargo check --all-targets
-
-      - name: cargo test (non-PG, targeted subset)
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1
-          cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres
-          cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
-          cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
-          cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
+      - name: just check
+        run: just check
 
   # Cross-OS Rust compile lanes: macOS + Windows. Gated on the narrower
   # rust_compile filter so docs-only, dashboard-only, JS-policy-only,
@@ -283,8 +283,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      # Stage 1 keeps Windows inline and default-feature-only instead of
+      # `just check`: `--all-features` enables legacy SQLite test surfaces
+      # that still reference Unix-only tmux modules. This lane's job is
+      # cross-OS compile and targeted test signal; fmt/staged clippy and
+      # all-feature checks are authoritative in the Ubuntu jobs above.
       - name: cargo check
-        run: cargo check --all-targets
+        run: cargo check --workspace --all-targets
 
       - name: cargo test (non-PG, targeted subset)
         shell: bash
@@ -405,6 +410,11 @@ jobs:
         with:
           toolchain: "1.94.1"
 
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@1.51.0
+
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
@@ -420,14 +430,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-fast-tests-
 
-      - name: cargo test (PG targeted subset)
+      - name: just test-postgres
         timeout-minutes: 15
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo test _pg -- --nocapture --test-threads=1
-          cargo test pg_ -- --nocapture --test-threads=1
-          cargo test postgres -- --nocapture --test-threads=1
+        run: just test-postgres
 
       - name: sccache stats
         if: always()
@@ -524,6 +529,11 @@ jobs:
           toolchain: "1.94.1"
           components: clippy, rustfmt
 
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@1.51.0
+
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
@@ -538,11 +548,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-lint-
 
-      - name: cargo fmt -- --check
-        run: cargo fmt -- --check
+      - name: just fmt-check
+        run: just fmt-check
 
-      - name: cargo clippy
-        run: cargo clippy --all-targets -- -W clippy::all
+      - name: just lint
+        run: just lint
 
       - name: sccache stats
         if: always()
