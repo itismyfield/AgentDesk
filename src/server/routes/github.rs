@@ -732,6 +732,8 @@ pub async fn sync_repo(
             "cards_created": triaged,
             "cards_closed": sync_result.closed_count,
             "inconsistencies": sync_result.inconsistency_count,
+            "stale_card_issue_checks": sync_result.stale_card_issue_check_count,
+            "stale_card_issue_batches": sync_result.stale_card_issue_batch_count,
         })),
     )
 }

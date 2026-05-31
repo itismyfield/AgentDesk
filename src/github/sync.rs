@@ -1,14 +1,19 @@
 //! GitHub issue state sync: keep kanban cards consistent with GitHub issue state.
 
-use chrono::{Duration, NaiveDate, Utc};
+use chrono::{Duration as ChronoDuration, NaiveDate, Utc};
 use sqlx::{PgPool, Row};
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 const ISSUE_JSON_FIELDS: &str =
     "number,state,title,labels,body,url,closedAt,closedByPullRequestsReferences";
 const PRIMARY_FETCH_LIMIT: u32 = 100;
 const RECENTLY_CLOSED_FETCH_LIMIT: u32 = 50;
 const RECENTLY_CLOSED_LOOKBACK_DAYS: i64 = 30;
+const STALE_CARD_RECONCILE_CARD_SCAN_LIMIT: i64 = 500;
+const STALE_CARD_RECONCILE_ISSUE_LIMIT: usize = 100;
+const STALE_CARD_RECONCILE_BATCH_SIZE: usize = 25;
+const STALE_CARD_RECONCILE_TIMEOUT_SECS: u64 = 30;
 
 /// Represents a GitHub issue as returned by `gh issue list --json`.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -100,7 +105,7 @@ fn fetch_issue_batch(
 }
 
 fn recent_closed_search_query(today: NaiveDate) -> String {
-    let cutoff = today - Duration::days(RECENTLY_CLOSED_LOOKBACK_DAYS);
+    let cutoff = today - ChronoDuration::days(RECENTLY_CLOSED_LOOKBACK_DAYS);
     format!("closed:>{} sort:updated-desc", cutoff.format("%Y-%m-%d"))
 }
 
@@ -174,14 +179,53 @@ pub async fn sync_github_issues_for_repo_pg(
     repo: &str,
     issues: &[GhIssue],
 ) -> Result<SyncResult, String> {
+    sync_github_issues_for_repo_pg_with_adapter(pool, repo, issues, super::adapter()).await
+}
+
+pub(crate) async fn sync_github_issues_for_repo_pg_with_adapter(
+    pool: &PgPool,
+    repo: &str,
+    issues: &[GhIssue],
+    adapter: &dyn super::GitHubAdapter,
+) -> Result<SyncResult, String> {
     crate::pipeline::ensure_loaded();
 
     let repo_override = load_pg_repo_override(pool, repo).await?;
     let mut agent_overrides: HashMap<String, Option<crate::pipeline::PipelineOverride>> =
         HashMap::new();
     let mut result = SyncResult::default();
+    let fetched_issue_numbers: HashSet<i64> = issues.iter().map(|issue| issue.number).collect();
+    let mut issues = issues.to_vec();
 
-    for issue in issues {
+    let stale_issue_numbers = stale_card_issue_numbers_for_reconcile(
+        pool,
+        repo,
+        &fetched_issue_numbers,
+        repo_override.as_ref(),
+        &mut agent_overrides,
+    )
+    .await?;
+    if !stale_issue_numbers.is_empty() {
+        let (stale_issues, batch_count) =
+            fetch_issues_by_number_batches(adapter, repo, &stale_issue_numbers).await?;
+        result.stale_card_issue_check_count = stale_issue_numbers.len();
+        result.stale_card_issue_batch_count = batch_count;
+
+        let stale_closed_issue_count = stale_issues
+            .iter()
+            .filter(|issue| issue.state == "CLOSED")
+            .count();
+        tracing::info!(
+            "[github-sync] {repo}: card-driven stale reconcile checked {} issue(s) in {} GraphQL batch(es); fetched={}, closed={}",
+            stale_issue_numbers.len(),
+            batch_count,
+            stale_issues.len(),
+            stale_closed_issue_count
+        );
+        merge_unique_issues(&mut issues, stale_issues);
+    }
+
+    for issue in &issues {
         let cards = load_pg_cards_for_issue(pool, repo, issue.number).await?;
 
         for card in cards {
@@ -380,6 +424,265 @@ async fn load_pg_cards_for_issue(
             })
         })
         .collect()
+}
+
+async fn stale_card_issue_numbers_for_reconcile(
+    pool: &PgPool,
+    repo: &str,
+    fetched_issue_numbers: &HashSet<i64>,
+    repo_override: Option<&crate::pipeline::PipelineOverride>,
+    agent_overrides: &mut HashMap<String, Option<crate::pipeline::PipelineOverride>>,
+) -> Result<Vec<i64>, String> {
+    let fetched_issue_numbers: Vec<i64> = fetched_issue_numbers.iter().copied().collect();
+    let rows = sqlx::query(
+        "SELECT id,
+                status,
+                review_status,
+                latest_dispatch_id,
+                assigned_agent_id,
+                github_issue_number::BIGINT AS github_issue_number
+         FROM kanban_cards
+         WHERE repo_id = $1
+           AND github_issue_number IS NOT NULL
+           AND github_issue_number > 0
+           AND status <> 'done'
+           AND NOT (github_issue_number = ANY($2::BIGINT[]))
+         ORDER BY updated_at ASC, id ASC
+         LIMIT $3",
+    )
+    .bind(repo)
+    .bind(&fetched_issue_numbers)
+    .bind(STALE_CARD_RECONCILE_CARD_SCAN_LIMIT)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("load stale card reconcile candidates for {repo}: {error}"))?;
+
+    let scanned_count = rows.len();
+    let mut seen_issue_numbers = HashSet::new();
+    let mut issue_numbers = Vec::new();
+
+    for row in rows {
+        let issue_number: i64 = row
+            .try_get("github_issue_number")
+            .map_err(|error| format!("read stale reconcile issue number: {error}"))?;
+        let card = PgCardRecord {
+            id: row
+                .try_get("id")
+                .map_err(|error| format!("read stale reconcile card id: {error}"))?,
+            status: row
+                .try_get("status")
+                .map_err(|error| format!("read stale reconcile card status: {error}"))?,
+            review_status: row
+                .try_get("review_status")
+                .map_err(|error| format!("read stale reconcile review_status: {error}"))?,
+            latest_dispatch_id: row
+                .try_get("latest_dispatch_id")
+                .map_err(|error| format!("read stale reconcile latest_dispatch_id: {error}"))?,
+            assigned_agent_id: row
+                .try_get("assigned_agent_id")
+                .map_err(|error| format!("read stale reconcile assigned_agent_id: {error}"))?,
+        };
+
+        let pipeline = resolve_pg_pipeline(
+            pool,
+            repo,
+            repo_override,
+            card.assigned_agent_id.as_deref(),
+            agent_overrides,
+        )
+        .await?;
+        if pipeline.is_terminal(&card.status) {
+            continue;
+        }
+
+        if seen_issue_numbers.insert(issue_number) {
+            issue_numbers.push(issue_number);
+            if issue_numbers.len() >= STALE_CARD_RECONCILE_ISSUE_LIMIT {
+                break;
+            }
+        }
+    }
+
+    if !issue_numbers.is_empty() {
+        tracing::info!(
+            "[github-sync] {repo}: card-driven stale reconcile found {} missing non-terminal issue(s) from {} candidate card(s) (scan_limit={}, issue_limit={})",
+            issue_numbers.len(),
+            scanned_count,
+            STALE_CARD_RECONCILE_CARD_SCAN_LIMIT,
+            STALE_CARD_RECONCILE_ISSUE_LIMIT
+        );
+    }
+
+    Ok(issue_numbers)
+}
+
+async fn fetch_issues_by_number_batches(
+    adapter: &dyn super::GitHubAdapter,
+    repo: &str,
+    issue_numbers: &[i64],
+) -> Result<(Vec<GhIssue>, usize), String> {
+    let (owner, name) = parse_repo_owner_name(repo)?;
+    let mut issues = Vec::new();
+    let mut batch_count = 0usize;
+
+    for batch in issue_numbers.chunks(STALE_CARD_RECONCILE_BATCH_SIZE) {
+        batch_count += 1;
+        let query = issue_number_batch_graphql_query(batch);
+        let args = vec![
+            "api".to_string(),
+            "graphql".to_string(),
+            "-f".to_string(),
+            format!("owner={owner}"),
+            "-f".to_string(),
+            format!("name={name}"),
+            "-f".to_string(),
+            format!("query={query}"),
+        ];
+        let output = adapter
+            .run_async(
+                args,
+                Duration::from_secs(STALE_CARD_RECONCILE_TIMEOUT_SECS),
+                format!(
+                    "github stale card reconcile timed out for {repo} ({} issue(s))",
+                    batch.len()
+                ),
+            )
+            .await?;
+        let mut batch_issues = parse_issue_number_batch_graphql_response(&output, batch)?;
+        issues.append(&mut batch_issues);
+    }
+
+    Ok((issues, batch_count))
+}
+
+fn parse_repo_owner_name(repo: &str) -> Result<(&str, &str), String> {
+    let (owner, name) = repo
+        .split_once('/')
+        .ok_or_else(|| format!("repo id '{repo}' is not in owner/name form"))?;
+    if owner.trim().is_empty() || name.trim().is_empty() || name.contains('/') {
+        return Err(format!("repo id '{repo}' is not in owner/name form"));
+    }
+    Ok((owner, name))
+}
+
+fn issue_number_batch_graphql_query(issue_numbers: &[i64]) -> String {
+    let fields = issue_numbers
+        .iter()
+        .enumerate()
+        .map(|(index, issue_number)| {
+            format!(
+                "i{index}: issue(number: {issue_number}) {{ number state title body url closedAt closedByPullRequestsReferences(first: 5) {{ nodes {{ number url }} }} }}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "query($owner: String!, $name: String!) {{ repository(owner: $owner, name: $name) {{ {fields} }} }}"
+    )
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GraphQlIssueBatchResponse {
+    data: Option<GraphQlIssueBatchData>,
+    #[serde(default)]
+    errors: Vec<GraphQlError>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GraphQlIssueBatchData {
+    repository: Option<HashMap<String, Option<GraphQlIssue>>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GraphQlError {
+    message: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GraphQlIssue {
+    number: i64,
+    state: String,
+    title: String,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default, rename = "closedAt")]
+    closed_at: Option<String>,
+    #[serde(default, rename = "closedByPullRequestsReferences")]
+    closed_by_pull_requests_references: Option<GraphQlPullRequestConnection>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GraphQlPullRequestConnection {
+    #[serde(default)]
+    nodes: Vec<GraphQlPullRequestReference>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GraphQlPullRequestReference {
+    number: Option<i64>,
+    url: Option<String>,
+}
+
+fn parse_issue_number_batch_graphql_response(
+    output: &str,
+    issue_numbers: &[i64],
+) -> Result<Vec<GhIssue>, String> {
+    let response: GraphQlIssueBatchResponse = serde_json::from_str(output)
+        .map_err(|error| format!("parse stale issue GraphQL response: {error}"))?;
+    if !response.errors.is_empty() {
+        let messages = response
+            .errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!("stale issue GraphQL query failed: {messages}"));
+    }
+
+    let repository = response
+        .data
+        .and_then(|data| data.repository)
+        .ok_or_else(|| "stale issue GraphQL response missing repository".to_string())?;
+
+    let mut issues = Vec::new();
+    for (index, issue_number) in issue_numbers.iter().enumerate() {
+        match repository.get(&format!("i{index}")) {
+            Some(Some(issue)) => issues.push(GhIssue {
+                number: issue.number,
+                state: issue.state.clone(),
+                title: issue.title.clone(),
+                labels: Vec::new(),
+                body: issue.body.clone(),
+                url: issue.url.clone(),
+                closed_at: issue.closed_at.clone(),
+                closed_by_pull_requests_references: issue
+                    .closed_by_pull_requests_references
+                    .as_ref()
+                    .map(|connection| {
+                        connection
+                            .nodes
+                            .iter()
+                            .map(|node| GhPullRequestReference {
+                                number: node.number,
+                                url: node.url.clone(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            }),
+            Some(None) | None => {
+                tracing::debug!(
+                    "[github-sync] stale reconcile: issue #{} missing from GraphQL response",
+                    issue_number
+                );
+            }
+        }
+    }
+
+    Ok(issues)
 }
 
 async fn load_pg_repo_override(
@@ -760,6 +1063,8 @@ pub fn sync_all_repos(
                 Ok(r) => {
                     total.closed_count += r.closed_count;
                     total.inconsistency_count += r.inconsistency_count;
+                    total.stale_card_issue_check_count += r.stale_card_issue_check_count;
+                    total.stale_card_issue_batch_count += r.stale_card_issue_batch_count;
                 }
                 Err(e) => {
                     tracing::error!("[github-sync] sync failed for {}: {e}", repo.id);
@@ -778,6 +1083,8 @@ pub fn sync_all_repos(
 pub struct SyncResult {
     pub closed_count: usize,
     pub inconsistency_count: usize,
+    pub stale_card_issue_check_count: usize,
+    pub stale_card_issue_batch_count: usize,
 }
 
 /// Reason code attached to terminal-card / OPEN-issue mismatch alerts so the
@@ -1081,7 +1388,7 @@ mod tests {
                     "--repo".to_string(),
                     "owner/repo".to_string(),
                     "--json".to_string(),
-                    "number,state,title,labels,body".to_string(),
+                    ISSUE_JSON_FIELDS.to_string(),
                     "--limit".to_string(),
                     "100".to_string(),
                     "--state".to_string(),
@@ -1093,7 +1400,7 @@ mod tests {
                     "--repo".to_string(),
                     "owner/repo".to_string(),
                     "--json".to_string(),
-                    "number,state,title,labels,body".to_string(),
+                    ISSUE_JSON_FIELDS.to_string(),
                     "--limit".to_string(),
                     "50".to_string(),
                     "--state".to_string(),
@@ -1103,6 +1410,127 @@ mod tests {
                 ],
             ]
         );
+    }
+
+    #[test]
+    fn parses_batched_graphql_issue_response() {
+        let issues = parse_issue_number_batch_graphql_response(
+            r#"{
+                "data": {
+                    "repository": {
+                        "i0": {
+                            "number": 2945,
+                            "state": "CLOSED",
+                            "title": "Old closed issue",
+                            "body": null,
+                            "url": "https://github.com/owner/repo/issues/2945",
+                            "closedAt": "2026-03-23T00:00:00Z",
+                            "closedByPullRequestsReferences": {
+                                "nodes": [
+                                    {
+                                        "number": 3001,
+                                        "url": "https://github.com/owner/repo/pull/3001"
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }"#,
+            &[2945],
+        )
+        .unwrap();
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].number, 2945);
+        assert_eq!(issues[0].state, "CLOSED");
+        assert_eq!(issues[0].closed_at.as_deref(), Some("2026-03-23T00:00:00Z"));
+        assert_eq!(
+            issues[0].closed_by_pull_requests_references[0].number,
+            Some(3001)
+        );
+    }
+
+    #[tokio::test]
+    async fn pg_card_driven_reconcile_closes_old_closed_issue_missing_from_fetch_window() {
+        let test_pg = TestPostgresDb::create().await;
+        let pool = test_pg.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id,
+                title,
+                status,
+                repo_id,
+                github_issue_number,
+                github_issue_url,
+                created_at,
+                updated_at
+             ) VALUES (
+                'card-old-closed-2945',
+                'Old closed ghost card',
+                'backlog',
+                'owner/repo',
+                2945,
+                'https://github.com/owner/repo/issues/2945',
+                NOW() - INTERVAL '40 days',
+                NOW() - INTERVAL '40 days'
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let adapter = RecordingAdapter::with_async_responses(vec![Ok(r#"{
+                "data": {
+                    "repository": {
+                        "i0": {
+                            "number": 2945,
+                            "state": "CLOSED",
+                            "title": "Old closed ghost card",
+                            "body": null,
+                            "url": "https://github.com/owner/repo/issues/2945",
+                            "closedAt": "2026-03-23T00:00:00Z",
+                            "closedByPullRequestsReferences": {
+                                "nodes": []
+                            }
+                        }
+                    }
+                }
+            }"#
+        .to_string())]);
+
+        let result =
+            sync_github_issues_for_repo_pg_with_adapter(&pool, "owner/repo", &[], &adapter)
+                .await
+                .unwrap();
+
+        assert_eq!(result.closed_count, 1);
+        assert_eq!(result.stale_card_issue_check_count, 1);
+        assert_eq!(result.stale_card_issue_batch_count, 1);
+
+        let status: String = sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = $1")
+            .bind("card-old-closed-2945")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "done");
+
+        let calls = adapter.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0][0], "api");
+        assert_eq!(calls[0][1], "graphql");
+        assert!(
+            calls[0]
+                .iter()
+                .any(|arg| arg.contains("issue(number: 2945)")),
+            "expected GraphQL batch query to include issue #2945, got {calls:?}"
+        );
+
+        crate::db::postgres::close_test_pool(pool, "github sync tests")
+            .await
+            .unwrap();
+        test_pg.drop().await;
     }
 
     #[tokio::test]
