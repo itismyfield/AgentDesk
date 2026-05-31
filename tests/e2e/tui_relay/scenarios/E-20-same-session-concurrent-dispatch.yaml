@@ -1,0 +1,27 @@
+id: E-20
+title: same-session near-concurrent dispatch returns both markers once
+cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
+isolation: required
+acceptance_criteria:
+  - Dispatch two prompts through the fan-out primitive without inter-step sleep.
+  - Observe both response markers in the same scenario window.
+  - Assert marker uniqueness and no duplicate relay bodies.
+notes: |
+  Concrete #2942 primitive coverage. The AgentDesk mailbox may serialize the
+  turns, but the driver now creates near-concurrent turn/start pressure instead
+  of a sequential for-loop with a sleep between prompts.
+steps:
+  - send_prompts_concurrent:
+      prompts:
+        - "응답에 정확히 한 줄로 [E2E:E20:A] 만 출력해줘."
+        - "응답에 정확히 한 줄로 [E2E:E20:B] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E20:A]"
+    timeout_s: 240
+  - wait_for_discord_text: "[E2E:E20:B]"
+    timeout_s: 240
+assertions:
+  - text_present: "[E2E:E20:A]"
+  - text_present: "[E2E:E20:B]"
+  - no_duplicate_marker: "[E2E:E20:A]"
+  - no_duplicate_marker: "[E2E:E20:B]"
+  - no_duplicate_content: true

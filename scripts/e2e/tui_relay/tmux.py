@@ -15,6 +15,27 @@ class PaneInfo:
     session_name: str
 
 
+@dataclasses.dataclass(frozen=True)
+class SessionIdentity:
+    session_name: str
+    panes: tuple[PaneInfo, ...]
+
+    def as_dict(self) -> dict:
+        return {
+            "session_name": self.session_name,
+            "pane_count": len(self.panes),
+            "panes": [
+                {
+                    "pane_id": pane.pane_id,
+                    "pid": pane.pid,
+                    "cwd": pane.cwd,
+                    "session_name": pane.session_name,
+                }
+                for pane in self.panes
+            ],
+        }
+
+
 def _have_tmux() -> bool:
     return shutil.which("tmux") is not None
 
@@ -57,6 +78,15 @@ def list_panes(session_name: str) -> list[PaneInfo]:
             PaneInfo(pane_id=parts[0], pid=pid, cwd=parts[2], session_name=parts[3])
         )
     return panes
+
+
+def session_identity(session_name: str) -> SessionIdentity | None:
+    """Return a stable tmux identity snapshot for restart continuity checks."""
+
+    panes = tuple(list_panes(session_name))
+    if not panes:
+        return None
+    return SessionIdentity(session_name=session_name, panes=panes)
 
 
 def send_keys(session_name: str, *keys: str) -> bool:

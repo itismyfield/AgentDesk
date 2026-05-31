@@ -27,6 +27,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime as dt
 import json
 import os
@@ -225,6 +226,12 @@ def is_destructive(scenario: dict[str, Any]) -> bool:
     return False
 
 
+def _scenario_thread_channel_id(
+    scenario: dict[str, Any], channel_id: str
+) -> str | None:
+    return channel_id if scenario.get("requires_thread_channel") else None
+
+
 def scenario_channel_id(scenario: dict[str, Any], args: argparse.Namespace) -> str | None:
     if scenario.get("requires_thread_channel"):
         return str(args.thread_channel_id).strip() if args.thread_channel_id else None
@@ -415,6 +422,131 @@ def poison_claude_tui_relay_offset(
         "offset_path": str(offset_path),
         "stale_output_path": str(stale_path),
     }
+
+
+def capture_session_identity(
+    *,
+    cell: str,
+    channel_id: str,
+    scenario: dict[str, Any],
+) -> dict[str, Any]:
+    session_name = cell_session_name(
+        cell,
+        thread_channel_id=_scenario_thread_channel_id(scenario, channel_id),
+    )
+    identity = tmux.session_identity(session_name)
+    if identity is None:
+        raise assertions.AssertionError(
+            f"no tmux session identity for {session_name!r}"
+        )
+    return identity.as_dict()
+
+
+def assert_session_preserved(
+    *,
+    before: dict[str, Any],
+    cell: str,
+    channel_id: str,
+    scenario: dict[str, Any],
+) -> dict[str, Any]:
+    after = capture_session_identity(cell=cell, channel_id=channel_id, scenario=scenario)
+    if after != before:
+        raise assertions.AssertionError(
+            "tmux session identity changed: "
+            f"before={_payload_summary(before)} after={_payload_summary(after)}"
+        )
+    return after
+
+
+def _normalize_concurrent_prompt_specs(
+    params: Any,
+    *,
+    channel_id: str,
+    cell: str,
+) -> list[dict[str, Any]]:
+    if isinstance(params, list):
+        prompts = params
+    elif isinstance(params, dict):
+        prompts = params.get("prompts") or []
+    else:
+        raise assertions.AssertionError(
+            f"send_prompts_concurrent requires a list or mapping: {params!r}"
+        )
+    if not isinstance(prompts, list) or not prompts:
+        raise assertions.AssertionError("send_prompts_concurrent requires non-empty prompts")
+
+    specs: list[dict[str, Any]] = []
+    for idx, item in enumerate(prompts):
+        if isinstance(item, str):
+            specs.append(
+                {
+                    "index": idx,
+                    "channel_id": channel_id,
+                    "content": item,
+                    "channel_kind": cell_channel_kind(cell),
+                }
+            )
+            continue
+        if not isinstance(item, dict):
+            raise assertions.AssertionError(
+                f"send_prompts_concurrent prompt {idx} must be string or mapping"
+            )
+        content = item.get("content") or item.get("send_prompt") or item.get("prompt")
+        if content is None:
+            raise assertions.AssertionError(
+                f"send_prompts_concurrent prompt {idx} missing content"
+            )
+        target_channel = str(item.get("channel_id") or channel_id)
+        specs.append(
+            {
+                "index": idx,
+                "channel_id": target_channel,
+                "content": str(content),
+                "channel_kind": str(item.get("channel_kind") or cell_channel_kind(cell)),
+            }
+        )
+    return specs
+
+
+def send_prompts_concurrent(
+    *,
+    client: discord.DiscordClient,
+    channel_id: str,
+    cell: str,
+    params: Any,
+) -> list[dict[str, Any]]:
+    """Start multiple prompt dispatches without the per-step sleep gap."""
+
+    specs = _normalize_concurrent_prompt_specs(params, channel_id=channel_id, cell=cell)
+    results: list[dict[str, Any]] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(specs)) as executor:
+        futures = {
+            executor.submit(
+                client.send_prompt,
+                spec["channel_id"],
+                spec["content"],
+                channel_kind=spec["channel_kind"],
+            ): spec
+            for spec in specs
+        }
+        for future in concurrent.futures.as_completed(futures):
+            spec = futures[future]
+            try:
+                response = future.result()
+            except Exception as error:  # noqa: BLE001 - report every failed branch
+                raise assertions.AssertionError(
+                    "send_prompts_concurrent failed "
+                    f"index={spec['index']} channel={spec['channel_id']}: "
+                    f"{type(error).__name__}: {error}"
+                ) from error
+            results.append(
+                {
+                    "index": spec["index"],
+                    "channel_id": spec["channel_id"],
+                    "message_id": response.get("message_id") or response.get("id"),
+                }
+            )
+    return sorted(results, key=lambda item: int(item["index"]))
 
 
 def scenario_teardown_marker(scenario_id: str, *, cell: str, run_id: str) -> str:
@@ -1040,13 +1172,17 @@ def run_one_cell(
         window.raw_messages = []
         window.messages = []
 
+    def _prepare_first_prompt_window() -> None:
+        nonlocal first_send_done
+        if not first_send_done:
+            _advance_window_past_setup_echo()
+            first_send_done = True
+
     for step in scenario.get("steps") or []:
         if not isinstance(step, dict):
             continue
         if "send_prompt" in step:
-            if not first_send_done:
-                _advance_window_past_setup_echo()
-                first_send_done = True
+            _prepare_first_prompt_window()
             window.mark_prompt_sent()
             client.send_prompt(
                 channel_id,
@@ -1054,6 +1190,24 @@ def run_one_cell(
                 channel_kind=cell_channel_kind(cell),
             )
             time.sleep(3)
+        elif "send_prompts_concurrent" in step:
+            _prepare_first_prompt_window()
+            params = step["send_prompts_concurrent"]
+            prompt_specs = _normalize_concurrent_prompt_specs(
+                params,
+                channel_id=channel_id,
+                cell=cell,
+            )
+            for _ in prompt_specs:
+                window.mark_prompt_sent()
+            record.setdefault("concurrent_prompt_batches", []).append(
+                send_prompts_concurrent(
+                    client=client,
+                    channel_id=channel_id,
+                    cell=cell,
+                    params=params,
+                )
+            )
         elif "wait_idle_s" in step:
             time.sleep(float(step["wait_idle_s"]))
         elif "wait_for_discord_text" in step:
@@ -1110,6 +1264,29 @@ def run_one_cell(
                     channel_id=channel_id,
                     runtime_root=Path(args.queue_runtime_root),
                 )
+            )
+        elif "capture_session_identity" in step:
+            params = step["capture_session_identity"] or {}
+            label = str(params.get("label") or "default")
+            record.setdefault("session_identities", {})[label] = capture_session_identity(
+                cell=cell,
+                channel_id=channel_id,
+                scenario=scenario,
+            )
+        elif "assert_session_preserved" in step:
+            raw_params = step["assert_session_preserved"]
+            params = raw_params if isinstance(raw_params, dict) else {}
+            label = str(params.get("label") or raw_params or "default")
+            before = record.get("session_identities", {}).get(label)
+            if not isinstance(before, dict):
+                raise assertions.AssertionError(
+                    f"assert_session_preserved missing captured label {label!r}"
+                )
+            record.setdefault("session_preserved", {})[label] = assert_session_preserved(
+                before=before,
+                cell=cell,
+                channel_id=channel_id,
+                scenario=scenario,
             )
         elif "cancel_turn" in step:
             params = step["cancel_turn"] or {}

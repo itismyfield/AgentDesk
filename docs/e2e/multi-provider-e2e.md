@@ -44,11 +44,13 @@ coverage because this matrix does not create a persistent Claude Code wake
 session for those cells. `E-16` and `E-17` are #2935 regression stubs: they are
 loaded by the relevant cells but skipped until the runtime/orchestrator exposes
 hooks to force Claude TUI completion-quiescence timeout and to hold a foreign
-active mailbox during a destructive restart attempt. `E-18` is the conservative
-Phase 1 `cancel_turn` stop-mid-turn stub for `codex-tui`; it is skipped until a
-deterministic provider throttle/hook can hold the turn active between the early
-marker and cancellation. `E-11` (cross-cell concurrency) is `cells: []` — the
-orchestrator owns that scenario.
+active mailbox during a destructive restart attempt. `E-18` runs the destructive
+`cancel_turn` stop-mid-turn path for relay-backed pipe/TUI cells and asserts the
+late sentinel is absent after cancellation. `E-19` captures tmux pane identity
+across dcserver restart for TUI cells. `E-20` uses same-session near-concurrent
+prompt fan-out to pressure dispatch serialization while asserting both markers
+arrive once. `E-11` (cross-cell concurrency) is `cells: []` — the orchestrator
+owns that scenario.
 
 ## Driver
 
@@ -109,6 +111,12 @@ require `status: healthy`, forbid degraded reason substrings such as
 `global_finalizing`. Destructive scenarios use this after the tested turn has
 settled so counter underflow and stuck-finalizing regressions are visible in the
 E2E report.
+
+Control-flow steps include `cancel_turn` (POSTs
+`/api/turns/<channel_id>/cancel?force=<bool>` and remains destructive-gated),
+`send_prompts_concurrent` (starts multiple prompt dispatches without the normal
+per-step sleep), `capture_session_identity`, and `assert_session_preserved`
+(compares tmux session name, pane ids, pane pids, and cwd after restart).
 
 Observation assertions now include negative and edit-aware primitives:
 `raw_text_absent`, `marker_absent`, `chrome_count`,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import threading
 import unittest
 import urllib.error
 from argparse import Namespace
@@ -542,6 +543,113 @@ class ScenarioHealthProbe(unittest.TestCase):
         self.assertEqual(captured["method"], "POST")
         self.assertEqual(captured["timeout"], 7)
         self.assertEqual(result["queue_purged"], True)
+
+
+class ControlFlowPrimitives(unittest.TestCase):
+    def test_send_prompts_concurrent_overlaps_dispatches(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def __init__(self):
+                self.lock = threading.Lock()
+                self.active = 0
+                self.max_active = 0
+                self.sent: list[str] = []
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                return {"id": "1"}
+
+            def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
+                return []
+
+            def send_prompt(self, channel_id, content, *, channel_kind="cc"):  # noqa: ARG002
+                with self.lock:
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                    self.sent.append(content)
+                threading.Event().wait(0.05)
+                with self.lock:
+                    self.active -= 1
+                return {"id": str(len(self.sent))}
+
+        args = Namespace(
+            cell="codex-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+        )
+        scenario = {
+            "id": "E-X",
+            "steps": [
+                {
+                    "send_prompts_concurrent": {
+                        "prompts": ["prompt-a", "prompt-b"]
+                    }
+                }
+            ],
+            "assertions": [],
+        }
+        client = FakeClient()
+
+        with (
+            patch("run_tui_relay.time.sleep", return_value=None),
+            patch(
+                "run_tui_relay.assert_cell_idle",
+                return_value={"status": "idle", "mailboxes_seen": 1},
+            ),
+        ):
+            record = driver.run_one_cell(
+                scenario=scenario,
+                cell="codex-tui",
+                channel_id="42",
+                client=client,  # type: ignore[arg-type]
+                run_id="run-1",
+                dry_run=False,
+                args=args,
+            )
+
+        self.assertEqual(client.max_active, 2)
+        self.assertCountEqual(client.sent, ["prompt-a", "prompt-b"])
+        self.assertEqual(
+            [item["index"] for item in record["concurrent_prompt_batches"][0]],
+            [0, 1],
+        )
+
+    def test_assert_session_preserved_detects_recreated_tmux_session(self):
+        before = {
+            "session_name": "AgentDesk-codex-adk-codex-tui-e2e",
+            "pane_count": 1,
+            "panes": [
+                {
+                    "pane_id": "%1",
+                    "pid": 100,
+                    "cwd": "/tmp/adk-codex-tui-e2e",
+                    "session_name": "AgentDesk-codex-adk-codex-tui-e2e",
+                }
+            ],
+        }
+        after_identity = driver.tmux.SessionIdentity(
+            session_name="AgentDesk-codex-adk-codex-tui-e2e",
+            panes=(
+                driver.tmux.PaneInfo(
+                    pane_id="%1",
+                    pid=200,
+                    cwd="/tmp/adk-codex-tui-e2e",
+                    session_name="AgentDesk-codex-adk-codex-tui-e2e",
+                ),
+            ),
+        )
+
+        with patch("run_tui_relay.tmux.session_identity", return_value=after_identity):
+            with self.assertRaises(assertions.AssertionError) as ctx:
+                driver.assert_session_preserved(
+                    before=before,
+                    cell="codex-tui",
+                    channel_id="42",
+                    scenario={"id": "E-X"},
+                )
+
+        self.assertIn("tmux session identity changed", str(ctx.exception))
 
 
 class ScenarioTeardown(unittest.TestCase):
