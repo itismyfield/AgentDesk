@@ -665,30 +665,32 @@ impl TestHealthHarness {
     }
 
     pub(crate) async fn seed_queue(&self, channel_id: u64, queue_items: &[(u64, &str)]) {
-        let queue = queue_items
-            .iter()
-            .map(|(message_id, text)| super::Intervention {
-                author_id: serenity::UserId::new(1),
-                author_is_bot: false,
-                message_id: serenity::MessageId::new(*message_id),
-                source_message_ids: vec![serenity::MessageId::new(*message_id)],
-                text: (*text).to_string(),
-                mode: super::InterventionMode::Soft,
-                created_at: Instant::now(),
-                reply_context: None,
-                has_reply_boundary: false,
-                merge_consecutive: false,
-                pending_uploads: Vec::new(),
-                voice_announcement: None,
-            })
-            .collect::<Vec<_>>();
-        super::mailbox_replace_queue(
-            &self.shared,
-            &self.provider,
-            ChannelId::new(channel_id),
-            queue,
-        )
-        .await;
+        for &(message_id, text) in queue_items {
+            let outcome = super::mailbox_enqueue_intervention(
+                &self.shared,
+                &self.provider,
+                ChannelId::new(channel_id),
+                super::Intervention {
+                    author_id: serenity::UserId::new(1),
+                    author_is_bot: false,
+                    message_id: serenity::MessageId::new(message_id),
+                    source_message_ids: vec![serenity::MessageId::new(message_id)],
+                    text: text.to_string(),
+                    mode: super::InterventionMode::Soft,
+                    created_at: Instant::now(),
+                    reply_context: None,
+                    has_reply_boundary: false,
+                    merge_consecutive: false,
+                    pending_uploads: Vec::new(),
+                    voice_announcement: None,
+                },
+            )
+            .await;
+            assert!(
+                outcome.enqueued,
+                "test harness expected queued intervention {message_id} to enqueue"
+            );
+        }
     }
 
     pub(crate) async fn mailbox_state(&self, channel_id: u64) -> (bool, usize, Option<String>) {
@@ -5830,17 +5832,21 @@ agents:
 
         // Simulate the racer: a brand-new user message that landed in
         // the in-memory mailbox after the cancel emptied it but before
-        // the drain helper got to hydrate.
+        // the drain helper got to hydrate. The real enqueue path now
+        // actor-local hydrates any durable queue first, so the first
+        // observable mailbox depth already includes the older disk
+        // payload plus this racer.
         harness
             .seed_queue(channel_id_u64, &[(2003, "concurrent-enqueue")])
             .await;
         assert_eq!(
             harness.queue_depth_for_channel(channel_id_u64).await,
-            1,
-            "racer message must already be in the in-memory mailbox"
+            3,
+            "racer enqueue must preserve the existing disk payload"
         );
 
-        // Drive the post-cancel drain. The fix must merge disk+memory.
+        // Drive the post-cancel drain. The fix must keep disk+memory
+        // idempotently merged.
         let outcome = schedule_pending_queue_drain_after_cancel(
             &harness.registry(),
             "codex",

@@ -2065,6 +2065,36 @@ fn hydrate_pending_queue_into_state(
     }
 }
 
+fn hydrate_pending_queue_from_disk_if_present(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    persistence: &QueuePersistenceContext,
+) -> HydratePendingQueueResult {
+    let (disk_items, restored_override) =
+        load_channel_pending_queue(&persistence.provider, &persistence.token_hash, channel_id);
+    if disk_items.is_empty() {
+        return HydratePendingQueueResult {
+            absorbed: 0,
+            queue_len_after: state.intervention_queue.len(),
+            restored_override,
+            persistence_error: None,
+        };
+    }
+
+    let mut effective_persistence = persistence.clone();
+    if effective_persistence.dispatch_role_override.is_none() {
+        effective_persistence.dispatch_role_override =
+            restored_override.map(|channel| channel.get());
+    }
+    hydrate_pending_queue_into_state(
+        state,
+        channel_id,
+        disk_items,
+        effective_persistence,
+        restored_override,
+    )
+}
+
 fn finalize_turn_state(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
@@ -2479,6 +2509,21 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     reply,
                 } => {
                     state.last_persistence = Some(persistence.clone());
+                    let hydrate_result = hydrate_pending_queue_from_disk_if_present(
+                        &mut state,
+                        channel_id,
+                        &persistence,
+                    );
+                    if let Some(error) = hydrate_result.persistence_error {
+                        let _ = reply.send(EnqueueInterventionResult {
+                            enqueued: false,
+                            merged: false,
+                            refusal_reason: None,
+                            queue_exit_events: Vec::new(),
+                            persistence_error: Some(error),
+                        });
+                        continue;
+                    }
                     let previous_queue = state.intervention_queue.clone();
                     let mut enqueue_result =
                         enqueue_intervention(&mut state.intervention_queue, intervention);
@@ -2719,22 +2764,10 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     // a dequeue that removes the file cannot race with a stale
                     // out-of-actor disk snapshot and reinsert an already
                     // processed item.
-                    let (disk_items, restored_override) = load_channel_pending_queue(
-                        &persistence.provider,
-                        &persistence.token_hash,
-                        channel_id,
-                    );
-                    let mut effective_persistence = persistence;
-                    if effective_persistence.dispatch_role_override.is_none() {
-                        effective_persistence.dispatch_role_override =
-                            restored_override.map(|channel| channel.get());
-                    }
-                    let result = hydrate_pending_queue_into_state(
+                    let result = hydrate_pending_queue_from_disk_if_present(
                         &mut state,
                         channel_id,
-                        disk_items,
-                        effective_persistence,
-                        restored_override,
+                        &persistence,
                     );
                     let _ = reply.send(result);
                 }

@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
 use serde::Serialize;
 
-use crate::services::discord::relay_health::RelayActiveTurn;
+use crate::services::discord::relay_health::{RelayActiveTurn, RelayStallState};
 use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::{CancelToken, ProviderKind};
 
@@ -1262,6 +1262,43 @@ pub(crate) fn stale_idle_foreground_queue_detected(
     age_secs >= 0 && (age_secs as u64) >= threshold_secs
 }
 
+pub(crate) fn stall_watchdog_should_force_clean_orphan_explicit_background_work(
+    relay_stall_state: RelayStallState,
+    attached: bool,
+    watcher_owner_channel_id: Option<u64>,
+    channel_id: u64,
+    desynced: bool,
+    inflight_state_present: bool,
+    inflight_updated_at: Option<&str>,
+    tmux_session_alive: Option<bool>,
+    unread_bytes: Option<u64>,
+    last_outbound_activity_ms: Option<i64>,
+    now_unix_secs: i64,
+    threshold_secs: u64,
+) -> bool {
+    if relay_stall_state != RelayStallState::ExplicitBackgroundWork
+        || !attached
+        || watcher_owner_channel_id != Some(channel_id)
+        || desynced
+        || !inflight_state_present
+        || tmux_session_alive != Some(true)
+        || unread_bytes != Some(0)
+        || last_outbound_activity_ms.is_none()
+        || outbound_activity_is_recent(last_outbound_activity_ms, now_unix_secs, threshold_secs)
+    {
+        return false;
+    }
+
+    let Some(updated_at) = inflight_updated_at else {
+        return false;
+    };
+    let Some(updated_at_unix) = discord::inflight::parse_updated_at_unix(updated_at) else {
+        return false;
+    };
+    let age_secs = now_unix_secs.saturating_sub(updated_at_unix);
+    age_secs >= 0 && (age_secs as u64) >= threshold_secs
+}
+
 /// Watchdog tick interval. Picked to converge inside ~1 cycle once the
 /// `2x` staleness window has elapsed, while staying well below the
 /// gateway-lease keepalive cadence so we never starve the gateway loop.
@@ -1371,6 +1408,66 @@ pub(crate) async fn run_stall_watchdog_pass(
                 result.has_pending_queue,
                 result.persistent_inflight_cleared
             );
+            cleaned += 1;
+            continue;
+        }
+
+        if stall_watchdog_should_force_clean_orphan_explicit_background_work(
+            snapshot.relay_stall_state,
+            snapshot.attached,
+            snapshot.watcher_owner_channel_id,
+            channel_id.get(),
+            snapshot.desynced,
+            snapshot.inflight_state_present,
+            snapshot.inflight_updated_at.as_deref(),
+            snapshot.tmux_session_alive,
+            snapshot.unread_bytes,
+            snapshot.relay_health.last_outbound_activity_ms,
+            now_unix_secs,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+        ) {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚡ STALL-WATCHDOG: forced cleanup for orphan explicit background work in channel {}",
+                channel_id
+            );
+            let pending_hourglass_user_msg_id =
+                discord::inflight::load_inflight_state(provider, channel_id.get())
+                    .filter(|state| state.user_msg_id != 0)
+                    .map(|state| state.user_msg_id);
+            discord::inflight::delete_inflight_state_file(provider, channel_id.get());
+            let finish = discord::mailbox_finish_turn(&shared, provider, channel_id).await;
+            apply_runtime_hard_stop_cleanup(
+                &shared,
+                provider,
+                channel_id,
+                &finish,
+                "2967_orphan_explicit_background_watchdog",
+                true,
+            )
+            .await;
+            if !finish.has_pending {
+                let hydrate = hydrate_pending_queue_from_disk(&shared, provider, channel_id).await;
+                if hydrate.queue_len_after > 0 && hydrate.persistence_error.is_none() {
+                    discord::schedule_deferred_idle_queue_kickoff(
+                        shared.clone(),
+                        provider.clone(),
+                        channel_id,
+                        "2967_orphan_explicit_background_watchdog",
+                    );
+                }
+            }
+            if let Some(user_msg_id) = pending_hourglass_user_msg_id
+                && let Ok(http) = super::resolve_bot_http(registry, provider.as_str()).await
+            {
+                discord::formatting::remove_reaction_raw(
+                    &http,
+                    channel_id,
+                    user_msg_id.into(),
+                    '⏳',
+                )
+                .await;
+            }
             cleaned += 1;
             continue;
         }
@@ -2270,8 +2367,9 @@ mod stall_watchdog_pure_tests {
         leak_recovery_unrelayed_range, preserve_cancel_should_skip_provider_interrupt_for_idle_tui,
         render_leak_recovery_delivery, stale_idle_foreground_queue_detected,
         stall_watchdog_should_force_clean,
+        stall_watchdog_should_force_clean_orphan_explicit_background_work,
     };
-    use crate::services::discord::relay_health::RelayActiveTurn;
+    use crate::services::discord::relay_health::{RelayActiveTurn, RelayStallState};
     use crate::services::discord::{InflightRestartMode, TmuxCleanupPolicy};
     use crate::services::provider::ProviderKind;
     use chrono::TimeZone;
@@ -2755,6 +2853,172 @@ mod stall_watchdog_pure_tests {
                     inflight,
                     updated_at,
                     tmux_alive,
+                    outbound,
+                    now_unix,
+                    STALL_WATCHDOG_THRESHOLD_SECS,
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn orphan_explicit_background_force_clean_requires_ownership_and_staleness() {
+        let now_unix = chrono::Utc::now().timestamp();
+        let stale = local_string(now_unix - (STALL_WATCHDOG_THRESHOLD_SECS as i64) - 1);
+        let fresh = local_string(now_unix - 5);
+        let stale_outbound = Some((now_unix - STALL_WATCHDOG_THRESHOLD_SECS as i64 - 1) * 1000);
+        let fresh_outbound = Some((now_unix - 5) * 1000);
+
+        assert!(
+            stall_watchdog_should_force_clean_orphan_explicit_background_work(
+                RelayStallState::ExplicitBackgroundWork,
+                true,
+                Some(42),
+                42,
+                false,
+                true,
+                Some(stale.as_str()),
+                Some(true),
+                Some(0),
+                stale_outbound,
+                now_unix,
+                STALL_WATCHDOG_THRESHOLD_SECS,
+            )
+        );
+
+        for (
+            name,
+            state,
+            attached,
+            owner,
+            desynced,
+            inflight,
+            updated_at,
+            tmux_alive,
+            unread,
+            outbound,
+        ) in [
+            (
+                "not explicit background",
+                RelayStallState::ActiveForegroundStream,
+                true,
+                Some(42),
+                false,
+                true,
+                Some(stale.as_str()),
+                Some(true),
+                Some(0),
+                stale_outbound,
+            ),
+            (
+                "detached",
+                RelayStallState::ExplicitBackgroundWork,
+                false,
+                Some(42),
+                false,
+                true,
+                Some(stale.as_str()),
+                Some(true),
+                Some(0),
+                stale_outbound,
+            ),
+            (
+                "cross owner",
+                RelayStallState::ExplicitBackgroundWork,
+                true,
+                Some(7),
+                false,
+                true,
+                Some(stale.as_str()),
+                Some(true),
+                Some(0),
+                stale_outbound,
+            ),
+            (
+                "desynced path owns cleanup",
+                RelayStallState::ExplicitBackgroundWork,
+                true,
+                Some(42),
+                true,
+                true,
+                Some(stale.as_str()),
+                Some(true),
+                Some(0),
+                stale_outbound,
+            ),
+            (
+                "missing inflight",
+                RelayStallState::ExplicitBackgroundWork,
+                true,
+                Some(42),
+                false,
+                false,
+                Some(stale.as_str()),
+                Some(true),
+                Some(0),
+                stale_outbound,
+            ),
+            (
+                "fresh inflight",
+                RelayStallState::ExplicitBackgroundWork,
+                true,
+                Some(42),
+                false,
+                true,
+                Some(fresh.as_str()),
+                Some(true),
+                Some(0),
+                stale_outbound,
+            ),
+            (
+                "tmux not alive",
+                RelayStallState::ExplicitBackgroundWork,
+                true,
+                Some(42),
+                false,
+                true,
+                Some(stale.as_str()),
+                Some(false),
+                Some(0),
+                stale_outbound,
+            ),
+            (
+                "unread capture bytes",
+                RelayStallState::ExplicitBackgroundWork,
+                true,
+                Some(42),
+                false,
+                true,
+                Some(stale.as_str()),
+                Some(true),
+                Some(1),
+                stale_outbound,
+            ),
+            (
+                "fresh outbound",
+                RelayStallState::ExplicitBackgroundWork,
+                true,
+                Some(42),
+                false,
+                true,
+                Some(stale.as_str()),
+                Some(true),
+                Some(0),
+                fresh_outbound,
+            ),
+        ] {
+            assert!(
+                !stall_watchdog_should_force_clean_orphan_explicit_background_work(
+                    state,
+                    attached,
+                    owner,
+                    42,
+                    desynced,
+                    inflight,
+                    updated_at,
+                    tmux_alive,
+                    unread,
                     outbound,
                     now_unix,
                     STALL_WATCHDOG_THRESHOLD_SECS,
