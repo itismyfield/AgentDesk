@@ -707,9 +707,13 @@ async fn maybe_spawn_claude_idle_response_tail(
     // #2843: resolve the freshest active transcript (the bound output_path can be
     // stale) and only let a non-stale tmux watcher suppress the tail when it
     // actually covers that transcript. Re-registers the binding if it changed.
-    let Some(transcript_path) =
-        resolve_idle_relay_transcript(&shared, &prompt.tmux_session_name, channel_id, &binding)
-    else {
+    let Some(transcript_path) = resolve_idle_relay_transcript(
+        &shared,
+        &prompt.tmux_session_name,
+        channel_id,
+        &binding,
+        false,
+    ) else {
         return false;
     };
 
@@ -910,6 +914,7 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                     &tmux_session_name,
                     channel_id,
                     &binding,
+                    !session_bound_discord_delivery_enabled(),
                 ) else {
                     continue;
                 };
@@ -1369,9 +1374,14 @@ fn resolve_idle_relay_transcript(
     tmux_session_name: &str,
     channel_id: ChannelId,
     binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+    allow_watcher_suppression: bool,
 ) -> Option<PathBuf> {
     let transcript_path =
         resolved_claude_idle_relay_transcript_path(shared, tmux_session_name, channel_id, binding)?;
+
+    if !allow_watcher_suppression {
+        return Some(transcript_path);
+    }
 
     // #2843 (codex P0): a non-stale watcher may suppress the idle tail ONLY when
     // the watcher itself is tailing the freshest transcript. Comparing the
@@ -2865,6 +2875,41 @@ mod tests {
                 true,
             ),
             ExternalInputRelayOwner::BridgeAdapter
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_tail_resolution_bypasses_watcher_suppression_for_session_bound_external_turn() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transcript_path = dir.path().join("claude-transcript.jsonl");
+        std::fs::write(&transcript_path, "").expect("write transcript");
+        let tmux_session_name = "AgentDesk-claude-session-bound-direct-input";
+        let channel_id = ChannelId::new(940_000_000_000_006);
+        let shared = super::super::make_shared_data_for_tests();
+        shared.tmux_watchers.insert(
+            channel_id,
+            test_watcher_handle(tmux_session_name, &transcript_path),
+        );
+        let binding = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: transcript_path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some("claude-transcript".to_string()),
+            last_offset: 0,
+            relay_last_offset: None,
+        };
+
+        assert_eq!(
+            resolve_idle_relay_transcript(&shared, tmux_session_name, channel_id, &binding, false,),
+            Some(transcript_path.clone()),
+            "BridgeAdapter-owned direct input must tail even when the watcher covers the transcript"
+        );
+        assert_eq!(
+            resolve_idle_relay_transcript(&shared, tmux_session_name, channel_id, &binding, true,),
+            None,
+            "legacy watcher-owned mode may still suppress the bridge tail to avoid duplicates"
         );
     }
 
