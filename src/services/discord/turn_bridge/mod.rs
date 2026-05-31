@@ -1505,6 +1505,14 @@ fn should_record_final_turn_transcript(
         && !full_response.trim().is_empty()
 }
 
+fn status_panel_completion_ready_after_terminal_body(
+    terminal_delivery_committed: bool,
+    terminal_body_visible: bool,
+    preserve_inflight_for_cleanup_retry: bool,
+) -> bool {
+    terminal_delivery_committed && terminal_body_visible && !preserve_inflight_for_cleanup_retry
+}
+
 fn sync_inflight_restart_mode_from_cancel(
     cancel_token: &crate::services::provider::CancelToken,
     inflight_state: &mut InflightTurnState,
@@ -3289,78 +3297,88 @@ async fn enqueue_headless_delivery(
                     session_key.map(str::trim).filter(|value| !value.is_empty())
                 {
                     let thread_channel_id = channel_id.get().to_string();
-                    // #2838 (codex review): once enqueue returned Ok(Some(outbox_id))
-                    // the outbox row exists and the message WILL be delivered.
+                    // #2838/#2950: once enqueue returned Ok(Some(outbox_id))
+                    // the outbox row exists, but visible completion must still
+                    // wait for the notify-bot worker to mark that row sent.
                     // The delivery marker below is best-effort dedup bookkeeping;
                     // propagating a marker failure as a delivery Err makes the
                     // caller preserve inflight, which then re-delivers via
                     // recovery (duplicate) AND stalls the queue. So every
-                    // post-enqueue marker failure logs and returns Ok (delivery
-                    // committed) — only a genuine non-delivery (no outbox row +
-                    // failed direct fallback, below) returns Err.
-                    let mut tx = match pool.begin().await {
-                        Ok(tx) => tx,
+                    // post-enqueue marker failure logs and still falls through
+                    // to the outbox visibility wait. Only genuine non-delivery
+                    // (failed outbox visibility or failed direct fallback below)
+                    // returns Err.
+                    match pool.begin().await {
+                        Ok(mut tx) => {
+                            if let Err(error) =
+                                sqlx::query("SELECT pg_advisory_xact_lock(1752, hashtext($1))")
+                                    .bind(&thread_channel_id)
+                                    .execute(&mut *tx)
+                                    .await
+                            {
+                                let _ = tx.rollback().await;
+                                tracing::warn!(
+                                    "[outbox] terminal delivery marker lock failed for session {session_key} (outbox {outbox_id} already enqueued; waiting for visible delivery): {error}"
+                                );
+                            } else {
+                                let active_user_message_id =
+                                    super::mailbox_snapshot(shared.as_ref(), channel_id)
+                                        .await
+                                        .active_user_message_id;
+                                if let Some(active_user_message_id) = active_user_message_id
+                                    && active_user_message_id != owning_user_msg_id
+                                {
+                                    tracing::warn!(
+                                        "[outbox] skipped terminal delivery marker {} for session {} because active turn message changed from {} to {}",
+                                        outbox_id,
+                                        session_key,
+                                        owning_user_msg_id.get(),
+                                        active_user_message_id.get()
+                                    );
+                                } else if let Err(error) = sqlx::query(
+                                    "UPDATE sessions
+                                            SET active_turn_delivery_outbox_id = $1
+                                          WHERE session_key = $2
+                                            AND thread_channel_id = $3
+                                            AND status IN ('turn_active', 'working')",
+                                )
+                                .bind(outbox_id)
+                                .bind(session_key)
+                                .bind(&thread_channel_id)
+                                .execute(&mut *tx)
+                                .await
+                                {
+                                    let _ = tx.rollback().await;
+                                    tracing::warn!(
+                                        "[outbox] terminal delivery marker write failed for session {session_key} row {outbox_id} (already enqueued; waiting for visible delivery): {error}"
+                                    );
+                                    return wait_for_headless_delivery_outbox_visible(
+                                        pool,
+                                        outbox_id,
+                                        HEADLESS_DELIVERY_OUTBOX_VISIBLE_TIMEOUT,
+                                    )
+                                    .await;
+                                }
+                                if let Err(error) = tx.commit().await {
+                                    tracing::warn!(
+                                        "[outbox] terminal delivery marker commit failed for session {session_key} (outbox {outbox_id} already enqueued; waiting for visible delivery): {error}"
+                                    );
+                                }
+                            }
+                        }
                         Err(error) => {
                             tracing::warn!(
-                                "[outbox] terminal delivery marker tx begin failed for session {session_key} (outbox {outbox_id} already enqueued; treating delivery as committed): {error}"
+                                "[outbox] terminal delivery marker tx begin failed for session {session_key} (outbox {outbox_id} already enqueued; waiting for visible delivery): {error}"
                             );
-                            return Ok(());
                         }
-                    };
-                    if let Err(error) =
-                        sqlx::query("SELECT pg_advisory_xact_lock(1752, hashtext($1))")
-                            .bind(&thread_channel_id)
-                            .execute(&mut *tx)
-                            .await
-                    {
-                        let _ = tx.rollback().await;
-                        tracing::warn!(
-                            "[outbox] terminal delivery marker lock failed for session {session_key} (outbox {outbox_id} already enqueued; treating delivery as committed): {error}"
-                        );
-                        return Ok(());
-                    }
-
-                    let active_user_message_id =
-                        super::mailbox_snapshot(shared.as_ref(), channel_id)
-                            .await
-                            .active_user_message_id;
-                    if let Some(active_user_message_id) = active_user_message_id
-                        && active_user_message_id != owning_user_msg_id
-                    {
-                        tracing::warn!(
-                            "[outbox] skipped terminal delivery marker {} for session {} because active turn message changed from {} to {}",
-                            outbox_id,
-                            session_key,
-                            owning_user_msg_id.get(),
-                            active_user_message_id.get()
-                        );
-                    } else if let Err(error) = sqlx::query(
-                        "UPDATE sessions
-                                SET active_turn_delivery_outbox_id = $1
-                              WHERE session_key = $2
-                                AND thread_channel_id = $3
-                                AND status IN ('turn_active', 'working')",
-                    )
-                    .bind(outbox_id)
-                    .bind(session_key)
-                    .bind(&thread_channel_id)
-                    .execute(&mut *tx)
-                    .await
-                    {
-                        let _ = tx.rollback().await;
-                        tracing::warn!(
-                            "[outbox] terminal delivery marker write failed for session {session_key} row {outbox_id} (already enqueued; treating delivery as committed): {error}"
-                        );
-                        return Ok(());
-                    }
-                    if let Err(error) = tx.commit().await {
-                        tracing::warn!(
-                            "[outbox] terminal delivery marker commit failed for session {session_key} (outbox {outbox_id} already enqueued; treating delivery as committed): {error}"
-                        );
-                        return Ok(());
                     }
                 }
-                return Ok(());
+                return wait_for_headless_delivery_outbox_visible(
+                    pool,
+                    outbox_id,
+                    HEADLESS_DELIVERY_OUTBOX_VISIBLE_TIMEOUT,
+                )
+                .await;
             }
             Ok(None) => {
                 tracing::info!(
@@ -3422,6 +3440,56 @@ async fn enqueue_headless_delivery(
         .await
         .map_err(|error| format!("headless direct delivery failed: {error}"))?;
     Ok(())
+}
+
+const HEADLESS_DELIVERY_OUTBOX_VISIBLE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+const HEADLESS_DELIVERY_OUTBOX_VISIBLE_POLL: std::time::Duration =
+    std::time::Duration::from_millis(100);
+
+async fn wait_for_headless_delivery_outbox_visible(
+    pool: &sqlx::PgPool,
+    outbox_id: i64,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let row = sqlx::query("SELECT status, error FROM message_outbox WHERE id = $1")
+            .bind(outbox_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| {
+                format!("poll headless delivery outbox row {outbox_id} failed: {error}")
+            })?;
+        let Some(row) = row else {
+            return Err(format!(
+                "headless delivery outbox row {outbox_id} disappeared before visible delivery"
+            ));
+        };
+        let status: String = row
+            .try_get("status")
+            .map_err(|error| format!("read headless outbox row {outbox_id} status: {error}"))?;
+        match status.as_str() {
+            "sent" => return Ok(()),
+            "failed" => {
+                let error: Option<String> = row.try_get("error").ok().flatten();
+                return Err(format!(
+                    "headless delivery outbox row {outbox_id} failed before visible delivery: {}",
+                    error.unwrap_or_else(|| "unknown error".to_string())
+                ));
+            }
+            _ => {}
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(format!(
+                "headless delivery outbox row {outbox_id} remained {status} for {}s before visible delivery",
+                timeout.as_secs()
+            ));
+        }
+        tokio::time::sleep(HEADLESS_DELIVERY_OUTBOX_VISIBLE_POLL.min(deadline - now)).await;
+    }
 }
 
 fn total_model_input_tokens(
@@ -6812,6 +6880,7 @@ pub(super) fn spawn_turn_bridge(
         };
         let mut preserve_inflight_for_cleanup_retry = false;
         let mut terminal_delivery_committed = false;
+        let mut terminal_body_visible = false;
         let mut status_panel_terminal_committed = false;
         // #2161 (Codex round-2 H1): hoisted into the outer scope so the
         // bridge can run the TUI completion gate BEFORE dispatch completion
@@ -7430,6 +7499,7 @@ pub(super) fn spawn_turn_bridge(
                     delivery_response.len()
                 );
                 terminal_delivery_committed = true;
+                terminal_body_visible = true;
                 advance_tmux_relay_confirmed_end(
                     shared_owned.as_ref(),
                     watcher_owner_channel_id,
@@ -7447,6 +7517,7 @@ pub(super) fn spawn_turn_bridge(
                     .is_ok()
                 {
                     terminal_delivery_committed = true;
+                    terminal_body_visible = true;
                 }
             } else {
                 delivery_response = if shared_owned.status_panel_v2_enabled {
@@ -7481,6 +7552,7 @@ pub(super) fn spawn_turn_bridge(
                         {
                             Ok(_) => {
                                 terminal_delivery_committed = true;
+                                terminal_body_visible = true;
                                 response_sent_offset = full_response.len();
                                 inflight_state.response_sent_offset = response_sent_offset;
                                 advance_tmux_relay_confirmed_end(
@@ -7539,6 +7611,7 @@ pub(super) fn spawn_turn_bridge(
                                 inflight_state.tmux_session_name.as_deref(),
                             );
                             terminal_delivery_committed = true;
+                            terminal_body_visible = true;
                         } else {
                             preserve_inflight_for_cleanup_retry = true;
                             if fallback_delivered {
@@ -7574,6 +7647,7 @@ pub(super) fn spawn_turn_bridge(
                             )
                             .await;
                             terminal_delivery_committed = true;
+                            terminal_body_visible = true;
                         }
                         Err(error) => {
                             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -7858,8 +7932,11 @@ pub(super) fn spawn_turn_bridge(
             if let Ok(mut last) = shared_owned.last_turn_at.lock() {
                 *last = Some(chrono::Local::now().to_rfc3339());
             }
-            status_panel_terminal_committed =
-                terminal_delivery_committed && !preserve_inflight_for_cleanup_retry;
+            status_panel_terminal_committed = status_panel_completion_ready_after_terminal_body(
+                terminal_delivery_committed,
+                terminal_body_visible,
+                preserve_inflight_for_cleanup_retry,
+            );
         }
 
         let mut status_panel_completion_committed = true;
@@ -8760,7 +8837,8 @@ mod status_panel_v2_rework_tests {
     use super::{
         ChannelId, InflightTurnState, MessageId, ProviderKind, StatusPanelCompletionAction,
         complete_status_panel_v2, should_open_long_running_placeholder_controller,
-        status_panel_completion_action, status_panel_message_id_for_turn,
+        status_panel_completion_action, status_panel_completion_ready_after_terminal_body,
+        status_panel_message_id_for_turn,
     };
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     use crate::services::discord::gateway::TurnGateway;
@@ -8991,6 +9069,81 @@ mod status_panel_v2_rework_tests {
         let action = status_panel_completion_action(Some(message_id), "", "응답 완료");
 
         assert_eq!(action, StatusPanelCompletionAction::Edit(message_id));
+    }
+
+    #[test]
+    fn status_panel_completion_waits_for_visible_terminal_body() {
+        assert!(
+            !status_panel_completion_ready_after_terminal_body(true, false, false),
+            "terminal delivery accepted by an async body path is not enough to post completion"
+        );
+        assert!(
+            status_panel_completion_ready_after_terminal_body(true, true, false),
+            "completion may post once the terminal body is visibly committed"
+        );
+        assert!(
+            !status_panel_completion_ready_after_terminal_body(true, true, true),
+            "cleanup retry preservation must still suppress visible completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_panel_fallback_completion_is_blocked_until_body_visible() {
+        let shared = make_status_panel_v2_shared_for_tests();
+        let gateway = StatusPanelFallbackGateway::default();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(1509350490461180105);
+        let mut last_status_panel_text = String::new();
+
+        if status_panel_completion_ready_after_terminal_body(true, false, false) {
+            let _ = complete_status_panel_v2(
+                shared.as_ref(),
+                &gateway,
+                channel_id,
+                Some(MessageId::new(9_100_000_000_000_000_123)),
+                &provider,
+                1_700_000_000,
+                &mut last_status_panel_text,
+                false,
+                "test_completion_before_body",
+                1510319194921504929,
+            )
+            .await;
+        }
+
+        assert!(
+            gateway
+                .sent_messages
+                .lock()
+                .expect("sent messages lock")
+                .is_empty(),
+            "fallback completion must not send before the terminal body is visible"
+        );
+
+        if status_panel_completion_ready_after_terminal_body(true, true, false) {
+            let committed = complete_status_panel_v2(
+                shared.as_ref(),
+                &gateway,
+                channel_id,
+                Some(MessageId::new(9_100_000_000_000_000_123)),
+                &provider,
+                1_700_000_000,
+                &mut last_status_panel_text,
+                false,
+                "test_completion_after_body",
+                1510319194921504929,
+            )
+            .await;
+            assert!(committed);
+        }
+
+        let sent_messages = gateway
+            .sent_messages
+            .lock()
+            .expect("sent messages lock")
+            .clone();
+        assert_eq!(sent_messages.len(), 1);
+        assert!(sent_messages[0].contains("응답 완료"));
     }
 
     #[tokio::test]
