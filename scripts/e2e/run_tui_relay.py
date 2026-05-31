@@ -58,6 +58,7 @@ IDLE_MAILBOX_STATUSES = {"", "idle", "none"}
 IDLE_RELAY_STALL_STATES = {"", "healthy"}
 RESTART_GUARD_FINALIZING_DRAIN_TIMEOUT_S = 30.0
 RESTART_GUARD_POLL_INTERVAL_S = 1.0
+DEFAULT_PROVIDER_HOLD_SECONDS = 60
 RUNTIME_QUEUE_DIRS: tuple[tuple[str, str], ...] = (
     ("pending_queue", "discord_pending_queue"),
     ("queued_placeholders", "discord_queued_placeholders"),
@@ -551,6 +552,319 @@ def send_prompts_concurrent(
     return sorted(results, key=lambda item: int(item["index"]))
 
 
+def send_tmux_key_sequence(
+    session_name: str,
+    keys: list[str],
+    *,
+    key_interval_s: float = 0.0,
+) -> dict[str, Any]:
+    if not keys:
+        raise assertions.AssertionError("send_tmux_key_sequence requires keys")
+    if key_interval_s <= 0:
+        if not tmux.send_keys(session_name, *keys):
+            raise assertions.AssertionError(
+                f"tmux send-keys sequence failed for session {session_name!r}"
+            )
+        return {"session": session_name, "count": len(keys), "mode": "single_call"}
+
+    sent = 0
+    for idx, key in enumerate(keys):
+        if not tmux.send_keys(session_name, key):
+            raise assertions.AssertionError(
+                "tmux send-keys sequence failed "
+                f"for session {session_name!r} at index={idx} key={key!r}"
+            )
+        sent += 1
+        if idx < len(keys) - 1:
+            time.sleep(key_interval_s)
+    return {
+        "session": session_name,
+        "count": sent,
+        "mode": "per_key",
+        "key_interval_s": key_interval_s,
+    }
+
+
+def build_provider_hold_prompt(params: Any, *, scenario_id: str) -> str:
+    """Build a provider-agnostic stop-mid-turn prompt fixture.
+
+    The fixture asks the model to emit an early marker, then block in its normal
+    shell/terminal tool before any late marker can be produced. E-18 cancels
+    during that blocking window.
+    """
+
+    if not isinstance(params, dict):
+        raise assertions.AssertionError(
+            f"send_provider_hold_prompt requires a mapping: {params!r}"
+        )
+    ok_marker = str(params.get("ok_marker") or params.get("marker") or "").strip()
+    late_marker = str(params.get("late_marker") or "").strip()
+    if not ok_marker:
+        raise assertions.AssertionError("send_provider_hold_prompt requires ok_marker")
+    if not late_marker:
+        raise assertions.AssertionError("send_provider_hold_prompt requires late_marker")
+    hold_seconds = int(params.get("hold_seconds") or DEFAULT_PROVIDER_HOLD_SECONDS)
+    if hold_seconds <= 0:
+        raise assertions.AssertionError(
+            f"send_provider_hold_prompt hold_seconds must be positive: {hold_seconds}"
+        )
+
+    return (
+        f"E2E {scenario_id} stop-mid-turn cancellation fixture.\n\n"
+        "Follow these steps exactly:\n"
+        f"1. First, emit assistant text containing exactly one line: {ok_marker}\n"
+        "2. Immediately after that line, use your normal shell/terminal command tool to run:\n"
+        f"   python3 -c \"import time; time.sleep({hold_seconds})\"\n"
+        f"3. Do not write, echo, quote, or mention {late_marker} before the command returns.\n"
+        f"4. Only if the turn is still running after the command returns, send exactly: {late_marker}\n\n"
+        "The harness will cancel this turn while the command is sleeping. If cancellation arrives, stop without sending the late marker."
+    )
+
+
+def provider_inflight_state_path(
+    *, runtime_root: str | Path, provider: str, channel_id: str
+) -> Path:
+    return Path(runtime_root) / "discord_inflight" / provider / f"{channel_id}.json"
+
+
+def validate_provider_hold_runtime_root(runtime_root: str | Path) -> Path:
+    root = Path(runtime_root)
+    if not root.is_dir():
+        raise assertions.AssertionError(
+            f"queue_runtime_root does not exist or is not a directory: {root}"
+        )
+    known_runtime_children = ("discord_inflight", "sessions", "dcserver.lock")
+    if not any((root / child).exists() for child in known_runtime_children):
+        raise assertions.AssertionError(
+            "queue_runtime_root does not look like an AgentDesk runtime root: "
+            f"{root} (expected one of {', '.join(known_runtime_children)})"
+        )
+    return root
+
+
+def _parse_discord_turn_id(turn_id: str) -> dict[str, str] | None:
+    parts = turn_id.split(":")
+    if len(parts) != 3 or parts[0] != "discord":
+        return None
+    channel_id, user_msg_id = parts[1], parts[2]
+    if not channel_id.isdigit() or not user_msg_id.isdigit():
+        return None
+    return {"turn_id": turn_id, "channel_id": channel_id, "user_msg_id": user_msg_id}
+
+
+def turn_identity_from_send_response(
+    response: dict[str, Any], *, channel_id: str
+) -> dict[str, str]:
+    """Extract the current turn identity from a prompt send response."""
+
+    def _with_optional_fields(identity: dict[str, str]) -> dict[str, str]:
+        for key in ("dispatch_id", "started_at", "born_generation"):
+            value = str(response.get(key) or "").strip()
+            if value:
+                identity[key] = value
+        return identity
+
+    turn_id = str(response.get("turn_id") or "").strip()
+    if turn_id:
+        parsed = _parse_discord_turn_id(turn_id)
+        if parsed is None:
+            raise assertions.AssertionError(
+                f"turn/start returned malformed turn_id: {turn_id!r}"
+            )
+        if parsed["channel_id"] != str(channel_id):
+            raise assertions.AssertionError(
+                "turn/start channel mismatch: "
+                f"response={parsed['channel_id']} expected={channel_id}"
+            )
+        return _with_optional_fields(parsed)
+
+    message_id = str(response.get("message_id") or response.get("id") or "").strip()
+    if message_id.isdigit():
+        return _with_optional_fields(
+            {"channel_id": str(channel_id), "user_msg_id": message_id}
+        )
+
+    raise assertions.AssertionError(
+        "prompt send response did not include turn_id, message_id, or id; "
+        f"cannot bind provider hold witness to the current turn: {response!r}"
+    )
+
+
+def _state_identity_summary(state: dict[str, Any]) -> str:
+    return (
+        f"channel_id={state.get('channel_id')!r} "
+        f"user_msg_id={state.get('user_msg_id')!r} "
+        f"dispatch_id={state.get('dispatch_id')!r} "
+        f"started_at={state.get('started_at')!r} "
+        f"born_generation={state.get('born_generation')!r}"
+    )
+
+
+def _provider_hold_identity_mismatch(
+    state: dict[str, Any], expected_identity: dict[str, str]
+) -> str | None:
+    expected_channel = str(expected_identity.get("channel_id") or "")
+    expected_user_msg = str(expected_identity.get("user_msg_id") or "")
+    if not expected_channel or not expected_user_msg:
+        return "expected turn identity is missing channel_id or user_msg_id"
+
+    actual_channel = str(state.get("channel_id") or "")
+    actual_user_msg = str(state.get("user_msg_id") or "")
+    if actual_channel != expected_channel:
+        return f"channel_id {actual_channel!r} != expected {expected_channel!r}"
+    if actual_user_msg != expected_user_msg:
+        return f"user_msg_id {actual_user_msg!r} != expected {expected_user_msg!r}"
+
+    expected_dispatch = str(expected_identity.get("dispatch_id") or "").strip()
+    if expected_dispatch:
+        actual_dispatch = str(state.get("dispatch_id") or "").strip()
+        if actual_dispatch != expected_dispatch:
+            return (
+                f"dispatch_id {actual_dispatch!r} != expected {expected_dispatch!r}"
+            )
+    expected_started_at = str(expected_identity.get("started_at") or "").strip()
+    if expected_started_at:
+        actual_started_at = str(state.get("started_at") or "").strip()
+        if actual_started_at != expected_started_at:
+            return (
+                f"started_at {actual_started_at!r} != expected {expected_started_at!r}"
+            )
+    expected_generation = str(expected_identity.get("born_generation") or "").strip()
+    if expected_generation:
+        actual_generation = str(state.get("born_generation") or "").strip()
+        if actual_generation != expected_generation:
+            return (
+                f"born_generation {actual_generation!r} "
+                f"!= expected {expected_generation!r}"
+            )
+    return None
+
+
+def _provider_hold_state_summary(
+    state: dict[str, Any], *, ok_marker: str, late_marker: str
+) -> str:
+    full_response = str(state.get("full_response") or "")
+    return (
+        f"{_state_identity_summary(state)} "
+        f"full_response_len={len(full_response)} "
+        f"ok_seen={ok_marker in full_response} "
+        f"late_seen={late_marker in full_response} "
+        f"any_tool_used={state.get('any_tool_used') is True} "
+        f"has_post_tool_text={state.get('has_post_tool_text') is True} "
+        f"terminal_delivery_committed={state.get('terminal_delivery_committed') is True}"
+    )
+
+
+def wait_for_provider_hold_state(
+    *,
+    runtime_root: str | Path,
+    provider: str,
+    channel_id: str,
+    expected_identity: dict[str, str],
+    ok_marker: str,
+    late_marker: str,
+    timeout_s: float,
+    poll_interval_s: float,
+) -> dict[str, Any]:
+    """Wait until the provider has emitted pre-tool OK text and entered a tool hold.
+
+    E-18 must cancel while the provider is still active. Waiting for the OK
+    marker on Discord is too late for TUI relay paths because pre-tool and
+    post-tool assistant text may be delivered in one terminal replacement.
+    The durable inflight row is the stable witness that OK was captured before
+    the tool call and no post-tool text has been produced yet. The row must
+    match the current prompt's turn identity so stale E-18 rows cannot satisfy
+    or fail the current run.
+    """
+
+    if timeout_s <= 0:
+        raise assertions.AssertionError(
+            f"wait_for_provider_hold_state timeout_s must be positive: {timeout_s}"
+        )
+    if poll_interval_s <= 0:
+        raise assertions.AssertionError(
+            "wait_for_provider_hold_state poll_interval_s must be positive: "
+            f"{poll_interval_s}"
+        )
+    root = validate_provider_hold_runtime_root(runtime_root)
+    path = provider_inflight_state_path(
+        runtime_root=root,
+        provider=provider,
+        channel_id=channel_id,
+    )
+    deadline = time.monotonic() + timeout_s
+    last_state = f"inflight state missing at {path}"
+    while time.monotonic() < deadline:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            last_state = f"inflight state missing at {path}"
+        except OSError as error:
+            last_state = f"inflight state unreadable at {path}: {error}"
+        else:
+            try:
+                state = json.loads(raw)
+            except json.JSONDecodeError as error:
+                last_state = f"inflight state invalid JSON at {path}: {error}"
+            else:
+                if not isinstance(state, dict):
+                    last_state = f"inflight state is not an object at {path}"
+                else:
+                    summary = _provider_hold_state_summary(
+                        state,
+                        ok_marker=ok_marker,
+                        late_marker=late_marker,
+                    )
+                    identity_mismatch = _provider_hold_identity_mismatch(
+                        state,
+                        expected_identity,
+                    )
+                    if identity_mismatch:
+                        last_state = f"identity_mismatch={identity_mismatch}; {summary}"
+                        time.sleep(poll_interval_s)
+                        continue
+                    full_response = str(state.get("full_response") or "")
+                    if late_marker in full_response:
+                        raise assertions.AssertionError(
+                            "late marker appeared in provider response before "
+                            f"the cancel step could observe a hold: {summary}"
+                        )
+                    if state.get("terminal_delivery_committed") is True:
+                        raise assertions.AssertionError(
+                            "turn delivered before provider hold was observed: "
+                            f"{summary}"
+                        )
+                    if (
+                        ok_marker in full_response
+                        and state.get("any_tool_used") is True
+                        and state.get("has_post_tool_text") is False
+                    ):
+                        # Both Claude and Codex relay parsers persist
+                        # `any_tool_used` from provider tool_use frames. If a
+                        # provider stops doing that, this current-turn witness
+                        # times out instead of matching stale content.
+                        return {
+                            "path": str(path),
+                            "turn_identity": dict(expected_identity),
+                            "full_response_len": len(full_response),
+                            "ok_marker": ok_marker,
+                            "ok_marker_seen": True,
+                            "late_marker": late_marker,
+                            "late_marker_seen": False,
+                            "any_tool_used": True,
+                            "has_post_tool_text": bool(
+                                state.get("has_post_tool_text")
+                            ),
+                        }
+                    last_state = summary
+        time.sleep(poll_interval_s)
+
+    raise assertions.AssertionError(
+        "timeout waiting for provider hold state before cancel: "
+        f"path={path} last_state={last_state}"
+    )
+
+
 def scenario_teardown_marker(scenario_id: str, *, cell: str, run_id: str) -> str:
     return f"### E2E TEARDOWN {scenario_id} cell={cell} run={run_id}"
 
@@ -732,6 +1046,39 @@ def assert_health(
     """Scenario-level health probe with explicit status/reason/counter checks."""
 
     options = params or {}
+    timeout_s = float(options.get("timeout_s") or 0)
+    poll_interval_s = float(options.get("poll_interval_s", 1.0))
+    attempts = 0
+    max_attempts = (
+        max(1, int(timeout_s / max(poll_interval_s, 0.1)) + 2)
+        if timeout_s > 0
+        else 1
+    )
+    deadline = time.monotonic() + max(timeout_s, 0.0)
+    last_error: assertions.AssertionError | None = None
+    while attempts < max_attempts:
+        attempts += 1
+        try:
+            return _assert_health_once(base_url, options)
+        except assertions.AssertionError as error:
+            last_error = error
+            if timeout_s <= 0 or time.monotonic() >= deadline:
+                raise
+            time.sleep(poll_interval_s)
+
+    if last_error is not None:
+        raise assertions.AssertionError(
+            f"assert_health did not pass within {timeout_s}s: {last_error}"
+        ) from last_error
+    raise assertions.AssertionError("assert_health failed without a captured error")
+
+
+def _assert_health_once(
+    base_url: str,
+    options: dict[str, Any],
+) -> dict[str, Any]:
+    """Single health probe attempt for assert_health polling."""
+
     status_code, health = _read_api_json(base_url, "/api/health", timeout=5)
     if not isinstance(health, dict):
         raise assertions.AssertionError(
@@ -1090,9 +1437,19 @@ def run_scenario(
             args=args,
         )
         result["assertions"].extend(window["assertions"])
-        result["relay_count"] = window.get("relay_count")
-        result["raw_count"] = window.get("raw_count")
-        result["sample_relay"] = window.get("sample_relay")
+        for key in (
+            "relay_count",
+            "raw_count",
+            "message_updates",
+            "sample_relay",
+            "provider_hold_prompts",
+            "provider_hold_states",
+            "cancel_turns",
+            "health_assertions",
+            "post_scenario_idle",
+        ):
+            if key in window:
+                result[key] = window[key]
         result["status"] = "pass"
     except assertions.AssertionError as error:
         result["status"] = "fail"
@@ -1180,16 +1537,50 @@ def run_one_cell(
             _advance_window_past_setup_echo()
             first_send_done = True
 
+    last_turn_identity: dict[str, str] | None = None
+
     for step in scenario.get("steps") or []:
         if not isinstance(step, dict):
             continue
         if "send_prompt" in step:
             _prepare_first_prompt_window()
             window.mark_prompt_sent()
-            client.send_prompt(
+            response = client.send_prompt(
                 channel_id,
                 step["send_prompt"],
                 channel_kind=cell_channel_kind(cell),
+            )
+            last_turn_identity = turn_identity_from_send_response(
+                response,
+                channel_id=channel_id,
+            )
+            time.sleep(3)
+        elif "send_provider_hold_prompt" in step:
+            _prepare_first_prompt_window()
+            prompt = build_provider_hold_prompt(
+                step["send_provider_hold_prompt"],
+                scenario_id=str(scenario_id),
+            )
+            window.mark_prompt_sent()
+            response = client.send_prompt(
+                channel_id,
+                prompt,
+                channel_kind=cell_channel_kind(cell),
+            )
+            last_turn_identity = turn_identity_from_send_response(
+                response,
+                channel_id=channel_id,
+            )
+            record.setdefault("provider_hold_prompts", []).append(
+                {
+                    "hold_seconds": int(
+                        (step["send_provider_hold_prompt"] or {}).get(
+                            "hold_seconds",
+                            DEFAULT_PROVIDER_HOLD_SECONDS,
+                        )
+                    ),
+                    "turn_identity": dict(last_turn_identity),
+                }
             )
             time.sleep(3)
         elif "send_prompts_concurrent" in step:
@@ -1242,6 +1633,35 @@ def run_one_cell(
                 raise assertions.AssertionError(
                     f"timeout waiting for raw Discord text {needle!r}"
                 )
+        elif "wait_for_provider_hold_state" in step:
+            params = step["wait_for_provider_hold_state"] or {}
+            ok_marker = str(params.get("ok_marker") or params.get("marker") or "").strip()
+            late_marker = str(params.get("late_marker") or "").strip()
+            if not ok_marker:
+                raise assertions.AssertionError(
+                    "wait_for_provider_hold_state requires ok_marker"
+                )
+            if not late_marker:
+                raise assertions.AssertionError(
+                    "wait_for_provider_hold_state requires late_marker"
+                )
+            if last_turn_identity is None:
+                raise assertions.AssertionError(
+                    "wait_for_provider_hold_state requires a preceding prompt send "
+                    "with a turn identity"
+                )
+            record.setdefault("provider_hold_states", []).append(
+                wait_for_provider_hold_state(
+                    runtime_root=Path(args.queue_runtime_root),
+                    provider=cell_provider(cell),
+                    channel_id=channel_id,
+                    expected_identity=last_turn_identity,
+                    ok_marker=ok_marker,
+                    late_marker=late_marker,
+                    timeout_s=float(params.get("timeout_s", 180)),
+                    poll_interval_s=float(params.get("poll_interval_s", 1)),
+                )
+            )
         elif "restart_dcserver" in step:
             target = args.restart_target_override or (step["restart_dcserver"] or {}).get(
                 "target", "release"
@@ -1327,6 +1747,30 @@ def run_one_cell(
                 raise assertions.AssertionError(
                     f"tmux send-keys failed for session {session_name!r}"
                 )
+        elif "send_keys_sequence" in step:
+            thread_channel_id = channel_id if scenario.get("requires_thread_channel") else None
+            session_name = cell_session_name(cell, thread_channel_id=thread_channel_id)
+            raw_params = step["send_keys_sequence"]
+            params = raw_params if isinstance(raw_params, dict) else {"keys": raw_params}
+            keys = params.get("keys")
+            if not isinstance(keys, list) or not keys:
+                raise assertions.AssertionError(
+                    f"send_keys_sequence requires a non-empty keys list: {step!r}"
+                )
+            if bool(params.get("mark_prompt_sent", True)):
+                window.mark_prompt_sent()
+            key_args = [str(key) for key in keys]
+            key_interval_s = float(
+                params.get("key_interval_s", params.get("interval_s", 0.0))
+            )
+            record.setdefault("tmux_key_sequences", []).append(
+                send_tmux_key_sequence(
+                    session_name,
+                    key_args,
+                    key_interval_s=key_interval_s,
+                )
+            )
+            time.sleep(float(params.get("sleep_s", 0.2)))
         elif "send_keys" in step:
             thread_channel_id = channel_id if scenario.get("requires_thread_channel") else None
             session_name = cell_session_name(cell, thread_channel_id=thread_channel_id)
@@ -1360,7 +1804,7 @@ def run_one_cell(
     ]
 
     for assertion_spec in scenario.get("assertions") or []:
-        run_assertion(assertion_spec, window=window)
+        run_assertion(assertion_spec, window=window, record=record)
         record["assertions"].append({"spec": assertion_spec, "passed": True})
 
     idle_check = assert_cell_idle(
@@ -1555,7 +1999,36 @@ def restart_dcserver_for_e2e(
     wait_for_health(base_url, timeout_s=90)
 
 
-def run_assertion(spec: dict[str, Any], *, window: assertions.Window) -> None:
+def _assert_provider_hold_marker_seen(
+    record: dict[str, Any] | None,
+    *,
+    marker: str,
+) -> None:
+    if not record:
+        raise assertions.AssertionError(
+            f"provider_hold_marker_seen requires provider_hold_states for {marker!r}"
+        )
+    states = record.get("provider_hold_states")
+    if not isinstance(states, list) or not states:
+        raise assertions.AssertionError(
+            f"provider_hold_marker_seen requires non-empty provider_hold_states for {marker!r}"
+        )
+    for state in states:
+        if not isinstance(state, dict):
+            continue
+        if state.get("ok_marker_seen") is True and state.get("ok_marker") == marker:
+            return
+    raise assertions.AssertionError(
+        f"expected provider hold state to observe {marker!r}; states={states!r}"
+    )
+
+
+def run_assertion(
+    spec: dict[str, Any],
+    *,
+    window: assertions.Window,
+    record: dict[str, Any] | None = None,
+) -> None:
     if not isinstance(spec, dict):
         raise assertions.AssertionError(f"bad assertion spec: {spec!r}")
     if "message_count_between_markers" in spec:
@@ -1575,6 +2048,15 @@ def run_assertion(spec: dict[str, Any], *, window: assertions.Window) -> None:
         assertions.no_duplicate_content(window)
     elif "text_present" in spec:
         assertions.text_present(window, needle=spec["text_present"])
+    elif "provider_hold_marker_seen" in spec:
+        marker = spec["provider_hold_marker_seen"]
+        if isinstance(marker, dict):
+            marker = marker.get("marker") or marker.get("ok_marker")
+        if marker is None:
+            raise assertions.AssertionError(
+                f"provider_hold_marker_seen requires marker: {spec!r}"
+            )
+        _assert_provider_hold_marker_seen(record, marker=str(marker))
     elif "raw_text_present" in spec:
         assertions.raw_text_present(window, needle=spec["raw_text_present"])
     elif "raw_text_absent" in spec:

@@ -96,6 +96,7 @@ class ScenarioFilter(unittest.TestCase):
         self.assertIn("E-18", ids)
         self.assertIn("E-19", ids)
         self.assertIn("E-20", ids)
+        self.assertIn("E-21", ids)
         self.assertNotIn("E-13", ids)
         self.assertIn("E-4", ids)
         self.assertIn("E-10", ids)
@@ -134,11 +135,12 @@ class ScenarioFilter(unittest.TestCase):
         self.assertIn("E-18", ids)
         self.assertIn("E-19", ids)
         self.assertIn("E-20", ids)
+        self.assertIn("E-21", ids)
         e17 = next(s for s in scenarios if s.get("id") == "E-17")
         self.assertIn("skip_reason", e17)
         self.assertIn("acceptance_criteria", e17)
         e18 = next(s for s in scenarios if s.get("id") == "E-18")
-        self.assertIn("skip_reason", e18)
+        self.assertNotIn("skip_reason", e18)
         self.assertIn("acceptance_criteria", e18)
 
     def test_e18_cancel_turn_scope_is_relay_backed_non_claude_e(self):
@@ -149,6 +151,33 @@ class ScenarioFilter(unittest.TestCase):
                 self.assertIn("E-18", ids)
             else:
                 self.assertNotIn("E-18", ids)
+
+    def test_e18_is_unskipped_and_uses_provider_hold_fixture(self):
+        for cell in {"claude-pipe", "claude-tui", "codex-pipe", "codex-tui"}:
+            scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
+            e18 = next(s for s in scenarios if s.get("id") == "E-18")
+            self.assertNotIn("skip_reason", e18)
+            hold_steps = [
+                step["send_provider_hold_prompt"]
+                for step in e18["steps"]
+                if "send_provider_hold_prompt" in step
+            ]
+            self.assertEqual(len(hold_steps), 1)
+            self.assertEqual(hold_steps[0]["ok_marker"], "[E2E:E18:OK]")
+            self.assertEqual(hold_steps[0]["late_marker"], "[E2E:E18:LATE]")
+            wait_steps = [
+                step["wait_for_provider_hold_state"]
+                for step in e18["steps"]
+                if "wait_for_provider_hold_state" in step
+            ]
+            self.assertEqual(len(wait_steps), 1)
+            self.assertEqual(wait_steps[0]["ok_marker"], "[E2E:E18:OK]")
+            self.assertEqual(wait_steps[0]["late_marker"], "[E2E:E18:LATE]")
+            health_steps = [
+                step["assert_health"] for step in e18["steps"] if "assert_health" in step
+            ]
+            self.assertEqual(health_steps[0]["global_active_max"], 0)
+            self.assertEqual(health_steps[0]["global_finalizing_max"], 0)
 
     def test_e19_session_continuity_scope_is_tui_only(self):
         for cell in driver.SUPPORTED_CELLS:
@@ -164,6 +193,18 @@ class ScenarioFilter(unittest.TestCase):
             scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
             ids = {str(s.get("id")) for s in scenarios}
             self.assertIn("E-20", ids)
+
+    def test_e21_direct_control_strip_scope_is_tui_only(self):
+        for cell in driver.SUPPORTED_CELLS:
+            scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
+            ids = {str(s.get("id")) for s in scenarios}
+            if cell in {"claude-tui", "codex-tui"}:
+                self.assertIn("E-21", ids)
+                e21 = next(s for s in scenarios if s.get("id") == "E-21")
+                self.assertIn("acceptance_criteria", e21)
+                self.assertNotIn("skip_reason", e21)
+            else:
+                self.assertNotIn("E-21", ids)
 
     def test_e11_excluded_everywhere(self):
         for cell in driver.SUPPORTED_CELLS:

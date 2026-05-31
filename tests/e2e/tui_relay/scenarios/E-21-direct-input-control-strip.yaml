@@ -1,0 +1,59 @@
+id: E-21
+title: Direct TUI input C-u clears stale draft and strips control bytes
+cells: [claude-tui, codex-tui]
+isolation: required
+acceptance_criteria:
+  - Warm the TUI through Discord so the hosted composer is ready.
+  - Type a stale draft marker, send C-u, then submit the real direct-input prompt in one ordered tmux key sequence.
+  - Assert the stale draft marker never appears in direct-input notification or relay output.
+  - Assert relay output contains the expected head-to-tail body and no terminal control bytes.
+notes: |
+  Concrete #2943 coverage for the direct-input body_complete + control-byte
+  strip backlog item (#2698/#2478 class). The expected output markers are
+  described as concatenated fragments so the direct-input notification preview
+  cannot satisfy relay assertions before the assistant response arrives. The
+  short key interval keeps the direct-input path human-like enough for TUI
+  composers to process C-u before Enter while still exercising real control
+  keys instead of AgentDesk prompt injection.
+steps:
+  - send_prompt: "응답에 정확히 한 줄로 [E2E:E21:WARMUP] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E21:WARMUP]"
+    timeout_s: 240
+  - wait_idle_s: 3
+  - send_keys_sequence:
+      keys:
+        - "E21_STALE_DRAFT_SHOULD_NOT_RELAY"
+        - C-u
+        - "E-21 direct input after control-u. Reply with exactly three lines: first concatenate '[E2E:E21:HE' and 'AD]'; second concatenate 'DIRECT_E21_' and 'OK'; third concatenate '[E2E:E21:TA' and 'IL]'. Do not include explanations."
+        - C-m
+      key_interval_s: 0.35
+  - wait_for_raw_discord_text: "터미널에 직접 주입된 입력"
+    timeout_s: 60
+  - wait_for_discord_text: "[E2E:E21:TAIL]"
+    timeout_s: 240
+assertions:
+  - raw_message_count_between_markers:
+      min: 2
+      max: 24
+  - relay_latency_within:
+      max_seconds: 240
+  - raw_text_present: "터미널에 직접 주입된 입력"
+  - raw_text_absent:
+      needle: "E21_STALE_DRAFT_SHOULD_NOT_RELAY"
+  - marker_absent:
+      marker: "E21_STALE_DRAFT_SHOULD_NOT_RELAY"
+      surface: relay
+  - text_present: "[E2E:E21:HEAD]"
+  - text_present: "DIRECT_E21_OK"
+  - text_present: "[E2E:E21:TAIL]"
+  - ordered_text_present:
+      - "[E2E:E21:HEAD]"
+      - "DIRECT_E21_OK"
+      - "[E2E:E21:TAIL]"
+  - body_complete:
+      head: "[E2E:E21:HEAD]"
+      tail: "[E2E:E21:TAIL]"
+  - no_duplicate_marker: "[E2E:E21:HEAD]"
+  - no_duplicate_marker: "[E2E:E21:TAIL]"
+  - no_duplicate_content: true
+  - no_control_chars: true

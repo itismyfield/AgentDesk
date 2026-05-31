@@ -515,6 +515,60 @@ class ScenarioHealthProbe(unittest.TestCase):
 
         self.assertIn("global_active=-1 < 0", str(ctx.exception))
 
+    def test_assert_health_polls_until_global_counters_drain(self):
+        payloads = {
+            "/api/health/detail": [
+                (
+                    503,
+                    {
+                        **_health_detail(_idle_mailbox("42", provider="codex")),
+                        "global_active": 1,
+                        "global_finalizing": 1,
+                    },
+                ),
+                (200, _health_detail(_idle_mailbox("42", provider="codex"))),
+            ],
+            "/api/health": [
+                (
+                    503,
+                    {
+                        "status": "degraded",
+                        "ok": False,
+                        "fully_recovered": False,
+                        "degraded": True,
+                        "degraded_reasons": [],
+                    },
+                ),
+                (
+                    200,
+                    {
+                        "status": "healthy",
+                        "ok": True,
+                        "fully_recovered": True,
+                        "degraded_reasons": [],
+                    },
+                ),
+            ],
+        }
+
+        with (
+            patch("run_tui_relay.urllib.request.urlopen", _fake_urlopen_for(payloads)),
+            patch("run_tui_relay.time.sleep", return_value=None) as sleep,
+        ):
+            result = driver.assert_health(
+                "http://agentdesk.test",
+                {
+                    "timeout_s": 1,
+                    "poll_interval_s": 0,
+                    "global_active_max": 0,
+                    "global_finalizing_max": 0,
+                },
+            )
+
+        self.assertEqual(result["global_active"], 0)
+        self.assertEqual(result["global_finalizing"], 0)
+        sleep.assert_called_once_with(0.0)
+
     def test_assert_health_forbid_only_allows_unrelated_transitional_reasons(self):
         payloads = {
             "/api/health": [
@@ -607,6 +661,451 @@ class ScenarioHealthProbe(unittest.TestCase):
 
 
 class ControlFlowPrimitives(unittest.TestCase):
+    def test_send_provider_hold_prompt_builds_cancel_fixture(self):
+        prompt = driver.build_provider_hold_prompt(
+            {
+                "ok_marker": "[E2E:E18:OK]",
+                "late_marker": "[E2E:E18:LATE]",
+                "hold_seconds": 60,
+            },
+            scenario_id="E-18",
+        )
+
+        self.assertIn("[E2E:E18:OK]", prompt)
+        self.assertIn("[E2E:E18:LATE]", prompt)
+        self.assertIn("time.sleep(60)", prompt)
+        self.assertIn("cancel this turn while the command is sleeping", prompt)
+
+    def test_turn_identity_from_turn_start_response_parses_user_message(self):
+        identity = driver.turn_identity_from_send_response(
+            {
+                "turn_id": "discord:1509350490461180105:9100000000000000123",
+                "dispatch_id": "dispatch-e18",
+                "started_at": "2026-05-31T13:53:19Z",
+                "born_generation": 7,
+            },
+            channel_id="1509350490461180105",
+        )
+
+        self.assertEqual(identity["channel_id"], "1509350490461180105")
+        self.assertEqual(identity["user_msg_id"], "9100000000000000123")
+        self.assertEqual(
+            identity["turn_id"],
+            "discord:1509350490461180105:9100000000000000123",
+        )
+        self.assertEqual(identity["dispatch_id"], "dispatch-e18")
+        self.assertEqual(identity["started_at"], "2026-05-31T13:53:19Z")
+        self.assertEqual(identity["born_generation"], "7")
+
+    def test_provider_hold_runtime_root_validation_fails_early(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_root = Path(tmp) / "missing-runtime"
+            with self.assertRaises(assertions.AssertionError) as ctx:
+                driver.wait_for_provider_hold_state(
+                    runtime_root=bad_root,
+                    provider="claude",
+                    channel_id="42",
+                    expected_identity={"channel_id": "42", "user_msg_id": "99"},
+                    ok_marker="[E2E:E18:OK]",
+                    late_marker="[E2E:E18:LATE]",
+                    timeout_s=0.1,
+                    poll_interval_s=0.01,
+                )
+
+        self.assertIn("queue_runtime_root", str(ctx.exception))
+
+    def test_wait_for_provider_hold_state_observes_pre_tool_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = (
+                Path(tmp)
+                / "discord_inflight"
+                / "claude"
+                / "1509350490461180105.json"
+            )
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "channel_id": 1509350490461180105,
+                        "user_msg_id": 9100000000000000123,
+                        "full_response": "[E2E:E18:OK]\n\n",
+                        "any_tool_used": True,
+                        "has_post_tool_text": False,
+                        "terminal_delivery_committed": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = driver.wait_for_provider_hold_state(
+                runtime_root=tmp,
+                provider="claude",
+                channel_id="1509350490461180105",
+                expected_identity={
+                    "channel_id": "1509350490461180105",
+                    "user_msg_id": "9100000000000000123",
+                },
+                ok_marker="[E2E:E18:OK]",
+                late_marker="[E2E:E18:LATE]",
+                timeout_s=0.1,
+                poll_interval_s=0.01,
+            )
+
+        self.assertEqual(result["path"], str(path))
+        self.assertTrue(result["ok_marker_seen"])
+        self.assertTrue(result["any_tool_used"])
+        self.assertFalse(result["has_post_tool_text"])
+
+    def test_wait_for_provider_hold_state_ignores_stale_late_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "discord_inflight" / "claude" / "42.json"
+            path.parent.mkdir(parents=True)
+
+            def write_state(user_msg_id: int, body: str, post_tool: bool) -> None:
+                path.write_text(
+                    json.dumps(
+                        {
+                            "channel_id": 42,
+                            "user_msg_id": user_msg_id,
+                            "full_response": body,
+                            "any_tool_used": True,
+                            "has_post_tool_text": post_tool,
+                            "terminal_delivery_committed": False,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            write_state(
+                111,
+                "[E2E:E18:OK]\n\n[E2E:E18:LATE]",
+                True,
+            )
+
+            def publish_current_turn() -> None:
+                threading.Event().wait(0.03)
+                write_state(222, "[E2E:E18:OK]\n\n", False)
+
+            updater = threading.Thread(target=publish_current_turn)
+            updater.start()
+            try:
+                result = driver.wait_for_provider_hold_state(
+                    runtime_root=tmp,
+                    provider="claude",
+                    channel_id="42",
+                    expected_identity={"channel_id": "42", "user_msg_id": "222"},
+                    ok_marker="[E2E:E18:OK]",
+                    late_marker="[E2E:E18:LATE]",
+                    timeout_s=0.5,
+                    poll_interval_s=0.01,
+                )
+            finally:
+                updater.join(timeout=1.0)
+
+        self.assertEqual(result["turn_identity"]["user_msg_id"], "222")
+
+    def test_wait_for_provider_hold_state_times_out_on_identity_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "discord_inflight" / "claude" / "42.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "channel_id": 42,
+                        "user_msg_id": 111,
+                        "full_response": "[E2E:E18:OK]\n\n",
+                        "any_tool_used": True,
+                        "has_post_tool_text": False,
+                        "terminal_delivery_committed": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(assertions.AssertionError) as ctx:
+                driver.wait_for_provider_hold_state(
+                    runtime_root=tmp,
+                    provider="claude",
+                    channel_id="42",
+                    expected_identity={"channel_id": "42", "user_msg_id": "222"},
+                    ok_marker="[E2E:E18:OK]",
+                    late_marker="[E2E:E18:LATE]",
+                    timeout_s=0.03,
+                    poll_interval_s=0.01,
+                )
+
+        self.assertIn("identity_mismatch", str(ctx.exception))
+
+    def test_wait_for_provider_hold_state_times_out_on_dispatch_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "discord_inflight" / "claude" / "42.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "channel_id": 42,
+                        "user_msg_id": 222,
+                        "dispatch_id": "old-dispatch",
+                        "full_response": "[E2E:E18:OK]\n\n",
+                        "any_tool_used": True,
+                        "has_post_tool_text": False,
+                        "terminal_delivery_committed": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(assertions.AssertionError) as ctx:
+                driver.wait_for_provider_hold_state(
+                    runtime_root=tmp,
+                    provider="claude",
+                    channel_id="42",
+                    expected_identity={
+                        "channel_id": "42",
+                        "user_msg_id": "222",
+                        "dispatch_id": "current-dispatch",
+                    },
+                    ok_marker="[E2E:E18:OK]",
+                    late_marker="[E2E:E18:LATE]",
+                    timeout_s=0.03,
+                    poll_interval_s=0.01,
+                )
+
+        self.assertIn("dispatch_id", str(ctx.exception))
+
+    def test_wait_for_provider_hold_state_rejects_delivered_current_turn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "discord_inflight" / "claude" / "42.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "channel_id": 42,
+                        "user_msg_id": 222,
+                        "full_response": "[E2E:E18:OK]\n\n",
+                        "any_tool_used": True,
+                        "has_post_tool_text": False,
+                        "terminal_delivery_committed": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(assertions.AssertionError) as ctx:
+                driver.wait_for_provider_hold_state(
+                    runtime_root=tmp,
+                    provider="claude",
+                    channel_id="42",
+                    expected_identity={"channel_id": "42", "user_msg_id": "222"},
+                    ok_marker="[E2E:E18:OK]",
+                    late_marker="[E2E:E18:LATE]",
+                    timeout_s=0.1,
+                    poll_interval_s=0.01,
+                )
+
+        self.assertIn("turn delivered before provider hold", str(ctx.exception))
+
+    def test_wait_for_provider_hold_state_rejects_late_before_cancel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "discord_inflight" / "claude" / "42.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "channel_id": 42,
+                        "user_msg_id": 222,
+                        "full_response": "[E2E:E18:OK]\n\n[E2E:E18:LATE]",
+                        "any_tool_used": True,
+                        "has_post_tool_text": True,
+                        "terminal_delivery_committed": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(assertions.AssertionError) as ctx:
+                driver.wait_for_provider_hold_state(
+                    runtime_root=tmp,
+                    provider="claude",
+                    channel_id="42",
+                    expected_identity={"channel_id": "42", "user_msg_id": "222"},
+                    ok_marker="[E2E:E18:OK]",
+                    late_marker="[E2E:E18:LATE]",
+                    timeout_s=0.1,
+                    poll_interval_s=0.01,
+                )
+
+        self.assertIn("late marker appeared", str(ctx.exception))
+
+    def test_run_one_cell_dispatches_provider_hold_prompt(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def __init__(self):
+                self.sent: list[str] = []
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                return {"id": "1"}
+
+            def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
+                return []
+
+            def send_prompt(self, channel_id, content, *, channel_kind="cc"):  # noqa: ARG002
+                self.sent.append(content)
+                return {"turn_id": "discord:42:9100000000000000123", "status": "started"}
+
+        args = Namespace(
+            cell="codex-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+        )
+        scenario = {
+            "id": "E-18",
+            "steps": [
+                {
+                    "send_provider_hold_prompt": {
+                        "ok_marker": "[E2E:E18:OK]",
+                        "late_marker": "[E2E:E18:LATE]",
+                        "hold_seconds": 60,
+                    }
+                }
+            ],
+            "assertions": [],
+        }
+        client = FakeClient()
+
+        with (
+            patch("run_tui_relay.time.sleep", return_value=None),
+            patch(
+                "run_tui_relay.assert_cell_idle",
+                return_value={"status": "idle", "mailboxes_seen": 1},
+            ),
+        ):
+            record = driver.run_one_cell(
+                scenario=scenario,
+                cell="codex-tui",
+                channel_id="42",
+                client=client,  # type: ignore[arg-type]
+                run_id="run-1",
+                dry_run=False,
+                args=args,
+            )
+
+        self.assertEqual(len(client.sent), 1)
+        self.assertIn("[E2E:E18:OK]", client.sent[0])
+        self.assertIn("time.sleep(60)", client.sent[0])
+        self.assertEqual(record["provider_hold_prompts"][0]["hold_seconds"], 60)
+        self.assertEqual(
+            record["provider_hold_prompts"][0]["turn_identity"]["user_msg_id"],
+            "9100000000000000123",
+        )
+
+    def test_run_one_cell_waits_for_hold_state_before_cancel(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def __init__(self):
+                self.sent: list[str] = []
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                return {"id": "1"}
+
+            def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
+                return []
+
+            def send_prompt(self, channel_id, content, *, channel_kind="cc"):  # noqa: ARG002
+                self.sent.append(content)
+                return {"turn_id": "discord:42:9100000000000000123", "status": "started"}
+
+        args = Namespace(
+            cell="claude-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+        )
+        scenario = {
+            "id": "E-18",
+            "steps": [
+                {
+                    "send_provider_hold_prompt": {
+                        "ok_marker": "[E2E:E18:OK]",
+                        "late_marker": "[E2E:E18:LATE]",
+                        "hold_seconds": 60,
+                    }
+                },
+                {
+                    "wait_for_provider_hold_state": {
+                        "ok_marker": "[E2E:E18:OK]",
+                        "late_marker": "[E2E:E18:LATE]",
+                    }
+                },
+                {"cancel_turn": {"force": True, "timeout_s": 15}},
+            ],
+            "assertions": [{"provider_hold_marker_seen": "[E2E:E18:OK]"}],
+        }
+        events: list[str] = []
+
+        def fake_wait_for_hold(**kwargs):  # noqa: ANN003
+            events.append("hold")
+            self.assertEqual(kwargs["provider"], "claude")
+            self.assertEqual(kwargs["channel_id"], "42")
+            self.assertEqual(
+                kwargs["expected_identity"]["user_msg_id"],
+                "9100000000000000123",
+            )
+            return {
+                "ok_marker": "[E2E:E18:OK]",
+                "ok_marker_seen": True,
+                "late_marker": "[E2E:E18:LATE]",
+                "late_marker_seen": False,
+            }
+
+        def fake_cancel(**kwargs):  # noqa: ANN003
+            events.append("cancel")
+            self.assertTrue(kwargs["force"])
+            return {"ok": True}
+
+        with (
+            patch("run_tui_relay.time.sleep", return_value=None),
+            patch("run_tui_relay.wait_for_provider_hold_state", side_effect=fake_wait_for_hold),
+            patch("run_tui_relay.cancel_turn", side_effect=fake_cancel),
+            patch(
+                "run_tui_relay.assert_cell_idle",
+                return_value={"status": "idle", "mailboxes_seen": 1},
+            ),
+        ):
+            record = driver.run_one_cell(
+                scenario=scenario,
+                cell="claude-tui",
+                channel_id="42",
+                client=FakeClient(),  # type: ignore[arg-type]
+                run_id="run-1",
+                dry_run=False,
+                args=args,
+            )
+
+        self.assertEqual(events, ["hold", "cancel"])
+        self.assertEqual(
+            record["provider_hold_states"],
+            [
+                {
+                    "ok_marker": "[E2E:E18:OK]",
+                    "ok_marker_seen": True,
+                    "late_marker": "[E2E:E18:LATE]",
+                    "late_marker_seen": False,
+                }
+            ],
+        )
+        self.assertEqual(record["cancel_turns"], [{"ok": True}])
+        self.assertEqual(
+            record["assertions"][0],
+            {
+                "spec": {"provider_hold_marker_seen": "[E2E:E18:OK]"},
+                "passed": True,
+            },
+        )
+
     def test_send_prompts_concurrent_overlaps_dispatches(self):
         class FakeClient:
             base_url = "http://agentdesk.test"
@@ -676,6 +1175,146 @@ class ControlFlowPrimitives(unittest.TestCase):
             [0, 1],
         )
 
+    def test_send_keys_sequence_sends_control_keys_as_tmux_key_args(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                return {"id": "1"}
+
+            def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
+                return []
+
+        args = Namespace(
+            cell="codex-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+        )
+        scenario = {
+            "id": "E-X",
+            "steps": [
+                {
+                    "send_keys_sequence": {
+                        "keys": ["STALE_DRAFT", "C-u", "final prompt", "C-m"]
+                    }
+                }
+            ],
+            "assertions": [],
+        }
+        sent: list[tuple[str, tuple[str, ...]]] = []
+
+        def fake_send_keys(session_name, *keys):
+            sent.append((session_name, keys))
+            return True
+
+        with (
+            patch("run_tui_relay.time.sleep", return_value=None),
+            patch("run_tui_relay.tmux.send_keys", side_effect=fake_send_keys),
+            patch(
+                "run_tui_relay.assert_cell_idle",
+                return_value={"status": "idle", "mailboxes_seen": 1},
+            ),
+        ):
+            record = driver.run_one_cell(
+                scenario=scenario,
+                cell="codex-tui",
+                channel_id="42",
+                client=FakeClient(),  # type: ignore[arg-type]
+                run_id="run-1",
+                dry_run=False,
+                args=args,
+            )
+
+        self.assertEqual(
+            sent,
+            [
+                (
+                    "AgentDesk-codex-adk-codex-tui-e2e",
+                    ("STALE_DRAFT", "C-u", "final prompt", "C-m"),
+                )
+            ],
+        )
+        self.assertEqual(
+            record["tmux_key_sequences"],
+            [{"session": sent[0][0], "count": 4, "mode": "single_call"}],
+        )
+
+    def test_send_keys_sequence_can_pause_between_control_keys(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                return {"id": "1"}
+
+            def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
+                return []
+
+        args = Namespace(
+            cell="claude-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+        )
+        scenario = {
+            "id": "E-21",
+            "steps": [
+                {
+                    "send_keys_sequence": {
+                        "keys": ["STALE_DRAFT", "C-u", "final prompt", "C-m"],
+                        "key_interval_s": 0.35,
+                    }
+                }
+            ],
+            "assertions": [],
+        }
+        sent: list[tuple[str, tuple[str, ...]]] = []
+        sleeps: list[float] = []
+
+        def fake_send_keys(session_name, *keys):
+            sent.append((session_name, keys))
+            return True
+
+        with (
+            patch("run_tui_relay.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)),
+            patch("run_tui_relay.tmux.send_keys", side_effect=fake_send_keys),
+            patch(
+                "run_tui_relay.assert_cell_idle",
+                return_value={"status": "idle", "mailboxes_seen": 1},
+            ),
+        ):
+            record = driver.run_one_cell(
+                scenario=scenario,
+                cell="claude-tui",
+                channel_id="42",
+                client=FakeClient(),  # type: ignore[arg-type]
+                run_id="run-1",
+                dry_run=False,
+                args=args,
+            )
+
+        self.assertEqual(
+            sent,
+            [
+                ("AgentDesk-claude-adk-claude-tui-e2e", ("STALE_DRAFT",)),
+                ("AgentDesk-claude-adk-claude-tui-e2e", ("C-u",)),
+                ("AgentDesk-claude-adk-claude-tui-e2e", ("final prompt",)),
+                ("AgentDesk-claude-adk-claude-tui-e2e", ("C-m",)),
+            ],
+        )
+        self.assertEqual([sleep for sleep in sleeps if sleep == 0.35], [0.35, 0.35, 0.35])
+        self.assertEqual(
+            record["tmux_key_sequences"],
+            [
+                {
+                    "session": "AgentDesk-claude-adk-claude-tui-e2e",
+                    "count": 4,
+                    "mode": "per_key",
+                    "key_interval_s": 0.35,
+                }
+            ],
+        )
+
     def test_assert_session_preserved_detects_recreated_tmux_session(self):
         before = {
             "session_name": "AgentDesk-codex-adk-codex-tui-e2e",
@@ -714,6 +1353,65 @@ class ControlFlowPrimitives(unittest.TestCase):
 
 
 class ScenarioTeardown(unittest.TestCase):
+    def test_run_scenario_includes_provider_hold_evidence_in_report_record(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                return {"id": "1"}
+
+        args = Namespace(
+            cell="claude-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            reset_before_each=False,
+            dry_run=False,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+            hard_reset_session_each=False,
+            allow_destructive=False,
+        )
+        scenario = {"id": "E-18", "steps": [], "assertions": []}
+        provider_hold_state = {
+            "ok_marker": "[E2E:E18:OK]",
+            "ok_marker_seen": True,
+            "late_marker": "[E2E:E18:LATE]",
+            "late_marker_seen": False,
+        }
+
+        with patch(
+            "run_tui_relay.run_one_cell",
+            return_value={
+                "assertions": [
+                    {
+                        "spec": {"provider_hold_marker_seen": "[E2E:E18:OK]"},
+                        "passed": True,
+                    }
+                ],
+                "relay_count": 0,
+                "raw_count": 1,
+                "message_updates": 0,
+                "sample_relay": [],
+                "provider_hold_prompts": [{"hold_seconds": 60}],
+                "provider_hold_states": [provider_hold_state],
+                "cancel_turns": [{"ok": True}],
+                "health_assertions": [{"status": "healthy"}],
+                "post_scenario_idle": {"status": "idle"},
+            },
+        ):
+            result = driver.run_scenario(
+                scenario,
+                args=args,
+                run_id="run-1",
+                client=FakeClient(),  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["provider_hold_states"], [provider_hold_state])
+        self.assertEqual(result["provider_hold_prompts"], [{"hold_seconds": 60}])
+        self.assertEqual(result["health_assertions"], [{"status": "healthy"}])
+        self.assertEqual(result["relay_count"], 0)
+        self.assertEqual(result["raw_count"], 1)
+
     def test_run_scenario_posts_teardown_when_idle_assertion_fails(self):
         class FakeClient:
             base_url = "http://agentdesk.test"

@@ -318,6 +318,31 @@ class RunAssertionDispatch(unittest.TestCase):
         self.run_assertion({"body_not_overwritten": "[BODY]"}, window=window)
         self.run_assertion({"no_suppressed_label_chrome": True}, window=window)
 
+    def test_provider_hold_marker_seen_dispatch_uses_record_not_relay(self):
+        window = _window()
+        record = {
+            "provider_hold_states": [
+                {
+                    "ok_marker": "[E2E:E18:OK]",
+                    "ok_marker_seen": True,
+                    "late_marker": "[E2E:E18:LATE]",
+                    "late_marker_seen": False,
+                }
+            ]
+        }
+
+        self.run_assertion(
+            {"provider_hold_marker_seen": "[E2E:E18:OK]"},
+            window=window,
+            record=record,
+        )
+        with self.assertRaises(assertions.AssertionError):
+            self.run_assertion(
+                {"provider_hold_marker_seen": "[E2E:E18:OTHER]"},
+                window=window,
+                record=record,
+            )
+
     def test_every_scenario_assertion_spec_is_dispatchable(self):
         import glob  # noqa: PLC0415
 

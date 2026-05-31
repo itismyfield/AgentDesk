@@ -20,6 +20,8 @@ const OBSERVED_PROMPT_BUFFER: usize = 128;
 
 static STATE: LazyLock<Mutex<TuiPromptDedupeState>> =
     LazyLock::new(|| Mutex::new(TuiPromptDedupeState::default()));
+#[cfg(test)]
+pub(crate) static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static OBSERVED_PROMPTS: LazyLock<broadcast::Sender<ObservedTuiPrompt>> =
     LazyLock::new(|| broadcast::channel(OBSERVED_PROMPT_BUFFER).0);
 
@@ -674,6 +676,37 @@ pub(crate) fn clear_external_input_relay_lease(
     true
 }
 
+pub(crate) fn clear_external_input_relay_lease_if_matches(
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+    expected: &ExternalInputRelayLease,
+) -> bool {
+    let provider = normalize_provider(provider);
+    let tmux_session_name = tmux_session_name.trim();
+    if provider.is_empty() || tmux_session_name.is_empty() || channel_id == 0 {
+        return false;
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    let key = PromptKey::new(&provider, tmux_session_name);
+    let Some(entry) = state.external_input_relay_lease_by_tmux.get(&key) else {
+        return false;
+    };
+    if entry
+        .value
+        .channel_id
+        .is_some_and(|leased| leased != channel_id)
+    {
+        return false;
+    }
+    if &entry.value != expected {
+        return false;
+    }
+    state.external_input_relay_lease_by_tmux.remove(&key);
+    true
+}
+
 fn mark_ssh_direct_observation_pending(provider: &str, tmux_session_name: &str) {
     let tmux_session_name = tmux_session_name.trim();
     if provider.is_empty() || tmux_session_name.is_empty() {
@@ -988,8 +1021,6 @@ impl TuiPromptDedupeState {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     fn reset_state() {
         let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
@@ -1545,6 +1576,45 @@ mod tests {
         assert_eq!(lease.relay_owner.as_str(), "session_bound_relay");
         assert_eq!(lease.runtime_kind, Some(RuntimeHandoffKind::CodexTui));
         assert!(external_input_relay_lease("codex", "tmux-trace", 43).is_none());
+    }
+
+    #[test]
+    fn clear_external_input_relay_lease_if_matches_preserves_newer_turn() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        let original = ExternalInputRelayLease {
+            channel_id: Some(42),
+            turn_id: Some("external:codex:42:tmux-trace:1".to_string()),
+            session_key: Some("host:tmux-trace".to_string()),
+            relay_owner: ExternalInputRelayOwner::BridgeAdapter,
+            runtime_kind: Some(RuntimeHandoffKind::CodexTui),
+        };
+        let newer = ExternalInputRelayLease {
+            turn_id: Some("external:codex:42:tmux-trace:2".to_string()),
+            ..original.clone()
+        };
+
+        record_external_input_turn_lease("codex", "tmux-trace", original.clone());
+        record_external_input_turn_lease("codex", "tmux-trace", newer.clone());
+
+        assert!(!clear_external_input_relay_lease_if_matches(
+            "codex",
+            "tmux-trace",
+            42,
+            &original
+        ));
+        assert_eq!(
+            external_input_relay_lease("codex", "tmux-trace", 42),
+            Some(newer.clone())
+        );
+        assert!(clear_external_input_relay_lease_if_matches(
+            "codex",
+            "tmux-trace",
+            42,
+            &newer
+        ));
+        assert!(external_input_relay_lease("codex", "tmux-trace", 42).is_none());
     }
 
     #[test]

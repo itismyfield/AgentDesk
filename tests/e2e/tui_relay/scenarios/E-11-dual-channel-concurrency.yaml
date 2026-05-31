@@ -1,23 +1,28 @@
 id: E-11
 title: cc · cdx 동시 진행, 채널 격리 (#2691 + 7.2)
-cells: []  # cross-cell scenario, handled at orchestrator layer in PR 4
+cells: []  # cross-cell scenario, handled by run_multi_provider_matrix.py
+orchestration: cross_channel
 isolation: required
+acceptance_criteria:
+  - Dispatch the cc and cdx prompts through configured e2e cells without an inter-step sleep.
+  - Observe the cc marker only in the cc channel window.
+  - Observe the cdx marker only in the cdx channel window.
+  - Fail closed before dispatch if live mailbox/session state exists outside the selected e2e cells.
 notes: |
-  Driver runs cc and cdx sequentially in the current implementation; true
-  concurrency arrives once the driver gains an async fan-out. Until then,
-  this scenario verifies neither channel sees the other's marker text.
-steps:
-  - send_prompt: "응답에 정확히 한 줄로 [E2E:E11:CC-MARKER] 만 출력해줘."
-  - wait_for_discord_text: "[E2E:E11:CC-MARKER]"
-    timeout_s: 240
-  - wait_idle_s: 2
-  - send_prompt: "응답에 정확히 한 줄로 [E2E:E11:CDX-MARKER] 만 출력해줘."
-  - wait_for_discord_text: "[E2E:E11:CDX-MARKER]"
-    timeout_s: 240
-assertions:
-  - raw_message_count_between_markers:
-      min: 2
-      max: 24
-  - relay_latency_within:
-      max_seconds: 240
-  - no_duplicate_content: true
+  E-11 is intentionally excluded from the single-cell driver. The matrix
+  runner owns both configured e2e channels, sends both prompts through the
+  same fan-out primitive window, and asserts that neither channel observes the
+  sibling marker on either the relay or raw Discord surface.
+cross_channel:
+  wait_timeout_s: 240
+  participants:
+    - name: cc
+      cell: claude-tui
+      channel_kind: cc
+      marker: "[E2E:E11:CC-MARKER]"
+      prompt: "응답에 정확히 한 줄로 [E2E:E11:CC-MARKER] 만 출력해줘."
+    - name: cdx
+      cell: codex-tui
+      channel_kind: cdx
+      marker: "[E2E:E11:CDX-MARKER]"
+      prompt: "응답에 정확히 한 줄로 [E2E:E11:CDX-MARKER] 만 출력해줘."
