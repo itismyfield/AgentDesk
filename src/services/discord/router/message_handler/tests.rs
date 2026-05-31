@@ -1594,13 +1594,14 @@ fn attach_paused_turn_watcher_pauses_existing_tmux_owner_channel() {
     let owner_channel = ChannelId::new(1485506232256168136);
     let thread_channel = ChannelId::new(1485506232256168137);
     let tmux_name = "AgentDesk-codex-adk-cdx-owner".to_string();
+    let output_path = "/tmp/agentdesk-test-owner-output.jsonl".to_string();
     let owner_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let owner_pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
     shared.tmux_watchers.insert(
         owner_channel,
         TmuxWatcherHandle {
             tmux_session_name: tmux_name.clone(),
-            output_path: "/tmp/agentdesk-test-owner-output.jsonl".to_string(),
+            output_path: output_path.clone(),
             paused: owner_paused.clone(),
             resume_offset: Arc::new(std::sync::Mutex::new(None)),
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1619,7 +1620,7 @@ fn attach_paused_turn_watcher_pauses_existing_tmux_owner_channel() {
         &ProviderKind::Codex,
         thread_channel,
         Some(tmux_name),
-        Some("/tmp/agentdesk-test-output.jsonl".to_string()),
+        Some(output_path),
         0,
         "unit-test-turn-start",
     );

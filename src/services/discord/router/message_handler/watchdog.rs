@@ -4,6 +4,17 @@ pub(super) const WATCHDOG_DEADLOCK_PREALERT_MS: i64 = 5 * 60 * 1000;
 pub(super) const WATCHDOG_DEADLOCK_PREALERT_BOT: &str = "announce";
 pub(super) const WATCHDOG_TIMEOUT_REASON: &str = "watchdog timeout";
 pub(super) const WATCHDOG_TIMEOUT_CANCEL_SOURCE: &str = "watchdog_timeout";
+#[cfg(not(test))]
+const PAUSED_WATCHER_COLD_START_RETRY_ATTEMPTS: u32 = 180;
+#[cfg(test)]
+const PAUSED_WATCHER_COLD_START_RETRY_ATTEMPTS: u32 = 20;
+#[cfg(not(test))]
+const PAUSED_WATCHER_COLD_START_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_secs(1);
+#[cfg(test)]
+const PAUSED_WATCHER_COLD_START_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(10);
+
 pub(super) fn watchdog_deadlock_prealert_bot_name() -> &'static str {
     WATCHDOG_DEADLOCK_PREALERT_BOT
 }
@@ -285,6 +296,176 @@ pub(super) async fn reconcile_watchdog_timeout(
     WatchdogTimeoutCancelDisposition::Cancelled
 }
 
+#[cfg(unix)]
+#[derive(Clone)]
+struct PausedTurnWatcherAttachRequest {
+    shared: Arc<SharedData>,
+    http: Arc<serenity::Http>,
+    provider: ProviderKind,
+    channel_id: serenity::ChannelId,
+    tmux_session_name: String,
+    output_path: String,
+    initial_offset: u64,
+    source: &'static str,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct PendingPausedWatcherAttachKey {
+    channel_id: u64,
+    tmux_session_name: String,
+}
+
+#[cfg(unix)]
+impl PendingPausedWatcherAttachKey {
+    fn new(channel_id: serenity::ChannelId, tmux_session_name: &str) -> Self {
+        Self {
+            channel_id: channel_id.get(),
+            tmux_session_name: tmux_session_name.to_string(),
+        }
+    }
+}
+
+#[cfg(unix)]
+static PENDING_PAUSED_WATCHER_ATTACHES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<PendingPausedWatcherAttachKey>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+#[cfg(test)]
+static TEST_PAUSED_WATCHER_TMUX_LIVE_OVERRIDE: std::sync::OnceLock<
+    std::sync::Mutex<Option<std::collections::HashSet<String>>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+static TEST_SUPPRESS_PAUSED_WATCHER_TASK_SPAWN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+fn set_test_paused_watcher_tmux_live_override(names: Option<&[&str]>) {
+    let lock = TEST_PAUSED_WATCHER_TMUX_LIVE_OVERRIDE.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = lock
+        .lock()
+        .expect("paused watcher tmux-live override lock poisoned");
+    *guard = names.map(|slice| slice.iter().map(|name| (*name).to_string()).collect());
+}
+
+#[cfg(test)]
+fn set_test_suppress_paused_watcher_task_spawn(suppress: bool) {
+    TEST_SUPPRESS_PAUSED_WATCHER_TASK_SPAWN.store(suppress, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(unix)]
+fn paused_watcher_tmux_session_has_live_pane(tmux_session_name: &str) -> bool {
+    #[cfg(test)]
+    {
+        if let Some(lock) = TEST_PAUSED_WATCHER_TMUX_LIVE_OVERRIDE.get()
+            && let Ok(guard) = lock.lock()
+            && let Some(names) = guard.as_ref()
+        {
+            return names.contains(tmux_session_name);
+        }
+    }
+
+    crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name)
+}
+
+#[cfg(unix)]
+fn active_watcher_owner_for_tmux(
+    shared: &Arc<SharedData>,
+    tmux_session_name: &str,
+) -> Option<serenity::ChannelId> {
+    let owner_channel_id = shared
+        .tmux_watchers
+        .owner_channel_for_tmux_session(tmux_session_name)?;
+    let handle = shared.tmux_watchers.get(&owner_channel_id)?;
+    (!handle.cancel.load(std::sync::atomic::Ordering::Relaxed)).then_some(owner_channel_id)
+}
+
+#[cfg(all(unix, test))]
+fn pending_paused_watcher_attach_count_for_tests() -> usize {
+    PENDING_PAUSED_WATCHER_ATTACHES
+        .lock()
+        .expect("pending paused watcher attach lock poisoned")
+        .len()
+}
+
+#[cfg(all(unix, test))]
+fn clear_pending_paused_watcher_attaches_for_tests() {
+    PENDING_PAUSED_WATCHER_ATTACHES
+        .lock()
+        .expect("pending paused watcher attach lock poisoned")
+        .clear();
+}
+
+#[cfg(unix)]
+fn remove_pending_paused_watcher_attach(key: &PendingPausedWatcherAttachKey) {
+    let mut guard = PENDING_PAUSED_WATCHER_ATTACHES
+        .lock()
+        .expect("pending paused watcher attach lock poisoned");
+    guard.remove(key);
+}
+
+#[cfg(unix)]
+fn schedule_pending_paused_turn_watcher_attach(request: PausedTurnWatcherAttachRequest) {
+    let key = PendingPausedWatcherAttachKey::new(request.channel_id, &request.tmux_session_name);
+    {
+        let mut guard = PENDING_PAUSED_WATCHER_ATTACHES
+            .lock()
+            .expect("pending paused watcher attach lock poisoned");
+        if !guard.insert(key.clone()) {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::debug!(
+                "  [{ts}] ↻ Pending paused tmux watcher attach already scheduled for channel {} — tmux {}",
+                request.channel_id,
+                request.tmux_session_name
+            );
+            return;
+        }
+    }
+
+    if tokio::runtime::Handle::try_current().is_err() {
+        remove_pending_paused_watcher_attach(&key);
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ↻ Unable to schedule paused tmux watcher retry for channel {} — no Tokio runtime",
+            request.channel_id
+        );
+        return;
+    }
+
+    super::super::super::task_supervisor::spawn_observed(
+        "pending_paused_turn_watcher_attach",
+        async move {
+            for attempt in 1..=PAUSED_WATCHER_COLD_START_RETRY_ATTEMPTS {
+                tokio::time::sleep(PAUSED_WATCHER_COLD_START_RETRY_DELAY).await;
+                if paused_watcher_tmux_session_has_live_pane(&request.tmux_session_name)
+                    || active_watcher_owner_for_tmux(&request.shared, &request.tmux_session_name)
+                        .is_some()
+                {
+                    let owner = attach_paused_turn_watcher_inner(request.clone(), false);
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] ↻ Re-attached paused tmux watcher for channel {} via cold-start retry attempt {attempt}; owner={}",
+                        request.channel_id,
+                        owner
+                    );
+                    remove_pending_paused_watcher_attach(&key);
+                    return;
+                }
+            }
+
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ↻ Giving up paused tmux watcher retry for channel {} after {} attempts — tmux {} never became live",
+                request.channel_id,
+                PAUSED_WATCHER_COLD_START_RETRY_ATTEMPTS,
+                request.tmux_session_name
+            );
+            remove_pending_paused_watcher_attach(&key);
+        },
+    );
+}
+
 pub(super) fn attach_paused_turn_watcher(
     shared: &Arc<SharedData>,
     http: Arc<serenity::Http>,
@@ -295,23 +476,79 @@ pub(super) fn attach_paused_turn_watcher(
     initial_offset: u64,
     source: &'static str,
 ) -> serenity::ChannelId {
-    let mut watcher_owner_channel_id = channel_id;
-
     #[cfg(unix)]
     if let (Some(tmux_session_name), Some(output_path)) = (tmux_session_name, output_path) {
-        let existing_owner_for_tmux = shared.tmux_watchers.iter().any(|entry| {
-            entry.tmux_session_name == tmux_session_name
-                && !entry.cancel.load(std::sync::atomic::Ordering::Relaxed)
-        });
-        let tmux_live =
-            crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_session_name);
+        return attach_paused_turn_watcher_inner(
+            PausedTurnWatcherAttachRequest {
+                shared: shared.clone(),
+                http,
+                provider: provider.clone(),
+                channel_id,
+                tmux_session_name,
+                output_path,
+                initial_offset,
+                source,
+            },
+            true,
+        );
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            shared,
+            http,
+            provider,
+            tmux_session_name,
+            output_path,
+            initial_offset,
+            source,
+        );
+    }
+
+    channel_id
+}
+
+#[cfg(unix)]
+fn attach_paused_turn_watcher_inner(
+    request: PausedTurnWatcherAttachRequest,
+    allow_cold_start_retry: bool,
+) -> serenity::ChannelId {
+    let PausedTurnWatcherAttachRequest {
+        shared,
+        http,
+        provider,
+        channel_id,
+        tmux_session_name,
+        output_path,
+        initial_offset,
+        source,
+    } = request;
+    let mut watcher_owner_channel_id = channel_id;
+
+    {
+        let existing_owner_for_tmux =
+            active_watcher_owner_for_tmux(&shared, &tmux_session_name).is_some();
+        let tmux_live = paused_watcher_tmux_session_has_live_pane(&tmux_session_name);
         if !tmux_live && !existing_owner_for_tmux {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
-                "  [{ts}] ↻ Skipping paused tmux watcher attach for channel {} ({source}) — tmux {} is not live yet",
+                "  [{ts}] ↻ Deferring paused tmux watcher attach for channel {} ({source}) — tmux {} is not live yet",
                 channel_id,
                 tmux_session_name
             );
+            if allow_cold_start_retry {
+                schedule_pending_paused_turn_watcher_attach(PausedTurnWatcherAttachRequest {
+                    shared,
+                    http,
+                    provider,
+                    channel_id,
+                    tmux_session_name,
+                    output_path,
+                    initial_offset,
+                    source,
+                });
+            }
             return watcher_owner_channel_id;
         }
 
@@ -339,7 +576,7 @@ pub(super) fn attach_paused_turn_watcher(
             &shared.tmux_watchers,
             channel_id,
             handle,
-            provider,
+            &provider,
             source,
         );
         watcher_owner_channel_id = claim.owner_channel_id();
@@ -353,27 +590,42 @@ pub(super) fn attach_paused_turn_watcher(
             if claim.replaced_existing() {
                 shared.record_tmux_watcher_reconnect(channel_id);
             }
-            super::super::super::task_supervisor::spawn_observed_tmux_watcher(
-                "router_tmux_output_watcher",
-                shared.clone(),
-                tmux_session_name.clone(),
-                cancel.clone(),
-                super::super::super::tmux::tmux_output_watcher(
-                    channel_id,
-                    http,
-                    shared.clone(),
-                    output_path,
-                    tmux_session_name,
-                    initial_offset,
-                    cancel,
-                    paused,
-                    resume_offset,
-                    pause_epoch,
-                    turn_delivered,
-                    last_heartbeat_ts_ms,
-                    mailbox_finalize_owed,
-                ),
-            );
+            #[cfg(test)]
+            let suppress_spawn =
+                TEST_SUPPRESS_PAUSED_WATCHER_TASK_SPAWN.load(std::sync::atomic::Ordering::Relaxed);
+            #[cfg(not(test))]
+            let suppress_spawn = false;
+            if !suppress_spawn {
+                if tokio::runtime::Handle::try_current().is_ok() {
+                    super::super::super::task_supervisor::spawn_observed_tmux_watcher(
+                        "router_tmux_output_watcher",
+                        shared.clone(),
+                        tmux_session_name.clone(),
+                        cancel.clone(),
+                        super::super::super::tmux::tmux_output_watcher(
+                            channel_id,
+                            http,
+                            shared.clone(),
+                            output_path,
+                            tmux_session_name,
+                            initial_offset,
+                            cancel,
+                            paused,
+                            resume_offset,
+                            pause_epoch,
+                            turn_delivered,
+                            last_heartbeat_ts_ms,
+                            mailbox_finalize_owed,
+                        ),
+                    );
+                } else {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ↻ Unable to spawn tmux watcher for channel {} — no Tokio runtime",
+                        channel_id
+                    );
+                }
+            }
         }
     }
 
@@ -387,6 +639,93 @@ pub(super) fn attach_paused_turn_watcher(
     }
 
     watcher_owner_channel_id
+}
+
+#[cfg(all(test, unix))]
+mod cold_start_retry_tests {
+    use super::*;
+    use tokio::time::{Duration, sleep, timeout};
+
+    struct RetryTestGuard;
+
+    impl RetryTestGuard {
+        fn new() -> Self {
+            clear_pending_paused_watcher_attaches_for_tests();
+            set_test_paused_watcher_tmux_live_override(Some(&[]));
+            set_test_suppress_paused_watcher_task_spawn(true);
+            Self
+        }
+    }
+
+    impl Drop for RetryTestGuard {
+        fn drop(&mut self) {
+            set_test_paused_watcher_tmux_live_override(None);
+            set_test_suppress_paused_watcher_task_spawn(false);
+            clear_pending_paused_watcher_attaches_for_tests();
+        }
+    }
+
+    #[tokio::test]
+    async fn deferred_paused_watcher_attach_retries_when_tmux_goes_live() {
+        let _guard = RetryTestGuard::new();
+        let shared = super::super::super::super::make_shared_data_for_tests();
+        let channel = serenity::ChannelId::new(1485506232256168199);
+        let tmux_name = format!(
+            "AgentDesk-codex-cold-start-retry-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+
+        let owner = attach_paused_turn_watcher(
+            &shared,
+            Arc::new(poise::serenity_prelude::Http::new("Bot test-token")),
+            &ProviderKind::Codex,
+            channel,
+            Some(tmux_name.clone()),
+            Some("/tmp/agentdesk-cold-start-retry-output.jsonl".to_string()),
+            42,
+            "unit-test-cold-start-restore",
+        );
+
+        assert_eq!(owner, channel);
+        assert!(
+            !shared.tmux_watchers.contains_key(&channel),
+            "cold-start attach must not create a dead-pane watcher immediately"
+        );
+        assert_eq!(
+            pending_paused_watcher_attach_count_for_tests(),
+            1,
+            "dead tmux attach should leave a bounded retry registered"
+        );
+
+        set_test_paused_watcher_tmux_live_override(Some(&[tmux_name.as_str()]));
+
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if shared.tmux_watchers.contains_key(&channel)
+                    && pending_paused_watcher_attach_count_for_tests() == 0
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("retry should attach once tmux becomes live");
+
+        let watcher = shared
+            .tmux_watchers
+            .get(&channel)
+            .expect("retry should install a watcher slot");
+        assert_eq!(watcher.tmux_session_name, tmux_name);
+        assert_eq!(
+            watcher.output_path,
+            "/tmp/agentdesk-cold-start-retry-output.jsonl"
+        );
+        assert!(
+            watcher.paused.load(std::sync::atomic::Ordering::Relaxed),
+            "reattached restored-turn watcher must stay paused until turn bridge hands off"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
