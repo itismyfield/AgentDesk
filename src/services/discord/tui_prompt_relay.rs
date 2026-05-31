@@ -360,6 +360,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         channel_id.get(),
         anchor_message.id.get(),
     );
+    super::formatting::add_reaction_raw(&notify_http, channel_id, anchor_message.id, '⏳').await;
     tracing::info!(
         provider = %prompt.provider,
         channel_id = channel_id.get(),
@@ -2349,6 +2350,51 @@ async fn prompt_anchor_for_response_after_wait(
     }
 }
 
+pub(super) fn should_complete_tui_direct_anchor_lifecycle(
+    terminal_output_committed: bool,
+    terminal_body_visible: bool,
+    anchor_or_lease_present: bool,
+    lifecycle_stage_paused: bool,
+    inflight_present: bool,
+) -> bool {
+    terminal_output_committed
+        && terminal_body_visible
+        && anchor_or_lease_present
+        && (lifecycle_stage_paused || !inflight_present)
+}
+
+pub(super) async fn complete_tui_direct_prompt_anchor_lifecycle_if_present(
+    http: &serenity::Http,
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: ChannelId,
+    reason: &str,
+) -> Option<crate::services::tui_prompt_dedupe::TuiPromptAnchor> {
+    let anchor = crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
+        provider,
+        tmux_session_name,
+        channel_id.get(),
+    )?;
+    let anchor_channel_id = ChannelId::new(anchor.channel_id);
+    let anchor_message_id = MessageId::new(anchor.message_id);
+    super::formatting::remove_reaction_raw(http, anchor_channel_id, anchor_message_id, '⏳').await;
+    super::formatting::add_reaction_raw(http, anchor_channel_id, anchor_message_id, '✅').await;
+    crate::services::tui_prompt_dedupe::clear_prompt_anchor_for_response(
+        provider,
+        tmux_session_name,
+        anchor,
+    );
+    tracing::info!(
+        provider = %provider,
+        channel_id = anchor.channel_id,
+        tmux_session_name = %tmux_session_name,
+        anchor_message_id = anchor.message_id,
+        reason,
+        "completed TUI-direct prompt anchor reaction lifecycle"
+    );
+    Some(anchor)
+}
+
 fn owner_channel_for_prompt(
     shared: &Arc<SharedData>,
     prompt: &ObservedTuiPrompt,
@@ -2485,6 +2531,32 @@ mod tests {
             );
         }
         assert!(output.contains("ringpagedelc1\n\tkeep"));
+    }
+
+    #[test]
+    fn direct_anchor_lifecycle_requires_visible_terminal_body() {
+        assert!(!should_complete_tui_direct_anchor_lifecycle(
+            true, false, true, true, false,
+        ));
+        assert!(!should_complete_tui_direct_anchor_lifecycle(
+            false, true, true, true, false,
+        ));
+        assert!(!should_complete_tui_direct_anchor_lifecycle(
+            true, true, false, true, false,
+        ));
+    }
+
+    #[test]
+    fn direct_anchor_lifecycle_uses_bridge_for_active_inflight_unless_paused() {
+        assert!(!should_complete_tui_direct_anchor_lifecycle(
+            true, true, true, false, true,
+        ));
+        assert!(should_complete_tui_direct_anchor_lifecycle(
+            true, true, true, true, true,
+        ));
+        assert!(should_complete_tui_direct_anchor_lifecycle(
+            true, true, true, false, false,
+        ));
     }
 
     #[cfg(unix)]
