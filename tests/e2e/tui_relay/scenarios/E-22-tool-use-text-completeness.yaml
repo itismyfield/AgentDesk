@@ -1,6 +1,6 @@
 id: E-22
 title: tool_use 이후 후속 텍스트 head-to-tail 완결성
-cells: [claude-pipe, claude-tui, codex-pipe, codex-tui]
+cells: [claude-pipe, claude-tui]
 isolation: required
 acceptance_criteria:
   - Emit visible pre-tool assistant text.
@@ -12,6 +12,8 @@ notes: |
   tool_use frame followed by additional text used to drop or overwrite earlier
   assistant text. The wait_for_provider_hold_state primitive proves the current
   turn saw pre-tool text and a real tool_use before the final post-tool body.
+  Codex cells are excluded because their E2E worker role cannot execute live
+  shell/tool commands; Codex modern-schema coverage remains in fixture E-25.
   This intentionally omits claude-e until the harness has a non-live proof or
   fixture that claude-e persists the same any_tool_used/has_post_tool_text
   inflight witness used by wait_for_provider_hold_state.

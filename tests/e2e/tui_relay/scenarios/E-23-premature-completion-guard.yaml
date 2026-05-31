@@ -1,6 +1,6 @@
 id: E-23
 title: 본문 전/본문 없는 completion chrome 회귀 가드
-cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
+cells: [claude-pipe, claude-tui, claude-e]
 isolation: required
 acceptance_criteria:
   - Delay the final body behind a real tool call.
@@ -10,7 +10,9 @@ notes: |
   #2943 P0 coverage for #2161/#2757-style premature completion. The scenario
   intentionally creates a short tool gap before the body so a relay that posts
   "응답 완료" before user-visible content is visible to
-  completion_chrome_after_body.
+  completion_chrome_after_body. Codex cells are excluded because their E2E
+  worker role cannot execute live shell/tool commands; Codex modern-schema
+  coverage remains in fixture E-25.
 steps:
   - send_prompt: |
       E2E E-23 premature completion guard.
