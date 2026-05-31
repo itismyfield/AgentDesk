@@ -2221,8 +2221,15 @@ fn codex_pipe_prompt_lines(prompt: &str) -> Vec<String> {
 }
 
 #[cfg(unix)]
+fn codex_pipe_prompt_buffer_text(prompt: &str) -> String {
+    let mut encoded = codex_pipe_prompt_lines(prompt).join("\n");
+    encoded.push('\n');
+    encoded
+}
+
+#[cfg(unix)]
 fn send_codex_pipe_prompt_to_tmux(tmux_session_name: &str, prompt: &str) -> Result<(), String> {
-    let encoded = codex_pipe_prompt_lines(prompt).join("\n");
+    let encoded = codex_pipe_prompt_buffer_text(prompt);
     let buffer_name = format!("agentdesk-codex-pipe-input-{}", uuid::Uuid::new_v4());
     let load_output = crate::services::platform::tmux::load_buffer(&buffer_name, &encoded)?;
     if !load_output.status.success() {
@@ -3674,6 +3681,23 @@ mod tests {
             "bGluZSAxCmxpbmUgMg=="
         );
         assert_eq!(lines, vec![line]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_pipe_prompt_buffer_terminates_sentinel_line_for_tmux_submit() {
+        let buffer = super::codex_pipe_prompt_buffer_text("[E2E:E2:TURN-1]\nreply json");
+
+        assert!(buffer.starts_with(super::TMUX_PROMPT_B64_PREFIX));
+        assert!(
+            buffer.ends_with('\n'),
+            "reused pipe wrapper prompt must be line-terminated before the explicit Enter fallback"
+        );
+        assert_eq!(
+            buffer.lines().count(),
+            1,
+            "small prompts should paste as one sentinel line so read_line can submit it"
+        );
     }
 
     #[cfg(unix)]
