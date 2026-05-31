@@ -193,8 +193,20 @@ class ScenarioFilter(unittest.TestCase):
             self.assertEqual(health_steps[0]["global_finalizing_max"], 0)
 
     def test_e8_health_assertion_waits_for_restart_finalizing_drain(self):
+        expected_e8_cells = {
+            "claude-pipe",
+            "claude-tui",
+            "claude-e",
+            "codex-pipe",
+            "codex-tui",
+        }
         for cell in driver.SUPPORTED_CELLS:
             scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
+            ids = {str(s.get("id")) for s in scenarios}
+            if cell not in expected_e8_cells:
+                self.assertNotIn("E-8", ids)
+                continue
+            self.assertIn("E-8", ids)
             e8 = next(s for s in scenarios if s.get("id") == "E-8")
             health_steps = [
                 step["assert_health"] for step in e8["steps"] if "assert_health" in step
