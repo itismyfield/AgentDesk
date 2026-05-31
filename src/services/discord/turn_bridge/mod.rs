@@ -1849,11 +1849,11 @@ async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
     last_status_panel_text: &mut String,
     background: bool,
     source: &'static str,
+    expected_user_msg_id: u64,
 ) -> bool {
     if !shared.status_panel_v2_enabled {
         return true;
     }
-    let status_msg_id = status_panel_msg_id.filter(|id| !is_synthetic_headless_message_id(*id));
     shared
         .placeholder_live_events
         .push_status_event(channel_id, StatusEvent::TurnCompleted { background });
@@ -1861,80 +1861,93 @@ async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
         shared
             .placeholder_live_events
             .render_status_panel(channel_id, provider, started_at_unix);
-    let Some(status_msg_id) = status_msg_id else {
-        return match send_status_panel_v2_completion_fallback(
-            shared,
-            gateway,
-            channel_id,
-            &panel_text,
-        )
-        .await
-        {
-            Ok(_) => {
-                *last_status_panel_text = panel_text;
-                true
+
+    match status_panel_completion_action(status_panel_msg_id, last_status_panel_text, &panel_text) {
+        StatusPanelCompletionAction::AlreadyCommitted => true,
+        StatusPanelCompletionAction::SendFallback => {
+            complete_status_panel_v2_fallback_with_gateway(
+                shared,
+                gateway,
+                channel_id,
+                provider,
+                expected_user_msg_id,
+                last_status_panel_text,
+                panel_text,
+                source,
+            )
+            .await
+        }
+        StatusPanelCompletionAction::Edit(status_msg_id) => {
+            let edit_result = if gateway.can_chain_locally() {
+                gateway
+                    .edit_message(channel_id, status_msg_id, &panel_text)
+                    .await
+            } else if let Some(http) = shared.serenity_http_or_token_fallback() {
+                super::http::edit_channel_message(&http, channel_id, status_msg_id, &panel_text)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            } else {
+                Err("no Discord HTTP available for status-panel-v2 completion edit".to_string())
+            };
+            match edit_result {
+                Ok(()) => {
+                    *last_status_panel_text = panel_text;
+                    true
+                }
+                Err(error) => {
+                    if status_panel_message_missing_error(&error) {
+                        return complete_status_panel_v2_fallback_with_gateway(
+                            shared,
+                            gateway,
+                            channel_id,
+                            provider,
+                            expected_user_msg_id,
+                            last_status_panel_text,
+                            panel_text,
+                            source,
+                        )
+                        .await;
+                    }
+                    tracing::warn!(
+                        "[turn_bridge] failed to finalize status-panel-v2 message {} in channel {} from {}: {}",
+                        status_msg_id,
+                        channel_id,
+                        source,
+                        error
+                    );
+                    false
+                }
             }
-            Err(error) => {
-                tracing::warn!(
-                    "[turn_bridge] failed to send fallback status-panel-v2 completion in channel {} from {}: {}",
-                    channel_id,
-                    source,
-                    error
-                );
-                false
-            }
-        };
-    };
-    if panel_text == *last_status_panel_text {
-        return true;
+        }
     }
-    let edit_result = if gateway.can_chain_locally() {
-        gateway
-            .edit_message(channel_id, status_msg_id, &panel_text)
-            .await
-    } else if let Some(http) = shared.serenity_http_or_token_fallback() {
-        super::http::edit_channel_message(&http, channel_id, status_msg_id, &panel_text)
-            .await
-            .map(|_| ())
-            .map_err(|error| error.to_string())
-    } else {
-        Err("no Discord HTTP available for status-panel-v2 completion edit".to_string())
-    };
-    match edit_result {
-        Ok(()) => {
+}
+
+async fn complete_status_panel_v2_fallback_with_gateway<G: TurnGateway + ?Sized>(
+    shared: &SharedData,
+    gateway: &G,
+    channel_id: ChannelId,
+    provider: &ProviderKind,
+    expected_user_msg_id: u64,
+    last_status_panel_text: &mut String,
+    panel_text: String,
+    source: &'static str,
+) -> bool {
+    match send_status_panel_v2_completion_fallback(shared, gateway, channel_id, &panel_text).await {
+        Ok(message_id) => {
+            persist_status_panel_completion_fallback_message_id(
+                provider,
+                channel_id,
+                Some(expected_user_msg_id),
+                message_id,
+                source,
+            );
             *last_status_panel_text = panel_text;
             true
         }
         Err(error) => {
-            if status_panel_message_missing_error(&error) {
-                return match send_status_panel_v2_completion_fallback(
-                    shared,
-                    gateway,
-                    channel_id,
-                    &panel_text,
-                )
-                .await
-                {
-                    Ok(_) => {
-                        *last_status_panel_text = panel_text;
-                        true
-                    }
-                    Err(fallback_error) => {
-                        tracing::warn!(
-                            "[turn_bridge] failed to finalize missing status-panel-v2 message {} in channel {} from {}; fallback send failed: {}; edit failed: {}",
-                            status_msg_id,
-                            channel_id,
-                            source,
-                            fallback_error,
-                            error
-                        );
-                        false
-                    }
-                };
-            }
             tracing::warn!(
-                "[turn_bridge] failed to finalize status-panel-v2 message {} in channel {} from {}: {}",
-                status_msg_id,
+                "[turn_bridge] failed to send fallback status-panel-v2 completion in channel {} from {}: {}",
                 channel_id,
                 source,
                 error
@@ -1942,6 +1955,195 @@ async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
             false
         }
     }
+}
+
+pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
+    shared: &std::sync::Arc<SharedData>,
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    status_panel_msg_id: Option<MessageId>,
+    provider: &ProviderKind,
+    started_at_unix: i64,
+    last_status_panel_text: &mut String,
+    background: bool,
+    source: &'static str,
+    expected_user_msg_id: Option<u64>,
+) -> bool {
+    if !shared.status_panel_v2_enabled {
+        return true;
+    }
+    shared
+        .placeholder_live_events
+        .push_status_event(channel_id, StatusEvent::TurnCompleted { background });
+    let panel_text =
+        shared
+            .placeholder_live_events
+            .render_status_panel(channel_id, provider, started_at_unix);
+
+    match status_panel_completion_action(status_panel_msg_id, last_status_panel_text, &panel_text) {
+        StatusPanelCompletionAction::AlreadyCommitted => true,
+        StatusPanelCompletionAction::SendFallback => {
+            rate_limit_wait(shared, channel_id).await;
+            complete_status_panel_v2_fallback_with_http(
+                http,
+                channel_id,
+                provider,
+                expected_user_msg_id,
+                last_status_panel_text,
+                panel_text,
+                source,
+            )
+            .await
+        }
+        StatusPanelCompletionAction::Edit(status_msg_id) => {
+            rate_limit_wait(shared, channel_id).await;
+            match super::http::edit_channel_message(http, channel_id, status_msg_id, &panel_text)
+                .await
+            {
+                Ok(_) => {
+                    *last_status_panel_text = panel_text;
+                    true
+                }
+                Err(error) => {
+                    let error = error.to_string();
+                    if status_panel_message_missing_error(&error) {
+                        return complete_status_panel_v2_fallback_with_http(
+                            http,
+                            channel_id,
+                            provider,
+                            expected_user_msg_id,
+                            last_status_panel_text,
+                            panel_text,
+                            source,
+                        )
+                        .await;
+                    }
+                    tracing::warn!(
+                        "[turn_bridge] failed to finalize status-panel-v2 message {} in channel {} from {}: {}",
+                        status_msg_id,
+                        channel_id,
+                        source,
+                        error
+                    );
+                    false
+                }
+            }
+        }
+    }
+}
+
+async fn complete_status_panel_v2_fallback_with_http(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    provider: &ProviderKind,
+    expected_user_msg_id: Option<u64>,
+    last_status_panel_text: &mut String,
+    panel_text: String,
+    source: &'static str,
+) -> bool {
+    match send_status_panel_v2_completion_fallback_http(http, channel_id, &panel_text).await {
+        Ok(message_id) => {
+            persist_status_panel_completion_fallback_message_id(
+                provider,
+                channel_id,
+                expected_user_msg_id,
+                message_id,
+                source,
+            );
+            *last_status_panel_text = panel_text;
+            true
+        }
+        Err(error) => {
+            tracing::warn!(
+                "[turn_bridge] failed to send fallback status-panel-v2 completion in channel {} from {}: {}",
+                channel_id,
+                source,
+                error
+            );
+            false
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusPanelCompletionAction {
+    AlreadyCommitted,
+    Edit(MessageId),
+    SendFallback,
+}
+
+fn status_panel_completion_action(
+    status_panel_msg_id: Option<MessageId>,
+    last_status_panel_text: &str,
+    panel_text: &str,
+) -> StatusPanelCompletionAction {
+    if panel_text == last_status_panel_text {
+        return StatusPanelCompletionAction::AlreadyCommitted;
+    }
+    match normalize_status_panel_message_id(status_panel_msg_id) {
+        Some(message_id) => StatusPanelCompletionAction::Edit(message_id),
+        None => StatusPanelCompletionAction::SendFallback,
+    }
+}
+
+pub(in crate::services::discord) fn normalize_status_panel_message_id(
+    status_panel_msg_id: Option<MessageId>,
+) -> Option<MessageId> {
+    status_panel_msg_id.filter(|id| !is_synthetic_headless_message_id(*id))
+}
+
+fn persist_status_panel_completion_fallback_message_id(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    expected_user_msg_id: Option<u64>,
+    message_id: MessageId,
+    source: &'static str,
+) {
+    if is_synthetic_headless_message_id(message_id) {
+        return;
+    }
+    let Some(expected_user_msg_id) = expected_user_msg_id else {
+        return;
+    };
+    let Some(mut inflight_state) = super::inflight::load_inflight_state(provider, channel_id.get())
+    else {
+        return;
+    };
+    if inflight_state.user_msg_id != expected_user_msg_id {
+        tracing::debug!(
+            "[turn_bridge] skipped persisting status-panel-v2 fallback id {} in channel {} from {}: inflight user_msg_id {} != expected {}",
+            message_id,
+            channel_id,
+            source,
+            inflight_state.user_msg_id,
+            expected_user_msg_id
+        );
+        return;
+    }
+    if inflight_state.status_message_id == Some(message_id.get()) {
+        return;
+    }
+    inflight_state.status_message_id = Some(message_id.get());
+    if let Err(error) = super::inflight::save_inflight_state(&inflight_state) {
+        tracing::warn!(
+            "[turn_bridge] failed to persist fallback status-panel-v2 message {} in channel {} from {}: {}",
+            message_id,
+            channel_id,
+            source,
+            error
+        );
+    }
+}
+
+async fn send_status_panel_v2_completion_fallback_http(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    panel_text: &str,
+) -> Result<MessageId, String> {
+    super::http::send_channel_message(http, channel_id, panel_text)
+        .await
+        .map(|message| message.id)
+        .map_err(|error| error.to_string())
 }
 
 async fn send_status_panel_v2_completion_fallback<G: TurnGateway + ?Sized>(
@@ -7711,6 +7913,7 @@ pub(super) fn spawn_turn_bridge(
                 &mut last_status_panel_text,
                 false,
                 "turn_terminal_delivery",
+                user_msg_id.get(),
             )
             .await;
         }
@@ -8555,8 +8758,9 @@ mod task_notification_kind_lifecycle_tests {
 #[cfg(test)]
 mod status_panel_v2_rework_tests {
     use super::{
-        InflightTurnState, MessageId, ProviderKind,
-        should_open_long_running_placeholder_controller, status_panel_message_id_for_turn,
+        InflightTurnState, MessageId, ProviderKind, StatusPanelCompletionAction,
+        should_open_long_running_placeholder_controller, status_panel_completion_action,
+        status_panel_message_id_for_turn,
     };
 
     #[test]
@@ -8613,6 +8817,35 @@ mod status_panel_v2_rework_tests {
 
         assert_eq!(status_panel_msg_id, None);
         assert_eq!(state.status_message_id, None);
+    }
+
+    #[test]
+    fn completion_action_does_not_fallback_when_panel_text_already_committed() {
+        let panel_text = "응답 완료";
+
+        let action = status_panel_completion_action(None, panel_text, panel_text);
+
+        assert_eq!(action, StatusPanelCompletionAction::AlreadyCommitted);
+    }
+
+    #[test]
+    fn completion_action_treats_synthetic_id_as_missing_target() {
+        let action = status_panel_completion_action(
+            Some(MessageId::new(9_100_000_000_000_000_123)),
+            "",
+            "응답 완료",
+        );
+
+        assert_eq!(action, StatusPanelCompletionAction::SendFallback);
+    }
+
+    #[test]
+    fn completion_action_edits_real_status_panel_message_id() {
+        let message_id = MessageId::new(1510319194921504931);
+
+        let action = status_panel_completion_action(Some(message_id), "", "응답 완료");
+
+        assert_eq!(action, StatusPanelCompletionAction::Edit(message_id));
     }
 }
 

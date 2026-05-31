@@ -572,6 +572,7 @@ async fn status_panel_completion_fallback_posts_when_message_id_is_synthetic() {
         &mut last_status_panel_text,
         false,
         "test_synthetic_status_panel_id",
+        1510319194921504929,
     )
     .await;
 
@@ -592,6 +593,31 @@ async fn status_panel_completion_fallback_posts_when_message_id_is_synthetic() {
     assert_eq!(sent_messages.len(), 1);
     assert!(sent_messages[0].contains("응답 완료"));
     assert_eq!(last_status_panel_text, sent_messages[0]);
+
+    let committed = complete_status_panel_v2(
+        shared.as_ref(),
+        &gateway,
+        channel_id,
+        Some(MessageId::new(9_100_000_000_000_000_123)),
+        &provider,
+        1_700_000_000,
+        &mut last_status_panel_text,
+        false,
+        "test_synthetic_status_panel_id_retry",
+        1510319194921504929,
+    )
+    .await;
+
+    assert!(committed);
+    assert_eq!(
+        gateway
+            .sent_messages
+            .lock()
+            .expect("sent messages lock")
+            .len(),
+        1,
+        "same completed panel text must not send duplicate fallback panels"
+    );
 }
 
 #[tokio::test]
@@ -613,6 +639,7 @@ async fn status_panel_completion_fallback_posts_after_unknown_message_edit() {
         &mut last_status_panel_text,
         false,
         "test_unknown_status_panel_id",
+        1510319194921504929,
     )
     .await;
 

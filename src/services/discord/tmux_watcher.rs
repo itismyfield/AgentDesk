@@ -153,7 +153,10 @@ fn adopt_watcher_terminal_message_ids_from_inflight(
         *placeholder_from_restored_inflight = true;
     }
     if status_panel_msg_id.is_none() {
-        *status_panel_msg_id = inflight.status_message_id.map(serenity::MessageId::new);
+        *status_panel_msg_id =
+            crate::services::discord::turn_bridge::normalize_status_panel_message_id(
+                inflight.status_message_id.map(serenity::MessageId::new),
+            );
     }
 }
 
@@ -1066,6 +1069,7 @@ async fn complete_watcher_status_panel_v2(
     started_at_unix: i64,
     last_status_panel_text: &mut String,
     background: bool,
+    expected_user_msg_id: Option<u64>,
 ) {
     // #2427 D wire (Codex round 2 HIGH-1): explicit-signal inflight cleanup
     // is intentionally NOT emitted from the watcher path. The watcher is
@@ -1078,41 +1082,19 @@ async fn complete_watcher_status_panel_v2(
     if !shared.status_panel_v2_enabled {
         return;
     }
-    let Some(status_msg_id) = status_panel_msg_id else {
-        return;
-    };
-    shared
-        .placeholder_live_events
-        .push_status_event(channel_id, StatusEvent::TurnCompleted { background });
-    let panel_text =
-        shared
-            .placeholder_live_events
-            .render_status_panel(channel_id, provider, started_at_unix);
-    if panel_text == *last_status_panel_text {
-        return;
-    }
-    rate_limit_wait(shared, channel_id).await;
-    match crate::services::discord::http::edit_channel_message(
+    let _committed = crate::services::discord::turn_bridge::complete_status_panel_v2_with_http(
+        shared,
         http,
         channel_id,
-        status_msg_id,
-        &panel_text,
+        status_panel_msg_id,
+        provider,
+        started_at_unix,
+        last_status_panel_text,
+        background,
+        "tmux_watcher",
+        expected_user_msg_id,
     )
-    .await
-    {
-        Ok(_) => {
-            *last_status_panel_text = panel_text;
-        }
-        Err(error) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                "  [{ts}] ⚠ tmux status-panel-v2 completion edit failed for msg {} in channel {}: {}",
-                status_msg_id.get(),
-                channel_id.get(),
-                error
-            );
-        }
-    }
+    .await;
 }
 
 /// #2161 — TUI completion gate. Callers ask `run_tui_completion_gate` to
@@ -5637,6 +5619,22 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // path). The recovery_engine D wire is preserved because its
             // `state.user_msg_id` is captured from the inflight snapshot
             // pinned at recovery entry, not re-read at completion time.
+            let status_panel_completion_user_msg_id =
+                inflight_before_relay.as_ref().and_then(|inflight| {
+                    let matches_current_watcher_session = inflight
+                        .tmux_session_name
+                        .as_deref()
+                        .map(str::trim)
+                        .is_some_and(|name| !name.is_empty() && name == tmux_session_name);
+                    if !inflight.rebind_origin
+                        && inflight.user_msg_id != 0
+                        && matches_current_watcher_session
+                    {
+                        Some(inflight.user_msg_id)
+                    } else {
+                        None
+                    }
+                });
             complete_watcher_status_panel_v2(
                 &http,
                 &shared,
@@ -5649,6 +5647,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     task_notification_kind,
                     Some(TaskNotificationKind::Background | TaskNotificationKind::MonitorAutoTurn)
                 ),
+                status_panel_completion_user_msg_id,
             )
             .await;
         }
@@ -6661,6 +6660,41 @@ mod tests {
         assert_eq!(placeholder_msg_id, Some(MessageId::new(2002)));
         assert!(placeholder_from_restored_inflight);
         assert_eq!(status_panel_msg_id, Some(MessageId::new(3003)));
+    }
+
+    #[test]
+    fn terminal_relay_does_not_adopt_synthetic_status_panel_message_id() {
+        let mut inflight = InflightTurnState::new(
+            ProviderKind::Claude,
+            123,
+            Some("adk-cc".to_string()),
+            42,
+            1001,
+            2002,
+            "prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            0,
+        );
+        inflight.status_message_id = Some(9_100_000_000_000_000_123);
+
+        let mut placeholder_msg_id = None;
+        let mut placeholder_from_restored_inflight = false;
+        let mut status_panel_msg_id = None;
+
+        adopt_watcher_terminal_message_ids_from_inflight(
+            &mut placeholder_msg_id,
+            &mut placeholder_from_restored_inflight,
+            &mut status_panel_msg_id,
+            &inflight,
+            "AgentDesk-claude-adk-cc",
+        );
+
+        assert_eq!(placeholder_msg_id, Some(MessageId::new(2002)));
+        assert!(placeholder_from_restored_inflight);
+        assert_eq!(status_panel_msg_id, None);
     }
 
     #[test]

@@ -6,9 +6,7 @@ use super::settings::{
 use super::turn_bridge::stale_inflight_message;
 use super::*;
 use crate::db::turns::TurnTokenUsage;
-use crate::services::agent_protocol::{
-    RuntimeHandoff, RuntimeHandoffKind, StatusEvent, StreamMessage,
-};
+use crate::services::agent_protocol::{RuntimeHandoff, RuntimeHandoffKind, StreamMessage};
 use crate::services::git::GitCommand;
 #[cfg(unix)]
 use crate::services::platform::binary_resolver;
@@ -346,13 +344,6 @@ async fn complete_recovery_visible_turn(
     if !shared.status_panel_v2_enabled {
         return RecoveryCompletionOutcome::Emitted;
     }
-    let Some(status_msg_id) = state.status_message_id.map(MessageId::new) else {
-        return RecoveryCompletionOutcome::Emitted;
-    };
-
-    shared
-        .placeholder_live_events
-        .push_status_event(channel_id, StatusEvent::TurnCompleted { background });
     // #2427 D wire: explicit completion signal — most recovery paths
     // already call `clear_inflight_state` unconditionally; this is a
     // safety net for any branch that emits TurnCompleted without doing
@@ -366,24 +357,45 @@ async fn complete_recovery_visible_turn(
     );
     let started_at_unix = super::inflight::parse_started_at_unix(&state.started_at)
         .unwrap_or_else(|| chrono::Utc::now().timestamp());
-    let panel_text =
-        shared
-            .placeholder_live_events
-            .render_status_panel(channel_id, provider, started_at_unix);
-
-    rate_limit_wait(shared, channel_id).await;
-    if let Err(error) =
-        super::http::edit_channel_message(http, channel_id, status_msg_id, &panel_text).await
-    {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⚠ recovery status-panel-v2 completion edit failed from {source} for msg {} in channel {}: {}",
-            status_msg_id.get(),
-            channel_id.get(),
-            error
-        );
-    }
+    let persisted_inflight = super::inflight::load_inflight_state(provider, channel_id.get());
+    let status_msg_id =
+        recovery_status_panel_message_id_for_completion(state, persisted_inflight.as_ref());
+    let mut last_status_panel_text = String::new();
+    let _committed = super::turn_bridge::complete_status_panel_v2_with_http(
+        shared,
+        http,
+        channel_id,
+        status_msg_id,
+        provider,
+        started_at_unix,
+        &mut last_status_panel_text,
+        background,
+        source,
+        Some(state.user_msg_id),
+    )
+    .await;
     RecoveryCompletionOutcome::Emitted
+}
+
+fn recovery_status_panel_message_id_for_completion(
+    state: &super::inflight::InflightTurnState,
+    persisted: Option<&super::inflight::InflightTurnState>,
+) -> Option<MessageId> {
+    persisted
+        .and_then(|inflight| {
+            if inflight.user_msg_id == state.user_msg_id {
+                super::turn_bridge::normalize_status_panel_message_id(
+                    inflight.status_message_id.map(MessageId::new),
+                )
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            super::turn_bridge::normalize_status_panel_message_id(
+                state.status_message_id.map(MessageId::new),
+            )
+        })
 }
 
 #[cfg(test)]
@@ -397,7 +409,25 @@ mod recovery_dispatch_gate_tests {
 
 #[cfg(test)]
 mod recovery_completion_outcome_tests {
-    use super::RecoveryCompletionOutcome;
+    use super::{RecoveryCompletionOutcome, recovery_status_panel_message_id_for_completion};
+    use crate::services::provider::ProviderKind;
+
+    fn state_for_recovery(user_msg_id: u64) -> super::inflight::InflightTurnState {
+        super::inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            4243,
+            Some("adk-cc".to_string()),
+            7,
+            user_msg_id,
+            user_msg_id + 1,
+            "prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/claude-transcript.jsonl".to_string()),
+            None,
+            0,
+        )
+    }
 
     #[test]
     fn emitted_lets_callers_proceed_with_dispatch_finalize() {
@@ -410,6 +440,32 @@ mod recovery_completion_outcome_tests {
             RecoveryCompletionOutcome::VisibleCompletionSuppressed.should_proceed(),
             "#2935: quiescence timeout may hide 응답 완료, but must not preserve stale active ownership"
         );
+    }
+
+    #[test]
+    fn completion_prefers_guarded_persisted_fallback_message_id() {
+        let mut snapshot = state_for_recovery(9101);
+        snapshot.status_message_id = Some(3003);
+        let mut persisted = state_for_recovery(9101);
+        persisted.status_message_id = Some(4004);
+
+        let status_msg_id =
+            recovery_status_panel_message_id_for_completion(&snapshot, Some(&persisted));
+
+        assert_eq!(status_msg_id, Some(super::MessageId::new(4004)));
+    }
+
+    #[test]
+    fn completion_ignores_persisted_id_from_different_turn() {
+        let mut snapshot = state_for_recovery(9101);
+        snapshot.status_message_id = Some(3003);
+        let mut persisted = state_for_recovery(9201);
+        persisted.status_message_id = Some(4004);
+
+        let status_msg_id =
+            recovery_status_panel_message_id_for_completion(&snapshot, Some(&persisted));
+
+        assert_eq!(status_msg_id, Some(super::MessageId::new(3003)));
     }
 }
 
