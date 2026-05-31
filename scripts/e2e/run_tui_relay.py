@@ -69,6 +69,37 @@ TUI_IDLE_DRAFT_GUARD_AFTER_S = float(
 TUI_IDLE_DRAFT_GUARD_POLL_S = float(
     os.environ.get("AGENTDESK_E2E_TUI_IDLE_DRAFT_GUARD_POLL_S", "2")
 )
+DIRECT_INPUT_NOTIFICATION_MARKER = "터미널에 직접 주입된 입력"
+REPORT_RECORD_KEYS: tuple[str, ...] = (
+    "relay_count",
+    "raw_count",
+    "message_updates",
+    "sample_relay",
+    "recent_relay",
+    "sample_raw",
+    "recent_raw",
+    "tmux_key_sequences",
+    "direct_input_prompts",
+    "wait_timeouts",
+    "provider_hold_prompts",
+    "provider_hold_states",
+    "cancel_turns",
+    "health_assertions",
+    "post_scenario_idle",
+    "fixture_steps",
+    "fixture_replays",
+    "fixture_state",
+    "fixture_health",
+    "fixture_followup_probes",
+)
+
+
+class ScenarioStepAssertionError(assertions.AssertionError):
+    """Assertion failure that carries the partial scenario record."""
+
+    def __init__(self, message: str, *, record: dict[str, Any]):
+        super().__init__(message)
+        self.record = record
 
 
 def parse_args() -> argparse.Namespace:
@@ -189,6 +220,61 @@ def cell_channel_kind(cell: str) -> str:
 def cell_workspace_substring(cell: str) -> str:
     """Substring tagged onto runtime/jsonl paths to safely target this cell."""
     return f"adk-{cell}-e2e"
+
+
+def _truncate_text(value: str, *, max_chars: int = 500) -> str:
+    if len(value) <= max_chars:
+        return value
+    return f"{value[:max_chars]}..."
+
+
+def _message_debug_summary(message: dict[str, Any]) -> dict[str, Any]:
+    author = message.get("author") if isinstance(message.get("author"), dict) else {}
+    content = message.get("content") or ""
+    return {
+        "id": str(message.get("id") or ""),
+        "type": message.get("type"),
+        "timestamp": message.get("timestamp"),
+        "edited_timestamp": message.get("edited_timestamp"),
+        "author_id": str(author.get("id") or ""),
+        "author_bot": author.get("bot"),
+        "is_our_send": assertions.is_our_send(message),
+        "is_relay_response": assertions.is_relay_response(message),
+        "content": _truncate_text(str(content), max_chars=700),
+    }
+
+
+def _update_record_window_snapshot(
+    record: dict[str, Any],
+    window: assertions.Window,
+) -> None:
+    record["relay_count"] = len(window.messages)
+    record["raw_count"] = len(window.raw_messages)
+    record["message_updates"] = len(window.message_updates)
+    record["sample_relay"] = [
+        (message.get("content") or "")[:120] for message in window.messages[:6]
+    ]
+    record["recent_relay"] = [
+        _message_debug_summary(message) for message in window.messages[-6:]
+    ]
+    record["sample_raw"] = [
+        _message_debug_summary(message) for message in window.raw_messages[:6]
+    ]
+    record["recent_raw"] = [
+        _message_debug_summary(message) for message in window.raw_messages[-8:]
+    ]
+
+
+def _merge_record_into_result(
+    result: dict[str, Any],
+    record: dict[str, Any] | None,
+) -> None:
+    if not record:
+        return
+    result["assertions"].extend(record.get("assertions") or [])
+    for key in REPORT_RECORD_KEYS:
+        if key in record:
+            result[key] = record[key]
 
 
 def resolve_output_dir(arg: str | None, cell: str) -> Path:
@@ -603,6 +689,48 @@ def send_tmux_key_sequence(
         "mode": "per_key",
         "key_interval_s": key_interval_s,
     }
+
+
+def _looks_like_tmux_control_key(key: str) -> bool:
+    normalized = key.strip()
+    if not normalized:
+        return True
+    if normalized in {
+        "BSpace",
+        "BTab",
+        "DC",
+        "Delete",
+        "Down",
+        "End",
+        "Enter",
+        "Escape",
+        "Home",
+        "IC",
+        "Left",
+        "NEnter",
+        "PageDown",
+        "PageUp",
+        "Right",
+        "Space",
+        "Tab",
+        "Up",
+    }:
+        return True
+    return len(normalized) <= 16 and normalized.startswith(("C-", "M-", "S-"))
+
+
+def _infer_direct_input_prompt_from_keys(keys: list[str]) -> str | None:
+    submit_indexes = [
+        idx for idx, key in enumerate(keys) if key.strip() in {"C-m", "Enter", "NEnter"}
+    ]
+    search_end = submit_indexes[-1] if submit_indexes else len(keys)
+    for key in reversed(keys[:search_end]):
+        if not _looks_like_tmux_control_key(key):
+            return key
+    for key in reversed(keys):
+        if not _looks_like_tmux_control_key(key):
+            return key
+    return None
 
 
 def build_provider_hold_prompt(params: Any, *, scenario_id: str) -> str:
@@ -1441,6 +1569,231 @@ def _pane_tail_contains_prompt_draft(pane: str, prompt: str) -> bool:
     return False
 
 
+def _body_complete_head_for_tail(scenario: dict[str, Any], tail: str) -> str | None:
+    for spec in scenario.get("assertions") or []:
+        if not isinstance(spec, dict):
+            continue
+        params = spec.get("body_complete")
+        if not isinstance(params, dict):
+            continue
+        if str(params.get("tail") or "") == tail:
+            head = params.get("head")
+            return str(head) if head is not None else None
+    return None
+
+
+def _expected_markers_for_wait(scenario: dict[str, Any], needle: str) -> list[str]:
+    markers: list[str] = [needle]
+
+    def add_marker(value: Any) -> None:
+        if isinstance(value, str) and value and value not in markers:
+            markers.append(value)
+
+    for spec in scenario.get("assertions") or []:
+        if not isinstance(spec, dict):
+            continue
+        add_marker(spec.get("text_present"))
+        add_marker(spec.get("no_duplicate_marker"))
+        ordered = spec.get("ordered_text_present")
+        if isinstance(ordered, list):
+            for item in ordered:
+                add_marker(item)
+        body = spec.get("body_complete")
+        if isinstance(body, dict):
+            add_marker(body.get("head"))
+            add_marker(body.get("tail"))
+    return markers[:12]
+
+
+def _marker_presence(
+    window: assertions.Window,
+    markers: list[str],
+) -> dict[str, dict[str, Any]]:
+    presence: dict[str, dict[str, Any]] = {}
+    for marker in markers:
+        relay_hits = [
+            str(message.get("id") or "")
+            for message in window.messages
+            if marker in (message.get("content") or "")
+        ]
+        raw_hits = [
+            str(message.get("id") or "")
+            for message in window.raw_messages
+            if marker in (message.get("content") or "")
+        ]
+        presence[marker] = {
+            "relay": bool(relay_hits),
+            "relay_message_ids": relay_hits[:6],
+            "raw": bool(raw_hits),
+            "raw_message_ids": raw_hits[:6],
+        }
+    return presence
+
+
+def _mailbox_debug_summary(mailbox: dict[str, Any]) -> dict[str, Any]:
+    relay = _relay_health(mailbox)
+    return {
+        "provider": _mailbox_provider(mailbox),
+        "channel_id": _mailbox_channel_id(mailbox),
+        "busy_reasons": _mailbox_busy_reasons(mailbox),
+        "agent_turn_status": mailbox.get("agent_turn_status"),
+        "inflight_state_present": mailbox.get("inflight_state_present"),
+        "active_user_message_id": mailbox.get("active_user_message_id"),
+        "active_dispatch_present": mailbox.get("active_dispatch_present"),
+        "queue_depth": mailbox.get("queue_depth"),
+        "relay_stall_state": mailbox.get("relay_stall_state"),
+        "relay_health": {
+            "active_turn": relay.get("active_turn"),
+            "bridge_inflight_present": relay.get("bridge_inflight_present"),
+            "mailbox_active_user_msg_id": relay.get("mailbox_active_user_msg_id"),
+            "pending_discord_callback_msg_id": relay.get(
+                "pending_discord_callback_msg_id"
+            ),
+            "queue_depth": relay.get("queue_depth"),
+            "desynced": relay.get("desynced"),
+        },
+    }
+
+
+def _target_mailbox_debug_snapshot(
+    *,
+    base_url: str,
+    channel_id: str,
+    provider: str,
+) -> dict[str, Any]:
+    try:
+        detail = _read_health_detail(base_url)
+    except Exception as error:  # noqa: BLE001 - diagnostics must not mask failure
+        return {"error": f"{type(error).__name__}: {error}"}
+    mailboxes = detail.get("mailboxes")
+    if not isinstance(mailboxes, list):
+        return {
+            "error": "mailboxes_not_list",
+            "payload": _payload_summary(detail),
+        }
+    target = [
+        mailbox
+        for mailbox in mailboxes
+        if isinstance(mailbox, dict)
+        and _mailbox_channel_id(mailbox) == str(channel_id)
+        and _mailbox_provider(mailbox) == provider
+    ]
+    return {
+        "status": detail.get("status"),
+        "ok": detail.get("ok"),
+        "fully_recovered": detail.get("fully_recovered"),
+        "global_active": detail.get("global_active"),
+        "global_finalizing": detail.get("global_finalizing"),
+        "global_queue_depth": detail.get("global_queue_depth")
+        or detail.get("queue_depth"),
+        "target_mailbox_count": len(target),
+        "target_mailboxes": [_mailbox_debug_summary(mailbox) for mailbox in target],
+    }
+
+
+def _classify_wait_timeout(
+    *,
+    window: assertions.Window,
+    needle: str,
+    head: str | None,
+    prompt_draft_present: bool | None,
+    health: dict[str, Any],
+) -> str:
+    if prompt_draft_present is True:
+        return "prompt_not_submitted_input_buffer_still_contains_prompt"
+
+    raw_has_needle = any(needle in (m.get("content") or "") for m in window.raw_messages)
+    relay_has_needle = any(needle in (m.get("content") or "") for m in window.messages)
+    if raw_has_needle and not relay_has_needle:
+        return "relay_surface_filter_miss_raw_contains_needle"
+
+    if head:
+        for message in window.messages:
+            body = message.get("content") or ""
+            head_at = body.find(head)
+            if head_at != -1 and body.find(needle, head_at + len(head)) == -1:
+                return "body_truncated_or_tail_missing_after_head"
+
+    direct_notice_seen = any(
+        DIRECT_INPUT_NOTIFICATION_MARKER in (m.get("content") or "")
+        for m in window.raw_messages
+    )
+    target_mailboxes = health.get("target_mailboxes")
+    busy = False
+    if isinstance(target_mailboxes, list):
+        busy = any((m.get("busy_reasons") or []) for m in target_mailboxes if isinstance(m, dict))
+    if direct_notice_seen and busy:
+        return "direct_input_notified_provider_or_relay_still_busy"
+    if direct_notice_seen:
+        return "direct_input_notified_no_tail_observed"
+    return "no_direct_input_or_relay_evidence"
+
+
+def _collect_wait_timeout_diagnostics(
+    *,
+    base_url: str,
+    channel_id: str,
+    cell: str,
+    scenario: dict[str, Any],
+    thread_channel_id: str | None,
+    after_id: str,
+    wait_kind: str,
+    needle: str,
+    prompt: str | None,
+    window: assertions.Window,
+) -> dict[str, Any]:
+    markers = _expected_markers_for_wait(scenario, needle)
+    head = _body_complete_head_for_tail(scenario, needle)
+    health = _target_mailbox_debug_snapshot(
+        base_url=base_url,
+        channel_id=channel_id,
+        provider=cell_provider(cell),
+    )
+    tmux_snapshot: dict[str, Any] = {}
+    prompt_draft_present: bool | None = None
+    if cell_runtime(cell) == "tui":
+        session_name = cell_session_name(cell, thread_channel_id=thread_channel_id)
+        pane = tmux.capture_pane(session_name, -120)
+        pane_tail = "\n".join(pane.splitlines()[-40:])
+        prompt_draft_present = (
+            _pane_tail_contains_prompt_draft(pane, prompt) if prompt else None
+        )
+        tmux_snapshot = {
+            "session_name": session_name,
+            "pane_tail": _truncate_text(pane_tail, max_chars=4000),
+            "prompt_draft_present": prompt_draft_present,
+            "diagnostic_prompt": _truncate_text(prompt or "", max_chars=700),
+        }
+
+    return {
+        "wait_kind": wait_kind,
+        "needle": needle,
+        "after_id": after_id,
+        "scenario_id": str(scenario.get("id") or ""),
+        "cell": cell,
+        "classification": _classify_wait_timeout(
+            window=window,
+            needle=needle,
+            head=head,
+            prompt_draft_present=prompt_draft_present,
+            health=health,
+        ),
+        "relay_count": len(window.messages),
+        "raw_count": len(window.raw_messages),
+        "message_updates": len(window.message_updates),
+        "body_complete_head_for_tail": head,
+        "marker_presence": _marker_presence(window, markers),
+        "recent_relay": [
+            _message_debug_summary(message) for message in window.messages[-6:]
+        ],
+        "recent_raw": [
+            _message_debug_summary(message) for message in window.raw_messages[-8:]
+        ],
+        "tmux": tmux_snapshot,
+        "health": health,
+    }
+
+
 def _raise_if_tui_prompt_stuck_while_idle(
     *,
     base_url: str,
@@ -1599,26 +1952,25 @@ def run_scenario(
             dry_run=args.dry_run,
             args=args,
         )
-        result["assertions"].extend(window["assertions"])
-        for key in (
-            "relay_count",
-            "raw_count",
-            "message_updates",
-            "sample_relay",
-            "provider_hold_prompts",
-            "provider_hold_states",
-            "cancel_turns",
-            "health_assertions",
-            "post_scenario_idle",
-            "fixture_steps",
-            "fixture_replays",
-            "fixture_state",
-            "fixture_health",
-            "fixture_followup_probes",
-        ):
-            if key in window:
-                result[key] = window[key]
+        _merge_record_into_result(result, window)
         result["status"] = "pass"
+    except ScenarioStepAssertionError as error:
+        result["status"] = "fail"
+        result["reason"] = f"assertion: {error}"
+        _merge_record_into_result(result, error.record)
+        if not args.dry_run:
+            try:
+                send_teardown_marker(
+                    client=client,
+                    channel_id=target_channel_id,
+                    scenario_id=scenario_id,
+                    cell=cell,
+                    run_id=run_id,
+                )
+            except Exception as teardown_error:  # noqa: BLE001 - report without masking failure
+                result["teardown_error"] = (
+                    f"{type(teardown_error).__name__}: {teardown_error}"
+                )
     except assertions.AssertionError as error:
         result["status"] = "fail"
         result["reason"] = f"assertion: {error}"
@@ -1794,8 +2146,26 @@ def run_one_cell(
             )
             _ingest_observed(observed)
             if not found:
-                raise assertions.AssertionError(
-                    f"timeout waiting for Discord text {needle!r}"
+                diagnostic = _collect_wait_timeout_diagnostics(
+                    base_url=client.base_url,
+                    channel_id=channel_id,
+                    cell=cell,
+                    scenario=scenario,
+                    thread_channel_id=(
+                        channel_id if scenario.get("requires_thread_channel") else None
+                    ),
+                    after_id=after_id,
+                    wait_kind="relay",
+                    needle=str(needle),
+                    prompt=last_sent_prompt,
+                    window=window,
+                )
+                record.setdefault("wait_timeouts", []).append(diagnostic)
+                _update_record_window_snapshot(record, window)
+                raise ScenarioStepAssertionError(
+                    f"timeout waiting for Discord text {needle!r}; "
+                    f"diagnostic={_payload_summary(diagnostic, max_chars=1400)}",
+                    record=record,
                 )
         elif "wait_for_raw_discord_text" in step:
             needle = step["wait_for_raw_discord_text"]
@@ -1812,8 +2182,26 @@ def run_one_cell(
             )
             _ingest_observed(observed)
             if not found:
-                raise assertions.AssertionError(
-                    f"timeout waiting for raw Discord text {needle!r}"
+                diagnostic = _collect_wait_timeout_diagnostics(
+                    base_url=client.base_url,
+                    channel_id=channel_id,
+                    cell=cell,
+                    scenario=scenario,
+                    thread_channel_id=(
+                        channel_id if scenario.get("requires_thread_channel") else None
+                    ),
+                    after_id=after_id,
+                    wait_kind="raw",
+                    needle=str(needle),
+                    prompt=last_sent_prompt,
+                    window=window,
+                )
+                record.setdefault("wait_timeouts", []).append(diagnostic)
+                _update_record_window_snapshot(record, window)
+                raise ScenarioStepAssertionError(
+                    f"timeout waiting for raw Discord text {needle!r}; "
+                    f"diagnostic={_payload_summary(diagnostic, max_chars=1400)}",
+                    record=record,
                 )
         elif "wait_for_provider_hold_state" in step:
             params = step["wait_for_provider_hold_state"] or {}
@@ -1942,6 +2330,21 @@ def run_one_cell(
             if bool(params.get("mark_prompt_sent", True)):
                 window.mark_prompt_sent()
             key_args = [str(key) for key in keys]
+            last_sent_prompt = (
+                str(params["diagnostic_prompt"])
+                if "diagnostic_prompt" in params
+                else _infer_direct_input_prompt_from_keys(key_args)
+            )
+            if last_sent_prompt:
+                record.setdefault("direct_input_prompts", []).append(
+                    {
+                        "mode": "send_keys_sequence",
+                        "prompt_preview": _truncate_text(
+                            last_sent_prompt,
+                            max_chars=700,
+                        ),
+                    }
+                )
             key_interval_s = float(
                 params.get("key_interval_s", params.get("interval_s", 0.0))
             )
@@ -1957,6 +2360,13 @@ def run_one_cell(
             thread_channel_id = channel_id if scenario.get("requires_thread_channel") else None
             session_name = cell_session_name(cell, thread_channel_id=thread_channel_id)
             window.mark_prompt_sent()
+            last_sent_prompt = str(step["send_keys"])
+            record.setdefault("direct_input_prompts", []).append(
+                {
+                    "mode": "send_keys",
+                    "prompt_preview": _truncate_text(last_sent_prompt, max_chars=700),
+                }
+            )
             if not tmux.send_keys(session_name, step["send_keys"]):
                 raise assertions.AssertionError(
                     f"tmux send-keys failed for session {session_name!r}"
@@ -1978,12 +2388,7 @@ def run_one_cell(
             time.sleep(final_refetch_interval_s)
         _ingest_observed(client.fetch_messages(channel_id, after_id=after_id, limit=100))
 
-    record["relay_count"] = len(window.messages)
-    record["raw_count"] = len(window.raw_messages)
-    record["message_updates"] = len(window.message_updates)
-    record["sample_relay"] = [
-        (m.get("content") or "")[:120] for m in window.messages[:6]
-    ]
+    _update_record_window_snapshot(record, window)
 
     for assertion_spec in scenario.get("assertions") or []:
         run_assertion(assertion_spec, window=window, record=record)

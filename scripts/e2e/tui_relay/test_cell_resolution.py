@@ -238,6 +238,28 @@ class ScenarioFilter(unittest.TestCase):
             self.assertEqual(health_steps[0]["global_active_max"], 0)
             self.assertEqual(health_steps[0]["global_finalizing_max"], 0)
 
+    def test_e10_health_assertion_waits_for_stranded_draft_finalizing_drain(self):
+        for cell in driver.SUPPORTED_CELLS:
+            scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
+            ids = {str(s.get("id")) for s in scenarios}
+            if cell not in {"claude-tui", "codex-tui"}:
+                self.assertNotIn("E-10", ids)
+                continue
+            self.assertIn("E-10", ids)
+            e10 = next(s for s in scenarios if s.get("id") == "E-10")
+            health_steps = [
+                step["assert_health"] for step in e10["steps"] if "assert_health" in step
+            ]
+            self.assertEqual(len(health_steps), 1)
+            self.assertGreaterEqual(health_steps[0]["timeout_s"], 30)
+            self.assertLessEqual(health_steps[0]["poll_interval_s"], 2)
+            self.assertIn(
+                "global_active_counter_out_of_bounds",
+                health_steps[0]["forbid_degraded_reasons"],
+            )
+            self.assertEqual(health_steps[0]["global_active_max"], 0)
+            self.assertEqual(health_steps[0]["global_finalizing_max"], 0)
+
     def test_e19_session_continuity_scope_is_tui_only(self):
         for cell in driver.SUPPORTED_CELLS:
             scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
