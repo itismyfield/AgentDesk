@@ -1420,6 +1420,27 @@ def run_one_cell(
                 raise assertions.AssertionError(
                     f"tmux send-keys failed for session {session_name!r}"
                 )
+        elif "send_keys_sequence" in step:
+            thread_channel_id = channel_id if scenario.get("requires_thread_channel") else None
+            session_name = cell_session_name(cell, thread_channel_id=thread_channel_id)
+            raw_params = step["send_keys_sequence"]
+            params = raw_params if isinstance(raw_params, dict) else {"keys": raw_params}
+            keys = params.get("keys")
+            if not isinstance(keys, list) or not keys:
+                raise assertions.AssertionError(
+                    f"send_keys_sequence requires a non-empty keys list: {step!r}"
+                )
+            if bool(params.get("mark_prompt_sent", True)):
+                window.mark_prompt_sent()
+            key_args = [str(key) for key in keys]
+            if not tmux.send_keys(session_name, *key_args):
+                raise assertions.AssertionError(
+                    f"tmux send-keys sequence failed for session {session_name!r}"
+                )
+            record.setdefault("tmux_key_sequences", []).append(
+                {"session": session_name, "count": len(key_args)}
+            )
+            time.sleep(float(params.get("sleep_s", 0.2)))
         elif "send_keys" in step:
             thread_channel_id = channel_id if scenario.get("requires_thread_channel") else None
             session_name = cell_session_name(cell, thread_channel_id=thread_channel_id)

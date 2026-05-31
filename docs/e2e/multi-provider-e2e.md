@@ -50,6 +50,9 @@ it remains disabled until a deterministic provider hold hook can avoid the known
 late-sentinel race. `E-19` captures tmux pane identity across dcserver restart
 for TUI cells. `E-20` uses same-session near-concurrent prompt fan-out to
 pressure dispatch serialization while asserting both markers arrive once.
+`E-21` covers TUI direct input with an actual `C-u` key sequence: a stale draft
+marker is typed, cleared, and then the real prompt must relay with a complete
+head-to-tail body while the stale marker and terminal controls stay absent.
 `E-11` (cross-cell concurrency) is `cells: []` — the orchestrator owns that
 scenario.
 
@@ -118,6 +121,9 @@ Control-flow steps include `cancel_turn` (POSTs
 `send_prompts_concurrent` (starts multiple prompt dispatches without the normal
 per-step sleep), `capture_session_identity`, and `assert_session_preserved`
 (compares tmux session name, pane ids, pane pids, and cwd after restart).
+`send_keys_sequence` sends one tmux `send-keys` call with explicit key args such
+as `C-u` and `C-m`; `E-21` uses it to cover direct TUI input where a stale draft
+is cleared by a real control key before the submitted prompt is relayed.
 
 Observation assertions now include negative and edit-aware primitives:
 `raw_text_absent`, `marker_absent`, `chrome_count`,

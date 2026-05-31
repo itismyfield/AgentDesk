@@ -96,6 +96,7 @@ class ScenarioFilter(unittest.TestCase):
         self.assertIn("E-18", ids)
         self.assertIn("E-19", ids)
         self.assertIn("E-20", ids)
+        self.assertIn("E-21", ids)
         self.assertNotIn("E-13", ids)
         self.assertIn("E-4", ids)
         self.assertIn("E-10", ids)
@@ -134,6 +135,7 @@ class ScenarioFilter(unittest.TestCase):
         self.assertIn("E-18", ids)
         self.assertIn("E-19", ids)
         self.assertIn("E-20", ids)
+        self.assertIn("E-21", ids)
         e17 = next(s for s in scenarios if s.get("id") == "E-17")
         self.assertIn("skip_reason", e17)
         self.assertIn("acceptance_criteria", e17)
@@ -183,6 +185,18 @@ class ScenarioFilter(unittest.TestCase):
             scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
             ids = {str(s.get("id")) for s in scenarios}
             self.assertIn("E-20", ids)
+
+    def test_e21_direct_control_strip_scope_is_tui_only(self):
+        for cell in driver.SUPPORTED_CELLS:
+            scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
+            ids = {str(s.get("id")) for s in scenarios}
+            if cell in {"claude-tui", "codex-tui"}:
+                self.assertIn("E-21", ids)
+                e21 = next(s for s in scenarios if s.get("id") == "E-21")
+                self.assertIn("acceptance_criteria", e21)
+                self.assertNotIn("skip_reason", e21)
+            else:
+                self.assertNotIn("E-21", ids)
 
     def test_e11_excluded_everywhere(self):
         for cell in driver.SUPPORTED_CELLS:

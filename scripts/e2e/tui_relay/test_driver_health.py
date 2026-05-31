@@ -805,6 +805,71 @@ class ControlFlowPrimitives(unittest.TestCase):
             [0, 1],
         )
 
+    def test_send_keys_sequence_sends_control_keys_as_tmux_key_args(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                return {"id": "1"}
+
+            def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
+                return []
+
+        args = Namespace(
+            cell="codex-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+        )
+        scenario = {
+            "id": "E-X",
+            "steps": [
+                {
+                    "send_keys_sequence": {
+                        "keys": ["STALE_DRAFT", "C-u", "final prompt", "C-m"]
+                    }
+                }
+            ],
+            "assertions": [],
+        }
+        sent: list[tuple[str, tuple[str, ...]]] = []
+
+        def fake_send_keys(session_name, *keys):
+            sent.append((session_name, keys))
+            return True
+
+        with (
+            patch("run_tui_relay.time.sleep", return_value=None),
+            patch("run_tui_relay.tmux.send_keys", side_effect=fake_send_keys),
+            patch(
+                "run_tui_relay.assert_cell_idle",
+                return_value={"status": "idle", "mailboxes_seen": 1},
+            ),
+        ):
+            record = driver.run_one_cell(
+                scenario=scenario,
+                cell="codex-tui",
+                channel_id="42",
+                client=FakeClient(),  # type: ignore[arg-type]
+                run_id="run-1",
+                dry_run=False,
+                args=args,
+            )
+
+        self.assertEqual(
+            sent,
+            [
+                (
+                    "AgentDesk-codex-adk-codex-tui-e2e",
+                    ("STALE_DRAFT", "C-u", "final prompt", "C-m"),
+                )
+            ],
+        )
+        self.assertEqual(
+            record["tmux_key_sequences"],
+            [{"session": sent[0][0], "count": 4}],
+        )
+
     def test_assert_session_preserved_detects_recreated_tmux_session(self):
         before = {
             "session_name": "AgentDesk-codex-adk-codex-tui-e2e",
