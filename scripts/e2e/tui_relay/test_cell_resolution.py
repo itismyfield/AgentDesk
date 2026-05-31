@@ -192,6 +192,19 @@ class ScenarioFilter(unittest.TestCase):
             self.assertEqual(health_steps[0]["global_active_max"], 0)
             self.assertEqual(health_steps[0]["global_finalizing_max"], 0)
 
+    def test_e8_health_assertion_waits_for_restart_finalizing_drain(self):
+        for cell in driver.SUPPORTED_CELLS:
+            scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
+            e8 = next(s for s in scenarios if s.get("id") == "E-8")
+            health_steps = [
+                step["assert_health"] for step in e8["steps"] if "assert_health" in step
+            ]
+            self.assertEqual(len(health_steps), 1)
+            self.assertGreaterEqual(health_steps[0]["timeout_s"], 30)
+            self.assertLessEqual(health_steps[0]["poll_interval_s"], 2)
+            self.assertEqual(health_steps[0]["global_active_max"], 0)
+            self.assertEqual(health_steps[0]["global_finalizing_max"], 0)
+
     def test_e19_session_continuity_scope_is_tui_only(self):
         for cell in driver.SUPPORTED_CELLS:
             scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
