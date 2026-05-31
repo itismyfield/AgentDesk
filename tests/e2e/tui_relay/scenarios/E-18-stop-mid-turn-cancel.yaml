@@ -36,6 +36,11 @@ steps:
       global_active_max: 0
       global_finalizing_max: 0
 assertions:
+  - raw_message_count_between_markers:
+      min: 1
+      max: 36
+  - relay_latency_within:
+      max_seconds: 180
   - text_present: "[E2E:E18:OK]"
   - marker_absent:
       marker: "[E2E:E18:LATE]"

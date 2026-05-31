@@ -1157,6 +1157,7 @@ def run_one_cell(
         elif "send_keys" in step:
             thread_channel_id = channel_id if scenario.get("requires_thread_channel") else None
             session_name = cell_session_name(cell, thread_channel_id=thread_channel_id)
+            window.mark_prompt_sent()
             if not tmux.send_keys(session_name, step["send_keys"]):
                 raise assertions.AssertionError(
                     f"tmux send-keys failed for session {session_name!r}"

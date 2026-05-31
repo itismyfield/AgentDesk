@@ -137,6 +137,46 @@ class DiscordClientSendPrompt(unittest.TestCase):
         self.assertEqual(len(attempts), 2)
         sleep.assert_called_once_with(1.0)
 
+    def test_wait_for_message_evaluates_same_id_edits(self):
+        class EditingClient(DiscordClient):
+            def __init__(self):
+                super().__init__(base_url="http://127.0.0.1:8791", timeout_s=1)
+                self.polls = 0
+
+            def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
+                self.polls += 1
+                if self.polls == 1:
+                    return [
+                        {
+                            "id": "10",
+                            "content": "Processing...",
+                            "edited_timestamp": None,
+                        }
+                    ]
+                return [
+                    {
+                        "id": "10",
+                        "content": "final [E2E:EDIT]",
+                        "edited_timestamp": "2026-05-31T00:00:01Z",
+                    }
+                ]
+
+        client = EditingClient()
+        found, observed = client.wait_for_message(
+            "1509350393350459434",
+            predicate=lambda message: "[E2E:EDIT]" in (message.get("content") or ""),
+            after_id="9",
+            timeout_s=1,
+            poll_interval_s=0,
+        )
+
+        self.assertIsNotNone(found)
+        self.assertEqual(found["content"], "final [E2E:EDIT]")
+        self.assertEqual([message["content"] for message in observed], [
+            "Processing...",
+            "final [E2E:EDIT]",
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()

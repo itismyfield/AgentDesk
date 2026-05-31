@@ -23,5 +23,11 @@ steps:
       global_active_max: 0
       global_finalizing_max: 0
 assertions:
+  - raw_message_count_between_markers:
+      min: 2
+      max: 36
+  - relay_latency_within:
+      max_seconds: 300
   - no_duplicate_content: true
   - text_present: "[E2E:E10:POST]"
+  - no_suppressed_label_chrome: true

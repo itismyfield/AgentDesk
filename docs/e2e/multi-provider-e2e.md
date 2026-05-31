@@ -119,10 +119,14 @@ the final edited body rather than only the first placeholder/chrome body.
 `completion_chrome_after_body` checks ordering by default and can set
 `required: true` when a scenario wants to fail on missing completion chrome.
 Latency budgets use the first prompt timestamp to make
-`relay_latency_within` meaningful even for one-response scenarios. Current
-baselines are deliberately loose: simple/turn-separation cases use 240s
-latency, raw-message budgets count status chrome but exclude harness-sent
-control/prompt messages unless a scenario opts into `include_our_send`.
+`relay_latency_within` meaningful even for one-response scenarios. If a prompt
+timestamp exists but no later timestamped relay body is observed, the assertion
+fails instead of silently no-oping. Current baselines are deliberately loose:
+simple/turn-separation cases use 240s, restart/compact/long-response cases use
+300s, scheduled wakeup uses 360s, and the tmux-kill/cancel guards use 180s to
+bound the prompt-to-first-relay phase before the destructive step. Raw-message
+budgets count status chrome but exclude harness-sent control/prompt messages
+unless a scenario opts into `include_our_send`.
 
 ## Orchestrator (`adk-e2e-orchestrator`)
 
