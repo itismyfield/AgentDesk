@@ -782,9 +782,20 @@ pub async fn finish_cancelled_provider_channel_mailbox(
     )
     .await;
     let after = runtime.shared.global_active.load(Ordering::Acquire);
+    let global_active_decremented = after < before;
+    if !global_active_decremented {
+        tracing::warn!(
+            provider = runtime.provider.as_str(),
+            channel_id = channel_id.get(),
+            global_active_before = before,
+            global_active_after = after,
+            stop_source,
+            "finished cancelled mailbox turn without decrementing global_active"
+        );
+    }
     FinishCancelledMailboxResult {
         cleared_active_turn: true,
-        global_active_decremented: after < before,
+        global_active_decremented,
         has_pending_queue: finish.has_pending,
         runtime_session_cleared,
     }
