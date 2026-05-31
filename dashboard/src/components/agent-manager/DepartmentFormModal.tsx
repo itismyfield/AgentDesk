@@ -382,10 +382,11 @@ export default function DepartmentFormModal({
 
               {locale.startsWith("ko") && (
                 <div>
-                  <label className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                  <label htmlFor="dept-name-ko" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
                     {tr("한글 이름", "Korean Name")}
                   </label>
                   <input
+                    id="dept-name-ko"
                     type="text"
                     {...register("name_ko")}
                     placeholder="개발팀"
@@ -396,10 +397,11 @@ export default function DepartmentFormModal({
               )}
               {locale.startsWith("ja") && (
                 <div>
-                  <label className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                  <label htmlFor="dept-name-ja" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
                     {t({ ko: "일본어 이름", en: "Japanese Name", ja: "日本語名", zh: "日语名" })}
                   </label>
                   <input
+                    id="dept-name-ja"
                     type="text"
                     {...register("name_ja")}
                     placeholder="開発チーム"
@@ -410,10 +412,11 @@ export default function DepartmentFormModal({
               )}
               {locale.startsWith("zh") && (
                 <div>
-                  <label className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                  <label htmlFor="dept-name-zh" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
                     {t({ ko: "중국어 이름", en: "Chinese Name", ja: "中国語名", zh: "中文名" })}
                   </label>
                   <input
+                    id="dept-name-zh"
                     type="text"
                     {...register("name_zh")}
                     placeholder="开发部"
@@ -424,10 +427,11 @@ export default function DepartmentFormModal({
               )}
 
               <div>
-                <label className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                <label htmlFor="dept-description" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
                   {tr("부서 설명", "Description")}
                 </label>
                 <input
+                  id="dept-description"
                   type="text"
                   {...register("description")}
                   placeholder={tr("부서의 역할 간단 설명", "Brief description of the department")}
@@ -443,7 +447,11 @@ export default function DepartmentFormModal({
             description={tr("소속 에이전트가 공통으로 따르는 부서 지침을 적습니다.", "Write the shared instruction applied to agents in this department.")}
           >
             <div className="space-y-3">
+              <label htmlFor="dept-prompt" className="sr-only">
+                {tr("운영 프롬프트", "Department Prompt")}
+              </label>
               <textarea
+                id="dept-prompt"
                 {...register("prompt")}
                 rows={4}
                 placeholder={tr(

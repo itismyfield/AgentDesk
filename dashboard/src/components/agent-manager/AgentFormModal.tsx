@@ -239,10 +239,11 @@ export default function AgentFormModal({
             {/* 로캘 기반 현지 이름 필드 */}
             {locale.startsWith("ko") && (
               <div>
-                <label className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                <label htmlFor="agent-name-ko" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
                   {tr("한글 이름", "Korean Name")}
                 </label>
                 <input
+                  id="agent-name-ko"
                   type="text"
                   {...register("name_ko")}
                   placeholder="도로롱"
@@ -253,10 +254,11 @@ export default function AgentFormModal({
             )}
             {locale.startsWith("ja") && (
               <div>
-                <label className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                <label htmlFor="agent-name-ja" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
                   {t({ ko: "일본어 이름", en: "Japanese Name", ja: "日本語名", zh: "日语名" })}
                 </label>
                 <input
+                  id="agent-name-ja"
                   type="text"
                   {...register("name_ja")}
                   placeholder="ドロロン"
@@ -267,10 +269,11 @@ export default function AgentFormModal({
             )}
             {locale.startsWith("zh") && (
               <div>
-                <label className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                <label htmlFor="agent-name-zh" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
                   {t({ ko: "중국어 이름", en: "Chinese Name", ja: "中国語名", zh: "中文名" })}
                 </label>
                 <input
+                  id="agent-name-zh"
                   type="text"
                   {...register("name_zh")}
                   placeholder="多罗隆"
@@ -290,10 +293,11 @@ export default function AgentFormModal({
                 />
               </div>
               <div>
-                <label className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                <label htmlFor="agent-department" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
                   {tr("소속 부서", "Department")}
                 </label>
                 <select
+                  id="agent-department"
                   {...register("department_id")}
                   className={`${inputCls} cursor-pointer`}
                   style={inputStyle}
@@ -319,10 +323,11 @@ export default function AgentFormModal({
             <div className="space-y-4">
             {/* 성격/프롬프트 */}
             <div>
-              <label className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
+              <label htmlFor="agent-personality" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
                 {tr("성격 / 역할 프롬프트", "Personality / Prompt")}
               </label>
               <textarea
+                id="agent-personality"
                 {...register("personality")}
                 rows={6}
                 placeholder={tr("전문 분야나 성격 설명...", "Expertise or personality...")}
