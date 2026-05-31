@@ -2194,6 +2194,8 @@ fn persist_watcher_stream_progress(
     current_tool_line: Option<&str>,
     prev_tool_status: Option<&str>,
     task_notification_kind: Option<TaskNotificationKind>,
+    any_tool_used: bool,
+    has_post_tool_text: bool,
 ) {
     let Some(mut inflight) = super::inflight::load_inflight_state(provider, channel_id.get())
     else {
@@ -2249,6 +2251,8 @@ fn persist_watcher_stream_progress(
     inflight.response_sent_offset = normalized_response_sent_offset;
     inflight.current_tool_line = current_tool_line.map(str::to_string);
     inflight.prev_tool_status = prev_tool_status.map(str::to_string);
+    inflight.any_tool_used = any_tool_used;
+    inflight.has_post_tool_text = has_post_tool_text;
     if task_notification_kind.is_some() {
         inflight.task_notification_kind = task_notification_kind;
     }
@@ -2421,6 +2425,76 @@ mod watcher_placeholder_status_tests {
             None,
             Some(TaskNotificationKind::Background)
         ));
+    }
+}
+
+#[cfg(test)]
+mod watcher_stream_progress_tests {
+    use super::persist_watcher_stream_progress;
+    use crate::services::discord::inflight::InflightTurnState;
+    use crate::services::provider::ProviderKind;
+    use poise::serenity_prelude::{ChannelId, MessageId};
+    use std::sync::{LazyLock, Mutex};
+
+    static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::<()>::new(()));
+
+    #[test]
+    fn persist_watcher_stream_progress_persists_tool_hold_witness() {
+        let _lock = match TEST_ENV_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(1509350490461180105);
+        let tmux_session_name = "AgentDesk-claude-adk-issue-2985-hold-witness";
+        let state = InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            Some("claude-pipe".to_string()),
+            42,
+            9100000000000000123,
+            9100000000000000124,
+            "emit OK, call a tool, then wait".to_string(),
+            Some("session-2985".to_string()),
+            Some(tmux_session_name.to_string()),
+            Some("/tmp/issue-2985-output.jsonl".to_string()),
+            Some("/tmp/issue-2985-input.fifo".to_string()),
+            0,
+        );
+        super::super::inflight::save_inflight_state(&state).expect("save inflight");
+
+        persist_watcher_stream_progress(
+            &provider,
+            channel_id,
+            tmux_session_name,
+            Some(MessageId::new(9100000000000000125)),
+            "[E2E:E18:OK]\n\n",
+            0,
+            Some("Bash: sleep 60"),
+            Some("Bash"),
+            None,
+            true,
+            false,
+        );
+
+        let persisted = super::super::inflight::load_inflight_state(&provider, channel_id.get())
+            .expect("load inflight");
+        assert_eq!(persisted.full_response, "[E2E:E18:OK]\n\n");
+        assert!(persisted.any_tool_used);
+        assert!(
+            !persisted.has_post_tool_text,
+            "pre-cancel hold witness must stay durable before post-tool text"
+        );
+        assert_eq!(
+            persisted.current_tool_line.as_deref(),
+            Some("Bash: sleep 60")
+        );
+        assert_eq!(persisted.current_msg_id, 9100000000000000125);
+
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
     }
 }
 

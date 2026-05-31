@@ -961,6 +961,51 @@ class ControlFlowPrimitives(unittest.TestCase):
 
         self.assertIn("dispatch_id", str(ctx.exception))
 
+    def test_wait_for_provider_hold_state_fails_if_current_turn_disappears(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "discord_inflight" / "claude" / "42.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "channel_id": 42,
+                        "user_msg_id": 222,
+                        "full_response": "[E2E:E18:OK]\n\n",
+                        "any_tool_used": False,
+                        "has_post_tool_text": False,
+                        "terminal_delivery_committed": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def remove_current_turn() -> None:
+                threading.Event().wait(0.03)
+                path.unlink(missing_ok=True)
+
+            remover = threading.Thread(target=remove_current_turn)
+            remover.start()
+            try:
+                with self.assertRaises(assertions.AssertionError) as ctx:
+                    driver.wait_for_provider_hold_state(
+                        runtime_root=tmp,
+                        provider="claude",
+                        channel_id="42",
+                        expected_identity={
+                            "channel_id": "42",
+                            "user_msg_id": "222",
+                        },
+                        ok_marker="[E2E:E18:OK]",
+                        late_marker="[E2E:E18:LATE]",
+                        timeout_s=0.5,
+                        poll_interval_s=0.01,
+                    )
+            finally:
+                remover.join(timeout=1.0)
+
+        self.assertIn("disappeared before cancel", str(ctx.exception))
+        self.assertIn("last_current_state=", str(ctx.exception))
+
     def test_wait_for_provider_hold_state_rejects_delivered_current_turn(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "discord_inflight" / "claude" / "42.json"
