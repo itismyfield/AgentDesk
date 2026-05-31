@@ -221,7 +221,11 @@ chmod +x "$TMP_FIXTURE_DIR/bin_fail/curl"
 # Stub _launchd_job_state so the post-loop branch reports "running" — forcing
 # the helper to rely on marker-consumed ack.
 _launchd_job_state() { echo "running"; }
-( sleep 1; rm -f "$TMP_RUNTIME/restart_pending" ) &
+( for _ in $(seq 1 50); do
+    [ -e "$TMP_RUNTIME/restart_pending" ] && break
+    sleep 0.1
+  done
+  rm -f "$TMP_RUNTIME/restart_pending" ) &
 BG_PID=$!
 set +e
 PATH="$TMP_FIXTURE_DIR/bin_fail:$PATH" \
@@ -277,9 +281,33 @@ out=$(PATH="$TMP_FIXTURE_DIR/bin_full:$PATH" health_turn_snapshot 0 2>/dev/null)
 rc=$?
 set -e
 assert_eq "snapshot returns 0 with counters present + Origin sent" "0" "$rc"
-assert_eq "snapshot prints 'active finalizing queue_depth'" "2 1 3" "$out"
+assert_eq "snapshot prints 'active finalizing queue_depth runtime_active'" "2 1 3 0" "$out"
 
-echo "== Test 5e: request helper clears marker if launchd job is stopped =="
+echo "== Test 5e: provider-active evidence blocks queued-only restart classification =="
+mkdir -p "$TMP_FIXTURE_DIR/bin_provider_active"
+cat >"$TMP_FIXTURE_DIR/bin_provider_active/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s' '{"global_active":0,"global_finalizing":0,"queue_depth":1,"providers":[{"name":"claude","active_turns":1,"queue_depth":1}],"mailboxes":[{"relay_stall_state":"active_foreground_stream","relay_health":{"bridge_inflight_present":true},"watcher_attached":true}]}'
+EOF
+chmod +x "$TMP_FIXTURE_DIR/bin_provider_active/curl"
+set +e
+out=$(PATH="$TMP_FIXTURE_DIR/bin_provider_active:$PATH" health_turn_snapshot 0 2>/dev/null)
+rc=$?
+set -e
+assert_eq "snapshot detects runtime active evidence even when global_active is zero" "0" "$rc"
+assert_eq "snapshot prints runtime_active=1 for provider/mailbox evidence" "0 0 1 1" "$out"
+_launchd_job_state() { echo "running"; }
+set +e
+PATH="$TMP_FIXTURE_DIR/bin_provider_active:$PATH" \
+  AGENTDESK_SKIP_TURN_DRAIN=0 \
+  wait_for_live_turns_to_drain_or_fail "release" "test.label" 0 0 1 \
+  >/dev/null 2>&1
+rc=$?
+set -e
+unset -f _launchd_job_state
+assert_eq "strict drain refuses provider-active foreground evidence with queued work" "1" "$rc"
+
+echo "== Test 5f: request helper clears marker if launchd job is stopped =="
 # Regression for #1447 review iteration 4 P2: previously the not-running
 # branch returned success but left restart_pending on disk, causing the
 # next cold boot to drain-and-self-exit (KeepAlive flap).

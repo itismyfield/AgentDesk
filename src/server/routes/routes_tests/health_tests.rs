@@ -56,6 +56,30 @@ fn startup_doctor_deferred_hooks_artifact() -> serde_json::Value {
     })
 }
 
+fn seed_pending_startup_doctor_lock(runtime_root: &std::path::Path) -> std::path::PathBuf {
+    let runtime_dir = runtime_root.join("runtime");
+    fs::create_dir_all(&runtime_dir).unwrap();
+    fs::write(runtime_dir.join("dcserver.pid"), "4242\n").unwrap();
+    let boot_id = crate::cli::doctor::startup::current_boot_id().unwrap();
+    let artifact_dir = runtime_dir.join("doctor").join("startup");
+    fs::create_dir_all(&artifact_dir).unwrap();
+    let lock_path = artifact_dir.join(format!("{boot_id}.lock"));
+    fs::write(&lock_path, b"in-progress\n").unwrap();
+    lock_path
+}
+
+fn seed_corrupt_startup_doctor_artifact(runtime_root: &std::path::Path) -> std::path::PathBuf {
+    let runtime_dir = runtime_root.join("runtime");
+    fs::create_dir_all(&runtime_dir).unwrap();
+    fs::write(runtime_dir.join("dcserver.pid"), "4242\n").unwrap();
+    let boot_id = crate::cli::doctor::startup::current_boot_id().unwrap();
+    let artifact_dir = runtime_dir.join("doctor").join("startup");
+    fs::create_dir_all(&artifact_dir).unwrap();
+    let artifact_path = artifact_dir.join(format!("{boot_id}.json"));
+    fs::write(&artifact_path, b"{ not valid json {{").unwrap();
+    artifact_path
+}
+
 #[tokio::test]
 async fn health_detail_and_stale_mailbox_repair_pg_require_bearer_when_auth_enabled() {
     let pg_db = TestPostgresDb::create().await;
@@ -286,6 +310,195 @@ async fn health_surfaces_latest_startup_doctor_summary_without_raw_checks() {
     assert!(doctor.get("failed_checks").is_none());
     assert!(doctor.get("warned_checks").is_none());
     assert!(doctor.get("checks").is_none());
+    assert_eq!(json["startup_status"], "doctor_failed");
+    assert_eq!(json["startup_degraded"], true);
+    assert!(
+        json["startup_degraded_reasons"]
+            .as_array()
+            .expect("startup_degraded_reasons must be an array")
+            .iter()
+            .any(|reason| reason.as_str() == Some("startup_doctor_failed:1"))
+    );
+}
+
+#[tokio::test]
+async fn health_keeps_startup_doctor_failures_on_startup_axis_when_runtime_healthy() {
+    let _lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    seed_startup_doctor_artifact(runtime_root.path(), sample_startup_doctor_artifact());
+
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let db = test_db();
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let harness = crate::services::discord::health::TestHealthHarness::new().await;
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        Some(harness.registry()),
+        pool.clone(),
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "healthy");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["startup_status"], "doctor_failed");
+    assert_eq!(json["startup_degraded"], true);
+    let startup_reasons = json["startup_degraded_reasons"]
+        .as_array()
+        .expect("startup_degraded_reasons must be an array");
+    assert!(
+        startup_reasons
+            .iter()
+            .any(|reason| reason.as_str() == Some("startup_doctor_failed:1"))
+    );
+    assert!(
+        startup_reasons
+            .iter()
+            .any(|reason| reason.as_str() == Some("startup_doctor_warned:1"))
+    );
+
+    let detail_response = app
+        .oneshot(local_get_request("/health/detail"))
+        .await
+        .unwrap();
+    assert_eq!(detail_response.status(), StatusCode::OK);
+    let detail_body = axum::body::to_bytes(detail_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let detail_json: serde_json::Value = serde_json::from_slice(&detail_body).unwrap();
+    assert_eq!(detail_json["status"], "healthy");
+    assert_eq!(
+        detail_json["degraded_reasons"]
+            .as_array()
+            .expect("degraded_reasons must be an array")
+            .len(),
+        0,
+        "startup doctor findings must not pollute runtime degraded_reasons"
+    );
+    assert_eq!(detail_json["startup_status"], "doctor_failed");
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+async fn assert_registry_health_surfaces_startup_doctor_state_reason(
+    seed_marker: fn(&std::path::Path) -> std::path::PathBuf,
+    expected_startup_status: &str,
+    expected_reason: &str,
+) {
+    let _lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let _marker_path = seed_marker(runtime_root.path());
+
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let db = test_db();
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let harness = crate::services::discord::health::TestHealthHarness::new().await;
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        Some(harness.registry()),
+        pool.clone(),
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "healthy");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["startup_status"], expected_startup_status);
+    assert_eq!(json["startup_degraded"], true);
+    assert_eq!(
+        json["latest_startup_doctor"]["doctor_status"],
+        expected_startup_status.trim_start_matches("doctor_")
+    );
+    assert!(
+        json["startup_degraded_reasons"]
+            .as_array()
+            .expect("startup_degraded_reasons must be an array")
+            .iter()
+            .any(|reason| reason.as_str() == Some(expected_reason)),
+        "{expected_reason} must be surfaced even when registry health pre-populates startup_degraded_reasons"
+    );
+
+    let detail_response = app
+        .oneshot(local_get_request("/health/detail"))
+        .await
+        .unwrap();
+    assert_eq!(detail_response.status(), StatusCode::OK);
+    let detail_body = axum::body::to_bytes(detail_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let detail_json: serde_json::Value = serde_json::from_slice(&detail_body).unwrap();
+    assert_eq!(detail_json["status"], "healthy");
+    assert!(
+        detail_json["startup_degraded_reasons"]
+            .as_array()
+            .expect("startup_degraded_reasons must be an array")
+            .iter()
+            .any(|reason| reason.as_str() == Some(expected_reason))
+    );
+    assert_eq!(
+        detail_json["degraded_reasons"]
+            .as_array()
+            .expect("runtime degraded_reasons must be an array")
+            .len(),
+        0,
+        "startup doctor markers must stay out of runtime degraded_reasons"
+    );
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn health_with_registry_surfaces_pending_and_error_startup_doctor_reasons() {
+    assert_registry_health_surfaces_startup_doctor_state_reason(
+        seed_pending_startup_doctor_lock,
+        "doctor_pending",
+        "startup_doctor_pending",
+    )
+    .await;
+    assert_registry_health_surfaces_startup_doctor_state_reason(
+        seed_corrupt_startup_doctor_artifact,
+        "doctor_error",
+        "startup_doctor_error",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -330,6 +543,8 @@ async fn health_does_not_latch_unhealthy_for_recovered_startup_deferred_hooks() 
     assert_eq!(json["status"], "healthy");
     assert_eq!(json["ok"], true);
     assert_eq!(json["fully_recovered"], true);
+    assert_eq!(json["startup_status"], "doctor_failed");
+    assert_eq!(json["startup_degraded"], true);
     assert_eq!(json["latest_startup_doctor"]["doctor_status"], "failed");
     assert_eq!(json["latest_startup_doctor"]["failed_count"], 1);
 
@@ -349,6 +564,14 @@ async fn health_does_not_latch_unhealthy_for_recovered_startup_deferred_hooks() 
             .expect("degraded_reasons must be an array")
             .len(),
         0
+    );
+    assert_eq!(
+        detail_json["startup_degraded_reasons"]
+            .as_array()
+            .expect("startup_degraded_reasons must be an array")
+            .len(),
+        0,
+        "recovered deferred-hook startup findings should not remain as effective startup drain blockers"
     );
 
     pool.close().await;
@@ -390,18 +613,18 @@ async fn health_keeps_startup_deferred_hook_failure_when_live_backlog_remains() 
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["status"], "unhealthy");
+    assert_eq!(json["status"], "degraded");
 
     let detail_response = app
         .oneshot(local_get_request("/health/detail"))
         .await
         .unwrap();
-    assert_eq!(detail_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(detail_response.status(), StatusCode::OK);
     let detail_body = axum::body::to_bytes(detail_response.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -416,6 +639,14 @@ async fn health_keeps_startup_deferred_hook_failure_when_live_backlog_remains() 
     );
     assert!(
         reasons
+            .iter()
+            .all(|reason| reason.as_str() != Some("startup_doctor_failed:1")),
+        "startup doctor failure must stay out of runtime degraded_reasons"
+    );
+    assert!(
+        detail_json["startup_degraded_reasons"]
+            .as_array()
+            .expect("startup_degraded_reasons must be an array")
             .iter()
             .any(|reason| reason.as_str() == Some("startup_doctor_failed:1"))
     );
@@ -495,6 +726,66 @@ async fn startup_doctor_latest_endpoint_reports_missing_artifact_as_json() {
     assert_eq!(json["available"], false);
     assert_eq!(json["reason"], "startup_doctor_artifact_missing");
     assert_eq!(json["artifact"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn startup_doctor_latest_endpoint_reports_pending_artifact_lock_as_json() {
+    let _lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+
+    let runtime_dir = runtime_root.path().join("runtime");
+    fs::create_dir_all(&runtime_dir).unwrap();
+    fs::write(runtime_dir.join("dcserver.pid"), "4242\n").unwrap();
+    let boot_id = crate::cli::doctor::startup::current_boot_id().unwrap();
+    let artifact_dir = runtime_dir.join("doctor").join("startup");
+    fs::create_dir_all(&artifact_dir).unwrap();
+    let lock_path = artifact_dir.join(format!("{boot_id}.lock"));
+    fs::write(&lock_path, b"in-progress\n").unwrap();
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let latest_response = app
+        .clone()
+        .oneshot(local_get_request("/doctor/startup/latest"))
+        .await
+        .unwrap();
+
+    assert_eq!(latest_response.status(), StatusCode::OK);
+    let latest_body = axum::body::to_bytes(latest_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let latest_json: serde_json::Value = serde_json::from_slice(&latest_body).unwrap();
+    assert_eq!(latest_json["ok"], true);
+    assert_eq!(latest_json["available"], false);
+    assert_eq!(latest_json["reason"], "startup_doctor_artifact_in_progress");
+    assert_eq!(latest_json["lock_path"], lock_path.display().to_string());
+    assert_eq!(latest_json["artifact"], serde_json::Value::Null);
+
+    let detail_response = app
+        .oneshot(local_get_request("/health/detail"))
+        .await
+        .unwrap();
+    assert_eq!(detail_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let detail_body = axum::body::to_bytes(detail_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let detail_json: serde_json::Value = serde_json::from_slice(&detail_body).unwrap();
+    assert_eq!(detail_json["startup_status"], "doctor_pending");
+    assert_eq!(detail_json["startup_degraded"], true);
+    assert_eq!(
+        detail_json["latest_startup_doctor"]["doctor_status"],
+        "pending"
+    );
+    assert!(
+        detail_json["startup_degraded_reasons"]
+            .as_array()
+            .expect("startup_degraded_reasons must be an array")
+            .iter()
+            .any(|reason| reason.as_str() == Some("startup_doctor_pending"))
+    );
 }
 
 #[tokio::test]

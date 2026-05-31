@@ -27,6 +27,32 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
   var _queuePMDecision = helpers._queuePMDecision;
   var _flushPMDecisions = helpers._flushPMDecisions;
 
+  function configBool(key, defaultValue) {
+    var value = agentdesk.config.get(key);
+    if (value === null || value === undefined || value === "") return defaultValue;
+    return value === true || value === 1 || value === "1" || value === "true" || value === "yes";
+  }
+
+  function configIntAtLeast(key, defaultValue, minValue) {
+    var value = parseInt(agentdesk.config.get(key), 10);
+    if (!isFinite(value)) return defaultValue;
+    return Math.max(minValue, value);
+  }
+
+  function reviewDispatchType(dispatchId) {
+    if (!dispatchId) return null;
+    try {
+      var rows = agentdesk.db.query(
+        "SELECT dispatch_type FROM task_dispatches WHERE id = ?",
+        [dispatchId]
+      );
+      return rows.length > 0 ? rows[0].dispatch_type : null;
+    } catch (e) {
+      agentdesk.log.warn("[deadlock] Failed to inspect dispatch type for " + dispatchId + ": " + e);
+      return null;
+    }
+  }
+
   timeouts._tmuxHasLivePane = function(tmuxName) {
       try {
         // "=" prefix prevents tmux prefix-matching (exact_target convention)
@@ -47,6 +73,12 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
       var DEADLOCK_MINUTES = 30;
       var MAX_EXTENSIONS = 3;
       var MAX_TURN_MINUTES = 180;
+      var REVIEW_HANG_AUTO_RECOVERY = configBool("review_hang_auto_recovery_enabled", false);
+      var REVIEW_HANG_MINUTES = configIntAtLeast("review_hang_auto_recovery_stale_min", 15, 5);
+      var REVIEW_HANG_MAX_EXTENSIONS = configIntAtLeast("review_hang_auto_recovery_max_extensions", 1, 0);
+      var STALE_SCAN_MINUTES = REVIEW_HANG_AUTO_RECOVERY
+        ? Math.min(DEADLOCK_MINUTES, REVIEW_HANG_MINUTES)
+        : DEADLOCK_MINUTES;
       var iCfg = agentdesk.pipeline.getConfig();
       var iInitial = agentdesk.pipeline.kickoffState(iCfg);
       var iInProgress = agentdesk.pipeline.nextGatedTarget(iInitial, iCfg);
@@ -56,7 +88,7 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
         "DELETE FROM kv_meta WHERE key IN (" +
         "SELECT 'deadlock_check:' || session_key FROM sessions " +
         "WHERE status IN ('turn_active', 'working') " +
-        "AND last_heartbeat >= datetime('now', '-" + DEADLOCK_MINUTES + " minutes')" +
+        "AND last_heartbeat >= datetime('now', '-" + STALE_SCAN_MINUTES + " minutes')" +
         ")"
       );
 
@@ -119,26 +151,36 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
         "SELECT session_key, agent_id, active_dispatch_id, last_heartbeat " +
         "FROM sessions WHERE status IN ('turn_active', 'working') " +
         "AND session_key NOT LIKE '%deadlock-manager%' " +
-        "AND last_heartbeat < datetime('now', '-" + DEADLOCK_MINUTES + " minutes') " +
+        "AND last_heartbeat < datetime('now', '-" + STALE_SCAN_MINUTES + " minutes') " +
         "ORDER BY last_heartbeat ASC LIMIT 50"
       );
       for (var dl = 0; dl < staleSessions.length; dl++) {
         var sess = staleSessions[dl];
         var deadlockKey = "deadlock_check:" + sess.session_key;
         var dlTmuxName = (sess.session_key || "").split(":").pop();
+        var dispatchType = REVIEW_HANG_AUTO_RECOVERY ? reviewDispatchType(sess.active_dispatch_id) : null;
+        var isReviewHangTarget = REVIEW_HANG_AUTO_RECOVERY && dispatchType === "review";
+        var sessionDeadlockMinutes = isReviewHangTarget ? REVIEW_HANG_MINUTES : DEADLOCK_MINUTES;
+        var sessionMaxExtensions = isReviewHangTarget ? REVIEW_HANG_MAX_EXTENSIONS : MAX_EXTENSIONS;
+        if (!isReviewHangTarget && STALE_SCAN_MINUTES < DEADLOCK_MINUTES) {
+          var heartbeatMs = parseLocalTimestampMs(sess.last_heartbeat);
+          if (heartbeatMs > 0 && (Date.now() - heartbeatMs) < DEADLOCK_MINUTES * 60 * 1000) {
+            continue;
+          }
+        }
         var tmuxAlive = timeouts._tmuxHasLivePane(dlTmuxName);
         var inflightProgress = tmuxAlive
-          ? inspectInflightProgress(sess.session_key, dlTmuxName, DEADLOCK_MINUTES, MAX_TURN_MINUTES)
+          ? inspectInflightProgress(sess.session_key, dlTmuxName, sessionDeadlockMinutes, MAX_TURN_MINUTES)
           : { recent: false, updated_age_min: null, turn_age_min: null, channel_id: null, max_turn_reached: false };
 
         // Recent terminal output is the authoritative signal for "normal progress".
         // A live pane alone is not enough — hung tools can leave a pane alive forever.
         if (tmuxAlive && inflightProgress.recent && !inflightProgress.max_turn_reached) {
           agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [deadlockKey]);
-          var extendMin = DEADLOCK_MINUTES;
+          var extendMin = sessionDeadlockMinutes;
           if (inflightProgress.turn_age_min !== null) {
             extendMin = Math.min(
-              DEADLOCK_MINUTES,
+              sessionDeadlockMinutes,
               Math.max(0, MAX_TURN_MINUTES - inflightProgress.turn_age_min)
             );
           }
@@ -199,25 +241,25 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
           }
         }
 
-        // 마지막 체크 후 DEADLOCK_MINUTES 미경과 시 스킵 (1분마다 카운터 증가 방지)
+        // 마지막 체크 후 configured deadlock window 미경과 시 스킵 (1분마다 카운터 증가 방지)
         var nowMs = Date.now();
-        if (lastCheckAt > 0 && (nowMs - lastCheckAt) < DEADLOCK_MINUTES * 60 * 1000) {
+        if (lastCheckAt > 0 && (nowMs - lastCheckAt) < sessionDeadlockMinutes * 60 * 1000) {
           continue;
         }
 
         var hitTurnCap = tmuxAlive && inflightProgress.recent && inflightProgress.max_turn_reached;
-        if (hitTurnCap || extensions >= MAX_EXTENSIONS) {
+        if (hitTurnCap || extensions >= sessionMaxExtensions) {
           // ── 데드락 확정: 강제 중단 + 자동 복구 ──
           var totalMin = hitTurnCap
             ? Math.max(MAX_TURN_MINUTES, Math.round(inflightProgress.turn_age_min || 0))
-            : DEADLOCK_MINUTES * (MAX_EXTENSIONS + 1);
+            : sessionDeadlockMinutes * (sessionMaxExtensions + 1);
           var timeoutLabel = hitTurnCap
             ? (MAX_TURN_MINUTES + "분 상한 도달")
             : (totalMin + "분 무응답");
           agentdesk.log.warn("[deadlock] Session " + sess.session_key +
             (hitTurnCap
               ? " — max turn cap reached. Force cancelling + re-dispatch."
-              : " — max extensions (" + MAX_EXTENSIONS + ") reached. Force cancelling + re-dispatch."));
+              : " — max extensions (" + sessionMaxExtensions + ") reached. Force cancelling + re-dispatch."));
 
           // 1) authoritative force-kill API로 tmux 종료 + inflight cleanup + dispatch fail/retry 일원화
           var forceKillResp = null;
@@ -229,7 +271,12 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
             }
             var forceKillUrl = "http://127.0.0.1:" + apiPort +
               "/api/sessions/" + encodeURIComponent(sess.session_key) + "/force-kill";
-            forceKillResp = agentdesk.http.post(forceKillUrl, { retry: true, reason: "deadlock timeout — 턴 무응답으로 강제 종료" });
+            forceKillResp = agentdesk.http.post(forceKillUrl, {
+              retry: true,
+              reason: isReviewHangTarget
+                ? "review hang timeout — 리뷰 턴 무응답으로 강제 종료"
+                : "deadlock timeout — 턴 무응답으로 강제 종료"
+            });
           } catch (e) {
             agentdesk.log.error("[deadlock] force-kill API exception for " + sess.session_key + ": " + e);
             continue;
@@ -258,13 +305,13 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
             "🔴 [Deadlock 복구] " + sess.agent_id + "\n" +
             "session_key: " + sess.session_key + "\n" +
             "tmux: " + ((sess.session_key || "").split(":").pop() || "unknown") + "\n" +
-            "연장: " + extensions + "/" + MAX_EXTENSIONS + "\n" +
+            "연장: " + extensions + "/" + sessionMaxExtensions + "\n" +
             timeoutLabel + " → 강제 중단" +
             (redispatched ? " + 재디스패치 완료" : ""));
 
           // 5) Termination audit
           try {
-            var probeInfo = "agent=" + sess.agent_id + " extensions=" + extensions + "/" + MAX_EXTENSIONS +
+            var probeInfo = "agent=" + sess.agent_id + " extensions=" + extensions + "/" + sessionMaxExtensions +
               " last_heartbeat=" + sess.last_heartbeat +
               " recent_output_age_min=" + (inflightProgress.updated_age_min === null ? "null" : Math.round(inflightProgress.updated_age_min)) +
               " turn_age_min=" + (inflightProgress.turn_age_min === null ? "null" : Math.round(inflightProgress.turn_age_min)) +
@@ -302,13 +349,13 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
             [deadlockKey, JSON.stringify({ count: extensions + 1, ts: nowMs })]
           );
           agentdesk.log.warn("[deadlock] Session " + sess.session_key +
-            " — heartbeat stale " + DEADLOCK_MINUTES + "min. Extension " +
-            (extensions + 1) + "/" + MAX_EXTENSIONS);
+            " — heartbeat stale " + sessionDeadlockMinutes + "min. Extension " +
+            (extensions + 1) + "/" + sessionMaxExtensions);
           sendDeadlockAlert(
             "⚠️ [Deadlock 의심] " + sess.agent_id + "\n" +
             "session_key: " + sess.session_key + "\n" +
             "tmux: " + ((sess.session_key || "").split(":").pop() || "unknown") + "\n" +
-            "무응답: " + DEADLOCK_MINUTES + "분 (연장 " + (extensions + 1) + "/" + MAX_EXTENSIONS + ")");
+            "무응답: " + sessionDeadlockMinutes + "분 (연장 " + (extensions + 1) + "/" + sessionMaxExtensions + ")");
         }
       }
 

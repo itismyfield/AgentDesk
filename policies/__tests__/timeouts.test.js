@@ -396,6 +396,125 @@ test("timeouts active monitor module treats synthetic reattach placeholders as a
   assert.deepEqual(toPlain(state.executions[2].params), ["deadlock_check:" + sessionKey]);
 });
 
+test("timeouts active monitor opt-in review hang recovery retries stale review dispatches", () => {
+  const sessionKey = "provider:AgentDesk-claude-review-session";
+  const previousCheck = Date.now() - 16 * 60 * 1000;
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: {
+      server_port: 8791,
+      review_hang_auto_recovery_enabled: true,
+      review_hang_auto_recovery_stale_min: 15,
+      review_hang_auto_recovery_max_extensions: 1
+    },
+    inflights: [
+      {
+        provider: "claude",
+        channel_id: "review-channel",
+        channel_name: "project-agentdesk-review",
+        session_key: sessionKey,
+        tmux_session_name: "AgentDesk-claude-review-session",
+        started_at: timestampMinutesAgo(20),
+        updated_at: timestampMinutesAgo(16),
+        dispatch_id: "dispatch-review-1"
+      }
+    ],
+    dbQuery: createSqlRouter([
+      { match: "DELETE FROM kv_meta WHERE key IN", result: [] },
+      {
+        match: "SELECT session_key FROM sessions WHERE status IN ('turn_active', 'working') AND last_heartbeat < datetime('now', '-10 minutes')",
+        result: []
+      },
+      {
+        match: "SELECT session_key, agent_id, active_dispatch_id, last_heartbeat FROM sessions WHERE status IN ('turn_active', 'working')",
+        result: [
+          {
+            session_key: sessionKey,
+            agent_id: "agent-review",
+            active_dispatch_id: "dispatch-review-1",
+            last_heartbeat: timestampMinutesAgo(16)
+          }
+        ]
+      },
+      {
+        match: "SELECT dispatch_type FROM task_dispatches WHERE id = ?",
+        result: [{ dispatch_type: "review" }]
+      },
+      {
+        match: "SELECT value FROM kv_meta WHERE key = ?",
+        result: [{ value: JSON.stringify({ count: 1, ts: previousCheck }) }]
+      },
+      { match: "SELECT key FROM kv_meta WHERE key LIKE 'deadlock_check:%'", result: [] },
+      { match: "SELECT key FROM kv_meta WHERE key LIKE 'deadlock_history:%'", result: [] }
+    ]),
+    exec() {
+      return "0\n";
+    },
+    httpPost() {
+      return {
+        ok: true,
+        tmux_killed: true,
+        inflight_cleared: true,
+        retry_dispatch_id: "retry-review-1"
+      };
+    }
+  });
+
+  policy._section_I();
+
+  assert.equal(state.httpPosts.length, 1);
+  assert.equal(
+    state.httpPosts[0].url,
+    "http://127.0.0.1:8791/api/sessions/" + encodeURIComponent(sessionKey) + "/force-kill"
+  );
+  assert.equal(state.httpPosts[0].body.retry, true);
+  assert.match(state.httpPosts[0].body.reason, /review hang timeout/);
+  assert.equal(state.deadlockAlerts.length, 1);
+  assert.match(state.deadlockAlerts[0].message, /재디스패치 완료/);
+});
+
+test("timeouts active monitor review fast path leaves non-review sessions on the normal threshold", () => {
+  const sessionKey = "provider:AgentDesk-codex-implementation-session";
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: {
+      server_port: 8791,
+      review_hang_auto_recovery_enabled: true,
+      review_hang_auto_recovery_stale_min: 15
+    },
+    dbQuery: createSqlRouter([
+      { match: "DELETE FROM kv_meta WHERE key IN", result: [] },
+      {
+        match: "SELECT session_key FROM sessions WHERE status IN ('turn_active', 'working') AND last_heartbeat < datetime('now', '-10 minutes')",
+        result: []
+      },
+      {
+        match: "SELECT session_key, agent_id, active_dispatch_id, last_heartbeat FROM sessions WHERE status IN ('turn_active', 'working')",
+        result: [
+          {
+            session_key: sessionKey,
+            agent_id: "agent-impl",
+            active_dispatch_id: "dispatch-impl-1",
+            last_heartbeat: timestampMinutesAgo(16)
+          }
+        ]
+      },
+      {
+        match: "SELECT dispatch_type FROM task_dispatches WHERE id = ?",
+        result: [{ dispatch_type: "implementation" }]
+      },
+      { match: "SELECT key FROM kv_meta WHERE key LIKE 'deadlock_check:%'", result: [] },
+      { match: "SELECT key FROM kv_meta WHERE key LIKE 'deadlock_history:%'", result: [] }
+    ]),
+    exec() {
+      throw new Error("non-review session under 30 minutes should not probe tmux");
+    }
+  });
+
+  policy._section_I();
+
+  assert.equal(state.httpPosts.length, 0);
+  assert.equal(state.deadlockAlerts.length, 0);
+});
+
 test("timeouts orphan dispatch module emits orphan recovery signals", () => {
   const { policy, state } = loadPolicy("policies/timeouts.js", {
     dbQuery: createSqlRouter([

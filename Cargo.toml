@@ -114,3 +114,9 @@ tower = { version = "0.5", features = ["util"] }
 opt-level = "z"
 lto = true
 strip = true
+
+[profile.release-fast]
+inherits = "release"
+opt-level = 1
+lto = false
+strip = false

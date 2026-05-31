@@ -46,10 +46,21 @@ pub(crate) fn latest_startup_artifact_path() -> Option<PathBuf> {
     Some(root.join(format!("{boot_id}.json")))
 }
 
+pub(crate) fn latest_startup_artifact_lock_path() -> Option<PathBuf> {
+    let root = startup_artifact_root()?;
+    let boot_id = current_boot_id().ok()?;
+    Some(root.join(format!("{boot_id}.lock")))
+}
+
 enum LatestStartupDoctorArtifact {
     Available {
         path: PathBuf,
         report: Value,
+    },
+    Pending {
+        path: Option<PathBuf>,
+        lock_path: Option<PathBuf>,
+        reason: &'static str,
     },
     Missing {
         path: Option<PathBuf>,
@@ -71,6 +82,14 @@ fn load_latest_startup_doctor_artifact() -> LatestStartupDoctorArtifact {
     };
 
     if !path.exists() {
+        let lock_path = latest_startup_artifact_lock_path();
+        if lock_path.as_ref().is_some_and(|path| path.exists()) {
+            return LatestStartupDoctorArtifact::Pending {
+                path: Some(path),
+                lock_path,
+                reason: "startup_doctor_artifact_in_progress",
+            };
+        }
         return LatestStartupDoctorArtifact::Missing {
             path: Some(path),
             reason: "startup_doctor_artifact_missing",
@@ -262,9 +281,9 @@ pub(crate) fn latest_startup_doctor_effective_counts(
             .unwrap_or_else(|| summary_count(&report, "warned", "warn"));
             (failed, warned)
         }
-        LatestStartupDoctorArtifact::Missing { .. } | LatestStartupDoctorArtifact::Error { .. } => {
-            (0, 0)
-        }
+        LatestStartupDoctorArtifact::Pending { .. }
+        | LatestStartupDoctorArtifact::Missing { .. }
+        | LatestStartupDoctorArtifact::Error { .. } => (0, 0),
     }
 }
 
@@ -272,6 +291,27 @@ pub(crate) fn latest_startup_doctor_health_json(detailed: bool) -> Value {
     match load_latest_startup_doctor_artifact() {
         LatestStartupDoctorArtifact::Available { path, report } => {
             startup_doctor_summary_json(&path, &report, detailed)
+        }
+        LatestStartupDoctorArtifact::Pending {
+            path,
+            lock_path,
+            reason,
+        } => {
+            let mut summary = json!({
+                "available": false,
+                "doctor_status": "pending",
+                "summary": Value::Null,
+                "failed_count": 0,
+                "warned_count": 0,
+                "detail_endpoint": LATEST_STARTUP_DOCTOR_ENDPOINT,
+                "reason": reason,
+                "artifact_path": if detailed { path_json(path.as_ref()) } else { Value::Null },
+            });
+            if detailed {
+                summary["lock_path"] = path_json(lock_path.as_ref());
+                summary["followup_context"] = json!(followup_context());
+            }
+            summary
         }
         LatestStartupDoctorArtifact::Missing { path, reason } => json!({
             "available": false,
@@ -311,6 +351,20 @@ pub(crate) fn latest_startup_doctor_response_json() -> Value {
             "followup_context": followup_context(),
             "summary": report.get("summary").cloned().unwrap_or(Value::Null),
             "artifact": report,
+        }),
+        LatestStartupDoctorArtifact::Pending {
+            path,
+            lock_path,
+            reason,
+        } => json!({
+            "ok": true,
+            "available": false,
+            "artifact_path": path_json(path.as_ref()),
+            "lock_path": path_json(lock_path.as_ref()),
+            "detail_source": "startup_doctor_artifact",
+            "followup_context": followup_context(),
+            "reason": reason,
+            "artifact": Value::Null,
         }),
         LatestStartupDoctorArtifact::Missing { path, reason } => json!({
             "ok": true,
