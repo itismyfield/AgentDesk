@@ -50,11 +50,14 @@ replace the staged subset with a broader non-PG command in `just check`.
 The Windows PR lane intentionally remains inline cargo commands for stage 1
 instead of calling `just check`. The root `justfile` uses bash-oriented recipe
 semantics, while that lane is meant to provide cross-OS compile and targeted
-test signal. It also stays default-feature-only with `cargo check --all-targets`:
-`--all-features` enables `legacy-sqlite-tests`, and those test surfaces still
-reference Unix-only tmux modules guarded by `#[cfg(unix)]`. The Ubuntu `just
-check` and `lint` jobs are the authoritative format, clippy, and all-feature
-gates until the legacy/tmux tests are made portable or cfg-guarded.
+test signal. It also stays default-feature-only with `cargo check --workspace
+--all-targets`: `--all-features` enables `legacy-sqlite-tests`, and those test
+surfaces still reference Unix-only tmux modules guarded by `#[cfg(unix)]`. The
+Ubuntu `just check` and `lint` jobs are the authoritative format, clippy, and
+all-feature gates until the legacy/tmux tests are made portable or cfg-guarded.
+`ci-nightly.yml` has the same Windows boundary today: its Windows lane runs
+default-feature `cargo test --all-targets`, so it does not expose the
+legacy/tmux `--all-features` compile failure.
 
 ## Strict Clippy Debt
 

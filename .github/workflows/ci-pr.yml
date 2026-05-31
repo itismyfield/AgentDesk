@@ -121,10 +121,11 @@ jobs:
             # rust_compile is a narrower subset of rust_or_policy: only paths
             # whose change can plausibly alter Rust binary output (and therefore
             # require cross-OS verification on macOS/Windows). Pure JS policy,
-            # shell script, CI metadata, and Node package changes are excluded —
-            # those are still verified by the ubuntu Rust lane plus Lint/Script
-            # checks, and the nightly workflow continues to run the full
-            # macOS/Windows matrix daily.
+            # shell script, most CI metadata, and Node package changes are
+            # excluded — those are still verified by the ubuntu Rust lane plus
+            # Lint/Script checks, and the nightly workflow continues to run
+            # the full macOS/Windows matrix daily. ci-pr.yml itself is included
+            # so edits to this Rust CI lane exercise its own Windows job.
             #
             # Must include every compile-time Rust input. Audit before adding
             # new `include_str!`/`include_bytes!`/`sqlx::migrate!`/`build.rs`
@@ -139,6 +140,7 @@ jobs:
               - '.cargo/**'
               - 'rust-toolchain*'
               - 'build.rs'
+              - '.github/workflows/ci-pr.yml'
               # defaults.json is embedded into the Rust binary via
               # `include_str!("../defaults.json")` in src/config.rs.
               - 'defaults.json'
@@ -287,7 +289,7 @@ jobs:
       # cross-OS compile and targeted test signal; fmt/staged clippy and
       # all-feature checks are authoritative in the Ubuntu jobs above.
       - name: cargo check
-        run: cargo check --all-targets
+        run: cargo check --workspace --all-targets
 
       - name: cargo test (non-PG, targeted subset)
         shell: bash
