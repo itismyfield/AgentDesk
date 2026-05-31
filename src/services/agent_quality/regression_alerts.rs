@@ -120,6 +120,32 @@ pub fn drill_down_link(agent_id: &str) -> String {
 /// Format a Discord-bound alert message for `regression`. Includes
 /// agent id, metric label, expected (baseline) vs actual (current),
 /// sample sizes, and a drill-down link as required by DoD.
+pub fn explicit_decode_fallback<'r, T, R>(row: &'r R, column: &str, default_val: T) -> Result<T>
+where
+    R: Row,
+    T: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    for<'a> &'a str: sqlx::ColumnIndex<R>,
+{
+    decode_with_fallback(column, default_val, || row.try_get(column))
+}
+
+fn decode_with_fallback<T, F>(column: &str, default_val: T, decode: F) -> Result<T>
+where
+    F: FnOnce() -> std::result::Result<T, sqlx::Error>,
+{
+    match decode() {
+        Ok(val) => Ok(val),
+        Err(sqlx::Error::ColumnDecode { .. }) => {
+            tracing::warn!(
+                column = column,
+                "[quality] explicit fallback on column decode error"
+            );
+            Ok(default_val)
+        }
+        Err(e) => Err(anyhow!("decode {}: {}", column, e)),
+    }
+}
+
 pub fn format_alert_message(regression: &Regression) -> String {
     format!(
         "[quality] regression on agent `{agent}` :: metric={metric} \
@@ -184,18 +210,10 @@ pub async fn compute_regressions(pool: &PgPool) -> Result<Vec<Regression>> {
             .try_get("agent_id")
             .map_err(|error| anyhow!("decode agent_id: {error}"))?;
 
-        let turn_7d: Option<f64> = row
-            .try_get("turn_success_rate_7d")
-            .map_err(|error| anyhow!("decode turn_success_rate_7d: {error}"))?;
-        let turn_30d: Option<f64> = row
-            .try_get("turn_success_rate_30d")
-            .map_err(|error| anyhow!("decode turn_success_rate_30d: {error}"))?;
-        let turn_s7: i64 = row
-            .try_get("turn_sample_size_7d")
-            .map_err(|error| anyhow!("decode turn_sample_size_7d: {error}"))?;
-        let turn_s30: i64 = row
-            .try_get("turn_sample_size_30d")
-            .map_err(|error| anyhow!("decode turn_sample_size_30d: {error}"))?;
+        let turn_7d: Option<f64> = explicit_decode_fallback(&row, "turn_success_rate_7d", None)?;
+        let turn_30d: Option<f64> = explicit_decode_fallback(&row, "turn_success_rate_30d", None)?;
+        let turn_s7: i64 = explicit_decode_fallback(&row, "turn_sample_size_7d", 0)?;
+        let turn_s30: i64 = explicit_decode_fallback(&row, "turn_sample_size_30d", 0)?;
         if let Some(reg) = build_regression(
             &agent_id,
             QualityMetric::TurnSuccessRate,
@@ -207,18 +225,10 @@ pub async fn compute_regressions(pool: &PgPool) -> Result<Vec<Regression>> {
             out.push(reg);
         }
 
-        let review_7d: Option<f64> = row
-            .try_get("review_pass_rate_7d")
-            .map_err(|error| anyhow!("decode review_pass_rate_7d: {error}"))?;
-        let review_30d: Option<f64> = row
-            .try_get("review_pass_rate_30d")
-            .map_err(|error| anyhow!("decode review_pass_rate_30d: {error}"))?;
-        let review_s7: i64 = row
-            .try_get("review_sample_size_7d")
-            .map_err(|error| anyhow!("decode review_sample_size_7d: {error}"))?;
-        let review_s30: i64 = row
-            .try_get("review_sample_size_30d")
-            .map_err(|error| anyhow!("decode review_sample_size_30d: {error}"))?;
+        let review_7d: Option<f64> = explicit_decode_fallback(&row, "review_pass_rate_7d", None)?;
+        let review_30d: Option<f64> = explicit_decode_fallback(&row, "review_pass_rate_30d", None)?;
+        let review_s7: i64 = explicit_decode_fallback(&row, "review_sample_size_7d", 0)?;
+        let review_s30: i64 = explicit_decode_fallback(&row, "review_sample_size_30d", 0)?;
         if let Some(reg) = build_regression(
             &agent_id,
             QualityMetric::ReviewPassRate,
@@ -428,3 +438,35 @@ pub async fn run_regression_alerter_pg(pool: &PgPool) -> Result<u64> {
 // ─────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod explicit_decode_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn returns_default_on_column_decode_error() {
+        let result: Result<f64, anyhow::Error> = decode_with_fallback("some_column", 42.0, || {
+            Err(sqlx::Error::ColumnDecode {
+                index: "some_column".to_string(),
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "mock decode error",
+                )),
+            })
+        });
+
+        assert_eq!(result.unwrap(), 42.0);
+    }
+
+    #[test]
+    fn fails_closed_on_other_errors() {
+        let result: Result<f64, anyhow::Error> = decode_with_fallback("some_column", 42.0, || {
+            Err(sqlx::Error::ColumnNotFound("missing".to_string()))
+        });
+
+        assert!(result.is_err());
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("decode some_column"));
+        assert!(error.contains("missing"));
+    }
+}
