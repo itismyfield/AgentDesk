@@ -10,10 +10,10 @@ const ISSUE_JSON_FIELDS: &str =
 const PRIMARY_FETCH_LIMIT: u32 = 100;
 const RECENTLY_CLOSED_FETCH_LIMIT: u32 = 50;
 const RECENTLY_CLOSED_LOOKBACK_DAYS: i64 = 30;
-const STALE_CARD_RECONCILE_CARD_SCAN_LIMIT: i64 = 500;
 const STALE_CARD_RECONCILE_ISSUE_LIMIT: usize = 100;
 const STALE_CARD_RECONCILE_BATCH_SIZE: usize = 25;
 const STALE_CARD_RECONCILE_TIMEOUT_SECS: u64 = 30;
+const STALE_CARD_RECONCILE_CURSOR_KEY_PREFIX: &str = "github_sync.stale_card_reconcile_cursor:";
 
 /// Represents a GitHub issue as returned by `gh issue list --json`.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -197,32 +197,32 @@ pub(crate) async fn sync_github_issues_for_repo_pg_with_adapter(
     let fetched_issue_numbers: HashSet<i64> = issues.iter().map(|issue| issue.number).collect();
     let mut issues = issues.to_vec();
 
-    let stale_issue_numbers = stale_card_issue_numbers_for_reconcile(
-        pool,
-        repo,
-        &fetched_issue_numbers,
-        repo_override.as_ref(),
-        &mut agent_overrides,
-    )
-    .await?;
-    if !stale_issue_numbers.is_empty() {
-        let (stale_issues, batch_count) =
-            fetch_issues_by_number_batches(adapter, repo, &stale_issue_numbers).await?;
-        result.stale_card_issue_check_count = stale_issue_numbers.len();
-        result.stale_card_issue_batch_count = batch_count;
-
-        let stale_closed_issue_count = stale_issues
-            .iter()
-            .filter(|issue| issue.state == "CLOSED")
-            .count();
-        tracing::info!(
-            "[github-sync] {repo}: card-driven stale reconcile checked {} issue(s) in {} GraphQL batch(es); fetched={}, closed={}",
-            stale_issue_numbers.len(),
-            batch_count,
-            stale_issues.len(),
-            stale_closed_issue_count
-        );
-        merge_unique_issues(&mut issues, stale_issues);
+    match stale_card_issue_numbers_for_reconcile(pool, repo, &fetched_issue_numbers).await {
+        Ok(selection) if !selection.issue_numbers.is_empty() => {
+            if let Some(next_cursor) = selection.next_cursor {
+                if let Err(error) = save_stale_reconcile_cursor(pool, repo, next_cursor).await {
+                    tracing::warn!(
+                        "[github-sync] {repo}: failed to persist stale reconcile cursor {next_cursor}: {error}"
+                    );
+                }
+            }
+            let report =
+                fetch_issues_by_number_batches(adapter, repo, &selection.issue_numbers).await;
+            apply_stale_reconcile_fetch_report(
+                repo,
+                &mut result,
+                &mut issues,
+                selection.issue_numbers.len(),
+                report,
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            result.stale_card_issue_error_count += 1;
+            tracing::warn!(
+                "[github-sync] {repo}: stale card reconcile candidate selection failed: {error}"
+            );
+        }
     }
 
     for issue in &issues {
@@ -426,107 +426,250 @@ async fn load_pg_cards_for_issue(
         .collect()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StaleIssueSelection {
+    issue_numbers: Vec<i64>,
+    next_cursor: Option<i64>,
+}
+
+#[derive(Debug, Default)]
+struct StaleIssueFetchReport {
+    issues: Vec<GhIssue>,
+    batch_count: usize,
+    error_count: usize,
+    errors: Vec<String>,
+}
+
+fn select_stale_issue_numbers_from_candidates(
+    candidates: &[i64],
+    fetched_issue_numbers: &HashSet<i64>,
+    cursor: Option<i64>,
+    limit: usize,
+) -> StaleIssueSelection {
+    if limit == 0 {
+        return StaleIssueSelection {
+            issue_numbers: Vec::new(),
+            next_cursor: None,
+        };
+    }
+
+    let mut candidates = candidates
+        .iter()
+        .copied()
+        .filter(|issue_number| *issue_number > 0)
+        .filter(|issue_number| !fetched_issue_numbers.contains(issue_number))
+        .collect::<Vec<_>>();
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    let Some(cursor) = cursor else {
+        let issue_numbers = candidates.into_iter().take(limit).collect::<Vec<_>>();
+        let next_cursor = issue_numbers.last().copied();
+        return StaleIssueSelection {
+            issue_numbers,
+            next_cursor,
+        };
+    };
+
+    let mut issue_numbers = candidates
+        .iter()
+        .copied()
+        .filter(|issue_number| *issue_number > cursor)
+        .take(limit)
+        .collect::<Vec<_>>();
+    if issue_numbers.len() < limit {
+        issue_numbers.extend(
+            candidates
+                .iter()
+                .copied()
+                .filter(|issue_number| *issue_number <= cursor)
+                .take(limit - issue_numbers.len()),
+        );
+    }
+    let next_cursor = issue_numbers.last().copied();
+    StaleIssueSelection {
+        issue_numbers,
+        next_cursor,
+    }
+}
+
 async fn stale_card_issue_numbers_for_reconcile(
     pool: &PgPool,
     repo: &str,
     fetched_issue_numbers: &HashSet<i64>,
-    repo_override: Option<&crate::pipeline::PipelineOverride>,
-    agent_overrides: &mut HashMap<String, Option<crate::pipeline::PipelineOverride>>,
-) -> Result<Vec<i64>, String> {
+) -> Result<StaleIssueSelection, String> {
     let fetched_issue_numbers: Vec<i64> = fetched_issue_numbers.iter().copied().collect();
-    let rows = sqlx::query(
-        "SELECT id,
-                status,
-                review_status,
-                latest_dispatch_id,
-                assigned_agent_id,
-                github_issue_number::BIGINT AS github_issue_number
-         FROM kanban_cards
-         WHERE repo_id = $1
-           AND github_issue_number IS NOT NULL
-           AND github_issue_number > 0
-           AND status <> 'done'
-           AND NOT (github_issue_number = ANY($2::BIGINT[]))
-         ORDER BY updated_at ASC, id ASC
-         LIMIT $3",
+    let cursor = load_stale_reconcile_cursor(pool, repo).await?;
+    let mut candidates = load_stale_reconcile_issue_page(
+        pool,
+        repo,
+        &fetched_issue_numbers,
+        cursor,
+        false,
+        STALE_CARD_RECONCILE_ISSUE_LIMIT,
     )
-    .bind(repo)
-    .bind(&fetched_issue_numbers)
-    .bind(STALE_CARD_RECONCILE_CARD_SCAN_LIMIT)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| format!("load stale card reconcile candidates for {repo}: {error}"))?;
+    .await?;
 
-    let scanned_count = rows.len();
-    let mut seen_issue_numbers = HashSet::new();
-    let mut issue_numbers = Vec::new();
-
-    for row in rows {
-        let issue_number: i64 = row
-            .try_get("github_issue_number")
-            .map_err(|error| format!("read stale reconcile issue number: {error}"))?;
-        let card = PgCardRecord {
-            id: row
-                .try_get("id")
-                .map_err(|error| format!("read stale reconcile card id: {error}"))?,
-            status: row
-                .try_get("status")
-                .map_err(|error| format!("read stale reconcile card status: {error}"))?,
-            review_status: row
-                .try_get("review_status")
-                .map_err(|error| format!("read stale reconcile review_status: {error}"))?,
-            latest_dispatch_id: row
-                .try_get("latest_dispatch_id")
-                .map_err(|error| format!("read stale reconcile latest_dispatch_id: {error}"))?,
-            assigned_agent_id: row
-                .try_get("assigned_agent_id")
-                .map_err(|error| format!("read stale reconcile assigned_agent_id: {error}"))?,
-        };
-
-        let pipeline = resolve_pg_pipeline(
+    if cursor.is_some() && candidates.len() < STALE_CARD_RECONCILE_ISSUE_LIMIT {
+        let mut wrapped = load_stale_reconcile_issue_page(
             pool,
             repo,
-            repo_override,
-            card.assigned_agent_id.as_deref(),
-            agent_overrides,
+            &fetched_issue_numbers,
+            cursor,
+            true,
+            STALE_CARD_RECONCILE_ISSUE_LIMIT - candidates.len(),
         )
         .await?;
-        if pipeline.is_terminal(&card.status) {
-            continue;
-        }
-
-        if seen_issue_numbers.insert(issue_number) {
-            issue_numbers.push(issue_number);
-            if issue_numbers.len() >= STALE_CARD_RECONCILE_ISSUE_LIMIT {
-                break;
-            }
-        }
+        candidates.append(&mut wrapped);
     }
 
-    if !issue_numbers.is_empty() {
+    let selection = select_stale_issue_numbers_from_candidates(
+        &candidates,
+        &HashSet::new(),
+        cursor,
+        STALE_CARD_RECONCILE_ISSUE_LIMIT,
+    );
+
+    if !selection.issue_numbers.is_empty() {
         tracing::info!(
-            "[github-sync] {repo}: card-driven stale reconcile found {} missing non-terminal issue(s) from {} candidate card(s) (scan_limit={}, issue_limit={})",
-            issue_numbers.len(),
-            scanned_count,
-            STALE_CARD_RECONCILE_CARD_SCAN_LIMIT,
-            STALE_CARD_RECONCILE_ISSUE_LIMIT
+            "[github-sync] {repo}: card-driven stale reconcile selected {} missing non-terminal issue(s) after cursor {:?} (issue_limit={}, next_cursor={:?})",
+            selection.issue_numbers.len(),
+            cursor,
+            STALE_CARD_RECONCILE_ISSUE_LIMIT,
+            selection.next_cursor
         );
     }
 
-    Ok(issue_numbers)
+    Ok(selection)
+}
+
+async fn load_stale_reconcile_issue_page(
+    pool: &PgPool,
+    repo: &str,
+    fetched_issue_numbers: &[i64],
+    cursor: Option<i64>,
+    wrap: bool,
+    limit: usize,
+) -> Result<Vec<i64>, String> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let rows = if wrap {
+        sqlx::query(
+            "SELECT DISTINCT github_issue_number::BIGINT AS issue_number
+             FROM kanban_cards
+             WHERE repo_id = $1
+               AND github_issue_number IS NOT NULL
+               AND github_issue_number > 0
+               AND status <> 'done'
+               AND NOT (github_issue_number = ANY($2::BIGINT[]))
+               AND github_issue_number <= $3
+             ORDER BY issue_number ASC
+             LIMIT $4",
+        )
+        .bind(repo)
+        .bind(fetched_issue_numbers)
+        .bind(cursor.unwrap_or(i64::MAX))
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+    } else {
+        sqlx::query(
+            "SELECT DISTINCT github_issue_number::BIGINT AS issue_number
+             FROM kanban_cards
+             WHERE repo_id = $1
+               AND github_issue_number IS NOT NULL
+               AND github_issue_number > 0
+               AND status <> 'done'
+               AND NOT (github_issue_number = ANY($2::BIGINT[]))
+               AND ($3::BIGINT IS NULL OR github_issue_number > $3)
+             ORDER BY issue_number ASC
+             LIMIT $4",
+        )
+        .bind(repo)
+        .bind(fetched_issue_numbers)
+        .bind(cursor)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+    }
+    .map_err(|error| format!("load stale card reconcile candidates for {repo}: {error}"))?;
+
+    rows.into_iter()
+        .map(|row| {
+            row.try_get("issue_number")
+                .map_err(|error| format!("read stale reconcile issue number: {error}"))
+        })
+        .collect()
+}
+
+fn stale_reconcile_cursor_key(repo: &str) -> String {
+    format!("{STALE_CARD_RECONCILE_CURSOR_KEY_PREFIX}{repo}")
+}
+
+async fn load_stale_reconcile_cursor(pool: &PgPool, repo: &str) -> Result<Option<i64>, String> {
+    let key = stale_reconcile_cursor_key(repo);
+    let raw: Option<String> =
+        sqlx::query_scalar("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
+            .bind(&key)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| format!("load stale reconcile cursor for {repo}: {error}"))?;
+
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    match raw.trim().parse::<i64>() {
+        Ok(value) if value > 0 => Ok(Some(value)),
+        _ => {
+            tracing::warn!(
+                "[github-sync] {repo}: ignoring invalid stale reconcile cursor value {:?}",
+                raw
+            );
+            Ok(None)
+        }
+    }
+}
+
+async fn save_stale_reconcile_cursor(
+    pool: &PgPool,
+    repo: &str,
+    issue_number: i64,
+) -> Result<(), String> {
+    let key = stale_reconcile_cursor_key(repo);
+    sqlx::query(
+        "INSERT INTO kv_meta (key, value)
+         VALUES ($1, $2)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+    )
+    .bind(&key)
+    .bind(issue_number.to_string())
+    .execute(pool)
+    .await
+    .map_err(|error| format!("save stale reconcile cursor for {repo}: {error}"))?;
+    Ok(())
 }
 
 async fn fetch_issues_by_number_batches(
     adapter: &dyn super::GitHubAdapter,
     repo: &str,
     issue_numbers: &[i64],
-) -> Result<(Vec<GhIssue>, usize), String> {
-    let (owner, name) = parse_repo_owner_name(repo)?;
-    let mut issues = Vec::new();
-    let mut batch_count = 0usize;
+) -> StaleIssueFetchReport {
+    let (owner, name) = match parse_repo_owner_name(repo) {
+        Ok(parts) => parts,
+        Err(error) => {
+            return StaleIssueFetchReport {
+                error_count: 1,
+                errors: vec![error],
+                ..StaleIssueFetchReport::default()
+            };
+        }
+    };
+    let mut report = StaleIssueFetchReport::default();
 
     for batch in issue_numbers.chunks(STALE_CARD_RECONCILE_BATCH_SIZE) {
-        batch_count += 1;
+        report.batch_count += 1;
         let query = issue_number_batch_graphql_query(batch);
         let args = vec![
             "api".to_string(),
@@ -538,7 +681,7 @@ async fn fetch_issues_by_number_batches(
             "-f".to_string(),
             format!("query={query}"),
         ];
-        let output = adapter
+        let output = match adapter
             .run_async(
                 args,
                 Duration::from_secs(STALE_CARD_RECONCILE_TIMEOUT_SECS),
@@ -547,12 +690,60 @@ async fn fetch_issues_by_number_batches(
                     batch.len()
                 ),
             )
-            .await?;
-        let mut batch_issues = parse_issue_number_batch_graphql_response(&output, batch)?;
-        issues.append(&mut batch_issues);
+            .await
+        {
+            Ok(output) => output,
+            Err(error) => {
+                report.error_count += 1;
+                report.errors.push(error);
+                continue;
+            }
+        };
+        match parse_issue_number_batch_graphql_response(&output, batch) {
+            Ok(mut batch_issues) => report.issues.append(&mut batch_issues),
+            Err(error) => {
+                report.error_count += 1;
+                report.errors.push(error);
+            }
+        }
     }
 
-    Ok((issues, batch_count))
+    report
+}
+
+fn apply_stale_reconcile_fetch_report(
+    repo: &str,
+    result: &mut SyncResult,
+    issues: &mut Vec<GhIssue>,
+    attempted_issue_count: usize,
+    report: StaleIssueFetchReport,
+) {
+    result.stale_card_issue_check_count += attempted_issue_count;
+    result.stale_card_issue_batch_count += report.batch_count;
+    result.stale_card_issue_error_count += report.error_count;
+
+    if report.error_count > 0 {
+        tracing::warn!(
+            "[github-sync] {repo}: stale card reconcile had {} non-fatal GraphQL error(s): {}",
+            report.error_count,
+            report.errors.join("; ")
+        );
+    }
+
+    let stale_closed_issue_count = report
+        .issues
+        .iter()
+        .filter(|issue| issue.state == "CLOSED")
+        .count();
+    tracing::info!(
+        "[github-sync] {repo}: card-driven stale reconcile checked {} issue(s) in {} GraphQL batch(es); fetched={}, closed={}, errors={}",
+        attempted_issue_count,
+        report.batch_count,
+        report.issues.len(),
+        stale_closed_issue_count,
+        report.error_count
+    );
+    merge_unique_issues(issues, report.issues);
 }
 
 fn parse_repo_owner_name(repo: &str) -> Result<(&str, &str), String> {
@@ -1065,6 +1256,7 @@ pub fn sync_all_repos(
                     total.inconsistency_count += r.inconsistency_count;
                     total.stale_card_issue_check_count += r.stale_card_issue_check_count;
                     total.stale_card_issue_batch_count += r.stale_card_issue_batch_count;
+                    total.stale_card_issue_error_count += r.stale_card_issue_error_count;
                 }
                 Err(e) => {
                     tracing::error!("[github-sync] sync failed for {}: {e}", repo.id);
@@ -1085,6 +1277,7 @@ pub struct SyncResult {
     pub inconsistency_count: usize,
     pub stale_card_issue_check_count: usize,
     pub stale_card_issue_batch_count: usize,
+    pub stale_card_issue_error_count: usize,
 }
 
 /// Reason code attached to terminal-card / OPEN-issue mismatch alerts so the
@@ -1181,6 +1374,81 @@ mod terminal_open_alert_tests {
         assert!(msg.contains("card-1812"), "msg: {msg}");
         assert!(msg.contains("done"), "msg: {msg}");
         assert!(msg.contains("#1946"), "msg should reference retro: {msg}");
+    }
+
+    #[test]
+    fn stale_candidate_selection_rotates_past_old_open_frontier() {
+        let candidates = (1..=150).collect::<Vec<_>>();
+        let fetched_issue_numbers = HashSet::new();
+
+        let first = select_stale_issue_numbers_from_candidates(
+            &candidates,
+            &fetched_issue_numbers,
+            None,
+            100,
+        );
+        assert_eq!(first.issue_numbers.first().copied(), Some(1));
+        assert_eq!(first.issue_numbers.last().copied(), Some(100));
+        assert_eq!(first.next_cursor, Some(100));
+
+        let second = select_stale_issue_numbers_from_candidates(
+            &candidates,
+            &fetched_issue_numbers,
+            first.next_cursor,
+            100,
+        );
+        assert_eq!(second.issue_numbers.first().copied(), Some(101));
+        assert!(
+            second.issue_numbers.contains(&125),
+            "closed ghost behind the first 100 candidates should be reached"
+        );
+        assert_eq!(second.issue_numbers.last().copied(), Some(50));
+        assert_eq!(second.next_cursor, Some(50));
+    }
+
+    #[test]
+    fn stale_candidate_selection_skips_normal_fetch_window() {
+        let candidates = vec![10, 11, 12, 13, 14];
+        let fetched_issue_numbers = [12, 13].into_iter().collect::<HashSet<_>>();
+
+        let selection = select_stale_issue_numbers_from_candidates(
+            &candidates,
+            &fetched_issue_numbers,
+            Some(11),
+            10,
+        );
+
+        assert_eq!(selection.issue_numbers, vec![14, 10, 11]);
+        assert_eq!(selection.next_cursor, Some(11));
+    }
+
+    #[test]
+    fn stale_fetch_failure_records_metric_without_dropping_normal_issues() {
+        let mut result = SyncResult::default();
+        let mut issues = vec![GhIssue {
+            number: 1,
+            state: "OPEN".to_string(),
+            title: "Normal fetched issue".to_string(),
+            labels: Vec::new(),
+            body: None,
+            url: None,
+            closed_at: None,
+            closed_by_pull_requests_references: Vec::new(),
+        }];
+        let report = StaleIssueFetchReport {
+            batch_count: 1,
+            error_count: 1,
+            errors: vec!["GraphQL unavailable".to_string()],
+            ..StaleIssueFetchReport::default()
+        };
+
+        apply_stale_reconcile_fetch_report("owner/repo", &mut result, &mut issues, 3, report);
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].number, 1);
+        assert_eq!(result.stale_card_issue_check_count, 3);
+        assert_eq!(result.stale_card_issue_batch_count, 1);
+        assert_eq!(result.stale_card_issue_error_count, 1);
     }
 
     /// PG dedupe: re-running the alert enqueue for the same
