@@ -2012,7 +2012,7 @@ impl SharedData {
     }
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[cfg(test)]
 pub(super) fn make_shared_data_for_tests() -> Arc<SharedData> {
     make_shared_data_for_tests_with_storage(None, None)
 }
@@ -2312,11 +2312,12 @@ pub(crate) mod test_harness_exports {
     }
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[cfg(test)]
 pub(super) fn make_shared_data_for_tests_with_storage(
     sqlite: Option<crate::db::Db>,
     pg_pool: Option<sqlx::PgPool>,
 ) -> Arc<SharedData> {
+    let _ = &sqlite;
     Arc::new(SharedData {
         core: tokio::sync::Mutex::new(CoreState {
             sessions: std::collections::HashMap::new(),
@@ -2373,6 +2374,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         token_hash: "test-token-hash".to_string(),
         provider: ProviderKind::Claude,
         api_port: 9,
+        #[cfg(all(test, feature = "legacy-sqlite-tests"))]
         sqlite,
         pg_pool,
         engine: None,
