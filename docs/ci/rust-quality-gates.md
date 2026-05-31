@@ -50,8 +50,11 @@ replace the staged subset with a broader non-PG command in `just check`.
 The Windows PR lane intentionally remains inline cargo commands for stage 1
 instead of calling `just check`. The root `justfile` uses bash-oriented recipe
 semantics, while that lane is meant to provide cross-OS compile and targeted
-test signal. The Ubuntu `just check` and `lint` jobs are the authoritative
-format and clippy gates.
+test signal. It also stays default-feature-only with `cargo check --all-targets`:
+`--all-features` enables `legacy-sqlite-tests`, and those test surfaces still
+reference Unix-only tmux modules guarded by `#[cfg(unix)]`. The Ubuntu `just
+check` and `lint` jobs are the authoritative format, clippy, and all-feature
+gates until the legacy/tmux tests are made portable or cfg-guarded.
 
 ## Strict Clippy Debt
 
