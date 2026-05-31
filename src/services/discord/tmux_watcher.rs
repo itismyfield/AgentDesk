@@ -5166,6 +5166,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                             }
                                             FallbackPlaceholderCleanupDecision::PreserveInflightForCleanupRetry => {
                                                 relay_ok = false;
+                                                tui_direct_anchor_terminal_body_visible = false;
                                                 let ts = chrono::Local::now().format("%H:%M:%S");
                                                 tracing::warn!(
                                                     "  [{ts}] ⚠ watcher: terminal response was delivered via fallback send, but stale placeholder cleanup did not commit for channel {} msg {}",

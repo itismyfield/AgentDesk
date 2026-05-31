@@ -2378,7 +2378,22 @@ pub(super) async fn complete_tui_direct_prompt_anchor_lifecycle_if_present(
     let anchor_channel_id = ChannelId::new(anchor.channel_id);
     let anchor_message_id = MessageId::new(anchor.message_id);
     super::formatting::remove_reaction_raw(http, anchor_channel_id, anchor_message_id, '⏳').await;
-    super::formatting::add_reaction_raw(http, anchor_channel_id, anchor_message_id, '✅').await;
+    let completion_reaction = serenity::ReactionType::Unicode('✅'.to_string());
+    if let Err(error) = anchor_channel_id
+        .create_reaction(http, anchor_message_id, completion_reaction)
+        .await
+    {
+        tracing::warn!(
+            provider = %provider,
+            channel_id = anchor.channel_id,
+            tmux_session_name = %tmux_session_name,
+            anchor_message_id = anchor.message_id,
+            reason,
+            error = %error,
+            "failed to complete TUI-direct prompt anchor reaction lifecycle; keeping anchor for retry"
+        );
+        return None;
+    }
     crate::services::tui_prompt_dedupe::clear_prompt_anchor_for_response(
         provider,
         tmux_session_name,
@@ -2556,6 +2571,16 @@ mod tests {
         ));
         assert!(should_complete_tui_direct_anchor_lifecycle(
             true, true, true, false, false,
+        ));
+    }
+
+    #[test]
+    fn direct_anchor_lifecycle_does_not_complete_preserved_cleanup_retry() {
+        assert!(!should_complete_tui_direct_anchor_lifecycle(
+            false, true, true, false, true,
+        ));
+        assert!(!should_complete_tui_direct_anchor_lifecycle(
+            true, false, true, false, true,
         ));
     }
 
