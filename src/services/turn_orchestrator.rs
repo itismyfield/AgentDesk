@@ -156,6 +156,7 @@ pub(crate) fn enqueue_intervention(
             && last.text == intervention.text
             && last.reply_context == intervention.reply_context
             && last.has_reply_boundary == intervention.has_reply_boundary
+            && last.pending_uploads == intervention.pending_uploads
             && intervention_age_since(last, &intervention) <= INTERVENTION_DEDUP_WINDOW
         {
             return EnqueueInterventionResult {
@@ -4267,6 +4268,24 @@ mod enqueue_refusal_reason_tests {
             result.refusal_reason,
             Some(EnqueueRefusalReason::LastItemDedup),
         );
+    }
+
+    #[test]
+    fn upload_bearing_interventions_are_not_deduped_by_empty_text() {
+        let now = Instant::now();
+        let mut first = intervention(1, "", now);
+        first.pending_uploads =
+            vec!["[File uploaded] one.png → /tmp/one.png (1 bytes)".to_string()];
+        let mut second = intervention(2, "", now);
+        second.pending_uploads =
+            vec!["[File uploaded] two.png → /tmp/two.png (2 bytes)".to_string()];
+        let mut queue = vec![first];
+
+        let result = enqueue_intervention(&mut queue, second);
+
+        assert!(result.enqueued);
+        assert_eq!(result.refusal_reason, None);
+        assert_eq!(queue.len(), 2);
     }
 
     #[test]
