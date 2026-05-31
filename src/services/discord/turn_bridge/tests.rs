@@ -27,10 +27,11 @@ use super::stale_resume::{
 };
 use super::{
     advance_tmux_relay_confirmed_end, bridge_should_reclaim_relay_from_missing_watcher,
-    done_result_requires_full_terminal_replay, merge_task_notification_kind,
-    monitor_handoff_tool_context, release_task_notification_kind, resolve_exact_completion_usage,
-    should_delegate_bridge_relay_to_watcher, task_notification_closes_background_child,
-    terminal_delivery_response_after_offset, turn_bridge_replace_outcome_committed,
+    complete_status_panel_v2, done_result_requires_full_terminal_replay,
+    merge_task_notification_kind, monitor_handoff_tool_context, release_task_notification_kind,
+    resolve_exact_completion_usage, should_delegate_bridge_relay_to_watcher,
+    task_notification_closes_background_child, terminal_delivery_response_after_offset,
+    turn_bridge_replace_outcome_committed,
 };
 use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::{
@@ -94,6 +95,33 @@ struct CountingGateway {
     edit_count: Arc<AtomicUsize>,
     replace_count: Arc<AtomicUsize>,
     remove_reaction_count: Arc<AtomicUsize>,
+}
+
+struct StatusPanelFallbackGateway {
+    sent_messages: Arc<Mutex<Vec<String>>>,
+    edited_message_ids: Arc<Mutex<Vec<MessageId>>>,
+    edit_error: Option<String>,
+    send_id: MessageId,
+}
+
+impl StatusPanelFallbackGateway {
+    fn with_edit_error(error: &str) -> Self {
+        Self {
+            edit_error: Some(error.to_string()),
+            ..Self::default()
+        }
+    }
+}
+
+impl Default for StatusPanelFallbackGateway {
+    fn default() -> Self {
+        Self {
+            sent_messages: Arc::new(Mutex::new(Vec::new())),
+            edited_message_ids: Arc::new(Mutex::new(Vec::new())),
+            edit_error: None,
+            send_id: MessageId::new(1_500_000_000_000_999),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -326,6 +354,109 @@ impl TurnGateway for CountingGateway {
     }
 }
 
+impl TurnGateway for StatusPanelFallbackGateway {
+    fn send_message<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        content: &'a str,
+    ) -> TestGatewayFuture<'a, Result<MessageId, String>> {
+        let sent_messages = self.sent_messages.clone();
+        let send_id = self.send_id;
+        Box::pin(async move {
+            sent_messages
+                .lock()
+                .expect("sent messages lock")
+                .push(content.to_string());
+            Ok(send_id)
+        })
+    }
+
+    fn edit_message<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        message_id: MessageId,
+        _content: &'a str,
+    ) -> TestGatewayFuture<'a, Result<(), String>> {
+        let edited_message_ids = self.edited_message_ids.clone();
+        let edit_error = self.edit_error.clone();
+        Box::pin(async move {
+            edited_message_ids
+                .lock()
+                .expect("edited ids lock")
+                .push(message_id);
+            match edit_error {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        })
+    }
+
+    fn replace_message_with_outcome<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _message_id: MessageId,
+        _content: &'a str,
+    ) -> TestGatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
+        Box::pin(async { Ok(ReplaceLongMessageOutcome::EditedOriginal) })
+    }
+
+    fn add_reaction<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _message_id: MessageId,
+        _emoji: char,
+    ) -> TestGatewayFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
+    fn remove_reaction<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _message_id: MessageId,
+        _emoji: char,
+    ) -> TestGatewayFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
+    fn schedule_retry_with_history<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _user_message_id: MessageId,
+        _user_text: &'a str,
+    ) -> TestGatewayFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
+    fn dispatch_queued_turn<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _intervention: &'a super::super::Intervention,
+        _request_owner_name: &'a str,
+        _has_more_queued_turns: bool,
+    ) -> TestGatewayFuture<'a, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn validate_live_routing<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+    ) -> TestGatewayFuture<'a, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn requester_mention(&self) -> Option<String> {
+        None
+    }
+
+    fn can_chain_locally(&self) -> bool {
+        true
+    }
+
+    fn bot_owner_provider(&self) -> Option<ProviderKind> {
+        Some(ProviderKind::Claude)
+    }
+}
+
 impl TurnGateway for CleanupFallbackQueueGateway {
     fn send_message<'a>(
         &'a self,
@@ -413,6 +544,95 @@ impl TurnGateway for CleanupFallbackQueueGateway {
     fn bot_owner_provider(&self) -> Option<ProviderKind> {
         Some(ProviderKind::Codex)
     }
+}
+
+fn make_status_panel_v2_shared_for_tests() -> Arc<crate::services::discord::SharedData> {
+    let mut shared = make_shared_data_for_tests();
+    Arc::get_mut(&mut shared)
+        .expect("fresh test shared data should be uniquely owned")
+        .status_panel_v2_enabled = true;
+    shared
+}
+
+#[tokio::test]
+async fn status_panel_completion_fallback_posts_when_message_id_is_synthetic() {
+    let shared = make_status_panel_v2_shared_for_tests();
+    let gateway = StatusPanelFallbackGateway::default();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(1509350490461180105);
+    let mut last_status_panel_text = String::new();
+
+    let committed = complete_status_panel_v2(
+        shared.as_ref(),
+        &gateway,
+        channel_id,
+        Some(MessageId::new(9_100_000_000_000_000_123)),
+        &provider,
+        1_700_000_000,
+        &mut last_status_panel_text,
+        false,
+        "test_synthetic_status_panel_id",
+    )
+    .await;
+
+    assert!(committed);
+    assert!(
+        gateway
+            .edited_message_ids
+            .lock()
+            .expect("edited ids lock")
+            .is_empty(),
+        "synthetic status-panel ids must not be edited through Discord"
+    );
+    let sent_messages = gateway
+        .sent_messages
+        .lock()
+        .expect("sent messages lock")
+        .clone();
+    assert_eq!(sent_messages.len(), 1);
+    assert!(sent_messages[0].contains("응답 완료"));
+    assert_eq!(last_status_panel_text, sent_messages[0]);
+}
+
+#[tokio::test]
+async fn status_panel_completion_fallback_posts_after_unknown_message_edit() {
+    let shared = make_status_panel_v2_shared_for_tests();
+    let gateway = StatusPanelFallbackGateway::with_edit_error("Unknown Message");
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(1509350490461180105);
+    let stale_status_msg_id = MessageId::new(1_500_000_000_000_111);
+    let mut last_status_panel_text = String::new();
+
+    let committed = complete_status_panel_v2(
+        shared.as_ref(),
+        &gateway,
+        channel_id,
+        Some(stale_status_msg_id),
+        &provider,
+        1_700_000_000,
+        &mut last_status_panel_text,
+        false,
+        "test_unknown_status_panel_id",
+    )
+    .await;
+
+    assert!(committed);
+    assert_eq!(
+        gateway
+            .edited_message_ids
+            .lock()
+            .expect("edited ids lock")
+            .as_slice(),
+        &[stale_status_msg_id]
+    );
+    let sent_messages = gateway
+        .sent_messages
+        .lock()
+        .expect("sent messages lock")
+        .clone();
+    assert_eq!(sent_messages.len(), 1);
+    assert!(sent_messages[0].contains("응답 완료"));
+    assert_eq!(last_status_panel_text, sent_messages[0]);
 }
 
 fn e15_long_body() -> String {

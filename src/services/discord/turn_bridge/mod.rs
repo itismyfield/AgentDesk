@@ -1853,9 +1853,7 @@ async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
     if !shared.status_panel_v2_enabled {
         return true;
     }
-    let Some(status_msg_id) = status_panel_msg_id else {
-        return true;
-    };
+    let status_msg_id = status_panel_msg_id.filter(|id| !is_synthetic_headless_message_id(*id));
     shared
         .placeholder_live_events
         .push_status_event(channel_id, StatusEvent::TurnCompleted { background });
@@ -1863,6 +1861,30 @@ async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
         shared
             .placeholder_live_events
             .render_status_panel(channel_id, provider, started_at_unix);
+    let Some(status_msg_id) = status_msg_id else {
+        return match send_status_panel_v2_completion_fallback(
+            shared,
+            gateway,
+            channel_id,
+            &panel_text,
+        )
+        .await
+        {
+            Ok(_) => {
+                *last_status_panel_text = panel_text;
+                true
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "[turn_bridge] failed to send fallback status-panel-v2 completion in channel {} from {}: {}",
+                    channel_id,
+                    source,
+                    error
+                );
+                false
+            }
+        };
+    };
     if panel_text == *last_status_panel_text {
         return true;
     }
@@ -1876,9 +1898,7 @@ async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
             .map(|_| ())
             .map_err(|error| error.to_string())
     } else {
-        gateway
-            .edit_message(channel_id, status_msg_id, &panel_text)
-            .await
+        Err("no Discord HTTP available for status-panel-v2 completion edit".to_string())
     };
     match edit_result {
         Ok(()) => {
@@ -1886,6 +1906,32 @@ async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
             true
         }
         Err(error) => {
+            if status_panel_message_missing_error(&error) {
+                return match send_status_panel_v2_completion_fallback(
+                    shared,
+                    gateway,
+                    channel_id,
+                    &panel_text,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        *last_status_panel_text = panel_text;
+                        true
+                    }
+                    Err(fallback_error) => {
+                        tracing::warn!(
+                            "[turn_bridge] failed to finalize missing status-panel-v2 message {} in channel {} from {}; fallback send failed: {}; edit failed: {}",
+                            status_msg_id,
+                            channel_id,
+                            source,
+                            fallback_error,
+                            error
+                        );
+                        false
+                    }
+                };
+            }
             tracing::warn!(
                 "[turn_bridge] failed to finalize status-panel-v2 message {} in channel {} from {}: {}",
                 status_msg_id,
@@ -1896,6 +1942,31 @@ async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
             false
         }
     }
+}
+
+async fn send_status_panel_v2_completion_fallback<G: TurnGateway + ?Sized>(
+    shared: &SharedData,
+    gateway: &G,
+    channel_id: ChannelId,
+    panel_text: &str,
+) -> Result<MessageId, String> {
+    if gateway.can_chain_locally() {
+        return gateway.send_message(channel_id, panel_text).await;
+    }
+    let Some(http) = shared.serenity_http_or_token_fallback() else {
+        return Err(
+            "no Discord HTTP available for status-panel-v2 completion fallback".to_string(),
+        );
+    };
+    super::http::send_channel_message(&http, channel_id, panel_text)
+        .await
+        .map(|message| message.id)
+        .map_err(|error| error.to_string())
+}
+
+fn status_panel_message_missing_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("unknown message") || normalized.contains("10008")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2316,7 +2387,12 @@ fn status_panel_message_id_for_turn(
     if !reuse_status_panel_message {
         inflight_state.status_message_id = None;
     }
-    inflight_state.status_message_id.map(MessageId::new)
+    let status_msg_id = inflight_state.status_message_id.map(MessageId::new)?;
+    if is_synthetic_headless_message_id(status_msg_id) {
+        inflight_state.status_message_id = None;
+        return None;
+    }
+    Some(status_msg_id)
 }
 
 fn response_portion_after_offset(full_response: &str, response_sent_offset: usize) -> &str {
@@ -3932,8 +4008,13 @@ pub(super) fn spawn_turn_bridge(
             let response_placeholder = super::formatting::build_processing_status_block(SPINNER[0]);
             match gateway.send_message(channel_id, &response_placeholder).await {
                 Ok(response_msg_id) => {
-                    status_panel_msg_id = Some(current_msg_id);
-                    inflight_state.status_message_id = Some(current_msg_id.get());
+                    if is_synthetic_headless_message_id(current_msg_id) {
+                        status_panel_msg_id = None;
+                        inflight_state.status_message_id = None;
+                    } else {
+                        status_panel_msg_id = Some(current_msg_id);
+                        inflight_state.status_message_id = Some(current_msg_id.get());
+                    }
                     current_msg_id = response_msg_id;
                     bridge_created_response_placeholder_msg_id = Some(response_msg_id);
                     last_edit_text = response_placeholder.to_string();
@@ -8521,6 +8602,17 @@ mod status_panel_v2_rework_tests {
 
         assert_eq!(status_panel_msg_id, Some(MessageId::new(99)));
         assert_eq!(state.status_message_id, Some(99));
+    }
+
+    #[test]
+    fn resume_turn_discards_synthetic_status_panel_message_id() {
+        let mut state = test_inflight_state();
+        state.status_message_id = Some(9_100_000_000_000_000_123);
+
+        let status_panel_msg_id = status_panel_message_id_for_turn(&mut state, true);
+
+        assert_eq!(status_panel_msg_id, None);
+        assert_eq!(state.status_message_id, None);
     }
 }
 
