@@ -574,6 +574,9 @@ mod no_anchored_placeholder_recovery_tests {
         );
     }
 
+    // `super::super::tmux` is `#[cfg(unix)]`-only (the tmux relay is Unix-only),
+    // so gate this test to Unix to keep the Windows cross-OS build green.
+    #[cfg(unix)]
     #[test]
     fn watcher_restore_seed_skips_placeholder_but_preserves_session() {
         // The pane-alive reattach branch seeds the watcher from the inflight.
