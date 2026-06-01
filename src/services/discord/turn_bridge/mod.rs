@@ -3980,6 +3980,24 @@ fn handle_watcher_runtime_handoff(
                 .mailbox_finalize_owed
                 .store(true, std::sync::atomic::Ordering::Release);
             *bridge_published_finalize_owed_for_this_turn = true;
+            // #3016 phase 2: register the turn with the single-authority
+            // finalizer BEFORE unpausing the watcher. Message arrival order in
+            // the actor replaces the deleted Release/AcqRel ordering: the
+            // ledger now knows the turn exists (with the watcher as relay
+            // owner) before the watcher can submit its terminal. The legacy
+            // `mailbox_finalize_owed` store stays for the incremental window
+            // (the watcher still consumes it until phase 3 / removed in phase
+            // 5); the ledger is the authority that supersedes the CAS revoke
+            // deleted from the bridge finalize branches below.
+            shared_owned.turn_finalizer.register_start(
+                super::turn_finalizer::TurnKey::new(
+                    channel_id,
+                    inflight_state.user_msg_id,
+                    shared_owned.current_generation,
+                ),
+                provider.clone(),
+                super::inflight::RelayOwnerKind::Watcher,
+            );
             watcher
                 .paused
                 .store(false, std::sync::atomic::Ordering::Release);
@@ -5749,6 +5767,29 @@ pub(super) fn spawn_turn_bridge(
                                         .mailbox_finalize_owed
                                         .store(true, Ordering::Release);
                                     bridge_published_finalize_owed_for_this_turn = true;
+                                    // #3016 phase 3: register the turn with the
+                                    // single-authority finalizer BEFORE
+                                    // unpausing the watcher — same as the
+                                    // `handle_watcher_runtime_handoff` helper.
+                                    // This legacy `StreamMessage::TmuxReady`
+                                    // handoff does NOT go through that helper, so
+                                    // without this the watcher's channel-only
+                                    // (id-0) GateTimeout/Complete submissions
+                                    // would create a `RelayOwnerKind::None`
+                                    // ledger entry — and a busy-pane gate-timeout
+                                    // would then finalize immediately instead of
+                                    // arming the deadline-backstop. Registering
+                                    // here with the Watcher owner makes the
+                                    // gate-timeout defer correctly.
+                                    shared_owned.turn_finalizer.register_start(
+                                        super::turn_finalizer::TurnKey::new(
+                                            channel_id,
+                                            inflight_state.user_msg_id,
+                                            shared_owned.current_generation,
+                                        ),
+                                        provider.clone(),
+                                        super::inflight::RelayOwnerKind::Watcher,
+                                    );
                                     // #1452 (Codex iter 3 P1): unpause must
                                     // use Release ordering so a watcher
                                     // observing `paused = false` is
@@ -6726,10 +6767,63 @@ pub(super) fn spawn_turn_bridge(
                     tui_gate_timed_out = bridge_early_gate_timed_out,
                     "  [{ts}] ⚠ bridge watcher handoff missing finalizer; bridge is releasing mailbox to avoid stranded queued turns"
                 );
-                let finish =
-                    super::mailbox_finish_turn(&shared_owned, &provider, channel_id).await;
+                // #3016 phase 2: route through the single-authority finalizer.
+                // It owns the exact sequence this branch ran inline (mailbox
+                // cancel_token release + `mark_completion_cleanup`/`cancelled`
+                // + counter decrement gated on `removed_token.is_some()` +
+                // watchdog override clear + dispatch_thread_parents retain +
+                // voice drain + dispatch_role_overrides cleanup). The ledger
+                // gate makes a transitional double-finalize with a still-direct
+                // watcher (phase 3 routes it) a harmless idempotent no-op.
+                let outcome = shared_owned
+                    .turn_finalizer
+                    .submit_terminal(
+                        super::turn_finalizer::TurnKey::new(
+                            channel_id,
+                            user_msg_id.get(),
+                            shared_owned.current_generation,
+                        ),
+                        provider.clone(),
+                        if cancelled {
+                            super::turn_finalizer::TerminalEvent::Cancel
+                        } else {
+                            super::turn_finalizer::TerminalEvent::Complete
+                        },
+                        super::turn_finalizer::FinalizeContext::bridge(),
+                        shared_owned.clone(),
+                    )
+                    .await;
+                // `finalize_owned` is the real invariant: SOME authority (this
+                // bridge submission OR whoever already finalized — the ledger
+                // guarantees exactly-once) owns the finalize for this turn. All
+                // three outcomes satisfy it, so none is a violation.
+                // `this_finalized` records only whether THIS submission was the
+                // one finalizer; an `AlreadyFinalized` (someone else won, e.g. a
+                // sweeper/watcher race) is the normal/info path and must NOT
+                // emit a false `[invariant]` ERROR.
+                let (this_finalized, finalize_owned, has_pending_after_voice) = match outcome {
+                    super::turn_finalizer::FinalizeOutcome::Finalized {
+                        removed_token,
+                        has_pending,
+                        ..
+                    } => (removed_token.is_some(), true, has_pending),
+                    super::turn_finalizer::FinalizeOutcome::AlreadyFinalized
+                    | super::turn_finalizer::FinalizeOutcome::Deferred => {
+                        // Something else finalized first (rare sweeper race —
+                        // the watcher handle is gone in this branch). This
+                        // branch always drained deferred voice work before
+                        // #3016, so drain it here too rather than leaking
+                        // deferred voice prompts.
+                        let voice_deferred_enqueued = shared_owned
+                            .voice_barge_in
+                            .drain_deferred_after_turn(&shared_owned, &provider, channel_id)
+                            .await;
+                        (false, true, voice_deferred_enqueued)
+                    }
+                };
+                let _ = this_finalized;
                 record_turn_bridge_invariant(
-                    finish.removed_token.is_some(),
+                    finalize_owned,
                     &provider,
                     channel_id,
                     dispatch_id.as_deref(),
@@ -6737,34 +6831,13 @@ pub(super) fn spawn_turn_bridge(
                     Some(turn_id.as_str()),
                     "mailbox_active_turn_recovered_after_missing_watcher_handoff",
                     "src/services/discord/turn_bridge/mod.rs:bridge_relay_delegated_to_watcher",
-                    "missing watcher handoff finalizer must not leave the channel mailbox active",
+                    "missing watcher handoff finalizer must leave the turn finalized by some authority",
                     serde_json::json!({
-                        "has_pending": finish.has_pending,
-                        "mailbox_online": finish.mailbox_online,
+                        "this_finalized": this_finalized,
+                        "has_pending": has_pending_after_voice,
                         "watcher_owner_channel_id": watcher_owner_channel_id.get(),
                     }),
                 );
-                if let Some(removed_token) = finish.removed_token {
-                    if !cancelled {
-                        removed_token.mark_completion_cleanup();
-                    }
-                    removed_token
-                        .cancelled
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                    super::saturating_decrement_global_active(&shared_owned);
-                }
-                super::clear_watchdog_deadline_override(channel_id.get()).await;
-                shared_owned
-                    .dispatch_thread_parents
-                    .retain(|_, thread| *thread != channel_id);
-                let voice_deferred_enqueued = shared_owned
-                    .voice_barge_in
-                    .drain_deferred_after_turn(&shared_owned, &provider, channel_id)
-                    .await;
-                let has_pending_after_voice = finish.has_pending || voice_deferred_enqueued;
-                if !has_pending_after_voice {
-                    shared_owned.dispatch_role_overrides.remove(&channel_id);
-                }
                 has_pending_after_voice
             }
         } else {
@@ -6774,109 +6847,106 @@ pub(super) fn spawn_turn_bridge(
             // prompt_too_long / transport_error / recovery_retry, or the
             // watcher never ended up owning relay).
             //
-            // Codex iter 3 P1: we must distinguish three outcomes:
-            //   (a) THIS turn published the debt AND watcher has NOT yet
-            //       consumed it → revoke (`true → false`) and run our own
-            //       `mailbox_finish_turn`. Without revoke a future swap
-            //       would mistakenly clear the next turn's cancel_token.
-            //   (b) THIS turn published the debt AND watcher ALREADY
-            //       consumed it (called `mailbox_finish_turn` itself) →
-            //       SKIP our own finalization to avoid clearing a turn we
-            //       no longer own (Codex P2 review iter 2).
-            //   (c) THIS turn never published the debt at all (no
-            //       `TmuxReady` reached, or watcher missing) → the
-            //       handle's value is just whatever the previous turn
-            //       left there. We MUST run our own `mailbox_finish_turn`
-            //       — treating this as outcome (b) would leak the
-            //       cancel_token (Codex iter 3 P1).
+            // #3016 phase 2/3: the single-authority finalizer's per-turn
+            // ledger phase gate now ARBITRATES exactly-once — whoever submits
+            // the terminal first finalizes; the loser receives
+            // `AlreadyFinalized` and does nothing. The CAS no longer decides
+            // who finalizes.
             //
-            // `bridge_published_finalize_owed_for_this_turn` distinguishes
-            // (a)/(b) from (c). `compare_exchange(true, false, AcqRel,
-            // Acquire)` then distinguishes (a) from (b): Ok = revoked
-            // unconsumed debt (a); Err = watcher beat us (b).
-            let watcher_already_finalized = if bridge_published_finalize_owed_for_this_turn
-                && let Some(watcher) =
-                    shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
+            // BUT we still REVOKE the legacy `mailbox_finalize_owed` flag here
+            // until it is fully removed (phase 5). The watcher consumes that
+            // flag via `swap(false)` and, when set, routes a terminal into the
+            // finalizer. If the bridge finalizes this turn and leaves the flag
+            // set, a watcher that survives into the NEXT turn would swap the
+            // stale `true` and submit a channel-only terminal that collapses
+            // onto — and prematurely finalizes — the next turn's live ledger
+            // entry. Clearing it here (only when THIS turn published it) closes
+            // that cross-turn hazard.
+            if bridge_published_finalize_owed_for_this_turn
+                && let Some(watcher) = shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
             {
-                matches!(
-                    watcher.mailbox_finalize_owed.compare_exchange(
-                        true,
-                        false,
-                        std::sync::atomic::Ordering::AcqRel,
-                        std::sync::atomic::Ordering::Acquire,
-                    ),
-                    Err(_)
-                )
-            } else {
-                false
-            };
-
-            if watcher_already_finalized {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] watcher_finalized_before_bridge_revoke: skipping bridge mailbox_finish_turn for channel {} (#1452)",
-                    channel_id.get()
+                let _ = watcher.mailbox_finalize_owed.compare_exchange(
+                    true,
+                    false,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
                 );
-                shared_owned
-                    .voice_barge_in
-                    .drain_deferred_after_turn(&shared_owned, &provider, channel_id)
-                    .await
-            } else {
-                if bridge_early_gate_timed_out {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
-                        provider = %provider.as_str(),
-                        channel = channel_id.get(),
-                        "  [{ts}] ⚠ #2293/#2780: bridge releasing mailbox despite TUI quiescence timeout; follow-up pre-submit gate will requeue if pane is still busy"
-                    );
-                }
-                let finish =
-                    super::mailbox_finish_turn(&shared_owned, &provider, channel_id).await;
-                record_turn_bridge_invariant(
-                    finish.removed_token.is_some(),
-                    &provider,
-                    channel_id,
-                    dispatch_id.as_deref(),
-                    adk_session_key.as_deref(),
-                    Some(turn_id.as_str()),
-                    "mailbox_active_turn_matches_dispatch",
-                    "src/services/discord/turn_bridge/mod.rs:mailbox_finish_turn",
-                    "turn_bridge finalization expected exactly one active mailbox turn",
-                    serde_json::json!({
-                        "has_pending": finish.has_pending,
-                        "mailbox_online": finish.mailbox_online,
-                    }),
-                );
-                if let Some(removed_token) = finish.removed_token {
-                    // Mark the token as cancelled so any lingering watchdog timer exits cleanly
-                    // instead of mistakenly firing on a newer turn's token.
-                    if !cancelled {
-                        removed_token.mark_completion_cleanup();
-                    }
-                    removed_token
-                        .cancelled
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                    super::saturating_decrement_global_active(&shared_owned);
-                }
-                // Clean up any pending watchdog deadline override for this channel
-                super::clear_watchdog_deadline_override(channel_id.get()).await;
-                // Clean up dispatch-thread parent mapping when the thread turn ends.
-                // Iterate and remove entries whose thread matches this channel_id.
-                shared_owned
-                    .dispatch_thread_parents
-                    .retain(|_, thread| *thread != channel_id);
-                let voice_deferred_enqueued = shared_owned
-                    .voice_barge_in
-                    .drain_deferred_after_turn(&shared_owned, &provider, channel_id)
-                    .await;
-                let has_pending_after_voice = finish.has_pending || voice_deferred_enqueued;
-                // Keep the override while queued turns remain so review/reused-thread routing
-                // survives restart-preserve and same-runtime dequeue paths.
-                if !has_pending_after_voice {
-                    shared_owned.dispatch_role_overrides.remove(&channel_id);
-                }
-                has_pending_after_voice
             }
+            if bridge_early_gate_timed_out {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    provider = %provider.as_str(),
+                    channel = channel_id.get(),
+                    "  [{ts}] ⚠ #2293/#2780: bridge releasing mailbox despite TUI quiescence timeout; follow-up pre-submit gate will requeue if pane is still busy"
+                );
+            }
+            let outcome = shared_owned
+                .turn_finalizer
+                .submit_terminal(
+                    super::turn_finalizer::TurnKey::new(
+                        channel_id,
+                        user_msg_id.get(),
+                        shared_owned.current_generation,
+                    ),
+                    provider.clone(),
+                    if cancelled {
+                        super::turn_finalizer::TerminalEvent::Cancel
+                    } else {
+                        super::turn_finalizer::TerminalEvent::Complete
+                    },
+                    super::turn_finalizer::FinalizeContext::bridge(),
+                    shared_owned.clone(),
+                )
+                .await;
+            // `finalize_owned` is the actual invariant: SOMEONE (this bridge
+            // submission OR the watcher that won the race OR the deadline-armed
+            // backstop for a deferred gate-timeout) owns the one finalize for
+            // this turn. The single-authority ledger guarantees that, so all
+            // three outcomes are the normal/info path. `this_finalized` only
+            // records whether THIS submission was the one that finalized — it
+            // must NOT be conflated with an invariant violation, otherwise a
+            // watcher-won `AlreadyFinalized` (e.g. the watcher consumed
+            // `mailbox_finalize_owed` before the bridge revoked it) emits a
+            // false `[invariant]` ERROR for completely normal exactly-once
+            // behaviour — the pre-#3016 code treated that as an info path.
+            let (this_finalized, finalize_owned, has_pending_after_voice) = match outcome {
+                super::turn_finalizer::FinalizeOutcome::Finalized {
+                    removed_token,
+                    has_pending,
+                    ..
+                } => (removed_token.is_some(), true, has_pending),
+                super::turn_finalizer::FinalizeOutcome::AlreadyFinalized
+                | super::turn_finalizer::FinalizeOutcome::Deferred => {
+                    // The watcher won the finalize race (or the gate-timeout
+                    // deferred), so the bridge's `do_finalize` did NOT run and
+                    // the watcher's finalize context does not drain voice. The
+                    // pre-#3016 `watcher_already_finalized` branch still drained
+                    // deferred voice barge-in work here, so we must too —
+                    // otherwise prompts deferred during the turn stay stuck.
+                    let voice_deferred_enqueued = shared_owned
+                        .voice_barge_in
+                        .drain_deferred_after_turn(&shared_owned, &provider, channel_id)
+                        .await;
+                    (false, true, voice_deferred_enqueued)
+                }
+            };
+            let _ = this_finalized;
+            record_turn_bridge_invariant(
+                finalize_owned,
+                &provider,
+                channel_id,
+                dispatch_id.as_deref(),
+                adk_session_key.as_deref(),
+                Some(turn_id.as_str()),
+                "mailbox_active_turn_matches_dispatch",
+                "src/services/discord/turn_bridge/mod.rs:mailbox_finish_turn",
+                "turn_bridge finalization expected the turn to be finalized by some authority",
+                serde_json::json!({
+                    "this_finalized": this_finalized,
+                    "has_pending": has_pending_after_voice,
+                }),
+            );
+            has_pending_after_voice
         };
         let mut preserve_inflight_for_cleanup_retry = false;
         let mut terminal_delivery_committed = false;

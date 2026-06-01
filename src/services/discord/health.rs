@@ -438,6 +438,7 @@ impl TestHealthHarness {
             recovery_started_at: Instant::now(),
             recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
             global_active,
+            turn_finalizer: super::turn_finalizer::TurnFinalizer::spawn(),
             global_finalizing,
             shutdown_remaining,
             shutdown_counted: std::sync::atomic::AtomicBool::new(false),

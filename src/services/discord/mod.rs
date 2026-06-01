@@ -79,6 +79,7 @@ mod tmux_reaper;
 mod tmux_restart_handoff;
 mod tui_prompt_relay;
 mod turn_bridge;
+mod turn_finalizer;
 mod voice_background_driver;
 mod voice_barge_in;
 mod voice_routing;
@@ -1570,6 +1571,13 @@ pub(crate) struct SharedData {
     /// Process-global active turn counter shared across all providers.
     /// Deferred restart checks this instead of provider-local cancel_tokens.len().
     pub(super) global_active: Arc<std::sync::atomic::AtomicUsize>,
+    /// EPIC #3016 — single-authority turn finalizer. The only code path that
+    /// owns the four finalize side-effects (inflight clear, mailbox
+    /// cancel_token release, `global_active` decrement, trailing terminal
+    /// side-effects) as an atomic, exactly-once unit. Bridge/watcher terminals
+    /// submit terminal events here instead of finalizing inline.
+    pub(in crate::services::discord) turn_finalizer:
+        Arc<turn_finalizer::TurnFinalizer>,
     /// Process-global finalizing turn counter shared across all providers.
     pub(super) global_finalizing: Arc<std::sync::atomic::AtomicUsize>,
     /// Number of providers still needing to complete shutdown.
@@ -2347,6 +2355,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         recovery_started_at: std::time::Instant::now(),
         recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
         global_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        turn_finalizer: turn_finalizer::TurnFinalizer::spawn(),
         global_finalizing: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         shutdown_remaining: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         shutdown_counted: std::sync::atomic::AtomicBool::new(false),
@@ -3355,6 +3364,40 @@ async fn mailbox_finish_turn(
     // that the legacy heuristic depended on. The latch is idempotent — if
     // `mailbox_clear_recovery_marker` already ran, this is a no-op.
     shared.mailboxes.recovery_done(channel_id).mark_done();
+    result
+}
+
+/// #3016 — identity-guarded variant of [`mailbox_finish_turn`]. Finalizes the
+/// channel's active turn ONLY when the mailbox's current
+/// `active_user_message_id` still matches `expected_user_message_id`. Used by
+/// the `TurnFinalizer` when the terminal carries a real `user_msg_id` so a
+/// stale / channel-only terminal arriving in the narrow window between one
+/// turn finalizing and the next turn's `try_start_turn` (or after ledger GC)
+/// cannot release the WRONG (newer) turn's token or decrement `global_active`.
+/// On mismatch it returns `removed_token = None`, exactly like an idempotent
+/// second `mailbox_finish_turn`, so the finalizer's counter-decrement gate is
+/// a no-op.
+async fn mailbox_finish_turn_if_matches(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    expected_user_message_id: serenity::model::id::MessageId,
+) -> FinishTurnResult {
+    let result = shared
+        .mailbox(channel_id)
+        .finish_turn_if_matches(
+            expected_user_message_id,
+            queue_persistence_context(shared, provider, channel_id),
+        )
+        .await;
+    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    // Mirror `mailbox_finish_turn`: a successful guarded finish is also a
+    // recovery-engine success exit. Only mark `recovery_done` when this call
+    // actually finalized (removed a token); a mismatch no-op must not free a
+    // watcher waiting on a turn that is still live.
+    if result.removed_token.is_some() {
+        shared.mailboxes.recovery_done(channel_id).mark_done();
+    }
     result
 }
 

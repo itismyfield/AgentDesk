@@ -1425,6 +1425,33 @@ impl ChannelMailboxHandle {
         .await
     }
 
+    /// #3016 — identity-guarded finish. Finalizes the active turn ONLY when
+    /// the mailbox's current `active_user_message_id` matches
+    /// `expected_user_message_id`; otherwise it is a no-op that returns
+    /// `removed_token = None` (so the caller's counter decrement is skipped)
+    /// and leaves the possibly-newer live turn untouched.
+    pub(crate) async fn finish_turn_if_matches(
+        &self,
+        expected_user_message_id: MessageId,
+        persistence: QueuePersistenceContext,
+    ) -> FinishTurnResult {
+        self.request(
+            |reply| ChannelMailboxMsg::FinishTurnIfMatches {
+                expected_user_message_id,
+                persistence,
+                reply,
+            },
+            FinishTurnResult {
+                removed_token: None,
+                has_pending: false,
+                mailbox_online: false,
+                queue_exit_events: Vec::new(),
+                persistence_error: None,
+            },
+        )
+        .await
+    }
+
     pub(crate) async fn hard_stop(&self) -> FinishTurnResult {
         self.request(
             |reply| ChannelMailboxMsg::HardStop { reply },
@@ -1924,6 +1951,18 @@ enum ChannelMailboxMsg {
         reply: oneshot::Sender<CancelQueuedMessageResult>,
     },
     FinishTurn {
+        persistence: QueuePersistenceContext,
+        reply: oneshot::Sender<FinishTurnResult>,
+    },
+    /// #3016 — identity-guarded finish. Only finalizes the active turn IF the
+    /// mailbox's CURRENT `active_user_message_id` matches
+    /// `expected_user_message_id`. Closes the wrong-turn race: a stale /
+    /// channel-only terminal arriving after a turn finalized but before the
+    /// next turn's `try_start_turn` (or after ledger GC) must NOT release the
+    /// NEWER turn's token or decrement `global_active`. On mismatch this is a
+    /// no-op that returns `removed_token = None`, leaving the live turn intact.
+    FinishTurnIfMatches {
+        expected_user_message_id: MessageId,
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<FinishTurnResult>,
     },
@@ -2687,6 +2726,48 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         Some(&persistence),
                     ));
                     mark_turn_finished_signal_done(channel_id);
+                }
+                ChannelMailboxMsg::FinishTurnIfMatches {
+                    expected_user_message_id,
+                    persistence,
+                    reply,
+                } => {
+                    // #3016 — identity guard. Finalize ONLY when the active
+                    // turn's user_message_id still matches the terminal's
+                    // identity. A mismatch (or no active turn) means the turn
+                    // this terminal belonged to already finalized and a newer
+                    // turn may now own the mailbox — so we must NOT take its
+                    // token. Return a no-op result (removed_token = None) that
+                    // mirrors `mailbox_finish_turn`'s idempotent second-call
+                    // shape, so the finalizer's `removed_token.is_some()` gate
+                    // skips the counter decrement and trailing release.
+                    let matches = state
+                        .active_user_message_id
+                        .is_some_and(|active| active == expected_user_message_id);
+                    if matches {
+                        state.last_persistence = Some(persistence.clone());
+                        let _ = reply.send(finalize_turn_state(
+                            &mut state,
+                            channel_id,
+                            Some(&persistence),
+                        ));
+                        mark_turn_finished_signal_done(channel_id);
+                    } else {
+                        // No-op: do not touch the active token. Surface the
+                        // current pending state so a caller that schedules a
+                        // queue kickoff still sees an accurate backlog flag,
+                        // but never release the (possibly newer) live turn.
+                        let _ = reply.send(FinishTurnResult {
+                            removed_token: None,
+                            has_pending: state
+                                .intervention_queue
+                                .iter()
+                                .any(|item| item.mode == InterventionMode::Soft),
+                            mailbox_online: true,
+                            queue_exit_events: Vec::new(),
+                            persistence_error: None,
+                        });
+                    }
                 }
                 ChannelMailboxMsg::HardStop { reply } => {
                     let persistence = state.last_persistence.clone();

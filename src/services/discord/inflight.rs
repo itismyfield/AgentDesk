@@ -3062,13 +3062,29 @@ mod wave_a_cleanup_tests {
         // run with a different "current_generation" — the helper must
         // still skip the row because `restart_mode.is_some()`, NOT
         // because the generations happen to match.
+        // `load_generation()` reads the PROCESS-WIDE `AGENTDESK_ROOT_DIR`, so
+        // serialize on the shared env lock and point the root at our own temp
+        // dir for the whole test. Otherwise a concurrent root-mutating test can
+        // flip the env between this read and the load-path read below, making
+        // `current_runtime_gen` inconsistent and tripping the assertions.
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let temp = TempDir::new().unwrap();
+        struct EnvReset(Option<std::ffi::OsString>);
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+                }
+            }
+        }
+        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
 
-        // Sync the row's restart_generation to whatever the process-
-        // wide `load_generation()` happens to return in this test
-        // environment (env var pointing at a sibling test's temp dir,
-        // missing file → 0, etc.). With them aligned, the load path's
-        // `stale_removal_reason` planned-restart branch hits its
+        // With the root isolated to `temp` (no generation file → 0), the load
+        // path's `stale_removal_reason` planned-restart branch hits its
         // generation-match arm and does not auto-evict.
         let current_runtime_gen = super::super::runtime_store::load_generation();
 
