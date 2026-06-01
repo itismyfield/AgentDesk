@@ -33,6 +33,19 @@ const DISPATCH_DELIVERY_MISMATCH_MISSING_TYPED: &str = "missing_typed";
 const DISPATCH_DELIVERY_MISMATCH_NOTIFIED_STATUS: &str = "notified_status_mismatch";
 const DISPATCH_DELIVERY_MISMATCH_MISSING_KV_META: &str = "missing_kv_meta";
 
+const DISPATCH_DELIVERY_RECOVERY_EXPIRED_RESERVING: &str = "expired_reserving";
+const DISPATCH_DELIVERY_RECOVERY_ORPHAN_NOTIFIED: &str = "orphan_notified";
+const DISPATCH_DELIVERY_RECOVERY_ORPHAN_TYPED: &str = "orphan_typed";
+
+/// Typed delivery-event statuses that represent a *completed* channel send.
+/// `finalize_dispatch_delivery_guard` writes the `dispatch_notified:*` guard for
+/// every one of these success paths (not just `sent`), so the reconcile
+/// classifier and recovery must both treat the whole set as "delivered" — else
+/// a fallback/duplicate/skipped delivery would be flagged as a mismatch forever.
+fn is_completed_delivery_status(status: &str) -> bool {
+    matches!(status, "sent" | "fallback" | "duplicate" | "skipped")
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) struct DispatchDeliveryEventReconcileStats {
     pub kv_reserving_checked: usize,
@@ -42,11 +55,29 @@ pub(crate) struct DispatchDeliveryEventReconcileStats {
     pub missing_typed: usize,
     pub notified_status_mismatch: usize,
     pub missing_kv_meta: usize,
+    /// Expired `dispatch_reserving:*` guard keys deleted this pass (provably
+    /// past their `expires_at`, i.e. a finalize never ran). Recovery, not a
+    /// mismatch report.
+    pub recovered_expired_reserving: usize,
+    /// Orphaned `dispatch_notified:*` guard keys reconciled this pass (typed
+    /// ledger backfilled/upgraded to a completed send, or the guard pruned when
+    /// its dispatch no longer exists). Recovery, not a report.
+    pub recovered_orphan_notified: usize,
+    /// Typed delivery events with no guard key reconciled this pass (a `sent`
+    /// row whose `dispatch_notified:*` guard was lost gets the guard rebuilt; an
+    /// expired `reserved` row gets finalized `failed`). Recovery, not a report.
+    pub recovered_orphan_typed: usize,
 }
 
 impl DispatchDeliveryEventReconcileStats {
     pub(crate) fn touched(&self) -> bool {
-        self.mismatch_count > 0
+        self.mismatch_count > 0 || self.recovered() > 0
+    }
+
+    pub(crate) fn recovered(&self) -> usize {
+        self.recovered_expired_reserving
+            + self.recovered_orphan_notified
+            + self.recovered_orphan_typed
     }
 
     fn record_mismatch(&mut self, kind: &str) {
@@ -132,6 +163,9 @@ struct DeliveryTypedGuardRow {
 static DISPATCH_DELIVERY_MISMATCH_COUNTERS: OnceLock<dashmap::DashMap<String, Arc<AtomicU64>>> =
     OnceLock::new();
 
+static DISPATCH_DELIVERY_RECOVERY_COUNTERS: OnceLock<dashmap::DashMap<String, Arc<AtomicU64>>> =
+    OnceLock::new();
+
 fn dispatch_delivery_mismatch_counter(kind: &str) -> Arc<AtomicU64> {
     DISPATCH_DELIVERY_MISMATCH_COUNTERS
         .get_or_init(dashmap::DashMap::new)
@@ -142,6 +176,38 @@ fn dispatch_delivery_mismatch_counter(kind: &str) -> Arc<AtomicU64> {
 
 fn record_dispatch_delivery_mismatch_metric(kind: &str) {
     dispatch_delivery_mismatch_counter(kind).fetch_add(1, Ordering::Relaxed);
+}
+
+fn dispatch_delivery_recovery_counter(kind: &str) -> Arc<AtomicU64> {
+    DISPATCH_DELIVERY_RECOVERY_COUNTERS
+        .get_or_init(dashmap::DashMap::new)
+        .entry(kind.to_string())
+        .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+        .clone()
+}
+
+fn record_dispatch_delivery_recovery_metric(kind: &str, count: u64) {
+    if count == 0 {
+        return;
+    }
+    dispatch_delivery_recovery_counter(kind).fetch_add(count, Ordering::Relaxed);
+}
+
+pub(crate) fn dispatch_delivery_event_recovery_metrics_snapshot()
+-> Vec<DispatchDeliveryEventMismatchMetric> {
+    let Some(counters) = DISPATCH_DELIVERY_RECOVERY_COUNTERS.get() else {
+        return Vec::new();
+    };
+    let mut rows: Vec<DispatchDeliveryEventMismatchMetric> = counters
+        .iter()
+        .map(|entry| DispatchDeliveryEventMismatchMetric {
+            name: "agentdesk_dispatch_delivery_event_recovered_total",
+            kind: entry.key().clone(),
+            value: entry.value().load(Ordering::Relaxed),
+        })
+        .collect();
+    rows.sort_by(|a, b| a.kind.cmp(&b.kind));
+    rows
 }
 
 pub(crate) fn dispatch_delivery_event_mismatch_metrics_snapshot()
@@ -166,6 +232,23 @@ pub(crate) fn reset_dispatch_delivery_event_mismatch_metrics_for_tests() {
     if let Some(counters) = DISPATCH_DELIVERY_MISMATCH_COUNTERS.get() {
         counters.clear();
     }
+    if let Some(counters) = DISPATCH_DELIVERY_RECOVERY_COUNTERS.get() {
+        counters.clear();
+    }
+}
+
+/// Serialize tests that reset and assert the process-global mismatch/recovery
+/// metric counters. These counters are shared across the whole test binary, so
+/// without a shared lock one test's `reset_..._for_tests()` can clear a counter
+/// another test (in this module or in route tests) is concurrently asserting.
+/// Acquire this guard at the very top of any such test. Returns a guard that
+/// must be held for the duration of the test.
+#[cfg(test)]
+pub(crate) fn lock_dispatch_delivery_metric_tests() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -340,21 +423,382 @@ pub(crate) async fn reconcile_dispatch_delivery_events_pg(
         );
     }
 
-    if report.stats.touched() {
+    let mut stats = report.stats;
+
+    // Recovery: bring the guard keys and the typed delivery ledger back into
+    // agreement so the same mismatch is not re-counted on every tick (#3008).
+    // Both steps are idempotent and only touch deliveries that are no longer in
+    // flight, so they are safe to run unconditionally each pass.
+    stats.recovered_expired_reserving = recover_expired_dispatch_reserving_pg(pool).await?;
+    stats.recovered_orphan_notified = recover_orphan_dispatch_notified_pg(pool).await?;
+    stats.recovered_orphan_typed = recover_orphan_typed_delivery_events_pg(pool).await?;
+
+    record_dispatch_delivery_recovery_metric(
+        DISPATCH_DELIVERY_RECOVERY_EXPIRED_RESERVING,
+        stats.recovered_expired_reserving as u64,
+    );
+    record_dispatch_delivery_recovery_metric(
+        DISPATCH_DELIVERY_RECOVERY_ORPHAN_NOTIFIED,
+        stats.recovered_orphan_notified as u64,
+    );
+    record_dispatch_delivery_recovery_metric(
+        DISPATCH_DELIVERY_RECOVERY_ORPHAN_TYPED,
+        stats.recovered_orphan_typed as u64,
+    );
+
+    if stats.touched() {
         tracing::warn!(
             target: "reconcile",
-            kv_reserving_checked = report.stats.kv_reserving_checked,
-            kv_notified_checked = report.stats.kv_notified_checked,
-            typed_events_checked = report.stats.typed_events_checked,
-            mismatch_count = report.stats.mismatch_count,
-            missing_typed = report.stats.missing_typed,
-            notified_status_mismatch = report.stats.notified_status_mismatch,
-            missing_kv_meta = report.stats.missing_kv_meta,
-            "[dispatch-delivery-reconcile] mismatch scan completed"
+            kv_reserving_checked = stats.kv_reserving_checked,
+            kv_notified_checked = stats.kv_notified_checked,
+            typed_events_checked = stats.typed_events_checked,
+            mismatch_count = stats.mismatch_count,
+            missing_typed = stats.missing_typed,
+            notified_status_mismatch = stats.notified_status_mismatch,
+            missing_kv_meta = stats.missing_kv_meta,
+            recovered_expired_reserving = stats.recovered_expired_reserving,
+            recovered_orphan_notified = stats.recovered_orphan_notified,
+            recovered_orphan_typed = stats.recovered_orphan_typed,
+            "[dispatch-delivery-reconcile] mismatch scan + recovery completed"
         );
     }
 
-    Ok(report.stats)
+    Ok(stats)
+}
+
+/// Reclaim `dispatch_reserving:*` guard keys whose reservation provably expired
+/// (`expires_at <= NOW()`), i.e. their owning delivery never reached finalize.
+///
+/// For each expired key we mirror the delivery guard's own expiry handling: the
+/// still-`reserved` typed delivery row is flipped to `failed` (matching
+/// `recover_expired_dispatch_delivery_reservation_pg`) and then the kv guard key
+/// is deleted. Doing both halves in one shot is what makes the recovery durable
+/// — deleting only the kv key would leave the expired typed `reserved` row
+/// behind, which the typed scan would then report as `missing_kv_meta` forever.
+///
+/// An in-flight reservation always has `expires_at > NOW()` and is never
+/// touched. Keys with a NULL `expires_at` are anomalous and left alone — they
+/// are not provably orphaned.
+///
+/// Returns the number of guard keys reclaimed.
+async fn recover_expired_dispatch_reserving_pg(pool: &PgPool) -> Result<usize> {
+    // Expire the typed reservation first so the typed ledger is consistent even
+    // if the kv delete below were to fail mid-pass; on the next tick the kv key
+    // would simply be reclaimed again.
+    sqlx::query(
+        "UPDATE dispatch_delivery_events e
+            SET status = 'failed',
+                error = COALESCE(e.error, 'delivery reservation expired before finalize'),
+                result_json = CASE
+                    WHEN e.result_json = '{}'::jsonb THEN jsonb_build_object(
+                        'status', 'failed',
+                        'dispatch_id', e.dispatch_id,
+                        'action', 'notify',
+                        'detail', 'delivery reservation expired before finalize'
+                    )
+                    ELSE e.result_json
+                END,
+                reserved_until = NULL,
+                updated_at = NOW()
+          WHERE e.operation = 'send'
+            AND e.target_kind = 'channel'
+            AND e.status = 'reserved'
+            AND e.reserved_until IS NOT NULL
+            AND e.reserved_until <= NOW()
+            AND EXISTS (
+                SELECT 1
+                  FROM kv_meta m
+                 WHERE m.key = 'dispatch_reserving:' || e.dispatch_id
+                   AND m.expires_at IS NOT NULL
+                   AND m.expires_at <= NOW()
+            )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|error| anyhow!("expire typed reservations for orphaned reserving guards: {error}"))?;
+
+    // Delete the kv guard only when no *still-active* typed reservation exists
+    // for the dispatch. The guard writes `kv_meta.expires_at` and the typed
+    // `reserved_until` in two separate statements (both NOW()+5min), so the kv
+    // side can expire a hair earlier; deleting purely on `expires_at <= NOW()`
+    // could drop the guard while the typed row is still active, after which the
+    // typed scan would report `missing_kv_meta` permanently. Anchoring the
+    // delete to "typed reservation is also done" closes that window.
+    sqlx::query(
+        "DELETE FROM kv_meta m
+          WHERE m.key LIKE 'dispatch\\_reserving:%' ESCAPE '\\'
+            AND m.expires_at IS NOT NULL
+            AND m.expires_at <= NOW()
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM dispatch_delivery_events e
+                 WHERE e.dispatch_id = SUBSTRING(m.key FROM LENGTH('dispatch_reserving:') + 1)
+                   AND e.operation = 'send'
+                   AND e.target_kind = 'channel'
+                   AND e.status = 'reserved'
+                   AND (e.reserved_until IS NULL OR e.reserved_until > NOW())
+            )",
+    )
+    .execute(pool)
+    .await
+    .map(|result| result.rows_affected() as usize)
+    .map_err(|error| anyhow!("delete expired dispatch reserving guard keys: {error}"))
+}
+
+/// Reconcile `dispatch_notified:*` guard keys whose typed delivery ledger does
+/// not yet record a completed channel send.
+///
+/// A `dispatch_notified:*` key is written by the delivery guard ONLY after the
+/// transport send returned success, so the key itself is the durable proof that
+/// the channel send happened — it is the dedupe guard that stops a retry from
+/// re-sending the same dispatch. The mismatch backlog comes from a crash in the
+/// narrow window between writing the notified key and finalizing the typed event
+/// (the typed row is then left `reserved`, or later flipped to `failed` by the
+/// expiry sweep, or never written at all).
+///
+/// The safe recovery is therefore to BACKFILL the typed event to `sent` to match
+/// the proof the notified key already carries — never to delete the key, which
+/// would drop the only idempotency guard and allow a duplicate send. We only
+/// touch keys with no completed-send typed row AND no still-active reservation
+/// (`reserved`, `reserved_until > NOW()`), so an in-flight delivery is never
+/// disturbed.
+///
+/// Returns the number of guard keys whose typed ledger was reconciled.
+async fn recover_orphan_dispatch_notified_pg(pool: &PgPool) -> Result<usize> {
+    // 1. Upgrade a stale, settled typed row to `sent` when the notified guard
+    //    proves the send actually landed but the typed finalize did not record a
+    //    completed status. Two crash windows produce this:
+    //      * the expiry sweep already flipped the orphaned reservation to
+    //        `failed` (latest status = `failed`), or
+    //      * the typed finalize never ran at all and the reservation simply
+    //        aged out (latest status = `reserved` with `reserved_until` past).
+    //
+    //    Guards that keep this race-free against a still-running delivery:
+    //      * We only act when the latest row is settled — `failed`, or `reserved`
+    //        whose `reserved_until` has passed. A live finalizer for a send that
+    //        outlived its 5-minute window still owns a NON-expired reservation
+    //        (or is mid-INSERT of one); the `NOT EXISTS active reservation` guard
+    //        below excludes exactly that case.
+    //      * We skip when a completed delivery row already exists (the real
+    //        finalizer landed); a placeholder would only add a contradictory row.
+    let upgraded = sqlx::query(
+        "WITH targets AS (
+            SELECT SUBSTRING(m.key FROM LENGTH('dispatch_notified:') + 1) AS dispatch_id
+              FROM kv_meta m
+             WHERE m.key LIKE 'dispatch\\_notified:%' ESCAPE '\\'
+        ),
+        latest AS (
+            SELECT DISTINCT ON (e.dispatch_id) e.id, e.dispatch_id, e.status, e.reserved_until
+              FROM dispatch_delivery_events e
+              JOIN targets ON targets.dispatch_id = e.dispatch_id
+             WHERE e.operation = 'send'
+               AND e.target_kind = 'channel'
+             ORDER BY e.dispatch_id, e.updated_at DESC, e.id DESC
+        )
+        UPDATE dispatch_delivery_events e
+            SET status = 'sent',
+                error = NULL,
+                reserved_until = NULL,
+                -- Overwrite result_json unconditionally: the prior payload may
+                -- still report `status: failed`/`reserved`, so preserving it
+                -- would leave a `sent` event whose JSON contradicts its status.
+                result_json = jsonb_build_object(
+                    'status', 'sent',
+                    'dispatch_id', e.dispatch_id,
+                    'action', 'notify',
+                    'detail', 'reconciled from dispatch_notified delivery guard'
+                ),
+                updated_at = NOW()
+          FROM latest
+         WHERE e.id = latest.id
+           AND (
+               latest.status = 'failed'
+               OR (
+                   latest.status = 'reserved'
+                   AND latest.reserved_until IS NOT NULL
+                   AND latest.reserved_until <= NOW()
+               )
+           )
+           -- Skip when a completed delivery row already exists (the real
+           -- finalizer landed): no upgrade needed, and a placeholder would only
+           -- add a contradictory row.
+           AND NOT EXISTS (
+               SELECT 1 FROM dispatch_delivery_events c
+                WHERE c.dispatch_id = e.dispatch_id
+                  AND c.operation = 'send'
+                  AND c.target_kind = 'channel'
+                  AND c.status IN ('sent', 'fallback', 'duplicate', 'skipped')
+           )
+           -- Skip when an ACTIVE reservation is present: a live finalizer is
+           -- mid-flight for this dispatch (its send outlived the 5-minute
+           -- window), so the typed ledger is not settled yet.
+           AND NOT EXISTS (
+               SELECT 1 FROM dispatch_delivery_events r
+                WHERE r.dispatch_id = e.dispatch_id
+                  AND r.operation = 'send'
+                  AND r.target_kind = 'channel'
+                  AND r.status = 'reserved'
+                  AND (r.reserved_until IS NULL OR r.reserved_until > NOW())
+           )",
+    )
+    .execute(pool)
+    .await
+    .map(|result| result.rows_affected() as usize)
+    .map_err(|error| anyhow!("upgrade stale typed events for notified guards: {error}"))?;
+
+    // 2. Backfill a typed `sent` row for notified keys that have no typed
+    //    delivery event at all (the typed write never landed). The INSERT is
+    //    scoped to dispatches that still exist in `task_dispatches`: the typed
+    //    table FKs to it `ON DELETE CASCADE`, so backfilling a row for a deleted
+    //    dispatch would raise an FK error and abort the whole reconcile pass.
+    let inserted = sqlx::query(
+        "INSERT INTO dispatch_delivery_events (
+            dispatch_id,
+            correlation_id,
+            semantic_event_id,
+            operation,
+            target_kind,
+            status,
+            attempt,
+            result_json
+         )
+         SELECT dispatch_id,
+                'dispatch:' || dispatch_id,
+                'dispatch:' || dispatch_id || ':notify',
+                'send',
+                'channel',
+                'sent',
+                1,
+                jsonb_build_object(
+                    'status', 'sent',
+                    'dispatch_id', dispatch_id,
+                    'action', 'notify',
+                    'detail', 'reconciled from dispatch_notified delivery guard'
+                )
+           FROM (
+               SELECT SUBSTRING(m.key FROM LENGTH('dispatch_notified:') + 1) AS dispatch_id
+                 FROM kv_meta m
+                WHERE m.key LIKE 'dispatch\\_notified:%' ESCAPE '\\'
+           ) targets
+          WHERE EXISTS (
+              SELECT 1 FROM task_dispatches td WHERE td.id = targets.dispatch_id
+          )
+            AND NOT EXISTS (
+              SELECT 1
+                FROM dispatch_delivery_events e
+               WHERE e.dispatch_id = targets.dispatch_id
+                 AND e.operation = 'send'
+                 AND e.target_kind = 'channel'
+          )
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(pool)
+    .await
+    .map(|result| result.rows_affected() as usize)
+    .map_err(|error| anyhow!("backfill typed sent events for notified guards: {error}"))?;
+
+    // 3. A `dispatch_notified:*` key whose `task_dispatches` row is gone is truly
+    //    orphaned: the dispatch (and its CASCADE-deleted delivery events) no
+    //    longer exist, so the dedupe guard protects nothing and there is nothing
+    //    to re-send. Reclaim those keys so they stop pinning the mismatch scan.
+    let pruned = sqlx::query(
+        "DELETE FROM kv_meta m
+          WHERE m.key LIKE 'dispatch\\_notified:%' ESCAPE '\\'
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM task_dispatches td
+                 WHERE td.id = SUBSTRING(m.key FROM LENGTH('dispatch_notified:') + 1)
+            )",
+    )
+    .execute(pool)
+    .await
+    .map(|result| result.rows_affected() as usize)
+    .map_err(|error| anyhow!("prune notified guards for deleted dispatches: {error}"))?;
+
+    Ok(upgraded + inserted + pruned)
+}
+
+/// Reconcile typed delivery events that have NO guard key in `kv_meta` — the
+/// `missing_kv_meta` mismatch class.
+///
+/// Two sub-cases, matching `classify_delivery_typed_guard_mismatches`:
+///
+///   * Latest typed status is `sent` (a completed send) but neither
+///     `dispatch_reserving:*` nor `dispatch_notified:*` exists — the notified
+///     dedupe guard was lost (kv GC, or the guard write never landed). The typed
+///     `sent` row is the source of truth that the send happened, so we rebuild
+///     the missing `dispatch_notified:*` guard. Re-creating the guard is safe:
+///     it only ever prevents re-sending something already delivered.
+///   * Latest typed status is `reserved` and the reservation has expired
+///     (`reserved_until <= NOW()`) but no guard key exists — an abandoned
+///     reservation whose kv key already vanished. We finalize it to `failed`,
+///     mirroring the delivery guard's own expiry handling, after which it is no
+///     longer reported.
+///
+/// In-flight reservations (`reserved` with `reserved_until > NOW()`) are never
+/// touched. Returns the number of typed rows reconciled.
+async fn recover_orphan_typed_delivery_events_pg(pool: &PgPool) -> Result<usize> {
+    // Latest typed event per dispatch with no guard key of either kind.
+    let latest_without_guard = "WITH latest AS (
+            SELECT DISTINCT ON (e.dispatch_id)
+                   e.id, e.dispatch_id, e.status, e.reserved_until
+              FROM dispatch_delivery_events e
+             WHERE e.operation = 'send'
+               AND e.target_kind = 'channel'
+             ORDER BY e.dispatch_id, e.updated_at DESC, e.id DESC
+        )
+        SELECT latest.id, latest.dispatch_id, latest.status, latest.reserved_until
+          FROM latest
+         WHERE NOT EXISTS (
+             SELECT 1 FROM kv_meta m
+              WHERE m.key = 'dispatch_reserving:' || latest.dispatch_id
+                 OR m.key = 'dispatch_notified:' || latest.dispatch_id
+         )";
+
+    // 1. Rebuild the lost `dispatch_notified:*` guard for completed sends. This
+    //    must cover every completed-delivery status the guard itself writes a
+    //    notified key for (sent/fallback/duplicate/skipped), or those rows would
+    //    keep reporting `missing_kv_meta`.
+    let notified_rebuilt = sqlx::query(&format!(
+        "INSERT INTO kv_meta (key, value)
+         SELECT 'dispatch_notified:' || src.dispatch_id, src.dispatch_id
+           FROM ({latest_without_guard}) src
+          WHERE src.status IN ('sent', 'fallback', 'duplicate', 'skipped')
+         ON CONFLICT (key) DO NOTHING"
+    ))
+    .execute(pool)
+    .await
+    .map(|result| result.rows_affected() as usize)
+    .map_err(|error| anyhow!("rebuild notified guard for guard-less completed events: {error}"))?;
+
+    // 2. Finalize abandoned expired reservations whose guard key is already gone.
+    let reservations_failed = sqlx::query(&format!(
+        "UPDATE dispatch_delivery_events e
+            SET status = 'failed',
+                error = COALESCE(e.error, 'delivery reservation expired before finalize'),
+                result_json = CASE
+                    WHEN e.result_json = '{{}}'::jsonb THEN jsonb_build_object(
+                        'status', 'failed',
+                        'dispatch_id', e.dispatch_id,
+                        'action', 'notify',
+                        'detail', 'delivery reservation expired before finalize'
+                    )
+                    ELSE e.result_json
+                END,
+                reserved_until = NULL,
+                updated_at = NOW()
+           FROM ({latest_without_guard}) src
+          WHERE e.id = src.id
+            AND src.status = 'reserved'
+            AND src.reserved_until IS NOT NULL
+            AND src.reserved_until <= NOW()"
+    ))
+    .execute(pool)
+    .await
+    .map(|result| result.rows_affected() as usize)
+    .map_err(|error| anyhow!("finalize guard-less expired reservations: {error}"))?;
+
+    Ok(notified_rebuilt + reservations_failed)
 }
 
 pub(crate) async fn dispatch_delivery_event_reconcile_report_pg(
@@ -427,7 +871,8 @@ fn classify_delivery_kv_guard_mismatches(
         return;
     }
 
-    if has_notified && typed_status != Some("sent") {
+    let typed_is_completed = typed_status.is_some_and(is_completed_delivery_status);
+    if has_notified && !typed_is_completed {
         if typed_status == Some("reserved")
             && row
                 .typed_reserved_until
@@ -454,27 +899,26 @@ fn classify_delivery_typed_guard_mismatches(
     if row.has_reserving || row.has_notified {
         return;
     }
-    match row.typed_status.as_str() {
-        "reserved" => {
-            if row
-                .reserved_until
-                .as_ref()
-                .is_some_and(|reserved_until| *reserved_until > Utc::now())
-            {
-                return;
-            }
-            let mismatch =
-                DispatchDeliveryEventMismatch::missing_kv_meta(row.dispatch_id.clone(), "reserved");
-            stats.record_mismatch(&mismatch.kind);
-            mismatches.push(mismatch);
+    let status = row.typed_status.as_str();
+    if status == "reserved" {
+        if row
+            .reserved_until
+            .as_ref()
+            .is_some_and(|reserved_until| *reserved_until > Utc::now())
+        {
+            return;
         }
-        "sent" => {
-            let mismatch =
-                DispatchDeliveryEventMismatch::missing_kv_meta(row.dispatch_id.clone(), "sent");
-            stats.record_mismatch(&mismatch.kind);
-            mismatches.push(mismatch);
-        }
-        _ => {}
+        let mismatch =
+            DispatchDeliveryEventMismatch::missing_kv_meta(row.dispatch_id.clone(), "reserved");
+        stats.record_mismatch(&mismatch.kind);
+        mismatches.push(mismatch);
+    } else if is_completed_delivery_status(status) {
+        // A completed delivery (sent/fallback/duplicate/skipped) with no guard
+        // key lost its `dispatch_notified:*` dedupe guard; recovery rebuilds it.
+        let mismatch =
+            DispatchDeliveryEventMismatch::missing_kv_meta(row.dispatch_id.clone(), "sent");
+        stats.record_mismatch(&mismatch.kind);
+        mismatches.push(mismatch);
     }
 }
 
@@ -1617,6 +2061,35 @@ mod dispatch_delivery_reconcile_tests {
             .unwrap();
     }
 
+    /// Insert a kv_meta row whose `expires_at` is offset from NOW by
+    /// `expires_in_seconds` (negative => already expired).
+    async fn insert_kv_with_expiry(
+        pool: &PgPool,
+        key: &str,
+        dispatch_id: &str,
+        expires_in_seconds: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO kv_meta (key, value, expires_at)
+             VALUES ($1, $2, NOW() + ($3::BIGINT * INTERVAL '1 second'))",
+        )
+        .bind(key)
+        .bind(dispatch_id)
+        .bind(expires_in_seconds)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn kv_key_exists(pool: &PgPool, key: &str) -> bool {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM kv_meta WHERE key = $1")
+            .bind(key)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+            > 0
+    }
+
     #[test]
     fn dispatch_delivery_reconcile_classifies_rows_without_postgres() {
         let mut stats = DispatchDeliveryEventReconcileStats::default();
@@ -1671,6 +2144,53 @@ mod dispatch_delivery_reconcile_tests {
                 DISPATCH_DELIVERY_MISMATCH_MISSING_KV_META,
             ]
         );
+    }
+
+    #[test]
+    fn dispatch_delivery_reconcile_treats_all_completed_statuses_as_delivered() {
+        // The delivery guard writes `dispatch_notified:*` for every success path
+        // (sent/fallback/duplicate/skipped), so a notified key paired with any of
+        // those typed statuses is a legitimate completed delivery, NOT a mismatch.
+        for status in ["sent", "fallback", "duplicate", "skipped"] {
+            let mut stats = DispatchDeliveryEventReconcileStats::default();
+            let mut mismatches = Vec::new();
+            classify_delivery_kv_guard_mismatches(
+                &mut stats,
+                &mut mismatches,
+                &DeliveryKvGuardRow {
+                    dispatch_id: format!("dispatch-completed-{status}"),
+                    reserving_count: 0,
+                    notified_count: 1,
+                    typed_status: Some(status.to_string()),
+                    typed_reserved_until: None,
+                },
+            );
+            assert_eq!(
+                stats.mismatch_count, 0,
+                "notified + typed '{status}' must not be flagged as a mismatch"
+            );
+            assert!(mismatches.is_empty());
+
+            // And the typed-side scan must classify a guard-less completed
+            // delivery as missing_kv_meta (so recovery rebuilds the guard).
+            let mut typed_stats = DispatchDeliveryEventReconcileStats::default();
+            let mut typed_mismatches = Vec::new();
+            classify_delivery_typed_guard_mismatches(
+                &mut typed_stats,
+                &mut typed_mismatches,
+                &DeliveryTypedGuardRow {
+                    dispatch_id: format!("dispatch-guardless-{status}"),
+                    typed_status: status.to_string(),
+                    reserved_until: None,
+                    has_reserving: false,
+                    has_notified: false,
+                },
+            );
+            assert_eq!(
+                typed_stats.missing_kv_meta, 1,
+                "guard-less completed '{status}' delivery must report missing_kv_meta"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1733,6 +2253,7 @@ mod dispatch_delivery_reconcile_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dispatch_delivery_reconcile_logs_dispatch_id_and_increments_metric_pg() {
+        let _serial = lock_dispatch_delivery_metric_tests();
         reset_dispatch_delivery_event_mismatch_metrics_for_tests();
         let Some(pg_db) = TestPostgresDb::try_create().await else {
             return;
@@ -1772,6 +2293,498 @@ mod dispatch_delivery_reconcile_tests {
         assert!(metrics.iter().any(|metric| {
             metric.kind == DISPATCH_DELIVERY_MISMATCH_MISSING_TYPED && metric.value == 1
         }));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    async fn latest_typed_status(pool: &PgPool, dispatch_id: &str) -> Option<String> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT status
+               FROM dispatch_delivery_events
+              WHERE dispatch_id = $1
+                AND operation = 'send'
+                AND target_kind = 'channel'
+              ORDER BY updated_at DESC, id DESC
+              LIMIT 1",
+        )
+        .bind(dispatch_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn dispatch_delivery_reconcile_expires_reserving_but_keeps_active_pg() {
+        let Some(pg_db) = TestPostgresDb::try_create().await else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+
+        // Expired reservation (finalize never ran): kv expires_at AND typed
+        // reserved_until both in the past.
+        seed_dispatch(&pool, "dispatch-expired-reserving").await;
+        insert_kv_with_expiry(
+            &pool,
+            "dispatch_reserving:dispatch-expired-reserving",
+            "dispatch-expired-reserving",
+            -60,
+        )
+        .await;
+        insert_delivery_event(&pool, "dispatch-expired-reserving", "reserved").await;
+
+        // Active reservation still in flight: expires_at in the future.
+        seed_dispatch(&pool, "dispatch-active-reserving").await;
+        insert_kv_with_expiry(
+            &pool,
+            "dispatch_reserving:dispatch-active-reserving",
+            "dispatch-active-reserving",
+            300,
+        )
+        .await;
+
+        let recovered = recover_expired_dispatch_reserving_pg(&pool).await.unwrap();
+
+        assert_eq!(
+            recovered, 1,
+            "only the expired reserving key should be reclaimed"
+        );
+        assert!(
+            !kv_key_exists(&pool, "dispatch_reserving:dispatch-expired-reserving").await,
+            "expired reserving key must be deleted"
+        );
+        assert_eq!(
+            latest_typed_status(&pool, "dispatch-expired-reserving").await,
+            Some("failed".to_string()),
+            "expired typed reservation must be flipped to failed so it stops re-reporting"
+        );
+        assert!(
+            kv_key_exists(&pool, "dispatch_reserving:dispatch-active-reserving").await,
+            "in-flight reservation must be preserved"
+        );
+
+        // Idempotent: a second pass reclaims nothing more.
+        let recovered_again = recover_expired_dispatch_reserving_pg(&pool).await.unwrap();
+        assert_eq!(recovered_again, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn dispatch_delivery_reconcile_backfills_notified_but_keeps_delivered_pg() {
+        let Some(pg_db) = TestPostgresDb::try_create().await else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+
+        // Orphan #1: notified key with no typed delivery event at all.
+        seed_dispatch(&pool, "dispatch-notified-no-typed").await;
+        insert_kv(
+            &pool,
+            "dispatch_notified:dispatch-notified-no-typed",
+            "dispatch-notified-no-typed",
+        )
+        .await;
+
+        // Orphan #2: notified key whose latest typed event is 'failed'.
+        seed_dispatch(&pool, "dispatch-notified-failed").await;
+        insert_kv(
+            &pool,
+            "dispatch_notified:dispatch-notified-failed",
+            "dispatch-notified-failed",
+        )
+        .await;
+        insert_delivery_event(&pool, "dispatch-notified-failed", "failed").await;
+
+        // Legitimate: notified key backed by a 'sent' typed event.
+        seed_dispatch(&pool, "dispatch-notified-sent").await;
+        insert_kv(
+            &pool,
+            "dispatch_notified:dispatch-notified-sent",
+            "dispatch-notified-sent",
+        )
+        .await;
+        insert_delivery_event(&pool, "dispatch-notified-sent", "sent").await;
+
+        // In flight: notified key alongside an active 'reserved' event (future
+        // reserved_until). Anomalous but must NOT be reclaimed mid-flight.
+        seed_dispatch(&pool, "dispatch-notified-reserved").await;
+        insert_kv(
+            &pool,
+            "dispatch_notified:dispatch-notified-reserved",
+            "dispatch-notified-reserved",
+        )
+        .await;
+        sqlx::query(
+            "INSERT INTO dispatch_delivery_events (
+                dispatch_id, correlation_id, semantic_event_id, operation,
+                target_kind, status, attempt, result_json, reserved_until,
+                created_at, updated_at
+             ) VALUES (
+                $1, 'dispatch:' || $1, 'dispatch:' || $1 || ':notify', 'send',
+                'channel', 'reserved', 1, '{}'::jsonb, NOW() + INTERVAL '5 minutes',
+                NOW(), NOW()
+             )",
+        )
+        .bind("dispatch-notified-reserved")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Orphan #3: notified key whose latest typed event is an EXPIRED
+        // 'reserved' (the typed finalize never ran and the reservation aged out).
+        // No active reservation / completed row => safe to upgrade to 'sent'.
+        seed_dispatch(&pool, "dispatch-notified-expired-reserved").await;
+        insert_kv(
+            &pool,
+            "dispatch_notified:dispatch-notified-expired-reserved",
+            "dispatch-notified-expired-reserved",
+        )
+        .await;
+        sqlx::query(
+            "INSERT INTO dispatch_delivery_events (
+                dispatch_id, correlation_id, semantic_event_id, operation,
+                target_kind, status, attempt, result_json, reserved_until,
+                created_at, updated_at
+             ) VALUES (
+                $1, 'dispatch:' || $1, 'dispatch:' || $1 || ':notify', 'send',
+                'channel', 'reserved', 1, '{}'::jsonb, NOW() - INTERVAL '1 minute',
+                NOW() - INTERVAL '6 minutes', NOW() - INTERVAL '6 minutes'
+             )",
+        )
+        .bind("dispatch-notified-expired-reserved")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let recovered = recover_orphan_dispatch_notified_pg(&pool).await.unwrap();
+
+        // The notified key is itself proof of a completed send, so recovery
+        // backfills/upgrades the typed event to 'sent' rather than deleting the
+        // idempotency guard (which would allow a duplicate send).
+        assert_eq!(
+            recovered, 3,
+            "no-typed, stale-failed, and expired-reserved orphans should all reconcile"
+        );
+        assert!(
+            kv_key_exists(&pool, "dispatch_notified:dispatch-notified-no-typed").await,
+            "notified guard must be preserved (it is the dedupe proof)"
+        );
+        assert_eq!(
+            latest_typed_status(&pool, "dispatch-notified-no-typed").await,
+            Some("sent".to_string()),
+            "missing typed event must be backfilled as sent"
+        );
+        assert!(
+            kv_key_exists(&pool, "dispatch_notified:dispatch-notified-failed").await,
+            "notified guard for a stale failed event must be preserved"
+        );
+        assert_eq!(
+            latest_typed_status(&pool, "dispatch-notified-failed").await,
+            Some("sent".to_string()),
+            "stale failed typed event must be upgraded to sent"
+        );
+        assert!(
+            kv_key_exists(&pool, "dispatch_notified:dispatch-notified-sent").await,
+            "notified guard for a completed send must be preserved"
+        );
+        // The in-flight reservation must remain 'reserved' — recovery must not
+        // touch a delivery that is still being attempted.
+        assert_eq!(
+            latest_typed_status(&pool, "dispatch-notified-reserved").await,
+            Some("reserved".to_string()),
+            "in-flight reservation must not be reconciled mid-flight"
+        );
+        // The expired reservation behind a notified guard must be upgraded.
+        assert_eq!(
+            latest_typed_status(&pool, "dispatch-notified-expired-reserved").await,
+            Some("sent".to_string()),
+            "expired reservation behind a notified guard must be upgraded to sent"
+        );
+
+        // Idempotent: a second pass reconciles nothing more.
+        let recovered_again = recover_orphan_dispatch_notified_pg(&pool).await.unwrap();
+        assert_eq!(recovered_again, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn dispatch_delivery_reconcile_notified_upgrade_avoids_live_finalizer_race_pg() {
+        let Some(pg_db) = TestPostgresDb::try_create().await else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+
+        // A delivery whose send outlived its reservation: the expiry sweep flipped
+        // the attempt to `failed`, but a new `reserved` attempt is in flight (the
+        // real finalizer is still running). Upgrading the failed row now would
+        // race that finalizer, so recovery must leave it `failed`.
+        seed_dispatch(&pool, "dispatch-live-finalizer").await;
+        insert_kv(
+            &pool,
+            "dispatch_notified:dispatch-live-finalizer",
+            "dispatch-live-finalizer",
+        )
+        .await;
+        sqlx::query(
+            "INSERT INTO dispatch_delivery_events (
+                dispatch_id, correlation_id, semantic_event_id, operation,
+                target_kind, status, attempt, result_json, reserved_until,
+                created_at, updated_at
+             ) VALUES
+             ($1, 'dispatch:' || $1, 'dispatch:' || $1 || ':notify', 'send',
+              'channel', 'failed', 1, '{}'::jsonb, NULL,
+              NOW() - INTERVAL '2 minutes', NOW() - INTERVAL '2 minutes'),
+             ($1, 'dispatch:' || $1, 'dispatch:' || $1 || ':notify', 'send',
+              'channel', 'reserved', 2, '{}'::jsonb, NOW() + INTERVAL '5 minutes',
+              NOW(), NOW())",
+        )
+        .bind("dispatch-live-finalizer")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // A delivery whose real finalize already landed a `sent` row alongside a
+        // stale `failed` attempt: recovery must not add a contradictory
+        // placeholder, it should leave the existing rows alone.
+        seed_dispatch(&pool, "dispatch-already-sent").await;
+        insert_kv(
+            &pool,
+            "dispatch_notified:dispatch-already-sent",
+            "dispatch-already-sent",
+        )
+        .await;
+        sqlx::query(
+            "INSERT INTO dispatch_delivery_events (
+                dispatch_id, correlation_id, semantic_event_id, operation,
+                target_kind, target_channel_id, status, attempt, result_json,
+                created_at, updated_at
+             ) VALUES
+             ($1, 'dispatch:' || $1, 'dispatch:' || $1 || ':notify', 'send',
+              'channel', NULL, 'failed', 1, '{}'::jsonb,
+              NOW() - INTERVAL '2 minutes', NOW() - INTERVAL '2 minutes'),
+             ($1, 'dispatch:' || $1, 'dispatch:' || $1 || ':notify', 'send',
+              'channel', '123', 'sent', 2, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind("dispatch-already-sent")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let recovered = recover_orphan_dispatch_notified_pg(&pool).await.unwrap();
+
+        assert_eq!(
+            recovered, 0,
+            "neither the live-finalizer nor already-sent case should be upgraded"
+        );
+        // The in-flight reservation's failed attempt #1 stays failed.
+        let live_statuses: Vec<String> = sqlx::query_scalar(
+            "SELECT status FROM dispatch_delivery_events
+              WHERE dispatch_id = 'dispatch-live-finalizer'
+              ORDER BY attempt",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            live_statuses,
+            vec!["failed".to_string(), "reserved".to_string()],
+            "live-finalizer dispatch must keep failed#1 + reserved#2 untouched"
+        );
+        // No placeholder sent row was created for the already-sent dispatch.
+        let placeholder_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM dispatch_delivery_events
+              WHERE dispatch_id = 'dispatch-already-sent'
+                AND status = 'sent'
+                AND target_channel_id IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(placeholder_count, 0, "no null-channel placeholder sent row");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn dispatch_delivery_reconcile_prunes_notified_for_deleted_dispatch_pg() {
+        let Some(pg_db) = TestPostgresDb::try_create().await else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+
+        // A notified guard whose owning task_dispatches row no longer exists.
+        // Backfilling a typed event here would violate the FK; recovery must
+        // instead prune the now-meaningless guard without erroring.
+        insert_kv(
+            &pool,
+            "dispatch_notified:dispatch-deleted",
+            "dispatch-deleted",
+        )
+        .await;
+
+        let recovered = recover_orphan_dispatch_notified_pg(&pool).await.unwrap();
+
+        assert_eq!(recovered, 1, "the orphaned notified guard should be pruned");
+        assert!(
+            !kv_key_exists(&pool, "dispatch_notified:dispatch-deleted").await,
+            "notified guard for a deleted dispatch must be removed"
+        );
+
+        // Idempotent: a second pass does nothing.
+        let recovered_again = recover_orphan_dispatch_notified_pg(&pool).await.unwrap();
+        assert_eq!(recovered_again, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn dispatch_delivery_reconcile_recovers_guard_less_typed_events_pg() {
+        let Some(pg_db) = TestPostgresDb::try_create().await else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+
+        // missing_kv_meta #1: a completed `sent` event whose dispatch_notified
+        // guard was lost. Recovery rebuilds the guard.
+        seed_dispatch(&pool, "dispatch-typed-sent-no-guard").await;
+        insert_delivery_event(&pool, "dispatch-typed-sent-no-guard", "sent").await;
+
+        // missing_kv_meta #2: an expired `reserved` event with no guard key.
+        // Recovery finalizes it to 'failed'. insert_delivery_event sets
+        // reserved_until = NOW() - 1 minute for the 'reserved' status.
+        seed_dispatch(&pool, "dispatch-typed-reserved-no-guard").await;
+        insert_delivery_event(&pool, "dispatch-typed-reserved-no-guard", "reserved").await;
+
+        // Still-active reservation (future reserved_until) with no guard key must
+        // NOT be touched — it is in flight.
+        seed_dispatch(&pool, "dispatch-typed-active-no-guard").await;
+        sqlx::query(
+            "INSERT INTO dispatch_delivery_events (
+                dispatch_id, correlation_id, semantic_event_id, operation,
+                target_kind, status, attempt, result_json, reserved_until,
+                created_at, updated_at
+             ) VALUES (
+                $1, 'dispatch:' || $1, 'dispatch:' || $1 || ':notify', 'send',
+                'channel', 'reserved', 1, '{}'::jsonb, NOW() + INTERVAL '5 minutes',
+                NOW(), NOW()
+             )",
+        )
+        .bind("dispatch-typed-active-no-guard")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let recovered = recover_orphan_typed_delivery_events_pg(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            recovered, 2,
+            "both guard-less mismatch cases should be reconciled"
+        );
+        assert!(
+            kv_key_exists(&pool, "dispatch_notified:dispatch-typed-sent-no-guard").await,
+            "notified guard must be rebuilt for a completed sent event"
+        );
+        assert_eq!(
+            latest_typed_status(&pool, "dispatch-typed-reserved-no-guard").await,
+            Some("failed".to_string()),
+            "expired guard-less reservation must be finalized as failed"
+        );
+        assert_eq!(
+            latest_typed_status(&pool, "dispatch-typed-active-no-guard").await,
+            Some("reserved".to_string()),
+            "in-flight reservation must be left untouched"
+        );
+
+        // Idempotent: a second pass reconciles nothing more. (The active one is
+        // still in flight, so it is correctly skipped both times.)
+        let recovered_again = recover_orphan_typed_delivery_events_pg(&pool)
+            .await
+            .unwrap();
+        assert_eq!(recovered_again, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dispatch_delivery_reconcile_recovers_and_clears_backlog_pg() {
+        let _serial = lock_dispatch_delivery_metric_tests();
+        reset_dispatch_delivery_event_mismatch_metrics_for_tests();
+        let Some(pg_db) = TestPostgresDb::try_create().await else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+
+        // Orphaned notified key with no typed event => missing_typed mismatch on
+        // the first pass, then reclaimed so the backlog clears on the next pass.
+        seed_dispatch(&pool, "dispatch-backlog-notified").await;
+        insert_kv(
+            &pool,
+            "dispatch_notified:dispatch-backlog-notified",
+            "dispatch-backlog-notified",
+        )
+        .await;
+
+        // Expired reserving key => reclaimed by recovery.
+        seed_dispatch(&pool, "dispatch-backlog-reserving").await;
+        insert_kv_with_expiry(
+            &pool,
+            "dispatch_reserving:dispatch-backlog-reserving",
+            "dispatch-backlog-reserving",
+            -60,
+        )
+        .await;
+
+        // Guard-less completed `sent` event => missing_kv_meta mismatch on the
+        // first pass; recovery rebuilds the notified guard.
+        seed_dispatch(&pool, "dispatch-backlog-typed-sent").await;
+        insert_delivery_event(&pool, "dispatch-backlog-typed-sent", "sent").await;
+
+        let first = reconcile_dispatch_delivery_events_pg(&pool).await.unwrap();
+        assert!(
+            first.mismatch_count > 0,
+            "first pass should report the backlog"
+        );
+        assert!(
+            first.missing_kv_meta > 0,
+            "first pass should observe the typed-only mismatch class too"
+        );
+        assert_eq!(first.recovered_expired_reserving, 1);
+        assert_eq!(first.recovered_orphan_notified, 1);
+        assert_eq!(first.recovered_orphan_typed, 1);
+
+        let recovery_metrics = dispatch_delivery_event_recovery_metrics_snapshot();
+        assert!(
+            recovery_metrics.iter().any(|m| {
+                m.kind == DISPATCH_DELIVERY_RECOVERY_EXPIRED_RESERVING && m.value == 1
+            })
+        );
+        assert!(
+            recovery_metrics
+                .iter()
+                .any(|m| { m.kind == DISPATCH_DELIVERY_RECOVERY_ORPHAN_NOTIFIED && m.value == 1 })
+        );
+        assert!(
+            recovery_metrics
+                .iter()
+                .any(|m| { m.kind == DISPATCH_DELIVERY_RECOVERY_ORPHAN_TYPED && m.value == 1 })
+        );
+
+        // Root-cause proof: the same orphans no longer recur on the next tick.
+        let second = reconcile_dispatch_delivery_events_pg(&pool).await.unwrap();
+        assert_eq!(
+            second.mismatch_count, 0,
+            "backlog must clear once orphans are reclaimed"
+        );
+        assert_eq!(second.recovered(), 0, "nothing left to recover");
 
         pool.close().await;
         pg_db.drop().await;
