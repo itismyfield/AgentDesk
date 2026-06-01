@@ -3749,6 +3749,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 let owed = mailbox_finalize_owed.swap(false, std::sync::atomic::Ordering::AcqRel);
                 let should_finish_mailbox = finish_mailbox_on_completion || owed;
                 if should_finish_mailbox {
+                    // #3016: capture the turn's real id BEFORE clearing inflight,
+                    // so the finalizer ledger match is exact (id-0 would risk a
+                    // stale terminal finalizing a queued follow-up).
+                    let fresh_idle_user_msg_id =
+                        crate::services::discord::inflight::load_inflight_state(
+                            &watcher_provider,
+                            channel_id.get(),
+                        )
+                        .map(|s| s.user_msg_id)
+                        .unwrap_or(0);
                     crate::services::discord::inflight::clear_inflight_state(
                         &watcher_provider,
                         channel_id.get(),
@@ -3771,6 +3781,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         &shared,
                         &watcher_provider,
                         channel_id,
+                        fresh_idle_user_msg_id,
                         finish_mailbox_on_completion,
                         owed,
                         true,
@@ -5687,8 +5698,51 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 provider = %watcher_provider.as_str(),
                 channel = channel_id.get(),
                 tmux_session = %tmux_session_name,
-                "[{ts}] ⚠ #2293: watcher lifecycle-stage paused — TUI quiescence gate timed out; skipping reaction / transcript / inflight-clear / mailbox-finish side effects until the next pass observes idle"
+                "[{ts}] ⚠ #2293: watcher lifecycle-stage paused — TUI quiescence gate timed out; submitting GateTimeout to the finalizer's deadline-armed reconciler instead of deferring to a never-firing next pass"
             );
+            // #3016 phase 3: this is the silent SKIP the EPIC targets. Today the
+            // `if terminal_output_committed && !lifecycle_stage_paused` blocks
+            // below are skipped entirely, so nothing finalizes until the 1800s
+            // placeholder sweeper — which never fires if the pane stays busy.
+            // Instead, submit a gate-timeout with `pane_quiescent: Some(false)`:
+            // the finalizer records it with a SHORT bounded deadline
+            // (GATE_BACKSTOP, seconds) and its single reconciler finalizes once
+            // the backstop elapses. The mailbox release does NOT inject into a
+            // busy pane — the hosted-TUI pre-submit guard remains the
+            // correctness floor that requeues follow-up input while the pane is
+            // non-quiescent. Only fire when terminal output was actually
+            // committed (a real turn end whose visible completion is gated),
+            // matching the committed-output precondition of the skipped block.
+            if terminal_output_committed {
+                // Prefer the real `user_msg_id` from inflight so this resolves
+                // to the exact ledger entry the bridge registered at handoff
+                // (with the Watcher owner) and thus DEFERS to the backstop. A
+                // channel-only id-0 here would risk resolving onto a different
+                // live entry; the real id keys exactly.
+                let gate_user_msg_id =
+                    crate::services::discord::inflight::load_inflight_state(
+                        &watcher_provider,
+                        channel_id.get(),
+                    )
+                    .map(|s| s.user_msg_id)
+                    .unwrap_or(0);
+                let _ = shared
+                    .turn_finalizer
+                    .submit_terminal(
+                        crate::services::discord::turn_finalizer::TurnKey::new(
+                            channel_id,
+                            gate_user_msg_id,
+                            shared.current_generation,
+                        ),
+                        watcher_provider.clone(),
+                        crate::services::discord::turn_finalizer::TerminalEvent::GateTimeout {
+                            pane_quiescent: Some(false),
+                        },
+                        crate::services::discord::turn_finalizer::FinalizeContext::watcher(),
+                        shared.clone(),
+                    )
+                    .await;
+            }
         }
 
         if terminal_output_committed && watcher_tui_gate_outcome.should_emit_completion() {
@@ -6130,10 +6184,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // entry. The redundant `should_kickoff_queue` block further
             // below is also `dispatch_ok`-gated and remains as a fallback
             // for paths where the helper short-circuited.
+            // #3016: the in-memory `inflight_state` (loaded at L~5860) still
+            // holds the real id even though the on-disk file was cleared above,
+            // so pass it for an exact ledger match.
+            let restored_user_msg_id = inflight_state
+                .as_ref()
+                .map(|s| s.user_msg_id)
+                .unwrap_or(0);
             finish_restored_watcher_active_turn(
                 &shared,
                 &provider_kind,
                 channel_id,
+                restored_user_msg_id,
                 finish_mailbox_on_completion,
                 owed,
                 dispatch_ok,
@@ -6876,6 +6938,7 @@ mod tests {
             &shared,
             &provider,
             channel_id,
+            state.user_msg_id,
             true,
             false,
             false,

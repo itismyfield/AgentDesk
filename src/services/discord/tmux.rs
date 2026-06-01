@@ -2276,6 +2276,9 @@ pub(super) async fn test_finish_restored_watcher_active_turn(
         shared,
         provider,
         channel_id,
+        // Tests exercise single-turn channels; id-0 is sufficient (no
+        // cross-turn collision in a single-active-turn test scenario).
+        0,
         finish_mailbox_on_completion,
         delegated_finalize_owed,
         true,
@@ -2298,6 +2301,7 @@ pub(super) async fn test_finish_restored_watcher_active_turn_with_kickoff_gate(
         shared,
         provider,
         channel_id,
+        0,
         finish_mailbox_on_completion,
         delegated_finalize_owed,
         kickoff_queue,
@@ -2310,6 +2314,11 @@ async fn finish_restored_watcher_active_turn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
+    // #3016: the turn's real `user_msg_id`, captured by the caller BEFORE it
+    // cleared inflight (a reload here returns `None`). 0 means "unknown" (true
+    // orphan); a real id makes the finalizer ledger match exact so a stale
+    // channel-only terminal cannot finalize a queued follow-up turn.
+    user_msg_id: u64,
     finish_mailbox_on_completion: bool,
     delegated_finalize_owed: bool,
     kickoff_queue: bool,
@@ -2347,21 +2356,58 @@ async fn finish_restored_watcher_active_turn(
         );
     }
 
-    let finish = super::mailbox_finish_turn(shared, provider, channel_id).await;
-    if let Some(token) = finish.removed_token {
-        token
-            .cancelled
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        super::saturating_decrement_global_active(shared);
-    }
-    super::clear_watchdog_deadline_override(channel_id.get()).await;
-    shared
-        .dispatch_thread_parents
-        .retain(|_, thread| *thread != channel_id);
-    if !finish.has_pending {
-        shared.dispatch_role_overrides.remove(&channel_id);
-    }
-    if kickoff_queue && finish.mailbox_online && finish.has_pending {
+    // #3016 phase 3: route the watcher terminal through the single-authority
+    // finalizer instead of calling mailbox_finish_turn + counter + side-effects
+    // inline. The ledger phase gate makes this exactly-once across bridge and
+    // watcher: whichever submits first finalizes; the loser gets
+    // `AlreadyFinalized` and the watcher simply skips the queue kickoff (the
+    // winner already owns it).
+    //
+    // Use the REAL `user_msg_id` the caller captured BEFORE clearing inflight
+    // (reloading inflight here returns `None` because the watcher already wiped
+    // it). The exact id makes the ledger match precise: a stale terminal from an
+    // already-finalized turn resolves to that turn's `Finalized` entry
+    // (→ AlreadyFinalized) instead of accidentally finalizing a queued follow-up.
+    //
+    // The watcher cleared inflight inline before calling this helper, and never
+    // marked completion-cleanup or drained voice, so `FinalizeContext::watcher`
+    // reproduces exactly that side-effect set; the kickoff stays gated on the
+    // caller's `kickoff_queue`.
+    let outcome = shared
+        .turn_finalizer
+        .submit_terminal(
+            super::turn_finalizer::TurnKey::new(
+                channel_id,
+                user_msg_id,
+                shared.current_generation,
+            ),
+            provider.clone(),
+            super::turn_finalizer::TerminalEvent::Complete,
+            super::turn_finalizer::FinalizeContext::watcher(),
+            shared.clone(),
+        )
+        .await;
+    let (mailbox_online, has_pending) = match outcome {
+        super::turn_finalizer::FinalizeOutcome::Finalized {
+            has_pending,
+            mailbox_online,
+            ..
+        } => {
+            // #3016 (codex P1): this watcher finalize consumed the delegated
+            // debt. Revoke the legacy `mailbox_finalize_owed` flag so a later
+            // watcher swap can't run stale cleanup against the NEXT active turn.
+            // (Removed wholesale in phase 5; revoked here in the meantime.)
+            if let Some(watcher) = shared.tmux_watchers.get(&channel_id) {
+                watcher
+                    .mailbox_finalize_owed
+                    .store(false, std::sync::atomic::Ordering::Release);
+            }
+            (mailbox_online, has_pending)
+        }
+        super::turn_finalizer::FinalizeOutcome::AlreadyFinalized
+        | super::turn_finalizer::FinalizeOutcome::Deferred => (false, false),
+    };
+    if kickoff_queue && mailbox_online && has_pending {
         super::schedule_deferred_idle_queue_kickoff(
             shared.clone(),
             provider.clone(),
@@ -4541,6 +4587,7 @@ mod tests {
             &shared,
             &provider,
             channel_id,
+            0,
             true,
             false,
             true,
@@ -4573,6 +4620,7 @@ mod tests {
             &shared,
             &provider,
             channel_id,
+            0,
             false,
             true,
             true,
