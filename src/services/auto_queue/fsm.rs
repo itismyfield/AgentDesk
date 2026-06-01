@@ -691,3 +691,19 @@ pub(super) fn load_kv_meta_value_pg(
         |error| error,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_retry_limit_enforces_minimum_and_maximum_bounds() {
+        assert_eq!(clamp_retry_limit(0), 1);
+        assert_eq!(clamp_retry_limit(1), 1);
+        assert_eq!(clamp_retry_limit(3), 3);
+        assert_eq!(clamp_retry_limit(100), 100);
+        assert_eq!(clamp_retry_limit(i64::MAX as u64), i64::MAX);
+        assert_eq!(clamp_retry_limit((i64::MAX as u64) + 1), i64::MAX);
+        assert_eq!(clamp_retry_limit(u64::MAX), i64::MAX);
+    }
+}
