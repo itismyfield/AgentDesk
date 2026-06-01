@@ -40,6 +40,11 @@ impl TmuxCleanupPolicy {
 /// upper-bound when the exit signal never fires. The constant is now a
 /// *safety net*, not the primary timing source.
 const PROVIDER_INTERRUPT_SETTLE: Duration = Duration::from_millis(750);
+// #3021 / codex P2: confirmation delay before treating a claude pane as
+// genuinely idle and skipping its SIGINT. Guards against a stale JSONL
+// turn-state read in the sub-second window after a follow-up prompt is
+// submitted but before claude flushes the new `user` envelope.
+const PROVIDER_IDLE_CONFIRM_DELAY: Duration = Duration::from_millis(400);
 /// Upper bound for the post-SIGINT grace period before we escalate to
 /// SIGKILL. Same #2426 rationale as `PROVIDER_INTERRUPT_SETTLE`: when the
 /// provider exits cleanly we observe its PID exit and proceed immediately.
@@ -77,16 +82,40 @@ fn provider_turn_interrupt_plan(provider: &ProviderKind) -> Option<ProviderTurnI
 
 fn fallback_sigint_pid_for_provider(
     provider: &ProviderKind,
-    _ready_for_input: bool,
+    ready_for_input: bool,
     provider_pid: Option<u32>,
 ) -> Option<u32> {
     match provider {
-        // #1260: claude only gets the interrupt via direct SIGINT (no C-c on
-        // the pane), so always deliver it when we have the PID. The previous
-        // `ready_for_input` branch was meant to avoid double-delivery when
-        // C-c had already gone to the pane — irrelevant now that the C-c
-        // path is removed for claude.
-        ProviderKind::Claude | ProviderKind::Codex | ProviderKind::Qwen => provider_pid,
+        // #3021: Claude has NO send-keys interrupt path (empty key list — see
+        // `provider_turn_interrupt_plan`), so the direct SIGINT is both its
+        // only interrupt AND, on an idle pane, a process-kill that terminates
+        // the TUI, kills the pane, and makes the watcher tear down the whole
+        // tmux session as "dead after turn". Under `PreserveSession` (e.g. ⏳
+        // reaction removal on a finished-but-still-"active" turn) that destroys
+        // the session + context — the opposite of the policy intent. When the
+        // pane is confirmed idle (`ready_for_input`, double-checked by the
+        // caller's confirmation re-probe so a stale post-submit read cannot
+        // pass) there is no generation to interrupt, so skip the SIGINT and
+        // leave the live process alone. An actively streaming turn reports
+        // `ready_for_input == false` and is still interrupted (#1260). The
+        // hard-stop path already treats `ready_for_input` as "do not kill"
+        // (`hard_stop_pid_for_unresponsive_provider`); this mirrors it.
+        ProviderKind::Claude => {
+            if ready_for_input {
+                None
+            } else {
+                provider_pid
+            }
+        }
+        // Codex/Qwen also send Escape/C-c, but those keys reach the wrapper
+        // PTY rather than the separately-spawned provider child, so the direct
+        // SIGINT fallback is what actually stops them. The readiness probe can
+        // read a stale terminal/ready state in the sub-second window after a
+        // follow-up submit, and (unlike Claude) these providers get no
+        // confirmation re-probe — so do NOT gate their interrupt on
+        // `ready_for_input`. Always deliver the fallback when we have the child
+        // PID, matching base-branch behavior (#1260).
+        ProviderKind::Codex | ProviderKind::Qwen => provider_pid,
         ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Unsupported(_) => None,
     }
 }
@@ -261,6 +290,70 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
             );
             (false, None)
         }
+    };
+
+    // #3021 / codex P2: the JSONL turn-state probe can briefly read a stale
+    // terminal `result` in the sub-second window after a follow-up prompt is
+    // submitted but before claude flushes the new `user` envelope to the
+    // transcript — reporting ready_for_input=true for a turn that is actually
+    // still generating. Claude has no send-keys interrupt path, so skipping
+    // its SIGINT on that stale read would leave a cancelled turn running. The
+    // 750ms settle above already lets the envelope land for a genuinely active
+    // turn; require a second agreeing read before committing to "idle, skip
+    // SIGINT" so a freshly-submitted turn (which flips to Busy on the confirm
+    // read) is still interrupted, while a genuinely idle pane (#3021) stays
+    // ready across both reads and is correctly left alone. Only claude needs
+    // this — every other provider also has a send-keys/Escape interrupt, and
+    // the extra delay is confined to the idle-stop path where nothing is being
+    // interrupted anyway.
+    let (ready_for_input, provider_pid) = if ready_for_input
+        && matches!(provider, ProviderKind::Claude)
+    {
+        tokio::time::sleep(PROVIDER_IDLE_CONFIRM_DELAY).await;
+        let session_for_confirm = tmux_session_name.to_string();
+        let provider_for_confirm = provider.clone();
+        let confirm = tokio::task::spawn_blocking(move || {
+            let ready =
+                tmux_ready_for_input_without_tui_pane(&session_for_confirm, &provider_for_confirm);
+            let pid = provider_cli_pid_in_tmux(
+                &session_for_confirm,
+                &provider_for_confirm,
+                tracked_child_pid,
+            );
+            (ready, pid)
+        })
+        .await;
+        match confirm {
+            // Stay "idle" only if the confirmation agrees; otherwise treat the
+            // turn as active and interrupt with the freshly observed pid.
+            //
+            // codex review P2: use ONLY the confirm probe's freshly-observed
+            // pid — never fall back to the pre-confirm `provider_pid`. If the
+            // provider/pane exited during the 400ms confirm window the confirm
+            // pid is `None`; reviving the stale pre-confirm pid here would
+            // SIGINT a process that is no longer under the tmux pane (and could
+            // signal an unrelated process after PID reuse). A `None` confirm
+            // pid therefore correctly skips the SIGINT — there is nothing left
+            // to interrupt.
+            Ok((confirmed_ready, confirmed_pid)) => (confirmed_ready, confirmed_pid),
+            Err(error) => {
+                tracing::warn!(
+                    "provider turn interrupt idle-confirm join error: provider={} session={} reason={} error={}",
+                    provider.as_str(),
+                    tmux_session_name,
+                    reason,
+                    error
+                );
+                // On a confirm-probe failure we cannot re-validate the pid, so
+                // do NOT reuse the stale pre-confirm pid (same PID-reuse hazard
+                // codex flagged). Skip the SIGINT fallback; the cooperative
+                // cancel in `cancel_active_token` still runs, and the hard-stop
+                // path re-probes for a live, pane-validated pid afterward.
+                (false, None)
+            }
+        }
+    } else {
+        (ready_for_input, provider_pid)
     };
 
     let fallback_sigint_pid =
@@ -1131,28 +1224,54 @@ mod tests {
     // ready-for-input gate was meant to avoid double-delivery on top of the
     // (now-removed) C-c.
     #[test]
-    fn provider_interrupt_fallback_always_fires_for_claude_when_pid_known() {
+    fn provider_interrupt_fallback_skips_idle_claude_but_always_fires_for_wrapped_providers() {
+        // #3021: an idle / ready-for-input claude pane has no running
+        // generation to interrupt; firing SIGINT at the live claude PID there
+        // terminates the TUI and the watcher then kills the whole session.
+        // Skip the fallback for an idle claude. The caller's confirmation
+        // re-probe guarantees this `ready_for_input=true` is not a stale
+        // post-submit read.
         assert_eq!(
             super::fallback_sigint_pid_for_provider(&ProviderKind::Claude, true, Some(42)),
+            None,
+            "idle claude (ready_for_input=true) must NOT receive SIGINT (#3021): it kills the TUI + session"
+        );
+
+        // codex review P1: Codex/Qwen send Escape/C-c to the wrapper PTY, but
+        // their provider child is spawned separately, so the direct SIGINT
+        // fallback is their real interrupt. They get no confirmation re-probe,
+        // so a stale-ready read must NOT suppress their SIGINT — always fire
+        // when a child PID is known, even on ready_for_input=true.
+        assert_eq!(
+            super::fallback_sigint_pid_for_provider(&ProviderKind::Codex, true, Some(42)),
             Some(42),
-            "claude SIGINT fallback must fire even when ready_for_input=true (#1260)"
+            "codex must still receive SIGINT even on a (possibly stale) ready read — its send-keys only hits the wrapper PTY"
         );
         assert_eq!(
+            super::fallback_sigint_pid_for_provider(&ProviderKind::Qwen, true, Some(42)),
+            Some(42),
+            "qwen must still receive SIGINT even on a (possibly stale) ready read"
+        );
+
+        // #1260: an actively streaming turn reports ready_for_input=false, and
+        // every wrapped provider must still be interrupted via SIGINT.
+        assert_eq!(
             super::fallback_sigint_pid_for_provider(&ProviderKind::Claude, false, Some(42)),
+            Some(42),
+            "running claude turn (ready_for_input=false) must still be interrupted (#1260)"
+        );
+        assert_eq!(
+            super::fallback_sigint_pid_for_provider(&ProviderKind::Codex, false, Some(42)),
+            Some(42)
+        );
+        assert_eq!(
+            super::fallback_sigint_pid_for_provider(&ProviderKind::Qwen, false, Some(42)),
             Some(42)
         );
         assert_eq!(
             super::fallback_sigint_pid_for_provider(&ProviderKind::Claude, false, None),
             None,
             "no PID = no SIGINT (still skip the fallback cleanly)"
-        );
-        assert_eq!(
-            super::fallback_sigint_pid_for_provider(&ProviderKind::Codex, true, Some(42)),
-            Some(42)
-        );
-        assert_eq!(
-            super::fallback_sigint_pid_for_provider(&ProviderKind::Qwen, false, Some(42)),
-            Some(42)
         );
         assert_eq!(
             super::fallback_sigint_pid_for_provider(&ProviderKind::Gemini, false, Some(42)),

@@ -413,11 +413,60 @@ pub(super) async fn resume_aborted_restart_turn(
     };
     let Some(state) = super::inflight::load_inflight_state(&provider_kind, channel_id.get()) else {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] ⚠ watcher death recovery: no inflight state for channel {} (provider {})",
-            channel_id.get(),
-            provider_kind.as_str()
-        );
+        // #3014: there is no persisted inflight turn to hand off, but the pane
+        // may have died *mid-turn while Discord inputs were queued*. Without
+        // inflight there is nothing to resume, so the historical behavior just
+        // returned here — leaving the queued backlog orphaned until the next
+        // dcserver restart (or the next user message) finally triggered a
+        // kickoff. That produced multi-minute "stuck queue" stalls (71-minute
+        // case). Reuse the proven deferred idle-queue kickoff so the backlog
+        // drains on its own: the kickoff gate passes for a dead session
+        // (no live pane ⇒ not "busy", no active turn ⇒ kickable), and the
+        // dispatch path spawns a fresh session for the queued item.
+        let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
+        let has_queued_backlog = !snapshot.intervention_queue.is_empty();
+        // codex review P2: only auto-drain when the mailbox is IDLE. The
+        // watcher death handler runs asynchronously, so by the time it fires a
+        // concurrent kickoff / user message may already have started the next
+        // queued turn in a fresh session — that turn holds a live cancel_token
+        // while the remaining backlog is still queued. The tmux session name is
+        // derived from the channel and thus shared across the dead and the
+        // fresh session, so it cannot distinguish the stale dead turn from a
+        // live one. Acting on backlog-presence alone would let a channel-scoped
+        // finish cancel that unrelated live turn and corrupt global_active.
+        // When an active turn is present we therefore leave the mailbox
+        // untouched: a live turn drains the backlog when it completes, and a
+        // stale dead-turn slot is reconciled by the watchdog / placeholder
+        // sweeper paths (which then trigger their own kickoff). Only the
+        // genuinely-idle case is the orphaned backlog this path must rescue.
+        let mailbox_idle = snapshot.cancel_token.is_none()
+            && snapshot.active_request_owner.is_none()
+            && snapshot.active_user_message_id.is_none();
+        if has_queued_backlog && mailbox_idle {
+            tracing::info!(
+                "  [{ts}] ↻ watcher death recovery: idle mailbox for channel {} (provider {}) with queued backlog — scheduling idle-queue kickoff (#3014)",
+                channel_id.get(),
+                provider_kind.as_str()
+            );
+            super::queue_io::schedule_deferred_idle_queue_kickoff(
+                shared.clone(),
+                provider_kind,
+                channel_id,
+                "watcher_death_backlog_recovery",
+            );
+        } else if has_queued_backlog {
+            tracing::info!(
+                "  [{ts}] ⚠ watcher death recovery: no inflight for channel {} (provider {}); queued backlog deferred — mailbox has an active turn (live drain or reconciler will handle)",
+                channel_id.get(),
+                provider_kind.as_str()
+            );
+        } else {
+            tracing::info!(
+                "  [{ts}] ⚠ watcher death recovery: no inflight state for channel {} (provider {})",
+                channel_id.get(),
+                provider_kind.as_str()
+            );
+        }
         return false;
     };
 
