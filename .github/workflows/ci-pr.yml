@@ -1,13 +1,22 @@
 name: CI PR
 
 on:
-  push:
-    branches-ignore:
-      - main
+  # PR-only triggers. The previous `push: branches-ignore: [main]` trigger ran
+  # this whole workflow a SECOND time for every push that also had an open PR
+  # (pull_request: synchronize already covers PR-branch pushes), doubling CI
+  # compute. Deduping via the concurrency group instead would cancel the older
+  # run, but the `*_required_context` mirrors run `if: always()` and FAIL CLOSED
+  # on a `cancelled` upstream — so cancellation surfaces spurious required-check
+  # failures. Dropping the redundant push trigger removes the duplicate at the
+  # source with no cancellation. Branch CI is obtained by opening a PR; main is
+  # covered by ci-main.yml.
   pull_request:
   workflow_dispatch:
 
 concurrency:
+  # Collapse rapid re-pushes to the same PR head branch into one run. Only
+  # pull_request/workflow_dispatch events reach here now, so `github.head_ref`
+  # is set for PRs; fall back to `github.ref` for manual dispatch.
   group: ci-pr-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
@@ -27,6 +36,15 @@ jobs:
       pg_db: ${{ steps.filter.outputs.pg_db }}
       rust_or_policy: ${{ steps.filter.outputs.rust_or_policy }}
       rust_compile: ${{ steps.filter.outputs.rust_compile }}
+      # True when a Rust-compile change touches paths OUTSIDE the relay
+      # stabilization surface, i.e. it actually needs cross-OS verification.
+      # Relay-only PRs (src/services/discord/**, tests/e2e/**) leave this
+      # false so the ~22min PR-time Windows lane is skipped; the nightly
+      # workflow still exercises the full macOS/Windows matrix within 24h.
+      # NOTE: this gates ONLY the advisory Windows lane — it does NOT touch
+      # `ci_relax_safe`, so the required ubuntu Rust/PG/dashboard mirrors keep
+      # verifying every PR for real.
+      cross_os_rust: ${{ steps.filter.outputs.cross_os_rust }}
       ci_relax_safe: ${{ contains(github.head_ref || github.ref_name, 'tui-relay-stabilization') }}
     steps:
       - uses: actions/checkout@v4
@@ -149,6 +167,30 @@ jobs:
               # (src/services/routines/loader.rs); a routine asset change
               # can fail the test on any OS.
               - 'routines/**'
+            # cross_os_rust mirrors `rust_compile` MINUS the relay
+            # stabilization surface. When false, the only compile-affecting
+            # changes are confined to `src/services/discord/**` and/or
+            # `tests/e2e/**`, which the nightly macOS/Windows matrix already
+            # exercises daily — so the advisory PR-time Windows lane is
+            # skipped to keep relay-only PRs fast. Any compile input outside
+            # that surface (a different crate path, Cargo/toolchain/build.rs,
+            # this CI file) flips it true and the Windows lane runs. Keep the
+            # positive list in sync with `rust_compile`.
+            cross_os_rust:
+              - 'src/**'
+              - '!src/services/discord/**'
+              - 'tests/**'
+              - '!tests/e2e/**'
+              - 'migrations/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'sqlx-data.json'
+              - '.cargo/**'
+              - 'rust-toolchain*'
+              - 'build.rs'
+              - '.github/workflows/ci-pr.yml'
+              - 'defaults.json'
+              - 'routines/**'
 
   dashboard:
     name: Dashboard (Node 22)
@@ -228,7 +270,12 @@ jobs:
   check_fast_cross_os:
     name: Fast check + non-PG tests (${{ matrix.os }})
     needs: changes
-    if: needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.ci_relax_safe != 'true'
+    # Advisory (non-required) cross-OS lane. Run only when a Rust-compile
+    # change reaches OUTSIDE the relay stabilization surface (cross_os_rust);
+    # relay-only PRs (src/services/discord/**, tests/e2e/**) skip it and rely
+    # on the nightly full macOS/Windows matrix. `ci_relax_safe` still fully
+    # relaxes it for the stabilization branch escape hatch.
+    if: needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' && needs.changes.outputs.ci_relax_safe != 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -592,8 +639,14 @@ jobs:
         if: ${{ needs.changes.outputs.ci_relax_safe != 'true' }}
         env:
           CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
-          FILTER_NAME: rust_compile
-          FILTER_OUTPUT: ${{ needs.changes.outputs.rust_compile }}
+          # Mirror on `cross_os_rust`, NOT `rust_compile`: the cross-OS lane is
+          # now gated on cross_os_rust, so a relay-only PR (rust_compile=true,
+          # cross_os_rust=false) legitimately SKIPS the Windows job. Keying the
+          # mirror on rust_compile would fail closed on that expected skip;
+          # cross_os_rust=false lets required-check-mirror.sh treat the skip as
+          # pass, while cross_os_rust=true still requires the lane to succeed.
+          FILTER_NAME: cross_os_rust
+          FILTER_OUTPUT: ${{ needs.changes.outputs.cross_os_rust }}
           UPSTREAM_JOB_NAME: check_fast_cross_os
           UPSTREAM_RESULT: ${{ needs.check_fast_cross_os.result }}
         run: ./scripts/required-check-mirror.sh
