@@ -802,6 +802,20 @@ pub(super) async fn auto_restore_session_force(
             session.remote_profile_name = saved_remote.clone();
         }
         if session.current_path.is_some() || last_path.is_none() {
+            // A pre-existing session (e.g. inserted by restart watcher
+            // registration with `current_path` from `sessions.cwd` but
+            // `worktree: None`) hits this early return before the insertion
+            // block below. Reconstruct the managed-worktree metadata here too so
+            // restarted thread sessions regain `WorktreeInfo` / inflight worktree
+            // context and a correct cleanup root (#3011).
+            if let Some(current_path) = session.current_path.clone() {
+                reconstruct_managed_worktree_metadata(
+                    session,
+                    &provider,
+                    channel_id,
+                    &current_path,
+                );
+            }
             return;
         }
     }
@@ -839,6 +853,7 @@ pub(super) async fn auto_restore_session_force(
             session.remote_profile_name = saved_remote.clone();
         }
         session.current_path = Some(last_path.clone());
+        reconstruct_managed_worktree_metadata(session, &provider, channel_id, &last_path);
         drop(data);
 
         // Rescan skills with project path
@@ -851,6 +866,221 @@ pub(super) async fn auto_restore_session_force(
             .unwrap_or_default();
         tracing::info!("  [{ts}] ↻ Auto-restored session: {last_path}{remote_info}");
     }
+}
+
+/// Look up the persisted worktree path for a thread session from the `sessions`
+/// DB table, mirroring the restore lookup in [`auto_restore_session_force`].
+///
+/// After a dcserver restart the in-memory `sessions` map is empty, so without
+/// this lookup a new thread message would create a brand-new worktree and drop
+/// the provider session fingerprint / recovery context tied to the previous
+/// worktree path (#3011). The returned path is only honored when it still names
+/// a usable git worktree on disk; otherwise we fall back to creating a fresh one.
+fn restore_thread_worktree_path_from_db(
+    pg_pool: Option<&sqlx::PgPool>,
+    token_hash: &str,
+    provider: &ProviderKind,
+    channel_name: &str,
+) -> Option<String> {
+    let tmux_name = provider.build_tmux_session_name(channel_name);
+    let session_keys = build_session_key_candidates(token_hash, provider, &tmux_name);
+    let pg_pool = pg_pool?;
+    crate::utils::async_bridge::block_on_pg_result(
+        pg_pool,
+        move |pool| async move {
+            for session_key in session_keys {
+                // `sessions.cwd` is nullable: decode as Option so a NULL /
+                // metadata-only row for an earlier session-key candidate does
+                // not fail the decode and abort the loop before the legacy
+                // fallback key is tried.
+                let path = sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT cwd FROM sessions WHERE session_key = $1 LIMIT 1",
+                )
+                .bind(&session_key)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|error| format!("load thread session cwd {session_key}: {error}"))?
+                .flatten();
+                if let Some(path) = path.filter(|p| !p.is_empty()) {
+                    return Ok(Some(path));
+                }
+            }
+            Ok(None)
+        },
+        |message| message,
+    )
+    .ok()
+    .flatten()
+}
+
+/// True when `worktree_path` exists, is a git worktree, and shares the same
+/// repository (git common dir) as `parent_path`. The shared-repo match is
+/// essential: a thread can be reused by a later dispatch that targets a
+/// *different* repo, in which case the stored cwd must NOT be restored — we must
+/// fall through to create a worktree off the requested `parent_path` so the
+/// dispatch runs against its real target (#3011 codex review: avoid treating a
+/// restored cwd as the dispatch target).
+///
+/// Both paths are compared by their `--git-common-dir` so the check holds even
+/// when `parent_path` is itself a linked worktree (e.g. a dispatch worktree),
+/// where comparing against the main checkout would otherwise reject a valid
+/// restored thread worktree.
+fn restored_worktree_belongs_to_parent(parent_path: &str, worktree_path: &str) -> bool {
+    if !std::path::Path::new(worktree_path).is_dir() {
+        return false;
+    }
+    // Only accept a *distinct linked* worktree. If a previous
+    // `create_git_worktree` failure persisted the fallback `parent_path` (the
+    // shared parent checkout) as this thread's cwd, restoring it would record
+    // the main checkout as `session.worktree`, defeating isolation and exposing
+    // it to worktree idle-cleanup. A linked worktree's per-worktree git dir
+    // differs from its shared common dir; the main checkout's do not.
+    if !is_linked_worktree(worktree_path) {
+        return false;
+    }
+    let worktree_repo = match git_common_dir(worktree_path) {
+        Some(dir) => dir,
+        None => return false,
+    };
+    let parent_repo = match git_common_dir(parent_path) {
+        Some(dir) => dir,
+        None => return false,
+    };
+    paths_equal(&worktree_repo, &parent_repo)
+}
+
+/// True when `path` lives under the AgentDesk-managed worktrees root, i.e. it is
+/// a worktree this process created via [`create_git_worktree`] and therefore owns
+/// for cleanup. A user's *configured workspace* that happens to be a linked git
+/// worktree lives elsewhere and must NOT be treated as a disposable
+/// AgentDesk-owned worktree — otherwise idle session cleanup could remove the
+/// user's checkout and delete its branch (#3011 codex review P1).
+fn is_managed_worktree_path(path: &str) -> bool {
+    let Some(root) = worktrees_root() else {
+        return false;
+    };
+    let root = root.canonicalize().unwrap_or(root);
+    let candidate = std::path::PathBuf::from(path);
+    let candidate = candidate.canonicalize().unwrap_or(candidate);
+    candidate.starts_with(&root)
+}
+
+/// True when `path` is a *linked* git worktree rather than the repository's main
+/// checkout. A linked worktree's per-worktree git dir
+/// (`<repo>/.git/worktrees/<name>`) differs from the shared common dir
+/// (`<repo>/.git`), whereas they are identical for the main checkout.
+fn is_linked_worktree(path: &str) -> bool {
+    let git_dir = git_command_stdout(path, &["rev-parse", "--path-format=absolute", "--git-dir"])
+        .ok()
+        .filter(|dir| !dir.is_empty());
+    let common_dir = git_common_dir(path);
+    match (git_dir, common_dir) {
+        (Some(git_dir), Some(common_dir)) => {
+            let git_dir = std::path::PathBuf::from(git_dir);
+            let git_dir = git_dir.canonicalize().unwrap_or(git_dir);
+            !paths_equal(&git_dir, &common_dir)
+        }
+        _ => false,
+    }
+}
+
+/// Resolve the absolute git common dir (the shared repository `.git` directory)
+/// for `path`, canonicalizing so the same repo compares equal regardless of how
+/// it was reached (main checkout vs. linked worktree, symlinks, relative input).
+fn git_common_dir(path: &str) -> Option<std::path::PathBuf> {
+    let common_dir = git_command_stdout(
+        path,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .ok()
+    .filter(|dir| !dir.is_empty())?;
+    let common_dir = std::path::PathBuf::from(common_dir);
+    Some(common_dir.canonicalize().unwrap_or(common_dir))
+}
+
+/// Compare two filesystem paths, tolerating symlinked/relative differences by
+/// canonicalizing when possible and falling back to a lexical comparison.
+fn paths_equal(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
+}
+
+/// Reconstruct the [`WorktreeInfo`] for a restored thread worktree path. The
+/// branch is read back from the worktree's HEAD so unmerged-commit / local-change
+/// detection keeps working across restarts.
+///
+/// Returns `None` when the worktree's branch cannot be recovered (detached HEAD
+/// or a failed lookup). Attaching `WorktreeInfo` with an empty branch is unsafe:
+/// idle cleanup builds an `origin/main..<branch>` range from it and, with an
+/// empty branch, inspects the wrong checkout's HEAD — so a clean detached
+/// worktree carrying unmerged work could be wrongly removed (#3011 codex P1).
+fn restored_worktree_info(parent_path: &str, worktree_path: &str) -> Option<WorktreeInfo> {
+    let branch_name = git_command_stdout(worktree_path, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .ok()
+        .filter(|b| !b.is_empty() && b != "HEAD")?;
+    Some(WorktreeInfo {
+        // `original_path` is the cleanup root: idle cleanup runs
+        // `git -C original_path worktree remove <worktree_path>` then
+        // `git -C original_path branch -D <branch>`. It must therefore be a
+        // stable checkout that survives removing this worktree — never the
+        // restored worktree itself (which `parent_path` can equal when the
+        // dispatch parent is itself a linked worktree). Resolve the main
+        // checkout from the worktree's common dir so branch deletion still
+        // works post-removal.
+        original_path: main_checkout_for_worktree(worktree_path)
+            .unwrap_or_else(|| parent_path.to_string()),
+        worktree_path: worktree_path.to_string(),
+        branch_name,
+    })
+}
+
+/// Reconstruct and attach [`WorktreeInfo`] to a restored session when its
+/// `path` is an AgentDesk-managed linked git worktree and the session does not
+/// already carry worktree metadata. No-op otherwise (already populated, a
+/// user-configured workspace outside the managed worktrees root, or the main
+/// checkout). Used by the auto-restore paths so a thread session that resumes
+/// after a dcserver restart regains its worktree metadata, inflight worktree
+/// context, and a stable cleanup root instead of silently dropping them (#3011).
+fn reconstruct_managed_worktree_metadata(
+    session: &mut DiscordSession,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    path: &str,
+) {
+    if session.worktree.is_some() || !is_managed_worktree_path(path) || !is_linked_worktree(path) {
+        return;
+    }
+    // Skip reconstruction when no branch can be recovered (detached HEAD); see
+    // `restored_worktree_info` — attaching an empty branch would mislead cleanup.
+    let Some(wt_info) = restored_worktree_info(path, path) else {
+        return;
+    };
+    let base_commit = crate::services::platform::git_head_commit(&wt_info.original_path);
+    sync_inflight_worktree_context(
+        provider,
+        channel_id.get(),
+        Some(wt_info.worktree_path.clone()),
+        Some(wt_info.branch_name.clone()),
+        base_commit,
+    );
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!(
+        "  [{ts}] ↻ Restored worktree metadata: {} (branch: {})",
+        wt_info.worktree_path,
+        wt_info.branch_name
+    );
+    session.worktree = Some(wt_info);
+}
+
+/// Resolve the repository's main checkout directory for a linked `worktree_path`.
+/// The common dir resolves to `<main_checkout>/.git`, so its parent is the main
+/// checkout. Returns `None` when the path is not under a resolvable git repo.
+fn main_checkout_for_worktree(worktree_path: &str) -> Option<String> {
+    let common_dir = git_common_dir(worktree_path)?;
+    let main_checkout = common_dir.parent()?;
+    Some(main_checkout.to_string_lossy().to_string())
 }
 
 /// Create a lightweight session for a thread, bootstrapped from the parent channel's path.
@@ -900,11 +1130,57 @@ pub(super) async fn bootstrap_thread_session(
             born_generation: runtime_store::load_generation(),
             assistant_turns: 0,
         });
+    // Prefer restoring the worktree persisted for this thread session across a
+    // dcserver restart. The in-memory `sessions` map is cleared on restart, so
+    // without this lookup a new thread message would create a brand-new worktree
+    // and drop the provider session fingerprint / recovery context tied to the
+    // previous worktree path (#3011). Mirror the DB cwd lookup used by
+    // `auto_restore_session_force`, and only create a fresh worktree when the
+    // stored path is absent or no longer a usable git worktree on disk.
+    let ch = session
+        .channel_name
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let restored_worktree = restore_thread_worktree_path_from_db(
+        shared.pg_pool.as_ref(),
+        &shared.token_hash,
+        &provider_kind,
+        &ch,
+    )
+    .filter(|path| is_managed_worktree_path(path))
+    .filter(|path| restored_worktree_belongs_to_parent(parent_path, path));
+    // Only honor the restore when a branch is recoverable. A detached / unknown
+    // branch would yield an empty `branch_name` that misleads idle cleanup, so
+    // in that case fall through to create a fresh, well-formed worktree instead.
+    if let Some(restored_path) = restored_worktree
+        && let Some(wt_info) = restored_worktree_info(parent_path, &restored_path)
+    {
+        let base_commit = crate::services::platform::git_head_commit(&wt_info.original_path);
+        let restored_path = wt_info.worktree_path.clone();
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] ↻ Restored thread worktree: {} (branch: {})",
+            wt_info.worktree_path,
+            wt_info.branch_name
+        );
+        sync_inflight_worktree_context(
+            &provider_kind,
+            thread_channel_id.get(),
+            Some(wt_info.worktree_path.clone()),
+            Some(wt_info.branch_name.clone()),
+            base_commit,
+        );
+        session.worktree = Some(wt_info);
+        session.current_path = Some(restored_path.clone());
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!("  [{ts}] ↻ Bootstrapped thread session: {restored_path}");
+        return true;
+    }
+
     // Always create a worktree for thread sessions to isolate concurrent work.
     let effective_path = {
-        let ch = session.channel_name.as_deref().unwrap_or("unknown");
         let provider_str = shared.settings.read().await.provider.as_str().to_string();
-        match create_git_worktree(parent_path, ch, &provider_str) {
+        match create_git_worktree(parent_path, &ch, &provider_str) {
             Ok((wt_path, branch)) => {
                 let base_commit = crate::services::platform::git_head_commit(parent_path);
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1190,6 +1466,115 @@ mod tests {
         run_git(repo.path(), &["push", "-u", "origin", "main"]);
 
         (repo, origin)
+    }
+
+    #[test]
+    fn restored_worktree_belongs_to_parent_matches_same_repo() {
+        let (repo, _origin) = setup_git_repo_with_origin();
+        let repo_path = repo.path().to_str().unwrap().to_string();
+
+        // Linked worktree off the same repo.
+        let wt = tempfile::tempdir().unwrap();
+        let wt_path = wt.path().join("thread-wt");
+        let wt_path_str = wt_path.to_str().unwrap();
+        run_git(
+            repo.path(),
+            &["worktree", "add", "-b", "wt/thread", wt_path_str],
+        );
+
+        // Same repository -> restore is honored.
+        assert!(restored_worktree_belongs_to_parent(&repo_path, wt_path_str));
+
+        // Comparing the worktree against itself as parent also matches (covers
+        // the case where the dispatch parent is itself a linked worktree).
+        assert!(restored_worktree_belongs_to_parent(
+            wt_path_str,
+            wt_path_str
+        ));
+
+        // The reconstructed cleanup root (`original_path`) must be the stable
+        // main checkout, never the worktree being removed — even when the
+        // dispatch parent is the worktree itself. Otherwise idle cleanup would
+        // delete the cwd before `git branch -D` and leak the branch.
+        let info = restored_worktree_info(wt_path_str, wt_path_str)
+            .expect("branch is recoverable for an attached worktree");
+        assert_eq!(info.branch_name, "wt/thread");
+        assert_ne!(info.original_path, wt_path_str.to_string());
+        assert!(paths_equal(
+            std::path::Path::new(&info.original_path),
+            repo.path()
+        ));
+
+        // A detached worktree yields no recoverable branch -> no WorktreeInfo,
+        // so cleanup never runs against an empty branch range.
+        let head = run_git(&wt_path, &["rev-parse", "HEAD"]);
+        run_git(&wt_path, &["checkout", "--detach", &head]);
+        assert!(restored_worktree_info(wt_path_str, wt_path_str).is_none());
+    }
+
+    #[test]
+    fn restored_worktree_belongs_to_parent_rejects_other_repo_and_missing() {
+        let (repo_a, _origin_a) = setup_git_repo_with_origin();
+        let (repo_b, _origin_b) = setup_git_repo_with_origin();
+
+        let wt = tempfile::tempdir().unwrap();
+        let wt_path = wt.path().join("thread-wt");
+        let wt_path_str = wt_path.to_str().unwrap();
+        run_git(
+            repo_a.path(),
+            &["worktree", "add", "-b", "wt/thread", wt_path_str],
+        );
+
+        // A worktree from repo_a must NOT be restored for a dispatch targeting
+        // repo_b — the dispatch must fall through to a fresh worktree.
+        assert!(!restored_worktree_belongs_to_parent(
+            repo_b.path().to_str().unwrap(),
+            wt_path_str
+        ));
+
+        // Non-existent / stale path is rejected.
+        assert!(!restored_worktree_belongs_to_parent(
+            repo_a.path().to_str().unwrap(),
+            "/nonexistent/stale/worktree",
+        ));
+    }
+
+    #[test]
+    fn is_managed_worktree_path_only_matches_under_worktrees_root() {
+        let _guard = super::runtime_store::lock_test_env();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("agentdesk-root");
+        let worktrees = root.join("worktrees");
+        std::fs::create_dir_all(worktrees.join("codex-thread")).unwrap();
+        let outside = temp.path().join("user-workspace");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &root) };
+
+        let managed = is_managed_worktree_path(worktrees.join("codex-thread").to_str().unwrap());
+        let configured = is_managed_worktree_path(outside.to_str().unwrap());
+
+        match previous_root {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
+
+        assert!(managed, "worktree under worktrees_root must be managed");
+        assert!(
+            !configured,
+            "configured workspace outside worktrees_root must NOT be managed"
+        );
+    }
+
+    #[test]
+    fn restored_worktree_belongs_to_parent_rejects_main_checkout_fallback() {
+        // If a prior worktree-creation failure persisted the parent checkout
+        // itself as the thread cwd, it must NOT be restored as a worktree —
+        // bootstrap must create a fresh isolated worktree instead.
+        let (repo, _origin) = setup_git_repo_with_origin();
+        let repo_path = repo.path().to_str().unwrap();
+        assert!(!restored_worktree_belongs_to_parent(repo_path, repo_path));
     }
 
     #[test]
