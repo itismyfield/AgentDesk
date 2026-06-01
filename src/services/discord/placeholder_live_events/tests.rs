@@ -199,10 +199,32 @@ fn result_event_filters_internal_cancellation_tool_error() {
     let events = events_from_json(&json!({
         "type": "result",
         "is_error": true,
-        "result": "Cancelled: aborted by harness"
+        "result": "Cancelled: parallel tool call Bash(echo hi)"
     }));
 
     assert!(events.is_empty());
+}
+
+#[test]
+fn events_from_json_keeps_genuine_cancelled_prefixed_tool_error() {
+    // A real tool/dispatch failure whose summary merely begins with
+    // "Cancelled:" (but is not the harness parallel-tool-call diagnostic) must
+    // still surface so the Recent mirror preserves real failure visibility.
+    let events = events_from_json(&json!({
+        "type": "user",
+        "message": {
+            "content": [{
+                "type": "tool_result",
+                "is_error": true,
+                "content": "Cancelled: terminal card cleanup"
+            }]
+        }
+    }));
+
+    assert_eq!(events.len(), 1);
+    let line = events[0].render_line();
+    assert!(line.starts_with("[tool error]"));
+    assert!(line.contains("terminal card cleanup"));
 }
 
 #[test]
