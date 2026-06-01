@@ -575,7 +575,20 @@ async fn handle_terminal(
     // Flip Pending → Finalizing, run the side-effects, flip → Finalized.
     entry.phase = Phase::Finalizing;
     let provider = entry.provider.clone();
-    let outcome = do_finalize(key, provider, &event, effective_ctx, shared).await;
+    // Codex P1 — finalize on the RESOLVED identity. An id-0 watcher/recovery
+    // terminal that collapsed onto a ledger entry registered (via
+    // `register_start`) with the real `user_msg_id` must finalize under THAT
+    // identity so `do_finalize` takes the guarded `finish_turn_if_matches` /
+    // `clear_inflight_state_if_matches` path. Otherwise the id-0 key would force
+    // the unguarded channel-scoped finish and could release a newer turn's token
+    // when the ledger entry is stale. When the submission already carries a real
+    // id, or the entry has no better identity (still id-0), this is the same key.
+    let finalize_key = if key.user_msg_id == 0 && entry.turn_key.user_msg_id != 0 {
+        entry.turn_key
+    } else {
+        key
+    };
+    let outcome = do_finalize(finalize_key, provider, &event, effective_ctx, shared).await;
     if let Some(entry) = ledger.get_mut(&ledger_key) {
         entry.phase = Phase::Finalized;
         entry.finalized_at = Some(Instant::now());
@@ -861,6 +874,10 @@ mod tests {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        // Codex P3 — SAVE the prior value and RESTORE it on exit (instead of
+        // unconditionally removing) so running the suite with the variable
+        // already set does not leak a cleared env to later tests.
+        let prev = std::env::var_os("AGENTDESK_ROOT_DIR");
         let tmp = tempfile::tempdir().expect("create temp runtime dir for turn finalizer test");
         unsafe {
             std::env::set_var(
@@ -870,7 +887,10 @@ mod tests {
         }
         f().await;
         unsafe {
-            std::env::remove_var("AGENTDESK_ROOT_DIR");
+            match prev {
+                Some(value) => std::env::set_var("AGENTDESK_ROOT_DIR", value),
+                None => std::env::remove_var("AGENTDESK_ROOT_DIR"),
+            }
         }
     }
 
@@ -1685,6 +1705,89 @@ mod tests {
         assert!(
             surviving.is_some_and(|s| s.user_msg_id == turn2_id),
             "guarded inflight clear must preserve turn-2's inflight when finalize carries turn-1's identity"
+        );
+        }).await;
+    }
+
+    /// #3016 Codex P1 regression: an id-0 watcher/recovery terminal that
+    /// collapses onto a ledger entry registered with the REAL `user_msg_id`
+    /// must finalize under THAT resolved identity (the guarded
+    /// `finish_turn_if_matches` path), not the literal id-0 (unguarded
+    /// channel-scoped finish). Here the mailbox's active turn was started with a
+    /// DIFFERENT id than the registered turn — simulating a stale ledger entry
+    /// while a newer turn is live — so the resolved-identity guarded finish must
+    /// refuse to release the newer turn's token.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn id0_terminal_uses_resolved_identity_and_spares_newer_turn() {
+        use serenity::model::id::{MessageId, UserId};
+
+        with_isolated_runtime_root(|| async move {
+        let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+        let ch = ChannelId::new(1515);
+        let registered_id = 7001u64; // the ledger entry's real identity
+        let live_active_id = 7002u64; // the DIFFERENT turn live in the mailbox
+
+        // The mailbox's active turn is a NEWER turn (live_active_id), distinct
+        // from the ledger's registered identity.
+        let live_token = Arc::new(CancelToken::new());
+        shared.global_active.store(1, Ordering::Relaxed);
+        shared
+            .mailbox(ch)
+            .restore_active_turn(
+                live_token.clone(),
+                UserId::new(7),
+                MessageId::new(live_active_id),
+            )
+            .await;
+
+        let fin = TurnFinalizer::spawn();
+        // Register the ledger entry under registered_id (a real id). A later
+        // id-0 terminal collapses onto THIS entry.
+        fin.register_start(
+            TurnKey::new(ch, registered_id, 0),
+            ProviderKind::Claude,
+            RelayOwnerKind::Watcher,
+        );
+
+        // id-0 terminal → resolves to the registered entry → finalize_key uses
+        // the registered real id → guarded finish, which does NOT match the
+        // live newer turn (live_active_id) → token spared.
+        let outcome = fin
+            .submit_terminal(
+                TurnKey::new(ch, 0, 0),
+                ProviderKind::Claude,
+                TerminalEvent::Complete,
+                FinalizeContext::watcher(),
+                shared.clone(),
+            )
+            .await;
+
+        match outcome {
+            FinalizeOutcome::Finalized { removed_token, .. } => {
+                assert!(
+                    removed_token.is_none(),
+                    "id-0 terminal resolved to a stale registered id must NOT release the newer live turn's token"
+                );
+            }
+            other => panic!(
+                "expected Finalized via the resolved-identity guarded path, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+        assert!(
+            !live_token
+                .cancelled
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "the newer live turn must not be cancelled"
+        );
+        assert!(
+            shared.mailbox(ch).has_active_turn().await,
+            "the newer live turn must remain active"
+        );
+        assert_eq!(
+            shared.global_active.load(Ordering::Relaxed),
+            1,
+            "counter must not be decremented for the wrong turn"
         );
         }).await;
     }
