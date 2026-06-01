@@ -445,8 +445,10 @@ src/
 │   │   │   ├── recent_events.rs
 │   │   │   ├── session_panel.rs
 │   │   │   ├── status_events.rs
+│   │   │   ├── status_panel.rs
 │   │   │   ├── task_panel.rs
-│   │   │   └── tests.rs
+│   │   │   ├── tests.rs
+│   │   │   └── workflow_panel.rs
 │   │   ├── prompt_builder/
 │   │   │   ├── dispatch_contract.rs
 │   │   │   ├── dispatch_contract_tests.rs
@@ -460,6 +462,18 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   └── shared.rs
 │   │   ├── router/
+│   │   │   ├── message_handler/
+│   │   │   │   ├── attachments.rs
+│   │   │   │   ├── control.rs
+│   │   │   │   ├── goal_lifecycle.rs
+│   │   │   │   ├── headless_turn.rs
+│   │   │   │   ├── intake_turn.rs
+│   │   │   │   ├── provider_isolation.rs
+│   │   │   │   ├── session_strategy_lifecycle_tests.rs
+│   │   │   │   ├── tests.rs
+│   │   │   │   ├── tui_followup.rs
+│   │   │   │   ├── turn_lifecycle.rs
+│   │   │   │   └── watchdog.rs
 │   │   │   ├── authorization.rs
 │   │   │   ├── control_intent.rs
 │   │   │   ├── dispatch_trigger.rs
@@ -677,6 +691,7 @@ src/
 │   ├── pr_summary.rs
 │   ├── process.rs
 │   ├── provider.rs
+│   ├── provider_auth.rs
 │   ├── provider_exec.rs
 │   ├── provider_hosting.rs
 │   ├── provider_runtime.rs
