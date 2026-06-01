@@ -2480,16 +2480,17 @@ mod watcher_stream_progress_tests {
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;
     use poise::serenity_prelude::{ChannelId, MessageId};
-    use std::sync::{LazyLock, Mutex};
-
-    static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::<()>::new(()));
 
     #[test]
     fn persist_watcher_stream_progress_persists_tool_hold_witness() {
-        let _lock = match TEST_ENV_LOCK.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        // Serialize on the PROCESS-WIDE `AGENTDESK_ROOT_DIR` lock so this test
+        // is mutually exclusive with every other test that mutates the runtime
+        // root (standby_relay, turn_finalizer, gateway, config, …). A module-
+        // local mutex would only serialize within this module, letting a
+        // concurrent root-mutating test stomp our tempdir env mid-flight.
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
 

@@ -6752,9 +6752,6 @@ mod tests {
     use crate::services::provider::{CancelToken, ProviderKind};
     use crate::services::turn_orchestrator::{Intervention, InterventionMode};
     use serenity::all::{ChannelId, MessageId, UserId};
-    use std::sync::{LazyLock, Mutex};
-
-    static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     struct AgentdeskRootGuard(Option<std::ffi::OsString>);
 
@@ -6800,10 +6797,13 @@ mod tests {
 
     #[test]
     fn watcher_terminal_delivery_commit_mirrors_bridge_inflight_fields() {
-        let _lock = match TEST_ENV_LOCK.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        // Serialize on the PROCESS-WIDE `AGENTDESK_ROOT_DIR` lock (shared with
+        // standby_relay / turn_finalizer / config tests) so a concurrent
+        // root-mutating test cannot stomp our tempdir env. A module-local mutex
+        // only serialized within this module and let the leak through.
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let _root_guard = AgentdeskRootGuard::set(tmp.path());
 
@@ -6853,10 +6853,13 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_delivery_timeout_cleanup_releases_mailbox_and_preserves_followup_queue() {
-        let _lock = match TEST_ENV_LOCK.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        // Serialize on the PROCESS-WIDE `AGENTDESK_ROOT_DIR` lock (shared with
+        // standby_relay / turn_finalizer / config tests). The guard is held
+        // across awaits, which is sound because `#[tokio::test]` runs on a
+        // current-thread runtime (the future is never moved across threads).
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let _root_guard = AgentdeskRootGuard::set(tmp.path());
 

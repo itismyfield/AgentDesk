@@ -769,10 +769,50 @@ mod tests {
         TurnKey::new(ChannelId::new(ch), 1, 0)
     }
 
+    /// Isolate a finalizer test from the process-global `AGENTDESK_ROOT_DIR`
+    /// runtime root. The finalize path reads that env var (via
+    /// `inflight::clear_inflight_state_if_matches` → `runtime_root()`) and can
+    /// delete inflight files under whatever root is currently set, so these
+    /// tests must serialize against the standby/watcher tests that also mutate
+    /// the env. Acquire the SAME shared mutex the existing helpers use
+    /// (`standby_relay::with_isolated_runtime_root`,
+    /// `gateway::with_isolated_runtime_root`, `runtime_store::lock_test_env`,
+    /// all of which resolve to `config::shared_test_env_lock()`) for the FULL
+    /// duration of the test and point `AGENTDESK_ROOT_DIR` at a private temp
+    /// dir, then clear it on exit so nothing leaks to a concurrent test.
+    ///
+    /// The guard is a `std::sync::MutexGuard` (not `Send`), held across the
+    /// test's `.await` points. That is sound because every finalizer test runs
+    /// on a `flavor = "current_thread"` runtime, so its future is never moved
+    /// across threads; concurrent tests on other OS threads simply block on
+    /// `lock()` until this test releases the guard, which is exactly the
+    /// serialization we want.
+    async fn with_isolated_runtime_root<F, Fut>(f: F)
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("create temp runtime dir for turn finalizer test");
+        unsafe {
+            std::env::set_var(
+                "AGENTDESK_ROOT_DIR",
+                tmp.path().to_str().expect("temp path must be valid utf-8"),
+            );
+        }
+        f().await;
+        unsafe {
+            std::env::remove_var("AGENTDESK_ROOT_DIR");
+        }
+    }
+
     /// A `Complete` on a registered Pending turn finalizes exactly once and the
     /// late loser receives `AlreadyFinalized`.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn exactly_once_complete_then_late_complete() {
+        with_isolated_runtime_root(|| async move {
         let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
         shared.global_active.store(1, Ordering::Relaxed);
         let fin = TurnFinalizer::spawn();
@@ -800,6 +840,7 @@ mod tests {
             )
             .await;
         assert!(matches!(second, FinalizeOutcome::AlreadyFinalized));
+        }).await;
     }
 
     /// A turn registered with the real `user_msg_id` and a terminal submitted
@@ -810,6 +851,7 @@ mod tests {
     /// them and duplicate the finalize side-effects.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn unknown_user_msg_id_collapses_onto_registered_turn() {
+        with_isolated_runtime_root(|| async move {
         let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
         let fin = TurnFinalizer::spawn();
         let ch = ChannelId::new(606);
@@ -840,6 +882,7 @@ mod tests {
             )
             .await;
         assert!(matches!(second, FinalizeOutcome::AlreadyFinalized));
+        }).await;
     }
 
     /// Two SEQUENTIAL turns in the SAME channel within `FINALIZED_TTL` must be
@@ -849,6 +892,7 @@ mod tests {
     /// P1 on the channel-only ledger key.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn sequential_same_channel_turns_each_finalize() {
+        with_isolated_runtime_root(|| async move {
         let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
         let fin = TurnFinalizer::spawn();
         let ch = ChannelId::new(909);
@@ -883,6 +927,7 @@ mod tests {
             matches!(f2, FinalizeOutcome::Finalized { .. }),
             "turn-2 must finalize independently of turn-1"
         );
+        }).await;
     }
 
     /// Cross-turn safety: a STALE channel-only (id-0) terminal arriving after
@@ -892,6 +937,7 @@ mod tests {
     /// Regression for the codex P1 on channel-only resolution.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn stale_channel_only_terminal_does_not_finalize_next_turn() {
+        with_isolated_runtime_root(|| async move {
         let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
         let fin = TurnFinalizer::spawn();
         let ch = ChannelId::new(919);
@@ -946,6 +992,7 @@ mod tests {
             matches!(f2, FinalizeOutcome::Finalized { .. }),
             "turn-2 must still be live after the stale id-0 terminal"
         );
+        }).await;
     }
 
     /// The counter is decremented at most once even under a double terminal
@@ -953,6 +1000,7 @@ mod tests {
     /// saturating helper can never underflow.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn no_underflow_on_double_terminal() {
+        with_isolated_runtime_root(|| async move {
         let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
         // No active mailbox turn → mailbox_finish_turn returns removed_token=None.
         shared.global_active.store(0, Ordering::Relaxed);
@@ -980,12 +1028,14 @@ mod tests {
 
         // Never underflows below zero.
         assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+        }).await;
     }
 
     /// A gate-timeout with a busy pane and a live relay owner defers; once the
     /// backstop deadline elapses the reconciler finalizes exactly once.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn gate_timeout_pane_busy_finalizes_after_backstop() {
+        with_isolated_runtime_root(|| async move {
         let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
         let fin = TurnFinalizer::spawn();
         let k = key(303);
@@ -1023,6 +1073,7 @@ mod tests {
             )
             .await;
         assert!(matches!(late, FinalizeOutcome::AlreadyFinalized));
+        }).await;
     }
 
     /// Repeated gate-timeouts (the watcher submits one per pass while the pane
@@ -1032,6 +1083,7 @@ mod tests {
     /// elapses and the reconciler finalizes.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn repeated_gate_timeout_does_not_postpone_backstop() {
+        with_isolated_runtime_root(|| async move {
         let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
         let fin = TurnFinalizer::spawn();
         let k = key(313);
@@ -1076,12 +1128,14 @@ mod tests {
             matches!(late, FinalizeOutcome::AlreadyFinalized),
             "the backstop must have finalized despite repeated gate-timeouts"
         );
+        }).await;
     }
 
     /// A gate-timeout whose pane is already quiescent finalizes immediately
     /// (no deferral).
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn gate_timeout_pane_quiescent_finalizes_now() {
+        with_isolated_runtime_root(|| async move {
         let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
         let fin = TurnFinalizer::spawn();
         let k = key(404);
@@ -1099,12 +1153,14 @@ mod tests {
             )
             .await;
         assert!(matches!(outcome, FinalizeOutcome::Finalized { .. }));
+        }).await;
     }
 
     /// A cancel submission does not double-apply completion cleanup and yields
     /// the exactly-once gate (a late Complete loses).
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn cancel_then_late_complete_already_finalized() {
+        with_isolated_runtime_root(|| async move {
         let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
         let fin = TurnFinalizer::spawn();
         let k = key(505);
@@ -1131,6 +1187,7 @@ mod tests {
             )
             .await;
         assert!(matches!(late, FinalizeOutcome::AlreadyFinalized));
+        }).await;
     }
 
     /// Phase 3 race: the watcher (`FinalizeContext::watcher`) and the bridge
@@ -1141,6 +1198,7 @@ mod tests {
     /// once (no active mailbox turn here, so it stays at 0 either way).
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn bridge_watcher_race_finalizes_exactly_once() {
+        with_isolated_runtime_root(|| async move {
         let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
         shared.global_active.store(0, Ordering::Relaxed);
         let fin = TurnFinalizer::spawn();
@@ -1178,6 +1236,7 @@ mod tests {
         assert_eq!(finalized, 1, "exactly one submission performs the finalize");
         assert_eq!(already, 1, "the loser receives AlreadyFinalized");
         assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+        }).await;
     }
 
     /// Phase 3 gate-timeout then watcher-complete-before-deadline: a
@@ -1187,6 +1246,7 @@ mod tests {
     /// no double finalize.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn gate_timeout_then_complete_before_deadline_no_double() {
+        with_isolated_runtime_root(|| async move {
         let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
         let fin = TurnFinalizer::spawn();
         let k = key(808);
@@ -1232,6 +1292,7 @@ mod tests {
             )
             .await;
         assert!(matches!(late, FinalizeOutcome::AlreadyFinalized));
+        }).await;
     }
 
     /// Restored/unregistered-watcher gate-timeout (#3016 P2 regression): a
@@ -1252,6 +1313,7 @@ mod tests {
         use crate::services::turn_orchestrator::{Intervention, InterventionMode};
         use serenity::model::id::{MessageId, UserId};
 
+        with_isolated_runtime_root(|| async move {
         let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
         shared.global_active.store(1, Ordering::Relaxed);
         let ch = ChannelId::new(1101);
@@ -1327,5 +1389,6 @@ mod tests {
         }
         // Counter decremented exactly once (token was removed).
         assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+        }).await;
     }
 }
