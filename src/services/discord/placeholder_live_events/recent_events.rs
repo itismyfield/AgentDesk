@@ -3,8 +3,8 @@ use serde_json::Value;
 use super::super::formatting::format_tool_input;
 use super::common::{
     EVENT_BLOCK_MAX_CHARS, EVENT_LINE_MAX_CHARS, EVENT_RENDER_LIMIT, first_content_line,
-    is_harness_task_tool_name, normalize_summary, sanitize_for_code_fence, tool_prefix,
-    truncate_chars, value_to_compact_string,
+    is_harness_task_tool_name, is_internal_tool_error, normalize_summary, sanitize_for_code_fence,
+    tool_prefix, truncate_chars, value_to_compact_string,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +28,12 @@ impl RecentPlaceholderEvent {
     }
 
     pub(in crate::services::discord) fn tool_error(content: &str) -> Option<Self> {
+        // Internal cancellation/abort diagnostics (e.g. "Cancelled: parallel
+        // tool call ...") are harness noise, not genuine tool failures, so they
+        // must not leak into the user-facing Recent mirror.
+        if is_internal_tool_error(content) {
+            return None;
+        }
         Self::new("[tool error]", content)
     }
 

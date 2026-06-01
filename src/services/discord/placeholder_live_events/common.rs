@@ -55,6 +55,16 @@ pub(super) fn normalize_tool_key(name: &str) -> String {
         .collect()
 }
 
+/// Returns true when a tool-error payload is an internal diagnostic marker
+/// rather than a genuine tool execution failure. These markers (e.g. the
+/// Claude API cancellation/abort notices that begin with "Cancelled:") are
+/// noise from the harness internals and must never surface in the user-facing
+/// "Recent" activity mirror.
+pub(super) fn is_internal_tool_error(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    trimmed.starts_with("Cancelled:")
+}
+
 pub(super) fn is_harness_task_tool_name(name: &str) -> bool {
     matches!(
         normalize_tool_key(name).as_str(),
