@@ -57,5 +57,5 @@ pub(crate) async fn send_command_confirmation_message(
 }
 
 fn confirmation_error(message: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
-    std::io::Error::new(std::io::ErrorKind::Other, message.into()).into()
+    std::io::Error::other(message.into()).into()
 }

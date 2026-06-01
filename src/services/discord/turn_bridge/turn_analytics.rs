@@ -66,9 +66,33 @@ pub(super) fn record_turn_bridge_invariant(
 pub(super) fn discord_turn_id(
     provider: &ProviderKind,
     channel_id: ChannelId,
-    user_msg_id: MessageId,
+    user_msg_id: Option<MessageId>,
     session_key: Option<&str>,
+    // PER-TURN discriminator for the message-less fallback (user_msg_id == 0):
+    // the turn's JSONL start offset, distinct per turn within a session. Keying
+    // only on `session_key` (stable across the whole tmux/Discord session) would
+    // make repeated message-less turns upsert-overwrite each other's transcript
+    // rows (Codex P2). Ignored when a real `user_msg_id` is present.
+    turn_start_offset: Option<u64>,
 ) -> String {
+    // A recovery turn with no anchored Discord user message (user_msg_id == 0,
+    // e.g. a TUI-direct turn) cannot key its turn id on a message id —
+    // `discord:<channel>:0` is the bogus form the invariant guards against.
+    // Fall back to the session key plus a per-turn discriminator, and skip the
+    // non-zero-message-id invariant, which does not apply here.
+    let Some(user_msg_id) = user_msg_id else {
+        let turn_discriminator = match turn_start_offset {
+            Some(offset) => format!("off{offset}"),
+            None => "recovery".to_string(),
+        };
+        return match session_key {
+            Some(key) => format!(
+                "discord:{}:session:{key}:{turn_discriminator}",
+                channel_id.get()
+            ),
+            None => format!("discord:{}:recovery:{turn_discriminator}", channel_id.get()),
+        };
+    };
     let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
     let nonzero_components = channel_id.get() != 0 && user_msg_id.get() != 0;
     record_turn_bridge_invariant(
@@ -147,4 +171,76 @@ pub(super) fn assert_response_sent_offset_progress(
         in_bounds,
         "turn_bridge response_sent_offset must stay on a full_response boundary"
     );
+}
+
+#[cfg(test)]
+mod discord_turn_id_no_user_message_tests {
+    //! Regression coverage for the msgid-0 panic class. A recovery turn with no
+    //! anchored Discord user message (user_msg_id == 0, e.g. a TUI-direct turn)
+    //! must key its turn id on the session instead of `discord:<channel>:0`,
+    //! and must not panic via `MessageId::new(0)`.
+    use super::discord_turn_id;
+    use crate::services::provider::ProviderKind;
+    use poise::serenity_prelude::{ChannelId, MessageId};
+
+    #[test]
+    fn none_user_msg_id_falls_back_to_session_plus_per_turn_offset() {
+        let turn_id = discord_turn_id(
+            &ProviderKind::Claude,
+            ChannelId::new(4243),
+            None,
+            Some("session-key-abc"),
+            Some(4096),
+        );
+        assert_eq!(turn_id, "discord:4243:session:session-key-abc:off4096");
+        assert!(
+            !turn_id.ends_with(":0"),
+            "must not produce the bogus discord:<channel>:0 form"
+        );
+    }
+
+    #[test]
+    fn message_less_turns_in_same_session_get_distinct_ids() {
+        // Two message-less turns sharing a session must NOT collide (Codex P2):
+        // the per-turn JSONL start offset keeps their transcript turn ids apart.
+        let first = discord_turn_id(
+            &ProviderKind::Claude,
+            ChannelId::new(4243),
+            None,
+            Some("session-key-abc"),
+            Some(1000),
+        );
+        let second = discord_turn_id(
+            &ProviderKind::Claude,
+            ChannelId::new(4243),
+            None,
+            Some("session-key-abc"),
+            Some(2000),
+        );
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn none_user_msg_id_and_no_session_uses_recovery_marker() {
+        let turn_id = discord_turn_id(
+            &ProviderKind::Claude,
+            ChannelId::new(4243),
+            None,
+            None,
+            Some(512),
+        );
+        assert_eq!(turn_id, "discord:4243:recovery:off512");
+    }
+
+    #[test]
+    fn some_user_msg_id_keeps_legacy_message_keyed_form() {
+        let turn_id = discord_turn_id(
+            &ProviderKind::Claude,
+            ChannelId::new(4243),
+            Some(MessageId::new(99)),
+            Some("session-key-abc"),
+            None,
+        );
+        assert_eq!(turn_id, "discord:4243:99");
+    }
 }

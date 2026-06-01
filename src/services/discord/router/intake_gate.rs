@@ -1086,11 +1086,17 @@ async fn handle_reaction_remove(
             let (active_message_id, expected_token) = match snapshot.active_user_message_id {
                 Some(active_id) => (Some(active_id), snapshot.cancel_token.clone()),
                 None => {
+                    // user_msg_id == 0 (e.g. a TUI-direct turn) anchors no
+                    // Discord message that could carry a reaction, so it yields
+                    // None (never matches `removed_reaction.message_id`);
+                    // `MessageId::new(0)` would panic.
                     let inflight_id = super::super::inflight::load_inflight_state(
                         &data.provider,
                         channel_id.get(),
                     )
-                    .map(|state| serenity::MessageId::new(state.user_msg_id));
+                    .and_then(|state| {
+                        super::super::inflight::optional_message_id(state.user_msg_id)
+                    });
                     (inflight_id, None)
                 }
             };

@@ -629,6 +629,13 @@ async fn close_action(
             if !closed {
                 return Ok(None);
             }
+            teardown_fresh_session_for_close(
+                store,
+                agent_executor,
+                &claimed,
+                "routine fresh run completed",
+            )
+            .await;
             Ok(Some(RoutineRunOutcome {
                 run_id: claimed.run_id,
                 routine_id: claimed.routine_id,
@@ -661,6 +668,13 @@ async fn close_action(
             if !closed {
                 return Ok(None);
             }
+            teardown_fresh_session_for_close(
+                store,
+                agent_executor,
+                &claimed,
+                "routine fresh run skipped",
+            )
+            .await;
             Ok(Some(RoutineRunOutcome {
                 run_id: claimed.run_id,
                 routine_id: claimed.routine_id,
@@ -691,6 +705,13 @@ async fn close_action(
             if !closed {
                 return Ok(None);
             }
+            teardown_fresh_session_for_close(
+                store,
+                agent_executor,
+                &claimed,
+                "routine fresh run paused",
+            )
+            .await;
             Ok(Some(RoutineRunOutcome {
                 run_id: claimed.run_id,
                 routine_id: claimed.routine_id,
@@ -737,6 +758,82 @@ async fn close_action(
                 .map(Some)
         }
     }
+}
+
+/// Tears down the fresh agent session backing a routine run when a terminal
+/// JS-script action (`Complete`/`Skip`/`Pause`) closes it. Without this, fresh
+/// routines that finish via a script action (rather than an agent turn) leave a
+/// stranded session that the reaper later collects and reports as a false
+/// "session ended" notification. No-op for non-fresh routines, and when no
+/// executor is available (the executor owns the session controller). The
+/// underlying teardown re-checks `execution_strategy == "fresh"`, so it is safe
+/// against races and runs exactly once per closed run.
+///
+/// Unlike the agent-turn completion path, the `result_json` here is the
+/// arbitrary object returned by the routine script, so it is NOT forwarded as
+/// teardown routing metadata: doing so would let untrusted `channel_id` /
+/// `discord_thread_id` fields target an unrelated (or the primary) session.
+/// Teardown therefore relies solely on the trusted persisted
+/// `routine.discord_thread_id`; if that is absent the controller safely refuses
+/// to tear down rather than risk killing the wrong session.
+///
+/// Gating on `execution_strategy == "fresh"` alone is too broad: a fresh
+/// routine's `discord_thread_id` is also used as the LOG thread for pure-script
+/// routines, and that thread can be shared with an unrelated operator/user
+/// session. Resolving "the latest session in the thread" and force-killing it
+/// would tear down that unrelated session (#3006). The teardown therefore only
+/// runs when *this run* actually started the agent turn whose fresh session it
+/// is closing (`run_started_agent_turn`).
+///
+/// A fresh agent session is created exclusively by the run that calls
+/// `mark_agent_turn_started` (which stamps `turn_id` on that run), and that same
+/// run is closed — and its session torn down — by the agent-completion path. A
+/// terminal JS-script action (`Complete`/`Skip`/`Pause`) is a *different* run
+/// that never started a turn (`turn_id` is NULL), so it owns no session and must
+/// not kill whatever session is currently latest in the thread. Gating on any
+/// prior routine turn is unsafe: a mixed routine that returned `agent` once
+/// would then let every later script-only close terminate an unrelated session
+/// created after that prior turn. The check is intentionally per-run.
+async fn teardown_fresh_session_for_close(
+    store: &RoutineStore,
+    agent_executor: Option<&RoutineAgentExecutor>,
+    claimed: &ClaimedRoutineRun,
+    reason: &str,
+) {
+    if claimed.execution_strategy != "fresh" {
+        return;
+    }
+    match store.run_started_agent_turn(&claimed.run_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::debug!(
+                routine_id = %claimed.routine_id,
+                run_id = %claimed.run_id,
+                "fresh routine session teardown skipped: run did not start an agent turn (owns no fresh session)"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(
+                routine_id = %claimed.routine_id,
+                run_id = %claimed.run_id,
+                error = %error,
+                "fresh routine session teardown skipped: run agent-turn ownership check failed"
+            );
+            return;
+        }
+    }
+    let Some(agent_executor) = agent_executor else {
+        tracing::warn!(
+            routine_id = %claimed.routine_id,
+            run_id = %claimed.run_id,
+            "fresh routine session teardown skipped: no agent executor available"
+        );
+        return;
+    };
+    agent_executor
+        .teardown_fresh_agent_session(store, &claimed.routine_id, None, reason)
+        .await;
 }
 
 #[cfg(test)]

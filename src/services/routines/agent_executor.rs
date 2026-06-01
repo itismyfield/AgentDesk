@@ -265,7 +265,7 @@ impl RoutineAgentExecutor {
         Ok(outcomes)
     }
 
-    async fn teardown_fresh_agent_session(
+    pub(crate) async fn teardown_fresh_agent_session(
         &self,
         store: &RoutineStore,
         routine_id: &str,

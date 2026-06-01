@@ -1011,7 +1011,10 @@ async fn finish_tui_direct_synthetic_turn_if_current(
         return;
     }
     let snapshot = super::mailbox_snapshot(shared, channel_id).await;
-    if snapshot.active_user_message_id != Some(MessageId::new(state.user_msg_id)) {
+    // user_msg_id == 0 (a TUI-direct turn with no anchored Discord user
+    // message) maps to `None`, matching the mailbox's `active_user_message_id`
+    // for such turns; `MessageId::new(0)` would panic.
+    if snapshot.active_user_message_id != super::inflight::optional_message_id(state.user_msg_id) {
         return;
     }
     super::inflight::clear_inflight_state(provider, channel_id.get());
@@ -2877,7 +2880,7 @@ async fn relay_tui_idle_response_through_bridge(
             provider: provider.clone(),
         }),
         channel_id,
-        user_msg_id,
+        user_msg_id: Some(user_msg_id),
         user_text_owned: prompt_text.to_string(),
         request_owner_name: "TUI direct".to_string(),
         role_binding: None,
@@ -2890,7 +2893,7 @@ async fn relay_tui_idle_response_through_bridge(
         memory_recall_usage: TokenUsage::default(),
         context_window_tokens: 0,
         context_compact_percent: 0,
-        current_msg_id,
+        current_msg_id: Some(current_msg_id),
         response_sent_offset: 0,
         full_response: String::new(),
         tmux_last_offset: Some(start_offset),

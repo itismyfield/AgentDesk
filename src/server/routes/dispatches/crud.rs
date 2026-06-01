@@ -145,6 +145,8 @@ pub async fn get_dispatch_delivery_reconcile_stats(
                 "stats": report.stats,
                 "mismatches": report.mismatches,
                 "metrics": crate::reconcile::dispatch_delivery_event_mismatch_metrics_snapshot(),
+                "recovery_metrics":
+                    crate::reconcile::dispatch_delivery_event_recovery_metrics_snapshot(),
             })),
         ),
         Err(error) => (
@@ -1020,6 +1022,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows() {
+        let _serial = crate::reconcile::lock_dispatch_delivery_metric_tests();
         crate::reconcile::reset_dispatch_delivery_event_mismatch_metrics_for_tests();
         let Some(pg_db) = TestPostgresDb::try_create().await else {
             return;

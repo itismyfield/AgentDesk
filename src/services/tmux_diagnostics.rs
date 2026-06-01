@@ -56,6 +56,15 @@ pub fn tmux_exit_reason_is_normal_completion(reason: &str) -> bool {
         || lower.contains("dispatch turn completed")
         || lower.contains("unified-thread run completed")
         || lower == "exit:0"
+        // Routine fresh-session teardown is an intentional, quiet cleanup the
+        // runtime performs after a fresh routine reaches a terminal state
+        // (agent turn finished/timed out, or a terminal JS-script action
+        // completed/skipped/paused the run). `force_kill_turn` records the
+        // exit reason as `explicit cleanup via routine fresh ...`, so without
+        // this branch the lifecycle watcher would treat the deliberate kill as
+        // an abnormal pane death and emit a false "session ended" notice for a
+        // session that already delivered its terminal response (#3006).
+        || lower.contains("routine fresh")
 }
 
 pub fn read_tmux_exit_reason(tmux_session_name: &str) -> Option<String> {
@@ -262,6 +271,27 @@ mod tests {
             "[2026-04-23 12:34:56] unified-thread run completed"
         ));
         assert!(!tmux_exit_reason_is_normal_completion("signal:9"));
+    }
+
+    #[test]
+    fn test_routine_fresh_teardown_is_quiet_normal_completion() {
+        // #3006: routine fresh-session teardown is a deliberate, quiet cleanup.
+        // The lifecycle watcher must treat these `explicit cleanup via routine
+        // fresh ...` exit reasons as normal completion so it suppresses the
+        // false "session ended" notice for a session that already delivered.
+        for reason in [
+            "explicit cleanup via routine fresh run completed",
+            "explicit cleanup via routine fresh run skipped",
+            "explicit cleanup via routine fresh run paused",
+            "explicit cleanup via routine fresh agent run completed",
+            "explicit cleanup via routine fresh agent run timed out",
+            "[2026-06-01 04:04:25] explicit cleanup via routine fresh run completed",
+        ] {
+            assert!(
+                tmux_exit_reason_is_normal_completion(reason),
+                "expected quiet normal completion for: {reason}"
+            );
+        }
     }
 
     #[test]

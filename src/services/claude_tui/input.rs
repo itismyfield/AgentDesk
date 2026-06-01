@@ -24,6 +24,10 @@ const PROMPT_READY_POST_EVENT_SETTLE: Duration = Duration::from_millis(50);
 const PROMPT_SUBMIT_INITIAL_SETTLE: Duration = Duration::from_millis(120);
 const PROMPT_SUBMIT_RETRY_SETTLE: Duration = Duration::from_millis(350);
 const PROMPT_SUBMIT_CONFIRM_RETRIES: usize = 2;
+/// Upper bound for how long we wait for an interactive selector overlay (e.g.
+/// `/effort`) to mount after submitting the slash command, before giving up and
+/// reporting failure rather than sending navigation keys into a composer.
+const SELECTOR_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 const PROMPT_READY_TIMEOUT_ERROR_PREFIX: &str = "timeout waiting for claude tui";
 pub const PROMPT_READY_CANCELLED_ERROR: &str = "claude tui prompt readiness wait cancelled";
 
@@ -94,6 +98,32 @@ pub enum TuiInputAction {
     Enter,
     Escape,
     Backspace(usize),
+    /// Navigate an interactive Claude TUI selector with a literal arrow key.
+    /// Only `Left`/`Right` are accepted so callers cannot smuggle arbitrary
+    /// tmux key names through this path. Claude Code's `/effort` UI is a
+    /// horizontal slider (`←/→ to adjust`), so navigation is left/right, not
+    /// up/down.
+    ArrowLeft,
+    ArrowRight,
+}
+
+/// Description of an interactive Claude TUI selector (e.g. `/effort`) that must
+/// be driven with arrow-key navigation instead of inline arguments.
+///
+/// Claude Code 2.1.x renders `/effort` as a *horizontal slider* whose footer
+/// reads `←/→ to adjust`: the stops are laid out left-to-right and Left/Right
+/// move the highlighted stop. `total_items` is the number of slider stops and
+/// `target_index` is the 0-based stop we want to land on (leftmost = 0).
+///
+/// Because the slider opens highlighting the *currently active* stop — which
+/// AgentDesk cannot observe ahead of time — navigation is made deterministic by
+/// first pressing `Left` enough times to clamp the highlight onto the leftmost
+/// stop, then pressing `Right` exactly `target_index` times.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectorNavigation {
+    pub slash_command: &'static str,
+    pub total_items: usize,
+    pub target_index: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,6 +160,59 @@ pub fn plan_prompt_submit(prompt: &str) -> Result<Vec<TuiInputAction>, String> {
 
 pub fn plan_cancel() -> Vec<TuiInputAction> {
     vec![TuiInputAction::Escape]
+}
+
+fn validate_selector_navigation(nav: SelectorNavigation) -> Result<(), String> {
+    if nav.total_items == 0 {
+        return Err(format!(
+            "{} selector has no selectable items",
+            nav.slash_command
+        ));
+    }
+    if nav.target_index >= nav.total_items {
+        return Err(format!(
+            "{} selector target index {} out of range for {} items",
+            nav.slash_command, nav.target_index, nav.total_items
+        ));
+    }
+    validate_prompt_text(nav.slash_command)?;
+    validate_prompt_not_empty(nav.slash_command)?;
+    Ok(())
+}
+
+/// Phase 1 of driving Claude's `/effort` slider: type the slash command and
+/// `Enter` to *open* the slider overlay. Navigation keys must NOT be sent until
+/// the overlay is confirmed mounted (see `wait_for_selector_open`), otherwise
+/// on a fresh/slow pane the keys land in the composer and are dropped.
+pub fn plan_selector_open(nav: SelectorNavigation) -> Result<Vec<TuiInputAction>, String> {
+    validate_selector_navigation(nav)?;
+    Ok(vec![
+        TuiInputAction::Literal(nav.slash_command.to_string()),
+        TuiInputAction::Enter,
+    ])
+}
+
+/// Phase 2 of driving Claude's `/effort` slider — run only AFTER the overlay is
+/// confirmed open.
+///
+/// Claude Code's `/effort` is a horizontal slider (`←/→ to adjust`):
+///   1. Press `Left` `total_items - 1` times so the highlight is clamped onto
+///      the leftmost stop regardless of which stop was initially highlighted
+///      (the active level). Pressing `Left` past the leftmost stop is a no-op,
+///      so this is a deterministic "home" move.
+///   2. Press `Right` `target_index` times to land on the requested stop.
+///   3. `Enter` to confirm the selection and close the overlay.
+pub fn plan_selector_navigation(nav: SelectorNavigation) -> Result<Vec<TuiInputAction>, String> {
+    validate_selector_navigation(nav)?;
+    let mut actions = Vec::with_capacity((nav.total_items - 1) + nav.target_index + 1);
+    for _ in 0..nav.total_items - 1 {
+        actions.push(TuiInputAction::ArrowLeft);
+    }
+    for _ in 0..nav.target_index {
+        actions.push(TuiInputAction::ArrowRight);
+    }
+    actions.push(TuiInputAction::Enter);
+    Ok(actions)
 }
 
 pub fn send_fresh_prompt(
@@ -224,6 +307,224 @@ fn send_prompt_with_readiness(
     }
 }
 
+/// Drive an interactive Claude TUI selector (e.g. `/effort <level>`) to a
+/// confirmed selection, then validate via a post-submit pane snapshot that the
+/// selector overlay actually closed.
+///
+/// Returns `Ok(())` only when the overlay confirms closed; otherwise returns an
+/// `Err` so the caller reports a clear failure to Discord instead of false
+/// success while the pane is stranded on the slider. If the overlay is
+/// still open we press `Escape` to dismiss it so the pane is not left blocking
+/// subsequent input.
+pub fn send_selector_followup(
+    session_name: &str,
+    nav: SelectorNavigation,
+    cancel_token: Option<&CancelToken>,
+) -> Result<(), String> {
+    let open_actions = plan_selector_open(nav)?;
+    let navigate_actions = plan_selector_navigation(nav)?;
+    wait_for_prompt_ready(session_name, PromptReadinessKind::Followup, cancel_token)?;
+    // The slash command is typed into Claude as a real composer entry, so the
+    // transcript relay would otherwise classify it as SSH-direct input and
+    // lease a spurious external turn. Record it as Discord-originated (same as
+    // send_prompt_with_readiness) and drop the record if the drive fails.
+    crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
+        "claude",
+        session_name,
+        nav.slash_command,
+    );
+    let result = (|| {
+        // Phase 1: open the slider overlay.
+        run_actions(session_name, &open_actions, cancel_token)?;
+        // Phase 2: confirm the overlay actually mounted before sending any
+        // navigation keys. On a fresh/slow pane the selector is not focused
+        // immediately after Enter; sending Left/Right too early drops the keys
+        // into the composer and leaves the effort unchanged.
+        wait_for_selector_open(session_name, nav, cancel_token)?;
+        // Phase 3: home + move to the requested stop + Enter to confirm.
+        run_actions(session_name, &navigate_actions, cancel_token)?;
+        // Phase 4: validate the overlay closed (selection committed).
+        confirm_selector_closed(session_name, nav, cancel_token)
+    })();
+    if result.is_err() {
+        crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+            "claude",
+            session_name,
+            nav.slash_command,
+        );
+    }
+    result
+}
+
+/// Poll until the `/effort` slider overlay is confirmed mounted, so navigation
+/// keys are never sent into a composer that has not yet entered the selector.
+///
+/// Bounded by `SELECTOR_OPEN_TIMEOUT`; a dead pane or capture failure short-
+/// circuits to an error. If the overlay never appears we return an error rather
+/// than blindly sending navigation that would silently no-op.
+fn wait_for_selector_open(
+    session_name: &str,
+    nav: SelectorNavigation,
+    cancel_token: Option<&CancelToken>,
+) -> Result<(), String> {
+    let start = Instant::now();
+    let mut wait_interval = Duration::from_millis(50);
+    loop {
+        check_prompt_cancel(cancel_token)?;
+        let snapshot = selector_state_snapshot(session_name);
+        check_prompt_cancel(cancel_token)?;
+        if !snapshot.tmux_pane_alive {
+            return Err(format!(
+                "claude tui session died before {} selector opened",
+                nav.slash_command
+            ));
+        }
+        if snapshot.selector_open {
+            return Ok(());
+        }
+        if start.elapsed() >= SELECTOR_OPEN_TIMEOUT {
+            log_selector_never_opened(session_name, nav, &snapshot);
+            return Err(format!(
+                "{} selector did not open within {}s; level not applied",
+                nav.slash_command,
+                SELECTOR_OPEN_TIMEOUT.as_secs()
+            ));
+        }
+        std::thread::sleep(wait_interval);
+        wait_interval = std::cmp::min(wait_interval * 2, Duration::from_millis(400));
+    }
+}
+
+fn confirm_selector_closed(
+    session_name: &str,
+    nav: SelectorNavigation,
+    cancel_token: Option<&CancelToken>,
+) -> Result<(), String> {
+    let mut attempt = 0usize;
+    loop {
+        std::thread::sleep(prompt_submit_settle_for_attempt(attempt));
+        check_prompt_cancel(cancel_token)?;
+        let snapshot = selector_state_snapshot(session_name);
+        check_prompt_cancel(cancel_token)?;
+
+        if !snapshot.tmux_pane_alive {
+            return Err(format!(
+                "claude tui session died while applying {}",
+                nav.slash_command
+            ));
+        }
+        if !snapshot.capture_available {
+            if attempt >= PROMPT_SUBMIT_CONFIRM_RETRIES {
+                return Err(format!(
+                    "{} selector confirmation unavailable after {} retries; capture_available=false",
+                    nav.slash_command, PROMPT_SUBMIT_CONFIRM_RETRIES
+                ));
+            }
+            attempt += 1;
+            continue;
+        }
+        if !snapshot.selector_open {
+            return Ok(());
+        }
+        if attempt >= PROMPT_SUBMIT_CONFIRM_RETRIES {
+            log_selector_left_open(session_name, nav, &snapshot);
+            // Dismiss the stranded overlay so the pane is not left blocking
+            // subsequent input, then report the failure to the caller.
+            if let Err(error) = run_actions(session_name, &[TuiInputAction::Escape], cancel_token) {
+                tracing::warn!(
+                    tmux_session_name = session_name,
+                    error = %error,
+                    "failed to Escape stranded Claude TUI selector overlay"
+                );
+            }
+            return Err(format!(
+                "{} selector did not close after {} confirm retries; level not applied",
+                nav.slash_command, PROMPT_SUBMIT_CONFIRM_RETRIES
+            ));
+        }
+        // Overlay still open within retry budget — re-send Enter to confirm.
+        run_actions(session_name, &[TuiInputAction::Enter], cancel_token)?;
+        attempt += 1;
+    }
+}
+
+struct SelectorStateSnapshot {
+    selector_open: bool,
+    tmux_pane_alive: bool,
+    capture_available: bool,
+    pane_tail: String,
+}
+
+fn selector_state_snapshot(session_name: &str) -> SelectorStateSnapshot {
+    let pane = crate::services::platform::tmux::capture_pane(
+        session_name,
+        PROMPT_READY_CAPTURE_SCROLLBACK,
+    );
+    let selector_open = pane
+        .as_deref()
+        .is_some_and(crate::services::tmux_common::tmux_capture_indicates_claude_tui_selector_open);
+    let pane_tail = pane
+        .as_deref()
+        .map(prompt_ready_debug_tail)
+        .unwrap_or_else(|| "<capture unavailable>".to_string());
+    SelectorStateSnapshot {
+        selector_open,
+        tmux_pane_alive: crate::services::tmux_diagnostics::tmux_session_has_live_pane(
+            session_name,
+        ),
+        capture_available: pane.is_some(),
+        pane_tail,
+    }
+}
+
+fn log_selector_left_open(
+    session_name: &str,
+    nav: SelectorNavigation,
+    snapshot: &SelectorStateSnapshot,
+) {
+    tracing::warn!(
+        tmux_session_name = session_name,
+        slash_command = nav.slash_command,
+        target_index = nav.target_index,
+        total_items = nav.total_items,
+        pane_tail = %snapshot.pane_tail,
+        "claude_tui selector overlay still open after confirm retries; selection not applied"
+    );
+    crate::services::claude::debug_log_to(
+        "claude_tui.log",
+        &format!(
+            "selector left open session={} command={} target_index={} total_items={} pane_tail:\n{}",
+            session_name, nav.slash_command, nav.target_index, nav.total_items, snapshot.pane_tail
+        ),
+    );
+}
+
+fn log_selector_never_opened(
+    session_name: &str,
+    nav: SelectorNavigation,
+    snapshot: &SelectorStateSnapshot,
+) {
+    tracing::warn!(
+        tmux_session_name = session_name,
+        slash_command = nav.slash_command,
+        timeout_secs = SELECTOR_OPEN_TIMEOUT.as_secs(),
+        capture_available = snapshot.capture_available,
+        pane_tail = %snapshot.pane_tail,
+        "claude_tui selector overlay never mounted; skipping navigation to avoid false success"
+    );
+    crate::services::claude::debug_log_to(
+        "claude_tui.log",
+        &format!(
+            "selector never opened session={} command={} timeout={}s capture_available={} pane_tail:\n{}",
+            session_name,
+            nav.slash_command,
+            SELECTOR_OPEN_TIMEOUT.as_secs(),
+            snapshot.capture_available,
+            snapshot.pane_tail
+        ),
+    );
+}
+
 pub fn send_cancel(session_name: &str) -> Result<(), String> {
     run_actions(session_name, &plan_cancel(), None)
 }
@@ -273,6 +574,12 @@ fn run_actions(
             }
             TuiInputAction::Escape => {
                 crate::services::platform::tmux::send_keys(session_name, &["Escape"])?
+            }
+            TuiInputAction::ArrowLeft => {
+                crate::services::platform::tmux::send_keys(session_name, &["Left"])?
+            }
+            TuiInputAction::ArrowRight => {
+                crate::services::platform::tmux::send_keys(session_name, &["Right"])?
             }
             TuiInputAction::Backspace(count) => {
                 let mut remaining = *count;
@@ -435,6 +742,8 @@ fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), St
         TuiInputAction::PasteBuffer(_) => "paste-buffer",
         TuiInputAction::Enter => "enter",
         TuiInputAction::Escape => "escape",
+        TuiInputAction::ArrowLeft => "arrow-left",
+        TuiInputAction::ArrowRight => "arrow-right",
         TuiInputAction::Backspace(_) => "backspace",
     };
     if stderr.is_empty() {
@@ -1026,6 +1335,171 @@ mod tests {
     #[test]
     fn cancel_uses_escape() {
         assert_eq!(plan_cancel(), vec![TuiInputAction::Escape]);
+    }
+
+    #[test]
+    fn selector_open_phase_is_slash_command_then_enter() {
+        // Phase 1 only opens the overlay — no navigation keys until the
+        // overlay is confirmed mounted.
+        let nav = SelectorNavigation {
+            slash_command: "/effort",
+            total_items: 5,
+            target_index: 2,
+        };
+
+        let actions = plan_selector_open(nav).unwrap();
+
+        assert_eq!(
+            actions,
+            vec![
+                TuiInputAction::Literal("/effort".to_string()),
+                TuiInputAction::Enter,
+            ]
+        );
+    }
+
+    #[test]
+    fn selector_navigation_homes_left_then_moves_right_to_target() {
+        // 5-stop slider, target stop index 2 (high): Left x4 (home to
+        // leftmost), Right x2 (to index 2), Enter — no slash/open keys here.
+        let nav = SelectorNavigation {
+            slash_command: "/effort",
+            total_items: 5,
+            target_index: 2,
+        };
+
+        let actions = plan_selector_navigation(nav).unwrap();
+
+        assert_eq!(
+            actions,
+            vec![
+                TuiInputAction::ArrowLeft,
+                TuiInputAction::ArrowLeft,
+                TuiInputAction::ArrowLeft,
+                TuiInputAction::ArrowLeft,
+                TuiInputAction::ArrowRight,
+                TuiInputAction::ArrowRight,
+                TuiInputAction::Enter,
+            ]
+        );
+    }
+
+    #[test]
+    fn selector_navigation_leftmost_stop_needs_no_right_moves() {
+        let nav = SelectorNavigation {
+            slash_command: "/effort",
+            total_items: 5,
+            target_index: 0,
+        };
+
+        let actions = plan_selector_navigation(nav).unwrap();
+
+        // Left x4 (home), Enter — no Right presses.
+        assert_eq!(
+            actions,
+            vec![
+                TuiInputAction::ArrowLeft,
+                TuiInputAction::ArrowLeft,
+                TuiInputAction::ArrowLeft,
+                TuiInputAction::ArrowLeft,
+                TuiInputAction::Enter,
+            ]
+        );
+    }
+
+    #[test]
+    fn selector_navigation_homes_past_hidden_ultracode_stop_for_effort_max() {
+        // Real /effort slider has 6 physical stops (incl. ultracode). Targeting
+        // `max` (index 4) must press Left 5 times to clear the full width from
+        // any starting stop (including ultracode), then Right 4 times.
+        let nav = SelectorNavigation {
+            slash_command: "/effort",
+            total_items: 6,
+            target_index: 4,
+        };
+
+        let actions = plan_selector_navigation(nav).unwrap();
+
+        let left_count = actions
+            .iter()
+            .filter(|a| matches!(a, TuiInputAction::ArrowLeft))
+            .count();
+        let right_count = actions
+            .iter()
+            .filter(|a| matches!(a, TuiInputAction::ArrowRight))
+            .count();
+        assert_eq!(
+            left_count, 5,
+            "must clear all 6 stops to reach the leftmost"
+        );
+        assert_eq!(right_count, 4, "must move right to the `max` stop");
+        assert_eq!(actions.last(), Some(&TuiInputAction::Enter));
+    }
+
+    #[test]
+    fn selector_navigation_rightmost_stop_moves_right_to_last_index() {
+        let nav = SelectorNavigation {
+            slash_command: "/effort",
+            total_items: 5,
+            target_index: 4,
+        };
+
+        let actions = plan_selector_navigation(nav).unwrap();
+
+        let right_count = actions
+            .iter()
+            .filter(|a| matches!(a, TuiInputAction::ArrowRight))
+            .count();
+        let left_count = actions
+            .iter()
+            .filter(|a| matches!(a, TuiInputAction::ArrowLeft))
+            .count();
+        assert_eq!(
+            left_count, 4,
+            "home move must press Left total_items-1 times"
+        );
+        assert_eq!(right_count, 4, "must move right to the last stop");
+        assert_eq!(actions.last(), Some(&TuiInputAction::Enter));
+    }
+
+    #[test]
+    fn selector_plans_reject_out_of_range_target() {
+        let nav = SelectorNavigation {
+            slash_command: "/effort",
+            total_items: 5,
+            target_index: 5,
+        };
+
+        assert!(
+            plan_selector_open(nav)
+                .unwrap_err()
+                .contains("out of range")
+        );
+        assert!(
+            plan_selector_navigation(nav)
+                .unwrap_err()
+                .contains("out of range")
+        );
+    }
+
+    #[test]
+    fn selector_plans_reject_empty_selector() {
+        let nav = SelectorNavigation {
+            slash_command: "/effort",
+            total_items: 0,
+            target_index: 0,
+        };
+
+        assert!(
+            plan_selector_open(nav)
+                .unwrap_err()
+                .contains("no selectable items")
+        );
+        assert!(
+            plan_selector_navigation(nav)
+                .unwrap_err()
+                .contains("no selectable items")
+        );
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use crate::services::claude_tui::input::SelectorNavigation;
 use crate::services::provider::ProviderKind;
 
 use super::super::{Context, Error, check_auth};
@@ -19,6 +20,27 @@ enum EffortLevel {
     Ultracode,
 }
 
+/// The *physical* stops Claude Code's `/effort` horizontal slider presents, in
+/// left-to-right order. This MUST include `ultracode` even though passthrough
+/// never targets it: the live slider still has `ultracode` as its rightmost
+/// stop, so the deterministic Left-home move (`total_items - 1` Left presses)
+/// must account for the full physical width. If the slider is currently parked
+/// on `ultracode` and we undercounted, the home move would stop short and apply
+/// the wrong level (e.g. `/effort max` confirming `ultracode`).
+///
+/// `ultracode` is guarded off the passthrough path elsewhere (see
+/// `ultracode_notice` / `provider_preflight_notice`), so it is never a
+/// navigable *target*; `selector_index` simply maps each targetable level to
+/// its physical stop position within this list.
+const EFFORT_SLIDER_STOPS: [EffortLevel; 6] = [
+    EffortLevel::Low,
+    EffortLevel::Medium,
+    EffortLevel::High,
+    EffortLevel::Xhigh,
+    EffortLevel::Max,
+    EffortLevel::Ultracode,
+];
+
 impl EffortLevel {
     const fn as_str(self) -> &'static str {
         match self {
@@ -28,6 +50,18 @@ impl EffortLevel {
             Self::Xhigh => "xhigh",
             Self::Max => "max",
             Self::Ultracode => "ultracode",
+        }
+    }
+
+    /// 0-based physical stop index of this level on the `/effort` slider.
+    fn selector_index(self) -> usize {
+        match self {
+            Self::Low => 0,
+            Self::Medium => 1,
+            Self::High => 2,
+            Self::Xhigh => 3,
+            Self::Max => 4,
+            Self::Ultracode => 5,
         }
     }
 }
@@ -56,6 +90,27 @@ impl ClaudeSlashPassthrough {
             Self::Compact => "/compact".to_string(),
             Self::Cost => "/cost".to_string(),
             Self::Context => "/context".to_string(),
+        }
+    }
+
+    /// `/effort` is an interactive horizontal slider, not an inline-argument
+    /// command: it must be driven with left/right arrow navigation + Enter
+    /// rather than submitted as a single-line prompt. Returns the navigation
+    /// plan for the requested level, or `None` for commands that take the
+    /// plain-prompt path.
+    fn selector_navigation(self) -> Option<SelectorNavigation> {
+        match self {
+            // `ultracode` is guarded off the passthrough path before this point
+            // (see `provider_preflight_notice`), so it never reaches the send
+            // step. The `total_items` here is the full physical slider width
+            // (including the ultracode stop) so the Left-home move is
+            // deterministic regardless of the slider's current position.
+            Self::Effort(level) => Some(SelectorNavigation {
+                slash_command: "/effort",
+                total_items: EFFORT_SLIDER_STOPS.len(),
+                target_index: level.selector_index(),
+            }),
+            Self::Compact | Self::Cost | Self::Context => None,
         }
     }
 }
@@ -160,23 +215,50 @@ async fn run_claude_passthrough(
 
     ctx.defer().await?;
 
-    let prompt = command.prompt();
     let tmux_name_for_send = tmux_name.clone();
-    let send_result = tokio::task::spawn_blocking(move || {
-        crate::services::claude_tui::input::send_followup_prompt(&tmux_name_for_send, &prompt, None)
-    })
-    .await
-    .unwrap_or_else(|error| Err(format!("join error: {error}")));
+    let send_result = match command.selector_navigation() {
+        Some(nav) => tokio::task::spawn_blocking(move || {
+            crate::services::claude_tui::input::send_selector_followup(
+                &tmux_name_for_send,
+                nav,
+                None,
+            )
+        })
+        .await
+        .unwrap_or_else(|error| Err(format!("join error: {error}"))),
+        None => {
+            let prompt = command.prompt();
+            tokio::task::spawn_blocking(move || {
+                crate::services::claude_tui::input::send_followup_prompt(
+                    &tmux_name_for_send,
+                    &prompt,
+                    None,
+                )
+            })
+            .await
+            .unwrap_or_else(|error| Err(format!("join error: {error}")))
+        }
+    };
 
     match send_result {
-        Ok(()) => {
-            ctx.say(format!(
-                "{}를 live Claude session `{}`에 전달했습니다. Claude 응답은 채널에 이어서 올라옵니다.",
-                command.slash_name(),
-                tmux_name,
-            ))
-            .await?;
-        }
+        Ok(()) => match command {
+            ClaudeSlashPassthrough::Effort(level) => {
+                ctx.say(format!(
+                    "`/effort {}`를 live Claude session `{}`에 적용했습니다. selector가 닫힌 것을 확인했습니다.",
+                    level.as_str(),
+                    tmux_name,
+                ))
+                .await?;
+            }
+            _ => {
+                ctx.say(format!(
+                    "{}를 live Claude session `{}`에 전달했습니다. Claude 응답은 채널에 이어서 올라옵니다.",
+                    command.slash_name(),
+                    tmux_name,
+                ))
+                .await?;
+            }
+        },
         Err(error) if crate::services::claude_tui::input::is_prompt_ready_timeout_error(&error) => {
             ctx.say(format!(
                 "{} 전달 대기 중 timeout이 났습니다. Claude turn이 아직 바쁘거나 prompt ready 상태가 아닙니다.",
@@ -237,10 +319,56 @@ pub(in crate::services::discord) async fn cmd_context(ctx: Context<'_>) -> Resul
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
     use super::{
-        ClaudeSlashPassthrough, EffortLevel, codex_effort_notice, live_session_required_notice,
-        provider_preflight_notice, ultracode_notice, unsupported_notice,
+        ClaudeSlashPassthrough, EFFORT_SLIDER_STOPS, EffortLevel, codex_effort_notice,
+        live_session_required_notice, provider_preflight_notice, ultracode_notice,
+        unsupported_notice,
     };
     use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn effort_levels_map_to_physical_slider_stops() {
+        assert_eq!(EffortLevel::Low.selector_index(), 0);
+        assert_eq!(EffortLevel::Medium.selector_index(), 1);
+        assert_eq!(EffortLevel::High.selector_index(), 2);
+        assert_eq!(EffortLevel::Xhigh.selector_index(), 3);
+        assert_eq!(EffortLevel::Max.selector_index(), 4);
+        // ultracode is the rightmost physical stop — it must be counted so the
+        // Left-home move clears the full slider width, even though it is never
+        // a passthrough target.
+        assert_eq!(EffortLevel::Ultracode.selector_index(), 5);
+    }
+
+    #[test]
+    fn effort_command_uses_full_slider_width_for_navigation() {
+        let nav = ClaudeSlashPassthrough::Effort(EffortLevel::High)
+            .selector_navigation()
+            .expect("/effort must drive a selector");
+        assert_eq!(nav.slash_command, "/effort");
+        // total_items is the full physical slider width (6, incl. ultracode)
+        // so the Left-home move is deterministic from any current stop.
+        assert_eq!(nav.total_items, EFFORT_SLIDER_STOPS.len());
+        assert_eq!(nav.total_items, 6);
+        assert_eq!(nav.target_index, 2);
+
+        // /effort max must home past the ultracode stop and land on stop 4.
+        let max_nav = ClaudeSlashPassthrough::Effort(EffortLevel::Max)
+            .selector_navigation()
+            .expect("/effort max must drive a selector");
+        assert_eq!(max_nav.total_items, 6);
+        assert_eq!(max_nav.target_index, 4);
+
+        assert!(
+            ClaudeSlashPassthrough::Compact
+                .selector_navigation()
+                .is_none()
+        );
+        assert!(ClaudeSlashPassthrough::Cost.selector_navigation().is_none());
+        assert!(
+            ClaudeSlashPassthrough::Context
+                .selector_navigation()
+                .is_none()
+        );
+    }
 
     #[test]
     fn effort_levels_render_expected_prompt() {

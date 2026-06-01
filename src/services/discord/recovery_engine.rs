@@ -1,4 +1,5 @@
 use super::gateway::DiscordGateway;
+use super::inflight::optional_message_id;
 use super::settings::{
     load_last_remote_profile, load_last_session_path, resolve_role_binding,
     validate_bot_channel_routing_with_provider_channel,
@@ -254,15 +255,42 @@ async fn relay_recovery_terminal_notice(
     state: &super::inflight::InflightTurnState,
     text: &str,
 ) -> bool {
-    super::formatting::replace_long_message_raw(
+    relay_recovered_terminal_text_to_placeholder(
         http,
-        ChannelId::new(state.channel_id),
-        MessageId::new(state.current_msg_id),
-        text,
         shared,
+        ChannelId::new(state.channel_id),
+        super::inflight::optional_message_id(state.current_msg_id),
+        text,
     )
     .await
-    .is_ok()
+}
+
+/// Deliver the recovered terminal text to Discord. When the turn anchored a
+/// placeholder (`current_msg_id != 0`) the placeholder is edited in place;
+/// when it did NOT (a TUI-direct / recovery turn with `current_msg_id == 0`,
+/// surfaced here as `placeholder == None`) the text is delivered as a NEW
+/// channel message instead. Either way `true` means the assistant response
+/// actually reached Discord, so the caller can safely advance recovery
+/// (release mailbox/inflight, complete the dispatch). Reporting success
+/// WITHOUT delivering would silently drop the answer (Codex P1). `MessageId::new(0)`
+/// would panic, hence the `Option`.
+async fn relay_recovered_terminal_text_to_placeholder(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    placeholder: Option<MessageId>,
+    text: &str,
+) -> bool {
+    match placeholder {
+        Some(placeholder) => {
+            super::formatting::replace_long_message_raw(http, channel_id, placeholder, text, shared)
+                .await
+                .is_ok()
+        }
+        None => super::formatting::send_long_message_raw(http, channel_id, text, shared)
+            .await
+            .is_ok(),
+    }
 }
 
 /// Outcome of `complete_recovery_visible_turn` exposed to callers so they can
@@ -302,7 +330,11 @@ async fn complete_recovery_visible_turn(
     source: &'static str,
 ) -> RecoveryCompletionOutcome {
     let channel_id = ChannelId::new(state.channel_id);
-    let user_msg_id = MessageId::new(state.user_msg_id);
+    // A recovery/orphan turn may carry no user message (user_msg_id == 0,
+    // e.g. a TUI-direct turn). There is then no user message to react against,
+    // so the ⏳→✅ reaction step is skipped while the quiescence gate and
+    // status-panel completion still run. `MessageId::new(0)` would panic.
+    let user_msg_id = super::inflight::optional_message_id(state.user_msg_id);
 
     // #2161 (Codex round-2 M1): recovery completes a turn based on JSONL
     // `result` + output-file drain, not tmux pane readiness. For ClaudeTui
@@ -338,8 +370,10 @@ async fn complete_recovery_visible_turn(
         }
     }
 
-    super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳').await;
-    super::formatting::add_reaction_raw(http, channel_id, user_msg_id, '✅').await;
+    if let Some(user_msg_id) = user_msg_id {
+        super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳').await;
+        super::formatting::add_reaction_raw(http, channel_id, user_msg_id, '✅').await;
+    }
 
     if !shared.status_panel_v2_enabled {
         return RecoveryCompletionOutcome::Emitted;
@@ -466,6 +500,126 @@ mod recovery_completion_outcome_tests {
             recovery_status_panel_message_id_for_completion(&snapshot, Some(&persisted));
 
         assert_eq!(status_msg_id, Some(super::MessageId::new(3003)));
+    }
+}
+
+#[cfg(test)]
+mod no_anchored_placeholder_recovery_tests {
+    //! Regression coverage for the msgid-0 panic class: a TUI-direct / recovery
+    //! inflight legitimately carries `current_msg_id == 0` (never anchored a
+    //! Discord placeholder, `status_message_id = None`) and may carry
+    //! `user_msg_id == 0` (no Discord user message). The startup recovery /
+    //! reattach loop derives placeholder / user message ids from these fields;
+    //! before the fix it called `serenity::MessageId::new(0)`, which panics
+    //! ("Attempted to call MessageId::new with invalid (0) value"). Because that
+    //! loop awaits inline, one such inflight aborted recovery before
+    //! `reconcile_done`, leaving the provider permanently degraded. These tests
+    //! assert the conversion helpers and the watcher-restore seed never panic
+    //! and yield a sane "no placeholder, recover watcher/session" result.
+    use super::inflight::{InflightTurnState, optional_message_id};
+    use super::optional_message_id as engine_optional_message_id;
+    use crate::services::provider::ProviderKind;
+
+    fn tui_direct_no_anchor_state() -> InflightTurnState {
+        // TUI-direct turn: never anchored a Discord placeholder
+        // (current_msg_id == 0, status_message_id == None) and has no Discord
+        // user message (user_msg_id == 0), but DOES own a live tmux session.
+        InflightTurnState::new(
+            ProviderKind::Claude,
+            4243,
+            Some("adk-cc".to_string()),
+            7,
+            0, // user_msg_id == 0
+            0, // current_msg_id == 0
+            "tui direct prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/claude-transcript.jsonl".to_string()),
+            None,
+            0,
+        )
+    }
+
+    #[test]
+    fn optional_message_id_maps_zero_to_none_without_panicking() {
+        assert_eq!(optional_message_id(0), None);
+        assert_eq!(
+            optional_message_id(123),
+            Some(super::MessageId::new(123)),
+            "non-zero ids must still build a real MessageId"
+        );
+        // Reachable via the engine re-export used across the recovery loop.
+        assert_eq!(engine_optional_message_id(0), None);
+    }
+
+    #[test]
+    fn recovery_loop_bindings_from_zero_state_are_none_not_panic() {
+        // This mirrors the eager bindings at the top of the recovery loop body
+        // (`restore_inflight_turns`) that previously panicked on a 0-valued
+        // inflight before `reconcile_done` could be reached.
+        let state = tui_direct_no_anchor_state();
+        assert_eq!(state.current_msg_id, 0);
+        assert_eq!(state.user_msg_id, 0);
+        assert_eq!(state.status_message_id, None);
+
+        let current_msg_id = optional_message_id(state.current_msg_id);
+        let user_msg_id = optional_message_id(state.user_msg_id);
+        assert_eq!(
+            current_msg_id, None,
+            "no anchored placeholder → relay step is skipped, not panicked"
+        );
+        assert_eq!(
+            user_msg_id, None,
+            "no Discord user message → reaction/analytics steps are skipped"
+        );
+    }
+
+    // `super::super::tmux` is `#[cfg(unix)]`-only (the tmux relay is Unix-only),
+    // so gate this test to Unix to keep the Windows cross-OS build green.
+    #[cfg(unix)]
+    #[test]
+    fn watcher_restore_seed_skips_placeholder_but_preserves_session() {
+        // The pane-alive reattach branch seeds the watcher from the inflight.
+        // For a no-anchor turn there is no placeholder to restore, but the tmux
+        // session/watcher must still be recovered — `restored_watcher_turn_from_inflight`
+        // returns None (no placeholder) WITHOUT panicking, and the watcher is
+        // spawned regardless by the caller.
+        let state = tui_direct_no_anchor_state();
+        let restored = super::super::tmux::restored_watcher_turn_from_inflight(
+            &state,
+            "AgentDesk-claude-adk-cc",
+            true,
+        );
+        assert!(
+            restored.is_none(),
+            "current_msg_id == 0 yields no restored placeholder (no MessageId::new(0) panic)"
+        );
+    }
+
+    #[test]
+    fn recovered_transcript_turn_id_avoids_bogus_zero_key() {
+        // user_msg_id == 0 must NOT key on discord:<channel>:0 (would collide /
+        // overwrite across every no-user-message turn in the channel), and must
+        // include a per-turn discriminator so repeated message-less turns in the
+        // same session do not upsert-overwrite each other (Codex P2 r3).
+        assert_eq!(
+            super::recovered_transcript_turn_id(4243, 0, Some("session-abc"), Some(4096), "x"),
+            "discord:4243:session:session-abc:off4096"
+        );
+        // No offset → fall back to the started_at timestamp discriminator.
+        assert_eq!(
+            super::recovered_transcript_turn_id(4243, 0, None, None, "2026-06-01 12:00:00"),
+            "discord:4243:recovery:at2026-06-01-12-00-00"
+        );
+        // Two message-less turns in the same session must NOT collide.
+        let a = super::recovered_transcript_turn_id(4243, 0, Some("s"), Some(100), "t");
+        let b = super::recovered_transcript_turn_id(4243, 0, Some("s"), Some(200), "t");
+        assert_ne!(a, b);
+        // A real user message keeps the legacy message-keyed transcript id.
+        assert_eq!(
+            super::recovered_transcript_turn_id(4243, 99, Some("session-abc"), Some(4096), "x"),
+            "discord:4243:99"
+        );
     }
 }
 
@@ -1259,6 +1413,37 @@ async fn lookup_turn_finished_dispatch_kind(dispatch_id: Option<&str>) -> Option
     .map(str::to_string)
 }
 
+/// Build the transcript turn id for a recovered turn. A recovery/orphan turn
+/// with no anchored Discord user message (`user_msg_id == 0`, e.g. a TUI-direct
+/// turn) must NOT key its transcript on `discord:<channel>:0` — that bogus key
+/// would collide across every such turn in the channel and overwrite recovered
+/// transcripts (Codex P2 r2). It must ALSO not key purely on the session
+/// (stable across the whole tmux session), or repeated message-less turns in
+/// the same session would upsert-overwrite each other (Codex P2 r3). For the
+/// message-less case we therefore append a PER-TURN discriminator: the turn's
+/// JSONL start offset (distinct per turn within a session), falling back to its
+/// `started_at` timestamp when no offset is recorded.
+fn recovered_transcript_turn_id(
+    channel_id: u64,
+    user_msg_id: u64,
+    session_key: Option<&str>,
+    turn_start_offset: Option<u64>,
+    started_at: &str,
+) -> String {
+    if user_msg_id != 0 {
+        return format!("discord:{channel_id}:{user_msg_id}");
+    }
+    // Per-turn discriminator: stable for THIS turn, distinct across turns.
+    let turn_discriminator = match turn_start_offset {
+        Some(offset) => format!("off{offset}"),
+        None => format!("at{}", started_at.replace([' ', ':'], "-")),
+    };
+    match session_key {
+        Some(key) => format!("discord:{channel_id}:session:{key}:{turn_discriminator}"),
+        None => format!("discord:{channel_id}:recovery:{turn_discriminator}"),
+    }
+}
+
 async fn persist_recovered_transcript(
     db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
@@ -1272,7 +1457,13 @@ async fn persist_recovered_transcript(
         return false;
     }
 
-    let turn_id = format!("discord:{}:{}", state.channel_id, state.user_msg_id);
+    let turn_id = recovered_transcript_turn_id(
+        state.channel_id,
+        state.user_msg_id,
+        state.session_key.as_deref(),
+        state.turn_start_offset,
+        &state.started_at,
+    );
     let channel_id_text = state.channel_id.to_string();
     match crate::db::session_transcripts::persist_turn_db(
         db,
@@ -1688,16 +1879,20 @@ pub(super) async fn restore_inflight_turns(
                     )
                 };
                 let channel_id = ChannelId::new(state.channel_id);
-                let current_msg_id = MessageId::new(state.current_msg_id);
-                let relay_ok = super::formatting::replace_long_message_raw(
+                // A TUI-direct / recovery turn (current_msg_id == 0) never
+                // anchored a Discord placeholder, so the recovered terminal text
+                // is delivered as a NEW channel message instead of an in-place
+                // edit (the helper handles both). `relay_ok` still reflects
+                // actual delivery so we never advance recovery without posting
+                // the answer; `MessageId::new(0)` would panic.
+                let relay_ok = relay_recovered_terminal_text_to_placeholder(
                     http,
-                    channel_id,
-                    current_msg_id,
-                    &final_text,
                     shared,
+                    channel_id,
+                    optional_message_id(state.current_msg_id),
+                    &final_text,
                 )
-                .await
-                .is_ok();
+                .await;
                 if !should_advance_recovery_dispatch_after_relay(relay_ok) {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!(
@@ -1707,8 +1902,12 @@ pub(super) async fn restore_inflight_turns(
                 }
                 // Mark user message as completed only after Discord terminal
                 // delivery commits; otherwise the channel shows completion
-                // without the final assistant message.
-                let user_msg_id = MessageId::new(state.user_msg_id);
+                // without the final assistant message. A recovery/orphan turn
+                // may carry no user message (user_msg_id == 0) — there is then
+                // no analytics row to key (`discord:<channel>:0` would be bogus,
+                // per the rebind-origin note above) and `MessageId::new(0)`
+                // would panic; the transcript persist below stays unconditional.
+                let user_msg_id = optional_message_id(state.user_msg_id);
                 let visible_outcome = complete_recovery_visible_turn(
                     http,
                     shared,
@@ -1744,24 +1943,26 @@ pub(super) async fn restore_inflight_turns(
                     recovered_turn_duration_ms(Some(state.started_at.as_str())).unwrap_or(0);
                 let has_completion_evidence =
                     if None::<&crate::db::Db>.is_some() || shared.pg_pool.is_some() {
-                        super::turn_bridge::persist_turn_analytics_row_with_handles(
-                            None::<&crate::db::Db>,
-                            shared.pg_pool.as_ref(),
-                            provider,
-                            channel_id,
-                            user_msg_id,
-                            role_binding.as_ref(),
-                            recovered_dispatch_id
-                                .as_deref()
-                                .or(state.dispatch_id.as_deref()),
-                            state.session_key.as_deref(),
-                            recovered_session_id
-                                .as_deref()
-                                .or(state.session_id.as_deref()),
-                            &state,
-                            recovered_usage.unwrap_or_default(),
-                            duration_ms,
-                        );
+                        if let Some(user_msg_id) = user_msg_id {
+                            super::turn_bridge::persist_turn_analytics_row_with_handles(
+                                None::<&crate::db::Db>,
+                                shared.pg_pool.as_ref(),
+                                provider,
+                                channel_id,
+                                user_msg_id,
+                                role_binding.as_ref(),
+                                recovered_dispatch_id
+                                    .as_deref()
+                                    .or(state.dispatch_id.as_deref()),
+                                state.session_key.as_deref(),
+                                recovered_session_id
+                                    .as_deref()
+                                    .or(state.session_id.as_deref()),
+                                &state,
+                                recovered_usage.unwrap_or_default(),
+                                duration_ms,
+                            );
+                        }
                         persist_recovered_transcript(
                             None::<&crate::db::Db>,
                             shared.pg_pool.as_ref(),
@@ -2194,8 +2395,16 @@ pub(super) async fn restore_inflight_turns(
             }
         }
 
-        let current_msg_id = MessageId::new(state.current_msg_id);
-        let user_msg_id = MessageId::new(state.user_msg_id);
+        // current_msg_id == 0 / user_msg_id == 0 are LEGITIMATE for a
+        // TUI-direct / recovery turn that never anchored a Discord placeholder
+        // (or carries no user message). `MessageId::new(0)` PANICS, and because
+        // this loop runs inline during startup recovery, a single such inflight
+        // would abort the loop before `reconcile_done` is set — leaving the
+        // provider permanently degraded. Carry both as `Option` and skip the
+        // placeholder/analytics step at each use site while still recovering the
+        // tmux watcher/session below.
+        let current_msg_id = optional_message_id(state.current_msg_id);
+        let user_msg_id = optional_message_id(state.user_msg_id);
         let channel_name = state.channel_name.clone();
         let tmux_session_name = state.tmux_session_name.clone().or_else(|| {
             channel_name
@@ -2315,15 +2524,14 @@ pub(super) async fn restore_inflight_turns(
             let assistant_response = state.full_response.clone();
             let final_text =
                 super::formatting::format_for_discord_with_provider(&assistant_response, provider);
-            let relay_ok = super::formatting::replace_long_message_raw(
+            let relay_ok = relay_recovered_terminal_text_to_placeholder(
                 http,
+                shared,
                 channel_id,
                 current_msg_id,
                 &final_text,
-                shared,
             )
-            .await
-            .is_ok();
+            .await;
 
             if !should_advance_recovery_dispatch_after_relay(relay_ok) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -2361,22 +2569,27 @@ pub(super) async fn restore_inflight_turns(
                 recovered_turn_duration_ms(Some(state.started_at.as_str())).unwrap_or(0);
             let has_completion_evidence =
                 if None::<&crate::db::Db>.is_some() || shared.pg_pool.is_some() {
-                    super::turn_bridge::persist_turn_analytics_row_with_handles(
-                        None::<&crate::db::Db>,
-                        shared.pg_pool.as_ref(),
-                        provider,
-                        channel_id,
-                        user_msg_id,
-                        role_binding.as_ref(),
-                        recovered_dispatch_id
-                            .as_deref()
-                            .or(state.dispatch_id.as_deref()),
-                        state.session_key.as_deref(),
-                        state.session_id.as_deref(),
-                        &state,
-                        TurnTokenUsage::default(),
-                        duration_ms,
-                    );
+                    // No user message (user_msg_id == 0) → no analytics row to
+                    // key (`discord:<channel>:0` would be bogus); skip the
+                    // analytics persist but still write the transcript.
+                    if let Some(user_msg_id) = user_msg_id {
+                        super::turn_bridge::persist_turn_analytics_row_with_handles(
+                            None::<&crate::db::Db>,
+                            shared.pg_pool.as_ref(),
+                            provider,
+                            channel_id,
+                            user_msg_id,
+                            role_binding.as_ref(),
+                            recovered_dispatch_id
+                                .as_deref()
+                                .or(state.dispatch_id.as_deref()),
+                            state.session_key.as_deref(),
+                            state.session_id.as_deref(),
+                            &state,
+                            TurnTokenUsage::default(),
+                            duration_ms,
+                        );
+                    }
                     persist_recovered_transcript(
                         None::<&crate::db::Db>,
                         shared.pg_pool.as_ref(),
@@ -2563,17 +2776,15 @@ pub(super) async fn restore_inflight_turns(
                 super::formatting::format_for_discord_with_provider(&assistant_response, provider)
             };
             // #225 P1-1: Track relay success — only clear inflight if Discord delivery succeeds
-            let relay_ok = super::formatting::replace_long_message_raw(
+            let relay_ok = relay_recovered_terminal_text_to_placeholder(
                 http,
+                shared,
                 channel_id,
                 current_msg_id,
                 &final_text,
-                shared,
             )
-            .await
-            .is_ok();
+            .await;
 
-            let user_msg_id = MessageId::new(state.user_msg_id);
             if !should_advance_recovery_dispatch_after_relay(relay_ok) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
@@ -2615,24 +2826,29 @@ pub(super) async fn restore_inflight_turns(
                 recovered_turn_duration_ms(Some(state.started_at.as_str())).unwrap_or(0);
             let has_completion_evidence =
                 if None::<&crate::db::Db>.is_some() || shared.pg_pool.is_some() {
-                    super::turn_bridge::persist_turn_analytics_row_with_handles(
-                        None::<&crate::db::Db>,
-                        shared.pg_pool.as_ref(),
-                        provider,
-                        channel_id,
-                        user_msg_id,
-                        role_binding.as_ref(),
-                        recovered_dispatch_id
-                            .as_deref()
-                            .or(state.dispatch_id.as_deref()),
-                        state.session_key.as_deref(),
-                        recovered_session_id
-                            .as_deref()
-                            .or(state.session_id.as_deref()),
-                        &state,
-                        recovered_usage.unwrap_or_default(),
-                        duration_ms,
-                    );
+                    // No user message (user_msg_id == 0) → no analytics row to
+                    // key (`discord:<channel>:0` would be bogus); skip the
+                    // analytics persist but still write the transcript.
+                    if let Some(user_msg_id) = user_msg_id {
+                        super::turn_bridge::persist_turn_analytics_row_with_handles(
+                            None::<&crate::db::Db>,
+                            shared.pg_pool.as_ref(),
+                            provider,
+                            channel_id,
+                            user_msg_id,
+                            role_binding.as_ref(),
+                            recovered_dispatch_id
+                                .as_deref()
+                                .or(state.dispatch_id.as_deref()),
+                            state.session_key.as_deref(),
+                            recovered_session_id
+                                .as_deref()
+                                .or(state.session_id.as_deref()),
+                            &state,
+                            recovered_usage.unwrap_or_default(),
+                            duration_ms,
+                        );
+                    }
                     persist_recovered_transcript(
                         None::<&crate::db::Db>,
                         shared.pg_pool.as_ref(),
@@ -3101,15 +3317,14 @@ pub(super) async fn restore_inflight_turns(
                             state.session_key.as_deref(),
                             "worktree_missing_main_fallback_blocked",
                         );
-                        let relay_ok = super::formatting::replace_long_message_raw(
+                        let relay_ok = relay_recovered_terminal_text_to_placeholder(
                             http,
+                            shared,
                             channel_id,
                             current_msg_id,
                             &format!("❌ {error}\nmain workspace fallback blocked."),
-                            shared,
                         )
-                        .await
-                        .is_ok();
+                        .await;
                         if should_advance_recovery_dispatch_after_relay(relay_ok) {
                             super::turn_bridge::fail_dispatch_with_retry(
                                 shared.api_port,
@@ -3344,15 +3559,14 @@ pub(super) async fn restore_inflight_turns(
                     state.session_key.as_deref(),
                     "worktree_missing_main_fallback_blocked",
                 );
-                let relay_ok = super::formatting::replace_long_message_raw(
+                let relay_ok = relay_recovered_terminal_text_to_placeholder(
                     http,
+                    shared,
                     channel_id,
                     current_msg_id,
                     &format!("❌ {error}\nmain workspace fallback blocked."),
-                    shared,
                 )
-                .await
-                .is_ok();
+                .await;
                 if should_advance_recovery_dispatch_after_relay(relay_ok) {
                     super::turn_bridge::fail_dispatch_with_retry(
                         shared.api_port,
@@ -3428,7 +3642,9 @@ pub(super) async fn restore_inflight_turns(
             channel_id,
             cancel_token.clone(),
             UserId::new(state.request_owner_user_id),
-            MessageId::new(state.user_msg_id),
+            // user_msg_id == 0 (TUI-direct turn) → no active user message to
+            // bind; `optional_message_id` yields None instead of panicking.
+            user_msg_id,
         )
         .await;
 

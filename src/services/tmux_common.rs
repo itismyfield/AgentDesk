@@ -215,6 +215,56 @@ pub(crate) fn tmux_capture_indicates_generic_ready_banner(capture: &str) -> bool
         .any(|l| l.contains(CLAUDE_TUI_READY_BANNER))
 }
 
+/// Detect whether the interactive Claude TUI `/effort` slider overlay is still
+/// open in the captured pane.
+///
+/// Claude Code 2.1.x renders `/effort` as a *horizontal slider*, not a
+/// box-drawing radio list: the open overlay carries BOTH an `Effort` heading
+/// and a `←/→ to adjust` (left/right arrow) instructional footer. When the
+/// overlay is dismissed (Enter confirms the selection) both disappear and the
+/// pane returns to the normal composer chrome.
+///
+/// We require BOTH signals to co-occur in the recent capture so that stale
+/// scrollback — e.g. a prior conversation or code snippet that merely mentions
+/// `←/→ to adjust` or the word "effort" — cannot be mistaken for a live
+/// overlay. Requiring the pair is the load-bearing guard against false
+/// "selector still open" failures.
+///
+/// This is the post-submit validation for `/effort` passthrough: if this
+/// returns true after we drive the slider, the selection did NOT confirm and
+/// the pane is stranded on the overlay.
+pub(crate) fn tmux_capture_indicates_claude_tui_selector_open(capture: &str) -> bool {
+    let non_empty = capture
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>();
+    let start = non_empty.len().saturating_sub(CLAUDE_TUI_DRAFT_SCAN_LINES);
+    let recent = &non_empty[start..];
+
+    let has_footer = recent.iter().any(|line| line_is_slider_adjust_footer(line));
+    let has_heading = recent
+        .iter()
+        .any(|line| line_is_effort_slider_heading(line));
+    has_footer && has_heading
+}
+
+/// True for the slider's instructional footer, e.g. `←/→ to adjust` or
+/// `← / → to adjust` (Claude renders the arrow glyphs `←`/`→` paired with the
+/// word "adjust"). We accept either arrow glyph plus the "adjust" keyword so a
+/// minor copy/spacing change does not silently disable the detector.
+fn line_is_slider_adjust_footer(line: &str) -> bool {
+    let lower = trim_prompt_line(line).to_lowercase();
+    (lower.contains('←') || lower.contains('→')) && lower.contains("adjust")
+}
+
+/// True for the `/effort` slider heading line — the overlay labels the control
+/// with the word "effort". Required alongside the adjust footer so a stray
+/// scrollback line containing only one of the two signals is not read as a
+/// live overlay.
+fn line_is_effort_slider_heading(line: &str) -> bool {
+    trim_prompt_line(line).to_lowercase().contains("effort")
+}
+
 /// Format a tmux session name as an exact-match target.
 ///
 /// tmux `-t` flags perform prefix matching by default: `-t foo` matches
@@ -635,6 +685,87 @@ pub fn truncate_jsonl_head_safe(
     }
     std::fs::rename(&tmp_path, path)?;
     Ok(Some(new_size))
+}
+
+#[cfg(test)]
+mod selector_overlay_tests {
+    use super::*;
+
+    #[test]
+    fn selector_open_detected_for_effort_slider_footer() {
+        // Claude Code 2.1.x `/effort` is a horizontal slider with a
+        // `←/→ to adjust` footer while the overlay is open.
+        let pane = "\
+Claude Code v2.1.141
+
+  Effort   low ─ medium ─ [high] ─ xhigh ─ max
+
+  ←/→ to adjust · Enter to confirm · Esc to cancel";
+
+        assert!(tmux_capture_indicates_claude_tui_selector_open(pane));
+    }
+
+    #[test]
+    fn selector_open_detected_with_spaced_arrow_footer() {
+        let pane = "\
+  Effort
+  ← / → to adjust   Enter to confirm";
+
+        assert!(tmux_capture_indicates_claude_tui_selector_open(pane));
+    }
+
+    #[test]
+    fn selector_open_false_when_only_footer_present_in_scrollback() {
+        // A stale scrollback line that mentions the adjust footer but has no
+        // accompanying Effort heading must not read as a live overlay.
+        let pane = "\
+Claude Code v2.1.141
+
+  README: press ←/→ to adjust the carousel
+❯
+  ⏵⏵ bypass permissions on";
+
+        assert!(!tmux_capture_indicates_claude_tui_selector_open(pane));
+    }
+
+    #[test]
+    fn selector_open_false_when_only_effort_word_present() {
+        // A line that merely mentions "effort" without the adjust footer is
+        // not a live slider overlay either.
+        let pane = "\
+Claude Code v2.1.141
+
+⏺ I adjusted the effort estimate in the doc.
+❯
+  ⏵⏵ bypass permissions on";
+
+        assert!(!tmux_capture_indicates_claude_tui_selector_open(pane));
+    }
+
+    #[test]
+    fn selector_open_false_for_plain_ready_prompt() {
+        let pane = "\
+Claude Code v2.1.141
+
+❯
+  CLAUDE.md: 1, MCP: 2 │ Tools: 0 done
+  ⏵⏵ bypass permissions on";
+
+        assert!(!tmux_capture_indicates_claude_tui_selector_open(pane));
+    }
+
+    #[test]
+    fn selector_open_false_for_composer_draft_mentioning_adjust() {
+        // A draft that merely contains the word "adjust" without the slider
+        // arrow footer must not be mistaken for an open slider overlay.
+        let pane = "\
+Claude Code v2.1.141
+
+❯ adjust the layout margins
+  CLAUDE.md: 1, MCP: 2 │ Tools: 0 done";
+
+        assert!(!tmux_capture_indicates_claude_tui_selector_open(pane));
+    }
 }
 
 #[cfg(test)]

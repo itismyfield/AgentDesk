@@ -161,6 +161,11 @@
     message handler; bugfix only outside a further extraction plan).
   - `src/services/discord/meeting_orchestrator.rs` (3779 lines).
   - `src/services/discord/turn_bridge/mod.rs` (7062 lines).
+  - `src/services/discord/turn_finalizer.rs` (1807 lines; EPIC #3016 single-authority
+    TurnFinalizer — the one actor that releases the mailbox cancel_token, clears
+    inflight, decrements the active-turn counter, and owns the offset/session
+    authority. All other actors submit terminal events here; bugfix only outside a
+    Phase 4-5 extraction plan).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (1525 lines; provider
     stop-token/tmux binding runtime + PID-exit observation helper (#2426),
     split before adding non-bugfix behavior).
@@ -447,8 +452,10 @@ The remaining giant-file modules under `src/services/` not covered above:
 - `src/services/routines/loader.rs` (1753),
   `src/services/routines/store.rs` (2755),
   `src/services/routines/migrated.rs` (1286),
-  `src/services/routines/discord_log.rs` (1056), and
-  `src/services/routines/agent_executor.rs` (1024); routine loader/store,
+  `src/services/routines/discord_log.rs` (1056),
+  `src/services/routines/agent_executor.rs` (1024), and
+  `src/services/routines/runtime.rs` (1011; routine claim/close-action runtime,
+  fresh-session teardown gating per #3006/#3022); routine loader/store,
   migrated launchd validation, Discord logging, and agent execution are the
   canonical scheduled JS routine surfaces. Further feature work should split
   focused helper modules before growing these files again.

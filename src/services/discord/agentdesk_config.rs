@@ -925,20 +925,23 @@ pub(crate) fn configured_workspaces() -> Vec<String> {
 #[cfg(test)]
 mod worktree_isolation_policy_tests {
     use std::fs;
-    use std::sync::Mutex;
 
     use poise::serenity_prelude::ChannelId;
     use tempfile::TempDir;
 
     use super::*;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     fn with_temp_root<F>(f: F)
     where
         F: FnOnce(&TempDir),
     {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        // Serialize on the PROCESS-WIDE `AGENTDESK_ROOT_DIR` lock (shared with
+        // standby_relay / turn_finalizer / tmux(_watcher) / config tests) so
+        // this root-mutating helper cannot race a concurrent test in another
+        // module that also mutates the runtime root.
+        let _guard = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
         let temp = TempDir::new().expect("temp home");
         let root = temp.path().join(".adk");

@@ -55,6 +55,29 @@ pub(super) fn normalize_tool_key(name: &str) -> String {
         .collect()
 }
 
+/// Returns true when a tool-error payload is an internal diagnostic marker
+/// rather than a genuine tool execution failure. The only marker we suppress is
+/// the Claude Code harness's parallel-tool-call cancellation notice (emitted
+/// when one tool in a parallel batch fails and the siblings are aborted, e.g.
+/// `Cancelled: parallel tool call Bash(...)`). This is noise from the harness
+/// internals and must never surface in the user-facing "Recent" activity
+/// mirror.
+///
+/// The match is intentionally narrow: a genuine tool error whose content merely
+/// begins with `Cancelled:` (for example a Bash command or a dispatch summary
+/// reporting its own cancellation) must still reach the mirror so real failure
+/// visibility is preserved.
+pub(super) fn is_internal_tool_error(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    // The harness diagnostic may begin with "Cancelled:" or, depending on the
+    // surrounding payload, lead directly with the "parallel tool call" wording.
+    let body = trimmed
+        .strip_prefix("Cancelled:")
+        .map(str::trim_start)
+        .unwrap_or(trimmed);
+    body.starts_with("parallel tool call")
+}
+
 pub(super) fn is_harness_task_tool_name(name: &str) -> bool {
     matches!(
         normalize_tool_key(name).as_str(),

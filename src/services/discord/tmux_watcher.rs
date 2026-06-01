@@ -3749,6 +3749,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 let owed = mailbox_finalize_owed.swap(false, std::sync::atomic::Ordering::AcqRel);
                 let should_finish_mailbox = finish_mailbox_on_completion || owed;
                 if should_finish_mailbox {
+                    // #3016: capture the turn's real id BEFORE clearing inflight,
+                    // so the finalizer ledger match is exact (id-0 would risk a
+                    // stale terminal finalizing a queued follow-up).
+                    let fresh_idle_user_msg_id =
+                        crate::services::discord::inflight::load_inflight_state(
+                            &watcher_provider,
+                            channel_id.get(),
+                        )
+                        .map(|s| s.user_msg_id)
+                        .unwrap_or(0);
                     crate::services::discord::inflight::clear_inflight_state(
                         &watcher_provider,
                         channel_id.get(),
@@ -3771,6 +3781,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         &shared,
                         &watcher_provider,
                         channel_id,
+                        fresh_idle_user_msg_id,
                         finish_mailbox_on_completion,
                         owed,
                         true,
@@ -3876,12 +3887,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 result.card_marked,
                                 result.human_alert_sent
                             );
+                            // Skip rebind-origin (synthetic, no real user
+                            // message) and user_msg_id == 0 (a TUI-direct turn
+                            // with no anchored Discord user message): there is
+                            // no message to react against, and
+                            // `MessageId::new(0)` would panic.
                             if let Some(state) =
                                 crate::services::discord::inflight::load_inflight_state(
                                     &watcher_provider,
                                     channel_id.get(),
                                 )
-                                .filter(|state| !state.rebind_origin)
+                                .filter(|state| !state.rebind_origin && state.user_msg_id != 0)
                             {
                                 let user_msg_id = serenity::MessageId::new(state.user_msg_id);
                                 crate::services::discord::formatting::remove_reaction_raw(
@@ -4141,8 +4157,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // inflights — their `user_msg_id=0` identifies no real Discord
             // message so issuing reactions against it just produces API
             // errors. The synthetic state was created by
-            // `/api/inflight/rebind` to adopt a live tmux session.
-            if let Some(state) = inflight_state.as_ref().filter(|s| !s.rebind_origin) {
+            // `/api/inflight/rebind` to adopt a live tmux session. The same
+            // holds for any user_msg_id == 0 (e.g. a TUI-direct turn) — there
+            // is no message to react against and `MessageId::new(0)` panics.
+            if let Some(state) = inflight_state
+                .as_ref()
+                .filter(|s| !s.rebind_origin && s.user_msg_id != 0)
+            {
                 let user_msg_id = serenity::MessageId::new(state.user_msg_id);
                 crate::services::discord::formatting::remove_reaction_raw(
                     &http,
@@ -4298,8 +4319,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 
             // #897 round-3 Medium: skip reaction + retry scheduling for
             // `rebind_origin` inflights — they have no real user message
-            // to react against and no real user text to re-prompt.
-            if let Some(state) = inflight_state.as_ref().filter(|s| !s.rebind_origin) {
+            // to react against and no real user text to re-prompt. The same
+            // holds for user_msg_id == 0 (e.g. a TUI-direct turn): no message
+            // to react against, and `MessageId::new(0)` would panic.
+            if let Some(state) = inflight_state
+                .as_ref()
+                .filter(|s| !s.rebind_origin && s.user_msg_id != 0)
+            {
                 let user_msg_id = serenity::MessageId::new(state.user_msg_id);
                 crate::services::discord::formatting::remove_reaction_raw(
                     &http,
@@ -4330,7 +4356,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     fingerprint,
                 } => {
                     if let Some(retry_text) = retry_text {
-                        if let Some(state) = inflight_state.as_ref().filter(|s| !s.rebind_origin) {
+                        // A turn with no anchored user message (rebind_origin or
+                        // user_msg_id == 0, e.g. a TUI-direct turn) has no
+                        // message to re-prompt against; clear retry state
+                        // instead of building `MessageId::new(0)` (panics).
+                        if let Some(state) = inflight_state
+                            .as_ref()
+                            .filter(|s| !s.rebind_origin && s.user_msg_id != 0)
+                        {
                             schedule_provider_overload_retry(
                                 shared.clone(),
                                 http.clone(),
@@ -4624,10 +4657,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &watcher_provider,
                 channel_id.get(),
             ) {
-                Some(state) if state.rebind_origin => {
+                Some(state) if state.rebind_origin || state.user_msg_id == 0 => {
+                    // rebind_origin and user_msg_id == 0 (e.g. a TUI-direct
+                    // turn) both have no anchored user message to retry against;
+                    // `MessageId::new(0)` would panic.
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!(
-                        "  [{ts}] ⚠ Watcher auto-retry skipped for channel {} — rebind_origin inflight has no user message to retry",
+                        "  [{ts}] ⚠ Watcher auto-retry skipped for channel {} — inflight has no user message to retry",
                         channel_id
                     );
                 }
@@ -5687,8 +5723,50 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 provider = %watcher_provider.as_str(),
                 channel = channel_id.get(),
                 tmux_session = %tmux_session_name,
-                "[{ts}] ⚠ #2293: watcher lifecycle-stage paused — TUI quiescence gate timed out; skipping reaction / transcript / inflight-clear / mailbox-finish side effects until the next pass observes idle"
+                "[{ts}] ⚠ #2293: watcher lifecycle-stage paused — TUI quiescence gate timed out; submitting GateTimeout to the finalizer's deadline-armed reconciler instead of deferring to a never-firing next pass"
             );
+            // #3016 phase 3: this is the silent SKIP the EPIC targets. Today the
+            // `if terminal_output_committed && !lifecycle_stage_paused` blocks
+            // below are skipped entirely, so nothing finalizes until the 1800s
+            // placeholder sweeper — which never fires if the pane stays busy.
+            // Instead, submit a gate-timeout with `pane_quiescent: Some(false)`:
+            // the finalizer records it with a SHORT bounded deadline
+            // (GATE_BACKSTOP, seconds) and its single reconciler finalizes once
+            // the backstop elapses. The mailbox release does NOT inject into a
+            // busy pane — the hosted-TUI pre-submit guard remains the
+            // correctness floor that requeues follow-up input while the pane is
+            // non-quiescent. Only fire when terminal output was actually
+            // committed (a real turn end whose visible completion is gated),
+            // matching the committed-output precondition of the skipped block.
+            if terminal_output_committed {
+                // Prefer the real `user_msg_id` from inflight so this resolves
+                // to the exact ledger entry the bridge registered at handoff
+                // (with the Watcher owner) and thus DEFERS to the backstop. A
+                // channel-only id-0 here would risk resolving onto a different
+                // live entry; the real id keys exactly.
+                let gate_user_msg_id = crate::services::discord::inflight::load_inflight_state(
+                    &watcher_provider,
+                    channel_id.get(),
+                )
+                .map(|s| s.user_msg_id)
+                .unwrap_or(0);
+                let _ = shared
+                    .turn_finalizer
+                    .submit_terminal(
+                        crate::services::discord::turn_finalizer::TurnKey::new(
+                            channel_id,
+                            gate_user_msg_id,
+                            shared.current_generation,
+                        ),
+                        watcher_provider.clone(),
+                        crate::services::discord::turn_finalizer::TerminalEvent::GateTimeout {
+                            pane_quiescent: Some(false),
+                        },
+                        crate::services::discord::turn_finalizer::FinalizeContext::watcher(),
+                        shared.clone(),
+                    )
+                    .await;
+            }
         }
 
         if terminal_output_committed && watcher_tui_gate_outcome.should_emit_completion() {
@@ -5863,9 +5941,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // JSONL offset; while the pane is still busy past the gate timeout
         // they would either lie about completion (✅) or write a row that
         // gets contradicted by the next pass (transcript / analytics).
+        // Skip rebind_origin (synthetic) and user_msg_id == 0 (e.g. a
+        // TUI-direct turn with no anchored Discord user message): there is no
+        // message to react against, `discord:<channel>:0` would be a bogus
+        // analytics/turn-id key, and `MessageId::new(0)` would panic. The
+        // recovered response was already delivered via the notify-bot outbox
+        // enqueue above, so skipping the reaction/analytics step is safe.
         if terminal_output_committed
             && !lifecycle_stage_paused
-            && let Some(state) = inflight_state.as_ref().filter(|s| !s.rebind_origin)
+            && let Some(state) = inflight_state
+                .as_ref()
+                .filter(|s| !s.rebind_origin && s.user_msg_id != 0)
         {
             let user_msg_id = serenity::MessageId::new(state.user_msg_id);
             crate::services::discord::formatting::remove_reaction_raw(
@@ -6130,10 +6216,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // entry. The redundant `should_kickoff_queue` block further
             // below is also `dispatch_ok`-gated and remains as a fallback
             // for paths where the helper short-circuited.
+            // #3016: the in-memory `inflight_state` (loaded at L~5860) still
+            // holds the real id even though the on-disk file was cleared above,
+            // so pass it for an exact ledger match.
+            let restored_user_msg_id = inflight_state.as_ref().map(|s| s.user_msg_id).unwrap_or(0);
             finish_restored_watcher_active_turn(
                 &shared,
                 &provider_kind,
                 channel_id,
+                restored_user_msg_id,
                 finish_mailbox_on_completion,
                 owed,
                 dispatch_ok,
@@ -6690,9 +6781,6 @@ mod tests {
     use crate::services::provider::{CancelToken, ProviderKind};
     use crate::services::turn_orchestrator::{Intervention, InterventionMode};
     use serenity::all::{ChannelId, MessageId, UserId};
-    use std::sync::{LazyLock, Mutex};
-
-    static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     struct AgentdeskRootGuard(Option<std::ffi::OsString>);
 
@@ -6738,10 +6826,13 @@ mod tests {
 
     #[test]
     fn watcher_terminal_delivery_commit_mirrors_bridge_inflight_fields() {
-        let _lock = match TEST_ENV_LOCK.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        // Serialize on the PROCESS-WIDE `AGENTDESK_ROOT_DIR` lock (shared with
+        // standby_relay / turn_finalizer / config tests) so a concurrent
+        // root-mutating test cannot stomp our tempdir env. A module-local mutex
+        // only serialized within this module and let the leak through.
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let _root_guard = AgentdeskRootGuard::set(tmp.path());
 
@@ -6791,10 +6882,13 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_delivery_timeout_cleanup_releases_mailbox_and_preserves_followup_queue() {
-        let _lock = match TEST_ENV_LOCK.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        // Serialize on the PROCESS-WIDE `AGENTDESK_ROOT_DIR` lock (shared with
+        // standby_relay / turn_finalizer / config tests). The guard is held
+        // across awaits, which is sound because `#[tokio::test]` runs on a
+        // current-thread runtime (the future is never moved across threads).
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let _root_guard = AgentdeskRootGuard::set(tmp.path());
 
@@ -6876,6 +6970,7 @@ mod tests {
             &shared,
             &provider,
             channel_id,
+            state.user_msg_id,
             true,
             false,
             false,

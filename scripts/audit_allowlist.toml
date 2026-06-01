@@ -65,7 +65,12 @@ direct_discord_sends = [
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:26d4f3ea346a4c7b",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:d2a63e6f1c91c479",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:c4f1e0c4fddb4380",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:9b9526b38f0691a8"
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:9b9526b38f0691a8",
+  # #3016 msg_id==0 recovery: bridge creates a fresh placeholder / posts a recovery
+  # notice for turns with no anchored Discord message. Consistent with the bridge's
+  # existing pre-migration direct sends; retire with the #1436 outbound v3 extraction.
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:d77122f8dd3466ba",
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:37e09c3e1136f9b1"
 ]
 
 # Manual JSON row mapping: legacy mapping callsites pending typed migration.
