@@ -226,13 +226,6 @@ fn register_globals_pg_only(
     Ok(())
 }
 
-/// Test-only wrapper for card_review_state sync (#158).
-/// PG-backed tests should pass a pool through `review_state_sync_with_backends`.
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub fn review_state_sync(db: &Db, json_str: &str) -> String {
-    review_state_sync_with_backends(Some(db), None, json_str)
-}
-
 pub fn review_state_sync_with_backends(
     db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,

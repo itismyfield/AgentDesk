@@ -45,8 +45,7 @@ high_risk_recovery:
   - 'src/db/**'
   - 'src/dispatch/**'
   - 'src/engine/**'
-  - 'src/integration_tests.rs'
-  - 'src/integration_tests/tests/high_risk_recovery.rs'
+  - 'src/high_risk_recovery.rs'
   - 'src/kanban.rs'                      # 카드 상태 전이가 reconcile 입력
   - 'src/reconcile.rs'
   - 'src/server/routes/auto_queue.rs'
@@ -69,7 +68,7 @@ high_risk_recovery:
 
 ## 3. High-risk recovery lane test axes
 
-`#1011`/`#974` 감사로그는 release gate 의 high-risk recovery lane 이 아래 **4 축**을 회귀 방지선으로 유지해야 한다고 명시한다. 각 축은 `src/integration_tests/tests/high_risk_recovery.rs` 의 `failure_recovery` / `outbox_boundary` / `delayed_worker` / `idle_session_cleanup` 모듈에 분산되어 있으며, 축별 대표 시나리오는 [`docs/high-risk-recovery-lane.md`](../high-risk-recovery-lane.md#release-gate-축-매핑) 에 풀 매트릭스가 있다.
+`#1011`/`#974` 감사로그는 release gate 의 high-risk recovery lane 이 아래 **4 축**을 회귀 방지선으로 유지해야 한다고 명시한다. 레거시 SQLite 기반 `src/integration_tests/tests/high_risk_recovery.rs` 시나리오 하네스는 #3035 Phase 1 에서 제거되었으며, PG-only 회귀 보호는 `src/high_risk_recovery.rs` 로 이전된다. 아래 시나리오 매트릭스(`failure_recovery` / `outbox_boundary` / `delayed_worker` / `idle_session_cleanup` 축)는 제거된 레거시 하네스 기준 기록이며 PG 스위트 재매핑은 후속 Phase 에서 진행한다. 축별 대표 시나리오는 [`docs/high-risk-recovery-lane.md`](../high-risk-recovery-lane.md#release-gate-축-매핑) 참고.
 
 | Axis | What it guards | Representative scenarios (cargo test filters) |
 | --- | --- | --- |

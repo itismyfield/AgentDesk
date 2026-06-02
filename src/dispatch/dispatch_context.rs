@@ -6385,7 +6385,3 @@ mod tests {
         pg_db.drop().await;
     }
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[path = "dispatch_context_relocated_tests.rs"]
-mod relocated_tests;

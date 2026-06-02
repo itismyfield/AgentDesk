@@ -100,8 +100,8 @@ These callsites already use the unified delivery engine. Rows marked
 | `src/services/discord/monitoring_status.rs:115` (`deliver_monitoring_status`) | monitoring status | **migrated_v3**. Status banner send + edit with `preserve_inline_content`; edits use `without_idempotency()`. |
 | `src/services/discord/meeting_orchestrator.rs:754, 796` (`meeting_outbound_message` / edit path) | meeting status / cancel / parse-error | **migrated_v3**. Stable meeting dedup metadata plus `OutboundOperation::Edit`. |
 | `src/services/routines/discord_log.rs:486, 531` (`deliver_or_update_discord_summary`) | routine Discord summary | **migrated_v3**. Uses direct v3 send/edit and disables semantic dedupe for repeated summary writes. |
-| `src/integration_tests/discord_flow/scenarios.rs:44, 55` | integration test harness | Mock-Discord roundtrip for §1.2 validation. |
-| `src/integration_tests/agents_setup_e2e.rs:259` | integration test | Wizard-ready E2E. |
+| `src/integration_tests/discord_flow/scenarios.rs` (removed in #3035 Phase 1) | integration test harness | Mock-Discord roundtrip for §1.2 validation; legacy-sqlite-only harness deleted. |
+| `src/integration_tests/agents_setup_e2e.rs` (removed in #3035 Phase 1) | integration test | Wizard-ready E2E; legacy-sqlite-only harness deleted. |
 
 Total **direct migrated_v3 production families: 11** (`dispatch_outbox`,
 `review_notifications`, final dispatch completion summaries, issue
