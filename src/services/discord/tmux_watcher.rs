@@ -1165,7 +1165,22 @@ fn session_bound_relay_frame_ack_reached(target: Option<&SessionBoundRelayAckTar
 fn watcher_should_direct_send_after_session_bound_ack(
     should_direct_send: bool,
     ack_outcome: SessionBoundRelayAckOutcome,
+    relay_owner_present: bool,
 ) -> bool {
+    // #3042 (relay-stability P1, immediate mitigation): after a restart the
+    // channel can run with `relay_owner_kind=none` + `inflight_present=false`
+    // (restore_inflight failed to rebind ownership), so the session-bound
+    // StreamRelay terminal-commit ACK never lands and the 10s wait reports
+    // `TimedOut` on every poll. In that ownerless state a `TimedOut` is NOT a
+    // reliable "not delivered" signal — the StreamRelay sink may have posted
+    // and merely failed to advance the committed-sequence metric — so blindly
+    // re-sending the same byte-range once per ACK-timeout poll produces the
+    // observed 3× duplicate. Suppress the watcher-direct fallback for an
+    // ownerless `TimedOut`. Owned outcomes and non-timeout outcomes keep the
+    // existing fallback behaviour.
+    if !relay_owner_present && matches!(ack_outcome, SessionBoundRelayAckOutcome::TimedOut) {
+        return false;
+    }
     should_direct_send && !matches!(ack_outcome, SessionBoundRelayAckOutcome::Delivered)
 }
 
@@ -2120,25 +2135,72 @@ mod matched_session_jsonl_gate_tests {
 
     #[test]
     fn frame_accepted_without_terminal_commit_uses_watcher_direct_fallback() {
+        // Owner present: a non-Delivered ACK keeps the watcher-direct fallback.
         assert!(watcher_should_direct_send_after_session_bound_ack(
             true,
-            SessionBoundRelayAckOutcome::TimedOut
+            SessionBoundRelayAckOutcome::TimedOut,
+            true
         ));
         assert!(watcher_should_direct_send_after_session_bound_ack(
             true,
-            SessionBoundRelayAckOutcome::TerminalSkipped
+            SessionBoundRelayAckOutcome::TerminalSkipped,
+            true
         ));
         assert!(watcher_should_direct_send_after_session_bound_ack(
             true,
-            SessionBoundRelayAckOutcome::MissingTarget
+            SessionBoundRelayAckOutcome::MissingTarget,
+            true
         ));
         assert!(!watcher_should_direct_send_after_session_bound_ack(
             true,
-            SessionBoundRelayAckOutcome::Delivered
+            SessionBoundRelayAckOutcome::Delivered,
+            true
         ));
         assert!(!watcher_should_direct_send_after_session_bound_ack(
             false,
-            SessionBoundRelayAckOutcome::TimedOut
+            SessionBoundRelayAckOutcome::TimedOut,
+            true
+        ));
+    }
+
+    /// #3042: after a restart `restore_inflight` can leave the channel with
+    /// `relay_owner_kind=none`/`inflight_present=false`, so the session-bound
+    /// terminal-commit ACK never lands and every 10s poll reports `TimedOut`.
+    /// In that ownerless state a `TimedOut` is not a reliable not-delivered
+    /// signal, so the watcher-direct blind re-send must be suppressed (the
+    /// observed 3× duplicate). Owner-absent + non-timeout outcomes still fall
+    /// back so genuine sink failures/skips are not silently dropped.
+    #[test]
+    fn ownerless_timeout_suppresses_watcher_direct_fallback() {
+        // The exact incident shape: should_direct_send=true, TimedOut, no owner.
+        assert!(!watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::TimedOut,
+            false
+        ));
+        // Owner present with the same TimedOut keeps the fallback (regression
+        // guard so the suppression is owner-scoped, not a blanket TimedOut mute).
+        assert!(watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::TimedOut,
+            true
+        ));
+        // Ownerless but a non-timeout (definitive) outcome still falls back.
+        assert!(watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::SinkError,
+            false
+        ));
+        assert!(watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::TerminalSkipped,
+            false
+        ));
+        // Ownerless TimedOut with should_direct_send=false is also suppressed.
+        assert!(!watcher_should_direct_send_after_session_bound_ack(
+            false,
+            SessionBoundRelayAckOutcome::TimedOut,
+            false
         ));
     }
 
@@ -2146,19 +2208,23 @@ mod matched_session_jsonl_gate_tests {
     fn session_sink_route_skip_uses_watcher_direct_fallback() {
         assert!(watcher_should_direct_send_after_session_bound_ack(
             true,
-            SessionBoundRelayAckOutcome::SinkError
+            SessionBoundRelayAckOutcome::SinkError,
+            true
         ));
         assert!(watcher_should_direct_send_after_session_bound_ack(
             true,
-            SessionBoundRelayAckOutcome::TerminalSkipped
+            SessionBoundRelayAckOutcome::TerminalSkipped,
+            true
         ));
         assert!(watcher_should_direct_send_after_session_bound_ack(
             true,
-            SessionBoundRelayAckOutcome::Dropped
+            SessionBoundRelayAckOutcome::Dropped,
+            true
         ));
         assert!(!watcher_should_direct_send_after_session_bound_ack(
             true,
-            SessionBoundRelayAckOutcome::Delivered
+            SessionBoundRelayAckOutcome::Delivered,
+            true
         ));
     }
 
@@ -5751,10 +5817,22 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let recent_stop_reason =
             recent_turn_stop_for_watcher_range(channel_id, &tmux_session_name, data_start_offset)
                 .map(|stop| stop.reason);
+        // #3042: an ownerless turn (`inflight_present=false` or
+        // `relay_owner_kind=none`, the post-restart restore_inflight gap) has no
+        // reliable terminal-commit ACK path, so a `TimedOut` there must not drive
+        // the watcher-direct re-send. Mirror the relay_flight_recorder fields used
+        // below so the gate sees exactly what is logged.
+        let relay_owner_present = inflight_before_relay.as_ref().is_some_and(|state| {
+            !matches!(
+                state.effective_relay_owner_kind(),
+                crate::services::discord::inflight::RelayOwnerKind::None
+            )
+        });
         let watcher_direct_fallback_after_session_bound_ack =
             watcher_should_direct_send_after_session_bound_ack(
                 relay_decision.should_direct_send,
                 session_bound_ack_outcome,
+                relay_owner_present,
             );
         let session_bound_fallback_uses_full_body = session_bound_terminal_delivery_attempted
             && watcher_direct_fallback_after_session_bound_ack;
@@ -5770,7 +5848,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // lagged the committed-sequence metric) and this re-sends the same
         // answer. Rising counts here are the signal that the dual-authority
         // terminal-delivery lease (P1) is overdue.
-        if watcher_direct_fallback_after_session_bound_ack
+        //
+        // #3042: keep recording the timeout even when the ownerless-timeout
+        // suppression above turns off the watcher-direct fallback — the ACK
+        // genuinely timed out and that is the observability signal we must not
+        // lose (the post-restart restore_inflight gap shows up precisely as
+        // ownerless `TimedOut`). Gate on the raw outcome plus the original
+        // should_direct_send intent rather than the (now-suppressed) fallback.
+        if relay_decision.should_direct_send
             && matches!(
                 session_bound_ack_outcome,
                 SessionBoundRelayAckOutcome::TimedOut
