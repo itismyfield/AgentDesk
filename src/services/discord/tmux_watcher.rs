@@ -1320,6 +1320,28 @@ async fn persist_watcher_provider_session_id(
     )
     .await;
 
+    // #3053: persisting a provider selector is live runtime activity — emit an
+    // auditable heartbeat touch so idle-kill's COALESCE(last_heartbeat,
+    // created_at) row is refreshed and the candidate-key match is logged.
+    // (hook_session already sets last_heartbeat; this adds the audit trail and
+    // covers any divergent/legacy session_key the upsert did not reach.)
+    touch_session_activity(
+        None::<&crate::db::Db>,
+        shared.pg_pool.as_ref(),
+        &shared.token_hash,
+        provider,
+        tmux_session_name,
+        crate::services::discord::adk_session::parse_thread_channel_id_from_name(
+            &crate::services::provider::parse_provider_and_channel_from_tmux_name(
+                tmux_session_name,
+            )
+            .map(|(_, channel)| channel)
+            .unwrap_or_default(),
+        ),
+        "provider_selector_persisted",
+        "tmux_watcher.rs:persist_provider_session_selector",
+    );
+
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
         "  [{ts}] 👁 watcher persisted provider session selector for {} channel {}",
@@ -3214,6 +3236,22 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &tmux_session_name,
                 current_offset,
                 "src/services/discord/tmux.rs:post_terminal_no_inflight_suppressed_output",
+            );
+            // #3053: suppressing post-terminal output is NOT idleness — the
+            // wrapper is still alive and producing JSONL. The original code
+            // `continue`d here before reaching the heartbeat refresh below, so
+            // a live TUI session that only ever emitted post-terminal output
+            // (e.g. provider selector continuation) never refreshed its
+            // idle-kill heartbeat and was killed as "idle". Touch it here too.
+            touch_session_activity(
+                None::<&crate::db::Db>,
+                shared.pg_pool.as_ref(),
+                &shared.token_hash,
+                &watcher_provider,
+                &tmux_session_name,
+                watcher_thread_channel_id,
+                "post_terminal_suppressed_output_while_tmux_alive",
+                "tmux_watcher.rs:post_terminal_no_inflight_suppressed_output",
             );
             utf8_decoder.clear_pending();
             continue;

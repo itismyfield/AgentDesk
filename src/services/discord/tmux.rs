@@ -2584,9 +2584,9 @@ mod tests {
         should_suppress_terminal_output_after_recent_stop, start_monitor_auto_turn_when_available,
         strip_inprogress_indicators, suppressed_placeholder_action, terminal_relay_decision,
         tmux_death_is_normal_completion, tmux_death_lifecycle_decision,
-        tmux_death_lifecycle_notification_reason, watcher_output_file_offset,
-        watcher_ready_for_input_turn_completed, watcher_should_yield_to_inflight_state,
-        watcher_stream_seed,
+        tmux_death_lifecycle_notification_reason, touch_session_activity,
+        watcher_output_file_offset, watcher_ready_for_input_turn_completed,
+        watcher_should_yield_to_inflight_state, watcher_stream_seed,
     };
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::db::session_transcripts::SessionTranscriptEventKind;
@@ -2789,6 +2789,81 @@ mod tests {
             )
             .unwrap();
         assert_ne!(last_heartbeat, "2026-04-09 01:02:03");
+    }
+
+    // #3053 regression: a session whose `last_heartbeat` is stale enough that
+    // idle-kill (COALESCE(last_heartbeat, created_at) < NOW() - 6h) would
+    // select it MUST be removed from the idle-kill candidate set once
+    // TUI-direct relay activity flows through `touch_session_activity`.
+    #[test]
+    fn touch_session_activity_refreshes_stale_heartbeat_so_idle_kill_skips_session() {
+        let db = crate::db::test_db();
+        let provider = ProviderKind::Codex;
+        let channel_name = "adk-cdx-t1485506232256168011";
+        let tmux_name = provider.build_tmux_session_name(channel_name);
+        let session_key = crate::services::discord::adk_session::build_namespaced_session_key(
+            "tokenxyz", &provider, &tmux_name,
+        );
+        // Stale heartbeat ~15h old (mirrors the #3053 report: "idle 15시간 초과").
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO sessions
+                 (session_key, provider, status, thread_channel_id, last_heartbeat, created_at)
+                 VALUES (?1, ?2, 'idle', '1485506232256168011',
+                         datetime('now', '-15 hours'), datetime('now', '-20 hours'))",
+                [session_key.as_str(), provider.as_str()],
+            )
+            .unwrap();
+
+        // Sanity: the stale row IS an idle-kill candidate before the touch.
+        let candidate_before: i64 = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM sessions
+                 WHERE session_key = ?1
+                   AND status = 'idle'
+                   AND COALESCE(last_heartbeat, created_at) < datetime('now', '-6 hours')",
+                [session_key.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            candidate_before, 1,
+            "stale session must be an idle-kill candidate before activity"
+        );
+
+        // TUI-direct relay activity (the path that previously left this row
+        // untouched and let idle-kill fire).
+        assert!(touch_session_activity(
+            Some(&db),
+            None,
+            "tokenxyz",
+            &provider,
+            &tmux_name,
+            Some(1485506232256168011),
+            "tui_direct_relay_activity",
+            "unit-test:touch_session_activity",
+        ));
+
+        // After the touch, the same idle-kill selector must NOT match.
+        let candidate_after: i64 = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM sessions
+                 WHERE session_key = ?1
+                   AND status = 'idle'
+                   AND COALESCE(last_heartbeat, created_at) < datetime('now', '-6 hours')",
+                [session_key.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            candidate_after, 0,
+            "after TUI relay activity, idle-kill must no longer select the session (#3053)"
+        );
     }
 
     #[test]
