@@ -13,6 +13,10 @@ pub(crate) use metadata::{
 };
 use sqlx::{PgPool, Row as SqlxRow};
 
+use crate::db::auto_queue::slot_predicate::{
+    DispatchSlotPolarity, active_dispatch_on_slot_predicate,
+};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SlotThreadBinding {
     pub(crate) agent_id: String,
@@ -329,54 +333,28 @@ async fn slot_has_active_dispatch_excluding_pg_tx(
         return Ok(true);
     }
 
-    let rows = sqlx::query(
-        "SELECT id, context
-         FROM task_dispatches
-         WHERE to_agent_id = $1
-           AND status IN ('pending', 'dispatched')",
-    )
-    .bind(agent_id)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| {
-        format!("load postgres active dispatches for {agent_id}:{slot_index}: {error}")
-    })?;
-
-    for row in rows {
-        let dispatch_id: String = row.try_get("id").map_err(|error| {
-            format!("read postgres dispatch id for {agent_id}:{slot_index}: {error}")
-        })?;
-        if dispatch_id == exclude_id {
-            continue;
-        }
-        let context: Option<String> = row.try_get("context").ok().flatten();
-        let Some(context) = context else {
-            continue;
-        };
-        let Some(context_json) = serde_json::from_str::<serde_json::Value>(&context).ok() else {
-            continue;
-        };
-        if context_json
-            .get("slot_index")
-            .and_then(|value| value.as_i64())
-            != Some(slot_index)
-        {
-            continue;
-        }
-        if context_json
-            .get("sidecar_dispatch")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        if context_json.get("phase_gate").is_some() {
-            continue;
-        }
-        return Ok(true);
-    }
-
-    Ok(false)
+    // #3040: share the single slot-occupancy SQL builder with claim.rs /
+    // slots.rs / runtime.rs. Previously this transactional path used its own
+    // hand-ported Rust loop that ALSO dropped the review-class / live-session
+    // guard, so a review/create-pr dispatch whose session had already
+    // completed kept the slot "busy" here while auto-queue allocation treated
+    // it as free — the exact split-brain this issue removes.
+    let active_dispatch_exists = active_dispatch_on_slot_predicate(
+        "$1",
+        "$2",
+        DispatchSlotPolarity::Exists,
+        Some("d.id != $3"),
+    );
+    let dispatch_query = format!("SELECT {active_dispatch_exists}");
+    sqlx::query_scalar::<_, bool>(&dispatch_query)
+        .bind(agent_id)
+        .bind(slot_index)
+        .bind(exclude_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| {
+            format!("load postgres active dispatches for {agent_id}:{slot_index}: {error}")
+        })
 }
 
 pub(crate) async fn read_slot_thread_binding_pg(

@@ -3,6 +3,9 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use sqlx::{PgPool, Row as SqlxRow};
 
+use crate::db::auto_queue::slot_predicate::{
+    DispatchSlotPolarity, active_dispatch_on_slot_predicate,
+};
 use crate::services::discord::health::HealthRegistry;
 
 #[derive(Debug, Clone)]
@@ -187,12 +190,12 @@ pub async fn slot_has_active_dispatch_excluding_pg(
 ) -> Result<bool, String> {
     let exclude_id = exclude_dispatch_id.unwrap_or("");
     let exclude_entry_id = exclude_entry_id.unwrap_or("");
-    // #2048 F5 + F8: align with claim.rs `active_dispatch_slot_guard_sql`.
-    // (1) Paused/cancelled-run entries no longer block — their dispatches
-    //     are being cancelled. (2) review / review-decision / create-pr
-    //     dispatches only block when a live session is attached. Slot reset
-    //     and slot allocation must agree; before this fix operators could
-    //     not reset slots that allocation already treated as free.
+    // #2048 F5 + F8 / #3040: paused/cancelled-run entries no longer block —
+    // their dispatches are being cancelled. review / review-decision /
+    // create-pr dispatches only block when a live session is attached. The
+    // task_dispatches half of this check shares the single SQL builder
+    // (`active_dispatch_on_slot_predicate`) with claim.rs and slots.rs so
+    // slot allocation and slot reset can never disagree.
     let auto_queue_active: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)::BIGINT
          FROM auto_queue_entries e
@@ -217,86 +220,22 @@ pub async fn slot_has_active_dispatch_excluding_pg(
         return Ok(true);
     }
 
-    let rows = sqlx::query(
-        "SELECT id, dispatch_type, status, context
-         FROM task_dispatches
-         WHERE to_agent_id = $1
-           AND status IN ('pending', 'dispatched')",
-    )
-    .bind(agent_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| {
-        format!("load postgres active dispatches for {agent_id}:{slot_index}: {error}")
-    })?;
-
-    for row in rows {
-        let dispatch_id: String = row.try_get("id").map_err(|error| {
-            format!("read postgres dispatch id for {agent_id}:{slot_index}: {error}")
-        })?;
-        if dispatch_id == exclude_id {
-            continue;
-        }
-        let dispatch_type: Option<String> = row.try_get("dispatch_type").ok().flatten();
-        let status: String = row.try_get("status").map_err(|error| {
-            format!("read postgres dispatch status for {agent_id}:{slot_index}: {error}")
-        })?;
-        let context: Option<String> = row.try_get("context").ok().flatten();
-        let Some(context) = context else {
-            continue;
-        };
-        let Some(context_json) = serde_json::from_str::<serde_json::Value>(&context).ok() else {
-            continue;
-        };
-        if context_json
-            .get("slot_index")
-            .and_then(|value| value.as_i64())
-            != Some(slot_index)
-        {
-            continue;
-        }
-        if context_json
-            .get("sidecar_dispatch")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        if context_json.get("phase_gate").is_some() {
-            continue;
-        }
-        let is_review_class = matches!(
-            dispatch_type.as_deref().unwrap_or("implementation"),
-            "review" | "review-decision" | "create-pr"
-        );
-        if is_review_class {
-            if status == "pending" {
-                return Ok(true);
-            }
-            let has_live_session = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (
-                     SELECT 1
-                     FROM sessions s
-                     WHERE s.active_dispatch_id = $1
-                       AND COALESCE(s.status, '') NOT IN ('disconnected', 'completed', 'failed', 'cancelled')
-                 )",
-            )
-            .bind(&dispatch_id)
-            .fetch_one(pool)
-            .await
-            .map_err(|error| {
-                format!(
-                    "probe live session for review-class dispatch {dispatch_id}: {error}"
-                )
-            })?;
-            if !has_live_session {
-                continue;
-            }
-        }
-        return Ok(true);
-    }
-
-    Ok(false)
+    let active_dispatch_exists = active_dispatch_on_slot_predicate(
+        "$1",
+        "$2",
+        DispatchSlotPolarity::Exists,
+        Some("d.id != $3"),
+    );
+    let dispatch_query = format!("SELECT {active_dispatch_exists}");
+    sqlx::query_scalar::<_, bool>(&dispatch_query)
+        .bind(agent_id)
+        .bind(slot_index)
+        .bind(exclude_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| {
+            format!("load postgres active dispatches for {agent_id}:{slot_index}: {error}")
+        })
 }
 
 pub async fn reset_slot_thread_bindings_pg(

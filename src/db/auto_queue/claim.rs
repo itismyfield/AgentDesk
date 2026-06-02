@@ -1,6 +1,7 @@
 use sqlx::{PgPool, Row as SqlxRow};
 
 use super::phase_gates::batch_phase_is_eligible;
+use super::slot_predicate::{DispatchSlotPolarity, active_dispatch_on_slot_predicate};
 use super::slots::{
     ensure_agent_slot_pool_rows_pg, run_slot_pool_size_pg, slot_has_active_dispatch_pg,
 };
@@ -252,51 +253,11 @@ async fn bind_slot_index_for_group_entries_pg(
 }
 
 fn active_dispatch_slot_guard_sql(agent_expr: &str, slot_expr: &str) -> String {
-    format!(
-        "NOT EXISTS (
-             SELECT 1
-             FROM task_dispatches d
-             WHERE d.to_agent_id = {agent_expr}
-               AND d.status IN ('pending', 'dispatched')
-               AND COALESCE(NULLIF((COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->>'slot_index', '')::BIGINT, -1) = {slot_expr}
-               AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
-               AND (COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->'phase_gate' IS NULL
-               AND (
-                   COALESCE(d.dispatch_type, 'implementation') NOT IN ('review', 'review-decision', 'create-pr')
-                   OR d.status = 'pending'
-                   OR EXISTS (
-                       SELECT 1
-                       FROM sessions s
-                       WHERE s.active_dispatch_id = d.id
-                         AND COALESCE(s.status, '') NOT IN ('disconnected', 'completed', 'failed', 'cancelled')
-                   )
-               )
-         )"
-    )
+    active_dispatch_on_slot_predicate(agent_expr, slot_expr, DispatchSlotPolarity::NotExists, None)
 }
 
 fn active_dispatch_slot_exists_sql(agent_expr: &str, slot_expr: &str) -> String {
-    format!(
-        "EXISTS (
-             SELECT 1
-             FROM task_dispatches d
-             WHERE d.to_agent_id = {agent_expr}
-               AND d.status IN ('pending', 'dispatched')
-               AND COALESCE(NULLIF((COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->>'slot_index', '')::BIGINT, -1) = {slot_expr}
-               AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
-               AND (COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->'phase_gate' IS NULL
-               AND (
-                   COALESCE(d.dispatch_type, 'implementation') NOT IN ('review', 'review-decision', 'create-pr')
-                   OR d.status = 'pending'
-                   OR EXISTS (
-                       SELECT 1
-                       FROM sessions s
-                       WHERE s.active_dispatch_id = d.id
-                         AND COALESCE(s.status, '') NOT IN ('disconnected', 'completed', 'failed', 'cancelled')
-                   )
-               )
-         )"
-    )
+    active_dispatch_on_slot_predicate(agent_expr, slot_expr, DispatchSlotPolarity::Exists, None)
 }
 
 async fn first_free_slot_blocked_by_active_dispatch_pg(

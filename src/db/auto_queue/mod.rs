@@ -4,6 +4,7 @@ pub mod entries;
 pub mod phase_gates;
 pub mod queries;
 pub mod runs;
+pub mod slot_predicate;
 pub mod slots;
 
 #[cfg(test)]
