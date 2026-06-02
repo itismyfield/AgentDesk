@@ -151,9 +151,14 @@ fn memento_search_tool_name(payload: &Value) -> Option<String> {
         .get("tool_name")
         .and_then(Value::as_str)
         .map(|name| name.trim().to_ascii_lowercase())?;
-    let is_search =
-        tool_name.contains("memento") && (tool_name.contains("recall") || tool_name.contains("context"));
-    is_search.then_some(tool_name)
+    if !tool_name.contains("memento") {
+        return None;
+    }
+    // Match the trailing tool segment exactly so both `mcp__memento__recall` and
+    // the dotted `memento.recall` form qualify, while `recall_context_combined`
+    // or a non-memento server's `recall` do not.
+    let leaf = tool_name.rsplit(|c| c == '_' || c == '.').next().unwrap_or("");
+    matches!(leaf, "recall" | "context").then_some(tool_name)
 }
 
 /// Best-effort extraction of `searchEventId` from the PostToolUse payload.
@@ -177,14 +182,35 @@ fn extract_search_event_id(payload: &Value) -> Option<String> {
 }
 
 fn scan_search_event_id(serialized: &str) -> Option<String> {
+    // Anchor on `searchEventId` as a JSON *key*: the marker must be followed by
+    // an (optionally backslash-escaped) closing quote and a `:`, then the value
+    // digits. This rejects longer keys (`searchEventIdHash`), bare-word mentions
+    // inside fragment text, and `null`/empty values — each of which would
+    // otherwise let a greedy digit scan capture an unrelated number. Multiple
+    // occurrences are tried so a non-matching first hit doesn't abort the scan.
     let marker = "searchEventId";
-    let start = serialized.find(marker)? + marker.len();
-    let digits: String = serialized[start..]
-        .chars()
-        .skip_while(|c| !c.is_ascii_digit())
-        .take_while(char::is_ascii_digit)
-        .collect();
-    (!digits.is_empty()).then_some(digits)
+    let mut haystack = serialized;
+    loop {
+        let rel = haystack.find(marker)?;
+        let after = &haystack[rel + marker.len()..];
+        let key_tail = after
+            .strip_prefix("\\\"")
+            .or_else(|| after.strip_prefix('"'))
+            .unwrap_or(after)
+            .trim_start();
+        if let Some(value_part) = key_tail.strip_prefix(':') {
+            let value = value_part.trim_start();
+            let value = value
+                .strip_prefix("\\\"")
+                .or_else(|| value.strip_prefix('"'))
+                .unwrap_or(value);
+            let digits: String = value.chars().take_while(char::is_ascii_digit).collect();
+            if !digits.is_empty() {
+                return Some(digits);
+            }
+        }
+        haystack = after;
+    }
 }
 
 fn memento_feedback_instruction(search_event_id: Option<String>) -> String {
@@ -525,6 +551,43 @@ mod tests {
             Some("981")
         );
         assert_eq!(scan_search_event_id(r#"{"other":"1"}"#), None);
+    }
+
+    #[test]
+    fn scan_search_event_id_rejects_false_positives() {
+        // Longer key that merely starts with the marker.
+        assert_eq!(
+            scan_search_event_id(r#"{"searchEventIdHash":"99"}"#),
+            None
+        );
+        // Bare-word mention inside fragment text (no key colon follows).
+        assert_eq!(
+            scan_search_event_id(r#"{"text":"the searchEventId was 4242 last time"}"#),
+            None
+        );
+        // Null / empty values are not captured.
+        assert_eq!(scan_search_event_id(r#"{"searchEventId":null}"#), None);
+        assert_eq!(scan_search_event_id(r#"{"searchEventId":""}"#), None);
+        // A non-matching first occurrence must not abort the scan: the real key
+        // (with a numeric value) appears after a longer-key decoy.
+        assert_eq!(
+            scan_search_event_id(r#"{"searchEventIdHash":"zz","searchEventId":"77"}"#).as_deref(),
+            Some("77")
+        );
+    }
+
+    #[test]
+    fn memento_search_tool_name_matches_both_forms_and_rejects_lookalikes() {
+        let target = |name: &str| {
+            memento_search_tool_name(&serde_json::json!({ "tool_name": name }))
+        };
+        assert!(target("mcp__memento__recall").is_some());
+        assert!(target("mcp__memento__context").is_some());
+        assert!(target("memento.recall").is_some());
+        // Lookalikes / other servers must not match.
+        assert!(target("mcp__memento__recall_context_combined").is_none());
+        assert!(target("mcp__memento__forget").is_none());
+        assert!(target("mcp__other__recall").is_none());
     }
 
     #[test]
