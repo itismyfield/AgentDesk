@@ -26,7 +26,7 @@ use super::outbound::{
 use super::role_map::load_meeting_config as load_meeting_config_from_role_map;
 use super::settings::{ResolvedMemorySettings, RoleBinding, load_role_prompt};
 use super::{DispatchProfile, SharedData, rate_limit_wait};
-use crate::server::routes::dispatches::discord_delivery::{
+use crate::services::dispatches::discord_delivery::{
     DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
 

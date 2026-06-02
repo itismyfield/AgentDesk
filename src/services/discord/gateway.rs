@@ -248,7 +248,7 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
         &self,
         target_channel: &str,
         content: &str,
-    ) -> Result<String, crate::server::routes::dispatches::discord_delivery::DispatchMessagePostError>
+    ) -> Result<String, crate::services::dispatches::discord_delivery::DispatchMessagePostError>
     {
         let channel_id = parse_channel_id(target_channel)?;
         rate_limit_wait(&self.shared, channel_id).await;
@@ -270,13 +270,13 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
         content: &str,
         reference_channel: &str,
         reference_message: &str,
-    ) -> Result<String, crate::server::routes::dispatches::discord_delivery::DispatchMessagePostError>
+    ) -> Result<String, crate::services::dispatches::discord_delivery::DispatchMessagePostError>
     {
         let channel_id = parse_channel_id(target_channel)?;
         let reference_channel_id = parse_channel_id(reference_channel)?;
         let reference_message_id = parse_message_id(reference_message).map_err(|error| {
-            crate::server::routes::dispatches::discord_delivery::DispatchMessagePostError::new(
-                crate::server::routes::dispatches::discord_delivery::DispatchMessagePostErrorKind::Other,
+            crate::services::dispatches::discord_delivery::DispatchMessagePostError::new(
+                crate::services::dispatches::discord_delivery::DispatchMessagePostErrorKind::Other,
                 error,
             )
         })?;
@@ -299,12 +299,12 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
         target_channel: &str,
         message_id: &str,
         content: &str,
-    ) -> Result<String, crate::server::routes::dispatches::discord_delivery::DispatchMessagePostError>
+    ) -> Result<String, crate::services::dispatches::discord_delivery::DispatchMessagePostError>
     {
         let channel_id = parse_channel_id(target_channel)?;
         let message_id = parse_message_id(message_id).map_err(|error| {
-            crate::server::routes::dispatches::discord_delivery::DispatchMessagePostError::new(
-                crate::server::routes::dispatches::discord_delivery::DispatchMessagePostErrorKind::Other,
+            crate::services::dispatches::discord_delivery::DispatchMessagePostError::new(
+                crate::services::dispatches::discord_delivery::DispatchMessagePostErrorKind::Other,
                 error,
             )
         })?;
@@ -325,32 +325,29 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
 
 fn parse_channel_id(
     raw: &str,
-) -> Result<ChannelId, crate::server::routes::dispatches::discord_delivery::DispatchMessagePostError>
-{
-    raw.parse::<u64>()
-        .map(ChannelId::new)
-        .map_err(|error| {
-            crate::server::routes::dispatches::discord_delivery::DispatchMessagePostError::new(
-                crate::server::routes::dispatches::discord_delivery::DispatchMessagePostErrorKind::Other,
-                format!("invalid Discord channel id {raw}: {error}"),
-            )
-        })
+) -> Result<ChannelId, crate::services::dispatches::discord_delivery::DispatchMessagePostError> {
+    raw.parse::<u64>().map(ChannelId::new).map_err(|error| {
+        crate::services::dispatches::discord_delivery::DispatchMessagePostError::new(
+            crate::services::dispatches::discord_delivery::DispatchMessagePostErrorKind::Other,
+            format!("invalid Discord channel id {raw}: {error}"),
+        )
+    })
 }
 
 fn dispatch_post_error(
     error: serenity::Error,
-) -> crate::server::routes::dispatches::discord_delivery::DispatchMessagePostError {
+) -> crate::services::dispatches::discord_delivery::DispatchMessagePostError {
     let detail = crate::utils::redact::redact_known_secrets(&error.to_string());
     let lowered = detail.to_ascii_lowercase();
     let kind = if detail.contains("BASE_TYPE_MAX_LENGTH")
         || lowered.contains("2000 or fewer in length")
         || lowered.contains("length")
     {
-        crate::server::routes::dispatches::discord_delivery::DispatchMessagePostErrorKind::MessageTooLong
+        crate::services::dispatches::discord_delivery::DispatchMessagePostErrorKind::MessageTooLong
     } else {
-        crate::server::routes::dispatches::discord_delivery::DispatchMessagePostErrorKind::Other
+        crate::services::dispatches::discord_delivery::DispatchMessagePostErrorKind::Other
     };
-    crate::server::routes::dispatches::discord_delivery::DispatchMessagePostError::new(kind, detail)
+    crate::services::dispatches::discord_delivery::DispatchMessagePostError::new(kind, detail)
 }
 
 /// codex review P2 (#1332 follow-up): drain the `queued_placeholders` /

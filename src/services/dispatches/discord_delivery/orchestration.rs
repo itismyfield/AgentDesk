@@ -11,11 +11,11 @@ use crate::db::dispatches::{
 };
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use crate::dispatch::dispatch_destination_provider_override;
-use crate::server::routes::dispatches::resolve_channel_alias;
 use crate::server::routes::dispatches::thread_reuse::{
     clear_thread_for_channel_pg, get_thread_for_channel_pg, set_thread_for_channel_map_only_pg,
     set_thread_for_channel_pg, try_reuse_thread,
 };
+use crate::services::dispatches::outbox_route::resolve_channel_alias;
 use crate::services::dispatches::outbox_route::{
     build_minimal_dispatch_message, format_dispatch_message, prefix_dispatch_message,
     review_submission_hint, review_target_hint,

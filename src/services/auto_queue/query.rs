@@ -306,7 +306,7 @@ pub(super) fn resolve_activate_dispatch_channel_id(channel: &str) -> Option<u64>
     channel
         .parse::<u64>()
         .ok()
-        .or_else(|| crate::server::routes::dispatches::resolve_channel_alias_pub(channel))
+        .or_else(|| crate::services::dispatches::outbox_route::resolve_channel_alias_pub(channel))
 }
 
 pub(super) async fn group_has_dispatched_entries_pg(

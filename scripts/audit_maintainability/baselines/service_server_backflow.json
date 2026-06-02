@@ -2,17 +2,14 @@
   "schema_version": 1,
   "rule": "service_server_backflow",
   "description": "No-regression baseline for src/services references to crate::server or super::server server-layer modules.",
-  "captured_at": "2026-05-30",
-  "total_count": 115,
+  "captured_at": "2026-06-03",
+  "total_count": 70,
   "files": {
     "src/services/agents/query.rs": {
       "count": 2
     },
     "src/services/agents/turn.rs": {
       "count": 2
-    },
-    "src/services/auto_queue.rs": {
-      "count": 4
     },
     "src/services/auto_queue/control_routes.rs": {
       "count": 1
@@ -21,9 +18,6 @@
       "count": 2
     },
     "src/services/auto_queue/phase_gate_violations.rs": {
-      "count": 1
-    },
-    "src/services/auto_queue/query.rs": {
       "count": 1
     },
     "src/services/auto_queue/route.rs": {
@@ -38,18 +32,6 @@
     "src/services/discord/commands/text_commands.rs": {
       "count": 4
     },
-    "src/services/discord/commands/voice.rs": {
-      "count": 2
-    },
-    "src/services/discord/discord_io.rs": {
-      "count": 2
-    },
-    "src/services/discord/gateway.rs": {
-      "count": 14
-    },
-    "src/services/discord/health.rs": {
-      "count": 2
-    },
     "src/services/discord/idle_detector.rs": {
       "count": 1
     },
@@ -57,19 +39,10 @@
       "count": 1
     },
     "src/services/discord/meeting_orchestrator.rs": {
-      "count": 2
+      "count": 1
     },
     "src/services/discord/monitoring_status.rs": {
-      "count": 2
-    },
-    "src/services/discord/outbound/confirmation.rs": {
       "count": 1
-    },
-    "src/services/discord/outbound/delivery.rs": {
-      "count": 1
-    },
-    "src/services/discord/outbound/transport.rs": {
-      "count": 4
     },
     "src/services/discord/recovery_engine.rs": {
       "count": 1
@@ -77,14 +50,8 @@
     "src/services/discord/router/intake_gate.rs": {
       "count": 1
     },
-    "src/services/discord/router/message_handler.rs": {
-      "count": 0
-    },
-    "src/services/discord/router/thread_binding.rs": {
-      "count": 0
-    },
     "src/services/discord/runtime_bootstrap.rs": {
-      "count": 4
+      "count": 3
     },
     "src/services/discord/tmux_lifecycle.rs": {
       "count": 2
@@ -105,7 +72,7 @@
       "count": 1
     },
     "src/services/dispatches/discord_delivery/orchestration.rs": {
-      "count": 3
+      "count": 2
     },
     "src/services/dispatches/outbox_claiming.rs": {
       "count": 4
@@ -113,17 +80,11 @@
     "src/services/dispatches/outbox_queue.rs": {
       "count": 1
     },
-    "src/services/dispatches/outbox_route.rs": {
-      "count": 0
-    },
     "src/services/dispatches/routing_constraint.rs": {
       "count": 3
     },
     "src/services/dispatches/wait_queue.rs": {
       "count": 1
-    },
-    "src/services/issue_announcements.rs": {
-      "count": 3
     },
     "src/services/kanban_cards.rs": {
       "count": 1
@@ -133,15 +94,6 @@
     },
     "src/services/onboarding/mod.rs": {
       "count": 8
-    },
-    "src/services/routines/agent_executor.rs": {
-      "count": 1
-    },
-    "src/services/routines/discord_log.rs": {
-      "count": 3
-    },
-    "src/services/routines/session_control.rs": {
-      "count": 3
     },
     "src/services/session_forwarding.rs": {
       "count": 3

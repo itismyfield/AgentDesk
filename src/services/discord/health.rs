@@ -10,9 +10,6 @@ use sqlx::PgPool;
 use super::SharedData;
 use super::formatting::{build_long_message_attachment, split_message};
 use crate::db::Db;
-use crate::server::routes::dispatches::discord_delivery::{
-    DispatchMessagePostError, DispatchMessagePostErrorKind,
-};
 use crate::services::discord::outbound::delivery::{
     deliver_outbound as deliver_v3_outbound, first_raw_message_id,
 };
@@ -22,6 +19,9 @@ use crate::services::discord::outbound::result::{DeliveryResult, FallbackUsed};
 use crate::services::discord::outbound::{
     DISCORD_HARD_LIMIT_CHARS, DISCORD_SAFE_LIMIT_CHARS, DiscordOutboundClient, OutboundDedupClaim,
     OutboundDedupReservation, OutboundDedupWait, OutboundDeduper, shared_outbound_deduper,
+};
+use crate::services::dispatches::discord_delivery::{
+    DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
 use crate::services::provider::ProviderKind;
 
@@ -1373,7 +1373,7 @@ fn parse_channel_target_value(target: &str) -> Option<u64> {
     trimmed
         .parse::<u64>()
         .ok()
-        .or_else(|| crate::server::routes::dispatches::resolve_channel_alias_pub(trimmed))
+        .or_else(|| crate::services::dispatches::outbox_route::resolve_channel_alias_pub(trimmed))
 }
 
 fn parse_agent_target(target: &str) -> Result<Option<&str>, SendTargetResolutionError> {

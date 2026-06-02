@@ -353,7 +353,7 @@ impl RoutineSessionController {
             .primary_channel()
             .ok_or_else(|| anyhow!("agent {agent_id} primary channel is not configured"))?;
         let primary_channel_id =
-            crate::server::routes::dispatches::resolve_channel_alias_pub(&primary_channel)
+            crate::services::dispatches::outbox_route::resolve_channel_alias_pub(&primary_channel)
                 .or_else(|| primary_channel.parse::<u64>().ok())
                 .ok_or_else(|| {
                     anyhow!("agent {agent_id} primary channel is invalid: {primary_channel}")
@@ -406,7 +406,7 @@ impl RoutineSessionController {
             .primary_channel()
             .ok_or_else(|| anyhow!("agent {agent_id} primary channel is not configured"))?;
         let channel_id =
-            crate::server::routes::dispatches::resolve_channel_alias_pub(&primary_channel)
+            crate::services::dispatches::outbox_route::resolve_channel_alias_pub(&primary_channel)
                 .or_else(|| primary_channel.parse::<u64>().ok())
                 .ok_or_else(|| {
                     anyhow!("agent {agent_id} primary channel is invalid: {primary_channel}")
@@ -469,7 +469,7 @@ impl RoutineSessionController {
             .primary_channel()
             .ok_or_else(|| anyhow!("agent {agent_id} primary channel is not configured"))?;
         let primary_channel_id =
-            crate::server::routes::dispatches::resolve_channel_alias_pub(&primary_channel)
+            crate::services::dispatches::outbox_route::resolve_channel_alias_pub(&primary_channel)
                 .or_else(|| primary_channel.parse::<u64>().ok())
                 .ok_or_else(|| {
                     anyhow!("agent {agent_id} primary channel is invalid: {primary_channel}")

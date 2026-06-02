@@ -2,13 +2,13 @@ use chrono::{DateTime, Utc};
 use poise::serenity_prelude::ChannelId;
 use sqlx::{PgPool, Row};
 
-use crate::server::routes::dispatches::discord_delivery::DispatchMessagePostError;
 use crate::services::discord::outbound::delivery::{deliver_outbound, first_raw_message_id};
 use crate::services::discord::outbound::message::OutboundTarget;
 use crate::services::discord::outbound::{
     DeliveryResult, DiscordOutboundClient, DiscordOutboundMessage, DiscordOutboundPolicy,
     HttpOutboundClient, shared_outbound_deduper,
 };
+use crate::services::dispatches::discord_delivery::DispatchMessagePostError;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct IssueAnnouncementDeliveryError {
@@ -433,7 +433,7 @@ async fn send_issue_announcement_message(
     let client = HttpOutboundClient::new(
         reqwest::Client::new(),
         token.to_string(),
-        crate::server::routes::dispatches::discord_delivery::discord_api_base_url(),
+        crate::services::dispatches::discord_delivery::discord_api_base_url(),
     );
     let channel_id = channel_id.trim();
     let channel_id_num = channel_id.parse::<u64>().map_err(|error| {
@@ -488,7 +488,7 @@ fn normalize_channel_id(channel_id: &str) -> String {
     if trimmed.parse::<u64>().is_ok() {
         return trimmed.to_string();
     }
-    crate::server::routes::dispatches::resolve_channel_alias_pub(trimmed)
+    crate::services::dispatches::outbox_route::resolve_channel_alias_pub(trimmed)
         .map(|value| value.to_string())
         .unwrap_or_else(|| trimmed.to_string())
 }

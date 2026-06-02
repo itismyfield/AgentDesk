@@ -582,7 +582,7 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
         );
 
         let recovery_result = if let Some(pool) = pg_pool {
-            crate::server::routes::dispatches::requeue_dispatch_notify_pg(pool, dispatch_id)
+            crate::db::dispatches::outbox::requeue_dispatch_notify_pg(pool, dispatch_id)
                 .await
                 .map(|queued| {
                     if !queued {

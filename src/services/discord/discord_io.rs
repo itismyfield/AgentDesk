@@ -199,7 +199,7 @@ fn notification_context(context: &serde_json::Value) -> serde_json::Value {
 /// Parse a channel identifier — numeric ID or name alias (e.g. "윤호네비서") → u64.
 fn resolve_channel_to_u64(raw: &str) -> Result<u64, String> {
     raw.parse::<u64>().or_else(|_| {
-        crate::server::routes::dispatches::resolve_channel_alias_pub(raw)
+        crate::services::dispatches::outbox_route::resolve_channel_alias_pub(raw)
             .ok_or_else(|| format!("cannot resolve channel '{raw}'"))
     })
 }
@@ -455,7 +455,7 @@ async fn deliver_channel_message(
     let client = HttpOutboundClient::new(
         reqwest::Client::new(),
         token.to_string(),
-        crate::server::routes::dispatches::discord_delivery::discord_api_base_url(),
+        crate::services::dispatches::discord_delivery::discord_api_base_url(),
     );
     let mut policy = DiscordOutboundPolicy::review_notification();
     if delivery_id.is_none() {

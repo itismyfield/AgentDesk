@@ -941,9 +941,9 @@ async fn notify_voice_alert(channel_id: ChannelId, content: String, kind: &'stat
         return;
     };
     let client = reqwest::Client::new();
-    let base = crate::server::routes::dispatches::discord_delivery::discord_api_base_url();
+    let base = crate::services::dispatches::discord_delivery::discord_api_base_url();
     let target = channel_id.get().to_string();
-    if let Err(error) = crate::server::routes::dispatches::discord_delivery::post_raw_message_once(
+    if let Err(error) = crate::services::dispatches::discord_delivery::post_raw_message_once(
         &client, &token, &base, &target, &content,
     )
     .await
