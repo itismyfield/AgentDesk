@@ -1512,7 +1512,7 @@ fn dispatch_thread_channel_id(
     bindings: Option<&crate::db::agents::AgentChannelBindings>,
 ) -> Option<u64> {
     let bindings = bindings?;
-    let channel = if crate::server::routes::dispatches::use_counter_model_channel(
+    let channel = if crate::services::dispatches::outbox_route::use_counter_model_channel(
         fact.dispatch_type.as_deref(),
     ) {
         bindings.counter_model_channel()
@@ -1521,7 +1521,7 @@ fn dispatch_thread_channel_id(
     };
     channel
         .as_deref()
-        .and_then(crate::server::routes::dispatches::parse_channel_id)
+        .and_then(crate::services::dispatches::outbox_route::parse_channel_id)
 }
 
 fn dispatch_thread_status_suppresses_link(status: &str) -> bool {
@@ -1538,11 +1538,11 @@ fn build_thread_link_candidates(
     let work_channel = bindings
         .primary_channel()
         .as_deref()
-        .and_then(crate::server::routes::dispatches::parse_channel_id);
+        .and_then(crate::services::dispatches::outbox_route::parse_channel_id);
     let review_channel = bindings
         .counter_model_channel()
         .as_deref()
-        .and_then(crate::server::routes::dispatches::parse_channel_id);
+        .and_then(crate::services::dispatches::outbox_route::parse_channel_id);
 
     match (work_channel, review_channel) {
         (Some(work_channel), Some(review_channel)) if work_channel == review_channel => {

@@ -468,7 +468,7 @@ impl RoutineDiscordLogger {
         let client = HttpOutboundClient::new(
             reqwest::Client::new(),
             token,
-            crate::server::routes::dispatches::discord_delivery::discord_api_base_url(),
+            crate::services::dispatches::discord_delivery::discord_api_base_url(),
         );
         let channel = channel_id.parse::<u64>().map_err(|error| {
             format!("invalid routine run Discord summary channel id {channel_id}: {error}")
@@ -595,7 +595,7 @@ impl RoutineDiscordLogger {
         let primary_channel = bindings
             .primary_channel()
             .ok_or_else(|| anyhow!("agent {agent_id} has no primary channel for routine log"))?;
-        let parent_channel_id = crate::server::routes::dispatches::resolve_channel_alias_pub(
+        let parent_channel_id = crate::services::dispatches::outbox_route::resolve_channel_alias_pub(
             &primary_channel,
         )
         .or_else(|| primary_channel.parse::<u64>().ok())
@@ -895,13 +895,14 @@ async fn resolve_agent_channel_target(pool: &PgPool, agent_id: &str) -> Result<S
     let primary_channel = bindings
         .primary_channel()
         .ok_or_else(|| format!("agent {agent_id} has no primary channel for routine log"))?;
-    let channel_id = crate::server::routes::dispatches::resolve_channel_alias_pub(&primary_channel)
-        .or_else(|| primary_channel.parse::<u64>().ok())
-        .ok_or_else(|| {
-            format!(
-                "agent {agent_id} primary channel is invalid for routine log: {primary_channel}"
-            )
-        })?;
+    let channel_id =
+        crate::services::dispatches::outbox_route::resolve_channel_alias_pub(&primary_channel)
+            .or_else(|| primary_channel.parse::<u64>().ok())
+            .ok_or_else(|| {
+                format!(
+                    "agent {agent_id} primary channel is invalid for routine log: {primary_channel}"
+                )
+            })?;
     Ok(format!("channel:{channel_id}"))
 }
 

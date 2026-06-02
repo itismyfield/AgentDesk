@@ -11,7 +11,7 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
-use crate::server::routes::dispatches::discord_delivery::{
+use crate::services::dispatches::discord_delivery::{
     DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
 
@@ -288,7 +288,7 @@ impl DiscordOutboundClient for HttpOutboundClient {
         target_channel: &str,
         content: &str,
     ) -> Result<String, DispatchMessagePostError> {
-        crate::server::routes::dispatches::discord_delivery::post_raw_message_once(
+        crate::services::dispatches::discord_delivery::post_raw_message_once(
             &self.client,
             &self.token,
             &self.discord_api_base,
@@ -304,7 +304,7 @@ impl DiscordOutboundClient for HttpOutboundClient {
         message_id: &str,
         content: &str,
     ) -> Result<String, DispatchMessagePostError> {
-        crate::server::routes::dispatches::discord_delivery::edit_raw_message_once(
+        crate::services::dispatches::discord_delivery::edit_raw_message_once(
             &self.client,
             &self.token,
             &self.discord_api_base,
@@ -316,7 +316,7 @@ impl DiscordOutboundClient for HttpOutboundClient {
     }
 
     async fn resolve_dm_channel(&self, user_id: &str) -> Result<String, DispatchMessagePostError> {
-        let url = crate::server::routes::dispatches::discord_delivery::discord_api_url(
+        let url = crate::services::dispatches::discord_delivery::discord_api_url(
             &self.discord_api_base,
             "/users/@me/channels",
         );

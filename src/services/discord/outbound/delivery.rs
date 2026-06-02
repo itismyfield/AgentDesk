@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use poise::serenity_prelude::ChannelId;
 
-use crate::server::routes::dispatches::discord_delivery::{
+use crate::services::dispatches::discord_delivery::{
     DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
 use crate::services::provider::{CancelToken, cancel_requested};

@@ -17,7 +17,7 @@ pub(crate) async fn send_command_confirmation_message(
     let client = HttpOutboundClient::new(
         reqwest::Client::new(),
         token.to_string(),
-        crate::server::routes::dispatches::discord_delivery::discord_api_base_url(),
+        crate::services::dispatches::discord_delivery::discord_api_base_url(),
     );
     let message = DiscordOutboundMessage::new(
         "discord-command-confirmation",
