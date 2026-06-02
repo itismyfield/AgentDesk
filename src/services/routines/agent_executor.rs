@@ -11,7 +11,9 @@ use crate::services::discord::health::{
 
 use super::runtime::RoutineRunOutcome;
 use super::session_control::RoutineSessionController;
-use super::store::{ClaimedRoutineRun, NextDueAtUpdate, RoutineStore, RunningAgentRoutineRun};
+use super::store::{
+    ClaimedRoutineRun, NextDueAtUpdate, RecoveredRoutineRun, RoutineStore, RunningAgentRoutineRun,
+};
 
 const FRESH_CONTEXT_GUARANTEED: bool = false;
 
@@ -315,6 +317,112 @@ impl RoutineAgentExecutor {
         }
     }
 
+    /// Boot-recovery reap (#3022): after a stale fresh run is marked
+    /// `interrupted` at worker startup, tear down the exact session it recorded
+    /// as owned. Requires positive ownership proof (`owned_tmux_session` set on a
+    /// `fresh` run); runs that own nothing are skipped, so an interrupted run can
+    /// never reap a session it did not create. Idempotent — if the session is
+    /// already gone the teardown is a harmless no-op.
+    ///
+    /// Called ONLY from boot recovery, which runs before the routine tick loop
+    /// starts, so on a single instance there is no concurrent claimer that could
+    /// re-create the deterministic fresh session under this run. The periodic
+    /// recovery path deliberately does NOT call this (its concurrent claims would
+    /// race the reap against a live replacement turn). As defence-in-depth for a
+    /// co-booting second instance whose tick loop is already claiming, the reap
+    /// is skipped whenever a *different* run for the routine is already `running`
+    /// (`routine_has_other_running_run`, which excludes this recovered run) —
+    /// that other run owns the deterministic session now, and killing by name
+    /// would tear down its live turn.
+    ///
+    /// The replacement decision is made by the presence of a different running
+    /// run, NOT by the owned session row's status: after a dcserver restart the
+    /// stranded orphan still carries its turn-start `turn_active`/`working`
+    /// status (recovery never updates `sessions`), so a status check would skip
+    /// the very orphan this reap must collect.
+    pub(crate) async fn teardown_recovered_fresh_session(
+        &self,
+        store: &RoutineStore,
+        recovered: &RecoveredRoutineRun,
+    ) {
+        let Some(owned_tmux_session) = recovered.boot_recovery_owned_session() else {
+            return;
+        };
+        let owned_tmux_session = owned_tmux_session.to_string();
+        match store
+            .routine_has_other_running_run(&recovered.routine_id, &recovered.run_id)
+            .await
+        {
+            Ok(false) => {}
+            Ok(true) => {
+                tracing::debug!(
+                    routine_id = %recovered.routine_id,
+                    run_id = %recovered.run_id,
+                    "recovered fresh session teardown skipped: a replacement run is already running (owns the deterministic session)"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    routine_id = %recovered.routine_id,
+                    run_id = %recovered.run_id,
+                    error = %error,
+                    "recovered fresh session teardown skipped: replacement-run check failed"
+                );
+                return;
+            }
+        }
+        let routine = match store.get_routine(&recovered.routine_id).await {
+            Ok(Some(routine)) => routine,
+            Ok(None) => {
+                tracing::warn!(
+                    routine_id = %recovered.routine_id,
+                    run_id = %recovered.run_id,
+                    "recovered fresh session teardown skipped: routine row not found"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    routine_id = %recovered.routine_id,
+                    run_id = %recovered.run_id,
+                    error = %error,
+                    "recovered fresh session teardown skipped: routine lookup failed"
+                );
+                return;
+            }
+        };
+        if routine.execution_strategy != "fresh" {
+            return;
+        }
+        let controller =
+            RoutineSessionController::new(self.pool.clone(), self.health_registry.clone());
+        match controller
+            .teardown_fresh_session_by_name(
+                &routine,
+                &owned_tmux_session,
+                "routine fresh run interrupted",
+            )
+            .await
+        {
+            Ok(result) => tracing::info!(
+                routine_id = %recovered.routine_id,
+                run_id = %recovered.run_id,
+                tmux_session = %result.tmux_session,
+                tmux_killed = result.tmux_killed,
+                disconnected_sessions = result.disconnected_sessions,
+                "recovered fresh routine session reaped"
+            ),
+            Err(error) => tracing::warn!(
+                routine_id = %recovered.routine_id,
+                run_id = %recovered.run_id,
+                tmux_session = %owned_tmux_session,
+                error = %error,
+                "recovered fresh routine session teardown failed"
+            ),
+        }
+    }
+
     async fn start_turn(
         &self,
         store: &RoutineStore,
@@ -513,10 +621,115 @@ impl RoutineAgentExecutor {
             );
         }
 
+        // #3022: persist run -> fresh-session ownership now that the session is
+        // up, so boot recovery can reap this exact session if a dcserver restart
+        // orphans it. Best-effort: a failure here only loses the boot-recovery
+        // backstop (the in-line completion path still tears the session down),
+        // so it must never fail the started turn.
+        if outcome.status.as_str() == "started" {
+            self.record_owned_fresh_session(store, claimed, &result_json)
+                .await;
+        }
+
         Ok(StartedAgentTurn {
             result_json,
             started: outcome.status.as_str() == "started",
         })
+    }
+
+    /// Records the tmux session a freshly-started fresh-routine run owns (#3022).
+    /// No-op for non-fresh routines (they reuse a persistent session that must
+    /// survive). Best-effort and non-fatal: every failure path only forgoes the
+    /// boot-recovery reap backstop, never the turn itself.
+    ///
+    /// DM-bound fresh actions (`dmUserId`) are intentionally NOT recorded: the
+    /// DM session is named `dm-<user_id>` in a DM channel with no
+    /// `thread_channel_id`, so the thread-based resolver would record the *wrong*
+    /// token and boot recovery could reap an unrelated session. Recording nothing
+    /// keeps such a session out of the reap (no positive ownership proof) and
+    /// lets the existing idle-kill backstop collect it — the pre-#3022 behavior,
+    /// with no risk of killing the wrong session.
+    async fn record_owned_fresh_session(
+        &self,
+        store: &RoutineStore,
+        claimed: &ClaimedRoutineRun,
+        result_json: &Value,
+    ) {
+        if claimed.execution_strategy != "fresh" {
+            return;
+        }
+        if started_turn_is_dm(result_json) {
+            tracing::debug!(
+                routine_id = %claimed.routine_id,
+                run_id = %claimed.run_id,
+                "fresh routine ownership not recorded: DM-bound session is not thread-resolvable"
+            );
+            return;
+        }
+        let routine = match store.get_routine(&claimed.routine_id).await {
+            Ok(Some(routine)) => routine,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    routine_id = %claimed.routine_id,
+                    run_id = %claimed.run_id,
+                    error = %error,
+                    "fresh routine ownership not recorded: routine lookup failed"
+                );
+                return;
+            }
+        };
+        let controller =
+            RoutineSessionController::new(self.pool.clone(), self.health_registry.clone());
+        let ownership_token = match controller
+            .resolve_fresh_ownership_token(&routine, Some(result_json))
+            .await
+        {
+            Ok(Some(ownership_token)) => ownership_token,
+            Ok(None) => {
+                // No concrete started session row was resolvable; recording a
+                // guessed/derived token risks reaping a non-existent session
+                // and leaving the real orphan alive (#3022). Leave it to the
+                // idle-kill backstop instead.
+                tracing::debug!(
+                    routine_id = %claimed.routine_id,
+                    run_id = %claimed.run_id,
+                    "fresh routine ownership not recorded: no concrete started session resolvable"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    routine_id = %claimed.routine_id,
+                    run_id = %claimed.run_id,
+                    error = %error,
+                    "fresh routine ownership not recorded: session unresolved"
+                );
+                return;
+            }
+        };
+        match store
+            .set_run_owned_tmux_session(&claimed.run_id, &ownership_token)
+            .await
+        {
+            Ok(true) => tracing::debug!(
+                routine_id = %claimed.routine_id,
+                run_id = %claimed.run_id,
+                ownership_token = %ownership_token,
+                "fresh routine run owned-session recorded"
+            ),
+            Ok(false) => tracing::debug!(
+                routine_id = %claimed.routine_id,
+                run_id = %claimed.run_id,
+                "fresh routine ownership not recorded: run no longer running"
+            ),
+            Err(error) => tracing::warn!(
+                routine_id = %claimed.routine_id,
+                run_id = %claimed.run_id,
+                error = %error,
+                "fresh routine ownership not recorded: persist failed"
+            ),
+        }
     }
 
     async fn find_turn_completion(
@@ -1042,6 +1255,22 @@ fn is_no_deliverable_quality_event(event_type: &str, outcome: Option<&str>) -> b
     event_type == "turn_error" && outcome == Some("empty_response")
 }
 
+/// Whether a started fresh-turn `result_json` describes a DM-bound turn (#3022).
+/// DM sessions are named `dm-<user_id>` in a DM channel without a
+/// `thread_channel_id`, so the thread-based ownership resolver cannot target
+/// them; such turns are excluded from boot-recovery ownership recording. Treats
+/// either an explicit `is_dm: true` or a non-null `dm_user_id` as a DM turn.
+fn started_turn_is_dm(result_json: &Value) -> bool {
+    result_json
+        .get("is_dm")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || result_json
+            .get("dm_user_id")
+            .map(|value| !value.is_null())
+            .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1309,5 +1538,31 @@ mod tests {
         assert!(title.chars().count() <= 90);
         assert!(!title.contains('\n'));
         assert!(!title.contains('\t'));
+    }
+
+    #[test]
+    fn started_turn_is_dm_detects_dm_routing() {
+        // #3022: DM-bound fresh turns must be excluded from ownership recording
+        // (their session is not thread-resolvable).
+        assert!(started_turn_is_dm(&json!({ "is_dm": true })));
+        assert!(started_turn_is_dm(
+            &json!({ "dm_user_id": "343742347365974026" })
+        ));
+        assert!(started_turn_is_dm(
+            &json!({ "is_dm": false, "dm_user_id": "1" })
+        ));
+    }
+
+    #[test]
+    fn started_turn_is_dm_false_for_thread_turn() {
+        assert!(!started_turn_is_dm(&json!({
+            "is_dm": false,
+            "dm_user_id": Value::Null,
+            "discord_thread_id": "1485506232256168011",
+        })));
+        assert!(!started_turn_is_dm(&json!({
+            "discord_thread_id": "1485506232256168011",
+        })));
+        assert!(!started_turn_is_dm(&json!({})));
     }
 }

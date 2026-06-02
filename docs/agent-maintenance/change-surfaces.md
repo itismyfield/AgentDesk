@@ -453,7 +453,9 @@ The remaining giant-file modules under `src/services/` not covered above:
   `src/services/routines/store.rs` (2755),
   `src/services/routines/migrated.rs` (1286),
   `src/services/routines/discord_log.rs` (1056),
-  `src/services/routines/agent_executor.rs` (1024), and
+  `src/services/routines/agent_executor.rs` (1024),
+  `src/services/routines/session_control.rs` (1036; run->fresh-session ownership
+  persistence and precise boot-orphan reap per #3022), and
   `src/services/routines/runtime.rs` (1011; routine claim/close-action runtime,
   fresh-session teardown gating per #3006/#3022); routine loader/store,
   migrated launchd validation, Discord logging, and agent execution are the
