@@ -411,10 +411,15 @@ async fn fetch_provider_session_id_once(
     // #107: Filter empty strings — a stale clear path may have stored ""
     // instead of NULL; treat it as no session ID.
     // Also try session_id field as fallback for provider-agnostic lookup.
+    // #3052: GET /claude-session-id also returns raw_provider_session_id (the
+    // native provider selector). Use it as a third durable fallback so a
+    // tmux-only idle cleanup that left only the raw selector can still
+    // provider-native resume.
     let selector = json
         .get("claude_session_id")
         .and_then(|v| v.as_str())
         .or_else(|| json.get("session_id").and_then(|v| v.as_str()))
+        .or_else(|| json.get("raw_provider_session_id").and_then(|v| v.as_str()))
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -436,12 +441,18 @@ async fn fetch_provider_session_id_once(
             .and_then(|v| v.as_str())
             .map(|value| !value.is_empty())
             .unwrap_or(false);
+        let has_raw_provider_session_id = json
+            .get("raw_provider_session_id")
+            .and_then(|v| v.as_str())
+            .map(|value| !value.is_empty())
+            .unwrap_or(false);
         tracing::info!(
-            "  [{ts}] [session-restore] provider session lookup returned no usable selector: key={} provider={} has_claude_selector={} has_session_id={}",
+            "  [{ts}] [session-restore] provider session lookup returned no usable selector: key={} provider={} has_claude_selector={} has_session_id={} has_raw_provider_session_id={}",
             session_key,
             provider.as_str(),
             has_claude_selector,
-            has_raw_session_id
+            has_raw_session_id,
+            has_raw_provider_session_id
         );
     }
     selector

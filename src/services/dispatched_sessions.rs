@@ -1242,14 +1242,60 @@ async fn kill_tmux_session_impl(
         false
     };
 
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!(
-        "  [{ts}] ✂ kill-tmux: session={}, tmux_killed={}, tmux_was_alive={}, active_dispatch_id={:?} (DB row preserved for resume)",
+    // #3052: a tmux-only idle cleanup must not silently claim "preserved for
+    // resume". Verify the provider resume selector is actually present in the
+    // DB row before logging that claim. Either selector column
+    // (claude_session_id namespaced selector or raw_provider_session_id native
+    // fallback) is sufficient for provider-native resume.
+    let resumable = match dispatched_sessions_db::load_provider_session_ids_pg(
+        pool,
         session_key,
-        tmux_killed,
-        tmux_was_alive,
-        active_dispatch_id
-    );
+        provider_name,
+    )
+    .await
+    {
+        Ok(Some(ids)) => {
+            let has_claude_selector = ids
+                .claude_session_id
+                .as_deref()
+                .map(|value| !value.is_empty())
+                .unwrap_or(false);
+            let has_raw_selector = ids
+                .raw_provider_session_id
+                .as_deref()
+                .map(|value| !value.is_empty())
+                .unwrap_or(false);
+            has_claude_selector || has_raw_selector
+        }
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(
+                "  [kill-tmux] failed to verify resume selector for {}: {}",
+                session_key,
+                error
+            );
+            false
+        }
+    };
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    if resumable {
+        tracing::info!(
+            "  [{ts}] ✂ kill-tmux: session={}, tmux_killed={}, tmux_was_alive={}, active_dispatch_id={:?} (DB row preserved for resume, resumable=true)",
+            session_key,
+            tmux_killed,
+            tmux_was_alive,
+            active_dispatch_id
+        );
+    } else {
+        tracing::info!(
+            "  [{ts}] ✂ kill-tmux: session={}, tmux_killed={}, tmux_was_alive={}, active_dispatch_id={:?} (DB row retained but no provider selector present, resumable=false)",
+            session_key,
+            tmux_killed,
+            tmux_was_alive,
+            active_dispatch_id
+        );
+    }
 
     // #2861: when the tmux session is already gone, the row is a zombie — it
     // claims a live process that no longer exists. Reconcile it to

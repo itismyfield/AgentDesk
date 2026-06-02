@@ -883,7 +883,8 @@ mod dispatch_surface_tests {
 mod selector_cleanup_tests {
     use super::{
         disconnect_session_and_prepare_retry_pg, disconnect_stale_fixed_session_by_key_pg,
-        gc_stale_fixed_working_sessions_db_pg, reconcile_orphaned_tmuxless_session_pg,
+        gc_stale_fixed_working_sessions_db_pg, load_provider_session_ids_pg,
+        reconcile_orphaned_tmuxless_session_pg,
     };
 
     struct TestPostgresDb {
@@ -1118,6 +1119,41 @@ mod selector_cleanup_tests {
         let (status, active_dispatch_id, _, _) = session_state(&pool, session_key).await;
         assert_eq!(status, "idle");
         assert_eq!(active_dispatch_id.as_deref(), Some("dispatch-2861"));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #3052: a tmux-only idle cleanup (the reconcile path `/kill-tmux` runs
+    /// when tmux is already gone) must leave BOTH provider resume selector
+    /// columns intact, and the resume lookup (`load_provider_session_ids_pg`)
+    /// must still surface them so provider-native resume can succeed.
+    #[tokio::test]
+    async fn tmux_only_kill_preserves_resume_selectors() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let session_key = "host:tmux-only-resume-selector";
+
+        seed_session_with_selectors(&pool, session_key, "idle", None).await;
+
+        // Simulate the tmux-only idle cleanup reconcile.
+        assert!(reconcile_orphaned_tmuxless_session_pg(&pool, session_key).await);
+
+        // Both selector columns must survive the cleanup.
+        assert_cleanup_preserved_selectors(&pool, session_key).await;
+
+        // The resume lookup used by kill-tmux's resumable check and by the
+        // session-restore fallback must still return both selectors.
+        let ids = load_provider_session_ids_pg(&pool, session_key, Some("claude"))
+            .await
+            .unwrap()
+            .expect("session row must still exist after tmux-only cleanup");
+        assert_eq!(ids.claude_session_id.as_deref(), Some("claude-selector-1841"));
+        assert_eq!(
+            ids.raw_provider_session_id.as_deref(),
+            Some("raw-selector-1841"),
+            "raw provider selector must survive so native resume can fall back to it"
+        );
 
         pool.close().await;
         pg_db.drop().await;
