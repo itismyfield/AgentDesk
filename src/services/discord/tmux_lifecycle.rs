@@ -187,6 +187,37 @@ pub(super) fn resolve_dispatch_tmux_protection(
         .flatten();
     }
 
+    resolve_dispatch_tmux_protection_legacy_fallback(
+        db,
+        provider,
+        &thread_channel_id,
+        &session_keys,
+        &namespaced_session_key_prefix,
+    )
+}
+
+// Production runs PostgreSQL-only (#3035 Phase 0): the legacy sqlite handle is
+// always `None`, so after the PG path above prod has no DB fallback and returns
+// `None` — preserving the historical `let db = db?;` short-circuit semantics.
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
+fn resolve_dispatch_tmux_protection_legacy_fallback(
+    _db: Option<&crate::db::Db>,
+    _provider: &ProviderKind,
+    _thread_channel_id: &str,
+    _session_keys: &[String; 2],
+    _namespaced_session_key_prefix: &str,
+) -> Option<DispatchTmuxProtection> {
+    None
+}
+
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+fn resolve_dispatch_tmux_protection_legacy_fallback(
+    db: Option<&crate::db::Db>,
+    provider: &ProviderKind,
+    thread_channel_id: &str,
+    session_keys: &[String; 2],
+    namespaced_session_key_prefix: &str,
+) -> Option<DispatchTmuxProtection> {
     let db = db?;
     let conn = db.read_conn().ok()?;
     if let Ok(protection) = conn.query_row(
@@ -218,9 +249,9 @@ pub(super) fn resolve_dispatch_tmux_protection(
         [
             session_keys[0].as_str(),
             session_keys[1].as_str(),
-            thread_channel_id.as_str(),
+            thread_channel_id,
             provider.as_str(),
-            namespaced_session_key_prefix.as_str(),
+            namespaced_session_key_prefix,
         ],
         |row| {
             Ok(DispatchTmuxProtection::SessionRow {
@@ -258,9 +289,9 @@ pub(super) fn resolve_dispatch_tmux_protection(
            td.rowid DESC
          LIMIT 1",
         [
-            thread_channel_id.as_str(),
+            thread_channel_id,
             provider.as_str(),
-            namespaced_session_key_prefix.as_str(),
+            namespaced_session_key_prefix,
         ],
         |row| {
             Ok(DispatchTmuxProtection::ThreadDispatch {

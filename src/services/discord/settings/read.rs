@@ -185,16 +185,6 @@ fn fallback_legacy_vec<T>(
     }
 }
 
-fn load_kv_meta_value_sqlite(db: Option<&crate::db::Db>, key: &str) -> Option<String> {
-    let db = db?;
-    let conn = db.read_conn().ok()?;
-    conn.query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
-        row.get::<_, String>(0)
-    })
-    .ok()
-    .filter(|value| !value.trim().is_empty())
-}
-
 fn load_kv_meta_value_pg(pg_pool: Option<&sqlx::PgPool>, key: &str) -> Option<String> {
     let pg_pool = pg_pool?;
     let key = key.to_string();
@@ -214,46 +204,31 @@ fn load_kv_meta_value_pg(pg_pool: Option<&sqlx::PgPool>, key: &str) -> Option<St
     .filter(|value| !value.trim().is_empty())
 }
 
-fn load_kv_meta_value(
-    db: Option<&crate::db::Db>,
-    pg_pool: Option<&sqlx::PgPool>,
-    key: &str,
-) -> Option<String> {
+fn load_kv_meta_value(pg_pool: Option<&sqlx::PgPool>, key: &str) -> Option<String> {
     if let Ok(value) = crate::services::discord::internal_api::get_kv_value(key) {
         return value.filter(|value| !value.trim().is_empty());
     }
 
-    if pg_pool.is_some() {
-        return load_kv_meta_value_pg(pg_pool, key);
-    }
-
-    load_kv_meta_value_sqlite(db, key)
+    load_kv_meta_value_pg(pg_pool, key)
 }
 
 pub(crate) fn load_last_session_path(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     channel_id: u64,
 ) -> Option<String> {
-    load_kv_meta_value(db, pg_pool, &last_session_path_key(token_hash, channel_id))
+    load_kv_meta_value(pg_pool, &last_session_path_key(token_hash, channel_id))
 }
 
 pub(crate) fn load_last_remote_profile(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     channel_id: u64,
 ) -> Option<String> {
-    load_kv_meta_value(
-        db,
-        pg_pool,
-        &last_remote_profile_key(token_hash, channel_id),
-    )
+    load_kv_meta_value(pg_pool, &last_remote_profile_key(token_hash, channel_id))
 }
 
 pub(crate) fn save_last_session_runtime(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     channel_id: u64,
@@ -331,38 +306,6 @@ pub(crate) fn save_last_session_runtime(
             },
             |message| message,
         );
-        return;
-    }
-
-    let Some(db) = db else {
-        return;
-    };
-    let Ok(conn) = db.lock() else {
-        return;
-    };
-
-    let _ = conn.execute(
-        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-        [
-            last_session_path_key(token_hash, channel_id),
-            current_path.to_string(),
-        ],
-    );
-
-    let remote_key = last_remote_profile_key(token_hash, channel_id);
-    match remote_profile_name
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(remote) => {
-            let _ = conn.execute(
-                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                [remote_key, remote.to_string()],
-            );
-        }
-        None => {
-            let _ = conn.execute("DELETE FROM kv_meta WHERE key = ?1", [remote_key]);
-        }
     }
 }
 

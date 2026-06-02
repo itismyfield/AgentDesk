@@ -4767,9 +4767,8 @@ pub(super) fn spawn_turn_bridge(
                                     );
                                 }
                             }
-                            if None::<&crate::db::Db>.is_some() || shared_owned.pg_pool.is_some() {
+                            if shared_owned.pg_pool.is_some() {
                                 match record_skill_usage_from_tool_use(
-                                    None::<&crate::db::Db>,
                                     shared_owned.pg_pool.as_ref(),
                                     &name,
                                     &input,

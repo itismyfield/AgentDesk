@@ -204,7 +204,6 @@ pub(in crate::services::discord) async fn cmd_start(
         drop(data);
 
         save_last_session_runtime(
-            None::<&crate::db::Db>,
             ctx.data().shared.pg_pool.as_ref(),
             &ctx.data().shared.token_hash,
             ch_key.parse::<u64>().unwrap_or_default(),

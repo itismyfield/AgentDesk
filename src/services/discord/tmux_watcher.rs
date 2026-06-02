@@ -3853,7 +3853,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 crate::services::provider::ReadyForInputIdleState::PostWorkIdleTimeout => {
                                     let ts = chrono::Local::now().format("%H:%M:%S");
                                     let dispatch_id = resolve_dispatched_thread_dispatch_from_db(
-                                        None::<&crate::db::Db>,
                                         shared.pg_pool.as_ref(),
                                         watcher_thread_channel_id.unwrap_or_else(|| channel_id.get()),
                                     )
@@ -6985,7 +6984,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     )
                     .or_else(|| {
                         resolve_dispatched_thread_dispatch_from_db(
-                            None::<&crate::db::Db>,
                             shared.pg_pool.as_ref(),
                             channel_id.get(),
                         )
@@ -7050,7 +7048,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             )
             .or_else(|| {
                 resolve_dispatched_thread_dispatch_from_db(
-                    None::<&crate::db::Db>,
                     shared.pg_pool.as_ref(),
                     channel_id.get(),
                 )

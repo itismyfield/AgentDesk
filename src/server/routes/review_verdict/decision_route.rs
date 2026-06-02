@@ -423,34 +423,6 @@ async fn load_review_decision_card_context_pg_first(
         };
     }
 
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    if let Some(db) = state.legacy_db()
-        && let Ok(conn) = db.separate_conn()
-        && let Ok(Some((status, repo_id, agent_id, title))) = conn
-            .query_row(
-                "SELECT status, repo_id, assigned_agent_id, title
-                 FROM kanban_cards
-                 WHERE id = ?1",
-                [card_id],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                    ))
-                },
-            )
-            .optional()
-    {
-        return ReviewDecisionCardContext {
-            status,
-            repo_id,
-            agent_id,
-            title,
-        };
-    }
-
     ReviewDecisionCardContext::default()
 }
 

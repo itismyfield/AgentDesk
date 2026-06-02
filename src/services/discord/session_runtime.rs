@@ -684,11 +684,6 @@ pub(super) async fn auto_restore_session_force(
     let (last_path, saved_remote, provider) = {
         let settings = shared.settings.read().await;
         let provider = settings.provider.clone();
-        let sqlite_settings_db = if shared.pg_pool.is_some() {
-            None
-        } else {
-            None::<&crate::db::Db>
-        };
         let configured_path = settings::resolve_workspace(channel_id, restore_ch_name.as_deref())
             .or_else(|| {
                 if is_dm {
@@ -699,7 +694,6 @@ pub(super) async fn auto_restore_session_force(
                 }
             });
         let saved_remote = load_last_remote_profile(
-            sqlite_settings_db,
             shared.pg_pool.as_ref(),
             &shared.token_hash,
             channel_id.get(),
@@ -764,7 +758,6 @@ pub(super) async fn auto_restore_session_force(
             }
         });
         let persisted_path = load_last_session_path(
-            sqlite_settings_db,
             shared.pg_pool.as_ref(),
             &shared.token_hash,
             channel_id.get(),

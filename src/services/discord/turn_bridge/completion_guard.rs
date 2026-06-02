@@ -452,27 +452,6 @@ fn transition_source_uses_live_command_bot(transition_source: &str) -> bool {
     source.starts_with("turn_bridge") || source.starts_with("watcher")
 }
 
-fn reset_linked_auto_queue_entries_on_db(
-    sqlite: &crate::db::Db,
-    dispatch_id: &str,
-) -> Result<usize, String> {
-    let conn = sqlite
-        .separate_conn()
-        .map_err(|error| format!("open sqlite auto_queue_entries connection: {error}"))?;
-    conn.execute(
-        "UPDATE auto_queue_entries
-         SET status = 'pending',
-             dispatch_id = NULL,
-             slot_index = NULL,
-             dispatched_at = NULL,
-             completed_at = NULL
-         WHERE dispatch_id = ?1
-           AND status IN ('pending', 'dispatched', 'failed')",
-        [dispatch_id],
-    )
-    .map_err(|error| format!("reset sqlite auto_queue_entries for {dispatch_id}: {error}"))
-}
-
 fn with_runtime_postgres_result<T, F>(operation: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -1114,6 +1093,52 @@ fn parse_completion_hint_context(
     }
 }
 
+type LegacyCompletionHintColumns = (Option<i64>, Option<String>, Option<String>, Option<String>);
+
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+fn lookup_dispatch_completion_hints_legacy_fallback(
+    db: Option<&crate::db::Db>,
+    dispatch_id: &str,
+) -> LegacyCompletionHintColumns {
+    db.and_then(|db| db.separate_conn().ok())
+        .as_ref()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT kc.github_issue_number, td.created_at, td.context, kc.repo_id
+                 FROM task_dispatches td
+                 LEFT JOIN kanban_cards kc ON kc.id = td.kanban_card_id
+                 WHERE td.id = ?1",
+                [dispatch_id],
+                |row| {
+                    let context_raw: Option<String> = row.get(2)?;
+                    let parsed_context = parse_completion_hint_context(
+                        dispatch_id,
+                        context_raw.as_deref(),
+                        row.get::<_, Option<String>>(3).ok().flatten(),
+                    );
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        parsed_context.target_repo,
+                        parsed_context.baseline_commit,
+                    ))
+                },
+            )
+            .ok()
+        })
+        .unwrap_or((None, None, None, None))
+}
+
+// Production runs PostgreSQL-only (#3035 Phase 0): the legacy sqlite handle is
+// always `None`, so the prod build has no DB fallback after the PG path.
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
+fn lookup_dispatch_completion_hints_legacy_fallback(
+    _db: Option<&crate::db::Db>,
+    _dispatch_id: &str,
+) -> LegacyCompletionHintColumns {
+    (None, None, None, None)
+}
+
 fn lookup_dispatch_completion_hints(
     db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
@@ -1197,34 +1222,9 @@ fn lookup_dispatch_completion_hints(
         }
     }
 
-    let conn = db.and_then(|db| db.separate_conn().ok());
-    let (issue_number, dispatch_created_at, target_repo, baseline_commit) = conn
-        .as_ref()
-        .and_then(|conn| {
-            conn.query_row(
-                "SELECT kc.github_issue_number, td.created_at, td.context, kc.repo_id
-                 FROM task_dispatches td
-                 LEFT JOIN kanban_cards kc ON kc.id = td.kanban_card_id
-                 WHERE td.id = ?1",
-                [dispatch_id],
-                |row| {
-                    let context_raw: Option<String> = row.get(2)?;
-                    let parsed_context = parse_completion_hint_context(
-                        dispatch_id,
-                        context_raw.as_deref(),
-                        row.get::<_, Option<String>>(3).ok().flatten(),
-                    );
-                    Ok((
-                        row.get::<_, Option<i64>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        parsed_context.target_repo,
-                        parsed_context.baseline_commit,
-                    ))
-                },
-            )
-            .ok()
-        })
-        .unwrap_or((None, None, None, None));
+    let (issue_number, dispatch_created_at, target_repo, baseline_commit) =
+        lookup_dispatch_completion_hints_legacy_fallback(db, dispatch_id);
+
     DispatchCompletionHints {
         issue_number,
         dispatch_created_at,
@@ -2373,168 +2373,5 @@ mod tests {
         assert_eq!(result["completed_without_changes"], true);
         assert_eq!(result["card_status_target"], "ready");
         assert_eq!(result["notes"], "OUTCOME: noop\nalready satisfied");
-    }
-
-    #[test]
-    fn reset_linked_auto_queue_entries_on_conn_resets_retryable_rows() {
-        let db = crate::db::test_db();
-        let conn = db.lock().expect("db lock");
-        conn.execute_batch(
-            "DROP TABLE IF EXISTS auto_queue_entries;
-             CREATE TABLE auto_queue_entries (
-                id TEXT PRIMARY KEY,
-                run_id TEXT,
-                kanban_card_id TEXT,
-                agent_id TEXT,
-                status TEXT,
-                dispatch_id TEXT,
-                slot_index INTEGER,
-                thread_group INTEGER DEFAULT 0,
-                batch_phase INTEGER DEFAULT 0,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                dispatched_at DATETIME,
-                completed_at DATETIME
-            );",
-        )
-        .expect("schema");
-        conn.execute(
-            "INSERT INTO auto_queue_entries (
-                id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group, batch_phase, dispatched_at, completed_at
-             ) VALUES
-                ('entry-pending', 'run-1', 'card-1', 'agent-1', 'pending', 'dispatch-1', 7, 0, 0, datetime('now'), datetime('now')),
-                ('entry-dispatched', 'run-1', 'card-2', 'agent-1', 'dispatched', 'dispatch-1', 8, 0, 0, datetime('now'), NULL),
-                ('entry-failed', 'run-1', 'card-3', 'agent-1', 'failed', 'dispatch-1', 9, 0, 0, datetime('now'), datetime('now')),
-                ('entry-done', 'run-1', 'card-4', 'agent-1', 'done', 'dispatch-1', 10, 0, 0, datetime('now'), datetime('now'))",
-            [],
-        )
-        .expect("seed entries");
-        drop(conn);
-
-        let changed = reset_linked_auto_queue_entries_on_db(&db, "dispatch-1").expect("reset");
-        assert_eq!(changed, 3);
-
-        let pending: (
-            String,
-            Option<String>,
-            Option<i64>,
-            Option<String>,
-            Option<String>,
-        ) = db
-            .read_conn()
-            .expect("read conn")
-            .query_row(
-                "SELECT status, dispatch_id, slot_index, dispatched_at, completed_at
-                 FROM auto_queue_entries
-                 WHERE id = 'entry-pending'",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .expect("pending row");
-        assert_eq!(pending.0, "pending");
-        assert!(pending.1.is_none());
-        assert!(pending.2.is_none());
-        assert!(pending.3.is_none());
-        assert!(pending.4.is_none());
-
-        let dispatched: (
-            String,
-            Option<String>,
-            Option<i64>,
-            Option<String>,
-            Option<String>,
-        ) = db
-            .read_conn()
-            .expect("read conn")
-            .query_row(
-                "SELECT status, dispatch_id, slot_index, dispatched_at, completed_at
-                 FROM auto_queue_entries
-                 WHERE id = 'entry-dispatched'",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .expect("dispatched row");
-        assert_eq!(dispatched.0, "pending");
-        assert!(dispatched.1.is_none());
-        assert!(dispatched.2.is_none());
-        assert!(dispatched.3.is_none());
-        assert!(dispatched.4.is_none());
-
-        let failed: (
-            String,
-            Option<String>,
-            Option<i64>,
-            Option<String>,
-            Option<String>,
-        ) = db
-            .read_conn()
-            .expect("read conn")
-            .query_row(
-                "SELECT status, dispatch_id, slot_index, dispatched_at, completed_at
-                 FROM auto_queue_entries
-                 WHERE id = 'entry-failed'",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .expect("failed row");
-        assert_eq!(failed.0, "pending");
-        assert!(failed.1.is_none());
-        assert!(failed.2.is_none());
-        assert!(failed.3.is_none());
-        assert!(failed.4.is_none());
-
-        let done: (
-            String,
-            Option<String>,
-            Option<i64>,
-            Option<String>,
-            Option<String>,
-        ) = db
-            .read_conn()
-            .expect("read conn")
-            .query_row(
-                "SELECT status, dispatch_id, slot_index, dispatched_at, completed_at
-                 FROM auto_queue_entries
-                 WHERE id = 'entry-done'",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .expect("done row");
-        assert_eq!(done.0, "done");
-        assert_eq!(done.1.as_deref(), Some("dispatch-1"));
-        assert_eq!(done.2, Some(10));
-        assert!(done.3.is_some());
-        assert!(done.4.is_some());
     }
 }

@@ -1732,11 +1732,7 @@ pub(super) async fn resolve_watcher_dispatch_id(
             .await,
         )
         .or_else(|| {
-            resolve_dispatched_thread_dispatch_from_db(
-                None::<&crate::db::Db>,
-                shared.pg_pool.as_ref(),
-                channel_id.get(),
-            )
+            resolve_dispatched_thread_dispatch_from_db(shared.pg_pool.as_ref(), channel_id.get())
         })
 }
 
@@ -2620,26 +2616,19 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
     // and message handlers find an active session with current_path
     if !owned_sessions.is_empty() {
         let mut data = shared.core.lock().await;
-        let sqlite_settings_db = if shared.pg_pool.is_some() {
-            None
-        } else {
-            None::<&crate::db::Db>
-        };
         for (channel_id, channel_name) in &owned_sessions {
             let persisted_path = load_last_session_path(
-                sqlite_settings_db,
                 shared.pg_pool.as_ref(),
                 &shared.token_hash,
                 channel_id.get(),
             );
             let remote_profile = load_last_remote_profile(
-                sqlite_settings_db,
                 shared.pg_pool.as_ref(),
                 &shared.token_hash,
                 channel_id.get(),
             );
             let persisted_session_id = load_restored_provider_session_id(
-                sqlite_settings_db,
+                None::<&crate::db::Db>,
                 shared.pg_pool.as_ref(),
                 &shared.token_hash,
                 &provider,
