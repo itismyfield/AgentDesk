@@ -91,6 +91,20 @@ fn should_retry_deferred_idle_queue_kickoff(attempt: usize) -> bool {
     attempt < DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
 }
 
+/// #3005: pre-sleep before the very first deferred-drain attempt. The
+/// finalize-completed (idle-confirmed) path passes `immediate_once = true` so
+/// the first kickoff runs without the 2s `INITIAL_DELAY` guard; every other
+/// caller keeps the full delay to avoid spinning during the dcserver/gateway
+/// restart window.
+#[cfg_attr(not(test), allow(dead_code))]
+fn deferred_idle_queue_initial_presleep(immediate_once: bool) -> std::time::Duration {
+    if immediate_once {
+        std::time::Duration::ZERO
+    } else {
+        DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY
+    }
+}
+
 impl Drop for DeferredHookBacklogGuard {
     fn drop(&mut self) {
         self.shared
@@ -105,6 +119,34 @@ pub(super) fn schedule_deferred_idle_queue_kickoff(
     channel_id: ChannelId,
     reason: &'static str,
 ) {
+    schedule_deferred_idle_queue_kickoff_inner(shared, provider, channel_id, reason, false);
+}
+
+/// #3005: variant for the finalize-completed (idle-confirmed) path. When a turn
+/// has just finalized with a confirmed-idle pane and a queued backlog remains,
+/// the first kickoff attempt skips the 2s `INITIAL_DELAY` pre-sleep and tries
+/// `kickoff_idle_queues` immediately, falling back to the existing 2s retry
+/// cadence if that first attempt cannot drain (e.g. cached ctx/token not yet
+/// available, or the hosted TUI is still transiently `Busy`). The
+/// `INITIAL_DELAY` constant is intentionally left untouched — it still guards
+/// the restart-window spin for every other caller — so this only narrows the
+/// post-finalize latency where idle has already been confirmed.
+pub(super) fn schedule_deferred_idle_queue_kickoff_immediate(
+    shared: Arc<SharedData>,
+    provider: ProviderKind,
+    channel_id: ChannelId,
+    reason: &'static str,
+) {
+    schedule_deferred_idle_queue_kickoff_inner(shared, provider, channel_id, reason, true);
+}
+
+fn schedule_deferred_idle_queue_kickoff_inner(
+    shared: Arc<SharedData>,
+    provider: ProviderKind,
+    channel_id: ChannelId,
+    reason: &'static str,
+    immediate_once: bool,
+) {
     shared
         .deferred_hook_backlog
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -114,7 +156,13 @@ pub(super) fn schedule_deferred_idle_queue_kickoff(
         let _backlog_guard = DeferredHookBacklogGuard {
             shared: shared.clone(),
         };
-        tokio::time::sleep(DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY).await;
+        // #3005: on the finalize-completed (idle-confirmed) reason the first
+        // attempt skips the 2s pre-sleep so a queued follow-up can drain right
+        // after the turn settles; all subsequent attempts keep the 2s cadence.
+        let initial_presleep = deferred_idle_queue_initial_presleep(immediate_once);
+        if !initial_presleep.is_zero() {
+            tokio::time::sleep(initial_presleep).await;
+        }
         for attempt in 1..=DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS {
             if let (Some(ctx), Some(tok)) = (
                 shared.cached_serenity_ctx.get(),
@@ -178,6 +226,34 @@ pub(super) fn schedule_deferred_idle_queue_kickoff(
         }
         // Drop guard at end of scope decrements the backlog counter.
     });
+}
+
+#[cfg(test)]
+mod presleep_tests {
+    use super::*;
+
+    /// #3005: the finalize-completed immediate path must skip the 2s
+    /// INITIAL_DELAY pre-sleep on the first attempt, while every other caller
+    /// keeps the full delay (restart-window spin guard). The INITIAL_DELAY
+    /// constant itself must remain 2s — only the immediate flag bypasses it.
+    #[test]
+    fn immediate_once_skips_initial_presleep() {
+        assert_eq!(
+            deferred_idle_queue_initial_presleep(true),
+            std::time::Duration::ZERO,
+            "finalize-completed immediate path must not pre-sleep"
+        );
+        assert_eq!(
+            deferred_idle_queue_initial_presleep(false),
+            DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY,
+            "non-immediate callers keep the full INITIAL_DELAY"
+        );
+        // Guard against silently lowering the shared constant (issue rule).
+        assert_eq!(
+            DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY,
+            std::time::Duration::from_secs(2)
+        );
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
