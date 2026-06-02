@@ -136,8 +136,6 @@ pub(crate) mod voice;
 
 #[cfg(test)]
 mod high_risk_recovery;
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod integration_tests;
 
 // Re-export for crate-level access (used by services::discord::mod.rs)
 pub(crate) use cli::agentdesk_runtime_root;

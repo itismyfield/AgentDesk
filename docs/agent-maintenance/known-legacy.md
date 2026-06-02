@@ -83,8 +83,8 @@ Every entry uses the common §8 schema: `feature`, `canonical_modules`,
 - allowed_changes: `bugfix`, `extraction` (provided the single-writer
   invariant is preserved); no `new_feature` that introduces a parallel
   synthetic writer.
-- tests: integration tests under
-  `src/integration_tests/tests/high_risk_recovery.rs` and the inflight
+- tests: PG-only high-risk recovery suite under
+  `src/high_risk_recovery.rs` and the inflight
   cancel/recovery suites.
 - related_issues: #896 (origin), #1283 (cancel-induced death immediate
   re-attach), #1138 (lifecycle restructure).

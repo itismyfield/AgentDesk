@@ -1,12 +1,9 @@
-use crate::services::git::GitCommand;
 use std::sync::MutexGuard;
 #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 use std::sync::{Mutex, OnceLock};
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use crate::db::Db;
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use crate::engine::PolicyEngine;
 
 pub(crate) struct DispatchPostgresTestDb {
     _lock: crate::db::postgres::PostgresTestLifecycleGuard,
@@ -181,33 +178,6 @@ impl Drop for DispatchEnvOverride {
     }
 }
 
-pub(crate) struct RepoDirOverride {
-    _lock: MutexGuard<'static, ()>,
-    previous: Option<String>,
-}
-
-impl RepoDirOverride {
-    pub(crate) fn new(path: &str) -> Self {
-        let lock = lock_dispatch_test_env();
-        let previous = std::env::var("AGENTDESK_REPO_DIR").ok();
-        unsafe { std::env::set_var("AGENTDESK_REPO_DIR", path) };
-        Self {
-            _lock: lock,
-            previous,
-        }
-    }
-}
-
-impl Drop for RepoDirOverride {
-    fn drop(&mut self) {
-        if let Some(value) = self.previous.as_deref() {
-            unsafe { std::env::set_var("AGENTDESK_REPO_DIR", value) };
-        } else {
-            unsafe { std::env::remove_var("AGENTDESK_REPO_DIR") };
-        }
-    }
-}
-
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) fn test_db() -> Db {
     let conn = sqlite_test::Connection::open_in_memory().unwrap();
@@ -227,63 +197,6 @@ pub(crate) fn test_db() -> Db {
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) fn test_engine(db: &Db) -> PolicyEngine {
-    let config = crate::config::Config::default();
-    PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
-}
-
-pub(crate) fn run_git(repo_dir: &str, args: &[&str]) -> std::process::Output {
-    GitCommand::new()
-        .repo(repo_dir)
-        .args(args)
-        .run_output()
-        .unwrap_or_else(|err| panic!("git {args:?} failed: {err}"))
-}
-
-pub(crate) fn init_test_repo() -> tempfile::TempDir {
-    let repo = tempfile::tempdir().unwrap();
-    let repo_dir = repo.path().to_str().unwrap();
-
-    run_git(repo_dir, &["init", "-b", "main"]);
-    run_git(repo_dir, &["config", "user.email", "test@test.com"]);
-    run_git(repo_dir, &["config", "user.name", "Test"]);
-    run_git(repo_dir, &["commit", "--allow-empty", "-m", "initial"]);
-
-    repo
-}
-
-pub(crate) fn setup_test_repo() -> (tempfile::TempDir, RepoDirOverride) {
-    let repo = init_test_repo();
-    let repo_dir = repo.path().to_str().unwrap();
-    let override_guard = RepoDirOverride::new(repo_dir);
-    (repo, override_guard)
-}
-
-pub(crate) fn setup_test_repo_with_origin()
--> (tempfile::TempDir, tempfile::TempDir, RepoDirOverride) {
-    let origin = tempfile::tempdir().unwrap();
-    let repo = tempfile::tempdir().unwrap();
-    let origin_dir = origin.path().to_str().unwrap();
-    let repo_dir = repo.path().to_str().unwrap();
-
-    run_git(origin_dir, &["init", "--bare", "--initial-branch=main"]);
-    run_git(repo_dir, &["init", "-b", "main"]);
-    run_git(repo_dir, &["config", "user.email", "test@test.com"]);
-    run_git(repo_dir, &["config", "user.name", "Test"]);
-    run_git(repo_dir, &["remote", "add", "origin", origin_dir]);
-    run_git(repo_dir, &["commit", "--allow-empty", "-m", "initial"]);
-    run_git(repo_dir, &["push", "-u", "origin", "main"]);
-
-    let override_guard = RepoDirOverride::new(repo_dir);
-    (repo, origin, override_guard)
-}
-
-pub(crate) fn git_commit(repo_dir: &str, message: &str) -> String {
-    run_git(repo_dir, &["commit", "--allow-empty", "-m", message]);
-    crate::services::platform::git_head_commit(repo_dir).unwrap()
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) fn seed_card(db: &Db, card_id: &str, status: &str) {
     let conn = db.separate_conn().unwrap();
     conn.execute(
@@ -291,72 +204,6 @@ pub(crate) fn seed_card(db: &Db, card_id: &str, status: &str) {
         sqlite_test::params![card_id, status],
     )
     .unwrap();
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) fn set_card_issue_number(db: &Db, card_id: &str, issue_number: i64) {
-    let conn = db.separate_conn().unwrap();
-    conn.execute(
-        "UPDATE kanban_cards SET github_issue_number = ?1 WHERE id = ?2",
-        sqlite_test::params![issue_number, card_id],
-    )
-    .unwrap();
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) fn set_card_repo_id(db: &Db, card_id: &str, repo_id: &str) {
-    let conn = db.separate_conn().unwrap();
-    conn.execute(
-        "UPDATE kanban_cards SET repo_id = ?1 WHERE id = ?2",
-        sqlite_test::params![repo_id, card_id],
-    )
-    .unwrap();
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) fn set_card_description(db: &Db, card_id: &str, description: &str) {
-    let conn = db.separate_conn().unwrap();
-    conn.execute(
-        "UPDATE kanban_cards SET description = ?1 WHERE id = ?2",
-        sqlite_test::params![description, card_id],
-    )
-    .unwrap();
-}
-
-pub(crate) fn write_repo_mapping_config(entries: &[(&str, &str)]) -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    let mut config = crate::config::Config::default();
-    for (repo_id, repo_dir) in entries {
-        config
-            .github
-            .repo_dirs
-            .insert((*repo_id).to_string(), (*repo_dir).to_string());
-    }
-    crate::config::save_to_path(&dir.path().join("agentdesk.yaml"), &config).unwrap();
-    dir
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) fn count_notify_outbox(conn: &sqlite_test::Connection, dispatch_id: &str) -> i64 {
-    conn.query_row(
-        "SELECT COUNT(*) FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'notify'",
-        [dispatch_id],
-        |row| row.get(0),
-    )
-    .unwrap()
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) fn count_status_reaction_outbox(
-    conn: &sqlite_test::Connection,
-    dispatch_id: &str,
-) -> i64 {
-    conn.query_row(
-        "SELECT COUNT(*) FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'status_reaction'",
-        [dispatch_id],
-        |row| row.get(0),
-    )
-    .unwrap()
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -378,24 +225,4 @@ pub(crate) fn load_dispatch_events(
     .unwrap()
     .filter_map(|row| row.ok())
     .collect()
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) fn seed_assistant_response_for_dispatch(db: &Db, dispatch_id: &str, message: &str) {
-    crate::db::session_transcripts::persist_turn(
-        db,
-        crate::db::session_transcripts::PersistSessionTranscript {
-            turn_id: &format!("dispatch-test:{dispatch_id}"),
-            session_key: Some("dispatch-test-session"),
-            channel_id: Some("123"),
-            agent_id: Some("agent-1"),
-            provider: Some("codex"),
-            dispatch_id: Some(dispatch_id),
-            user_message: "Implement the task",
-            assistant_message: message,
-            events: &[],
-            duration_ms: None,
-        },
-    )
-    .unwrap();
 }

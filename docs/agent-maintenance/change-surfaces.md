@@ -53,8 +53,7 @@
 - allowed_changes: `new_feature` only on the v3 `outbound/` submodules;
   `extraction` from `formatting.rs` requires a contract update for ordered
   chunk metadata.
-- tests: `src/integration_tests/discord_flow/scenarios.rs`,
-  `src/integration_tests/agents_setup_e2e.rs`, plus per-module unit tests in
+- tests: per-module unit tests in
   `outbound/{message,policy,decision,result}.rs`.
 - related_issues: #1006, #1175, #1280.
 
@@ -84,7 +83,7 @@
   filed first (no current owner — file under "policy-engine refactor" follow-up
   per #1279).
 - tests: see `engine/` per-module `#[cfg(test)] mod tests` and
-  `src/integration_tests/tests/high_risk_recovery.rs`.
+  `src/high_risk_recovery.rs`.
 - related_issues: #735 (`docs/policy-tick-bottleneck-735.md`).
 
 ### `dispatch`
@@ -92,9 +91,9 @@
 - canonical_modules: `src/dispatch/{mod,dispatch_context,dispatch_create,dispatch_status}.rs`.
 - legacy_modules: none.
 - do_not_edit_without_migration_plan (giant-file, awaiting split issue):
-  - `src/dispatch/dispatch_context.rs` (5258 lines).
-  - `src/dispatch/dispatch_create.rs` (3639 lines).
-  - `src/dispatch/dispatch_status.rs` (2129 lines).
+  - `src/dispatch/dispatch_context.rs` (5254 lines).
+  - `src/dispatch/dispatch_create.rs` (3635 lines).
+  - `src/dispatch/dispatch_status.rs` (2125 lines).
   - `src/services/dispatches/outbox_route.rs` (1118 lines; route extraction
     orchestration surface from #1722, split before adding non-bugfix behavior).
   - `src/services/dispatches/discord_delivery/orchestration.rs` (1697 lines;
@@ -185,7 +184,7 @@
 - 2026-05-18 refresh: #2558 removed dead watcher/placeholder cleanup parameters
   and retained a warning log for pause/epoch placeholder delete failures; no
   new watcher ownership path was introduced.
-- tests: `src/integration_tests/tests/*` cancel/recovery suites.
+- tests: `src/high_risk_recovery.rs` cancel/recovery suites.
 - related_issues: #964, #1112, #1138, #1222, #1223, #1283.
 
 ### `dashboard_routes`

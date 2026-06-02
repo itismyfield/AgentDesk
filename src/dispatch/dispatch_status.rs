@@ -2226,7 +2226,3 @@ mod auto_queue_terminal_sync_policy_tests {
         ));
     }
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[path = "dispatch_status_relocated_tests.rs"]
-mod relocated_tests;

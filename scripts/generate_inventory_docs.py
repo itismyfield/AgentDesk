@@ -111,8 +111,6 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "error.rs": "Shared HTTP and policy error type with typed codes and JSON response helpers.",
     "github/": "GitHub sync, issue triage, and Definition-of-Done mirroring.",
     "high_risk_recovery.rs": "PG-only high-risk recovery tests for boot reconciliation and review refire paths.",
-    "integration_tests/": "Scenario-specific integration test modules that supplement `src/integration_tests.rs`.",
-    "integration_tests.rs": "End-to-end pipeline, dispatch, review, and recovery integration test harness.",
     "kanban/": "High-level kanban orchestration, state machine facade, and shared test support.",
     "launch.rs": "Starts the Tokio runtime and hands off to server boot.",
     "lib.rs": "Library crate boundary that exposes the server/CLI modules for the slim binary entry point and tests.",

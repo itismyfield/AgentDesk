@@ -116,14 +116,10 @@ src/
 │   ├── dispatch_cancel.rs
 │   ├── dispatch_cancel_tests.rs
 │   ├── dispatch_channel.rs
-│   ├── dispatch_channel_relocated_tests.rs
 │   ├── dispatch_context.rs
-│   ├── dispatch_context_relocated_tests.rs
 │   ├── dispatch_create.rs
-│   ├── dispatch_create_relocated_tests.rs
 │   ├── dispatch_query.rs
 │   ├── dispatch_status.rs
-│   ├── dispatch_status_relocated_tests.rs
 │   ├── dispatch_summary.rs
 │   ├── mod.rs
 │   ├── test_support.rs
@@ -164,15 +160,6 @@ src/
 │   ├── mod.rs
 │   ├── sync.rs
 │   └── triage.rs
-├── integration_tests/
-│   ├── discord_flow/
-│   │   ├── harness.rs
-│   │   ├── mock_discord.rs
-│   │   ├── mod.rs
-│   │   └── scenarios.rs
-│   ├── tests/
-│   │   └── high_risk_recovery.rs
-│   └── agents_setup_e2e.rs
 ├── kanban/
 │   ├── audit.rs
 │   ├── github_sync.rs
@@ -764,7 +751,6 @@ src/
 ├── credential.rs
 ├── error.rs
 ├── high_risk_recovery.rs
-├── integration_tests.rs
 ├── launch.rs
 ├── lib.rs
 ├── logging.rs
@@ -794,7 +780,6 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/dispatch/` | Dispatch context construction, review metadata, and worktree targeting. |
 | `src/engine/` | QuickJS policy runtime, hook wiring, transition logic, and Rust-JS bridge ops. |
 | `src/github/` | GitHub sync, issue triage, and Definition-of-Done mirroring. |
-| `src/integration_tests/` | Scenario-specific integration test modules that supplement `src/integration_tests.rs`. |
 | `src/kanban/` | High-level kanban orchestration, state machine facade, and shared test support. |
 | `src/runtime_layout/` | Managed runtime layout, memory-path migration, shared prompt sync, and skill deployment. |
 | `src/server/` | Axum server boot, routes, workers, background loops, and WebSocket broadcast. |
@@ -808,7 +793,6 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/credential.rs` | Reads runtime credential files such as Discord bot tokens from the AgentDesk root. |
 | `src/error.rs` | Shared HTTP and policy error type with typed codes and JSON response helpers. |
 | `src/high_risk_recovery.rs` | PG-only high-risk recovery tests for boot reconciliation and review refire paths. |
-| `src/integration_tests.rs` | End-to-end pipeline, dispatch, review, and recovery integration test harness. |
 | `src/launch.rs` | Starts the Tokio runtime and hands off to server boot. |
 | `src/lib.rs` | Library crate boundary that exposes the server/CLI modules for the slim binary entry point and tests. |
 | `src/logging.rs` | Tracing span helpers that stamp dispatch, card, agent, and hook context onto logs. |

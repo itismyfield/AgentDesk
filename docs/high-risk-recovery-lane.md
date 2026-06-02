@@ -2,6 +2,8 @@
 
 고위험 회귀는 개별 함수 단위보다 상태 전이, 재시작, outbox 전달 경계, 지연된 worker 복구에서 더 자주 발생한다. 이 문서는 해당 영역을 `unit / state-transition integration / failure-recovery` 3계층으로 고정하고, 항상 실행되는 recovery lane과 남은 테스트 공백을 기록한다.
 
+> **#3035 Phase 1 메모:** 레거시 SQLite 기반 `src/integration_tests.rs` 및 `src/integration_tests/tests/high_risk_recovery.rs` 하네스(legacy-sqlite-tests 게이트, 기본 빌드 미컴파일)는 제거되었다. PG-only 회귀 보호는 `src/high_risk_recovery.rs` 로 이전되며, 아래 `scenario_*` 시나리오 표는 제거된 레거시 하네스 기준 기록(historical)이다. PG 스위트로의 시나리오 재매핑은 후속 Phase 에서 진행한다.
+
 ## Layer Model
 
 | Layer | Responsibility | Primary code path | Stable command |
