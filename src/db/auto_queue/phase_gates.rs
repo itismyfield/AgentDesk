@@ -484,7 +484,6 @@ pub(crate) enum PhaseGateReconciliation {
 ///
 /// `dispatch_context_json` and `dispatch_result_json` are the raw JSONB text
 /// columns — the function tolerates `None`/empty/malformed inputs.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn reconcile_phase_gate_for_terminal_dispatch_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     dispatch_id: &str,

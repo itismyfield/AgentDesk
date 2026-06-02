@@ -2,6 +2,9 @@
 // Non-dead-code clippy debt predates the bin/lib split. Keep the existing
 // style/complexity debt explicit here so this change can remove the crate-wide
 // dead_code blanket without rewriting unrelated modules.
+//
+// `too_many_arguments` is governed solely by this crate-wide allow; per-function
+// `#[allow(clippy::too_many_arguments)]` attributes are redundant and removed.
 #![allow(
     clippy::absurd_extreme_comparisons,
     clippy::assertions_on_constants,
@@ -85,7 +88,6 @@ mod bootstrap;
 #[allow(dead_code)]
 mod cli;
 // Legacy path shims remain available while runtime-layout migrations settle.
-#[allow(dead_code)]
 pub(crate) mod compat;
 // Config helpers are shared by CLI/server/tests, with some provider-onboarding
 // helpers only called from rollout flows.
@@ -106,7 +108,6 @@ mod dispatch;
 mod engine;
 // Error-code helpers are kept for API response boundaries that only some
 // routes currently surface.
-#[allow(dead_code)]
 mod error;
 // GitHub sync/triage helpers are optional integration surfaces behind runtime
 // configuration.
@@ -130,7 +131,6 @@ pub(crate) mod receipt;
 pub(crate) mod reconcile;
 pub(crate) mod runtime;
 // Runtime layout exposes migration helpers used by setup and repair commands.
-#[allow(dead_code)]
 pub(crate) mod runtime_layout;
 // Server route modules include API endpoints whose handlers are selected by
 // router composition and integration tests.
@@ -145,7 +145,6 @@ mod services;
 pub(crate) mod supervisor;
 mod ui;
 // Utility detectors are shared opportunistically across provider paths.
-#[allow(dead_code)]
 mod utils;
 // Voice runtime is an optional provider feature; most entry points are wired
 // only when voice config is enabled.

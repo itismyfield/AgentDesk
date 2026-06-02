@@ -18,6 +18,10 @@
 // the canonical implementation in `tmux_common.rs` + the
 // `resolve_session_temp_path` fallback chain. At that point, inline the
 // resolve-fallback into `session_temp_path` and delete both.
+//
+// Retained as the #1076 compat read-path entry point even while no current
+// caller routes through it; see module docs.
+#[allow(dead_code)]
 pub fn legacy_tmp_session_path(session_name: &str, extension: &str) -> String {
     crate::services::tmux_common::legacy_tmp_session_path(session_name, extension)
 }

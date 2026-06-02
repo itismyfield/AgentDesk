@@ -29,7 +29,6 @@ use crate::services::session_backend::{
 /// for a per-turn `claude-e` invocation. TUI / tmux / remote profile
 /// arguments are intentionally absent — those routes do not flow
 /// through this adapter.
-#[allow(clippy::too_many_arguments)]
 pub fn execute_streaming(
     prompt: &str,
     session_id: Option<&str>,

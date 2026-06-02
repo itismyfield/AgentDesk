@@ -9,6 +9,9 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+// `Discord` and `Kanban` complete the API error-category vocabulary; their
+// routes do not yet construct AppError through this enum.
+#[allow(dead_code)]
 pub enum ErrorCode {
     AutoQueue,
     Config,
@@ -87,6 +90,8 @@ impl AppError {
         self.status
     }
 
+    // Accessor parallel to `status`/`message`/`context`; no current reader.
+    #[allow(dead_code)]
     pub fn code(&self) -> ErrorCode {
         self.code
     }

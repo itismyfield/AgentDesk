@@ -1565,7 +1565,6 @@ fn execute_streaming_remote_tmux(
 }
 
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
 fn execute_streaming_local_tui_tmux(
     prompt: &str,
     session_id: Option<&str>,

@@ -155,7 +155,6 @@ pub fn execute_command_simple_cancellable(
     Err("Empty response from OpenCode".to_string())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn execute_command_streaming(
     prompt: &str,
     _session_id: Option<&str>,
@@ -188,7 +187,6 @@ pub fn execute_command_streaming(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn execute_command_streaming_inner(
     prompt: &str,
     _session_id: Option<&str>,

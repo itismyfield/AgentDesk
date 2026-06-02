@@ -472,7 +472,6 @@ pub fn tail_resumed_rollout_for_session_with_handoff(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux(
     cwd: &Path,
     session_id: &str,
@@ -504,7 +503,6 @@ pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn tail_resumed_rollout_for_session_with_options(
     cwd: &Path,
     session_id: &str,
@@ -532,7 +530,6 @@ fn tail_resumed_rollout_for_session_with_options(
     .map(|result| result.read_result)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn tail_resumed_rollout_for_session_with_handoff_options(
     cwd: &Path,
     session_id: &str,
@@ -615,7 +612,6 @@ fn wait_for_latest_rollout_for_cwd(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn wait_for_resumed_rollout_for_session(
     cwd: &Path,
     session_id: &str,
@@ -833,7 +829,6 @@ fn same_path(left: &Path, right: &Path) -> bool {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn tail_rollout_file_until_assistant_response(
     rollout_path: &Path,
     start_offset: u64,
@@ -2994,7 +2989,6 @@ mod tests {
     /// so we can observe the EOF drain vs `task_complete` fast-path
     /// interaction. The `is_alive` closure flips to `false` once the rollout
     /// has been fully written, mirroring the production `pane_alive` signal.
-    #[allow(clippy::too_many_arguments)]
     fn run_tail_with_options(
         body: &str,
         drain: Duration,

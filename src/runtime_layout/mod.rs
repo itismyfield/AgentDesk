@@ -684,6 +684,9 @@ fn remove_file_idempotent(path: &Path) -> Result<(), String> {
     }
 }
 
+// Only reachable from the `#[cfg(windows)]` symlink-removal branch in
+// `remove_link_or_path`; dead on other platforms.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn remove_dir_idempotent(path: &Path) -> Result<(), String> {
     match fs::remove_dir(path) {
         Ok(()) => Ok(()),
