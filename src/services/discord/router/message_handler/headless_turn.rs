@@ -551,9 +551,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         adk_session_key.as_deref(),
     )
     .await;
-    shared
-        .global_active
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::services::discord::increment_global_active(shared, "headless_turn_start");
     shared
         .turn_start_times
         .insert(channel_id, std::time::Instant::now());

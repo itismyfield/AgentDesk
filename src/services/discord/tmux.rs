@@ -1135,9 +1135,7 @@ async fn start_monitor_auto_turn_when_available(
         )
         .await;
         if started {
-            shared
-                .global_active
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            super::increment_global_active(shared, "tmux_monitor_auto_turn");
             shared
                 .turn_start_times
                 .insert(channel_id, std::time::Instant::now());

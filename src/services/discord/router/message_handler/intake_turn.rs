@@ -2308,9 +2308,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             }
         }
     };
-    shared
-        .global_active
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::services::discord::increment_global_active(shared, "intake_after_mailbox_slot");
     shared
         .turn_start_times
         .insert(channel_id, std::time::Instant::now());
