@@ -1429,6 +1429,31 @@ pub(in crate::services::discord) async fn clear_recovery_handled_channels(shared
     let _ = shared;
 }
 
+/// Outcome of a single `last_heartbeat` refresh attempt, used for auditable
+/// logging at the `touch_session_activity` boundary (#3053). Distinguishes
+/// which candidate key path matched so silent no-ops (the original failure
+/// mode where TUI/watcher activity refreshed a non-matching row) are visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum HeartbeatRefreshMatch {
+    /// One of the namespaced/legacy `session_key` candidates matched.
+    SessionKey,
+    /// Fell back to `provider + thread_channel_id` and matched.
+    ThreadChannelFallback,
+    /// No row matched any candidate — activity went unobserved by idle-kill.
+    NoMatch,
+}
+
+pub(in crate::services::discord) struct HeartbeatRefreshOutcome {
+    pub matched: HeartbeatRefreshMatch,
+    pub rows_affected: u64,
+}
+
+impl HeartbeatRefreshOutcome {
+    pub fn refreshed(&self) -> bool {
+        self.rows_affected > 0
+    }
+}
+
 // Tmux watcher output is activity, but reusing hook_session here would also
 // overwrite status/tokens defaults. Touch only last_heartbeat instead.
 pub(in crate::services::discord) fn refresh_session_heartbeat_from_tmux_output(
@@ -1439,6 +1464,28 @@ pub(in crate::services::discord) fn refresh_session_heartbeat_from_tmux_output(
     tmux_session_name: &str,
     thread_channel_id: Option<u64>,
 ) -> bool {
+    refresh_session_heartbeat_from_tmux_output_detailed(
+        db,
+        pg_pool,
+        token_hash,
+        provider,
+        tmux_session_name,
+        thread_channel_id,
+    )
+    .refreshed()
+}
+
+/// Same as `refresh_session_heartbeat_from_tmux_output` but reports which
+/// candidate key matched and how many rows were touched, so callers can emit
+/// auditable activity logs (#3053).
+pub(in crate::services::discord) fn refresh_session_heartbeat_from_tmux_output_detailed(
+    db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
+    token_hash: &str,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    thread_channel_id: Option<u64>,
+) -> HeartbeatRefreshOutcome {
     let session_keys = super::super::adk_session::build_session_key_candidates(
         token_hash,
         provider,
@@ -1463,11 +1510,17 @@ pub(in crate::services::discord) fn refresh_session_heartbeat_from_tmux_output(
                 .map_err(|error| format!("refresh pg watcher heartbeat by session key: {error}"))?
                 .rows_affected();
                 if updated > 0 {
-                    return Ok(true);
+                    return Ok(HeartbeatRefreshOutcome {
+                        matched: HeartbeatRefreshMatch::SessionKey,
+                        rows_affected: updated,
+                    });
                 }
 
                 let Some(thread_channel_id) = thread_channel_id else {
-                    return Ok(false);
+                    return Ok(HeartbeatRefreshOutcome {
+                        matched: HeartbeatRefreshMatch::NoMatch,
+                        rows_affected: 0,
+                    });
                 };
                 let updated = sqlx::query(
                     "UPDATE sessions
@@ -1484,31 +1537,121 @@ pub(in crate::services::discord) fn refresh_session_heartbeat_from_tmux_output(
                     format!("refresh pg watcher heartbeat by thread channel: {error}")
                 })?
                 .rows_affected();
-                Ok(updated > 0)
+                Ok(HeartbeatRefreshOutcome {
+                    matched: if updated > 0 {
+                        HeartbeatRefreshMatch::ThreadChannelFallback
+                    } else {
+                        HeartbeatRefreshMatch::NoMatch
+                    },
+                    rows_affected: updated,
+                })
             },
             |message| message,
         )
-        .unwrap_or(false);
+        .unwrap_or(HeartbeatRefreshOutcome {
+            matched: HeartbeatRefreshMatch::NoMatch,
+            rows_affected: 0,
+        });
     }
 
     #[cfg(all(test, feature = "legacy-sqlite-tests"))]
     if let Some(db) = db {
         let Ok(conn) = db.lock() else {
-            return false;
+            return HeartbeatRefreshOutcome {
+                matched: HeartbeatRefreshMatch::NoMatch,
+                rows_affected: 0,
+            };
         };
-        return conn
+        let updated = conn
             .execute(
                 "UPDATE sessions
                  SET last_heartbeat = datetime('now')
                  WHERE session_key = ?1 AND provider = ?2",
                 sqlite_test::params![session_keys[0], provider.as_str()],
             )
-            .map(|updated| updated > 0)
-            .unwrap_or(false);
+            .unwrap_or(0) as u64;
+        return HeartbeatRefreshOutcome {
+            matched: if updated > 0 {
+                HeartbeatRefreshMatch::SessionKey
+            } else {
+                HeartbeatRefreshMatch::NoMatch
+            },
+            rows_affected: updated,
+        };
     }
 
     let _ = (db, provider, thread_channel_id, session_keys);
-    false
+    HeartbeatRefreshOutcome {
+        matched: HeartbeatRefreshMatch::NoMatch,
+        rows_affected: 0,
+    }
+}
+
+/// Single auditable entry point for runtime-observed session activity (#3053).
+///
+/// Refreshes `sessions.last_heartbeat = NOW()` for the row idle-kill selects
+/// on (`COALESCE(last_heartbeat, created_at)`) and logs the resolved
+/// `session_key`, BOTH candidate keys (namespaced + legacy `host:tmux`),
+/// rows-affected, the caller-supplied `reason`/`source`, and whether the
+/// `thread_channel_id` fallback was used. The original failure mode (#3053)
+/// was a silent no-op: TUI/watcher activity refreshed a non-matching row or
+/// no row at all, and idle-kill later killed the live session. The structured
+/// log makes that branch observable.
+///
+/// Returns true when at least one row was touched.
+pub(in crate::services::discord) fn touch_session_activity(
+    db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
+    token_hash: &str,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    thread_channel_id: Option<u64>,
+    reason: &str,
+    source: &str,
+) -> bool {
+    let session_keys = super::super::adk_session::build_session_key_candidates(
+        token_hash,
+        provider,
+        tmux_session_name,
+    );
+    let outcome = refresh_session_heartbeat_from_tmux_output_detailed(
+        db,
+        pg_pool,
+        token_hash,
+        provider,
+        tmux_session_name,
+        thread_channel_id,
+    );
+
+    let used_thread_fallback = outcome.matched == HeartbeatRefreshMatch::ThreadChannelFallback;
+    if outcome.refreshed() {
+        tracing::debug!(
+            source,
+            reason,
+            tmux_session = %tmux_session_name,
+            namespaced_key = %session_keys[0],
+            legacy_key = %session_keys[1],
+            rows_affected = outcome.rows_affected,
+            used_thread_fallback,
+            thread_channel_id = ?thread_channel_id,
+            "touch_session_activity: refreshed idle-kill heartbeat (#3053)"
+        );
+    } else {
+        // No row matched — idle-kill will not observe this activity. This is the
+        // exact #3053 failure mode, so warn (not debug) to make it actionable.
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            source,
+            reason,
+            tmux_session = %tmux_session_name,
+            namespaced_key = %session_keys[0],
+            legacy_key = %session_keys[1],
+            rows_affected = outcome.rows_affected,
+            thread_channel_id = ?thread_channel_id,
+            "  [{ts}] ⚠ touch_session_activity: NO session row matched runtime activity — idle-kill heartbeat NOT refreshed (#3053)",
+        );
+    }
+    outcome.refreshed()
 }
 
 pub(super) fn maybe_refresh_watcher_activity_heartbeat(

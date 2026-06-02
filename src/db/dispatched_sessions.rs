@@ -1570,6 +1570,48 @@ pub(crate) async fn reconcile_orphaned_tmuxless_session_pg(
     }
 }
 
+/// Return the effective "last seen" instant idle-kill selects on for a session
+/// (`COALESCE(last_heartbeat, created_at)`), as a unix-epoch nanosecond count.
+/// Used by the kill-time live-activity guard (#3053) to compare against runtime
+/// file mtimes (relay output / generation marker / provider transcript).
+/// `None` when the row is absent or the timestamp cannot be decoded.
+pub(crate) async fn session_last_seen_unix_nanos_pg(
+    pool: &PgPool,
+    session_key: &str,
+) -> Option<i64> {
+    let last_seen: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT COALESCE(last_heartbeat, created_at) FROM sessions WHERE session_key = $1",
+    )
+    .bind(session_key)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    last_seen.map(|value| value.timestamp_nanos_opt().unwrap_or(0))
+}
+
+/// Refresh `sessions.last_heartbeat = NOW()` by exact `session_key`. Used by the
+/// kill-time live-activity guard (#3053) when runtime activity is newer than the
+/// stored heartbeat, so a subsequent idle-kill tick no longer selects the row.
+/// Returns true when a row was touched.
+pub(crate) async fn refresh_session_heartbeat_by_key_pg(pool: &PgPool, session_key: &str) -> bool {
+    match sqlx::query("UPDATE sessions SET last_heartbeat = NOW() WHERE session_key = $1")
+        .bind(session_key)
+        .execute(pool)
+        .await
+    {
+        Ok(result) => result.rows_affected() > 0,
+        Err(error) => {
+            tracing::warn!(
+                "[dispatched-sessions] refresh_session_heartbeat_by_key_pg: failed for {}: {}",
+                session_key,
+                error
+            );
+            false
+        }
+    }
+}
+
 /// Mark stale fixed-channel working sessions as disconnected without clearing
 /// provider selectors needed for resume after runtime cleanup.
 pub async fn gc_stale_fixed_working_sessions_db_pg(pool: &PgPool) -> usize {

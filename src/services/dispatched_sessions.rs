@@ -1161,6 +1161,42 @@ pub async fn kill_tmux_session(
     kill_tmux_session_impl(&state, &headers, &session_key, reason).await
 }
 
+/// #3053: most-recent runtime activity instant for a tmux session, as a
+/// unix-epoch nanosecond count. Considers the relay output (`jsonl`) file mtime,
+/// the `.generation` marker mtime, and (best-effort) the provider transcript
+/// mtime. These files are touched by the live wrapper/relay even when the
+/// session-key heartbeat path silently misses the idle-kill row, so they are a
+/// reliable "is this tmux actually doing work?" signal at kill time. Returns 0
+/// when nothing is observable.
+fn latest_runtime_activity_unix_nanos(tmux_session_name: &str) -> i64 {
+    fn mtime_nanos(path: &str) -> i64 {
+        std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|d| i64::try_from(d.as_nanos()).ok())
+            .unwrap_or(0)
+    }
+
+    let mut latest = 0i64;
+
+    // Relay output (jsonl) — written by the live wrapper on every provider event.
+    if let Some(output_path) =
+        crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "jsonl")
+    {
+        latest = latest.max(mtime_nanos(&output_path));
+    }
+    // `.generation` marker — written once per spawn; covers fresh sessions whose
+    // jsonl has not yet been created.
+    if let Some(generation_path) =
+        crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "generation")
+    {
+        latest = latest.max(mtime_nanos(&generation_path));
+    }
+
+    latest
+}
+
 async fn kill_tmux_session_impl(
     state: &AppState,
     headers: &HeaderMap,
@@ -1236,6 +1272,52 @@ async fn kill_tmux_session_impl(
     }
 
     let tmux_was_alive = crate::services::platform::tmux::has_session(&tmux_name);
+
+    // #3053: live-activity guard. idle-kill selects on COALESCE(last_heartbeat,
+    // created_at); if the matching heartbeat path silently missed this row,
+    // a still-working tmux session can be selected for kill while it is alive.
+    // Before killing a live session, compare its idle-kill "last seen" instant
+    // against the most recent runtime activity (relay output / generation
+    // marker mtime). When runtime activity is NEWER, the session is not idle:
+    // refresh the heartbeat and SKIP the kill so the next idle-kill tick no
+    // longer selects it. Forced/explicit reasons are not affected — this guard
+    // only fires for the idle-cleanup reason shape and a live tmux.
+    let reason_is_idle_cleanup = reason.contains("idle") || reason.contains("자동 정리");
+    if tmux_was_alive && reason_is_idle_cleanup && active_dispatch_id.is_none() {
+        let last_seen_nanos =
+            dispatched_sessions_db::session_last_seen_unix_nanos_pg(pool, session_key)
+                .await
+                .unwrap_or(0);
+        let runtime_activity_nanos = latest_runtime_activity_unix_nanos(&tmux_name);
+        if runtime_activity_nanos > 0 && runtime_activity_nanos > last_seen_nanos {
+            let refreshed =
+                dispatched_sessions_db::refresh_session_heartbeat_by_key_pg(pool, session_key)
+                    .await;
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                session_key,
+                tmux_session = %tmux_name,
+                last_seen_unix_nanos = last_seen_nanos,
+                runtime_activity_unix_nanos = runtime_activity_nanos,
+                heartbeat_refreshed = refreshed,
+                "  [{ts}] 🛡 kill-tmux: SKIPPED idle kill — runtime activity newer than last_heartbeat, session is live (#3053). Heartbeat refreshed.",
+            );
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "tmux_killed": false,
+                    "tmux_was_alive": true,
+                    "tmux_session_name": tmux_name,
+                    "session_row_preserved": true,
+                    "skipped_live_activity_guard": true,
+                    "heartbeat_refreshed": refreshed,
+                    "active_dispatch_id": active_dispatch_id,
+                })),
+            );
+        }
+    }
+
     let tmux_killed = if tmux_was_alive {
         crate::services::platform::tmux::kill_session(&tmux_name, reason)
     } else {
