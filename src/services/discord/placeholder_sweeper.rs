@@ -255,36 +255,21 @@ pub(in crate::services::discord) async fn probe_placeholder_state(
 ///     glyphs followed by a space, e.g. `⠋ Processing...` or
 ///     `⠹ ⚙ Bash: cargo build`. Produced by
 ///     [`build_placeholder_status_block`] / [`build_processing_status_block`].
-///   - Monitor handoff card: new cards carry [`PLACEHOLDER_PROBE_MARKER`].
-///     Legacy unmarked cards must match the full generated card skeleton, not
-///     just the first header line. This protects delivered answers whose first
-///     line is exactly one of the Korean handoff headers (#2877).
+///   - Monitor handoff card: the authoritative signal is the structured
+///     [`PLACEHOLDER_PROBE_MARKER`] embedded by `monitor_handoff_header`. Every
+///     card emitted since #2896 carries it, so detection no longer depends on
+///     the card's locale-specific header/footer prose.
+///   - Legacy fallback (#3031C): pre-marker cards still in flight are matched by
+///     the card's *structural* scaffold — the `> **시작**: <t:…:R>` started-at
+///     blockquote plus another `> **…**:` field line — never by exact Korean
+///     header/footer strings. This drops the manual cross-file lockstep with
+///     `monitor_handoff_header` in `formatting.rs` while still protecting the
+///     dwindling set of unmarked legacy cards.
 ///
 /// Anything else (real prose, code blocks, embeds rendered as text) is
 /// treated as a delivered response and protected from sweeper overwrite.
 pub(in crate::services::discord) fn is_message_still_placeholder(content: &str) -> bool {
     const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-    // Exact canonical header strings produced by `monitor_handoff_header`
-    // in `src/services/discord/formatting.rs`. Keep in lockstep with that
-    // function; `handoff_card_headers_are_placeholder` and
-    // `delivered_response_with_status_style_prefix_is_not_placeholder`
-    // pin the in/out boundaries.
-    const HANDOFF_HEADERS_EXACT: &[&str] = &[
-        "📬 **메시지 대기 중**",
-        "🔄 **백그라운드 처리 중**",
-        "🔄 **응답 처리 중**",
-        "⚠ **백그라운드 정체**",
-        "⚠ **응답 정체**",
-        "✅ **백그라운드 완료**",
-        "✅ **응답 완료**",
-        "⏱ **백그라운드 타임아웃**",
-        "⏱ **응답 타임아웃**",
-        "⚠ **백그라운드 중단** (모니터 연결 끊김)",
-        "⚠ **응답 중단**",
-    ];
-    // Failed states render as `❌ **{label}**[: {detail}]`. Accept the bare
-    // header plus the header-with-detail-prefix variant.
-    const HANDOFF_FAILED_HEADERS: &[&str] = &["❌ **백그라운드 실패**", "❌ **응답 실패**"];
 
     let trimmed = content.trim_start();
     if trimmed.is_empty() {
@@ -304,50 +289,43 @@ pub(in crate::services::discord) fn is_message_still_placeholder(content: &str) 
         }
     }
 
+    // Authoritative, locale-independent signal: the structured probe marker that
+    // `monitor_handoff_header` embeds in every placeholder card.
     if trimmed.contains(PLACEHOLDER_PROBE_MARKER) {
         return true;
     }
 
-    // Legacy pre-marker handoff cards are still recognized, but only when the
-    // whole generated card skeleton is present. First-line-only matching is
-    // what caused #2877 false StillPlaceholder classifications.
+    // #3031C — minimal legacy fallback for pre-marker cards still in flight.
+    // Matches the card's structural scaffold only (the `> **시작**: <t:…:R>`
+    // started-at blockquote + at least one other `> **…**:` field line), so it
+    // stays correct regardless of header/footer wording and requires no manual
+    // lockstep with `formatting.rs`. First-line header matching is intentionally
+    // gone (it caused #2877 false StillPlaceholder classifications).
     let lines = trimmed.lines().collect::<Vec<_>>();
-    let first_line = lines.first().copied().unwrap_or(trimmed).trim_end();
-    let header_matches = HANDOFF_HEADERS_EXACT.iter().any(|h| first_line == *h)
-        || HANDOFF_FAILED_HEADERS
-            .iter()
-            .any(|h| first_line == *h || first_line.starts_with(&format!("{h}: ")));
-    if header_matches && legacy_handoff_card_shape(&lines) {
+    if legacy_handoff_card_shape(&lines) {
         return true;
     }
 
     false
 }
 
+/// #3031C — locale-independent structural detector for legacy (pre-marker)
+/// handoff cards. Keys off the markdown blockquote scaffold the card always
+/// renders rather than any translatable header/footer prose.
 fn legacy_handoff_card_shape(lines: &[&str]) -> bool {
-    let has_reason_or_tool = lines.iter().skip(1).any(|line| {
-        let line = line.trim();
-        line.starts_with("> **도구**:") || line.starts_with("> **사유**:")
-    });
     let has_started_at = lines
         .iter()
-        .skip(1)
-        .any(|line| line.trim().starts_with("> **시작**: <t:"));
-    let has_known_footer_or_tail = lines.iter().skip(1).any(|line| {
-        let line = line.trim();
-        matches!(
-            line,
-            "현재 진행 중인 턴 완료 후 처리 시작합니다."
-                | "완료 시 이 채널로 결과 이어서 보냅니다."
-                | "완료 시 이 채널로 결과를 이어서 표시합니다."
-                | "스트림 진행이 멈춰 복구 상태를 확인 중입니다."
-                | "결과가 위에 도착했습니다."
-                | "자세한 사유는 다음 응답을 확인해 주세요."
-                | "타임아웃 임계를 넘어 종료되었습니다."
-                | "브릿지 또는 세션이 종료되었습니다."
-        ) || line.starts_with('⠋')
-    });
-    has_reason_or_tool && has_started_at && has_known_footer_or_tail
+        .any(|line| line.trim().starts_with("> **") && line.contains(": <t:"));
+    // A second blockquote field (도구/사유/요약 in any locale) distinguishes the
+    // card scaffold from an arbitrary message that merely quotes a timestamp.
+    let blockquote_field_lines = lines
+        .iter()
+        .filter(|line| {
+            let line = line.trim();
+            line.starts_with("> **") && line.contains("**:")
+        })
+        .count();
+    has_started_at && blockquote_field_lines >= 2
 }
 
 /// Run a single sweep pass for the given provider. Public for testability —
@@ -1118,6 +1096,44 @@ mod is_message_still_placeholder_tests {
         assert!(is_message_still_placeholder(&format!(
             "\n🔄 **응답 처리 중**\n{PLACEHOLDER_PROBE_MARKER}"
         )));
+    }
+
+    #[test]
+    fn marker_is_authoritative_regardless_of_header_wording() {
+        // #3031C: detection keys off the structured marker, not the card's
+        // header/footer prose. A card with a non-Korean (or future-localized)
+        // header is still recognised purely via the marker — proving the brittle
+        // exact-string lockstep with formatting.rs is gone.
+        assert!(is_message_still_placeholder(&format!(
+            "🔄 **Processing response**\n{PLACEHOLDER_PROBE_MARKER}"
+        )));
+        assert!(is_message_still_placeholder(&format!(
+            "🆕 **completely new header text**\n> **whatever**: x\n{PLACEHOLDER_PROBE_MARKER}"
+        )));
+        // The marker alone, with no recognizable header at all.
+        assert!(is_message_still_placeholder(&format!(
+            "arbitrary leading text\n{PLACEHOLDER_PROBE_MARKER}"
+        )));
+    }
+
+    #[test]
+    fn legacy_unmarked_card_matched_by_structural_scaffold_not_header_strings() {
+        // #3031C: pre-marker legacy cards are recognised by the markdown
+        // blockquote scaffold (started-at `<t:…>` line + a second field line),
+        // independent of the exact (translatable) header/footer wording.
+        assert!(is_message_still_placeholder(
+            "ANY HEADER LINE\n> **사유**: 응답 스트리밍 중\n> **시작**: <t:123:R>\nfooter prose in any language"
+        ));
+        // A delivered answer that merely starts with a status-style header but
+        // lacks the blockquote scaffold must NOT be treated as a placeholder.
+        assert!(!is_message_still_placeholder(
+            "✅ **응답 완료**\n실제 답변 본문입니다."
+        ));
+        // A single quoted timestamp without a second blockquote field is not a
+        // card scaffold.
+        assert!(!is_message_still_placeholder(
+            "지난 알림 인용:\n> **시작**: <t:123:R>"
+        ));
     }
 }
 
