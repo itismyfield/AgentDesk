@@ -1473,6 +1473,65 @@ async fn complete_watcher_status_panel_v2(
     .await
 }
 
+/// #3055 — the per-channel session lifecycle panel snapshot (`🆕 새 세션 시작`,
+/// `기존 세션 복원`, …) is set by the bridge's
+/// `refresh_session_panel_line_from_lifecycle` and is keyed only by channel,
+/// not by turn. The bridge re-derives it from the *current* turn's lifecycle
+/// row on every status tick (and clears it when the current turn has no
+/// session lifecycle event). The watcher-direct render/completion paths never
+/// performed that refresh, so a watcher-direct TUI turn would reuse a stale
+/// snapshot left behind by a prior turn's `session_fresh`/`session_resumed`
+/// event (e.g. a `(최근 대화 N개…)` recovery line from an earlier
+/// recovery/new-session turn).
+///
+/// Mirror the bridge behaviour for the watcher: load the latest session
+/// lifecycle event for *this* watcher turn and set the panel from it, or clear
+/// the panel when the current turn has no such event. Watcher-direct TUI turns
+/// carry `user_msg_id == 0` (no anchored Discord message) so they key onto the
+/// invariant-guarded `discord:<channel>:0` turn id, which by construction has
+/// no session lifecycle row — the panel is therefore cleared and the stale
+/// line is never reused.
+async fn refresh_watcher_session_panel_from_lifecycle(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    user_msg_id: u64,
+) {
+    if !shared.status_panel_v2_enabled {
+        return;
+    }
+    let Some(pg_pool) = shared.pg_pool.as_ref() else {
+        return;
+    };
+    let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id);
+    let channel_id_text = channel_id.get().to_string();
+    match crate::services::observability::turn_lifecycle::load_latest_session_lifecycle_event(
+        pg_pool,
+        &channel_id_text,
+        &turn_id,
+    )
+    .await
+    {
+        Ok(Some(event)) => {
+            shared
+                .placeholder_live_events
+                .set_session_panel_lifecycle_event(channel_id, &event.kind, &event.details_json);
+        }
+        Ok(None) => {
+            shared
+                .placeholder_live_events
+                .clear_session_panel(channel_id);
+        }
+        Err(error) => {
+            tracing::debug!(
+                "[tmux_watcher] failed to load session lifecycle line for turn {} in channel {}: {}",
+                turn_id,
+                channel_id,
+                error
+            );
+        }
+    }
+}
+
 /// #2161 — TUI completion gate. Callers ask `run_tui_completion_gate` to
 /// confirm the underlying tmux pane has reached a `Ready for input`
 /// quiescent state before pushing `StatusEvent::TurnCompleted` to the live
@@ -3868,6 +3927,22 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     if shared.status_panel_v2_enabled
                         && let Some(status_msg_id) = status_panel_msg_id
                     {
+                        // #3055: re-derive the session lifecycle panel line for
+                        // *this* watcher turn before each streaming render, the
+                        // same way the bridge does on every status tick. Without
+                        // this the watcher-direct path renders a stale
+                        // per-channel `🆕 새 세션 시작 (최근 대화 N개…)` snapshot left
+                        // by an earlier recovery/new-session turn. The lookup is
+                        // already throttled by `status_update_interval`.
+                        refresh_watcher_session_panel_from_lifecycle(
+                            &shared,
+                            channel_id,
+                            turn_identity_for_panel
+                                .as_ref()
+                                .map(|identity| identity.user_msg_id)
+                                .unwrap_or(0),
+                        )
+                        .await;
                         let panel_text = shared.placeholder_live_events.render_status_panel(
                             channel_id,
                             &watcher_provider,
@@ -6649,6 +6724,32 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         None
                     }
                 });
+            // #3055: re-derive this turn's session lifecycle panel line before
+            // finalizing. The bridge does this on every status tick via
+            // `refresh_session_panel_line_from_lifecycle`; the watcher-direct
+            // completion path historically skipped it and so reused a stale
+            // per-channel `🆕 새 세션 시작 (최근 대화 N개…)` snapshot from a prior
+            // recovery/new-session turn. A watcher-direct TUI turn has
+            // `user_msg_id == 0`, keying onto the `discord:<channel>:0` turn id
+            // which has no session lifecycle row, so the panel is cleared and
+            // the stale line is not rendered.
+            let session_panel_lifecycle_user_msg_id = inflight_before_relay
+                .as_ref()
+                .filter(|inflight| {
+                    inflight
+                        .tmux_session_name
+                        .as_deref()
+                        .map(str::trim)
+                        .is_some_and(|name| !name.is_empty() && name == tmux_session_name)
+                })
+                .map(|inflight| inflight.user_msg_id)
+                .unwrap_or(0);
+            refresh_watcher_session_panel_from_lifecycle(
+                &shared,
+                channel_id,
+                session_panel_lifecycle_user_msg_id,
+            )
+            .await;
             let completion_committed = complete_watcher_status_panel_v2(
                 &http,
                 &shared,
