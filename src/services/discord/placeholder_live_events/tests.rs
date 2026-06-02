@@ -495,6 +495,42 @@ fn status_panel_appends_recovery_message_count_line_when_present() {
     assert!(rendered.contains("(최근 대화 7개를 읽어들였습니다)"));
 }
 
+/// #3055 — a watcher-direct turn that has no session lifecycle event of its own
+/// must not reuse the per-channel session panel snapshot left behind by a prior
+/// turn's `session_fresh(recoveryMessageCount=N)`. The watcher completion path
+/// re-derives the snapshot for the current turn; when the current turn has no
+/// lifecycle row it clears the panel (mirroring the bridge), so the stale
+/// `🆕 새 세션 시작 (최근 대화 N개…)` line is gone.
+#[test]
+fn status_panel_clears_stale_session_line_for_watcher_turn_without_lifecycle() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3055);
+
+    // Turn A: a fresh-session/recovery event sets the channel-scoped snapshot.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        "session_fresh",
+        &json!({
+            "reason": "no_cached_provider_session",
+            "recoveryMessageCount": 33,
+        }),
+    ));
+    let turn_a = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(turn_a.contains("🆕 새 세션 시작"));
+    assert!(turn_a.contains("(최근 대화 33개를 읽어들였습니다)"));
+
+    // Turn B (watcher-direct, no lifecycle row): the completion path clears the
+    // session panel before rendering. The cleared snapshot must drop the stale
+    // new-session/recovery line.
+    assert!(events.clear_session_panel(channel_id));
+    let turn_b = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(!turn_b.contains("🆕 새 세션 시작"));
+    assert!(!turn_b.contains("최근 대화"));
+
+    // Idempotent: clearing an already-cleared panel reports no change.
+    assert!(!events.clear_session_panel(channel_id));
+}
+
 #[test]
 fn status_panel_omits_recovery_line_when_count_is_zero_or_missing() {
     let events = PlaceholderLiveEvents::default();

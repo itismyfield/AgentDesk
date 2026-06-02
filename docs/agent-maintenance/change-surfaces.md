@@ -121,9 +121,10 @@
     lifecycle behavior).
   - `src/services/discord/tmux.rs` (2206 lines after #2558 dead-code sweep;
     failover guard; still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (6725 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (6826 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
-    explicit-cleanup wires; split loop helpers
+    explicit-cleanup wires + #3055 watcher session-panel lifecycle
+    refresh; split loop helpers
     further before adding behavior).
   - `src/services/discord/tui_prompt_relay.rs` (3241 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
