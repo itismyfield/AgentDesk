@@ -4,6 +4,7 @@
 
 use axum::{
     Json,
+    body::Bytes,
     extract::{Path, Query, State},
     http::StatusCode,
 };
@@ -154,6 +155,34 @@ pub struct CancelTurnQuery {
     pub force: bool,
 }
 
+/// #3029(C): `force` carried in the request *body*, mirroring the JSON-body
+/// shape of `cancel_all_dispatches` / `extend_turn_timeout`. Clients that POST
+/// `{"force": true}` previously had it silently dropped because the handler
+/// only read `Query<CancelTurnQuery>`, downgrading an intended hard-kill to a
+/// soft cancel.
+#[derive(Debug, Default, Deserialize)]
+pub struct CancelTurnBody {
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// #3029(C): resolve the effective `force` intent from query + body. The body
+/// wins when present and parseable (it's the canonical JSON shape); the query
+/// param remains an honored fallback for existing `?force=true` clients. An
+/// empty or non-JSON body falls through to the query value, so callers that
+/// never sent a body keep working unchanged.
+fn resolve_cancel_force(query_force: bool, body: &Bytes) -> bool {
+    if body.is_empty() {
+        return query_force;
+    }
+    match serde_json::from_slice::<CancelTurnBody>(body) {
+        Ok(parsed) => parsed.force || query_force,
+        // Unparseable body: do not silently swallow the request; honor the
+        // query fallback so a `?force=true` with a junk body still forces.
+        Err(_) => query_force,
+    }
+}
+
 /// Cancel the active turn in a channel.
 ///
 /// Default (`force=false`): preserves the live provider session and watcher;
@@ -162,15 +191,19 @@ pub struct CancelTurnQuery {
 ///
 /// `force=true`: tear the tmux session down, SIGKILL the PID tree, clear
 /// inflight state. The turn will not complete gracefully; in-flight
-/// `cargo`/`claude` subprocesses get terminated.
+/// `cargo`/`claude` subprocesses get terminated. `force` may be supplied either
+/// as a query param (`?force=true`) or in the JSON body (`{"force": true}`,
+/// #3029); the body wins when both are present.
 pub async fn cancel_turn(
     State(state): State<AppState>,
     Path(channel_id): Path<String>,
     Query(query): Query<CancelTurnQuery>,
+    body: Bytes,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let force = resolve_cancel_force(query.force, &body);
     match state
         .queue_service()
-        .cancel_turn(state.health_registry.as_ref(), &channel_id, query.force)
+        .cancel_turn(state.health_registry.as_ref(), &channel_id, force)
         .await
     {
         Ok(response) => (StatusCode::OK, Json(response)),
@@ -470,5 +503,59 @@ mod tests {
 
         // Clean up the global store entry to avoid polluting other tests.
         let _ = global_store().take_handoff(message_id);
+    }
+}
+
+// #3029(C): `resolve_cancel_force` is a pure parser with no DB/runtime
+// dependency, so its coverage lives in a plain `#[cfg(test)]` module that runs
+// under the default `cargo test` invocation (the suite above is gated behind
+// the `legacy-sqlite-tests` feature, which CI does not enable by default).
+#[cfg(test)]
+mod cancel_force_tests {
+    use super::*;
+    use axum::body::Bytes;
+
+    #[test]
+    fn body_force_true_is_honored_even_when_query_false() {
+        let body = Bytes::from_static(b"{\"force\": true}");
+        assert!(
+            resolve_cancel_force(false, &body),
+            "force in body must be honored (#3029 C): previously dropped to default=false"
+        );
+    }
+
+    #[test]
+    fn body_force_false_is_respected() {
+        let body = Bytes::from_static(b"{\"force\": false}");
+        assert!(!resolve_cancel_force(false, &body));
+    }
+
+    #[test]
+    fn empty_body_falls_back_to_query() {
+        let empty = Bytes::new();
+        assert!(
+            resolve_cancel_force(true, &empty),
+            "existing ?force=true clients (no body) must keep forcing"
+        );
+        assert!(!resolve_cancel_force(false, &empty));
+    }
+
+    #[test]
+    fn query_force_remains_fallback_when_body_omits_force() {
+        // Body is valid JSON but omits `force` → serde default false; the query
+        // value still wins as a fallback.
+        let body = Bytes::from_static(b"{}");
+        assert!(resolve_cancel_force(true, &body));
+        assert!(!resolve_cancel_force(false, &body));
+    }
+
+    #[test]
+    fn unparseable_body_falls_back_to_query() {
+        let junk = Bytes::from_static(b"not json");
+        assert!(
+            resolve_cancel_force(true, &junk),
+            "a junk body must not silently swallow a ?force=true intent"
+        );
+        assert!(!resolve_cancel_force(false, &junk));
     }
 }

@@ -1009,6 +1009,17 @@ pub(crate) struct CancelActiveTurnResult {
     pub(crate) already_stopping: bool,
 }
 
+/// #3029(D): outcome of a `PurgeQueue` request.
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub(crate) struct PurgeQueueResult {
+    /// Number of intervention-queue entries drained.
+    pub(crate) drained: usize,
+    /// Whether the request also released a *cancelled* active-turn anchor
+    /// (only possible when `clear_cancelled_active_anchor` was requested and
+    /// the anchored token was already cancelled).
+    pub(crate) cleared_active_anchor: bool,
+}
+
 pub(crate) struct HasPendingSoftQueueResult {
     pub(crate) has_pending: bool,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
@@ -1499,10 +1510,23 @@ impl ChannelMailboxHandle {
     /// touching the active `cancel_token`, so a turn that entered the
     /// mailbox between a sibling force-kill and this call is not
     /// collaterally cancelled.
-    pub(crate) async fn purge_queue(&self, persistence: QueuePersistenceContext) -> usize {
+    ///
+    /// #3029(D): `clear_cancelled_active_anchor=true` additionally releases the
+    /// active-turn anchor when its token is already `cancelled` (force purge),
+    /// so a force cancel does not leave a stale anchor that blocks the next
+    /// dispatch. Pass `false` for a pure queue drain.
+    pub(crate) async fn purge_queue(
+        &self,
+        persistence: QueuePersistenceContext,
+        clear_cancelled_active_anchor: bool,
+    ) -> PurgeQueueResult {
         self.request(
-            |reply| ChannelMailboxMsg::PurgeQueue { persistence, reply },
-            0,
+            |reply| ChannelMailboxMsg::PurgeQueue {
+                persistence,
+                clear_cancelled_active_anchor,
+                reply,
+            },
+            PurgeQueueResult::default(),
         )
         .await
     }
@@ -1983,9 +2007,19 @@ enum ChannelMailboxMsg {
     /// `cancel_token`. Used by `cancel_turn(force=true)` so the in-memory
     /// channel mailbox is emptied even if a fresh turn entered the actor
     /// between `force_kill_turn_without_cancel_event` and this purge.
+    ///
+    /// #3029(D): when `clear_cancelled_active_anchor` is set (force purge),
+    /// also release the active-turn anchor (`cancel_token` /
+    /// `active_request_owner` / `active_user_message_id` / `turn_started_at`)
+    /// — but ONLY if that anchor's token is already `cancelled`. The force
+    /// path cancels the token via `cancel_active_token` before purging, so the
+    /// just-killed turn's anchor is cleared, while a fresh *uncancelled* turn
+    /// that entered the actor between force-kill and purge keeps its anchor
+    /// (preserving the #2706 no-collateral-cancel guarantee).
     PurgeQueue {
         persistence: QueuePersistenceContext,
-        reply: oneshot::Sender<usize>,
+        clear_cancelled_active_anchor: bool,
+        reply: oneshot::Sender<PurgeQueueResult>,
     },
     ReplaceQueue {
         queue: Vec<Intervention>,
@@ -2844,16 +2878,42 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     let _ = reply.send(result);
                     mark_turn_finished_signal_done(channel_id);
                 }
-                ChannelMailboxMsg::PurgeQueue { persistence, reply } => {
+                ChannelMailboxMsg::PurgeQueue {
+                    persistence,
+                    clear_cancelled_active_anchor,
+                    reply,
+                } => {
                     // #2706: queue-only purge. Leaves `cancel_token`,
                     // `active_request_owner`, `active_user_message_id`
                     // untouched so a turn that entered the actor in
                     // between force-kill and purge is not collaterally
                     // cancelled.
+                    //
+                    // #3029(D): a force purge additionally releases the
+                    // active-turn anchor, but ONLY when the anchored token is
+                    // already `cancelled`. The force path flips that flag via
+                    // `cancel_active_token` before purging, so this clears the
+                    // just-killed turn's anchor while still leaving a fresh,
+                    // uncancelled turn (which raced in after the force-kill)
+                    // fully intact — keeping the #2706 guarantee.
+                    let cleared_active_anchor = if clear_cancelled_active_anchor
+                        && state.cancel_token.as_ref().is_some_and(|token| {
+                            token.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+                        }) {
+                        state.cancel_token = None;
+                        state.active_request_owner = None;
+                        state.active_user_message_id = None;
+                        state.recovery_started_at = None;
+                        state.turn_started_at = None;
+                        reset_watchdog_extension_state(&mut state);
+                        true
+                    } else {
+                        false
+                    };
                     state.last_persistence = Some(persistence.clone());
                     let previous_queue = state.intervention_queue.clone();
                     let drained = state.intervention_queue.drain(..).count();
-                    let result = if persist_queue_or_restore(
+                    let drained = if persist_queue_or_restore(
                         &mut state,
                         channel_id,
                         &persistence,
@@ -2866,7 +2926,13 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     } else {
                         drained
                     };
-                    let _ = reply.send(result);
+                    if cleared_active_anchor {
+                        mark_turn_finished_signal_done(channel_id);
+                    }
+                    let _ = reply.send(PurgeQueueResult {
+                        drained,
+                        cleared_active_anchor,
+                    });
                 }
                 ChannelMailboxMsg::ReplaceQueue {
                     queue,
@@ -4697,8 +4763,9 @@ mod purge_queue_tests {
             .restore_active_turn(active_token.clone(), UserId::new(7), MessageId::new(70))
             .await;
 
-        let drained = handle.purge_queue(persistence).await;
-        assert_eq!(drained, 3);
+        let purge = handle.purge_queue(persistence, false).await;
+        assert_eq!(purge.drained, 3);
+        assert!(!purge.cleared_active_anchor);
 
         let snapshot = handle.snapshot().await;
         assert!(snapshot.intervention_queue.is_empty());
@@ -4719,11 +4786,71 @@ mod purge_queue_tests {
         let persistence =
             QueuePersistenceContext::new(&provider, "mailbox-purge-idempotent-2706", None);
 
-        let drained_first = handle.purge_queue(persistence.clone()).await;
-        let drained_second = handle.purge_queue(persistence).await;
-        assert_eq!(drained_first, 0);
-        assert_eq!(drained_second, 0);
+        let drained_first = handle.purge_queue(persistence.clone(), false).await;
+        let drained_second = handle.purge_queue(persistence, false).await;
+        assert_eq!(drained_first.drained, 0);
+        assert_eq!(drained_second.drained, 0);
         assert!(handle.snapshot().await.intervention_queue.is_empty());
+    }
+
+    // #3029(D): a force purge (clear_cancelled_active_anchor=true) against an
+    // already-cancelled active turn releases the anchor so the next dispatch
+    // is not blocked by a stale cancel_token / active_user_message_id.
+    #[tokio::test]
+    async fn force_purge_clears_cancelled_active_anchor() {
+        let provider = ProviderKind::Claude;
+        let registry = ChannelMailboxRegistry::default();
+        let channel_id = ChannelId::new(30290);
+        let handle = registry.handle(channel_id);
+        let persistence = QueuePersistenceContext::new(&provider, "mailbox-force-purge-3029", None);
+
+        let active_token = Arc::new(CancelToken::new());
+        handle
+            .restore_active_turn(active_token.clone(), UserId::new(7), MessageId::new(70))
+            .await;
+        // The force path flips `cancelled` (via cancel_active_token) before
+        // purging; emulate that here.
+        active_token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let purge = handle.purge_queue(persistence, true).await;
+        assert!(
+            purge.cleared_active_anchor,
+            "force purge must release a cancelled active-turn anchor (#3029 D)"
+        );
+        assert!(
+            handle.cancel_token().await.is_none(),
+            "cancelled active anchor must be cleared after force purge"
+        );
+    }
+
+    // #3029(D) / #2706: a force purge must NOT clear the anchor of a fresh,
+    // *uncancelled* turn that raced into the actor after the force-kill —
+    // otherwise force=true would collaterally cancel the new turn.
+    #[tokio::test]
+    async fn force_purge_preserves_uncancelled_active_anchor() {
+        let provider = ProviderKind::Claude;
+        let registry = ChannelMailboxRegistry::default();
+        let channel_id = ChannelId::new(30291);
+        let handle = registry.handle(channel_id);
+        let persistence =
+            QueuePersistenceContext::new(&provider, "mailbox-force-purge-fresh-3029", None);
+
+        let fresh_token = Arc::new(CancelToken::new());
+        handle
+            .restore_active_turn(fresh_token.clone(), UserId::new(7), MessageId::new(71))
+            .await;
+        // Token is NOT cancelled — represents a fresh turn that raced in.
+
+        let purge = handle.purge_queue(persistence, true).await;
+        assert!(
+            !purge.cleared_active_anchor,
+            "uncancelled fresh turn must keep its anchor (#2706 no-collateral-cancel)"
+        );
+        let surviving = handle.cancel_token().await;
+        assert!(surviving.is_some());
+        assert!(Arc::ptr_eq(&surviving.unwrap(), &fresh_token));
     }
 }
 
