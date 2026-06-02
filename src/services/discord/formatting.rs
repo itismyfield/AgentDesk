@@ -4300,10 +4300,15 @@ pub(super) fn build_monitor_handoff_placeholder_with_live_events(
     {
         lines.push(block.to_string());
     }
+    // Push the (invisible) probe marker *before* the processing tail so the
+    // Active card still ends with the "계속 처리 중" footer (#2896 regression,
+    // #3051). The sweeper detects the marker via `trimmed.contains`, so its
+    // position is irrelevant for detection — keeping the tail last preserves
+    // the intended "tail is last" invariant.
+    lines.push(PLACEHOLDER_PROBE_MARKER.to_string());
     if matches!(status, MonitorHandoffStatus::Active) {
         lines.push(monitor_handoff_active_tail(started_at_unix));
     }
-    lines.push(PLACEHOLDER_PROBE_MARKER.to_string());
 
     lines.join("\n")
 }

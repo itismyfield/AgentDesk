@@ -153,6 +153,13 @@ fn tmux_recent_lines_show_claude_tui_active_work(lines: &[&str]) -> bool {
             || line.contains("Musing")
             || lower.contains("esc to interrupt")
             || lower.contains("current work")
+            // A freshly-submitted prompt renders a meaningfully advanced
+            // progress bar (e.g. `██░░░░░░░░ │ 24%`) in the footer chrome while
+            // the turn runs. An idle composer shows an empty or barely-filled
+            // bar (`░░░░░░░░░░`, `█░░░░░░░░░` at a few percent), so a run of two
+            // or more filled block glyphs (`██`) marks active work and must not
+            // be judged ready-for-input (#3051 / #2896 regression).
+            || line.contains("██")
             || (line.starts_with('⏺')
                 && ((line.contains("Running ") && line.contains("command"))
                     || line.contains("Searching for ")
