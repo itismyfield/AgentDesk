@@ -540,16 +540,23 @@ fn run_turn(
     }
 
     if !state.saw_turn_completed {
-        emit_json_line(
-            output,
-            serde_json::json!({
-                "type": "result",
-                "subtype": "success",
-                "result": state.final_text,
-                "session_id": thread_id.as_deref(),
-                "duration_ms": start.elapsed().as_millis() as u64,
-            }),
-        )?;
+        // The stream closed without a recognized terminal event. If schema drift
+        // dropped the body, synthesizing a success here is the #3027 blackhole;
+        // fail closed instead so the turn surfaces an error/retry.
+        if let Some(reason) = schema_drift_reason(&state) {
+            emit_schema_drift_result(output, &mut state, &reason);
+        } else {
+            emit_json_line(
+                output,
+                serde_json::json!({
+                    "type": "result",
+                    "subtype": "success",
+                    "result": state.final_text,
+                    "session_id": thread_id.as_deref(),
+                    "duration_ms": start.elapsed().as_millis() as u64,
+                }),
+            )?;
+        }
     }
 
     Ok(())
@@ -559,7 +566,74 @@ fn run_turn(
 struct CodexWrapperTurnState {
     final_text: String,
     saw_turn_completed: bool,
+    // Diagnostic-only count of every unrecognized event (top-level / event_msg /
+    // response_item), benign or not, used for the ignored-event log.
     unknown_event_count: u64,
+    // #3027: set only when an UNRECOGNIZED event carried assistant-content shape
+    // (role=assistant, or a non-empty text/message/content body). This — not the
+    // broad `unknown_event_count` — is what signals schema drift dropped the
+    // answer, so benign progress/lifecycle unknowns on a legitimately empty or
+    // tool-only turn do not trip the fail-closed path.
+    saw_dropped_assistant_content: bool,
+}
+
+/// True when an unrecognized Codex event has the *shape* of an assistant
+/// message body (vs a benign lifecycle/progress/status event). If an event with
+/// this shape was dropped, the answer was lost (#3027), so it must trip the
+/// fail-closed path.
+///
+/// To avoid both misses and false positives we:
+///  - unwrap the common `payload`/`item` envelopes, since drift may rename the
+///    outer event type while keeping the assistant message nested inside; and
+///  - require *assistant/message context* before trusting a text-bearing
+///    `content` array — a bare `content`/`message`/`text` field on a tool or
+///    status payload is NOT treated as a dropped answer.
+fn value_carries_assistant_content(value: &serde_json::Value) -> bool {
+    // Direct assistant message shape (role=assistant, possibly with content).
+    if object_is_assistant_message(value) {
+        return true;
+    }
+    // Drift may keep the assistant message nested under a known wrapper key while
+    // only the outer event type changed. Inspect one envelope level down.
+    for key in ["payload", "item", "message", "response_item"] {
+        if let Some(inner) = value.get(key) {
+            if object_is_assistant_message(inner) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// True when `value` is an assistant message envelope carrying non-empty body
+/// text: either `role == "assistant"`, or `type == "message"` with a
+/// text-bearing `content` array. A bare `content` array without that context
+/// (e.g. on a tool/status payload) does not qualify.
+fn object_is_assistant_message(value: &serde_json::Value) -> bool {
+    let role = value.get("role").and_then(|v| v.as_str());
+    let is_message_type = value.get("type").and_then(|v| v.as_str()) == Some("message");
+    if role != Some("assistant") && !is_message_type {
+        return false;
+    }
+    // An explicit non-assistant role (e.g. a user echo `role: "user"` wrapped in
+    // a renamed `type: "message"` envelope) is never dropped assistant output —
+    // only assistant messages may trigger the fail-closed schema-drift path.
+    if let Some(role) = role {
+        return role == "assistant";
+    }
+    // type=message with text-bearing content.
+    value
+        .get("content")
+        .and_then(|v| v.as_array())
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.is_object()
+                    && item
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| !s.trim().is_empty())
+            })
+        })
 }
 
 fn handle_codex_wrapper_event(
@@ -595,7 +669,7 @@ fn handle_codex_wrapper_event(
         }
         "response_item" => {
             if let Some(payload) = json.get("payload") {
-                handle_response_item(output, payload, &mut state.final_text)?;
+                handle_response_item(output, payload, state)?;
             }
         }
         "background_event" => {
@@ -625,7 +699,7 @@ fn handle_codex_wrapper_event(
             state.saw_turn_completed = true;
         }
         event_type => {
-            record_unknown_codex_event(output, state, event_type)?;
+            record_unknown_codex_event(output, state, event_type, json)?;
         }
     }
 
@@ -635,10 +709,10 @@ fn handle_codex_wrapper_event(
 fn handle_response_item(
     output: &mut RotatingJsonlWriter,
     payload: &serde_json::Value,
-    final_text: &mut String,
+    state: &mut CodexWrapperTurnState,
 ) -> Result<(), String> {
     match payload.get("type").and_then(|v| v.as_str()).unwrap_or("") {
-        "message" => handle_response_message(output, payload, final_text),
+        "message" => handle_response_message(output, payload, state),
         "function_call" | "custom_tool_call" | "tool_search_call" => {
             handle_response_tool_call(output, payload)
         }
@@ -646,14 +720,62 @@ fn handle_response_item(
             handle_response_tool_output(output, payload)
         }
         "reasoning" => emit_json_line(output, assistant_redacted_thinking_event()),
-        _ => Ok(()),
+        // #3027: an unrecognized response_item payload type (case c in the issue)
+        // is fail-open the same way as an unknown top-level event. Route it through
+        // the recorder so the offending type is logged and counted — otherwise a
+        // dropped answer under a future response_item type finalizes as
+        // schema_drift with unknown_event_count=0 and no diagnostic for the type.
+        other => {
+            let event_type = if other.is_empty() {
+                "response_item.<missing-type>"
+            } else {
+                other
+            };
+            record_unknown_codex_event(output, state, event_type, payload)?;
+            // The response_item envelope already establishes assistant-output
+            // context, so a payload carrying body text is a drifted answer even
+            // as a bare `{"type":"output_text","text":"…"}` without the
+            // role/message wrapper the generic classifier requires. Mark it
+            // dropped so a trailing bodyless task_complete fails closed.
+            if response_item_payload_carries_text(payload) {
+                state.saw_dropped_assistant_content = true;
+            }
+            Ok(())
+        }
     }
+}
+
+/// Within a `response_item` envelope the surrounding context is already
+/// assistant output, so any payload carrying body text is a drifted answer —
+/// including a bare `{"type":"output_text","text":"…"}` that [`value_carries_assistant_content`]
+/// rejects because it lacks a `role`/`type:"message"` wrapper.
+fn response_item_payload_carries_text(payload: &serde_json::Value) -> bool {
+    if value_carries_assistant_content(payload) {
+        return true;
+    }
+    if payload
+        .get("text")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        return true;
+    }
+    payload
+        .get("content")
+        .and_then(|v| v.as_array())
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("text")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.trim().is_empty())
+            })
+        })
 }
 
 fn handle_response_message(
     output: &mut RotatingJsonlWriter,
     payload: &serde_json::Value,
-    final_text: &mut String,
+    state: &mut CodexWrapperTurnState,
 ) -> Result<(), String> {
     if payload.get("role").and_then(|v| v.as_str()) != Some("assistant") {
         return Ok(());
@@ -662,20 +784,33 @@ fn handle_response_message(
         return Ok(());
     };
     let include_in_final_text = payload.get("phase").and_then(|v| v.as_str()) != Some("commentary");
+    // #3027 (case c): an assistant message envelope is recognized, but Codex may
+    // rename the content item types we relay (`output_text`/`text`). Track
+    // whether this message carried any non-empty text item we could NOT relay so
+    // that, if nothing usable was emitted, finalization fails closed instead of
+    // synthesizing an empty success.
+    let mut relayed_text = false;
+    let mut dropped_text = false;
     for item in content {
         let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
         if item_type != "output_text" && item_type != "text" {
+            // Unrecognized content item shape: if it still carries body text,
+            // the answer was dropped by content-type drift.
+            if !text.trim().is_empty() {
+                dropped_text = true;
+            }
             continue;
         }
-        let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
         if text.is_empty() {
             continue;
         }
+        relayed_text = true;
         if include_in_final_text {
-            if !final_text.is_empty() {
-                final_text.push_str("\n\n");
+            if !state.final_text.is_empty() {
+                state.final_text.push_str("\n\n");
             }
-            final_text.push_str(text);
+            state.final_text.push_str(text);
         }
         emit_json_line(
             output,
@@ -689,6 +824,9 @@ fn handle_response_message(
                 }
             }),
         )?;
+    }
+    if dropped_text && !relayed_text {
+        state.saw_dropped_assistant_content = true;
     }
     Ok(())
 }
@@ -769,7 +907,7 @@ fn handle_event_msg(
         "task_complete" => emit_success_result(output, payload, thread_id, state, start),
         "agent_reasoning" => emit_json_line(output, assistant_redacted_thinking_event()),
         "token_count" | "composer_ready" => Ok(()),
-        event_type => record_unknown_codex_event(output, state, event_type),
+        event_type => record_unknown_codex_event(output, state, event_type, payload),
     }
 }
 
@@ -790,6 +928,15 @@ fn emit_success_result(
     {
         state.final_text.clear();
         state.final_text.push_str(text);
+    }
+    // Fail-closed on schema drift: a terminal event that carries no body while
+    // unknown events were observed means the assistant content was dropped by an
+    // unrecognized schema. Emitting a success frame here reproduces the adk-cdx
+    // blackhole (#3027). Surface it as an error so the turn retries instead of
+    // silently completing with an empty answer.
+    if let Some(reason) = schema_drift_reason(state) {
+        emit_schema_drift_result(output, state, &reason);
+        return Ok(());
     }
     let usage = json
         .get("usage")
@@ -823,12 +970,75 @@ fn emit_success_result(
     Ok(())
 }
 
+/// Decide whether a turn is finalizing in a fail-open schema-drift state.
+///
+/// Returns a human-readable reason when the turn has no assistant body to relay
+/// (`final_text` empty) *and* an unrecognized event that looked like it carried
+/// the assistant body was dropped (`saw_dropped_assistant_content`). That
+/// combination means the answer was dropped by a Codex schema we no longer
+/// parse, so a "success" frame would silently blackhole the turn (#3027).
+///
+/// Crucially this does NOT trip on the broad `unknown_event_count`: a legitimate
+/// tool-only or intentionally empty turn can emit benign unknown progress or
+/// lifecycle events without losing any answer, and those must still finalize as
+/// success. When the body is present, or only benign drift was observed, returns
+/// `None` and the caller proceeds with the normal success path.
+fn schema_drift_reason(state: &CodexWrapperTurnState) -> Option<String> {
+    if state.final_text.is_empty() && state.saw_dropped_assistant_content {
+        Some(format!(
+            "Codex turn produced no relayable body after dropping unrecognized \
+             assistant-content event(s) (unknown_event_count={}); treating schema \
+             drift as an error instead of an empty success",
+            state.unknown_event_count
+        ))
+    } else {
+        None
+    }
+}
+
+/// Emit a fail-closed terminal frame for schema drift and mark the turn complete.
+///
+/// Idempotent: a no-op once `saw_turn_completed` is set, so it is safe to call
+/// from multiple finalization paths.
+fn emit_schema_drift_result(
+    output: &mut RotatingJsonlWriter,
+    state: &mut CodexWrapperTurnState,
+    reason: &str,
+) {
+    if state.saw_turn_completed {
+        return;
+    }
+    eprintln!(
+        "\x1b[91m[codex wrapper schema drift: {reason}; unknown_event_count={}]\x1b[0m",
+        state.unknown_event_count
+    );
+    let _ = emit_json_line(
+        output,
+        serde_json::json!({
+            "type": "result",
+            "subtype": "schema_drift",
+            "is_error": true,
+            "errors": [reason],
+            "source": "codex_tmux_wrapper",
+            "unknown_event_count": state.unknown_event_count,
+        }),
+    );
+    state.saw_turn_completed = true;
+}
+
 fn record_unknown_codex_event(
     output: &mut RotatingJsonlWriter,
     state: &mut CodexWrapperTurnState,
     event_type: &str,
+    value: &serde_json::Value,
 ) -> Result<(), String> {
     state.unknown_event_count = state.unknown_event_count.saturating_add(1);
+    // #3027: only an unknown event that carried assistant body text proves the
+    // answer was dropped. Benign unknown lifecycle/progress events are counted
+    // for diagnostics but must not trip the fail-closed finalization path.
+    if value_carries_assistant_content(value) {
+        state.saw_dropped_assistant_content = true;
+    }
     let label = if event_type.is_empty() {
         "<missing>"
     } else {
@@ -861,7 +1071,10 @@ fn compact_json_or_string(value: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod modern_event_tests {
-    use super::{CodexWrapperTurnState, handle_codex_wrapper_event};
+    use super::{
+        CodexWrapperTurnState, emit_schema_drift_result, handle_codex_wrapper_event,
+        schema_drift_reason,
+    };
     use crate::services::codex::{
         CODEX_BACKGROUND_TASK_NOTIFICATION_ID, CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
     };
@@ -1120,6 +1333,415 @@ mod modern_event_tests {
         assert_eq!(lines[0]["count"], 1);
         assert_eq!(lines[1]["event_type"], "future_event");
         assert_eq!(lines[1]["count"], 2);
+    }
+
+    // #3027: schema drift must fail CLOSED. A terminal event with no relayable
+    // body, after unknown events were observed, used to emit a `result/success`
+    // with an empty body (the adk-cdx blackhole). It must now emit an error.
+    #[test]
+    fn empty_terminal_after_drift_emits_schema_drift_error_not_empty_success() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut thread_id = Some("thread-drift".to_string());
+        let mut state = CodexWrapperTurnState::default();
+        let start = std::time::Instant::now();
+
+        // (1) The assistant body arrives inside an unrecognized event shape that
+        //     still carries assistant-content text — dropped, drift flag set,
+        //     final_text stays empty.
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "future.message.event",
+                "role": "assistant",
+                "content": [{ "type": "future_text", "text": "the lost answer" }]
+            }),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+        assert!(state.saw_dropped_assistant_content);
+        // (2) A terminal event with no last_agent_message closes the turn.
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({"type":"event_msg","payload":{"type":"task_complete"}}),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+
+        assert!(state.saw_turn_completed);
+        let lines = read_jsonl(&path);
+        let result = lines
+            .iter()
+            .find(|l| l["type"] == "result")
+            .expect("a terminal result frame");
+        assert_eq!(result["subtype"], "schema_drift");
+        assert_eq!(result["is_error"], true);
+        assert_eq!(result["unknown_event_count"], 1);
+        // Anti-blackhole contract: the reason must ride in `errors` so the shared
+        // relay tailer's extract_result_error_text() surfaces non-empty text and
+        // terminates the turn as an error HardResult instead of an empty Done.
+        let drift_errors = result["errors"]
+            .as_array()
+            .expect("schema_drift result carries an errors array");
+        assert!(
+            drift_errors
+                .iter()
+                .any(|e| e.as_str().is_some_and(|s| !s.trim().is_empty())),
+            "drift reason must be non-empty so the relay surfaces an error, not a blackhole"
+        );
+        // No empty `success` frame may be emitted.
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l["type"] == "result" && l["subtype"] == "success"),
+            "schema drift must not be downgraded to success"
+        );
+    }
+
+    // #3027 case (c): the `response_item`/`message` envelope is recognized but
+    // the content item type is renamed, so the body is silently skipped. A
+    // bodyless terminal event must then fail closed, not emit an empty success.
+    #[test]
+    fn renamed_message_content_item_then_empty_terminal_fails_closed() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut thread_id = Some("thread-content-drift".to_string());
+        let mut state = CodexWrapperTurnState::default();
+        let start = std::time::Instant::now();
+
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "future_text", "text": "the answer" }]
+                }
+            }),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+        assert!(
+            state.saw_dropped_assistant_content,
+            "an assistant message whose only content item drifted must flag the drop"
+        );
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({"type":"event_msg","payload":{"type":"task_complete"}}),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+
+        let lines = read_jsonl(&path);
+        let result = lines
+            .iter()
+            .find(|l| l["type"] == "result")
+            .expect("a terminal result frame");
+        assert_eq!(result["subtype"], "schema_drift");
+        assert!(!lines.iter().any(|l| l["subtype"] == "success"));
+    }
+
+    // #3027 round-3 Codex finding: a `response_item` whose payload carries the
+    // assistant body DIRECTLY as a bare text item (no role / `type:"message"`
+    // wrapper, e.g. a drifted `output_text` payload) must still flag the drop so
+    // a trailing bodyless terminal fails closed — the generic role/message gate
+    // would otherwise reject the bare text and re-open the blackhole.
+    #[test]
+    fn bare_text_response_item_then_empty_terminal_fails_closed() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut thread_id = Some("thread-bare-text".to_string());
+        let mut state = CodexWrapperTurnState::default();
+        let start = std::time::Instant::now();
+
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "response_item",
+                "payload": { "type": "output_text", "text": "the lost answer" }
+            }),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+        assert!(
+            state.saw_dropped_assistant_content,
+            "a response_item carrying bare body text must flag the drop"
+        );
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({"type":"event_msg","payload":{"type":"task_complete"}}),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+
+        let lines = read_jsonl(&path);
+        let result = lines
+            .iter()
+            .find(|l| l["type"] == "result")
+            .expect("a terminal result frame");
+        assert_eq!(result["subtype"], "schema_drift");
+        assert!(!lines.iter().any(|l| l["subtype"] == "success"));
+    }
+
+    // A mixed assistant message (one known text item + one drifted item) still
+    // relays the known text and must NOT be flagged as drift.
+    #[test]
+    fn message_with_one_known_text_item_is_not_flagged_as_drift() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut thread_id = Some("thread-mixed-content".to_string());
+        let mut state = CodexWrapperTurnState::default();
+
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        { "type": "output_text", "text": "relayed answer" },
+                        { "type": "future_text", "text": "extra" }
+                    ]
+                }
+            }),
+            &mut thread_id,
+            &mut state,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+        assert!(!state.saw_dropped_assistant_content);
+        assert_eq!(state.final_text, "relayed answer");
+        assert!(schema_drift_reason(&state).is_none());
+    }
+
+    // Classification guard: only assistant/message-context shapes count as
+    // dropped content; benign status/tool payloads do not (P2 false-positive),
+    // and assistant messages nested under a wrapper still count (P1 miss).
+    #[test]
+    fn assistant_content_classification_requires_message_context() {
+        use super::value_carries_assistant_content;
+        // Benign status events with diagnostic strings — not assistant content.
+        assert!(!value_carries_assistant_content(
+            &json!({"type":"future_status","message":"running tool"})
+        ));
+        assert!(!value_carries_assistant_content(
+            &json!({"type":"future_status","text":"step 3 of 5"})
+        ));
+        // A bare content array on an unknown tool/status payload (no assistant
+        // or message context) must NOT be treated as a dropped answer.
+        assert!(!value_carries_assistant_content(
+            &json!({"type":"future_tool","content":[{"type":"text","text":"hi"}]})
+        ));
+        // Real assistant shapes trip it: role=assistant ...
+        assert!(value_carries_assistant_content(
+            &json!({"role":"assistant"})
+        ));
+        // ... or type=message with text content ...
+        assert!(value_carries_assistant_content(
+            &json!({"type":"message","content":[{"type":"text","text":"hi"}]})
+        ));
+        // ... or an assistant message nested under a renamed outer event.
+        assert!(value_carries_assistant_content(&json!({
+            "type": "future.unknown",
+            "payload": { "type": "message", "role": "assistant",
+                         "content": [{"type":"output_text","text":"answer"}] }
+        })));
+        assert!(value_carries_assistant_content(&json!({
+            "type": "future.unknown",
+            "item": { "role": "assistant" }
+        })));
+        // An explicit non-assistant role (user echo) wrapped in a renamed
+        // message envelope is NOT dropped assistant content — even with text.
+        assert!(!value_carries_assistant_content(&json!({
+            "type":"message","role":"user",
+            "content":[{"type":"text","text":"echoed prompt"}]
+        })));
+        assert!(!value_carries_assistant_content(&json!({
+            "type":"future.unknown",
+            "payload":{"type":"message","role":"user",
+                       "content":[{"type":"text","text":"echoed prompt"}]}
+        })));
+    }
+
+    // A real body present at finalization stays a success even if earlier
+    // unknown events were observed — drift detection must not be over-eager.
+    #[test]
+    fn drift_with_real_body_still_emits_success() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut thread_id = Some("thread-mixed".to_string());
+        let mut state = CodexWrapperTurnState::default();
+        let start = std::time::Instant::now();
+
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({"type":"future.event","payload":{"type":"nested"}}),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "real answer" }]
+                }
+            }),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({"type":"event_msg","payload":{"type":"task_complete"}}),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+
+        let lines = read_jsonl(&path);
+        let result = lines
+            .iter()
+            .find(|l| l["type"] == "result")
+            .expect("a terminal result frame");
+        assert_eq!(result["subtype"], "success");
+        assert_eq!(result["result"], "real answer");
+        assert!(
+            !lines.iter().any(|l| l["subtype"] == "schema_drift"),
+            "a turn with a real body must not be flagged as drift"
+        );
+    }
+
+    // No drift observed but empty body (e.g. a tool-only turn) must remain a
+    // success — fail-closed only triggers when an assistant-content event was
+    // actually dropped, not on the broad unknown_event_count.
+    #[test]
+    fn empty_body_without_dropped_content_remains_success() {
+        let mut state = CodexWrapperTurnState::default();
+        assert!(schema_drift_reason(&state).is_none());
+        // Benign unknown events were seen but none carried assistant content:
+        // this is a legitimate empty/tool-only turn, NOT drift.
+        state.unknown_event_count = 3;
+        assert!(
+            schema_drift_reason(&state).is_none(),
+            "benign unknown events must not trip the fail-closed path"
+        );
+        // An unknown event that dropped assistant content + empty body => drift.
+        state.saw_dropped_assistant_content = true;
+        assert!(schema_drift_reason(&state).is_some());
+        // Body present => not flagged even when content was dropped.
+        state.final_text.push_str("answer");
+        assert!(schema_drift_reason(&state).is_none());
+    }
+
+    // #3027 P2 regression: a tool-only turn that emits a benign unknown
+    // lifecycle event and a bodyless task_complete must finalize as SUCCESS,
+    // not be misclassified as schema drift.
+    #[test]
+    fn tool_only_turn_with_benign_unknown_event_finalizes_success() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut thread_id = Some("thread-tool".to_string());
+        let mut state = CodexWrapperTurnState::default();
+        let start = std::time::Instant::now();
+
+        // A recognized tool call (relayable activity, but no final_text).
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "update_plan",
+                    "arguments": "{}",
+                    "call_id": "c1"
+                }
+            }),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+        // A benign unknown lifecycle event with no assistant body.
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({"type":"event_msg","payload":{"type":"future_progress_tick","step":3}}),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+        assert!(!state.saw_dropped_assistant_content);
+        // Bodyless terminal event closes the turn.
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({"type":"event_msg","payload":{"type":"task_complete"}}),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+
+        let lines = read_jsonl(&path);
+        let result = lines
+            .iter()
+            .find(|l| l["type"] == "result")
+            .expect("a terminal result frame");
+        assert_eq!(
+            result["subtype"], "success",
+            "benign unknown events on a tool-only turn must not fail closed"
+        );
+        assert!(!lines.iter().any(|l| l["subtype"] == "schema_drift"));
+    }
+
+    // emit_schema_drift_result is idempotent: a no-op once the turn is closed.
+    #[test]
+    fn schema_drift_emit_is_idempotent() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut state = CodexWrapperTurnState {
+            unknown_event_count: 2,
+            ..Default::default()
+        };
+
+        emit_schema_drift_result(&mut output, &mut state, "drift reason");
+        emit_schema_drift_result(&mut output, &mut state, "drift reason");
+
+        assert!(state.saw_turn_completed);
+        let lines = read_jsonl(&path);
+        assert_eq!(
+            lines.iter().filter(|l| l["type"] == "result").count(),
+            1,
+            "schema drift result must be emitted at most once"
+        );
     }
 
     #[test]
