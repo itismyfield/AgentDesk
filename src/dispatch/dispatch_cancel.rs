@@ -166,13 +166,25 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(
 
     // On error the Transaction's Drop runs an implicit rollback, so any
     // partial writes from the helper are discarded automatically.
-    let changed =
-        cancel_dispatch_and_reset_auto_queue_on_pg_tx(&mut tx, dispatch_id, reason).await?;
+    let outcome =
+        cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(&mut tx, dispatch_id, reason).await?;
 
     tx.commit()
         .await
         .map_err(|error| format!("commit postgres dispatch cancel {dispatch_id}: {error}"))?;
-    if changed > 0 {
+    if outcome.changed > 0 {
+        // #3039: emit the observability + quality events the canonical writer
+        // (`set_dispatch_status_on_pg_with_sync`) guarantees for every other
+        // terminal transition. The raw cancel writer used to reproduce the
+        // `dispatch_events` row and `status_reaction` outbox but silently
+        // dropped these two emits, so operator/queue cancels never reached the
+        // observability + quality pipelines. We emit only after a successful
+        // commit so a rolled-back cancel does not surface a phantom event; the
+        // tx-composing variant intentionally leaves emission to the caller that
+        // owns the surrounding commit boundary.
+        if let Some(meta) = outcome.transition.as_ref() {
+            meta.emit();
+        }
         crate::services::dispatches::wait_queue::spawn_cached_constraint_release_wake(
             pool.clone(),
             "constraint_release",
@@ -181,7 +193,51 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(
         );
     }
 
-    Ok(changed)
+    Ok(outcome.changed)
+}
+
+/// Observability metadata captured while cancelling a dispatch so the
+/// commit-owning caller can fire the canonical writer's emits after the
+/// transaction durably lands (#3039).
+struct CancelTransitionMeta {
+    dispatch_id: String,
+    kanban_card_id: Option<String>,
+    to_agent_id: Option<String>,
+    dispatch_type: Option<String>,
+    from_status: String,
+    payload: Option<serde_json::Value>,
+}
+
+impl CancelTransitionMeta {
+    fn emit(&self) {
+        crate::services::observability::emit_dispatch_result(
+            &self.dispatch_id,
+            self.kanban_card_id.as_deref(),
+            self.dispatch_type.as_deref(),
+            Some(&self.from_status),
+            "cancelled",
+            "cancel_dispatch",
+            self.payload.as_ref(),
+        );
+        super::dispatch_status::emit_dispatch_quality_event(
+            &self.dispatch_id,
+            self.to_agent_id.as_deref(),
+            self.kanban_card_id.as_deref(),
+            self.dispatch_type.as_deref(),
+            Some(&self.from_status),
+            "cancelled",
+            "cancel_dispatch",
+            self.payload.as_ref(),
+        );
+    }
+}
+
+/// Result of the cancel/reset helper: how many dispatch rows changed plus the
+/// observability metadata for the transition (present only when a row actually
+/// moved to `cancelled`).
+struct CancelOutcome {
+    changed: usize,
+    transition: Option<CancelTransitionMeta>,
 }
 
 /// Cancel a live dispatch and reset linked auto-queue entries inside a caller-owned
@@ -198,10 +254,25 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx(
     dispatch_id: &str,
     reason: Option<&str>,
 ) -> Result<usize, String> {
+    // tx-composing callers own the surrounding commit boundary, so they also
+    // own observability emission for the wider unit of work; we hand back only
+    // the row count and discard the captured transition metadata (#3039).
+    Ok(
+        cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(tx, dispatch_id, reason)
+            .await?
+            .changed,
+    )
+}
+
+async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    dispatch_id: &str,
+    reason: Option<&str>,
+) -> Result<CancelOutcome, String> {
     let cancel_payload = reason.map(|value| json!({ "reason": value }));
 
     let current = sqlx::query(
-        "SELECT status, kanban_card_id, dispatch_type, thread_id
+        "SELECT status, kanban_card_id, to_agent_id, dispatch_type, thread_id
          FROM task_dispatches
          WHERE id = $1",
     )
@@ -210,7 +281,10 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx(
     .await
     .map_err(|error| format!("load postgres dispatch {dispatch_id}: {error}"))?;
     let Some(current) = current else {
-        return Ok(0);
+        return Ok(CancelOutcome {
+            changed: 0,
+            transition: None,
+        });
     };
 
     let current_status = current
@@ -219,7 +293,10 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx(
         .flatten()
         .unwrap_or_default();
     if !matches!(current_status.as_str(), "pending" | "dispatched") {
-        return Ok(0);
+        return Ok(CancelOutcome {
+            changed: 0,
+            transition: None,
+        });
     }
 
     let changed = match cancel_payload.as_ref() {
@@ -256,11 +333,18 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx(
     };
 
     if changed == 0 {
-        return Ok(0);
+        return Ok(CancelOutcome {
+            changed: 0,
+            transition: None,
+        });
     }
 
     let kanban_card_id = current
         .try_get::<Option<String>, _>("kanban_card_id")
+        .ok()
+        .flatten();
+    let to_agent_id = current
+        .try_get::<Option<String>, _>("to_agent_id")
         .ok()
         .flatten();
     let dispatch_type = current
@@ -312,8 +396,8 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx(
         ) VALUES ($1, $2, $3, $4, 'cancelled', 'cancel_dispatch', $5)",
     )
     .bind(dispatch_id)
-    .bind(kanban_card_id)
-    .bind(dispatch_type)
+    .bind(&kanban_card_id)
+    .bind(&dispatch_type)
     .bind(&current_status)
     .bind(cancel_payload.clone())
     .execute(&mut **tx)
@@ -383,7 +467,17 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx(
         .await?;
     }
 
-    Ok(changed)
+    Ok(CancelOutcome {
+        changed,
+        transition: Some(CancelTransitionMeta {
+            dispatch_id: dispatch_id.to_string(),
+            kanban_card_id,
+            to_agent_id,
+            dispatch_type,
+            from_status: current_status,
+            payload: cancel_payload,
+        }),
+    })
 }
 
 fn normalized_dispatch_thread_id(value: Option<&str>) -> Option<String> {
@@ -589,3 +683,54 @@ pub fn cancel_active_dispatches_for_card_on_conn(
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 #[path = "dispatch_cancel_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod pg_observability_tests {
+    use super::*;
+
+    async fn create_test_pg_db() -> crate::dispatch::test_support::DispatchPostgresTestDb {
+        crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_dispatch_cancel_obs",
+            "dispatch cancel observability tests",
+        )
+        .await
+    }
+
+    /// #3039 regression guard: the raw cancel writer used to reproduce the
+    /// `dispatch_events` row but never fired `emit_dispatch_result`, so
+    /// API/queue-driven cancels were invisible to the observability pipeline.
+    /// Cancelling a live dispatch must now record a `dispatch_result` event
+    /// with `to_status = cancelled`, exactly as the canonical writer does for
+    /// every other terminal transition.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_emits_dispatch_result_observability_event() {
+        let pg_db = create_test_pg_db().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let dispatch_id = "dispatch-cancel-obs-3039";
+        crate::dispatch::test_support::seed_pg_dispatch(&pool, dispatch_id, "Cancel obs test").await;
+
+        let changed = cancel_dispatch_and_reset_auto_queue_on_pg(
+            &pool,
+            dispatch_id,
+            Some("user_cancelled_by_operator"),
+        )
+        .await
+        .expect("cancel dispatch on pg");
+        assert_eq!(changed, 1, "cancel should mark exactly one dispatch");
+
+        let event = crate::services::observability::events::recent(64)
+            .into_iter()
+            .find(|event| {
+                event.event_type == "dispatch_result"
+                    && event.payload["dispatch_id"] == dispatch_id
+            })
+            .expect("cancel must record a dispatch_result observability event (#3039)");
+        assert_eq!(event.payload["to_status"], "cancelled");
+        assert_eq!(event.payload["from_status"], "pending");
+        assert_eq!(event.payload["transition_source"], "cancel_dispatch");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+}

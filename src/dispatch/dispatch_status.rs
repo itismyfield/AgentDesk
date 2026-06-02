@@ -40,7 +40,7 @@ fn should_enqueue_status_reaction(to_status: &str, transition_source: &str) -> b
     }
 }
 
-fn emit_dispatch_quality_event(
+pub(crate) fn emit_dispatch_quality_event(
     dispatch_id: &str,
     agent_id: Option<&str>,
     card_id: Option<&str>,
