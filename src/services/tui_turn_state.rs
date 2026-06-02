@@ -7,6 +7,17 @@ use crate::services::provider::ProviderKind;
 
 const TURN_STATE_TAIL_BYTES: u64 = 64 * 1024;
 
+/// Bounded upper limit for the strict-terminator re-scan when the default
+/// 64KB tail window does not contain a turn-state envelope but the transcript
+/// is larger than the window. Post-terminator housekeeping bursts (`/model`,
+/// `/compact`, attachment metadata, …) can exceed 64KB and push the real
+/// terminator out of the default window, which left the idle-queue stuck on
+/// `Busy` forever (#3030). We widen the window once, up to this ceiling, so a
+/// terminator that merely scrolled out of the small tail is still found —
+/// while keeping the read bounded so the 9+ hot call sites never read a whole
+/// multi-megabyte transcript on every probe.
+const TURN_STATE_MAX_TAIL_BYTES: u64 = 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TuiTurnState {
     Idle,
@@ -205,34 +216,157 @@ pub(crate) fn jsonl_ready_for_input(
 ///     own `full_response`-non-empty guard, so this skip cannot tear down a
 ///     spinning-up turn — see #2712.)
 fn jsonl_strict_terminator_idle(provider: &ProviderKind, path: &Path) -> bool {
-    let Ok(lines) = read_recent_jsonl_lines(path) else {
+    // First pass over the default 64KB tail window.
+    let Ok(window) = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES) else {
+        // A read error cannot prove the turn has ended → conservative Busy.
         return false;
     };
-    for line in lines.iter().rev() {
+    match scan_strict_terminator(provider, &window.lines) {
+        StrictTerminatorScan::Idle => return true,
+        StrictTerminatorScan::Busy => return false,
+        // The window contained no definitive turn-state envelope. If it already
+        // covered the whole file there is nothing more to read → conservative
+        // Busy. Otherwise the real terminator may have scrolled out of the
+        // small tail window behind a post-terminator housekeeping burst
+        // (`/model`, `/compact`, attachments — #3030); widen once, bounded.
+        StrictTerminatorScan::Inconclusive => {
+            if window.window_covers_file {
+                return false;
+            }
+        }
+    }
+
+    let Ok(wide) = read_recent_jsonl_window(path, TURN_STATE_MAX_TAIL_BYTES) else {
+        return false;
+    };
+    match scan_strict_terminator(provider, &wide.lines) {
+        StrictTerminatorScan::Idle => true,
+        // Even in the widened window we found no terminator (or the terminator
+        // is still older than the 1MB ceiling): stay conservatively Busy rather
+        // than assume idle on an ambiguous, unbounded transcript.
+        StrictTerminatorScan::Busy | StrictTerminatorScan::Inconclusive => false,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrictTerminatorScan {
+    /// A definitive terminator proves the turn is over → Ready.
+    Idle,
+    /// A definitive in-flight signal (streaming/user, an active-looking partial,
+    /// or a non-torn unparseable line) proves the turn is not over → Busy.
+    Busy,
+    /// The window held only housekeeping/unknown envelopes and ran out without a
+    /// verdict. The caller decides whether to widen the window or stay Busy.
+    Inconclusive,
+}
+
+/// Reverse-scan the tail window for the most recent *definitive* turn-state
+/// envelope. Conservatism rule (#3030): never report `Idle` while there is any
+/// plausible evidence of an in-flight turn — false-idle (input injected
+/// mid-turn) is strictly worse than false-busy.
+fn scan_strict_terminator(provider: &ProviderKind, lines: &[String]) -> StrictTerminatorScan {
+    let mut allow_torn_trailing_skip = true;
+    for (rev_index, line) in lines.iter().rev().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let Ok(json) = serde_json::from_str::<Value>(trimmed) else {
-            // Partial trailing fragment — a new turn may be mid-write.
-            // Cannot prove the turn has ended.
-            return false;
+        let json = match serde_json::from_str::<Value>(trimmed) {
+            Ok(json) => json,
+            Err(_) => {
+                // A single torn *trailing* write (the writer was mid-flush when
+                // we read) should not pin the session Busy forever. We skip at
+                // most ONE such line, and ONLY when we can *positively* identify
+                // it as recognized post-turn housekeeping (e.g. a partial
+                // `permission-mode` / `mode` envelope). Requirements:
+                //   - it is the very last non-empty line (the only place a torn
+                //     write can legitimately appear), and
+                //   - it looks truncated (does not end in `}`), and
+                //   - its recoverable top-level `type` is a *known* housekeeping
+                //     marker — NOT active (`user`/`assistant`/streaming), NOT a
+                //     terminator we would trust from a partial, and NOT an
+                //     unrecoverable/too-short fragment (e.g. `{"ty`, which could
+                //     be the start of a new `user` envelope).
+                // Anything we cannot positively prove is housekeeping keeps the
+                // session Busy — false-busy here is recoverable; false-idle
+                // injects input mid-turn (#3030).
+                if allow_torn_trailing_skip
+                    && rev_index == 0
+                    && is_torn_trailing_fragment(trimmed)
+                    && partial_is_skippable_housekeeping(provider, trimmed)
+                {
+                    allow_torn_trailing_skip = false;
+                    continue;
+                }
+                // An active-looking partial, an unidentifiable partial, an
+                // interior partial, or a second unparseable line — none of these
+                // can prove the turn has ended.
+                return StrictTerminatorScan::Busy;
+            }
         };
+        // Any complete line consumes the one-shot torn-trailing budget: a torn
+        // write can only ever be the trailing line, so once we have seen a
+        // complete line, a later (older) unparseable line is genuine corruption.
+        allow_torn_trailing_skip = false;
         let classified = match provider {
             ProviderKind::Claude => claude_envelope_turn_state(&json),
             ProviderKind::Codex => codex_envelope_turn_state(&json),
-            _ => return false,
+            _ => return StrictTerminatorScan::Busy,
         };
         match classified {
-            Some(TuiTurnState::Idle) => return true,
-            Some(TuiTurnState::Streaming | TuiTurnState::UserSubmitted) => return false,
+            Some(TuiTurnState::Idle) => return StrictTerminatorScan::Idle,
+            Some(TuiTurnState::Streaming | TuiTurnState::UserSubmitted) => {
+                return StrictTerminatorScan::Busy;
+            }
             // Skip post-turn housekeeping (`permission-mode` → Unknown) and
             // unrecognized metadata envelopes (None); keep looking for the
-            // real terminator.
+            // real terminator. Unknown/None NEVER count as idle (#3030): a
+            // renamed housekeeping envelope must not be able to *create* an
+            // idle verdict — it can only be skipped over to reveal the real,
+            // structurally-recognized terminator beneath it.
             Some(TuiTurnState::Unknown) | None => continue,
         }
     }
-    false
+    StrictTerminatorScan::Inconclusive
+}
+
+/// A truncated trailing JSON fragment looks like the writer was interrupted
+/// mid-flush: it starts as an object but the final non-whitespace byte is not a
+/// closing `}`. A complete JSON object always ends in `}`, so this is a cheap,
+/// conservative "was this a torn write?" check.
+fn is_torn_trailing_fragment(trimmed: &str) -> bool {
+    let bytes = trimmed.as_bytes();
+    bytes.first() == Some(&b'{') && bytes.last() != Some(&b'}')
+}
+
+/// Positive identification that a torn trailing partial is *recognized post-turn
+/// housekeeping* and therefore safe to skip over. This is the conservative
+/// inverse of an "is it active?" check: we skip ONLY when we can affirmatively
+/// classify the partial's top-level `type` as a known mode/permission marker.
+/// An unrecoverable type (too short, e.g. `{"ty`), an active envelope, or a
+/// partial terminator all return `false` → the caller stays Busy.
+///
+/// We reuse the same top-level field-fragment parser the standard observer uses
+/// so a partial `{"type":"permission-mode"...` is recognized before its line is
+/// fully flushed, without ever mistaking a partial `{"type":"user"...` for
+/// housekeeping.
+fn partial_is_skippable_housekeeping(provider: &ProviderKind, trimmed: &str) -> bool {
+    if !trimmed.trim_start().starts_with('{') {
+        return false;
+    }
+    let Some(type_value) = top_level_string_field_fragment(trimmed, "type") else {
+        // Could not even recover the top-level `type` — could be the start of a
+        // new active envelope. Do not skip.
+        return false;
+    };
+    match provider {
+        // Claude: only the structurally-recognized mode/permission housekeeping
+        // family is skippable. `user`/`assistant`/`result`/`system` are not.
+        ProviderKind::Claude => is_interactive_mode_housekeeping_type(&type_value),
+        // Codex has no equivalent post-turn housekeeping envelope family that is
+        // safe to skip on a torn trailing line; stay conservative and never skip.
+        _ => false,
+    }
 }
 
 pub(crate) fn runtime_binding_ready_for_input(
@@ -325,23 +459,51 @@ fn observe_jsonl_turn_state(
 }
 
 fn read_recent_jsonl_lines(path: &Path) -> Result<Vec<String>, std::io::Error> {
+    Ok(read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES)?.lines)
+}
+
+/// Result of a bounded tail read: the parsed lines plus whether the window
+/// reached the start of the file. `window_covers_file` is `false` when bytes
+/// precede the window — i.e. there may be an older terminator we did not read.
+struct JsonlTailWindow {
+    lines: Vec<String>,
+    window_covers_file: bool,
+}
+
+fn read_recent_jsonl_window(
+    path: &Path,
+    window_bytes: u64,
+) -> Result<JsonlTailWindow, std::io::Error> {
     let mut file = match std::fs::File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(JsonlTailWindow {
+                lines: Vec::new(),
+                window_covers_file: true,
+            });
+        }
         Err(error) => return Err(error),
     };
     let len = file.metadata()?.len();
-    let start = len.saturating_sub(TURN_STATE_TAIL_BYTES);
+    let start = len.saturating_sub(window_bytes);
     if start > 0 {
         file.seek(SeekFrom::Start(start))?;
     }
     let mut buf = String::new();
     file.read_to_string(&mut buf)?;
     let mut lines = buf.lines().map(ToString::to_string).collect::<Vec<_>>();
-    if start > 0 && !buf.starts_with('\n') && !lines.is_empty() {
+    // When the window does not begin at byte 0 the first "line" is almost
+    // certainly a fragment of an envelope that started before the window, so
+    // we drop it. That dropped fragment also means the window does not cover
+    // the whole file.
+    let dropped_partial_head = start > 0 && !buf.starts_with('\n') && !lines.is_empty();
+    if dropped_partial_head {
         lines.remove(0);
     }
-    Ok(lines)
+    Ok(JsonlTailWindow {
+        lines,
+        window_covers_file: start == 0,
+    })
 }
 
 fn claude_envelope_turn_state(json: &Value) -> Option<TuiTurnState> {
@@ -357,6 +519,20 @@ fn claude_envelope_turn_state(json: &Value) -> Option<TuiTurnState> {
         // watcher down before the first assistant line gets written
         // (#2712, #2716). Map them to `Unknown` so the gate keeps waiting
         // for a real turn-state envelope.
+        //
+        // NOTE (#3030): we intentionally do NOT generalize this to the whole
+        // `is_interactive_mode_housekeeping_type` family here. In the *standard*
+        // observer (`observe_jsonl_turn_state`) `None` means "walk back to the
+        // prior envelope" while `Unknown` means "stop and report Unknown". A
+        // completed turn legitimately trails housekeeping like `{"type":"mode"}`
+        // (see `structured_jsonl_ready_terminator_with_trailing_housekeeping`),
+        // and the observer must walk back across it to the real terminator and
+        // report Idle. The `permission-mode` special case is the lone exception
+        // because it appears on a *fresh session restart* with only a stale
+        // previous `result` beneath it (the #2712 race). The structural
+        // mode-family hardening for #3030 lives in the strict offset-behind scan
+        // and the torn-write skip, where `None`/`Unknown` are treated
+        // identically (both skipped), so it cannot regress this walk-back.
         "permission-mode" => Some(TuiTurnState::Unknown),
         "system" => match json.get("subtype").and_then(Value::as_str) {
             Some("turn_duration" | "stop_hook_summary" | "init") => Some(TuiTurnState::Idle),
@@ -364,6 +540,29 @@ fn claude_envelope_turn_state(json: &Value) -> Option<TuiTurnState> {
         },
         _ => None,
     }
+}
+
+/// Heuristic shape match for the family of `/model` / `/compact` interactive-
+/// view and mode-change housekeeping envelopes (`permission-mode`, `mode`, and
+/// future renames like `model-mode` / `permission_mode`). These are never
+/// turn-state signals.
+///
+/// Used ONLY by the strict offset-behind scan's torn-write skip
+/// (`partial_is_skippable_housekeeping`) to positively identify a truncated
+/// trailing line as safe-to-skip housekeeping. It is deliberately NOT wired into
+/// `claude_envelope_turn_state`: there, mapping the whole family to `Unknown`
+/// would stop the standard observer's walk-back across a completed turn's
+/// trailing `mode` housekeeping and wrongly report not-ready (see the note in
+/// `claude_envelope_turn_state`).
+///
+/// Deliberately narrow: matches only types that *are* a mode marker (`mode`),
+/// end in a `-mode`/`_mode` suffix, or carry a `permission` token. It must not
+/// match any envelope that could be a real turn-state signal.
+fn is_interactive_mode_housekeeping_type(type_str: &str) -> bool {
+    type_str == "mode"
+        || type_str.ends_with("-mode")
+        || type_str.ends_with("_mode")
+        || type_str.contains("permission")
 }
 
 fn claude_partial_turn_state(line: &str) -> Option<TuiTurnState> {
@@ -381,6 +580,10 @@ fn claude_partial_turn_state(line: &str) -> Option<TuiTurnState> {
             "turn_duration" | "stop_hook_summary" | "init" => Some(TuiTurnState::Idle),
             _ => None,
         },
+        // As with `claude_envelope_turn_state`, the broader mode-family
+        // hardening (#3030) is intentionally NOT applied here — the partial
+        // classifier feeds the same walk-back observer, which must reach the
+        // real terminator beneath a completed turn's trailing `mode` line.
         _ => None,
     }
 }
@@ -1101,5 +1304,356 @@ mod tests {
             observe_codex_jsonl_turn_state(file.path()),
             TuiTurnState::Idle
         );
+    }
+
+    // ----------------------------------------------------------------------
+    // #3030 — torn trailing write: a single truncated *housekeeping* trailing
+    // line (writer mid-flush) must not pin the strict probe Busy forever. The
+    // probe skips just that one trailing partial and reads the prior complete
+    // terminator → Ready.
+    // ----------------------------------------------------------------------
+    #[test]
+    fn structured_jsonl_ready_torn_trailing_housekeeping_partial_is_ready() {
+        let file = write_jsonl(&[
+            r#"{"type":"user","message":{"content":"hi"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#,
+            r#"{"type":"result","result":"done","session_id":"s"}"#,
+            // Torn trailing housekeeping write (no closing brace).
+            r#"{"type":"permission-mode","mode":"def"#,
+        ]);
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            jsonl_ready_for_input(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                file.path(),
+                Some(len / 2),
+            ),
+            Some(TuiReadyState::Ready),
+            "a torn trailing housekeeping partial must be skipped to reveal the \
+             prior result terminator"
+        );
+    }
+
+    // #3030 false-idle guard: a torn trailing fragment that is too short to
+    // identify (could be the start of a new `user`/`assistant` envelope) must
+    // NOT be skipped — stay Busy. This is the same race the #2790 guard
+    // protected, re-verified under the torn-write skip logic.
+    #[test]
+    fn structured_jsonl_ready_torn_trailing_unidentifiable_partial_stays_busy() {
+        let file = write_jsonl(&[
+            r#"{"type":"result","result":"done","session_id":"s"}"#,
+            r#"{"ty"#,
+        ]);
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            jsonl_ready_for_input(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                file.path(),
+                Some(len.saturating_sub(5)),
+            ),
+            Some(TuiReadyState::Busy),
+            "an unidentifiable torn trailing fragment could be a new turn — \
+             must stay Busy"
+        );
+    }
+
+    // #3030 false-idle guard: a torn trailing fragment that *does* identify as
+    // an active envelope (a partial new `user`) must keep the session Busy even
+    // though its line is truncated — never skip an active-looking partial.
+    #[test]
+    fn structured_jsonl_ready_torn_trailing_active_user_partial_stays_busy() {
+        let file = write_jsonl(&[
+            r#"{"type":"result","result":"done","session_id":"s"}"#,
+            r#"{"type":"user","message":{"content":"new prompt"#,
+        ]);
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            jsonl_ready_for_input(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                file.path(),
+                Some(len / 2),
+            ),
+            Some(TuiReadyState::Busy),
+            "a torn trailing partial that identifies as a new user envelope \
+             must stay Busy"
+        );
+    }
+
+    // #3030 false-idle guard: only ONE trailing partial may be skipped. A torn
+    // housekeeping partial followed (above) by a *second* unparseable interior
+    // line must stay Busy — we never skip multiple/interior partials.
+    #[test]
+    fn structured_jsonl_ready_torn_trailing_then_interior_partial_stays_busy() {
+        let file = write_jsonl(&[
+            r#"{"type":"result","result":"done","session_id":"s"}"#,
+            r#"{interior-corruption"#,
+            r#"{"type":"permission-mode","mode":"def"#,
+        ]);
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            jsonl_ready_for_input(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                file.path(),
+                Some(len / 2),
+            ),
+            Some(TuiReadyState::Busy),
+            "a second (interior) unparseable line after the torn trailing skip \
+             must keep the session Busy"
+        );
+    }
+
+    // #3030 false-idle guard: a torn trailing partial sitting above a still
+    // *streaming* assistant envelope must stay Busy — skipping the housekeeping
+    // partial must reveal the streaming signal, not an idle one.
+    #[test]
+    fn structured_jsonl_ready_torn_trailing_above_streaming_stays_busy() {
+        let file = write_jsonl(&[
+            r#"{"type":"user","message":{"content":"hi"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#,
+            r#"{"type":"mode","mode":"def"#,
+        ]);
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            jsonl_ready_for_input(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                file.path(),
+                Some(len / 2),
+            ),
+            Some(TuiReadyState::Busy),
+            "skipping a torn housekeeping partial must reveal the underlying \
+             streaming assistant → Busy"
+        );
+    }
+
+    // ----------------------------------------------------------------------
+    // #3030 — unknown-envelope-hiding-terminator: a renamed `/model`-view mode
+    // envelope (structurally recognized as housekeeping) must be skipped to
+    // reveal the real terminator beneath it. The structural match maps it to
+    // Unknown, NOT Idle — so it can only *uncover* a terminator, never create
+    // one.
+    // ----------------------------------------------------------------------
+    #[test]
+    fn structured_jsonl_ready_renamed_mode_housekeeping_uncovers_terminator() {
+        let file = write_jsonl(&[
+            r#"{"type":"result","result":"done","session_id":"s"}"#,
+            // Hypothetical future rename of the interactive-view housekeeping
+            // envelope; structurally still a mode marker.
+            r#"{"type":"model-mode","model":"opus"}"#,
+            r#"{"type":"permission_mode","permissionMode":"default"}"#,
+        ]);
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            jsonl_ready_for_input(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                file.path(),
+                Some(len / 2),
+            ),
+            Some(TuiReadyState::Ready),
+            "renamed mode/permission housekeeping envelopes must be skipped to \
+             uncover the real terminator"
+        );
+    }
+
+    // #3030 false-idle guard: a renamed mode housekeeping envelope must NOT
+    // itself be treated as idle when there is no terminator beneath it — the
+    // session stays Busy (Unknown, not Idle).
+    #[test]
+    fn structured_jsonl_ready_renamed_mode_without_terminator_stays_busy() {
+        let file = write_jsonl(&[
+            r#"{"type":"user","message":{"content":"hi"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"x"}]}}"#,
+            r#"{"type":"model-mode","model":"opus"}"#,
+        ]);
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            jsonl_ready_for_input(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                file.path(),
+                Some(len / 2),
+            ),
+            Some(TuiReadyState::Busy),
+            "a mode housekeeping envelope is Unknown, never an idle terminator"
+        );
+    }
+
+    // #3030 false-idle guard: a genuinely unknown (non-mode) envelope after a
+    // streaming assistant must NOT count as idle — it is skipped, the streaming
+    // signal beneath wins → Busy. Confirms unknowns are never upgraded to idle.
+    #[test]
+    fn structured_jsonl_ready_unknown_envelope_above_streaming_stays_busy() {
+        let file = write_jsonl(&[
+            r#"{"type":"user","message":{"content":"hi"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"x"}]}}"#,
+            r#"{"type":"some-brand-new-envelope","data":1}"#,
+        ]);
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            jsonl_ready_for_input(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                file.path(),
+                Some(len / 2),
+            ),
+            Some(TuiReadyState::Busy),
+            "a genuinely-unknown envelope must never be classified idle"
+        );
+    }
+
+    // #3030 / reviewer P2: the broader mode-family hardening is intentionally
+    // NOT wired into the standard observer's classifier. A completed turn that
+    // trails a renamed `/model` housekeeping envelope (`model-mode`) must walk
+    // back across it to the real `result` terminator and report Idle — NOT stop
+    // at the housekeeping line and report not-ready. (Mapping the whole family
+    // to Unknown here would regress completion/readiness paths that pass no
+    // consumed offset and rely on this walk-back.) `permission-mode` keeps its
+    // narrow Unknown special case for the fresh-restart race (#2712); see the
+    // dedicated test above.
+    #[test]
+    fn claude_trailing_renamed_mode_walks_back_to_terminator() {
+        let file = write_jsonl(&[
+            r#"{"type":"result","result":"done","session_id":"s"}"#,
+            r#"{"type":"model-mode","model":"opus"}"#,
+        ]);
+
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::Idle
+        );
+    }
+
+    // ----------------------------------------------------------------------
+    // #3030 — tail window: a terminator older than the default 64KB window
+    // (pushed out by a large post-terminator housekeeping burst) must still be
+    // found by the bounded widened re-scan → Ready, instead of being stuck Busy.
+    // ----------------------------------------------------------------------
+    #[test]
+    fn structured_jsonl_ready_terminator_beyond_default_window_is_ready() {
+        let mut lines: Vec<String> = vec![
+            r#"{"type":"user","message":{"content":"hi"}}"#.to_string(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#
+                .to_string(),
+            r#"{"type":"result","result":"done","session_id":"s"}"#.to_string(),
+        ];
+        // Append > 64KB of post-terminator housekeeping to push the terminator
+        // out of the default tail window.
+        let filler = r#"{"type":"pr-link","url":"https://example.com/pr/very-long-path-padding-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
+        let mut bytes = 0usize;
+        while bytes < (TURN_STATE_TAIL_BYTES as usize) + 4096 {
+            lines.push(filler.to_string());
+            bytes += filler.len() + 1;
+        }
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), lines.join("\n")).unwrap();
+        let len = std::fs::metadata(file.path()).unwrap().len();
+        assert!(
+            len > TURN_STATE_TAIL_BYTES,
+            "fixture must exceed 64KB window"
+        );
+
+        assert_eq!(
+            jsonl_ready_for_input(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                file.path(),
+                Some(len / 2),
+            ),
+            Some(TuiReadyState::Ready),
+            "a terminator pushed out of the 64KB window by a housekeeping burst \
+             must still be found by the bounded widened re-scan"
+        );
+    }
+
+    // #3030 false-idle guard for the tail window: if neither the default nor
+    // the widened window contains a terminator (only streaming/housekeeping)
+    // the session must stay Busy — widening must never manufacture an idle.
+    #[test]
+    fn structured_jsonl_ready_no_terminator_in_large_file_stays_busy() {
+        let mut lines: Vec<String> = vec![
+            r#"{"type":"user","message":{"content":"hi"}}"#.to_string(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#
+                .to_string(),
+        ];
+        let filler = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"streaming chunk padding aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}}"#;
+        let mut bytes = 0usize;
+        while bytes < (TURN_STATE_TAIL_BYTES as usize) + 4096 {
+            lines.push(filler.to_string());
+            bytes += filler.len() + 1;
+        }
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), lines.join("\n")).unwrap();
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            jsonl_ready_for_input(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                file.path(),
+                Some(len / 2),
+            ),
+            Some(TuiReadyState::Busy),
+            "no terminator anywhere in a large streaming file must stay Busy"
+        );
+    }
+
+    // #3030 Codex parity: the torn-trailing skip must NOT apply to Codex (it has
+    // no safe-to-skip post-turn housekeeping family) — a torn trailing Codex
+    // line stays Busy.
+    #[test]
+    fn structured_jsonl_ready_codex_torn_trailing_partial_stays_busy() {
+        let file = write_jsonl(&[
+            r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#,
+            r#"{"type":"event_msg","payload":{"type":"token_co"#,
+        ]);
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            jsonl_ready_for_input(
+                &ProviderKind::Codex,
+                Some(RuntimeHandoffKind::CodexTui),
+                file.path(),
+                Some(len / 2),
+            ),
+            Some(TuiReadyState::Busy),
+            "Codex has no skippable housekeeping family — torn trailing line \
+             stays Busy"
+        );
+    }
+
+    // #3030 unit coverage for the structural mode-type matcher: it must catch
+    // the mode/permission family and never catch a real turn-state type.
+    #[test]
+    fn interactive_mode_housekeeping_type_matches_only_mode_family() {
+        assert!(is_interactive_mode_housekeeping_type("mode"));
+        assert!(is_interactive_mode_housekeeping_type("permission-mode"));
+        assert!(is_interactive_mode_housekeeping_type("permission_mode"));
+        assert!(is_interactive_mode_housekeeping_type("model-mode"));
+        assert!(is_interactive_mode_housekeeping_type("compact-mode"));
+        assert!(!is_interactive_mode_housekeeping_type("result"));
+        assert!(!is_interactive_mode_housekeeping_type("assistant"));
+        assert!(!is_interactive_mode_housekeeping_type("user"));
+        assert!(!is_interactive_mode_housekeeping_type("system"));
+        assert!(!is_interactive_mode_housekeeping_type("turn.completed"));
+    }
+
+    #[test]
+    fn torn_trailing_fragment_detects_missing_close_brace() {
+        assert!(is_torn_trailing_fragment(r#"{"type":"mode","mode":"def"#));
+        assert!(!is_torn_trailing_fragment(r#"{"type":"result"}"#));
+        assert!(!is_torn_trailing_fragment("not-json-at-all"));
     }
 }
