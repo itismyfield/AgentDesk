@@ -61,18 +61,18 @@
 ### `policy_engine`
 
 - canonical_modules: `src/engine/mod.rs` (driver) plus `src/engine/ops/*.rs`
-  (per-domain op handlers). `src/pipeline.rs` (1340 lines, giant-file)
+  (per-domain op handlers). `src/pipeline.rs` (1351 lines, giant-file)
   composes the policy pipeline.
 - legacy_modules: none — there is no parallel engine. The whole surface is
   pre-migration giant-file territory.
 - do_not_edit_without_migration_plan:
-  - `src/engine/mod.rs` (1449 lines, giant-file).
+  - `src/engine/mod.rs` (1453 lines, giant-file).
   - `src/engine/ops/review_automation_ops.rs` (1056 lines, giant-file).
   - `src/engine/ops/kanban_ops.rs` (1141 lines, giant-file).
   - `src/engine/ops/db_ops.rs` (1286 lines, giant-file).
-  - `src/engine/loader.rs` (1325 lines, giant-file) — engine loader / QuickJS
+  - `src/engine/loader.rs` (1332 lines, giant-file) — engine loader / QuickJS
     validator surface; split before adding non-bugfix behavior.
-  - `src/pipeline.rs` (1340 lines, giant-file).
+  - `src/pipeline.rs` (1351 lines, giant-file).
 - non-giant migration-sensitive note: `src/engine/intent.rs` is below the
   giant-file threshold but remains a migration-sensitive intent surface; keep
   changes scoped to the typed-facade contract.
@@ -258,7 +258,7 @@
   (supervised-worker registry / leader-only lifecycle).
 - legacy_modules: none — these are shared runtime coordination surfaces.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/config.rs` (2246 lines).
+  - `src/config.rs` (2242 lines).
   - `src/runtime_layout/mod.rs` (1663 lines).
   - `src/server/mod.rs` (2484 lines).
   - `src/receipt.rs` (1843 lines).

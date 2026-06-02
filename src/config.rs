@@ -184,23 +184,6 @@ impl Config {
             .unwrap_or_else(|| default_provider_tui_hosting(&key))
     }
 
-    pub fn any_provider_tui_hosting_requested(&self) -> bool {
-        crate::services::provider::supported_provider_ids()
-            .iter()
-            .any(|provider| self.provider_tui_hosting_enabled(provider))
-            || self
-                .providers
-                .values()
-                .any(|provider| provider.tui_hosting == Some(true))
-            || self.agents.iter().any(|agent| {
-                agent
-                    .channels
-                    .iter()
-                    .into_iter()
-                    .any(|(_, channel)| channel.and_then(AgentChannel::tui_hosting) == Some(true))
-            })
-    }
-
     /// Issue #2193 — Codex remote SSH gate accessor.
     ///
     /// Returns `true` only when the operator has explicitly set
@@ -1508,6 +1491,10 @@ impl OnboardingConfig {
     /// `setupWizardHelpers.ts::PROVIDER_SUFFIX_MAP`. Used as a fallback
     /// when `provider_suffix_map` is unset, so backend and dashboard stay
     /// in lockstep without a config file present.
+    // reason: onboarding suffix-resolution config API mirroring the dashboard
+    // `setupWizardHelpers.ts`; test-covered but not yet wired into a production
+    // caller (the live path uses dispatch::provider_from_channel_suffix).
+    #[allow(dead_code)]
     pub fn provider_suffix_default_map() -> &'static [(&'static str, &'static str)] {
         &[
             ("-cc", "claude"),
@@ -1525,6 +1512,9 @@ impl OnboardingConfig {
     /// Resolves a provider id from a channel name (or any string with the
     /// suffix-bearing trailing token). Reads `provider_suffix_map` first;
     /// falls back to the built-in default map. Case-insensitive.
+    // reason: onboarding config-driven suffix resolver; covered by config tests,
+    // pending wiring into the setup flow.
+    #[allow(dead_code)]
     pub fn provider_from_channel_suffix(&self, channel_name: &str) -> Option<String> {
         let lowered = channel_name.trim().to_ascii_lowercase();
         if lowered.is_empty() {
@@ -1555,6 +1545,9 @@ impl OnboardingConfig {
 
     /// Resolve a category by either a label key (e.g. `dev`) or a raw
     /// numeric Discord category ID. Returns the resolved Discord ID.
+    // reason: onboarding category resolver (label or raw Discord ID); test-covered,
+    // pending wiring into the setup flow.
+    #[allow(dead_code)]
     pub fn resolve_category(&self, label_or_id: &str) -> Option<String> {
         let trimmed = label_or_id.trim();
         if trimmed.is_empty() {
@@ -1582,6 +1575,9 @@ impl OnboardingConfig {
 
 /// Normalise a user-provided suffix key so both `cc` and `-cc` resolve to
 /// `-cc`. Empty strings stay empty so the caller can drop them.
+// reason: helper for provider_from_channel_suffix (onboarding config API), dead
+// until that resolver is wired into the setup flow.
+#[allow(dead_code)]
 fn normalize_suffix_key(raw: &str) -> String {
     let trimmed = raw.trim().trim_start_matches('-').to_ascii_lowercase();
     if trimmed.is_empty() {

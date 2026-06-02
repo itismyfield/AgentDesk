@@ -91,7 +91,6 @@ mod cli;
 pub(crate) mod compat;
 // Config helpers are shared by CLI/server/tests, with some provider-onboarding
 // helpers only called from rollout flows.
-#[allow(dead_code)]
 mod config;
 pub(crate) mod credential;
 // Database repositories intentionally expose cross-route helpers that are only
@@ -104,7 +103,6 @@ mod db;
 mod dispatch;
 // Policy-engine loader/runtime helpers cover hot-reload and test-only entry
 // points outside the default server launch path.
-#[allow(dead_code)]
 mod engine;
 // Error-code helpers are kept for API response boundaries that only some
 // routes currently surface.
@@ -122,12 +120,10 @@ mod logging;
 pub(crate) mod manual_intervention;
 // Pipeline policy structs include retry/override fields retained for policy
 // compatibility across staged rollout paths.
-#[allow(dead_code)]
 pub(crate) mod pipeline;
 pub(crate) mod receipt;
 // Reconciliation sweep jobs are invoked by maintenance scheduling, not by every
 // compile target.
-#[allow(dead_code)]
 pub(crate) mod reconcile;
 pub(crate) mod runtime;
 // Runtime layout exposes migration helpers used by setup and repair commands.
@@ -141,7 +137,6 @@ mod server;
 #[allow(dead_code)]
 mod services;
 // Supervisor test hooks are intentionally retained for dispatch/runtime tests.
-#[allow(dead_code)]
 pub(crate) mod supervisor;
 mod ui;
 // Utility detectors are shared opportunistically across provider paths.

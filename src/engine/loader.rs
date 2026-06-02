@@ -211,6 +211,9 @@ pub fn load_policies_from_dir(ctx: &Context, dir: &Path) -> Result<Vec<LoadedPol
 /// Load policies from a directory, returning an error if any validation fails.
 /// Used by hot-reload pre-validation so the previous loaded version can be
 /// preserved on failure.
+// reason: hot-reload pre-validation entry point; production hot-reload uses the
+// `_inner` variant, while this thin wrapper is exercised by engine loader tests.
+#[allow(dead_code)]
 pub fn load_policies_from_dir_validated(ctx: &Context, dir: &Path) -> Result<Vec<LoadedPolicy>> {
     load_policies_from_dir_validated_inner(ctx, dir, None)
 }
@@ -1045,6 +1048,10 @@ pub struct HotReloadGuard {
     /// aborts the eval once the deadline passes (#2372). Exposed on the
     /// guard so tests and callers can arm a deadline for live evals running
     /// on the shared runtime.
+    // reason: armed/cleared by the QuickJS interrupt path and read via the
+    // cfg(test)-only `arm_eval_deadline`; the non-test build writes but never
+    // reads this slot.
+    #[allow(dead_code)]
     eval_deadline: Arc<AtomicU64>,
 }
 

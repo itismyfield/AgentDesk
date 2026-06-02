@@ -292,6 +292,10 @@ pub struct PolicyInfo {
 
 impl PolicyEngine {
     /// Create a new policy engine, initializing QuickJS and loading policies.
+    // reason: SQLite-path constructor consumed only by cross-module test setups
+    // (server route tests build engines via new_with_pg); kept as the public
+    // non-PG entry point.
+    #[allow(dead_code)]
     pub fn new(config: &Config) -> Result<Self> {
         Self::new_with_pg_and_label(config, None, "main")
     }
@@ -1554,12 +1558,6 @@ mod tests {
             },
             ..Config::default()
         }
-    }
-
-    fn test_engine_with_pg(_db: &Db, pg_pool: sqlx::PgPool) -> PolicyEngine {
-        let mut config = crate::config::Config::default();
-        config.policies.hot_reload = false;
-        PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
     }
 
     fn test_engine_with_pg_and_config(config: Config, pg_pool: sqlx::PgPool) -> PolicyEngine {

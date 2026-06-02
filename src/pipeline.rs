@@ -152,6 +152,10 @@ impl PipelineOverrideHealthReport {
     }
 }
 
+// reason: postgres override-health loader exercised by pipeline tests; the live
+// refresh path persists via refresh_override_health_report, so this read-back
+// helper has no production caller yet.
+#[allow(dead_code)]
 pub async fn load_persisted_override_health_report(
     _db: &crate::db::Db,
     pg_pool: Option<&PgPool>,
@@ -782,6 +786,9 @@ impl Default for BackoffPolicy {
 }
 
 /// `on_failure` policy for stages (#1082).
+// reason: staged-rollout policy enum retained for config compatibility; the
+// runtime mirror lives in services::pipeline_routes and is not yet wired here.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum OnFailurePolicy {
@@ -839,6 +846,10 @@ pub struct TimeoutConfig {
     pub condition: Option<String>,
 }
 
+// reason: #1082 timeout retry/backoff resolution surface retained for staged
+// policy rollout; currently consumed only by the #1082 DoD unit tests, pending
+// wiring into the live timeout executor.
+#[allow(dead_code)]
 impl TimeoutConfig {
     /// Default max_retries when caller did not specify (1, per #1082 DoD).
     pub const DEFAULT_MAX_RETRIES: u32 = 1;

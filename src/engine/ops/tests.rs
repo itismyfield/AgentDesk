@@ -12,63 +12,6 @@ fn test_db() -> Db {
     crate::db::test_db()
 }
 
-fn legacy_review_state_sync_for_tests(conn: &sqlite_test::Connection, json_str: &str) -> String {
-    let params: serde_json::Value = match serde_json::from_str(json_str) {
-        Ok(v) => v,
-        Err(e) => return format!(r#"{{"error":"invalid JSON: {}"}}"#, e),
-    };
-
-    let card_id = params["card_id"].as_str().unwrap_or("");
-    let state = params["state"].as_str().unwrap_or("");
-    if card_id.is_empty() || state.is_empty() {
-        return r#"{"error":"card_id and state are required"}"#.to_string();
-    }
-
-    if state == "clear_verdict" {
-        let result = conn.execute(
-            "UPDATE card_review_state SET last_verdict = NULL, updated_at = datetime('now') WHERE card_id = ?1",
-            sqlite_test::params![card_id],
-        );
-        return match result {
-            Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
-            Err(e) => format!(r#"{{"error":"sql error: {}"}}"#, e),
-        };
-    }
-
-    let review_round = params["review_round"].as_i64();
-    let last_verdict = params["last_verdict"].as_str();
-    let last_decision = params["last_decision"].as_str();
-    let pending_dispatch_id = params["pending_dispatch_id"].as_str();
-    let review_entered_at = params["review_entered_at"].as_str();
-
-    let result = conn.execute(
-        "INSERT INTO card_review_state (card_id, state, review_round, last_verdict, last_decision, pending_dispatch_id, review_entered_at, updated_at) \
-         VALUES (?1, ?2, COALESCE(?3, (SELECT COALESCE(review_round, 0) FROM kanban_cards WHERE id = ?1), 0), ?4, ?5, ?6, COALESCE(?7, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE NULL END), datetime('now')) \
-         ON CONFLICT(card_id) DO UPDATE SET \
-         state = ?2, \
-         review_round = COALESCE(?3, (SELECT COALESCE(review_round, 0) FROM kanban_cards WHERE id = ?1), review_round), \
-         last_verdict = COALESCE(?4, last_verdict), \
-         last_decision = COALESCE(?5, last_decision), \
-         pending_dispatch_id = CASE WHEN ?6 IS NOT NULL THEN ?6 WHEN ?2 = 'suggestion_pending' THEN pending_dispatch_id ELSE NULL END, \
-         review_entered_at = COALESCE(?7, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE review_entered_at END), \
-         updated_at = datetime('now')",
-        sqlite_test::params![
-            card_id,
-            state,
-            review_round,
-            last_verdict,
-            last_decision,
-            pending_dispatch_id,
-            review_entered_at,
-        ],
-    );
-
-    match result {
-        Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
-        Err(e) => format!(r#"{{"error":"sql error: {}"}}"#, e),
-    }
-}
-
 fn test_engine_with_pg(_db: &Db, pg_pool: sqlx::PgPool) -> crate::engine::PolicyEngine {
     let mut config = crate::config::Config::default();
     config.policies.hot_reload = false;
