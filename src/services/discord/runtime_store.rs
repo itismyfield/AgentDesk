@@ -53,6 +53,13 @@ pub(crate) fn discord_pending_queue_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_pending_queue"))
 }
 
+/// #3003: durable retry store for orphaned status-panel-v2 message deletes that
+/// failed transiently when no per-turn inflight handle survived (e.g. a
+/// stopped/cancelled TUI-direct turn). Drained by the placeholder sweeper.
+pub(super) fn discord_status_panel_orphans_root() -> Option<PathBuf> {
+    runtime_root().map(|root| root.join("discord_status_panel_orphans"))
+}
+
 /// #1332 round-3 codex review P2: per-channel sidecar root for the
 /// `queued_placeholders` mapping. Persisted next to `discord_pending_queue/`
 /// so a dcserver restart can re-attach restored mailbox queue entries to the
