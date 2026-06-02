@@ -68,7 +68,14 @@ fn tmux_lines_after_claude_prompt_show_idle_suggestion_chrome(lines: &[&str]) ->
     });
     let idle_footer = lines.iter().any(|line| {
         let line = trim_prompt_line(line);
-        line.contains("Tools: 0 done") || line.contains("bypass permissions")
+        // `Tools: 0 done` means a turn has just started (no tools run yet) — a
+        // running, not idle, signal — so it must NOT count as idle chrome (it
+        // previously let a freshly-submitted running prompt read as ready, #3051).
+        // A completed-work footer (`Tools: N>0 done`) or the permission-mode
+        // banner are the genuine idle markers; mirrors the `!Tools: 0 done` guard
+        // in `..._show_completed_history`.
+        line.contains("bypass permissions")
+            || (line.contains("Tools:") && line.contains(" done") && !line.contains("Tools: 0 done"))
     });
     separator && idle_footer
 }
@@ -153,13 +160,14 @@ fn tmux_recent_lines_show_claude_tui_active_work(lines: &[&str]) -> bool {
             || line.contains("Musing")
             || lower.contains("esc to interrupt")
             || lower.contains("current work")
-            // A freshly-submitted prompt renders a meaningfully advanced
-            // progress bar (e.g. `██░░░░░░░░ │ 24%`) in the footer chrome while
-            // the turn runs. An idle composer shows an empty or barely-filled
-            // bar (`░░░░░░░░░░`, `█░░░░░░░░░` at a few percent), so a run of two
-            // or more filled block glyphs (`██`) marks active work and must not
-            // be judged ready-for-input (#3051 / #2896 regression).
-            || line.contains("██")
+            // NOTE: neither the footer context-usage bar (`🤖 Model │ ██░░ │ NN%`)
+            // nor the completed-thinking summary line (`✻ Churned for 4m 56s`) is a
+            // running signal — both render in IDLE/ready states too. #3051 keyed
+            // active-work on the `██` run, which flipped a ready prompt with >20%
+            // context usage to not-ready; the running vs. idle distinction is
+            // instead carried by the footer (`Tools: 0 done` = freshly-started, no
+            // tools yet) handled in `..._show_idle_suggestion_chrome`, plus the
+            // explicit `esc to interrupt`/spinner-verb keywords above.
             || (line.starts_with('⏺')
                 && ((line.contains("Running ") && line.contains("command"))
                     || line.contains("Searching for ")
