@@ -61,6 +61,41 @@ pub(in crate::services::discord) struct ProviderTurnInterruptOutcome {
     pub sent_keys: bool,
     pub fallback_sigint_pid: Option<u32>,
     pub missing_tmux_session: bool,
+    /// #3029(A): set when the SIGINT-only interrupt path (empty key list —
+    /// claude, whose pane C-c targets the wrapper) needed to deliver a SIGINT
+    /// to an actively-generating turn but the provider PID lookup returned
+    /// `None` (ps failure, command-name drift, or a just-spawned child not yet
+    /// visible). On that path the interrupt is the *only* delivery mechanism,
+    /// so a `None` PID is a silent no-op: the mailbox marks the turn [Stopped]
+    /// but no signal reaches the provider. This flag converts that into an
+    /// explicit failure the hard-stop path can escalate on, instead of
+    /// reporting unconditional success.
+    pub sigint_target_missing: bool,
+}
+
+/// #3029(A): does this provider/plan combination treat the direct SIGINT
+/// fallback as its *only* interrupt delivery (i.e. there is no send-keys path
+/// that could have reached the turn)? Claude uses an empty key list because a
+/// pane C-c hits the wrapper and tears the session down (#1260) — so when its
+/// SIGINT target is missing, the interrupt silently did nothing.
+fn interrupt_is_sigint_only(provider: &ProviderKind, plan_keys_empty: bool) -> bool {
+    plan_keys_empty && matches!(provider, ProviderKind::Claude)
+}
+
+/// #3029(A): the interrupt silently did nothing when the SIGINT-only path was
+/// the only delivery mechanism, the turn was genuinely active
+/// (`ready_for_input == false`), yet no SIGINT target PID could be resolved.
+/// An idle pane (`ready_for_input == true`) intentionally resolves to no PID
+/// and is NOT a missed interrupt (#3021).
+fn interrupt_sigint_target_missing(
+    provider: &ProviderKind,
+    plan_keys_empty: bool,
+    ready_for_input: bool,
+    resolved_sigint_pid: Option<u32>,
+) -> bool {
+    interrupt_is_sigint_only(provider, plan_keys_empty)
+        && !ready_for_input
+        && resolved_sigint_pid.is_none()
 }
 
 fn provider_turn_interrupt_plan(provider: &ProviderKind) -> Option<ProviderTurnInterruptPlan> {
@@ -169,6 +204,7 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
             sent_keys: false,
             fallback_sigint_pid: None,
             missing_tmux_session: true,
+            sigint_target_missing: false,
         };
     };
     let Some(plan) = provider_turn_interrupt_plan(provider) else {
@@ -177,6 +213,7 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
             sent_keys: false,
             fallback_sigint_pid: None,
             missing_tmux_session: false,
+            sigint_target_missing: false,
         };
     };
 
@@ -238,6 +275,7 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
             sent_keys,
             fallback_sigint_pid: None,
             missing_tmux_session: false,
+            sigint_target_missing: false,
         };
     }
 
@@ -358,6 +396,32 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
 
     let fallback_sigint_pid =
         fallback_sigint_pid_for_provider(provider, ready_for_input, provider_pid);
+
+    // #3029(A): on the SIGINT-only path (claude — empty key list, so the
+    // direct SIGINT is the *only* way to reach the turn), an active turn
+    // (`ready_for_input == false`) that yields no SIGINT target is a silent
+    // no-op: nothing actually interrupts the provider even though the caller
+    // marks the turn [Stopped]. `ready_for_input == false` here means the
+    // confirmation re-probe agreed the turn is genuinely generating (an idle
+    // pane correctly resolves to `None` and is intentionally left alone, #3021).
+    // Flag this so the hard-stop path escalates instead of trusting an
+    // unconditional success.
+    let sigint_target_missing = interrupt_sigint_target_missing(
+        provider,
+        plan.keys.is_empty(),
+        ready_for_input,
+        fallback_sigint_pid,
+    );
+    if sigint_target_missing {
+        tracing::error!(
+            "provider turn interrupt SIGINT target missing: provider={} session={} reason={} \
+             detail=active_turn_without_provider_pid (PID lookup returned None; SIGINT not delivered) — escalating",
+            provider.as_str(),
+            tmux_session_name,
+            reason
+        );
+    }
+
     if let Some(pid) = fallback_sigint_pid {
         if let Err(error) = send_sigint(pid) {
             tracing::warn!(
@@ -384,6 +448,7 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
         sent_keys,
         fallback_sigint_pid,
         missing_tmux_session: false,
+        sigint_target_missing,
     }
 }
 
@@ -559,6 +624,48 @@ async fn hard_stop_unresponsive_provider_cli_turn(
             (false, false, None, None)
         }
     };
+
+    // #3029(A): the initial interrupt could not find a SIGINT target for an
+    // active SIGINT-only (claude) turn, so no signal was delivered. The
+    // post-grace re-probe runs against current `ps` state and may now resolve
+    // the provider PID (the child became visible / `ps` recovered). Deliver
+    // the SIGINT we previously missed — but only to a live provider PID that
+    // is NOT the pane foreground, so we never SIGINT the wrapper/pane and tear
+    // down a reusable session (PreserveSession intent stays intact; this is a
+    // contained, reach-guaranteed escalation, not the #3018 mapping rework).
+    if interrupt_outcome.sigint_target_missing && session_alive && !ready_for_input {
+        match current_provider_pid {
+            Some(pid) if Some(pid) != pane_pid => {
+                if let Err(error) = send_sigint(pid) {
+                    tracing::warn!(
+                        "provider hard-stop SIGINT re-delivery failed: provider={} session={} pid={} reason={} error={}",
+                        provider.as_str(),
+                        tmux_session_name,
+                        pid,
+                        reason,
+                        error
+                    );
+                } else {
+                    tracing::info!(
+                        "provider hard-stop SIGINT re-delivered after missed interrupt target: provider={} session={} pid={} reason={}",
+                        provider.as_str(),
+                        tmux_session_name,
+                        pid,
+                        reason
+                    );
+                }
+            }
+            _ => {
+                tracing::error!(
+                    "provider hard-stop could not escalate missed SIGINT: provider={} session={} reason={} \
+                     detail=no_live_non_pane_provider_pid (interrupt did not reach the turn)",
+                    provider.as_str(),
+                    tmux_session_name,
+                    reason
+                );
+            }
+        }
+    }
 
     let Some(pid) = hard_stop_pid_for_unresponsive_provider(
         provider,
@@ -1785,5 +1892,61 @@ mod pid_exit_tests {
             elapsed < Duration::from_secs(2),
             "the upper bound must not be exceeded by more than scheduler jitter (took {elapsed:?})"
         );
+    }
+}
+
+// #3029(A): the "missed SIGINT target" decision is a pure boolean and runs
+// under the default `cargo test` invocation (the main suite is gated behind
+// the `legacy-sqlite-tests` feature, which CI does not enable by default).
+#[cfg(test)]
+mod sigint_target_missing_tests {
+    use super::interrupt_sigint_target_missing;
+    use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn active_claude_without_pid_is_a_missed_interrupt() {
+        // SIGINT-only path (empty keys = claude), turn actively generating
+        // (ready_for_input=false), and NO resolved PID → silent no-op that must
+        // now be flagged for escalation instead of reporting success.
+        assert!(
+            interrupt_sigint_target_missing(&ProviderKind::Claude, true, false, None),
+            "active claude with no resolvable PID must escalate (#3029 A), not silently succeed"
+        );
+    }
+
+    #[test]
+    fn active_claude_with_pid_is_not_missed() {
+        assert!(
+            !interrupt_sigint_target_missing(&ProviderKind::Claude, true, false, Some(42)),
+            "a resolved PID means the SIGINT had a target — not a miss"
+        );
+    }
+
+    #[test]
+    fn idle_claude_without_pid_is_not_missed() {
+        // #3021: an idle pane intentionally resolves to no PID and is left
+        // alone; that is NOT a missed interrupt.
+        assert!(
+            !interrupt_sigint_target_missing(&ProviderKind::Claude, true, true, None),
+            "idle claude (ready_for_input=true) is intentionally skipped, not a miss (#3021)"
+        );
+    }
+
+    #[test]
+    fn wrapped_providers_are_not_sigint_only() {
+        // Codex/Qwen have a send-keys path, so a missing fallback PID is not a
+        // SIGINT-only silent no-op (their send-keys still reaches the wrapper).
+        assert!(!interrupt_sigint_target_missing(
+            &ProviderKind::Codex,
+            false,
+            false,
+            None
+        ));
+        assert!(!interrupt_sigint_target_missing(
+            &ProviderKind::Qwen,
+            false,
+            false,
+            None
+        ));
     }
 }

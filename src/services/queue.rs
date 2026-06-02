@@ -96,12 +96,19 @@ async fn force_purge_channel_mailbox(
         &token_hash,
         None,
     );
-    let purged = handle.purge_queue(persistence).await;
+    // #3029(D): force purge must also release the active-turn anchor so the
+    // next dispatch is not blocked by a stale `cancel_token` /
+    // `active_user_message_id`. The handler only clears an anchor whose token
+    // is already `cancelled` (the force-kill above flipped it), so a fresh
+    // turn that raced in after the kill keeps its anchor (#2706).
+    let purge = handle.purge_queue(persistence, true).await;
+    let purged = purge.drained;
     tracing::info!(
         provider = provider.as_str(),
         channel_id = channel_id.get(),
         purged,
         disk_files_removed,
+        cleared_active_anchor = purge.cleared_active_anchor,
         session_key,
         "force purged channel mailbox queue"
     );
