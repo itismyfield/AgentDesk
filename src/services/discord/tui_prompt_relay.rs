@@ -824,9 +824,7 @@ async fn claim_tui_direct_synthetic_turn(
             };
         }
         if started {
-            shared
-                .global_active
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            super::increment_global_active(shared, "tui_direct_synthetic_refresh");
             shared
                 .turn_start_times
                 .insert(channel_id, std::time::Instant::now());
@@ -873,9 +871,7 @@ async fn claim_tui_direct_synthetic_turn(
     }
 
     if started {
-        shared
-            .global_active
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        super::increment_global_active(shared, "tui_direct_synthetic_save");
         shared
             .turn_start_times
             .insert(channel_id, std::time::Instant::now());

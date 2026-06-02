@@ -915,9 +915,43 @@ pub(in crate::services::discord) fn saturating_decrement_global_active(
     saturating_decrement_counter(shared.global_active.as_ref())
 }
 
+/// Single authoritative writer for the INCREMENT side of `global_active`,
+/// mirroring [`saturating_decrement_global_active`] on the decrement side
+/// (#3019, sub-issue of #3016).
+///
+/// INVARIANT: `global_active` == number of mailbox slots currently in the
+/// started-not-yet-finished state. This helper MUST be called +1 IFF a mailbox
+/// `try_start_turn` / `recovery_kickoff` actually activated a slot
+/// (`started` / `activated_turn == true`); the matching -1 happens IFF a
+/// mailbox finish/clear actually removed it (`removed_token.is_some()`). Keeping
+/// increment/decrement 1:1 with the real mailbox state transition — NEVER caller
+/// intent — is what prevents the drift/underflow seen in #2934.
+///
+/// Callers are responsible for the mailbox-activation gate; this helper does NOT
+/// change WHEN the counter moves, only funnels HOW it moves so increment is
+/// single-authority/single-helper exactly like decrement. `reason` is recorded
+/// for observability so every increment is attributable to its activation site.
+pub(in crate::services::discord) fn increment_global_active(
+    shared: &SharedData,
+    reason: &str,
+) -> usize {
+    increment_counter(shared.global_active.as_ref(), reason)
+}
+
+fn increment_counter(counter: &AtomicUsize, reason: &str) -> usize {
+    let next = counter.fetch_add(1, Ordering::Relaxed) + 1;
+    tracing::debug!(
+        target: "agentdesk::global_active",
+        reason,
+        global_active = next,
+        "global_active increment"
+    );
+    next
+}
+
 #[cfg(test)]
 mod global_active_counter_tests {
-    use super::saturating_decrement_counter;
+    use super::{increment_counter, saturating_decrement_counter};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -934,6 +968,35 @@ mod global_active_counter_tests {
 
         assert!(saturating_decrement_counter(&counter));
         assert_eq!(counter.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn increment_counter_increments_once_and_returns_new_value() {
+        let counter = AtomicUsize::new(0);
+
+        assert_eq!(increment_counter(&counter, "unit_test"), 1);
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn paired_increment_then_decrement_keeps_counter_balanced() {
+        let counter = AtomicUsize::new(0);
+
+        // A single activated mailbox transition: +1 on start, -1 on finish.
+        increment_counter(&counter, "mailbox_started");
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+        assert!(saturating_decrement_counter(&counter));
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn increment_counter_is_strictly_additive_across_repeated_calls() {
+        let counter = AtomicUsize::new(0);
+
+        for expected in 1..=6 {
+            assert_eq!(increment_counter(&counter, "repeated_site"), expected);
+        }
+        assert_eq!(counter.load(Ordering::Relaxed), 6);
     }
 }
 
@@ -2744,9 +2807,7 @@ async fn mailbox_recovery_kickoff(
         .recovery_kickoff(cancel_token, request_owner, user_message_id)
         .await;
     if result.activated_turn {
-        shared
-            .global_active
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        increment_global_active(shared, "recovery_kickoff");
     }
     result
 }

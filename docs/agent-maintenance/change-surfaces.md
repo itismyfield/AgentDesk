@@ -118,14 +118,14 @@
   - `src/services/discord/watchers/lifecycle.rs` (2445 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior).
-  - `src/services/discord/tmux.rs` (2206 lines after #2558 dead-code sweep;
+  - `src/services/discord/tmux.rs` (2204 lines after #2558 dead-code sweep;
     failover guard; still giant-file territory).
   - `src/services/discord/tmux_watcher.rs` (6861 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh; split loop helpers
     further before adding behavior).
-  - `src/services/discord/tui_prompt_relay.rs` (3241 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (3237 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan).
   - `src/services/codex_tmux_wrapper.rs` (1223 lines; Codex tmux wrapper JSON
@@ -139,10 +139,10 @@
     extraction).
   - `src/services/discord/health/recovery.rs` (2425 lines; health recovery
     extraction surface, split further before adding non-bugfix behavior).
-  - `src/services/discord/router/message_handler/intake_turn.rs` (3613 lines;
+  - `src/services/discord/router/message_handler/intake_turn.rs` (3611 lines;
     Discord message intake turn orchestration split from the router message
     handler; bugfix only outside a further extraction plan).
-  - `src/services/discord/router/message_handler/headless_turn.rs` (1318 lines;
+  - `src/services/discord/router/message_handler/headless_turn.rs` (1316 lines;
     headless Discord turn launch/terminal-response path split from the router
     message handler; bugfix only outside a further extraction plan).
   - `src/services/discord/meeting_orchestrator.rs` (3228 lines).
@@ -369,7 +369,10 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   execution are the canonical scheduled JS routine surfaces. Split focused
   helper modules before growing these files again.
 - `src/services/platform/binary_resolver.rs` (1936).
-- `src/services/discord/mod.rs` (5837),
+- `src/services/discord/mod.rs` (5871; +34 from #3019 added the
+  single-authority `increment_global_active` helper + doc mirroring the
+  existing decrement helper — offset by removing 6 inline raw `fetch_add`
+  blocks across the relay turn-start sites that now route through it),
   `src/services/discord_config_audit.rs` (1318).
 - `src/services/turn_orchestrator.rs` (2932).
 
