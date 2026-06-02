@@ -1278,6 +1278,15 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
             {
                 let Some(channel_id) = owner_channel_for_tmux_session(&shared, &tmux_session_name)
                 else {
+                    // #3018: registry has no owner channel for this active Claude
+                    // TUI binding — the idle relay cannot route, so it skips. Make
+                    // the skip visible (was a silent continue) so missing mappings
+                    // are diagnosable instead of silently dropping relay output.
+                    tracing::warn!(
+                        tmux_session_name = %tmux_session_name,
+                        provider = "claude",
+                        "Claude idle relay skipped: no authoritative owner channel for tmux session"
+                    );
                     continue;
                 };
                 if super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get())
@@ -1461,6 +1470,9 @@ fn rehydrate_existing_claude_tui_bindings() {
         let existing_binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
             &tmux_session_name,
         );
+        // #3018: dedupe lookup here is a diagnostic/mirror rehydration hint only
+        // (subordinate to the freshly resolved channel below), never a routing
+        // authority — the authoritative resolver is owner_channel_for_tmux_session.
         let existing_channel =
             crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(&tmux_session_name);
         let fresh_binding = rehydrated_claude_tui_binding_for_tmux_session(&tmux_session_name);
@@ -2010,6 +2022,14 @@ fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                 }
                 let Some(channel_id) = owner_channel_for_tmux_session(&shared, &tmux_session_name)
                 else {
+                    // #3018: registry has no owner channel for this active Codex
+                    // TUI binding — surface the relay skip (was a silent continue)
+                    // so missing mappings are diagnosable.
+                    tracing::warn!(
+                        tmux_session_name = %tmux_session_name,
+                        provider = "codex",
+                        "Codex idle relay skipped: no authoritative owner channel for tmux session"
+                    );
                     continue;
                 };
                 if super::inflight::load_inflight_state(&ProviderKind::Codex, channel_id.get())
@@ -3117,17 +3137,54 @@ fn owner_channel_for_prompt(
     owner_channel_for_tmux_session(shared, &prompt.tmux_session_name)
 }
 
+/// Resolve the owner channel for a tmux session.
+///
+/// #3018: the authoritative `tmux_watchers` registry (which holds the 1:1
+/// `by_tmux_session`/`tmux_session_by_channel`/`owner_channel_by_tmux_session`
+/// invariant) is the SINGLE source of truth. The `tui_prompt_dedupe` cache is a
+/// best-effort, expiry-based mirror only — it must NEVER act as a reverse
+/// authority for resolution, because when the two disagree it produces
+/// wrong-channel routing or silent relay skips at the call sites.
+///
+/// When the registry misses but the dedupe cache still holds a mapping we have
+/// observable drift: we emit an explicit warn and return `None` so the drift is
+/// surfaced rather than silently papered over by routing to the stale mirror.
 fn owner_channel_for_tmux_session(
     shared: &Arc<SharedData>,
     tmux_session_name: &str,
 ) -> Option<ChannelId> {
-    shared
+    let registry_owner = shared
         .tmux_watchers
-        .owner_channel_for_tmux_session(tmux_session_name)
-        .or_else(|| {
-            crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux_session_name)
-                .map(ChannelId::new)
-        })
+        .owner_channel_for_tmux_session(tmux_session_name);
+    let dedupe_owner =
+        crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux_session_name);
+    resolve_owner_channel_authoritatively(tmux_session_name, registry_owner, dedupe_owner)
+}
+
+/// Pure decision core for [`owner_channel_for_tmux_session`], split out so the
+/// registry-as-single-authority and drift-alert behaviour can be unit tested
+/// without constructing a full `SharedData`.
+fn resolve_owner_channel_authoritatively(
+    tmux_session_name: &str,
+    registry_owner: Option<ChannelId>,
+    dedupe_owner: Option<u64>,
+) -> Option<ChannelId> {
+    match (registry_owner, dedupe_owner) {
+        (Some(registry_channel), _) => Some(registry_channel),
+        (None, Some(dedupe_channel)) => {
+            // #3018: registry miss + dedupe mirror hit == observable drift.
+            // Do NOT fall back to the mirror (it is not a reverse authority);
+            // surface the drift so it is visible instead of routing on stale state.
+            tracing::warn!(
+                tmux_session_name = %tmux_session_name,
+                dedupe_channel_id = dedupe_channel,
+                "tmux-session→channel registry miss while dedupe mirror has a mapping; \
+                 treating registry as single authority and dropping (drift alert)"
+            );
+            None
+        }
+        (None, None) => None,
+    }
 }
 
 pub(super) fn format_ssh_direct_prompt_notification(
@@ -3185,6 +3242,53 @@ fn truncate_chars(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #3018: the tmux_watchers registry is the SINGLE authority for
+    // tmux-session→channel resolution. When the registry has a mapping it wins
+    // outright (the dedupe mirror is never consulted as a reverse authority).
+    #[test]
+    fn registry_is_authoritative_for_owner_channel_resolution() {
+        let registry_channel = ChannelId::new(123_000_000_000_000);
+
+        // Registry hit, no mirror.
+        assert_eq!(
+            resolve_owner_channel_authoritatively("tmux-a", Some(registry_channel), None),
+            Some(registry_channel),
+        );
+
+        // Registry hit takes precedence even when the mirror disagrees.
+        assert_eq!(
+            resolve_owner_channel_authoritatively(
+                "tmux-a",
+                Some(registry_channel),
+                Some(999_000_000_000_000),
+            ),
+            Some(registry_channel),
+            "registry must win over a disagreeing dedupe mirror"
+        );
+    }
+
+    // #3018: a registry miss while the dedupe mirror still holds a mapping is
+    // observable drift. The resolver must NOT fall back to the mirror; it
+    // returns None (the warn drift alert is emitted as a side effect).
+    #[test]
+    fn registry_miss_but_dedupe_hit_drops_and_does_not_use_mirror() {
+        assert_eq!(
+            resolve_owner_channel_authoritatively(
+                "tmux-drift",
+                None,
+                Some(456_000_000_000_000),
+            ),
+            None,
+            "dedupe mirror must never act as a reverse routing authority"
+        );
+
+        // Both miss → None.
+        assert_eq!(
+            resolve_owner_channel_authoritatively("tmux-empty", None, None),
+            None,
+        );
+    }
 
     #[test]
     fn formats_ssh_direct_prompt_notification() {

@@ -253,6 +253,15 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding(
     }
 }
 
+/// #3018: DIAGNOSTIC / MIRROR USE ONLY.
+///
+/// This expiry-based cache is NOT the authority for tmux-session→channel
+/// resolution. The authoritative source is the `tmux_watchers` registry
+/// (`SharedData::tmux_watchers`), which holds the 1:1 routing invariant. This
+/// lookup may only be used for best-effort diagnostics / rehydration hints — it
+/// must never be used as a reverse authority to route relays, or drift between
+/// the two sources will silently mis-route. See
+/// `tui_prompt_relay::owner_channel_for_tmux_session`.
 pub fn owner_channel_for_tmux_session(tmux_session_name: &str) -> Option<u64> {
     let tmux_session_name = tmux_session_name.trim();
     if tmux_session_name.is_empty() {
