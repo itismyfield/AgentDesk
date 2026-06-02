@@ -731,7 +731,12 @@ async fn do_finalize(
         // (E) optional deferred queue kickoff (watcher path), gated exactly as
         //     `finish_restored_watcher_active_turn` did.
         if ctx.kickoff_queue && finish.mailbox_online && has_pending_after_voice {
-            super::schedule_deferred_idle_queue_kickoff(
+            // #3005: idle has just been confirmed on this finalize, so let the
+            // first kickoff attempt run immediately (skipping the 2s pre-sleep)
+            // instead of waiting the full deferred-drain INITIAL_DELAY before a
+            // queued follow-up can start. Subsequent retries keep the existing
+            // 2s cadence (e.g. if the hosted TUI is still transiently Busy).
+            super::schedule_deferred_idle_queue_kickoff_immediate(
                 shared.clone(),
                 provider.clone(),
                 channel_id,
