@@ -355,6 +355,11 @@
       "path": "migrations/postgres/0068_core_status_constraints.sql",
       "sha256": "be3ec7a7e55ed066599f34a6c08ae3e11c7ad69490e758df04faf6f060a35b38",
       "version": 68
+    },
+    {
+      "path": "migrations/postgres/0069_routine_run_owned_session.sql",
+      "sha256": "7ef682d8903faf472d9e3d0a93401617f189df77cd2d78848d2f8cd13c68313b",
+      "version": 69
     }
   ],
   "version": 1

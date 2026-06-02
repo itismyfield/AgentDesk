@@ -412,6 +412,36 @@ pub struct RecoveredRoutineRun {
     pub script_ref: String,
     pub name: String,
     pub discord_thread_id: Option<String>,
+    /// Routine execution strategy (`fresh` | `persistent`). Only `fresh` runs
+    /// own a throwaway session that boot recovery should reap (#3022).
+    pub execution_strategy: String,
+    /// The ownership token of the session this run created, if it started an
+    /// agent turn (#3022). This is a full `session_key` (`host:<tmux>`) when the
+    /// session row was resolvable at turn-start, or a bare tmux name otherwise.
+    /// `None` means the run owns nothing to reap (it never started a turn, or
+    /// predates ownership tracking), so recovery leaves all sessions alone.
+    pub owned_tmux_session: Option<String>,
+}
+
+impl RecoveredRoutineRun {
+    /// The ownership token recovery must reap for this interrupted run, or
+    /// `None` if the run owns nothing reapable.
+    ///
+    /// Positive ownership proof is required (`owned_tmux_session` set) before
+    /// any teardown, so an interrupted run can never tear down a session it did
+    /// not create. The strategy is re-checked defensively: only `fresh` runs
+    /// create throwaway sessions, and a persistent routine's session must
+    /// survive a restart. The token is trimmed and empty tokens are treated as
+    /// "owns nothing" so a blank legacy value cannot resolve to a wildcard.
+    pub fn boot_recovery_owned_session(&self) -> Option<&str> {
+        if self.execution_strategy != "fresh" {
+            return None;
+        }
+        self.owned_tmux_session
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -653,6 +683,43 @@ impl RoutineStore {
         .await
         .map_err(|e| anyhow!("check run agent turn {run_id}: {e}"))?;
         Ok(matches!(turn_id, Some(Some(_))))
+    }
+
+    /// Returns `true` when the routine has another `running` run besides the
+    /// given (just-interrupted) run (#3022).
+    ///
+    /// The fresh-session reap runs only from boot recovery, before the routine
+    /// tick loop starts, so a single instance has no concurrent claimer. This
+    /// query is the defence-in-depth guard for a co-booting second instance
+    /// whose tick loop is already claiming: because a fresh routine's tmux
+    /// session name is deterministic for its log thread, a replacement run would
+    /// reuse the same name on the same host, so reaping "the recovered run's
+    /// owned session" could force-kill that live replacement turn. The reap is
+    /// therefore skipped whenever another run for the routine is currently
+    /// `running` — that run owns the deterministic session now, and the stale
+    /// run's leftover (if any) is harmlessly replaced rather than killed.
+    pub async fn routine_has_other_running_run(
+        &self,
+        routine_id: &str,
+        excluded_run_id: &str,
+    ) -> Result<bool> {
+        let exists: Option<bool> = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM routine_runs
+                WHERE routine_id = $1
+                  AND id <> $2
+                  AND status = 'running'
+            )
+            "#,
+        )
+        .bind(routine_id)
+        .bind(excluded_run_id)
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|e| anyhow!("check other running run for routine {routine_id}: {e}"))?;
+        Ok(exists.unwrap_or(false))
     }
 
     pub async fn list_running_agent_runs(&self, limit: u32) -> Result<Vec<RunningAgentRoutineRun>> {
@@ -1864,6 +1931,42 @@ impl RoutineStore {
         Ok(result.rows_affected() == 1)
     }
 
+    /// Records the concrete tmux session a fresh-strategy run owns (#3022).
+    ///
+    /// Called once the headless agent turn has been started and its backing
+    /// session is up, so the run row carries positive, run-specific ownership
+    /// proof. Boot recovery uses this to reap the exact orphaned fresh session
+    /// after a dcserver restart, instead of guessing the "latest session in the
+    /// routine log thread" — which after a restart can no longer be attributed
+    /// to the run, or could match an unrelated session sharing the thread.
+    ///
+    /// Guarded on `status = 'running'` so a run that already finished (and was
+    /// torn down) is not re-stamped; the in-line completion path tears the
+    /// session down itself, so a late ownership stamp would only be a harmless
+    /// dangling name. Returns `true` when the running run row was updated.
+    pub async fn set_run_owned_tmux_session(
+        &self,
+        run_id: &str,
+        owned_tmux_session: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE routine_runs
+            SET owned_tmux_session = $2,
+                updated_at = NOW()
+            WHERE id = $1
+              AND status = 'running'
+            "#,
+        )
+        .bind(run_id)
+        .bind(owned_tmux_session)
+        .execute(&*self.pool)
+        .await
+        .map_err(|e| anyhow!("record routine run owned session {run_id}: {e}"))?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
     pub async fn complete_agent_run(
         &self,
         run_id: &str,
@@ -2320,14 +2423,16 @@ impl RoutineStore {
                   AND rr.status = 'running'
                   AND rr.lease_expires_at IS NOT NULL
                   AND rr.lease_expires_at < NOW()
-                RETURNING rr.id, rr.routine_id
+                RETURNING rr.id, rr.routine_id, rr.owned_tmux_session
             )
             SELECT closed.id AS run_id,
                    r.id AS routine_id,
                    r.agent_id,
                    r.script_ref,
                    r.name,
-                   r.discord_thread_id
+                   r.discord_thread_id,
+                   r.execution_strategy,
+                   closed.owned_tmux_session
             FROM closed
             JOIN routines r ON r.id = closed.routine_id
             "#,
@@ -3265,6 +3370,76 @@ mod tests {
         assert!(
             evidence_ref.starts_with("routine_runs:"),
             "evidence_ref must be prefixed with 'routine_runs:'"
+        );
+    }
+
+    fn recovered_run(
+        execution_strategy: &str,
+        owned_tmux_session: Option<&str>,
+    ) -> super::RecoveredRoutineRun {
+        super::RecoveredRoutineRun {
+            run_id: "run-1".to_string(),
+            routine_id: "routine-1".to_string(),
+            agent_id: Some("agent-1".to_string()),
+            script_ref: "monitoring/x.js".to_string(),
+            name: "Routine".to_string(),
+            discord_thread_id: Some("123".to_string()),
+            execution_strategy: execution_strategy.to_string(),
+            owned_tmux_session: owned_tmux_session.map(ToOwned::to_owned),
+        }
+    }
+
+    #[test]
+    fn boot_recovery_reaps_only_fresh_runs_with_owned_session() {
+        // #3022: positive ownership proof targets the exact orphaned session.
+        assert_eq!(
+            recovered_run("fresh", Some("AgentDesk-claude-routine-x"))
+                .boot_recovery_owned_session(),
+            Some("AgentDesk-claude-routine-x")
+        );
+    }
+
+    #[test]
+    fn boot_recovery_skips_run_without_owned_session() {
+        // A fresh run that never started an agent turn (or predates ownership
+        // tracking) owns nothing reapable — leave every session alone.
+        assert_eq!(
+            recovered_run("fresh", None).boot_recovery_owned_session(),
+            None
+        );
+    }
+
+    #[test]
+    fn boot_recovery_never_reaps_persistent_run() {
+        // A persistent routine's session must survive a restart, even if a
+        // stale owned-session value somehow lingered on the row.
+        assert_eq!(
+            recovered_run("persistent", Some("AgentDesk-claude-persistent"))
+                .boot_recovery_owned_session(),
+            None
+        );
+    }
+
+    #[test]
+    fn boot_recovery_treats_blank_owned_session_as_nothing() {
+        // A blank/whitespace owned-session must not resolve to a wildcard that
+        // could match an unrelated session; it means "owns nothing".
+        assert_eq!(
+            recovered_run("fresh", Some("   ")).boot_recovery_owned_session(),
+            None
+        );
+        assert_eq!(
+            recovered_run("fresh", Some("")).boot_recovery_owned_session(),
+            None
+        );
+    }
+
+    #[test]
+    fn boot_recovery_trims_owned_session_name() {
+        assert_eq!(
+            recovered_run("fresh", Some("  AgentDesk-claude-routine-x  "))
+                .boot_recovery_owned_session(),
+            Some("AgentDesk-claude-routine-x")
         );
     }
 }

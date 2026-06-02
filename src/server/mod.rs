@@ -3958,6 +3958,13 @@ async fn routine_runtime_loop(
     match store.recover_stale_running_runs().await {
         Ok(recovered) if !recovered.is_empty() => {
             for run in &recovered {
+                // #3022: reap the orphaned fresh session the interrupted run
+                // owned (positive ownership proof required) before logging, so a
+                // dcserver restart no longer leaves a stranded fresh session to
+                // be later misreported as an abrupt "session ended".
+                agent_executor
+                    .teardown_recovered_fresh_session(&store, run)
+                    .await;
                 discord_logger.log_recovery(&store, run).await;
             }
             tracing::info!(
@@ -3975,6 +3982,15 @@ async fn routine_runtime_loop(
         match store.recover_stale_running_runs().await {
             Ok(recovered) if !recovered.is_empty() => {
                 for run in &recovered {
+                    // #3022: deliberately NO fresh-session reap here. Periodic
+                    // recovery runs concurrently with claims/run-now, so the
+                    // routine can be re-claimed and a replacement fresh run can
+                    // create a new session under the same deterministic tmux
+                    // name before any reap completes — racing the reap against a
+                    // live turn. The reap is therefore confined to boot recovery
+                    // (above), which runs before the tick loop with no concurrent
+                    // claimer. An expired-lease orphan that slips through here is
+                    // still collected by the idle-kill backstop.
                     discord_logger.log_recovery(&store, run).await;
                 }
                 tracing::info!(
