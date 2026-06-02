@@ -605,10 +605,15 @@ pub fn fetch_pr_view(repo: &str, pr_number: i64) -> Result<PrView, String> {
 /// Fetch only the head SHA + state of a PR. Used by the cache to cheaply
 /// validate freshness — if the SHA matches the cached entry we can serve a
 /// stale body without paying for the full payload.
+// reason: pub gh-integration probe (PR head/state) wired by the runtime-gated
+// PR-cache freshness path, not the default lib/test build. See #3034.
+#[allow(dead_code)]
 pub fn fetch_pr_head_state(repo: &str, pr_number: i64) -> Result<(Option<String>, String), String> {
     fetch_pr_head_state_with(adapter(), repo, pr_number)
 }
 
+// reason: private impl of the runtime-gated fetch_pr_head_state probe above. See #3034.
+#[allow(dead_code)]
 fn fetch_pr_head_state_with(
     adapter: &dyn GitHubAdapter,
     repo: &str,
@@ -689,7 +694,10 @@ pub fn list_repos(db: &Db) -> Result<Vec<RepoRow>, String> {
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+// reason: production-build twin of the legacy-sqlite-tests list_repos; the live
+// path is list_repos_pg, this stub keeps the symbol present for non-test builds. See #3034 (M2 dead-twin).
 #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
+#[allow(dead_code)]
 pub fn list_repos(_db: &Db) -> Result<Vec<RepoRow>, String> {
     Err("sqlite github repo registry is unavailable in production".to_string())
 }
@@ -753,7 +761,10 @@ pub fn register_repo(db: &Db, repo_id: &str) -> Result<RepoRow, String> {
     Ok(row)
 }
 
+// reason: production-build twin of the legacy-sqlite-tests register_repo; the live
+// path is db::postgres::register_repo, this stub keeps the symbol present for non-test builds. See #3034 (M2 dead-twin).
 #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
+#[allow(dead_code)]
 pub fn register_repo(_db: &Db, repo_id: &str) -> Result<RepoRow, String> {
     Err(format!(
         "sqlite github repo registry is unavailable in production for {repo_id}"

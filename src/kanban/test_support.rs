@@ -207,7 +207,9 @@ impl Drop for EnvVarGuard {
     }
 }
 
+// reason: test-support helper used by integration_tests; only that target invokes it. See #3034.
 #[cfg(unix)]
+#[allow(dead_code)]
 pub(crate) fn write_executable_script(path: &std::path::Path, contents: &str) {
     use std::os::unix::fs::PermissionsExt;
 
@@ -412,32 +414,6 @@ pub(crate) fn seed_pipeline_stages(db: &Db, repo_id: &str) -> (i64, i64) {
     .unwrap();
     let stage2 = conn.last_insert_rowid();
     (stage1, stage2)
-}
-
-pub(crate) fn seed_auto_queue_run(db: &Db, agent_id: &str) -> (String, String, String) {
-    ensure_auto_queue_tables(db);
-    let conn = db.lock().unwrap();
-    let run_id = "run-1";
-    let entry_a = "entry-a";
-    let entry_b = "entry-b";
-    conn.execute(
-        "INSERT INTO auto_queue_runs (id, status, agent_id, created_at) VALUES (?1, 'active', ?2, datetime('now'))",
-        sqlite_test::params![run_id, agent_id],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank)
-         VALUES (?1, ?2, 'card-q1', ?3, 'dispatched', 1)",
-        sqlite_test::params![entry_a, run_id, agent_id],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank)
-         VALUES (?1, ?2, 'card-q2', ?3, 'pending', 2)",
-        sqlite_test::params![entry_b, run_id, agent_id],
-    )
-    .unwrap();
-    (run_id.to_string(), entry_a.to_string(), entry_b.to_string())
 }
 
 pub(crate) async fn seed_auto_queue_run_pg(

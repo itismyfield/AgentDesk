@@ -58,6 +58,8 @@ pub(super) fn fire_dynamic_hooks(
 ///
 /// Hooks cannot re-enter the engine, so transition requests and dispatch
 /// creations are accumulated for post-hook replay.
+// reason: pub kanban hook side-effect drainer; lib-build callers are cfg/test-gated. See #3034.
+#[allow(dead_code)]
 pub fn drain_hook_side_effects(db: &Db, engine: &PolicyEngine) {
     drain_hook_side_effects_with_backends(Some(db), engine);
 }
@@ -90,6 +92,8 @@ pub fn drain_hook_side_effects_with_backends(db: Option<&Db>, engine: &PolicyEng
 /// Looks up the `events` section of the effective pipeline and fires each
 /// hook name via `try_fire_hook_by_name`. Falls back to firing the default
 /// hook name if no pipeline config or no event binding is found.
+// reason: pub kanban event-hook firer used by dispatched_sessions; lib-build callers are cfg/test-gated. See #3034.
+#[allow(dead_code)]
 pub fn fire_event_hooks(
     db: &Db,
     engine: &PolicyEngine,
@@ -219,6 +223,8 @@ fn resolve_effective_pipeline_for_hooks(
     }
 }
 
+// reason: pub kanban state-hook firer used by dispatch_create; lib-build callers are cfg/test-gated. See #3034.
+#[allow(dead_code)]
 pub fn fire_state_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from: &str, to: &str) {
     fire_state_hooks_with_backends(Some(db), engine, card_id, from, to);
 }
@@ -244,6 +250,8 @@ pub fn fire_state_hooks_with_backends(
 ///
 /// Used when re-entering the same state (e.g., restarting review from awaiting_dod)
 /// where `fire_state_hooks` would no-op because from == to.
+// reason: pub kanban enter-hook firer; lib-build callers are cfg/test-gated. See #3034.
+#[allow(dead_code)]
 pub fn fire_enter_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, state: &str) {
     fire_enter_hooks_with_backends(Some(db), engine, card_id, state);
 }
@@ -273,6 +281,8 @@ pub fn fire_enter_hooks_with_backends(
 
 /// Fire hooks for a status transition that already happened in the DB.
 /// Use this when the DB UPDATE was done elsewhere (e.g., update_card with mixed fields).
+// reason: pub kanban transition-hook firer; lib-build callers are cfg/test-gated. See #3034.
+#[allow(dead_code)]
 pub fn fire_transition_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from: &str, to: &str) {
     fire_transition_hooks_with_backends(Some(db), engine.pg_pool(), engine, card_id, from, to);
 }

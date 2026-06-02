@@ -760,7 +760,10 @@ pub(crate) fn commit_belongs_to_card_issue(
     commit_subject_references_issue(&subject, issue_number)
 }
 
+// reason: production cfg-arm of the commit/card-issue scope check; live callers
+// and the _pg twin are cfg/test-gated in the default lib build. See #3034.
 #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
+#[allow(dead_code)]
 pub(crate) fn commit_belongs_to_card_issue(
     _db: &Db,
     card_id: &str,
@@ -860,7 +863,10 @@ pub(crate) fn commit_belongs_to_card_issue_tri(
     }
 }
 
+// reason: production cfg-arm of the tri-state commit/card-issue scope check;
+// live callers and the _pg_tri twin are cfg/test-gated in the lib build. See #3034.
 #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
+#[allow(dead_code)]
 pub(crate) fn commit_belongs_to_card_issue_tri(
     _db: &Db,
     card_id: &str,
@@ -944,6 +950,9 @@ fn worktree_path_belongs_to_repo(worktree_path: &str, repo_dir: &str) -> bool {
 /// reviewer sees is the descendant, not the reviewed commit. Exact HEAD
 /// match is the only way to guarantee the on-disk state matches the
 /// reviewed commit.
+// reason: worktree HEAD validation helper for the review-target resolver cluster;
+// callers are cfg/test-gated in the default lib build. See #3034.
+#[allow(dead_code)]
 fn worktree_head_matches_commit(dir: &str, commit_sha: &str) -> bool {
     let Ok(output) = GitCommand::new()
         .repo(dir)
@@ -966,6 +975,9 @@ fn worktree_head_matches_commit(dir: &str, commit_sha: &str) -> bool {
 /// when the underlying git invocation or the join handle fails. The
 /// failure case is logged at warn level for observability so it does not
 /// silently look like "clean worktree" without any trace.
+// reason: async clean-worktree probe for the review-target resolver paths;
+// invoked from cfg/test-gated resolver flows in the default lib build. See #3034.
+#[allow(dead_code)]
 async fn dirty_tracked_change_paths_async(path: &str) -> Vec<String> {
     let path_owned = path.to_string();
     let join_result = tokio::task::spawn_blocking(move || {
@@ -1106,6 +1118,9 @@ async fn probe_clean_exact_review_worktree(
     probe
 }
 
+// reason: review-worktree cleanliness resolver; callers are cfg/test-gated in
+// the default lib build. See #3034.
+#[allow(dead_code)]
 async fn clean_exact_review_worktree_path(
     card_id: &str,
     source: &str,
@@ -1502,10 +1517,16 @@ fn latest_completed_work_dispatch_target(
         })
 }
 
+// reason: work-dispatch classifier shared with the outbox route; lib-build
+// callers are cfg/test-gated. See #3034.
+#[allow(dead_code)]
 fn is_work_dispatch_type(dispatch_type: Option<&str>) -> bool {
     matches!(dispatch_type, Some("implementation") | Some("rework"))
 }
 
+// reason: work-completion-evidence predicate for the dispatch-result gate;
+// lib-build callers are cfg/test-gated. See #3034.
+#[allow(dead_code)]
 fn result_has_work_completion_evidence(result: &serde_json::Value) -> bool {
     json_string_field(result, "completed_commit").is_some()
         || json_string_field(result, "assistant_message").is_some()

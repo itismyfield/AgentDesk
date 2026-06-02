@@ -117,11 +117,6 @@ pub(crate) fn post_json_value(path: &str, body: Value) -> Result<Value, String> 
     post_json(path, Some(body))
 }
 
-pub(crate) fn patch_json_value(path: &str, body: Value) -> Result<Value, String> {
-    let body_string = body.to_string();
-    request_json("PATCH", path, Some(&body_string))
-}
-
 fn parse_github_repo_from_remote(remote: &str) -> Option<String> {
     crate::services::platform::shell::parse_github_repo_from_remote(remote)
 }
@@ -1936,26 +1931,6 @@ pub fn cmd_dispatch(
             obj.insert("dispatch".to_string(), dispatch);
         }
     }
-    print_json(&value);
-    Ok(())
-}
-
-/// `agentdesk dispatch retry <card_id>`
-pub fn cmd_dispatch_retry(card_id: &str) -> Result<(), String> {
-    let value = post_json(
-        &format!("/api/kanban-cards/{card_id}/retry"),
-        Some(serde_json::json!({})),
-    )?;
-    print_json(&value);
-    Ok(())
-}
-
-/// `agentdesk dispatch redispatch <card_id>`
-pub fn cmd_dispatch_redispatch(card_id: &str) -> Result<(), String> {
-    let value = post_json(
-        &format!("/api/kanban-cards/{card_id}/redispatch"),
-        Some(serde_json::json!({})),
-    )?;
     print_json(&value);
     Ok(())
 }

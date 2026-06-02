@@ -612,6 +612,9 @@ pub async fn transition_status_with_opts_and_allowed_cleanup_pg_only(
     .await
 }
 
+// reason: pub pg transition wrapper exposing cleanup counts; operational entry
+// point not wired by the default lib build. See #3034.
+#[allow(dead_code)]
 pub async fn transition_status_with_opts_and_allowed_cleanup_pg(
     db: Option<&Db>,
     pg_pool: &sqlx::PgPool,

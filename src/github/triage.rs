@@ -159,17 +159,6 @@ enum TriageRoutingOutcome {
     UnknownAgent,
 }
 
-/// Find GitHub issues that don't have kanban cards yet and create backlog cards for them.
-///
-/// Returns the number of new cards created.
-pub fn triage_new_issues(
-    _db: &crate::db::Db,
-    _repo: &str,
-    _issues: &[GhIssue],
-) -> Result<usize, String> {
-    Err("postgres backend required for GitHub issue triage; use triage_new_issues_pg".to_string())
-}
-
 /// PostgreSQL variant of issue auto-triage.
 pub async fn triage_new_issues_pg(
     pool: &PgPool,

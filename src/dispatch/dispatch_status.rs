@@ -907,6 +907,8 @@ async fn set_dispatch_status_on_pg_with_sync(
     Ok(changed)
 }
 
+// reason: Postgres dispatch-status writer; lib-build callers are cfg/test-gated. See #3034.
+#[allow(dead_code)]
 async fn set_dispatch_status_on_pg(
     pool: &PgPool,
     dispatch_id: &str,
@@ -1446,6 +1448,9 @@ pub(crate) fn set_dispatch_status_on_conn(
 ///   2. OnDispatchCompleted hook firing  (pipeline event hooks)
 ///   3. Side-effect draining  (intents, transitions, follow-up dispatches)
 ///   4. Safety-net re-fire of OnReviewEnter (#139)
+// reason: pub dispatch-completion authority (#143) re-exported via dispatch::*;
+// lib-build callers are recovery/turn_bridge + cfg/test-gated paths. See #3034.
+#[allow(dead_code)]
 pub fn finalize_dispatch(
     db: &Db,
     engine: &PolicyEngine,
@@ -1484,6 +1489,9 @@ pub fn finalize_dispatch_with_backends(
 /// Used by specialized paths (review_verdict, pm-decision) that fire their own
 /// domain-specific hooks instead of the generic OnDispatchCompleted.
 /// Returns the number of rows updated (0 = already completed/cancelled/not found).
+// reason: pub pg-first completion API for review_verdict/pm-decision paths,
+// re-exported via dispatch::*; lib-build callers are cfg/test-gated. See #3034.
+#[allow(dead_code)]
 pub fn mark_dispatch_completed_pg_first(
     db: &Db,
     pg_pool: Option<&PgPool>,
@@ -1502,6 +1510,9 @@ pub fn mark_dispatch_completed_pg_first(
     )
 }
 
+// reason: pub pg-first status setter re-exported via dispatch::*; lib-build
+// callers are cfg/test-gated. See #3034.
+#[allow(dead_code)]
 pub fn set_dispatch_status_pg_first(
     db: &Db,
     pg_pool: Option<&PgPool>,
@@ -1644,60 +1655,6 @@ fn set_dispatch_status_with_backends_and_sync(
     })
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn set_dispatch_status_sqlite_for_tests(
-    db: &Db,
-    dispatch_id: &str,
-    to_status: &str,
-    result: Option<&serde_json::Value>,
-    allowed_from: Option<&[&str]>,
-    touch_completed_at: bool,
-) -> Result<usize> {
-    let conn = db
-        .separate_conn()
-        .map_err(|error| anyhow::anyhow!("open sqlite dispatch status connection: {error}"))?;
-    let current_status = conn
-        .query_row(
-            "SELECT status FROM task_dispatches WHERE id = ?1",
-            [dispatch_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    let Some(current_status) = current_status else {
-        return Ok(0);
-    };
-    if let Some(allowed_from) = allowed_from
-        && !allowed_from.contains(&current_status.as_str())
-    {
-        return Ok(0);
-    }
-
-    let result_json = result.map(serde_json::Value::to_string);
-    let changed = if touch_completed_at {
-        conn.execute(
-            "UPDATE task_dispatches
-             SET status = ?1,
-                 result = COALESCE(?2, result),
-                 updated_at = datetime('now'),
-                 last_stuck_alert_at = NULL,
-                 completed_at = CASE WHEN ?1 = 'completed' THEN datetime('now') ELSE completed_at END
-             WHERE id = ?3",
-            sqlite_test::params![to_status, result_json, dispatch_id],
-        )?
-    } else {
-        conn.execute(
-            "UPDATE task_dispatches
-             SET status = ?1,
-                 result = COALESCE(?2, result),
-                 updated_at = datetime('now'),
-                 last_stuck_alert_at = NULL
-             WHERE id = ?3",
-            sqlite_test::params![to_status, result_json, dispatch_id],
-        )?
-    };
-    Ok(changed)
-}
-
 pub(crate) fn set_dispatch_status_without_queue_sync_with_backends(
     db: Option<&Db>,
     pg_pool: Option<&PgPool>,
@@ -1743,6 +1700,9 @@ pub(crate) fn set_dispatch_status_without_queue_sync_on_conn(
     )
 }
 
+// reason: pub pg-first dispatch-row loader re-exported via dispatch::*; lib-build
+// callers are cfg/test-gated. See #3034.
+#[allow(dead_code)]
 pub fn load_dispatch_row_pg_first(
     db: &Db,
     pg_pool: Option<&PgPool>,

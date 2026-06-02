@@ -92,9 +92,9 @@
 - canonical_modules: `src/dispatch/{mod,dispatch_context,dispatch_create,dispatch_status}.rs`.
 - legacy_modules: none.
 - do_not_edit_without_migration_plan (giant-file, awaiting split issue):
-  - `src/dispatch/dispatch_context.rs` (5237 lines).
+  - `src/dispatch/dispatch_context.rs` (5258 lines).
   - `src/dispatch/dispatch_create.rs` (3639 lines).
-  - `src/dispatch/dispatch_status.rs` (2169 lines).
+  - `src/dispatch/dispatch_status.rs` (2129 lines).
   - `src/services/dispatches/outbox_route.rs` (1118 lines; route extraction
     orchestration surface from #1722, split before adding non-bugfix behavior).
   - `src/services/dispatches/discord_delivery/orchestration.rs` (1697 lines;
@@ -234,7 +234,7 @@
 - do_not_edit_without_migration_plan (giant-file):
   - `src/cli/migrate.rs` is the retired postgres-cutover facade (now below the
     giant-file threshold; bugfix only).
-  - `src/cli/doctor/orchestrator.rs` (4430 lines).
+  - `src/cli/doctor/orchestrator.rs` (4385 lines).
   - `src/cli/migrate/apply.rs` (3146 lines).
   - `src/cli/migrate/{plan.rs (1513), source.rs (1612)}`.
   - `src/cli/{init.rs (1445), client.rs (2955), direct.rs (1781),

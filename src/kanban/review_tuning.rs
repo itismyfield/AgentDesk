@@ -6,6 +6,8 @@ use sqlx::Row as SqlxRow;
 /// #119: When a card reaches done after a review pass verdict, record a true_negative
 /// tuning outcome. This confirms the review was correct in not finding issues.
 /// Returns true if a TN was actually inserted.
+// reason: review-tuning TN recorder (#119) called from hooks; lib-build callers are cfg/test-gated. See #3034.
+#[allow(dead_code)]
 pub(super) fn record_true_negative_if_pass(
     db: &Db,
     pg_pool: Option<&sqlx::PgPool>,

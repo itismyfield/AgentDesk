@@ -83,9 +83,6 @@
 )]
 
 mod bootstrap;
-// CLI subcommands include operational and migration surfaces that are not all
-// exercised by every binary/test target yet.
-#[allow(dead_code)]
 mod cli;
 // Legacy path shims remain available while runtime-layout migrations settle.
 pub(crate) mod compat;
@@ -97,9 +94,6 @@ pub(crate) mod credential;
 // wired from selected API/maintenance paths.
 #[allow(dead_code)]
 mod db;
-// Dispatch orchestration spans direct, review, auto-queue, and test-support
-// paths that are not all active in each target.
-#[allow(dead_code)]
 mod dispatch;
 // Policy-engine loader/runtime helpers cover hot-reload and test-only entry
 // points outside the default server launch path.
@@ -107,13 +101,7 @@ mod engine;
 // Error-code helpers are kept for API response boundaries that only some
 // routes currently surface.
 mod error;
-// GitHub sync/triage helpers are optional integration surfaces behind runtime
-// configuration.
-#[allow(dead_code)]
 mod github;
-// Kanban transition helpers include hook and cleanup entry points selected by
-// policy/runtime flows.
-#[allow(dead_code)]
 pub(crate) mod kanban;
 mod launch;
 mod logging;

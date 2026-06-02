@@ -7,8 +7,6 @@ use super::contract::{DoctorProfile, FixSafety, RunContext, SecurityExposure, Se
 use super::{health, mailbox};
 use crate::cli::dcserver;
 use crate::config;
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use crate::db::{open_write_connection, schema};
 use crate::services::operator_connectors::{
     OptionalConnectorState, OptionalConnectorStatus, optional_connector_statuses,
 };
@@ -481,13 +479,6 @@ fn provider_runtime_guidance(provider: &ProviderKind) -> String {
     let log_hint = dcserver_log_hint();
     format!(
         "{provider_name} CLI 설치/PATH와 서비스 런타임 PATH를 확인하고, 연결 문제가 있으면 {log_hint} 로그와 provider 인증 상태를 점검하세요."
-    )
-}
-
-fn provider_unused_guidance(provider: &ProviderKind) -> String {
-    format!(
-        "{} CLI는 설치되어 있지만 현재 config/health 기준 활성 provider가 아닙니다. 의도한 구성이면 무시해도 됩니다.",
-        provider.as_str()
     )
 }
 
@@ -4068,42 +4059,6 @@ fn check_github_repo_registry(cfg: &config::Config) -> Check {
     .with_security_exposure(SecurityExposure::OperationalMetadata)
     .with_path(db_path.display().to_string())
     .with_expected_actual("Postgres source-of-truth active", "SQLite registry check retired");
-}
-
-fn normalized_config_repo_ids(cfg: &config::Config) -> (BTreeSet<String>, Vec<String>) {
-    let mut valid = BTreeSet::new();
-    let mut invalid = BTreeSet::new();
-
-    for raw_repo_id in &cfg.github.repos {
-        let repo_id = raw_repo_id.trim();
-        if repo_id.is_empty() {
-            continue;
-        }
-        if repo_id.contains('/') {
-            valid.insert(repo_id.to_string());
-        } else {
-            invalid.insert(repo_id.to_string());
-        }
-    }
-
-    (valid, invalid.into_iter().collect())
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn open_registered_github_repo_ids(db_path: &std::path::Path) -> Result<BTreeSet<String>, String> {
-    let conn = open_write_connection(db_path).map_err(|e| format!("cannot open: {e}"))?;
-    let mut stmt = conn
-        .prepare("SELECT id FROM github_repos ORDER BY id")
-        .map_err(|e| format!("prepare: {e}"))?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|e| format!("query: {e}"))?;
-
-    let mut repos = BTreeSet::new();
-    for row in rows {
-        repos.insert(row.map_err(|e| format!("row: {e}"))?);
-    }
-    Ok(repos)
 }
 
 const DISK_WARN_BYTES: u64 = 30 * 1024 * 1024 * 1024;
