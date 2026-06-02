@@ -365,13 +365,7 @@ pub(in crate::services::discord) async fn current_working_dir(
         return Some(path);
     }
 
-    let sqlite_settings_db = if shared.pg_pool.is_some() {
-        None
-    } else {
-        None::<&crate::db::Db>
-    };
     load_last_session_path(
-        sqlite_settings_db,
         shared.pg_pool.as_ref(),
         &shared.token_hash,
         channel_id.get(),

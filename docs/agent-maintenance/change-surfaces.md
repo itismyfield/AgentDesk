@@ -116,12 +116,12 @@
   parsing), `src/services/discord/inflight.rs` (state file contract).
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/services/discord/watchers/lifecycle.rs` (2456 lines — canonical
+  - `src/services/discord/watchers/lifecycle.rs` (2445 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior).
   - `src/services/discord/tmux.rs` (2206 lines after #2558 dead-code sweep;
     failover guard; still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (6864 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (6861 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh; split loop helpers
@@ -135,7 +135,7 @@
   - `src/services/tui_prompt_dedupe.rs` (1029 lines; shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
     outside an extraction plan).
-  - `src/services/discord/recovery_engine.rs` (3958 lines).
+  - `src/services/discord/recovery_engine.rs` (3944 lines).
   - `src/services/discord/health.rs` (2817 lines after #1879 snapshot/mailbox
     extraction).
   - `src/services/discord/health/recovery.rs` (2425 lines; health recovery
@@ -157,7 +157,7 @@
   - `src/services/discord/prompt_builder/` (directory, refactored).
   - `src/services/discord/runtime_bootstrap.rs` (2564 lines after #2558
     thread-session GC loopback shim cleanup).
-  - `src/services/discord/session_runtime.rs` (1425 lines).
+  - `src/services/discord/session_runtime.rs` (1418 lines).
   - `src/services/discord/voice_barge_in.rs` (4653 lines; voice STT/TTS,
     lobby routing, progress mirroring, and barge-in orchestration surface;
     tracked decompose target — see `giant-file-registry.md` (owner
@@ -165,7 +165,7 @@
   - `src/voice/receiver.rs` (1046 lines; voice receive pipeline, utterance
     segmentation, artifact cleanup, and retention policy surface; split before
     adding non-bugfix behavior).
-  - `src/services/discord/commands/config.rs` (1900 lines).
+  - `src/services/discord/commands/config.rs` (1894 lines).
   - `src/services/discord/{commands/text_commands.rs, commands/diagnostics.rs,
     discord_config_audit.rs, router/intake_gate.rs, inflight.rs}`
     (all 1000+ production lines).
@@ -209,7 +209,7 @@
   - `src/server/routes/docs.rs` (5877 lines).
   - `src/server/routes/escalation.rs` (2344 lines).
   - `src/server/routes/meetings.rs` (1705 lines).
-  - `src/server/routes/review_verdict/decision_route.rs` (4832 lines).
+  - `src/server/routes/review_verdict/decision_route.rs` (4804 lines).
   - `src/server/routes/{agents,agents_crud,agents_setup,v1,resume,
     dispatches/thread_reuse}.rs` (all 1000+ production lines).
 - active_callsite_coverage: legacy_db helper coverage tracked separately —

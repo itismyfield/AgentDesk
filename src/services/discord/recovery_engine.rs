@@ -3282,13 +3282,7 @@ pub(super) async fn restore_inflight_turns(
                 .map(|(_, ch)| ch)
             });
             {
-                let sqlite_settings_db = if shared.pg_pool.is_some() {
-                    None
-                } else {
-                    None::<&crate::db::Db>
-                };
                 let persisted_session_path = load_last_session_path(
-                    sqlite_settings_db,
                     shared.pg_pool.as_ref(),
                     &shared.token_hash,
                     channel_id.get(),
@@ -3344,7 +3338,6 @@ pub(super) async fn restore_inflight_turns(
                     }
                 };
                 let saved_remote = load_last_remote_profile(
-                    sqlite_settings_db,
                     shared.pg_pool.as_ref(),
                     &shared.token_hash,
                     channel_id.get(),
@@ -3525,13 +3518,7 @@ pub(super) async fn restore_inflight_turns(
             .recovering_channels
             .insert(channel_id, std::time::Instant::now());
 
-        let sqlite_settings_db = if shared.pg_pool.is_some() {
-            None
-        } else {
-            None::<&crate::db::Db>
-        };
         let persisted_session_path = load_last_session_path(
-            sqlite_settings_db,
             shared.pg_pool.as_ref(),
             &shared.token_hash,
             channel_id.get(),
@@ -3586,7 +3573,6 @@ pub(super) async fn restore_inflight_turns(
             }
         };
         let saved_remote = load_last_remote_profile(
-            sqlite_settings_db,
             shared.pg_pool.as_ref(),
             &shared.token_hash,
             channel_id.get(),

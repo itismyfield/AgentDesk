@@ -123,81 +123,46 @@ fn restart_handoff_notice_target(
     RestartHandoffNoticeTarget::Edit(state.current_msg_id)
 }
 
-fn resolve_dispatched_thread_dispatch(
-    sqlite: &crate::db::Db,
-    thread_channel_id: u64,
-) -> Option<String> {
-    let thread_channel_id = thread_channel_id.to_string();
-    let conn = sqlite.read_conn().ok()?;
-
-    conn.query_row(
-        "SELECT id FROM task_dispatches
-         WHERE status = 'dispatched' AND thread_id = ?1
-         ORDER BY datetime(created_at) DESC, rowid DESC
-         LIMIT 1",
-        [thread_channel_id.as_str()],
-        |row| row.get::<_, String>(0),
-    )
-    .ok()
-    .or_else(|| {
-        conn.query_row(
-            "SELECT active_dispatch_id FROM sessions
-             WHERE thread_channel_id = ?1
-               AND status IN ('turn_active', 'working')
-               AND active_dispatch_id IS NOT NULL
-             ORDER BY datetime(COALESCE(last_heartbeat, created_at)) DESC, id DESC
-             LIMIT 1",
-            [thread_channel_id.as_str()],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-    })
-}
-
 pub(super) fn resolve_dispatched_thread_dispatch_from_db(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     thread_channel_id: u64,
 ) -> Option<String> {
-    if let Some(pg_pool) = pg_pool {
-        let thread_channel_id = thread_channel_id.to_string();
-        return crate::utils::async_bridge::block_on_pg_result(
-            pg_pool,
-            move |pool| async move {
-                if let Some(dispatch_id) = sqlx::query_scalar::<_, String>(
-                    "SELECT id FROM task_dispatches
-                     WHERE status = 'dispatched' AND thread_id = $1
-                     ORDER BY created_at DESC, id DESC
-                     LIMIT 1",
-                )
-                .bind(&thread_channel_id)
-                .fetch_optional(&pool)
-                .await
-                .map_err(|error| format!("load pg dispatched thread dispatch: {error}"))?
-                {
-                    return Ok(Some(dispatch_id));
-                }
+    let pg_pool = pg_pool?;
+    let thread_channel_id = thread_channel_id.to_string();
+    crate::utils::async_bridge::block_on_pg_result(
+        pg_pool,
+        move |pool| async move {
+            if let Some(dispatch_id) = sqlx::query_scalar::<_, String>(
+                "SELECT id FROM task_dispatches
+                 WHERE status = 'dispatched' AND thread_id = $1
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT 1",
+            )
+            .bind(&thread_channel_id)
+            .fetch_optional(&pool)
+            .await
+            .map_err(|error| format!("load pg dispatched thread dispatch: {error}"))?
+            {
+                return Ok(Some(dispatch_id));
+            }
 
-                sqlx::query_scalar::<_, String>(
-                    "SELECT active_dispatch_id FROM sessions
-                     WHERE thread_channel_id = $1
-                       AND status IN ('turn_active', 'working')
-                       AND active_dispatch_id IS NOT NULL
-                     ORDER BY COALESCE(last_heartbeat, created_at) DESC, id DESC
-                     LIMIT 1",
-                )
-                .bind(&thread_channel_id)
-                .fetch_optional(&pool)
-                .await
-                .map_err(|error| format!("load pg session dispatch fallback: {error}"))
-            },
-            |message| message,
-        )
-        .ok()
-        .flatten();
-    }
-
-    resolve_dispatched_thread_dispatch(db?, thread_channel_id)
+            sqlx::query_scalar::<_, String>(
+                "SELECT active_dispatch_id FROM sessions
+                 WHERE thread_channel_id = $1
+                   AND status IN ('turn_active', 'working')
+                   AND active_dispatch_id IS NOT NULL
+                 ORDER BY COALESCE(last_heartbeat, created_at) DESC, id DESC
+                 LIMIT 1",
+            )
+            .bind(&thread_channel_id)
+            .fetch_optional(&pool)
+            .await
+            .map_err(|error| format!("load pg session dispatch fallback: {error}"))
+        },
+        |message| message,
+    )
+    .ok()
+    .flatten()
 }
 
 fn build_restart_handoff_session_key(
@@ -584,12 +549,6 @@ mod tests {
         )
     }
 
-    fn fresh_restart_handoff_db() -> (tempfile::TempDir, crate::db::Db) {
-        let temp = tempfile::tempdir().unwrap();
-        let db = crate::db::test_db();
-        (temp, db)
-    }
-
     #[test]
     fn restart_handoff_prefers_exact_metadata_match() {
         let state = sample_inflight_state();
@@ -695,83 +654,5 @@ mod tests {
         assert!(preserve_dispatch_on_watcher_death(Some("phase-gate")));
         assert!(!preserve_dispatch_on_watcher_death(Some("implementation")));
         assert!(!preserve_dispatch_on_watcher_death(None));
-    }
-
-    #[test]
-    fn watcher_dispatch_db_fallback_prefers_dispatched_thread_row() {
-        let (_temp, db) = fresh_restart_handoff_db();
-        let conn = db.lock().unwrap();
-        conn.execute_batch(
-            "
-            DROP TABLE IF EXISTS task_dispatches;
-            DROP TABLE IF EXISTS sessions;
-            CREATE TABLE task_dispatches (
-                id TEXT PRIMARY KEY,
-                status TEXT,
-                thread_id TEXT,
-                created_at TEXT
-            );
-            CREATE TABLE sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                status TEXT,
-                active_dispatch_id TEXT,
-                created_at TEXT,
-                last_heartbeat TEXT,
-                thread_channel_id TEXT
-            );
-            INSERT INTO task_dispatches (id, status, thread_id, created_at)
-            VALUES
-                ('older-dispatch', 'dispatched', '1492091375422930966', '2026-04-11 00:15:42'),
-                ('latest-dispatch', 'dispatched', '1492091375422930966', '2026-04-11 00:15:43');
-            INSERT INTO sessions (status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
-            VALUES ('turn_active', 'session-dispatch', '2026-04-11 00:15:40', '2026-04-11 00:24:21', '1492091375422930966');
-            ",
-        )
-        .unwrap();
-        drop(conn);
-
-        let resolved = super::resolve_dispatched_thread_dispatch_from_db(
-            Some(&db),
-            None,
-            1_492_091_375_422_930_966,
-        );
-        assert_eq!(resolved.as_deref(), Some("latest-dispatch"));
-    }
-
-    #[test]
-    fn watcher_dispatch_db_fallback_uses_session_when_thread_row_missing() {
-        let (_temp, db) = fresh_restart_handoff_db();
-        let conn = db.lock().unwrap();
-        conn.execute_batch(
-            "
-            DROP TABLE IF EXISTS task_dispatches;
-            DROP TABLE IF EXISTS sessions;
-            CREATE TABLE task_dispatches (
-                id TEXT PRIMARY KEY,
-                status TEXT,
-                thread_id TEXT,
-                created_at TEXT
-            );
-            CREATE TABLE sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                status TEXT,
-                active_dispatch_id TEXT,
-                created_at TEXT,
-                last_heartbeat TEXT,
-                thread_channel_id TEXT
-            );
-            INSERT INTO sessions (status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
-            VALUES ('turn_active', 'session-dispatch', '2026-04-11 00:15:40', '2026-04-11 00:24:21', '1492091380045189131');
-            ",
-        )
-        .unwrap();
-        drop(conn);
-
-        let resolved = super::resolve_dispatched_thread_dispatch_from_db(
-            Some(&db),
-            None,
-            1_492_091_380_045_189_131,
-        );
-        assert_eq!(resolved.as_deref(), Some("session-dispatch"));
     }
 }
