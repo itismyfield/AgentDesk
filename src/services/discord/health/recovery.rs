@@ -1840,7 +1840,19 @@ fn leak_recovery_chunk_ledger_path(identity: &LeakRecoveryLedgerIdentity) -> Opt
     })
 }
 
-fn leak_recovery_ledger_matches(
+/// #3031(A) — stable, byte-boundary-INDEPENDENT identity gate.
+///
+/// The durable ledger's idempotency key is the turn coordinate
+/// (`provider/channel_id/current_msg_id/user_msg_id`) plus `byte_start`, NOT the
+/// *whole* response extent. We deliberately drop `byte_end` and the full
+/// `chunk_fingerprints` array from this gate: a late post-terminal assistant
+/// continuation grows `full_response`, which moves `byte_end` and appends chunk
+/// fingerprints. Gating on those would invalidate the entire ledger and reset the
+/// confirmed prefix to 0 (`.unwrap_or(0)`), risking a re-send of already-delivered
+/// chunks. Per-chunk fingerprint equality is enforced separately and only for the
+/// chunks the ledger actually claims as confirmed, so the confirmed prefix stays
+/// immutable (monotonic) as the response grows.
+fn leak_recovery_ledger_stable_identity_matches(
     ledger: &LeakRecoveryChunkLedger,
     identity: &LeakRecoveryLedgerIdentity,
 ) -> bool {
@@ -1850,8 +1862,38 @@ fn leak_recovery_ledger_matches(
         && ledger.current_msg_id == identity.current_msg_id
         && ledger.user_msg_id == identity.user_msg_id
         && ledger.byte_start == identity.byte_start
-        && ledger.byte_end == identity.byte_end
-        && ledger.chunk_fingerprints == identity.chunk_fingerprints
+}
+
+/// #3031(A) — count the confirmed chunk prefix that is still valid against the
+/// (possibly grown) live identity. A confirmed chunk only counts while its
+/// ledger fingerprint still equals the current identity's fingerprint at the same
+/// index; the first divergence (or a chunk index now beyond the live chunk count)
+/// stops the prefix. This makes a longer `full_response` unable to LOWER the
+/// confirmed prefix — appended tail chunks leave the confirmed prefix untouched,
+/// while an actually-rewritten confirmed chunk still fails closed at that index.
+fn leak_recovery_confirmed_prefix_against_identity(
+    ledger: &LeakRecoveryChunkLedger,
+    identity: &LeakRecoveryLedgerIdentity,
+) -> usize {
+    let mut expected = 0usize;
+    for confirmed in &ledger.confirmed_chunks {
+        if confirmed.index != expected || confirmed.message_id == 0 {
+            break;
+        }
+        // The chunk must still exist in the live response and carry the same
+        // fingerprint we recorded when we confirmed delivery. A grown response
+        // keeps these prefix fingerprints byte-identical, so growth never trims
+        // the prefix; a content rewrite at this index does.
+        match (
+            ledger.chunk_fingerprints.get(expected),
+            identity.chunk_fingerprints.get(expected),
+        ) {
+            (Some(recorded), Some(live)) if recorded == live => {}
+            _ => break,
+        }
+        expected += 1;
+    }
+    expected.min(identity.chunk_fingerprints.len())
 }
 
 fn leak_recovery_confirmed_prefix_from_ledger(
@@ -1860,17 +1902,12 @@ fn leak_recovery_confirmed_prefix_from_ledger(
     let path = leak_recovery_chunk_ledger_path(identity)?;
     let content = fs::read_to_string(path).ok()?;
     let ledger: LeakRecoveryChunkLedger = serde_json::from_str(&content).ok()?;
-    if !leak_recovery_ledger_matches(&ledger, identity) {
+    if !leak_recovery_ledger_stable_identity_matches(&ledger, identity) {
         return None;
     }
-    let mut expected = 0usize;
-    for confirmed in &ledger.confirmed_chunks {
-        if confirmed.index != expected || confirmed.message_id == 0 {
-            break;
-        }
-        expected += 1;
-    }
-    Some(expected.min(identity.chunk_fingerprints.len()))
+    Some(leak_recovery_confirmed_prefix_against_identity(
+        &ledger, identity,
+    ))
 }
 
 fn leak_recovery_record_confirmed_chunk(
@@ -1889,9 +1926,15 @@ fn leak_recovery_record_confirmed_chunk(
     let mut confirmed_chunks = Vec::new();
     if let Ok(content) = fs::read_to_string(&path)
         && let Ok(existing) = serde_json::from_str::<LeakRecoveryChunkLedger>(&content)
-        && leak_recovery_ledger_matches(&existing, identity)
+        && leak_recovery_ledger_stable_identity_matches(&existing, identity)
     {
+        // #3031(A): carry forward only the confirmed prefix that is STILL valid
+        // against the current identity. A grown response keeps prefix fingerprints
+        // identical (prefix preserved); a rewritten confirmed chunk trims the prefix
+        // at the divergence so we never claim a stale delivery.
+        let valid_prefix = leak_recovery_confirmed_prefix_against_identity(&existing, identity);
         confirmed_chunks = existing.confirmed_chunks;
+        confirmed_chunks.retain(|chunk| chunk.index < valid_prefix);
     }
 
     confirmed_chunks.retain(|chunk| chunk.index < chunk_index);
@@ -2648,7 +2691,7 @@ mod stall_watchdog_pure_tests {
     }
 
     #[test]
-    fn chunk_ledger_ignores_stale_identity_or_changed_chunks() {
+    fn chunk_ledger_ignores_stale_identity_or_changed_confirmed_chunk() {
         let _guard = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -2660,16 +2703,20 @@ mod stall_watchdog_pure_tests {
         leak_recovery_clear_chunk_ledger(&identity).expect("clear ledger");
         leak_recovery_record_confirmed_chunk(&identity, 0, identity.current_msg_id)
             .expect("record chunk");
+        leak_recovery_record_confirmed_chunk(&identity, 1, 10_001).expect("record tail chunk");
 
+        // #3031(A): a CONFIRMED chunk being rewritten must trim the prefix at the
+        // divergence so we never claim a stale delivery.
         let changed_chunks = vec!["chunk-0".to_string(), "changed-tail".to_string()];
         let changed_identity = LeakRecoveryLedgerIdentity {
             chunk_fingerprints: leak_recovery_chunk_fingerprints(&changed_chunks),
+            byte_end: identity.byte_end + 4,
             ..identity.clone()
         };
         assert_eq!(
             leak_recovery_confirmed_prefix_from_ledger(&changed_identity),
-            None,
-            "formatting/content changes must not reuse stale chunk confirmations"
+            Some(1),
+            "a rewritten confirmed tail chunk trims the prefix exactly at its index"
         );
 
         let other_turn = LeakRecoveryLedgerIdentity {
@@ -2680,6 +2727,59 @@ mod stall_watchdog_pure_tests {
             leak_recovery_confirmed_prefix_from_ledger(&other_turn),
             None,
             "another turn using the same channel/message id must not inherit confirmations"
+        );
+    }
+
+    #[test]
+    fn chunk_ledger_growing_response_never_lowers_confirmed_prefix() {
+        // #3031(A) regression: a late post-terminal continuation grows
+        // `full_response`, moving `byte_end` and appending chunk fingerprints. The
+        // already-confirmed prefix (whose fingerprints are byte-identical) must
+        // remain confirmed so recovery never re-sends already-delivered chunks.
+        let _guard = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let tempdir = tempfile::tempdir().expect("temp runtime root");
+        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+
+        let chunks = vec!["chunk-0".to_string(), "chunk-1".to_string()];
+        let identity = test_ledger_identity(&chunks);
+        leak_recovery_clear_chunk_ledger(&identity).expect("clear ledger");
+        leak_recovery_record_confirmed_chunk(&identity, 0, identity.current_msg_id)
+            .expect("record chunk 0");
+        leak_recovery_record_confirmed_chunk(&identity, 1, 10_001).expect("record chunk 1");
+        assert_eq!(
+            leak_recovery_confirmed_prefix_from_ledger(&identity),
+            Some(2)
+        );
+
+        // Response grows: the same two chunks plus two appended tail chunks. byte_end
+        // and the fingerprint array both change, but the confirmed prefix is intact.
+        let grown_chunks = vec![
+            "chunk-0".to_string(),
+            "chunk-1".to_string(),
+            "chunk-2".to_string(),
+            "chunk-3".to_string(),
+        ];
+        let grown_identity = LeakRecoveryLedgerIdentity {
+            chunk_fingerprints: leak_recovery_chunk_fingerprints(&grown_chunks),
+            byte_end: identity.byte_end + 16,
+            ..identity.clone()
+        };
+        assert_eq!(
+            leak_recovery_confirmed_prefix_from_ledger(&grown_identity),
+            Some(2),
+            "a longer full_response must NOT lower the confirmed prefix"
+        );
+
+        // Recording a further chunk against the grown identity must preserve, not
+        // drop, the carried-forward prefix.
+        leak_recovery_record_confirmed_chunk(&grown_identity, 2, 10_002)
+            .expect("record appended chunk 2");
+        assert_eq!(
+            leak_recovery_confirmed_prefix_from_ledger(&grown_identity),
+            Some(3),
+            "appended-chunk confirmation builds on the preserved prefix"
         );
     }
 
