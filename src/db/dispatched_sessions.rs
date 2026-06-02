@@ -867,10 +867,20 @@ mod dispatch_surface_tests {
 
     #[test]
     fn delivery_state_uppercase_status_is_normalized() {
-        // Defensive: callers occasionally write status values uppercase.
+        // Defensive: callers occasionally write status values uppercase, so
+        // classify_delivery_state lowercases before matching.
+        // NOTE: per #2036, sent_at dominates session_is_working — so a
+        // DISPATCHED turn only reads "codex_active" once sent_at is set
+        // (the bridge handed the prompt to codex); with sent_at unset it is
+        // still "queued". This test pins the case-normalization, not the
+        // sent_at gating, so it passes sent_at_is_set=true for the active case.
+        assert_eq!(
+            classify_delivery_state(Some("DISPATCHED"), true, true),
+            "codex_active"
+        );
         assert_eq!(
             classify_delivery_state(Some("DISPATCHED"), true, false),
-            "codex_active"
+            "queued"
         );
         assert_eq!(
             classify_delivery_state(Some("Completed"), false, false),
