@@ -369,6 +369,23 @@ async fn run_placeholder_sweep_pass(
             // Skip — there is no placeholder message to edit.
             continue;
         }
+        // #3003: reclaim an orphaned status-panel-v2 BEFORE the placeholder skips
+        // below — a panel-only row can have `current_msg_id == 0` or a non-empty
+        // `full_response`, both of which the placeholder sweep skips. Planned
+        // restart/hot-swap rows are left for recovery (matching the placeholder
+        // restart_mode guard).
+        if state.restart_mode.is_none() {
+            sweep_orphan_status_panel(
+                http,
+                shared,
+                provider,
+                &shared.token_hash,
+                &state,
+                age_secs,
+                &mut report,
+            )
+            .await;
+        }
         if state.current_msg_id == 0 || state.channel_id == 0 {
             continue;
         }
@@ -751,16 +768,147 @@ fn observed_age_still_stale(
     current_age_secs + slack_secs >= snapshot_age_secs
 }
 
+/// #3003 durable safety net: reclaim an orphaned status-panel-v2 message left on
+/// an abandoned inflight row.
+///
+/// A watcher-created TUI-direct panel whose turn never completed — e.g. a
+/// transient Discord delete failure during the turn, or the owning process died
+/// before the in-loop reclaim ran — keeps its `status_message_id` on the
+/// lingering inflight and would otherwise stay stuck at "계속 처리 중". This is
+/// the panel counterpart to the placeholder (`current_msg_id`) sweep below, and
+/// runs even for rows the placeholder sweep skips (`current_msg_id == 0`, or a
+/// non-empty `full_response`).
+///
+/// Mirrors the placeholder abandon semantics: act only at the time-based abandon
+/// threshold, normalise synthetic-headless ids, guard against a replacement
+/// turn, and treat transient Discord errors as retryable (id preserved for a
+/// later pass). A permanent gone status (404/403/410) is treated as success so
+/// the persisted id is cleared. Returns true when a real delete committed.
+/// Gate for [`sweep_orphan_status_panel`]: returns the real Discord panel id to
+/// reclaim, or `None` when this row is not an abandoned panel-bearing row.
+/// Pure (no IO) so the threshold / synthetic-id / channel gating is unit-tested.
+fn panel_reclaim_target(state: &InflightTurnState, age_secs: u64) -> Option<serenity::MessageId> {
+    if !matches!(classify_age(age_secs), SweepDecision::Abandoned) {
+        return None;
+    }
+    if state.channel_id == 0 {
+        return None;
+    }
+    super::turn_bridge::normalize_status_panel_message_id(
+        state.status_message_id.map(serenity::MessageId::new),
+    )
+}
+
+/// True when the placeholder abandoned branch below will NOT evict this row this
+/// pass — either it has no placeholder (`current_msg_id == 0`) or it already
+/// streamed partial output (the partial-response guard at the top of
+/// `run_placeholder_sweep_pass`). For those rows the panel sweep must clear the
+/// persisted `status_message_id` itself to converge; for rows the placeholder
+/// branch WILL evict, clearing here would only refresh the file mtime and defer
+/// that eviction (codex P2 r12).
+fn placeholder_sweep_leaves_row_unevicted(state: &InflightTurnState) -> bool {
+    state.current_msg_id == 0
+        || (!state.long_running_placeholder_active
+            && (!state.full_response.is_empty() || state.response_sent_offset > 0))
+}
+
+async fn sweep_orphan_status_panel(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    token_hash: &str,
+    state: &InflightTurnState,
+    age_secs: u64,
+    report: &mut SweepPassReport,
+) {
+    let Some(panel_msg) = panel_reclaim_target(state, age_secs) else {
+        return;
+    };
+    // Do not delete a panel a replacement turn now owns, or one whose turn has
+    // already completed (state file gone).
+    if !inflight_state_still_same_turn(provider, state, age_secs) {
+        return;
+    }
+    let channel = serenity::ChannelId::new(state.channel_id);
+    let committed = match channel.delete_message(http, panel_msg).await {
+        Ok(_) => true,
+        Err(serenity::Error::Http(http_err))
+            if http_err
+                .status_code()
+                .is_some_and(|status| is_permanent_message_gone_status(status.as_u16())) =>
+        {
+            // Permanently gone — count as reclaimed, clear the persisted id.
+            true
+        }
+        Err(err) => {
+            // Transient: hand off to the durable store so the retry survives even
+            // if this inflight row is evicted/cleared before the next sweep (codex
+            // P2 r10/r11/r13). The drain in the sweeper loop owns the retry.
+            super::status_panel_orphan_store::enqueue(
+                provider,
+                token_hash,
+                state.channel_id,
+                panel_msg.get(),
+            );
+            tracing::debug!(
+                "[placeholder_sweeper] orphan status-panel-v2 delete for {}/{} failed transiently \
+                 — enqueued for durable retry: {err}",
+                state.channel_id,
+                panel_msg.get()
+            );
+            false
+        }
+    };
+    // Converge the inflight row so the sweeper stops re-detecting this panel.
+    if state.current_msg_id == 0 {
+        // Panel-only abandoned row: it has no placeholder, so the placeholder
+        // abandoned branch below skips it forever. Once the panel is handled
+        // (deleted, or — on transient failure — enqueued to the durable store) the
+        // row has nothing left, so evict it instead of only clearing the panel id
+        // (codex P2 r23) — otherwise it lingers and keeps the channel busy.
+        if inflight_state_still_same_turn(provider, state, age_secs) {
+            finalize_abandoned_mailbox(shared, provider, state).await;
+            let _ = delete_inflight_state_file(provider, state.channel_id);
+        }
+    } else if placeholder_sweep_leaves_row_unevicted(state)
+        && let Some(mut current) = super::inflight::load_inflight_state(provider, state.channel_id)
+        && current.user_msg_id == state.user_msg_id
+        && current.current_msg_id == state.current_msg_id
+        && current.status_message_id == state.status_message_id
+    {
+        // Partial-response rows (real placeholder + streamed output) are owned by
+        // the placeholder sweeper's deferred follow-up; do not evict them here.
+        // Only clear our panel reference so we stop re-detecting it (codex P2 r12).
+        // On a transient failure the durable store owns the retry, so this is safe.
+        current.status_message_id = None;
+        let _ = super::inflight::save_inflight_state(&current);
+    }
+    if !committed {
+        return;
+    }
+    report.reclaimed_panels += 1;
+    tracing::warn!(
+        "[sweeper SAFETY-NET] reclaimed orphan status-panel-v2 age={age_secs}s for {}/{} \
+         (panel_msg {})",
+        provider.as_str(),
+        state.channel_id,
+        panel_msg.get()
+    );
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct SweepPassReport {
     pub scanned: usize,
     pub stalled: usize,
     pub abandoned: usize,
+    /// #3003: orphaned status-panel-v2 messages reclaimed this pass.
+    pub reclaimed_panels: usize,
 }
 
 fn should_log_sweep_report(report: SweepPassReport, sweeps_since_heartbeat: u64) -> bool {
     report.stalled > 0
         || report.abandoned > 0
+        || report.reclaimed_panels > 0
         || sweeps_since_heartbeat >= SWEEP_HEARTBEAT_INTERVAL_SWEEPS
 }
 
@@ -779,15 +927,22 @@ pub(super) fn spawn_placeholder_sweeper(
         loop {
             let report =
                 run_placeholder_sweep_pass(&http, &shared, &provider, &mut stalled_tracker).await;
+            // #3003: retry any durably-queued orphan status-panel deletes whose
+            // inline reclaim failed transiently (and whose inflight row is gone, so
+            // there is no per-turn handle left). Independent of inflight lifecycle.
+            let drained =
+                super::status_panel_orphan_store::drain(&http, &provider, &shared.token_hash).await;
             sweeps_since_heartbeat = sweeps_since_heartbeat.saturating_add(1);
-            if should_log_sweep_report(report, sweeps_since_heartbeat) {
+            if should_log_sweep_report(report, sweeps_since_heartbeat) || drained > 0 {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
-                    "  [{ts}] 🧹 placeholder sweeper ({}): scanned={} stalled={} abandoned={}",
+                    "  [{ts}] 🧹 placeholder sweeper ({}): scanned={} stalled={} abandoned={} reclaimed_panels={} drained_orphans={}",
                     provider.as_str(),
                     report.scanned,
                     report.stalled,
-                    report.abandoned
+                    report.abandoned,
+                    report.reclaimed_panels,
+                    drained
                 );
                 sweeps_since_heartbeat = 0;
             }
@@ -1058,6 +1213,7 @@ mod tests {
                 scanned: 0,
                 stalled: 0,
                 abandoned: 0,
+                reclaimed_panels: 0,
             },
             SWEEP_HEARTBEAT_INTERVAL_SWEEPS - 1,
         ));
@@ -1066,6 +1222,7 @@ mod tests {
                 scanned: 0,
                 stalled: 0,
                 abandoned: 0,
+                reclaimed_panels: 0,
             },
             SWEEP_HEARTBEAT_INTERVAL_SWEEPS,
         ));
@@ -1074,6 +1231,17 @@ mod tests {
                 scanned: 1,
                 stalled: 1,
                 abandoned: 0,
+                reclaimed_panels: 0,
+            },
+            0,
+        ));
+        // #3003: a panel reclaim alone triggers the report log.
+        assert!(should_log_sweep_report(
+            SweepPassReport {
+                scanned: 1,
+                stalled: 0,
+                abandoned: 0,
+                reclaimed_panels: 1,
             },
             0,
         ));
@@ -1104,6 +1272,43 @@ mod tests {
         assert!(text.contains("stalled — no stream progress"));
         assert!(!text.contains("계속 처리 중"));
         assert!(!text.contains("90s"));
+    }
+
+    #[test]
+    fn panel_reclaim_target_returns_real_id_when_abandoned() {
+        // #3003: an abandoned row with a real status_message_id is reclaimable —
+        // even a panel-only row (current_msg_id == 0).
+        let mut state = make_state(1234, 0);
+        state.status_message_id = Some(1_510_747_006_337_945_732);
+        assert_eq!(
+            panel_reclaim_target(&state, ABANDON_THRESHOLD_SECS + 60),
+            Some(serenity::MessageId::new(1_510_747_006_337_945_732))
+        );
+    }
+
+    #[test]
+    fn panel_reclaim_target_skips_before_abandon_threshold() {
+        let mut state = make_state(1234, 0);
+        state.status_message_id = Some(1_510_747_006_337_945_732);
+        assert_eq!(panel_reclaim_target(&state, 60), None);
+    }
+
+    #[test]
+    fn panel_reclaim_target_skips_synthetic_and_missing_panels() {
+        // Synthetic headless id (>= 8e18) is not a real Discord message.
+        let mut synthetic = make_state(1234, 0);
+        synthetic.status_message_id = Some(8_000_000_000_000_000_001);
+        assert_eq!(
+            panel_reclaim_target(&synthetic, ABANDON_THRESHOLD_SECS + 60),
+            None
+        );
+
+        // No panel at all.
+        let none = make_state(1234, 5678);
+        assert_eq!(
+            panel_reclaim_target(&none, ABANDON_THRESHOLD_SECS + 60),
+            None
+        );
     }
 
     #[test]

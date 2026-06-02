@@ -63,6 +63,7 @@ mod session_runtime;
 pub(crate) mod settings;
 pub(crate) mod shared_memory;
 mod stall_recovery;
+mod status_panel_orphan_store;
 pub(in crate::services::discord) mod streaming_finalizer;
 pub(in crate::services::discord) mod task_supervisor;
 #[cfg(unix)]

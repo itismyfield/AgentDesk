@@ -100,6 +100,122 @@ fn watcher_should_clear_stale_terminal_message_ids(
     has_assistant_response && !inflight_present && placeholder_msg_id.is_some()
 }
 
+/// #3003: decide whether the watcher must proactively create a status-panel-v2
+/// message for the live turn.
+///
+/// The Discord intake path (`turn_bridge::mod.rs` ~4356) re-designates the
+/// existing user/placeholder message as the panel and publishes a fresh answer
+/// message. A pure TUI-direct turn (`TurnSource::ExternalInput` /
+/// `ExternalAdopted`) has no preceding Discord-origin message to re-designate,
+/// so the panel is never created and `status_panel_msg_id` stays `None` — the
+/// dedicated v2 panel never appears for tmux-typed input. When v2 is enabled,
+/// no panel exists yet, and the live turn is an external-input turn, the watcher
+/// creates the panel itself. Branching on `turn_source` here is presentation
+/// bookkeeping only (mirrors the terminal message-id adoption gate at
+/// `adopt_watcher_terminal_message_ids_from_inflight`); it does not influence
+/// relay membership or completion semantics (#2285 E).
+fn watcher_should_create_external_input_status_panel(
+    status_panel_v2_enabled: bool,
+    status_panel_present: bool,
+    inflight_represents_external_input: bool,
+) -> bool {
+    status_panel_v2_enabled && !status_panel_present && inflight_represents_external_input
+}
+
+/// #3003 (codex P2): a status-panel-v2 message already persisted on the
+/// matching-session inflight row that the restore seed could not re-hydrate.
+///
+/// `restored_watcher_turn_from_inflight` returns `None` while
+/// `current_msg_id == 0`, so a panel created for a TUI-direct turn *before* its
+/// answer placeholder exists is persisted (`status_message_id`) but never
+/// re-seeded into `status_panel_msg_id` after a watcher restart. Adopting the
+/// persisted id here keeps the watcher from publishing a duplicate/orphan panel.
+/// Returns the persisted id only when the inflight belongs to this
+/// `tmux_session_name`, mirroring the restore-path session guard. Synthetic
+/// headless ids are filtered via `normalize_status_panel_message_id` (codex P2
+/// r3) so the adoption path never edits a nonexistent Discord message.
+fn watcher_persisted_status_panel_msg_id(
+    inflight: Option<&InflightTurnState>,
+    tmux_session_name: &str,
+) -> Option<serenity::MessageId> {
+    inflight.and_then(|state| {
+        if state.tmux_session_name.as_deref() != Some(tmux_session_name) {
+            return None;
+        }
+        crate::services::discord::turn_bridge::normalize_status_panel_message_id(
+            state.status_message_id.map(serenity::MessageId::new),
+        )
+    })
+}
+
+/// #3003 (codex P2 r2/r25): is the loaded inflight a TUI-direct/external-input
+/// turn that belongs to *this* watcher's `tmux_session_name` AND is owned by the
+/// watcher relay (so the watcher — not `turn_bridge` / the session-bound relay —
+/// is the status-panel owner)?
+///
+/// The session guard matters because a same-channel watcher
+/// replacement/recovery can load an `ExternalInput`/`ExternalAdopted` inflight
+/// for a *different* tmux session; without the match this watcher would publish
+/// a status panel the save guard then refuses to persist, leaving an orphan
+/// panel for the wrong turn. Mirrors the session guard on the persisted/adoption
+/// path (`watcher_persisted_status_panel_msg_id`).
+///
+/// The relay-owner guard matters because an external-input turn can be routed
+/// through the bridge adapter / session-bound relay; its inflight still carries
+/// `TurnSource::ExternalInput`, but the watcher is NOT the panel owner. Without
+/// this guard the watcher would race `turn_bridge`'s own status-panel-v2
+/// creation and leave duplicate/orphan panels (codex P2 r25).
+fn watcher_inflight_is_external_input_for_session(
+    inflight: Option<&InflightTurnState>,
+    tmux_session_name: &str,
+) -> bool {
+    inflight
+        .filter(|state| state.tmux_session_name.as_deref() == Some(tmux_session_name))
+        .is_some_and(|state| {
+            watcher_inflight_represents_external_input(Some(state))
+                && matches!(
+                    state.effective_relay_owner_kind(),
+                    crate::services::discord::inflight::RelayOwnerKind::Watcher
+                )
+        })
+}
+
+/// #3003 single-chokepoint orphan reclaim: has the in-flight TUI-direct turn
+/// been abandoned, so a watcher-created v2 panel can never reach terminal
+/// completion?
+///
+/// True when the inflight row for this channel is gone (a stop/cancel cleared
+/// it), has been *replaced* by a different turn on the same channel (codex P2
+/// r11 — the original TUI-direct row is just as gone), or a recent turn-stop
+/// tombstone covers this turn's byte range. Evaluated at the top of the
+/// streaming-interval block and at the terminal chokepoint — before every
+/// early-`continue` suppression guard — so no guard can bypass the reclaim,
+/// which was the recurring orphan source across the per-guard cleanup attempts.
+fn watcher_external_input_turn_abandoned(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    data_start_offset: u64,
+    expected_identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+) -> bool {
+    match crate::services::discord::inflight::load_inflight_state(provider, channel_id.get()) {
+        None => true,
+        Some(state) => {
+            let replaced = expected_identity.is_some_and(|expected| {
+                *expected
+                    != crate::services::discord::inflight::InflightTurnIdentity::from_state(&state)
+            });
+            replaced
+                || recent_turn_stop_for_watcher_range(
+                    channel_id,
+                    tmux_session_name,
+                    data_start_offset,
+                )
+                .is_some()
+        }
+    }
+}
+
 fn discard_restored_response_seed_before_no_inflight_terminal_relay(
     full_response: &mut String,
     response_sent_offset: &mut usize,
@@ -693,6 +809,143 @@ mod pane_dead_identity_tests {
 
         assert!(identity.is_none());
     }
+
+    #[test]
+    fn watcher_creates_status_panel_for_external_input_when_v2_on_and_panel_absent() {
+        // #3003: pure TUI-direct (ExternalInput) turn with v2 enabled and no panel
+        // yet must proactively create one.
+        assert!(watcher_should_create_external_input_status_panel(
+            true,  // status_panel_v2_enabled
+            false, // status_panel_present
+            true,  // inflight_represents_external_input
+        ));
+    }
+
+    #[test]
+    fn watcher_skips_status_panel_creation_when_panel_already_present() {
+        // An adopted/existing panel must never be duplicated.
+        assert!(!watcher_should_create_external_input_status_panel(
+            true, true, true
+        ));
+    }
+
+    #[test]
+    fn watcher_skips_status_panel_creation_for_non_external_input_turns() {
+        // Discord-intake (Managed) turns are owned by turn_bridge, which creates
+        // the panel itself — the watcher must not create a second one.
+        assert!(!watcher_should_create_external_input_status_panel(
+            true, false, false
+        ));
+    }
+
+    #[test]
+    fn watcher_skips_status_panel_creation_when_v2_disabled() {
+        assert!(!watcher_should_create_external_input_status_panel(
+            false, false, true
+        ));
+    }
+
+    #[test]
+    fn watcher_external_input_predicate_matches_external_turn_sources() {
+        let mut external = state_for_turn(0, "AgentDesk-codex-adk-cdx");
+        external.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
+        assert!(watcher_inflight_represents_external_input(Some(&external)));
+
+        let mut adopted = state_for_turn(0, "AgentDesk-codex-adk-cdx");
+        adopted.turn_source = crate::services::discord::inflight::TurnSource::ExternalAdopted;
+        assert!(watcher_inflight_represents_external_input(Some(&adopted)));
+
+        let managed = state_for_turn(100, "AgentDesk-codex-adk-cdx");
+        assert!(!watcher_inflight_represents_external_input(Some(&managed)));
+        assert!(!watcher_inflight_represents_external_input(None));
+    }
+
+    #[test]
+    fn watcher_adopts_persisted_panel_for_matching_session() {
+        // #3003 codex P2: a panel persisted on this turn's inflight (status set,
+        // current_msg_id still 0) must be adopted on restart, not re-created.
+        let mut state = state_for_turn(0, "AgentDesk-codex-adk-cdx");
+        state.status_message_id = Some(1_510_747_006_337_945_732);
+        assert_eq!(
+            watcher_persisted_status_panel_msg_id(Some(&state), "AgentDesk-codex-adk-cdx"),
+            Some(serenity::MessageId::new(1_510_747_006_337_945_732))
+        );
+    }
+
+    #[test]
+    fn watcher_does_not_adopt_synthetic_headless_persisted_panel() {
+        // #3003 codex P2 r3: a synthetic headless id must not be adopted as a
+        // real Discord message (>= 8e18 is the synthetic range).
+        let mut state = state_for_turn(0, "AgentDesk-codex-adk-cdx");
+        state.status_message_id = Some(8_000_000_000_000_000_001);
+        assert_eq!(
+            watcher_persisted_status_panel_msg_id(Some(&state), "AgentDesk-codex-adk-cdx"),
+            None
+        );
+    }
+
+    #[test]
+    fn watcher_does_not_adopt_persisted_panel_from_other_session() {
+        let mut state = state_for_turn(0, "AgentDesk-codex-adk-cdx");
+        state.status_message_id = Some(1_510_747_006_337_945_732);
+        assert_eq!(
+            watcher_persisted_status_panel_msg_id(Some(&state), "AgentDesk-codex-adk-cdx-fresh"),
+            None
+        );
+    }
+
+    #[test]
+    fn watcher_has_no_persisted_panel_without_status_message_id() {
+        let state = state_for_turn(0, "AgentDesk-codex-adk-cdx");
+        assert_eq!(
+            watcher_persisted_status_panel_msg_id(Some(&state), "AgentDesk-codex-adk-cdx"),
+            None
+        );
+        assert_eq!(
+            watcher_persisted_status_panel_msg_id(None, "AgentDesk-codex-adk-cdx"),
+            None
+        );
+    }
+
+    #[test]
+    fn watcher_external_input_for_session_requires_session_match() {
+        // #3003 codex P2 r2: an ExternalInput inflight for a *different* tmux
+        // session in the same channel must not trigger panel creation here.
+        let mut external = state_for_turn(0, "AgentDesk-codex-adk-cdx");
+        external.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
+        external.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+        assert!(watcher_inflight_is_external_input_for_session(
+            Some(&external),
+            "AgentDesk-codex-adk-cdx"
+        ));
+        assert!(!watcher_inflight_is_external_input_for_session(
+            Some(&external),
+            "AgentDesk-codex-adk-cdx-other"
+        ));
+
+        // #3003 codex P2 r25: an external-input turn owned by the session-bound
+        // relay (not the watcher) must NOT enter the watcher panel path.
+        let mut session_bound = state_for_turn(0, "AgentDesk-codex-adk-cdx");
+        session_bound.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
+        session_bound.set_relay_owner_kind(
+            crate::services::discord::inflight::RelayOwnerKind::SessionBoundRelay,
+        );
+        assert!(!watcher_inflight_is_external_input_for_session(
+            Some(&session_bound),
+            "AgentDesk-codex-adk-cdx"
+        ));
+
+        // Managed turn on the matching session is still not external input.
+        let managed = state_for_turn(100, "AgentDesk-codex-adk-cdx");
+        assert!(!watcher_inflight_is_external_input_for_session(
+            Some(&managed),
+            "AgentDesk-codex-adk-cdx"
+        ));
+        assert!(!watcher_inflight_is_external_input_for_session(
+            None,
+            "AgentDesk-codex-adk-cdx"
+        ));
+    }
 }
 
 /// E5 (#2412): forward a freshly-read tmux output chunk into the
@@ -1060,6 +1313,114 @@ async fn persist_watcher_provider_session_id(
     );
 }
 
+/// #3003 (codex P2 r3): delete a watcher-created TUI-direct status panel that
+/// will never reach terminal completion — the turn was stopped or returned to
+/// idle with no committed response, so `complete_watcher_status_panel_v2` never
+/// runs and the panel would stay stuck at "계속 처리 중".
+///
+/// Ownership is decided by `turn_is_external_input` — a flag cached *while the
+/// inflight row was still present* — rather than reloading inflight here (codex
+/// P2 r4): a stopped/cancelled TUI-direct turn has already cleared its inflight,
+/// so a fresh read would miss the very panel this reclaim was added for. A
+/// bridge-owned panel never sets the flag, so it is never touched.
+///
+/// Deletion routes through `delete_nonterminal_placeholder` so the in-memory and
+/// persisted ids are dropped only on a committed delete (codex P3 r4) — a
+/// transient Discord error leaves the ids intact for a later retry. The
+/// persisted `status_message_id` is cleared only when it still points at this
+/// exact panel, so a newer turn's panel is never clobbered.
+///
+/// Returns `false` only when a delete was attempted and did not commit, so the
+/// caller can defer finalization/inflight-clearing and let a later iteration
+/// retry (codex P2 r5); `true` means nothing to clean or the delete committed.
+async fn cleanup_orphan_external_input_status_panel(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    status_panel_msg_id: &mut Option<serenity::MessageId>,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    turn_is_external_input: bool,
+) -> bool {
+    if !turn_is_external_input {
+        return true;
+    }
+    let Some(panel_msg_id) = *status_panel_msg_id else {
+        return true;
+    };
+    let outcome = delete_nonterminal_placeholder(
+        http,
+        channel_id,
+        shared,
+        provider,
+        tmux_session_name,
+        panel_msg_id,
+        "watcher_orphan_external_input_status_panel_cleanup",
+    )
+    .await;
+    if !outcome.is_committed() && !outcome.is_permanent_failure() {
+        // #3003 (codex P2 r10/r11/r13): the inline delete failed transiently. The
+        // local id is kept for an in-turn retry, but a stopped/cancelled turn may
+        // clear its inflight before any retry runs, leaving no per-turn handle.
+        // Record the panel in the durable store so the sweeper drain reclaims it
+        // independent of inflight lifecycle.
+        crate::services::discord::status_panel_orphan_store::enqueue(
+            provider,
+            &shared.token_hash,
+            channel_id.get(),
+            panel_msg_id.get(),
+        );
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ watcher: orphan status-panel-v2 delete did not commit for channel {} panel_msg {}; kept local id + enqueued durable retry",
+            channel_id.get(),
+            panel_msg_id.get()
+        );
+        return false;
+    }
+    // Committed (succeeded / already-gone) OR a permanent failure (403/410): in
+    // both cases the delete will not be retried — a permanent failure can never
+    // succeed, so treat it as terminal and clear the handle (codex P2 r16) rather
+    // than wedge the turn finalization forever. Drop the durable record too, since
+    // the drain would also give up on the same permanent error.
+    if !outcome.is_committed() {
+        crate::services::discord::status_panel_orphan_store::remove(
+            provider,
+            &shared.token_hash,
+            channel_id.get(),
+            panel_msg_id.get(),
+        );
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ watcher: orphan status-panel-v2 delete permanently failed for channel {} panel_msg {}; giving up (treated as committed)",
+            channel_id.get(),
+            panel_msg_id.get()
+        );
+    }
+    *status_panel_msg_id = None;
+    if let Some(mut state) =
+        crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
+        && state.tmux_session_name.as_deref() == Some(tmux_session_name)
+        && state.status_message_id == Some(panel_msg_id.get())
+    {
+        state.status_message_id = None;
+        let _ = crate::services::discord::inflight::save_inflight_state(&state);
+    }
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!(
+        "  [{ts}] 🧹 watcher: cleaned orphan status-panel-v2 for TUI-direct turn (channel {}, tmux={}, panel_msg={})",
+        channel_id.get(),
+        tmux_session_name,
+        panel_msg_id.get()
+    );
+    true
+}
+
+/// Returns whether the completion edit/send committed. `false` means the final
+/// panel edit hit a transient Discord error and the panel is still showing the
+/// processing state — the caller must preserve a retry handle (enqueue the panel
+/// for the durable drain) before clearing the inflight, or the panel orphans
+/// (codex P2 r20).
 async fn complete_watcher_status_panel_v2(
     http: &serenity::Http,
     shared: &Arc<SharedData>,
@@ -1070,7 +1431,7 @@ async fn complete_watcher_status_panel_v2(
     last_status_panel_text: &mut String,
     background: bool,
     expected_user_msg_id: Option<u64>,
-) {
+) -> bool {
     // #2427 D wire (Codex round 2 HIGH-1): explicit-signal inflight cleanup
     // is intentionally NOT emitted from the watcher path. The watcher is
     // not turn-scoped, so any user_msg_id read here would be the *current*
@@ -1080,9 +1441,9 @@ async fn complete_watcher_status_panel_v2(
     // TurnCompleted still emits the guarded signal (see recovery_engine.rs)
     // because its state snapshot is pinned at recovery entry.
     if !shared.status_panel_v2_enabled {
-        return;
+        return true;
     }
-    let _committed = crate::services::discord::turn_bridge::complete_status_panel_v2_with_http(
+    crate::services::discord::turn_bridge::complete_status_panel_v2_with_http(
         shared,
         http,
         channel_id,
@@ -1094,7 +1455,7 @@ async fn complete_watcher_status_panel_v2(
         "tmux_watcher",
         expected_user_msg_id,
     )
-    .await;
+    .await
 }
 
 /// #2161 — TUI completion gate. Callers ask `run_tui_completion_gate` to
@@ -2821,6 +3182,61 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let mut placeholder_msg_id: Option<serenity::MessageId> = stream_seed.placeholder_msg_id;
         let mut placeholder_from_restored_inflight = placeholder_msg_id.is_some();
         let mut status_panel_msg_id: Option<serenity::MessageId> = stream_seed.status_panel_msg_id;
+        // #3003 (codex P2 r4): cache whether this turn is a TUI-direct
+        // external-input turn while the inflight row is still present, so the
+        // orphan-panel reclaim can run after a stop/cancel clears inflight.
+        let startup_inflight_snapshot = crate::services::discord::inflight::load_inflight_state(
+            &watcher_provider,
+            channel_id.get(),
+        );
+        let mut turn_is_external_input_for_session = watcher_inflight_is_external_input_for_session(
+            startup_inflight_snapshot.as_ref(),
+            &tmux_session_name,
+        );
+        // #3003 (codex P2 r11): snapshot this turn's identity so the abandon check
+        // can treat a *replaced* inflight (a new turn on the same channel) as
+        // abandoned, not just a missing one. user_msg_id is 0 for external input,
+        // so `started_at` is the discriminator between consecutive TUI-direct turns.
+        let mut turn_identity_for_panel = startup_inflight_snapshot
+            .as_ref()
+            .filter(|state| state.tmux_session_name.as_deref() == Some(tmux_session_name.as_str()))
+            .map(crate::services::discord::inflight::InflightTurnIdentity::from_state);
+        // #3003 (codex P2 r8): on a restart that created+persisted the panel before
+        // an answer placeholder existed (current_msg_id == 0), watcher_stream_seed
+        // leaves status_panel_msg_id None. Rehydrate it from the persisted inflight
+        // id now — while the inflight row is still present — so a later stop/fresh-idle
+        // cleanup can reclaim the panel even after the inflight row is cleared. Only
+        // for external-input turns, so a bridge-owned panel is never adopted here.
+        if status_panel_msg_id.is_none() && turn_is_external_input_for_session {
+            status_panel_msg_id = watcher_persisted_status_panel_msg_id(
+                startup_inflight_snapshot.as_ref(),
+                &tmux_session_name,
+            );
+        }
+        // #3003 (codex P2 r6): turn_bridge clears the per-channel live-status store
+        // at managed turn start (mod.rs:4188). The watcher-owned TUI-direct path has
+        // no such reset, so a fresh external-input turn would inherit the previous
+        // turn's status/todos and render them in its new v2 panel. Clear once at the
+        // fresh-turn boundary — no restored placeholder/panel/response seed — before
+        // the initial live-events flush below, so the current turn's own events
+        // (re-derived from this frame's buffer) are preserved.
+        //
+        // The clear is NOT gated on external-input detection (codex P2 r16/r17): the
+        // ExternalInput inflight may not be written yet at turn start, so gating here
+        // would skip the clear and force a late clear that wipes already-flushed
+        // current-turn events. The fresh-frame guards below already exclude
+        // bridge-owned turns (those restore a placeholder/panel id from inflight) and
+        // mid-turn restarts (restored assistant text), so clearing every genuinely
+        // fresh watcher frame before the initial flush is safe and covers the
+        // not-yet-detected external-input case cleanly.
+        let watcher_fresh_turn_frame = placeholder_msg_id.is_none()
+            && status_panel_msg_id.is_none()
+            && !restored_assistant_text_seen;
+        if watcher_fresh_turn_frame
+            && (shared.placeholder_live_events_enabled || shared.status_panel_v2_enabled)
+        {
+            shared.placeholder_live_events.clear_channel(channel_id);
+        }
         let mut last_status_panel_text = String::new();
         let status_panel_started_at = chrono::Utc::now().timestamp();
         let mut last_edit_text = stream_seed.last_edit_text;
@@ -3339,6 +3755,36 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     let indicator = SPINNER[spin_idx % SPINNER.len()];
                     spin_idx += 1;
 
+                    // #3003 single-chokepoint orphan reclaim: reclaim a watcher-created
+                    // external-input v2 panel the moment its turn is abandoned (stopped/
+                    // cancelled → inflight cleared, or covered by a recent turn-stop
+                    // tombstone). Positioned BEFORE every early-`continue` guard below
+                    // (silent / bridge-delivered / inflight-missing / recent-stop) so no
+                    // guard can skip it — the recurring orphan source. Committed turns
+                    // null out `status_panel_msg_id` right after completion, so a
+                    // finalized panel is never deleted here.
+                    if turn_is_external_input_for_session
+                        && status_panel_msg_id.is_some()
+                        && watcher_external_input_turn_abandoned(
+                            &watcher_provider,
+                            channel_id,
+                            &tmux_session_name,
+                            data_start_offset,
+                            turn_identity_for_panel.as_ref(),
+                        )
+                    {
+                        cleanup_orphan_external_input_status_panel(
+                            &http,
+                            &shared,
+                            channel_id,
+                            &mut status_panel_msg_id,
+                            &watcher_provider,
+                            &tmux_session_name,
+                            turn_is_external_input_for_session,
+                        )
+                        .await;
+                    }
+
                     // Headless silent trigger (metadata.silent=true): skip both
                     // status-panel and streaming-chunk edits to keep the channel
                     // at zero bytes for the assistant turn.
@@ -3509,7 +3955,225 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             }
                             streaming_suppressed_by_recent_stop = true;
                         }
+                        // #3003: the stopped-turn panel reclaim now runs at the
+                        // single chokepoint at the top of this interval block, before
+                        // this recent-stop `continue` and the inflight-missing guard
+                        // can bypass it.
                         continue;
+                    }
+
+                    // #3003: TUI-direct turns have no preceding Discord message to
+                    // re-designate as the status panel, so create a dedicated v2 panel
+                    // here — past the bridge-delivered / inflight-missing / recent-stop
+                    // suppression guards above, so suppressed turns never spawn a panel.
+                    // The panel seeds with a minimal processing block (matching
+                    // turn_bridge ~4359) and the interval edit above refreshes it via
+                    // render_status_panel on the next tick. Creation is gated on
+                    // visible streaming work (response text or a tool/task status line)
+                    // so a turn that only emits non-user-visible JSONL and returns to
+                    // idle never publishes an orphan panel (codex P2 r3).
+                    let has_visible_streaming_work = !full_response
+                        .get(response_sent_offset..)
+                        .unwrap_or("")
+                        .trim()
+                        .is_empty()
+                        || watcher_should_render_status_only_placeholder(
+                            placeholder_msg_id.is_some(),
+                            tool_state.current_tool_line.as_deref(),
+                            task_notification_kind,
+                        );
+                    if shared.status_panel_v2_enabled
+                        && status_panel_msg_id.is_none()
+                        && has_visible_streaming_work
+                    {
+                        let inflight_for_panel =
+                            crate::services::discord::inflight::load_inflight_state(
+                                &watcher_provider,
+                                channel_id.get(),
+                            );
+                        let persisted_panel_msg_id = watcher_persisted_status_panel_msg_id(
+                            inflight_for_panel.as_ref(),
+                            &tmux_session_name,
+                        );
+                        let external_input_turn = watcher_inflight_is_external_input_for_session(
+                            inflight_for_panel.as_ref(),
+                            &tmux_session_name,
+                        );
+                        if external_input_turn {
+                            turn_is_external_input_for_session = true;
+                            // #3003 (codex P2 r15): when the watcher started before
+                            // this turn's inflight existed, the startup identity
+                            // snapshot was None. Capture it now that we own the panel
+                            // so the abandon check can detect a later same-channel
+                            // replacement (otherwise the old panel would survive or be
+                            // edited as the new turn's).
+                            if turn_identity_for_panel.is_none() {
+                                turn_identity_for_panel = inflight_for_panel
+                                    .as_ref()
+                                    .filter(|state| {
+                                        state.tmux_session_name.as_deref()
+                                            == Some(tmux_session_name.as_str())
+                                    })
+                                    .map(crate::services::discord::inflight::InflightTurnIdentity::from_state);
+                            }
+                            // #3003 (codex P2 r17): the previous-turn live-event store
+                            // was already cleared at the fresh-turn boundary above
+                            // (now ungated on external-input detection), before the
+                            // initial flush — so the current turn's events are intact
+                            // and no late clear (which would wipe them) is needed here.
+                        }
+                        if let Some(persisted) = persisted_panel_msg_id {
+                            // Restart-safe adoption: the panel already exists and was
+                            // persisted on this turn's inflight; reuse it instead of
+                            // publishing a duplicate (#3003 codex P2). Synthetic headless
+                            // ids are already filtered by the persisted helper.
+                            status_panel_msg_id = Some(persisted);
+                        } else if watcher_should_create_external_input_status_panel(
+                            shared.status_panel_v2_enabled,
+                            status_panel_msg_id.is_some(),
+                            external_input_turn,
+                        ) && !watcher_external_input_turn_abandoned(
+                            &watcher_provider,
+                            channel_id,
+                            &tmux_session_name,
+                            data_start_offset,
+                            turn_identity_for_panel.as_ref(),
+                        ) {
+                            // #3003 (codex P2 r18): do NOT create a panel for an already
+                            // stopped/abandoned turn. A stop tombstone can be recorded
+                            // before the inflight row is removed; without this guard the
+                            // interval-top reclaim would delete the panel and this branch
+                            // would immediately recreate one for the same stopped turn.
+                            //
+                            // Snapshot the turn identity *before* the await so a
+                            // stop/cancel/next-turn that lands during send cannot make
+                            // us persist stale state onto a different turn (codex P2 r4).
+                            let pre_send_identity = inflight_for_panel
+                                .as_ref()
+                                .map(crate::services::discord::inflight::InflightTurnIdentity::from_state);
+                            let panel_seed =
+                                crate::services::discord::formatting::build_processing_status_block(
+                                    indicator,
+                                );
+                            rate_limit_wait(&shared, channel_id).await;
+                            match crate::services::discord::http::send_channel_message(
+                                &http,
+                                channel_id,
+                                &panel_seed,
+                            )
+                            .await
+                            {
+                                Ok(panel_msg) => {
+                                    let fresh_inflight =
+                                        crate::services::discord::inflight::load_inflight_state(
+                                            &watcher_provider,
+                                            channel_id.get(),
+                                        );
+                                    let identity_matches = matches!(
+                                        (&pre_send_identity, &fresh_inflight),
+                                        (Some(pre), Some(fresh))
+                                            if pre == &crate::services::discord::inflight::InflightTurnIdentity::from_state(fresh)
+                                    );
+                                    // #3003 (codex P2 r18): another overlapping watcher may
+                                    // have already published+persisted a panel for this turn
+                                    // during our send await. If the fresh inflight already
+                                    // carries a real status_message_id, our send is a
+                                    // duplicate — reclaim it instead of overwriting the
+                                    // canonical id (which would orphan the other panel).
+                                    let fresh_panel_already_set = fresh_inflight.as_ref().is_some_and(|fresh| {
+                                        crate::services::discord::turn_bridge::normalize_status_panel_message_id(
+                                            fresh.status_message_id.map(serenity::MessageId::new),
+                                        )
+                                        .is_some()
+                                    });
+                                    if identity_matches
+                                        && !fresh_panel_already_set
+                                        && let Some(mut inflight) = fresh_inflight
+                                    {
+                                        status_panel_msg_id = Some(panel_msg.id);
+                                        inflight.status_message_id = Some(panel_msg.id.get());
+                                        let _ =
+                                            crate::services::discord::inflight::save_inflight_state(
+                                                &inflight,
+                                            );
+                                        let ts = chrono::Local::now().format("%H:%M:%S");
+                                        tracing::info!(
+                                            "  [{ts}] 🪧 watcher: created status-panel-v2 for TUI-direct turn (channel {}, tmux={}, panel_msg={})",
+                                            channel_id.get(),
+                                            tmux_session_name,
+                                            panel_msg.id.get()
+                                        );
+                                    } else {
+                                        // The turn vanished/changed during the send await,
+                                        // or an overlapping watcher already owns the panel;
+                                        // the panel we just created is a duplicate/orphan —
+                                        // reclaim it instead of persisting stale state. The
+                                        // next interval adopts the canonical persisted panel.
+                                        let discard_outcome = delete_nonterminal_placeholder(
+                                            &http,
+                                            channel_id,
+                                            &shared,
+                                            &watcher_provider,
+                                            &tmux_session_name,
+                                            panel_msg.id,
+                                            "watcher_external_input_status_panel_turn_changed",
+                                        )
+                                        .await;
+                                        if !discard_outcome.is_committed()
+                                            && !discard_outcome.is_permanent_failure()
+                                        {
+                                            // #3003 (codex P2 r14): the delete failed
+                                            // transiently but the duplicate panel exists.
+                                            // This path does not persist to inflight, so a
+                                            // cancellation/restart before the next interval
+                                            // would lose the only handle — record it in the
+                                            // durable store so the sweeper drain reclaims it.
+                                            crate::services::discord::status_panel_orphan_store::enqueue(
+                                                &watcher_provider,
+                                                &shared.token_hash,
+                                                channel_id.get(),
+                                                panel_msg.id.get(),
+                                            );
+                                            // #3003 (codex P2 r19/r22): pick the local handle
+                                            // carefully. Adopt the CANONICAL persisted panel ONLY
+                                            // for a same-turn overlapping-watcher duplicate
+                                            // (`identity_matches`) — so interval edits/completion
+                                            // target the real panel while the duplicate is left to
+                                            // the durable drain. If the fresh inflight is a
+                                            // *replacement* turn (`!identity_matches`), that
+                                            // persisted id belongs to the new turn; adopting it
+                                            // here would let the old frame's abandon cleanup delete
+                                            // the replacement's panel — so keep the just-sent
+                                            // duplicate id locally for an in-turn retry instead.
+                                            if fresh_panel_already_set && identity_matches {
+                                                status_panel_msg_id =
+                                                    watcher_persisted_status_panel_msg_id(
+                                                        fresh_inflight.as_ref(),
+                                                        &tmux_session_name,
+                                                    );
+                                            } else {
+                                                status_panel_msg_id = Some(panel_msg.id);
+                                            }
+                                        }
+                                        let ts = chrono::Local::now().format("%H:%M:%S");
+                                        tracing::warn!(
+                                            "  [{ts}] ⚠ watcher: discarded status-panel-v2 for TUI-direct turn in channel {} — inflight changed during send (panel_msg={}, delete_committed={})",
+                                            channel_id.get(),
+                                            panel_msg.id.get(),
+                                            discard_outcome.is_committed()
+                                        );
+                                    }
+                                }
+                                Err(error) => {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    tracing::warn!(
+                                        "  [{ts}] ⚠ watcher: failed to create status-panel-v2 for TUI-direct turn in channel {}: {}",
+                                        channel_id.get(),
+                                        error
+                                    );
+                                }
+                            }
+                        }
                     }
 
                     loop {
@@ -3744,6 +4408,27 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     true
                 };
                 if !cleanup_committed {
+                    continue;
+                }
+                // #3003 (codex P2 r3): fresh idle with no committed response means the
+                // terminal completion path will not run, so reclaim any watcher-created
+                // status panel before it orphans at "계속 처리 중". Self-gated to
+                // external-input turns on this session (bridge-owned panels untouched).
+                // #3003 (codex P2 r5): if the panel delete did not commit, defer
+                // finalization — clearing the inflight here would drop the persisted
+                // status_message_id and strand the panel with no retry path. Re-enter
+                // fresh idle next iteration to retry, mirroring the placeholder guard.
+                let panel_cleanup_committed = cleanup_orphan_external_input_status_panel(
+                    &http,
+                    &shared,
+                    channel_id,
+                    &mut status_panel_msg_id,
+                    &watcher_provider,
+                    &tmux_session_name,
+                    turn_is_external_input_for_session,
+                )
+                .await;
+                if !panel_cleanup_committed {
                     continue;
                 }
                 let owed = mailbox_finalize_owed.swap(false, std::sync::atomic::Ordering::AcqRel);
@@ -4750,6 +5435,46 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let recent_stop_for_output =
             recent_turn_stop_for_watcher_range(channel_id, &tmux_session_name, data_start_offset);
         let inflight_missing_before_relay = inflight_before_relay.is_none();
+        // #3003 single terminal chokepoint: every turn termination converges on
+        // this terminal-relay block, including a fast `result` that breaks out of
+        // the streaming loop before the periodic interval reclaim runs again.
+        // Reclaim a watcher-created external-input panel here when the turn will
+        // not finalize it — no assistant text (status-only/no-response), a recent
+        // turn-stop tombstone, or a cleared inflight (stop/cancel). A turn that has
+        // assistant text, is not stopped, and still has its inflight is left for
+        // the committed relay path to complete (or a failed send to preserve for
+        // retry). Runs before every terminal sub-path (stale-id clear, silent,
+        // recent-stop suppression, no-response).
+        //
+        // The no-response arm excludes task-notification turns (codex P2 r15): a
+        // status-only `task_notification_kind` turn is relay-suppressed-and-
+        // committed below, so `complete_watcher_status_panel_v2` still finalizes
+        // its panel — deleting it here would erase a panel that is about to
+        // complete. Stopped/abandoned such turns are still reclaimed via the
+        // abandon arm.
+        let terminal_panel_reclaim_committed = if turn_is_external_input_for_session
+            && status_panel_msg_id.is_some()
+            && ((!has_assistant_response && task_notification_kind.is_none())
+                || watcher_external_input_turn_abandoned(
+                    &watcher_provider,
+                    channel_id,
+                    &tmux_session_name,
+                    data_start_offset,
+                    turn_identity_for_panel.as_ref(),
+                )) {
+            cleanup_orphan_external_input_status_panel(
+                &http,
+                &shared,
+                channel_id,
+                &mut status_panel_msg_id,
+                &watcher_provider,
+                &tmux_session_name,
+                turn_is_external_input_for_session,
+            )
+            .await
+        } else {
+            true
+        };
         let inflight_silent_turn = inflight_before_relay
             .as_ref()
             .map(|state| state.silent_turn)
@@ -4770,7 +5495,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 );
             }
             placeholder_msg_id = None;
-            status_panel_msg_id = None;
+            // #3003 (codex P2 r12): only drop the local panel id if the terminal
+            // reclaim above actually committed its delete. When the delete failed
+            // transiently the id is held for retry (the persisted id, if any, also
+            // survives for the sweeper); nulling it here would strand the still-
+            // visible "계속 처리 중" panel with no handle.
+            if terminal_panel_reclaim_committed {
+                status_panel_msg_id = None;
+            }
             placeholder_from_restored_inflight = false;
             last_edit_text.clear();
         }
@@ -5633,6 +6365,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         if terminal_output_committed {
             terminal_delivery_observed = true;
         }
+        // #3003: the no-response/stopped external-input panel reclaim now runs once
+        // at the single terminal chokepoint near the top of this block (where
+        // recent_stop_for_output / inflight_missing_before_relay are computed),
+        // before every terminal sub-path — so no separate cleanup is needed here.
         let runtime_binding_candidate_offset = terminal_output_committed
             .then(|| terminal_event_consumed_offset(current_offset, &all_data));
         let terminal_delivery_committed = relay_ok
@@ -5828,7 +6564,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         None
                     }
                 });
-            complete_watcher_status_panel_v2(
+            let completion_committed = complete_watcher_status_panel_v2(
                 &http,
                 &shared,
                 channel_id,
@@ -5843,6 +6579,42 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 status_panel_completion_user_msg_id,
             )
             .await;
+            if turn_is_external_input_for_session && let Some(panel_msg_id) = status_panel_msg_id {
+                if completion_committed {
+                    // #3003 (codex P2 r21): an earlier reclaim attempt this turn may
+                    // have enqueued this panel after a transient delete failure, but it
+                    // has now been completed/edited into its final state. Drop the stale
+                    // durable record so a later drain does not delete the valid panel.
+                    crate::services::discord::status_panel_orphan_store::remove(
+                        &watcher_provider,
+                        &shared.token_hash,
+                        channel_id.get(),
+                        panel_msg_id.get(),
+                    );
+                } else {
+                    // #3003 (codex P2 r20): the final completion edit failed transiently
+                    // and the inflight is about to be cleared on this committed-output
+                    // path, dropping the only handle to the panel that is still stuck at
+                    // the processing state. Enqueue it in the durable store so the sweeper
+                    // drain reclaims (deletes) it independent of inflight lifecycle.
+                    crate::services::discord::status_panel_orphan_store::enqueue(
+                        &watcher_provider,
+                        &shared.token_hash,
+                        channel_id.get(),
+                        panel_msg_id.get(),
+                    );
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ⚠ watcher: status-panel-v2 completion did not commit for channel {} panel_msg {}; enqueued durable reclaim",
+                        channel_id.get(),
+                        panel_msg_id.get()
+                    );
+                }
+            }
+            // #3003 single-chokepoint reclaim safety: after completion the turn
+            // frame ends and the next frame re-seeds `status_panel_msg_id`, so the
+            // top-of-interval abandon reclaim never observes this finalized panel's
+            // id again — no explicit reset needed here.
         }
 
         // Advance the shared confirmed-delivery watermark on any committed

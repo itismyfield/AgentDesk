@@ -57,6 +57,35 @@ impl PlaceholderCleanupOutcome {
         matches!(self, Self::Succeeded | Self::AlreadyGone)
     }
 
+    /// #3003: a delete failure that will never succeed on retry — the bot lacks
+    /// permission (403) or the message is permanently gone (410). Distinct from a
+    /// transient 5xx / rate-limit / network `Failed`. Callers that block turn
+    /// finalization until a panel delete commits must treat these as terminal
+    /// (give up the delete) so the turn does not wedge retrying forever. Matches
+    /// the permanent classification used by `status_panel_orphan_store::drain`.
+    pub(super) fn is_permanent_failure(&self) -> bool {
+        match self {
+            // Match HTTP-status *phrases*, not bare digit substrings (codex P2
+            // r21): a Discord snowflake or retry delay in the error detail can
+            // contain "403"/"410" without being the status. These phrases only
+            // appear in an actual permission/gone status line.
+            Self::Failed { detail, .. } => {
+                let lower = detail.to_ascii_lowercase();
+                lower.contains("403 forbidden")
+                    || lower.contains("(403)")
+                    || lower.contains("http 403")
+                    || lower.contains("status code 403")
+                    || lower.contains("410 gone")
+                    || lower.contains("(410)")
+                    || lower.contains("http 410")
+                    || lower.contains("status code 410")
+                    || lower.contains("missing permissions")
+                    || lower.contains("missing access")
+            }
+            Self::Succeeded | Self::AlreadyGone => false,
+        }
+    }
+
     pub(super) fn failed(detail: impl Into<String>) -> Self {
         let detail = detail.into();
         Self::Failed {
@@ -238,6 +267,54 @@ pub(super) fn classify_cleanup_failure(detail: &str) -> PlaceholderCleanupFailur
         PlaceholderCleanupFailureClass::PermissionOrRoutingDiagnostic
     } else {
         PlaceholderCleanupFailureClass::LifecycleFailure
+    }
+}
+
+#[cfg(test)]
+mod permanent_failure_tests {
+    use super::PlaceholderCleanupOutcome;
+
+    #[test]
+    fn permanent_failure_matches_http_status_phrases_not_digit_substrings() {
+        // #3003 codex P2 r21: real permanent statuses are permanent.
+        for detail in [
+            "HTTP 403 Forbidden: Missing Permissions",
+            "Unsuccessful request (403)",
+            "HTTP 403",
+            "error: status code 403",
+            "HTTP 410 Gone",
+            "Discord error (410)",
+            "HTTP 410",
+            "status code 410",
+            "Missing Access",
+        ] {
+            assert!(
+                PlaceholderCleanupOutcome::failed(detail).is_permanent_failure(),
+                "{detail}"
+            );
+        }
+    }
+
+    #[test]
+    fn permanent_failure_does_not_match_incidental_digit_substrings() {
+        // A snowflake / retry delay containing 403/410 is NOT an HTTP status.
+        for detail in [
+            "503 Service Unavailable",
+            "rate limited, retry after 4103ms",
+            "timeout deleting message 1410403000000000000",
+            "connection reset",
+        ] {
+            assert!(
+                !PlaceholderCleanupOutcome::failed(detail).is_permanent_failure(),
+                "{detail}"
+            );
+        }
+    }
+
+    #[test]
+    fn committed_outcomes_are_not_permanent_failures() {
+        assert!(!PlaceholderCleanupOutcome::Succeeded.is_permanent_failure());
+        assert!(!PlaceholderCleanupOutcome::AlreadyGone.is_permanent_failure());
     }
 }
 
