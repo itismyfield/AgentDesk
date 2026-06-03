@@ -71,6 +71,8 @@ pub(in crate::services::discord) mod task_supervisor;
 #[cfg(unix)]
 mod tmux;
 #[cfg(unix)]
+mod watcher_panel_parity;
+#[cfg(unix)]
 pub(crate) use tmux::write_spawn_nonce;
 mod status_panel_controller;
 #[cfg(unix)]

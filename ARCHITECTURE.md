@@ -536,7 +536,8 @@ src/
 │   │   ├── turn_finalizer.rs
 │   │   ├── voice_background_driver.rs
 │   │   ├── voice_barge_in.rs
-│   │   └── voice_routing.rs
+│   │   ├── voice_routing.rs
+│   │   └── watcher_panel_parity.rs
 │   ├── dispatches/
 │   │   ├── discord_delivery/
 │   │   │   ├── guard.rs

@@ -1750,6 +1750,15 @@ async fn cleanup_orphan_external_input_status_panel(
     let Some(panel_msg_id) = *status_panel_msg_id else {
         return true;
     };
+    // EPIC #3078 PR-4 — SHADOW parity: the controller's chosen reclaim target
+    // must equal `panel_msg_id`; legacy deletes + clears the real id below.
+    crate::services::discord::watcher_panel_parity::assert_watcher_reclaim_parity(
+        shared,
+        channel_id,
+        provider,
+        panel_msg_id,
+    )
+    .await;
     let outcome = delete_nonterminal_placeholder(
         http,
         channel_id,
@@ -1780,11 +1789,10 @@ async fn cleanup_orphan_external_input_status_panel(
         );
         return false;
     }
-    // Committed (succeeded / already-gone) OR a permanent failure (403/410): in
-    // both cases the delete will not be retried — a permanent failure can never
-    // succeed, so treat it as terminal and clear the handle (codex P2 r16) rather
-    // than wedge the turn finalization forever. Drop the durable record too, since
-    // the drain would also give up on the same permanent error.
+    // Committed (succeeded / already-gone) OR a permanent failure (403/410): neither
+    // is retried, so treat a permanent failure as terminal and clear the handle
+    // (codex P2 r16) rather than wedge finalization forever. Drop the durable record
+    // too, since the drain would also give up on the same permanent error.
     if !outcome.is_committed() {
         crate::services::discord::status_panel_orphan_store::remove(
             provider,
@@ -1850,6 +1858,16 @@ async fn complete_watcher_status_panel_v2(
     if !shared.status_panel_v2_enabled {
         return true;
     }
+    // EPIC #3078 PR-4 — SHADOW parity: the controller's chosen completion id must
+    // equal `status_panel_msg_id`; legacy completes the real Discord IO below.
+    crate::services::discord::watcher_panel_parity::assert_watcher_completion_parity(
+        shared,
+        channel_id,
+        expected_user_msg_id.unwrap_or(0),
+        provider,
+        status_panel_msg_id,
+    )
+    .await;
     crate::services::discord::turn_bridge::complete_status_panel_v2_with_http(
         shared,
         http,
@@ -4751,12 +4769,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                         && !fresh_panel_already_set
                                         && fresh_inflight.is_some()
                                     {
-                                        // #3077: bind through the typed op so the
-                                        // identity guard + "don't clobber an already-set
-                                        // panel" check are re-validated atomically under
-                                        // the inflight flock — closing the window where an
-                                        // overlapping watcher rebinds between our snapshot
-                                        // load and this write (#3003).
+                                        // #3077: bind through the typed op so the identity guard +
+                                        // "don't clobber an already-set panel" check re-validate
+                                        // atomically under the inflight flock, closing the rebind
+                                        // window between our snapshot load and this write (#3003).
                                         let bind_outcome = crate::services::discord::inflight::bind_status_panel(
                                             &watcher_provider,
                                             channel_id.get(),
@@ -4768,33 +4784,23 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                             },
                                         );
                                         // #3077 (codex P1): the pre-send snapshot/`identity_matches`
-                                        // check narrows the race window but does NOT close it — an
-                                        // overlapping watcher can rebind/replace the inflight row
-                                        // between our `load_inflight_state` and this atomic bind.
+                                        // check narrows but does NOT close the race; an overlapping
+                                        // watcher can rebind between our load and this atomic bind.
                                         // The bind is the single source of truth for whether THIS
-                                        // panel is now recorded on the inflight row, so the handle
-                                        // we adopt MUST be decided by its return. Adopting
-                                        // `panel_msg.id` unconditionally would leave a sent-but-
-                                        // unrecorded panel that the watcher then treats as its own
-                                        // → duplicate-panel leak / wrong-panel lifecycle.
+                                        // panel is now recorded, so the adopted handle MUST come
+                                        // from its return — adopting `panel_msg.id` unconditionally
+                                        // would leak a sent-but-unrecorded panel as our own.
                                         let decision =
                                             resolve_tui_status_panel_bind_decision(bind_outcome);
                                         if decision.delete_sent_panel {
-                                            // The inflight row did NOT record our panel:
-                                            //  - SkippedPanelAlreadySet → the row already carries a
-                                            //    DIFFERENT (real) panel id; ours is a duplicate.
-                                            //  - GuardMismatch / Missing / IoError → the bind never
-                                            //    happened (the row changed/disappeared or a guard
-                                            //    failed); we must not claim ownership of a panel the
-                                            //    row doesn't know about.
-                                            // Delete the just-sent duplicate so it never leaks. This
-                                            // reuses the same delete path the "inflight changed
-                                            // during send" branch below uses
-                                            // (delete_nonterminal_placeholder → tmux.rs:803). It
-                                            // never double-deletes a legitimately-bound panel: we
-                                            // only reach here when our bind did NOT record
-                                            // `panel_msg.id`, so the row's owned panel (if any) is a
-                                            // *different* id we never delete.
+                                            // Bind did NOT record our panel (SkippedPanelAlreadySet:
+                                            // row owns a DIFFERENT real id, ours is a duplicate; or
+                                            // GuardMismatch/Missing/IoError: bind never happened, so
+                                            // we must not claim a panel the row doesn't know about).
+                                            // Delete the just-sent duplicate via the same path the
+                                            // "inflight changed during send" branch below uses; it
+                                            // never double-deletes a bound panel (we only reach here
+                                            // when our bind did NOT record `panel_msg.id`).
                                             let discard_outcome = delete_nonterminal_placeholder(
                                                 &http,
                                                 channel_id,
@@ -4820,19 +4826,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                                     panel_msg.id.get(),
                                                 );
                                             }
-                                            // Resolve the handle from the row's CURRENT owned panel
-                                            // id as observed by the bind (decision.owned_panel_id),
-                                            // never from the just-sent duplicate and never from the
-                                            // pre-bind `fresh_inflight` snapshot (#3077 codex P2 #2).
-                                            // The snapshot can be stale: when a concurrent writer set
-                                            // the panel between our snapshot load and this atomic
-                                            // bind, the bind returns SkippedPanelAlreadySet carrying
-                                            // the freshly-set id while the snapshot still shows none.
-                                            // `owned_panel_id` is `None` for GuardMismatch / Missing /
-                                            // IoError (the bind observed no panel we may claim), which
-                                            // correctly leaves the handle unset (safe). Adopt only for
-                                            // the SAME turn we sent for (`identity_matches`); a
-                                            // replacement turn's panel belongs to that turn.
+                                            // Resolve the handle from the row's CURRENT owned id as
+                                            // observed by the bind (`decision.owned_panel_id`), never
+                                            // the just-sent duplicate nor the (possibly stale) pre-bind
+                                            // `fresh_inflight` snapshot (#3077 codex P2 #2). It is
+                                            // `None` for GuardMismatch/Missing/IoError (no panel we may
+                                            // claim → handle unset). Adopt only for the SAME turn we
+                                            // sent for; a replacement turn's panel belongs to it.
                                             let resolved_handle = if identity_matches {
                                                 decision
                                                     .owned_panel_id
@@ -4852,8 +4852,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                                 resolved_handle.map(serenity::MessageId::get)
                                             );
                                         } else {
-                                            // Bound / AlreadyBound: the row now owns this exact
-                                            // panel id — adopt the just-sent panel as today.
+                                            // Bound / AlreadyBound: the row now owns this exact id.
                                             debug_assert!(decision.adopt_sent_panel);
                                             status_panel_msg_id = Some(panel_msg.id);
                                             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -4865,11 +4864,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                             );
                                         }
                                     } else {
-                                        // The turn vanished/changed during the send await,
-                                        // or an overlapping watcher already owns the panel;
-                                        // the panel we just created is a duplicate/orphan —
-                                        // reclaim it instead of persisting stale state. The
-                                        // next interval adopts the canonical persisted panel.
+                                        // The turn vanished/changed during the send await, or an
+                                        // overlapping watcher already owns the panel; ours is a
+                                        // duplicate/orphan — reclaim it instead of persisting stale
+                                        // state (the next interval adopts the canonical panel).
                                         let discard_outcome = delete_nonterminal_placeholder(
                                             &http,
                                             channel_id,
@@ -4883,29 +4881,21 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                         if !discard_outcome.is_committed()
                                             && !discard_outcome.is_permanent_failure()
                                         {
-                                            // #3003 (codex P2 r14): the delete failed
-                                            // transiently but the duplicate panel exists.
-                                            // This path does not persist to inflight, so a
-                                            // cancellation/restart before the next interval
-                                            // would lose the only handle — record it in the
-                                            // durable store so the sweeper drain reclaims it.
+                                            // #3003 (codex P2 r14): transient delete failure but the
+                                            // duplicate exists and this path never persists it —
+                                            // record it for the sweeper drain to reclaim.
                                             crate::services::discord::status_panel_orphan_store::enqueue(
                                                 &watcher_provider,
                                                 &shared.token_hash,
                                                 channel_id.get(),
                                                 panel_msg.id.get(),
                                             );
-                                            // #3003 (codex P2 r19/r22): pick the local handle
-                                            // carefully. Adopt the CANONICAL persisted panel ONLY
-                                            // for a same-turn overlapping-watcher duplicate
-                                            // (`identity_matches`) — so interval edits/completion
-                                            // target the real panel while the duplicate is left to
-                                            // the durable drain. If the fresh inflight is a
-                                            // *replacement* turn (`!identity_matches`), that
-                                            // persisted id belongs to the new turn; adopting it
-                                            // here would let the old frame's abandon cleanup delete
-                                            // the replacement's panel — so keep the just-sent
-                                            // duplicate id locally for an in-turn retry instead.
+                                            // #3003 (codex P2 r19/r22): adopt the CANONICAL persisted
+                                            // panel ONLY for a same-turn overlapping-watcher duplicate
+                                            // (`identity_matches`), so edits/completion hit the real
+                                            // panel. For a *replacement* turn the persisted id is the
+                                            // new turn's; adopting it would let the old frame's abandon
+                                            // cleanup delete it — keep the just-sent duplicate locally.
                                             if fresh_panel_already_set && identity_matches {
                                                 status_panel_msg_id =
                                                     watcher_persisted_status_panel_msg_id(
@@ -4936,6 +4926,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             }
                         }
                     }
+                    // EPIC #3078 PR-4 — SHADOW parity: the controller's chosen create/adopt id
+                    // must equal the watcher's resolved `status_panel_msg_id` (TUI-direct uid 0).
+                    crate::services::discord::watcher_panel_parity::assert_watcher_create_parity(
+                        &shared,
+                        channel_id,
+                        0,
+                        &watcher_provider,
+                        status_panel_msg_id,
+                    )
+                    .await;
 
                     loop {
                         let current_portion =
