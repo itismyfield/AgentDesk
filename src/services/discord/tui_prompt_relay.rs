@@ -468,14 +468,67 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             }
         }
     } else {
-        let content = format_ssh_direct_prompt_notification(
-            &prompt.provider,
-            &prompt.tmux_session_name,
-            &prompt.prompt,
-        );
+        // #3075: a `<task-notification>` auto-turn is a MACHINE event — render it
+        // as a compact structured card and DEDUPE repeats by task-id (a repeat
+        // edits its live card or drops as a no-op → no new ⏳/turn; the first
+        // sighting returns content to post as the #3099 anchor). HumanTuiDirect
+        // keeps the raw render; SystemContinuation is handled above (#3100).
+        let content = if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
+            match super::tui_task_card::resolve_task_card_content(
+                &notify_http,
+                shared,
+                channel_id,
+                &prompt.prompt,
+            )
+            .await
+            {
+                super::tui_task_card::TaskCardOutcome::Post { content } => content,
+                super::tui_task_card::TaskCardOutcome::Repeat => {
+                    // #3075 codex P1 #2: a repeat edited the live card (or dropped
+                    // as a no-op) and early-returns BEFORE the bridge-tail /
+                    // lease-guard cleanup block below. But `record_observed_external_turn_lease`
+                    // (above) already recorded a fresh external-input turn lease for
+                    // THIS observation, overwriting any prior one. If we returned now
+                    // without clearing it, that dangling non-Unassigned lease would
+                    // make `session_bound_external_lease_blocks_delivery` skip a
+                    // legitimate session-bound / bridge-tail delivery. Clear exactly
+                    // the lease this observation recorded (exact-match, so a newer
+                    // turn that reused this provider/session/channel is preserved).
+                    clear_observed_external_turn_lease_if_current(&prompt, channel_id, &lease);
+                    return;
+                }
+            }
+        } else {
+            format_ssh_direct_prompt_notification(
+                &prompt.provider,
+                &prompt.tmux_session_name,
+                &prompt.prompt,
+            )
+        };
         let anchor_message = match channel_id.say(&*notify_http, content).await {
             Ok(message) => message,
             Err(error) => {
+                // #3075 codex P2: for a TaskNotificationEvent the `Post` outcome
+                // above reserved a placeholder card slot (message_id == 0) BEFORE
+                // this post. If the post fails we early-return without ever calling
+                // `record_posted_card`, so the placeholder would linger and force
+                // every later same-task notification to resolve to `Pending`
+                // (`TaskCardOutcome::Repeat` → no-op), silently suppressing that
+                // task-id until the 1h stale purge. Release the reservation we own
+                // (exact-match: only while message_id is still 0) so the NEXT
+                // same-task notification reserves fresh and reposts. A racing
+                // repeat that legitimately saw `Pending` is still a safe no-op:
+                // its slot read happened against this same placeholder, and clearing
+                // it only changes the *next* reservation's outcome — it never turns
+                // an already-dropped repeat into a double-post.
+                if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
+                    let task_id =
+                        super::tui_task_card::parse_task_notification(&prompt.prompt).task_id;
+                    super::tui_task_card::forget_reserved_card(
+                        channel_id.get(),
+                        task_id.as_deref(),
+                    );
+                }
                 tracing::warn!(
                     provider = %prompt.provider,
                     channel_id = channel_id.get(),
@@ -489,6 +542,14 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                 return;
             }
         };
+        if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
+            // #3075: remember this card so a repeat completion edits it.
+            super::tui_task_card::record_posted_card(
+                channel_id.get(),
+                &prompt.prompt,
+                anchor_message.id.get(),
+            );
+        }
         crate::services::tui_prompt_dedupe::record_prompt_anchor(
             &prompt.provider,
             &prompt.tmux_session_name,
@@ -628,6 +689,30 @@ fn record_observed_external_turn_lease(
         "observed TUI-direct input as already-submitted external turn"
     );
     lease
+}
+
+/// Clear the external-input turn lease recorded by
+/// [`record_observed_external_turn_lease`] for THIS observation, if it is still
+/// the current lease (exact match).
+///
+/// Used by the `<task-notification>` edit-repeat path (#3075 codex P1 #2): a
+/// repeat records a fresh lease before card resolution but then early-returns,
+/// skipping the normal bridge-tail / lease-guard cleanup. Without this, that
+/// stale non-`Unassigned` lease would block session-bound / bridge-tail delivery
+/// (`session_relay_sink::session_bound_external_lease_blocks_delivery`). The
+/// exact-match guard means a newer turn that reused the same
+/// provider/session/channel after we recorded ours is left untouched.
+fn clear_observed_external_turn_lease_if_current(
+    prompt: &ObservedTuiPrompt,
+    channel_id: ChannelId,
+    lease: &ExternalInputRelayLease,
+) -> bool {
+    crate::services::tui_prompt_dedupe::clear_external_input_relay_lease_if_matches(
+        &prompt.provider,
+        &prompt.tmux_session_name,
+        channel_id.get(),
+        lease,
+    )
 }
 
 fn external_input_relay_output_path(
@@ -3757,38 +3842,10 @@ fn sanitize_inline_code(value: &str) -> String {
     value.replace('`', "'")
 }
 
-fn strip_terminal_controls(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
-    let mut chars = value.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' {
-            if chars.peek().copied() == Some('[') {
-                chars.next();
-                for next in chars.by_ref() {
-                    if ('@'..='~').contains(&next) {
-                        break;
-                    }
-                }
-            }
-            continue;
-        }
-        if ch.is_control() && ch != '\n' && ch != '\r' && ch != '\t' {
-            continue;
-        }
-        output.push(ch);
-    }
-    output
-}
-
-fn truncate_chars(value: &str, limit: usize) -> String {
-    let mut chars = value.chars();
-    let truncated = chars.by_ref().take(limit).collect::<String>();
-    if chars.next().is_some() {
-        format!("{truncated}...")
-    } else {
-        truncated
-    }
-}
+// #3075: `strip_terminal_controls` and the ASCII `truncate_chars` are shared
+// with the task-card renderer; the single definitions now live in
+// `tui_task_card` so the classifier, formatters, and card parser stay in sync.
+use super::tui_task_card::{strip_terminal_controls, truncate_chars_ascii as truncate_chars};
 
 #[cfg(test)]
 mod tests {
@@ -4881,6 +4938,120 @@ mod tests {
             )
             .is_none(),
             "precondition skips before a tail guard exists must clear the recorded BridgeAdapter lease"
+        );
+    }
+
+    // #3075 codex P1 #2: a `<task-notification>` edit-repeat records a fresh
+    // external-input turn lease (record_observed_external_turn_lease) but then
+    // early-returns before the normal bridge-tail / lease-guard cleanup. The
+    // repeat path must clear exactly the lease it recorded so a dangling
+    // non-Unassigned lease cannot make session-bound delivery skip a legitimate
+    // bridge-tail delivery.
+    #[test]
+    fn task_notification_repeat_clears_its_recorded_external_lease() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        let tmux = "AgentDesk-task-card-repeat-lease";
+        let channel_id = ChannelId::new(950_000_000_000_001);
+        let prompt = ObservedTuiPrompt {
+            provider: ProviderKind::Claude.as_str().to_string(),
+            tmux_session_name: tmux.to_string(),
+            prompt: "<task-notification><task-id>repeat-x</task-id><status>completed</status></task-notification>".to_string(),
+            observed_at: chrono::Utc::now(),
+        };
+        let lease = ExternalInputRelayLease {
+            channel_id: Some(channel_id.get()),
+            turn_id: Some("external:claude:950000000000001:repeat:1".to_string()),
+            session_key: Some("host:AgentDesk-task-card-repeat-lease".to_string()),
+            // A BridgeAdapter (non-Unassigned) lease is exactly what would block
+            // session-bound delivery if left dangling.
+            relay_owner: ExternalInputRelayOwner::BridgeAdapter,
+            runtime_kind: Some(RuntimeHandoffKind::ClaudeTui),
+        };
+        crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+            ProviderKind::Claude.as_str(),
+            tmux,
+            lease.clone(),
+        );
+        // Sanity: the lease is present and would block delivery.
+        assert!(
+            crate::services::tui_prompt_dedupe::external_input_relay_lease_present(
+                ProviderKind::Claude.as_str(),
+                tmux,
+                channel_id.get(),
+            )
+        );
+
+        // The repeat early-return clears exactly its recorded lease.
+        assert!(clear_observed_external_turn_lease_if_current(
+            &prompt, channel_id, &lease,
+        ));
+        assert!(
+            crate::services::tui_prompt_dedupe::external_input_relay_lease(
+                ProviderKind::Claude.as_str(),
+                tmux,
+                channel_id.get(),
+            )
+            .is_none(),
+            "a task-notification edit-repeat must not leave a stale lease that blocks bridge-tail delivery"
+        );
+    }
+
+    // #3075 codex P1 #2: the exact-match guard must NOT clobber a newer turn's
+    // lease that reused the same provider/session/channel after the repeat
+    // recorded its lease.
+    #[test]
+    fn task_notification_repeat_lease_clear_preserves_newer_turn() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        let tmux = "AgentDesk-task-card-repeat-newer";
+        let channel_id = ChannelId::new(950_000_000_000_002);
+        let prompt = ObservedTuiPrompt {
+            provider: ProviderKind::Claude.as_str().to_string(),
+            tmux_session_name: tmux.to_string(),
+            prompt: "<task-notification><task-id>repeat-y</task-id></task-notification>"
+                .to_string(),
+            observed_at: chrono::Utc::now(),
+        };
+        let repeat_lease = ExternalInputRelayLease {
+            channel_id: Some(channel_id.get()),
+            turn_id: Some("external:claude:950000000000002:repeat:1".to_string()),
+            session_key: Some("host:AgentDesk-task-card-repeat-newer".to_string()),
+            relay_owner: ExternalInputRelayOwner::BridgeAdapter,
+            runtime_kind: Some(RuntimeHandoffKind::ClaudeTui),
+        };
+        let newer_lease = ExternalInputRelayLease {
+            turn_id: Some("external:claude:950000000000002:repeat:2".to_string()),
+            ..repeat_lease.clone()
+        };
+        crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+            ProviderKind::Claude.as_str(),
+            tmux,
+            repeat_lease.clone(),
+        );
+        // A newer turn overwrites the lease before the repeat's cleanup runs.
+        crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+            ProviderKind::Claude.as_str(),
+            tmux,
+            newer_lease.clone(),
+        );
+
+        // The repeat's exact-match clear is a no-op against the newer lease.
+        assert!(!clear_observed_external_turn_lease_if_current(
+            &prompt,
+            channel_id,
+            &repeat_lease,
+        ));
+        assert_eq!(
+            crate::services::tui_prompt_dedupe::external_input_relay_lease(
+                ProviderKind::Claude.as_str(),
+                tmux,
+                channel_id.get(),
+            ),
+            Some(newer_lease),
+            "exact-match clear must preserve a newer turn's lease",
         );
     }
 

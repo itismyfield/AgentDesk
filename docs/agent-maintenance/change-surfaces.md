@@ -131,7 +131,7 @@
     inflight-missing suppressions, re-acquires a watcher-owned inflight, and
     preserves the panel under an active turn; split loop helpers further before
     adding behavior).
-  - `src/services/discord/tui_prompt_relay.rs` (3792 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (3849 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3082 queued-only answer-flush gate
     (`is_queued_notice = false` for the TUI idle-response placeholder); +139
@@ -155,7 +155,30 @@
     transient pane-probe flake can never tombstone a LIVE session's mirror; +26
     from #3105 codex-P2 followup: the blocking rehydrate pass (sync `tmux`
     subprocess probes + the multi-sample `std::thread::sleep`) is now dispatched
-    via `tokio::task::spawn_blocking` so it never stalls a Tokio executor worker).
+    via `tokio::task::spawn_blocking` so it never stalls a Tokio executor worker);
+    +37 from #3075 codex P1 #2: the `<task-notification>` edit-repeat early-return
+    now clears exactly the external-input turn lease it recorded
+    (`clear_observed_external_turn_lease_if_current`) before returning, so a
+    dangling non-`Unassigned` lease can no longer make session-bound delivery skip
+    a legitimate bridge-tail delivery, plus exact-match preserve-newer regression
+    tests; net -1 from #3075: the `<task-notification>` TaskNotificationEvent class now
+    renders a structured, deduped card (the `terminal injected input` raw block
+    is replaced for that class only) — the card render/parse/dedupe-store logic
+    lives in the new `tui_task_card.rs` module, and the shared
+    `strip_terminal_controls` + ASCII `truncate_chars` helpers were consolidated
+    there too, so this file's surface shrank by one line overall; the new
+    `tui_task_card.rs` module (627 prod LoC, below the giant threshold) hosts the
+    card render/parse/JSON-aggregate/dedupe-store logic; +48 from #3075 codex P1
+    #1: a `CardSlot::Pending` variant + `TaskCardOutcome` enum so a repeat that
+    races ahead of `record_card_message` drops as a no-op instead of building
+    `MessageId::new(0)` (panic), plus the pre-record-repeat regression test);
+    +21 from #3075 codex P2: the TaskNotificationEvent post-failure path now
+    releases the reserved card placeholder via `forget_reserved_card`
+    (exact-match: only while `message_id == 0`, never evicting a concurrently
+    recorded real id) so a transient Discord post failure no longer leaves a
+    stuck `Pending` slot suppressing that task-id for up to 1h; the next
+    same-task notification reserves fresh and reposts (plus failed-post-reposts /
+    preserve-recorded-id / missing-id regression tests).
   - `src/services/codex_tmux_wrapper.rs` (1222 lines; Codex tmux wrapper JSON
     event parser and relay bridge for native Codex session events — bugfix only
     outside an extraction plan).
