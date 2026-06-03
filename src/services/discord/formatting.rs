@@ -171,6 +171,10 @@ pub(super) fn risk_badge(destructive: bool) -> &'static str {
 
 /// Claude Code built-in slash commands
 pub(super) const BUILTIN_SKILLS: &[(&str, &str)] = &[
+    (
+        "branch",
+        "Create a branch (fork) of the current conversation",
+    ),
     ("clear", "Clear conversation context and start fresh"),
     ("compact", "Compact conversation to reduce context"),
     ("context", "Visualize current context usage"),
@@ -180,7 +184,10 @@ pub(super) const BUILTIN_SKILLS: &[(&str, &str)] = &[
     ("export", "Export conversation to file"),
     ("fast", "Toggle fast output mode"),
     ("files", "List all files currently in context"),
-    ("fork", "Create a fork of the current conversation"),
+    (
+        "fork",
+        "Alias for /branch: create a branch of the current conversation",
+    ),
     ("init", "Initialize project with CLAUDE.md guide"),
     ("memory", "Edit CLAUDE.md memory files"),
     ("model", "Switch AI model"),

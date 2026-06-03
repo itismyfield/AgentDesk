@@ -151,7 +151,7 @@
     split before adding non-bugfix behavior).
   - `src/services/discord/turn_bridge/completion_guard.rs` (1909 lines).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (1243 lines).
-  - `src/services/discord/formatting.rs` (2713 lines).
+  - `src/services/discord/formatting.rs` (2720 lines).
   - `src/services/discord/settings.rs` (2479 lines).
   - `src/services/discord/prompt_builder/` (directory, refactored).
   - `src/services/discord/runtime_bootstrap.rs` (2564 lines after #2558
