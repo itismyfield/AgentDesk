@@ -18,6 +18,27 @@ fn startup_doctor_report_next_step() -> String {
     format!("inspect the startup doctor report via {LATEST_STARTUP_DOCTOR_ENDPOINT}")
 }
 
+fn format_bytes(bytes_str: &str) -> String {
+    bytes_str
+        .parse::<u64>()
+        .ok()
+        .map(|b| {
+            const KB: u64 = 1024;
+            const MB: u64 = KB * 1024;
+            const GB: u64 = MB * 1024;
+            if b >= GB {
+                format!("{:.1} GB", b as f64 / GB as f64)
+            } else if b >= MB {
+                format!("{:.1} MB", b as f64 / MB as f64)
+            } else if b >= KB {
+                format!("{:.1} KB", b as f64 / KB as f64)
+            } else {
+                format!("{b} B")
+            }
+        })
+        .unwrap_or_else(|| bytes_str.to_string())
+}
+
 pub(crate) fn classify_degraded_reason(raw: &str) -> ClassifiedReason {
     let parts: Vec<&str> = raw.split(':').collect();
     match parts.as_slice() {
@@ -151,7 +172,7 @@ pub(crate) fn classify_degraded_reason(raw: &str) -> ClassifiedReason {
             severity: Severity::Warning,
             fix_safety: FixSafety::ReadOnly,
             security_exposure: SecurityExposure::OperationalMetadata,
-            summary: format!("disk has low free bytes: {bytes}"),
+            summary: format!("disk has low free bytes: {}", format_bytes(bytes)),
             next_step: "free up disk space or increase disk capacity".to_string(),
         },
         ["db_unavailable"] => ClassifiedReason {
@@ -223,6 +244,16 @@ mod health_classification_tests {
         assert_eq!(warned.subsystem, "startup_doctor");
         assert_eq!(warned.summary, "startup doctor reported 3 warning(s)");
         assert_eq!(warned.next_step.as_str(), expected_next_step.as_str());
+    }
+
+    #[test]
+    fn disk_low_free_bytes_reason_formats_bytes() {
+        let reason = classify_degraded_reason("disk_low_free_bytes:104857600");
+        assert_eq!(reason.subsystem, "disk");
+        assert_eq!(reason.summary, "disk has low free bytes: 100.0 MB");
+
+        let reason_invalid = classify_degraded_reason("disk_low_free_bytes:invalid");
+        assert_eq!(reason_invalid.summary, "disk has low free bytes: invalid");
     }
 
     #[test]
