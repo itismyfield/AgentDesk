@@ -116,7 +116,8 @@ pub(crate) async fn wake_waiting_dispatch_outbox_pg(
     trigger: &str,
 ) -> Result<DispatchOutboxWakeSummary, String> {
     let lease_ttl_secs = cluster_config.lease_ttl_secs.max(1);
-    let mut worker_nodes = crate::server::cluster::list_worker_nodes(pool, lease_ttl_secs).await?;
+    let mut worker_nodes =
+        crate::services::cluster::node_registry::list_worker_nodes(pool, lease_ttl_secs).await?;
     let routing_engine = RoutingEngine::from_cluster_config(cluster_config);
     let cluster_default = cluster_default_required_capabilities(&cluster_config.dispatch_routing);
     let now = Utc::now();

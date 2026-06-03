@@ -1202,10 +1202,11 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             // Bridge the race by awaiting the OnceLock inside the spawned task
             // before the worker logs "poll loop started".
             tokio::spawn(async move {
-                let resolved_target_id = crate::server::cluster::wait_for_self_instance_id(
-                    std::time::Duration::from_secs(30),
-                )
-                .await;
+                let resolved_target_id =
+                    crate::services::cluster::node_registry::wait_for_self_instance_id(
+                        std::time::Duration::from_secs(30),
+                    )
+                    .await;
                 // claim_owner appends provider so multi-bot deployments
                 // surface which token's worker holds a row in
                 // observability dashboards.

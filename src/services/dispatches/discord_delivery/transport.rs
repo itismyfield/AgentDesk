@@ -1,10 +1,169 @@
-use super::{
-    DispatchMessagePostError, DispatchMessagePostErrorKind, DispatchMessagePostOutcome,
-    DispatchNotifyDeliveryResult, ReviewFollowupKind,
-};
 use sqlx::PgPool;
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
+
+// Dispatch delivery transport types.
+//
+// These are non-presentation domain transport types (delivery results, post
+// errors, follow-up classification) produced and consumed entirely within the
+// dispatch delivery service. They were previously defined in
+// `crate::server::dto::dispatches` (#3037 bucket 4); they now live beside the
+// transport logic that owns them. The route layer keeps access through the
+// `services::dispatches::discord_delivery` re-export facade.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReviewFollowupKind {
+    Pass,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DispatchMessagePostErrorKind {
+    MessageTooLong,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DispatchMessagePostError {
+    kind: DispatchMessagePostErrorKind,
+    detail: String,
+    http_status: Option<reqwest::StatusCode>,
+    discord_error_code: Option<i64>,
+}
+
+impl DispatchMessagePostError {
+    pub(crate) fn new(kind: DispatchMessagePostErrorKind, detail: String) -> Self {
+        Self {
+            kind,
+            detail,
+            http_status: None,
+            discord_error_code: None,
+        }
+    }
+
+    pub(crate) fn http(
+        kind: DispatchMessagePostErrorKind,
+        status: reqwest::StatusCode,
+        discord_error_code: Option<i64>,
+        detail: String,
+    ) -> Self {
+        Self {
+            kind,
+            detail,
+            http_status: Some(status),
+            discord_error_code,
+        }
+    }
+
+    pub(crate) fn kind(&self) -> DispatchMessagePostErrorKind {
+        self.kind
+    }
+
+    pub(crate) fn http_status(&self) -> Option<reqwest::StatusCode> {
+        self.http_status
+    }
+
+    pub(crate) fn discord_error_code(&self) -> Option<i64> {
+        self.discord_error_code
+    }
+
+    pub(crate) fn is_length_error(&self) -> bool {
+        self.kind == DispatchMessagePostErrorKind::MessageTooLong
+    }
+}
+
+impl std::fmt::Display for DispatchMessagePostError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for DispatchMessagePostError {}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct DispatchNotifyDeliveryResult {
+    pub(crate) status: String,
+    pub(crate) dispatch_id: String,
+    pub(crate) action: String,
+    pub(crate) correlation_id: Option<String>,
+    pub(crate) semantic_event_id: Option<String>,
+    pub(crate) target_channel_id: Option<String>,
+    pub(crate) message_id: Option<String>,
+    pub(crate) fallback_kind: Option<String>,
+    pub(crate) detail: Option<String>,
+}
+
+impl DispatchNotifyDeliveryResult {
+    pub(crate) fn success(
+        dispatch_id: impl Into<String>,
+        action: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            status: "success".to_string(),
+            dispatch_id: dispatch_id.into(),
+            action: action.into(),
+            correlation_id: None,
+            semantic_event_id: None,
+            target_channel_id: None,
+            message_id: None,
+            fallback_kind: None,
+            detail: Some(detail.into()),
+        }
+    }
+
+    pub(crate) fn duplicate(dispatch_id: impl Into<String>, detail: impl Into<String>) -> Self {
+        let dispatch_id = dispatch_id.into();
+        Self {
+            status: "duplicate".to_string(),
+            action: "notify".to_string(),
+            correlation_id: Some(format!("dispatch:{dispatch_id}")),
+            semantic_event_id: Some(format!("dispatch:{dispatch_id}:notify")),
+            dispatch_id,
+            target_channel_id: None,
+            message_id: None,
+            fallback_kind: None,
+            detail: Some(detail.into()),
+        }
+    }
+
+    pub(crate) fn permanent_failure(
+        dispatch_id: impl Into<String>,
+        action: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            status: "permanent_failure".to_string(),
+            dispatch_id: dispatch_id.into(),
+            action: action.into(),
+            correlation_id: None,
+            semantic_event_id: None,
+            target_channel_id: None,
+            message_id: None,
+            fallback_kind: None,
+            detail: Some(detail.into()),
+        }
+    }
+
+    pub(crate) fn with_thread_creation_fallback(mut self, detail: impl Into<String>) -> Self {
+        let detail = detail.into();
+        self.status = "fallback".to_string();
+        self.fallback_kind = Some(match self.fallback_kind.take() {
+            Some(existing) => format!("ThreadCreationParentChannel+{existing}"),
+            None => "ThreadCreationParentChannel".to_string(),
+        });
+        self.detail = Some(match self.detail.take() {
+            Some(existing) if !existing.trim().is_empty() => format!("{detail}; {existing}"),
+            _ => detail,
+        });
+        self
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct DispatchMessagePostOutcome {
+    pub(crate) message_id: String,
+    pub(crate) delivery: DispatchNotifyDeliveryResult,
+}
 
 fn dispatch_delivery_correlation_id(dispatch_id: &str) -> String {
     format!("dispatch:{dispatch_id}")
@@ -798,6 +957,59 @@ mod tests {
             result.detail.as_deref(),
             Some("thread creation failed with 403; delivered with minimal fallback")
         );
+    }
+
+    fn roundtrip_delivery(delivery: DispatchNotifyDeliveryResult) -> DispatchNotifyDeliveryResult {
+        let value = serde_json::to_value(&delivery).expect("delivery DTO serializes");
+        serde_json::from_value(value).expect("delivery DTO deserializes")
+    }
+
+    #[test]
+    fn delivery_result_dto_pins_success_path() {
+        let delivery = roundtrip_delivery(DispatchNotifyDeliveryResult::success(
+            "dispatch-ok",
+            "notify",
+            "sent",
+        ));
+
+        assert_eq!(delivery.status, "success");
+        assert_eq!(delivery.dispatch_id, "dispatch-ok");
+        assert_eq!(delivery.action, "notify");
+        assert_eq!(delivery.detail.as_deref(), Some("sent"));
+        assert_eq!(delivery.fallback_kind, None);
+    }
+
+    #[test]
+    fn delivery_result_dto_pins_duplicate_path() {
+        let delivery = roundtrip_delivery(DispatchNotifyDeliveryResult::duplicate(
+            "dispatch-dup",
+            "already sent",
+        ));
+
+        assert_eq!(delivery.status, "duplicate");
+        assert_eq!(delivery.dispatch_id, "dispatch-dup");
+        assert_eq!(
+            delivery.correlation_id.as_deref(),
+            Some("dispatch:dispatch-dup")
+        );
+        assert_eq!(
+            delivery.semantic_event_id.as_deref(),
+            Some("dispatch:dispatch-dup:notify")
+        );
+    }
+
+    #[test]
+    fn delivery_result_dto_pins_permanent_failure_path() {
+        let delivery = roundtrip_delivery(DispatchNotifyDeliveryResult::permanent_failure(
+            "dispatch-fail",
+            "notify",
+            "discord rejected",
+        ));
+
+        assert_eq!(delivery.status, "permanent_failure");
+        assert_eq!(delivery.dispatch_id, "dispatch-fail");
+        assert_eq!(delivery.action, "notify");
+        assert_eq!(delivery.detail.as_deref(), Some("discord rejected"));
     }
 
     #[tokio::test]

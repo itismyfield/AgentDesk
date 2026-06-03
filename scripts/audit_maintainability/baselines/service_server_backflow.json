@@ -3,7 +3,7 @@
   "rule": "service_server_backflow",
   "description": "No-regression baseline for src/services references to crate::server or super::server server-layer modules.",
   "captured_at": "2026-06-03",
-  "total_count": 70,
+  "total_count": 44,
   "files": {
     "src/services/agents/query.rs": {
       "count": 2
@@ -21,9 +21,6 @@
       "count": 1
     },
     "src/services/auto_queue/route.rs": {
-      "count": 1
-    },
-    "src/services/cluster/intake_router_hook.rs": {
       "count": 1
     },
     "src/services/discord/adk_session.rs": {
@@ -47,13 +44,7 @@
     "src/services/discord/recovery_engine.rs": {
       "count": 1
     },
-    "src/services/discord/router/intake_gate.rs": {
-      "count": 1
-    },
     "src/services/discord/runtime_bootstrap.rs": {
-      "count": 3
-    },
-    "src/services/discord/tmux_lifecycle.rs": {
       "count": 2
     },
     "src/services/discord/tmux_watcher.rs": {
@@ -66,25 +57,10 @@
       "count": 2
     },
     "src/services/dispatched_sessions.rs": {
-      "count": 10
-    },
-    "src/services/dispatches/discord_delivery/mod.rs": {
-      "count": 1
+      "count": 8
     },
     "src/services/dispatches/discord_delivery/orchestration.rs": {
       "count": 2
-    },
-    "src/services/dispatches/outbox_claiming.rs": {
-      "count": 4
-    },
-    "src/services/dispatches/outbox_queue.rs": {
-      "count": 1
-    },
-    "src/services/dispatches/routing_constraint.rs": {
-      "count": 3
-    },
-    "src/services/dispatches/wait_queue.rs": {
-      "count": 1
     },
     "src/services/kanban_cards.rs": {
       "count": 1
@@ -93,10 +69,10 @@
       "count": 1
     },
     "src/services/onboarding/mod.rs": {
-      "count": 8
+      "count": 1
     },
     "src/services/session_forwarding.rs": {
-      "count": 3
+      "count": 1
     }
   }
 }

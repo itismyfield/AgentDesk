@@ -2784,7 +2784,7 @@ pub(in crate::services::discord) async fn handle_event(
                 let mode =
                     crate::services::cluster::intake_router_hook::IntakeRoutingMode::from_env();
                 let leader_instance_id =
-                    crate::server::cluster::resolve_self_instance_id_without_config();
+                    crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
                 let channel_id_str = channel_id.get().to_string();
                 let user_msg_id_str = new_message.id.get().to_string();
                 let request_owner_id_str = user_id.get().to_string();

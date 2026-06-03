@@ -84,7 +84,7 @@ pub(crate) fn resolve_forward_target_from_nodes(
         return ForwardResolution::Local;
     }
 
-    let routing = crate::server::cluster_session_routing::session_owner_routing_status(
+    let routing = crate::services::cluster::session_routing::session_owner_routing_status(
         Some(owner),
         Some(local),
         worker_nodes,
@@ -151,7 +151,7 @@ pub(crate) async fn resolve_forward_target(
         return ForwardResolution::Local;
     }
 
-    let worker_nodes = match crate::server::cluster::list_worker_nodes(
+    let worker_nodes = match crate::services::cluster::node_registry::list_worker_nodes(
         pool,
         state.config.cluster.lease_ttl_secs,
     )
