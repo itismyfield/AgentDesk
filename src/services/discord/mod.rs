@@ -69,6 +69,8 @@ pub(in crate::services::discord) mod task_supervisor;
 #[cfg(unix)]
 mod tmux;
 #[cfg(unix)]
+pub(crate) use tmux::write_spawn_nonce;
+#[cfg(unix)]
 mod tmux_error_detect;
 #[cfg(unix)]
 mod tmux_lifecycle;

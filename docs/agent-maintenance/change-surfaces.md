@@ -118,12 +118,13 @@
   - `src/services/discord/watchers/lifecycle.rs` (2445 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior).
-  - `src/services/discord/tmux.rs` (2204 lines after #2558 dead-code sweep;
-    failover guard; still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (6861 lines after #2558
+  - `src/services/discord/tmux.rs` (2206 lines after #2558 dead-code sweep;
+    failover guard; #3087 `session_panel_instance_key`/`write_spawn_nonce`
+    re-exports; still giant-file territory).
+  - `src/services/discord/tmux_watcher.rs` (6870 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
-    refresh; split loop helpers
+    refresh + #3087 session-instance-key panel reset; split loop helpers
     further before adding behavior).
   - `src/services/discord/tui_prompt_relay.rs` (3237 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
@@ -350,8 +351,8 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
 - `src/services/dispatches/outbox_route.rs` (1118) — dispatch outbox route
   support extracted from the route layer; split before adding non-bugfix
   behavior.
-- `src/services/claude.rs` (3765), `src/services/gemini.rs` (1406),
-  `src/services/qwen.rs` (2182), `src/services/codex.rs` (2893),
+- `src/services/claude.rs` (3787), `src/services/gemini.rs` (1406),
+  `src/services/qwen.rs` (2189), `src/services/codex.rs` (2907),
   `src/services/opencode.rs` (1862), `src/services/provider.rs` (1739) —
   provider adapters.
 - `src/services/codex_tui/rollout_tail.rs` (1726) — Codex TUI rollout tail

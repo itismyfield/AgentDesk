@@ -81,6 +81,20 @@ pub(super) struct StatusPanelState {
 }
 
 impl StatusPanelState {
+    /// Clears the content slots that accumulate within a single provider
+    /// session (subagents/tasks/todos/workflows) and resets the derived status
+    /// back to `Running`, while PRESERVING the context/token usage snapshot and
+    /// the session panel snapshot itself. Invoked on a true session boundary
+    /// (a provider session id delta) so a freshly started session does not
+    /// inherit the previous session's stale subagent/task list (#3087).
+    pub(super) fn reset_session_content(&mut self) {
+        self.status = DerivedStatus::Running;
+        self.todos.clear();
+        self.tasks.clear();
+        self.subagents.clear();
+        self.workflows.clear();
+    }
+
     pub(super) fn apply(&mut self, event: StatusEvent) {
         match event {
             StatusEvent::ToolStart { name, args_summary } => {

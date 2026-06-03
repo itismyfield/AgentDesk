@@ -427,6 +427,7 @@ fn status_panel_renders_session_resumed_line_from_lifecycle_details() {
     let channel_id = ChannelId::new(177);
     assert!(events.set_session_panel_lifecycle_event(
         channel_id,
+        None,
         "session_resumed",
         &json!({
             "provider_session_id": "8f21abcd12345678",
@@ -440,12 +441,708 @@ fn status_panel_renders_session_resumed_line_from_lifecycle_details() {
     assert!(rendered.contains("tmux kept"));
 }
 
+/// #3087 — when a new session INSTANCE begins (a new tmux spawn → new
+/// `.generation` mtime → new `session_instance_key`), the status panel must
+/// drop the previous session's accumulated subagents and task-tool slots while
+/// preserving the context/token usage snapshot. Then, re-firing the SAME
+/// instance key + provider id must NOT wipe same-session accumulation (no
+/// spurious reset on unrelated field churn).
+#[test]
+fn status_panel_resets_subagents_and_tasks_on_new_provider_session() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3087);
+
+    // Session A: instance key A, established provider session, accumulate content.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch3087#100"),
+        "session_resumed",
+        &json!({ "provider_session_id": "session-A", "tmux_reused": true }),
+    ));
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Task",
+            &json!({"subagent_type": "explorer", "description": "Inspect bridge"}).to_string(),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "TaskCreate",
+            &json!({"taskId": "task-A", "subject": "session A task"}).to_string(),
+        ),
+    );
+    assert!(events.set_context_panel_usage(channel_id, None, 4000, 80, 10, 1000, 60));
+
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(guard.subagents.len(), 1);
+        assert_eq!(guard.tasks.len(), 1);
+        assert!(guard.context.is_some());
+    }
+
+    // Session B: a NEW spawn → NEW instance key (and a new provider id). Content
+    // slots must be cleared, but the context/token snapshot must survive.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch3087#200"),
+        "session_fresh",
+        &json!({ "provider_session_id": "session-B", "tmux_reused": false }),
+    ));
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            guard.subagents.is_empty(),
+            "subagents must reset on a new provider session"
+        );
+        assert!(
+            guard.tasks.is_empty(),
+            "tasks must reset on a new provider session"
+        );
+        assert!(
+            guard.context.is_some(),
+            "context/token usage must be preserved across the boundary"
+        );
+    }
+
+    // Re-accumulate within session B, then re-fire the SAME instance key + id
+    // (only unrelated field churn: tmux/recovery). The same-session slots must
+    // be retained.
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Task",
+            &json!({"subagent_type": "explorer", "description": "Session B work"}).to_string(),
+        ),
+    );
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch3087#200"),
+        "session_fresh",
+        &json!({ "provider_session_id": "session-B", "tmux_reused": true }),
+    ));
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            guard.subagents.len(),
+            1,
+            "same provider session must NOT reset accumulated subagents"
+        );
+        assert_eq!(
+            guard.subagents.first().map(|slot| slot.desc.as_str()),
+            Some("Session B work")
+        );
+    }
+}
+
+/// #3087 (codex P1 — false NON-reset) — a GENUINELY fresh session legitimately
+/// arrives with `provider_session_id == None` (the common `/clear`,
+/// idle-timeout, turn-cap, goal-fresh, `no_cached_provider_session` paths all
+/// normalize to None). Such a fresh session is a NEW tmux spawn, so it carries a
+/// NEW `session_instance_key` and MUST still reset the previous session's
+/// accumulated subagents/tasks even though it has no provider id. Context/token
+/// usage must be preserved across the boundary.
+#[test]
+fn status_panel_resets_on_fresh_session_with_no_provider_session_id() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(30871);
+
+    // Prior session (instance key A): accumulate content + context.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch30871#100"),
+        "session_resumed",
+        &json!({ "provider_session_id": "stale-session", "tmux_reused": true }),
+    ));
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Task",
+            &json!({"subagent_type": "explorer", "description": "Stale work"}).to_string(),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "TaskCreate",
+            &json!({"taskId": "task-stale", "subject": "stale task"}).to_string(),
+        ),
+    );
+    assert!(events.set_context_panel_usage(channel_id, None, 4000, 80, 10, 1000, 60));
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(guard.subagents.len(), 1);
+        assert_eq!(guard.tasks.len(), 1);
+        assert!(guard.context.is_some());
+    }
+
+    // Fresh session = NEW spawn → NEW instance key, with NO provider session id
+    // (e.g. /clear).
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch30871#200"),
+        "session_fresh",
+        &json!({ "reason": "no_cached_provider_session", "tmux_reused": false }),
+    ));
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            guard.subagents.is_empty(),
+            "subagents must reset on a fresh session even when provider_session_id is None"
+        );
+        assert!(
+            guard.tasks.is_empty(),
+            "tasks must reset on a fresh session even when provider_session_id is None"
+        );
+        assert!(
+            guard.context.is_some(),
+            "context/token usage must be preserved across the fresh boundary"
+        );
+    }
+}
+
+/// #3087 (codex P1-A — false per-turn RESET) — the prior `turn_id`-keyed design
+/// reset on EVERY status tick / turn of a no-provider-id session, because each
+/// turn carries a new `turn_id`. The redesign keys the boundary on the STABLE
+/// per-INSTANCE `session_instance_key` (the `.generation` spawn marker), which
+/// is invariant across every tick AND every TURN of one session. This test
+/// asserts that a no-provider-id session running MULTIPLE turns (the
+/// `set_session_panel_*` lifecycle re-loaded each tick/turn, with field churn
+/// modelling distinct turns) does NOT reset its mid-session accumulation.
+#[test]
+fn status_panel_preserves_accumulation_across_ticks_of_same_fresh_session() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(30872);
+    // One spawn → one stable instance key across all of this session's turns.
+    let instance_key = "AgentDesk-claude-ch30872#100";
+
+    // First tick of the fresh session (no provider id) — establishes the marker.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some(instance_key),
+        "session_fresh",
+        &json!({ "reason": "idle_timeout", "tmux_reused": false }),
+    ));
+
+    // Accumulate mid-session content.
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Task",
+            &json!({"subagent_type": "explorer", "description": "Mid-session work"}).to_string(),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "TaskCreate",
+            &json!({"taskId": "task-mid", "subject": "mid task"}).to_string(),
+        ),
+    );
+
+    // Subsequent TICKS AND TURNS of the SAME session instance: the same stable
+    // instance key, still None provider id, only unrelated field churn (tmux /
+    // recovery count). Even though these model >=2 distinct turns, the instance
+    // key is unchanged, so there must be NO reset.
+    for details in [
+        json!({ "reason": "idle_timeout", "tmux_reused": true }),
+        json!({ "reason": "idle_timeout", "tmux_reused": true, "recoveryMessageCount": 3 }),
+        json!({ "reason": "no_cached_provider_session", "tmux_reused": true }),
+    ] {
+        events.set_session_panel_lifecycle_event(
+            channel_id,
+            Some(instance_key),
+            "session_fresh",
+            &details,
+        );
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            guard.subagents.len(),
+            1,
+            "ticks/turns of the same session instance must NOT reset accumulated subagents"
+        );
+        assert_eq!(
+            guard.subagents.first().map(|slot| slot.desc.as_str()),
+            Some("Mid-session work")
+        );
+        assert_eq!(
+            guard.tasks.len(),
+            1,
+            "ticks/turns of the same session instance must NOT reset accumulated tasks"
+        );
+    }
+}
+
+/// #3087 (codex P1-B — false mid-session RESET) — when a fresh session's
+/// `provider_session_id` is assigned mid-session (`None`→`Some`, the
+/// `StreamMessage::Init` handshake), the spawn marker is untouched, so the
+/// `session_instance_key` is unchanged and the panel MUST NOT reset. This is
+/// the case the old provider-id-delta gate got wrong; the redesign gates that
+/// delta on the old id being `Some` too, so `None`→`Some` within one instance
+/// is never a boundary.
+#[test]
+fn status_panel_preserves_accumulation_on_none_to_some_provider_id_same_instance() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(30874);
+    let instance_key = "AgentDesk-claude-ch30874#100";
+
+    // Fresh session begins with NO provider id yet.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some(instance_key),
+        "session_fresh",
+        &json!({ "reason": "first_turn", "tmux_reused": false }),
+    ));
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Task",
+            &json!({"subagent_type": "explorer", "description": "Pre-init work"}).to_string(),
+        ),
+    );
+
+    // Mid-session: the provider id is assigned (None→Some) on the SAME instance.
+    // The lifecycle now renders `session_resumed` with the id, but the spawn
+    // marker (instance key) is unchanged — there must be NO reset.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some(instance_key),
+        "session_resumed",
+        &json!({ "provider_session_id": "late-bound-id", "tmux_reused": true }),
+    ));
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            guard.subagents.len(),
+            1,
+            "None→Some provider id on the same instance must NOT reset accumulation"
+        );
+        assert_eq!(
+            guard.subagents.first().map(|slot| slot.desc.as_str()),
+            Some("Pre-init work")
+        );
+    }
+
+    // A subsequent tick re-firing the SAME id on the SAME instance must also
+    // not reset (idempotent within the instance).
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some(instance_key),
+        "session_resumed",
+        &json!({ "provider_session_id": "late-bound-id", "tmux_reused": true, "recoveryMessageCount": 2 }),
+    ));
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            guard.subagents.len(),
+            1,
+            "re-firing the same id on the same instance must NOT reset accumulation"
+        );
+    }
+}
+
+/// #3087 — two CONSECUTIVE distinct fresh sessions, both with
+/// `provider_session_id == None` but different `session_instance_key`s (each a
+/// new tmux spawn → new `.generation` mtime, e.g. back-to-back `/clear`s), must
+/// EACH reset. The boundary is keyed on the instance-key change, so each new
+/// spawn drops the prior session's accumulation.
+#[test]
+fn status_panel_resets_on_each_of_two_distinct_none_id_fresh_sessions() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(30873);
+
+    // Fresh session #1 (instance key #1, no provider id) → accumulate.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch30873#100"),
+        "session_fresh",
+        &json!({ "reason": "first_turn", "tmux_reused": false }),
+    ));
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Task",
+            &json!({"subagent_type": "explorer", "description": "Session 1 work"}).to_string(),
+        ),
+    );
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(guard.subagents.len(), 1);
+    }
+
+    // Fresh session #2 (new spawn → instance key #2, still no provider id) → reset.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch30873#200"),
+        "session_fresh",
+        &json!({ "reason": "goal_fresh", "tmux_reused": false }),
+    ));
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            guard.subagents.is_empty(),
+            "a second distinct None-id fresh session must reset the first session's content"
+        );
+    }
+
+    // Accumulate in session #2, then a THIRD distinct spawn → reset again.
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Task",
+            &json!({"subagent_type": "explorer", "description": "Session 2 work"}).to_string(),
+        ),
+    );
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch30873#300"),
+        "session_fresh",
+        &json!({ "reason": "turn_cap", "tmux_reused": false }),
+    ));
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            guard.subagents.is_empty(),
+            "a third distinct None-id fresh session must reset again"
+        );
+    }
+}
+
+/// #3087 (codex Edge 5 — false RESET on key AVAILABILITY transition) — the
+/// `session_instance_key` can become available mid-session (`None`→`Some`)
+/// purely because `tmux_session_name` resolved or the `.spawn_nonce` marker
+/// became readable. That is NOT a session change. The boundary must be gated on
+/// the OLD key being `Some` too (mirroring the provider-id gate), so a
+/// `None`→`Some` key transition PRESERVES the same-session accumulation.
+#[test]
+fn status_panel_preserves_accumulation_on_none_to_some_instance_key_availability() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(30875);
+
+    // First tick: no instance key yet (e.g. tmux name / nonce marker not yet
+    // resolved). Establishes a session with a `None` key, same provider id.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        None,
+        "session_resumed",
+        &json!({ "provider_session_id": "stable-id", "tmux_reused": true }),
+    ));
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Task",
+            &json!({"subagent_type": "explorer", "description": "Pre-key work"}).to_string(),
+        ),
+    );
+
+    // Second tick of the SAME session: the instance key is now AVAILABLE
+    // (`None`→`Some`), same provider id. This is an availability transition,
+    // not a new session — there must be NO reset.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch30875#nonce-aaaa"),
+        "session_resumed",
+        &json!({ "provider_session_id": "stable-id", "tmux_reused": true }),
+    ));
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            guard.subagents.len(),
+            1,
+            "None→Some instance-key availability transition must NOT reset accumulation"
+        );
+        assert_eq!(
+            guard.subagents.first().map(|slot| slot.desc.as_str()),
+            Some("Pre-key work")
+        );
+    }
+
+    // A subsequent genuinely-new spawn (key Some(a)→Some(b)) still resets.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch30875#nonce-bbbb"),
+        "session_fresh",
+        &json!({ "reason": "clear", "tmux_reused": false }),
+    ));
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            guard.subagents.is_empty(),
+            "a Some(a)→Some(b) instance-key change (new spawn) must reset"
+        );
+    }
+}
+
+/// #3087 (codex Edge 3 — missing-nonce same-name respawn must NOT suppress a
+/// real reset) — the prior mtime design folded a missing marker into a
+/// `{name}#0` key, so two back-to-back respawns reusing the same tmux session
+/// name both produced `{name}#0` → identical key → NO reset (the bug
+/// persisted). The nonce design yields `None` when the marker is unavailable,
+/// so a respawn whose nonce is missing never collides with a stored key; the
+/// provider-session delta then remains the reset boundary instead of a
+/// suppressed reset. This test models a same-name respawn where the FIRST
+/// session had a real nonce and the respawn's nonce is unavailable (key `None`)
+/// but the provider session genuinely changed — the panel MUST still reset.
+#[test]
+fn status_panel_resets_on_same_name_respawn_with_missing_nonce_via_provider_delta() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(30876);
+
+    // Session #1: real nonce key + provider id A → accumulate.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch30876#nonce-1111"),
+        "session_resumed",
+        &json!({ "provider_session_id": "session-A", "tmux_reused": true }),
+    ));
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Task",
+            &json!({"subagent_type": "explorer", "description": "Session A work"}).to_string(),
+        ),
+    );
+
+    // Respawn reusing the SAME tmux name, but the `.spawn_nonce` marker is
+    // unavailable this tick → instance key is `None`. The provider session
+    // genuinely changed (A→B). Under the OLD mtime design both would key to
+    // `{name}#0` and NOT reset; here the `None` key does not collide, and the
+    // Some(a)→Some(b) provider delta drives the reset.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        None,
+        "session_fresh",
+        &json!({ "provider_session_id": "session-B", "tmux_reused": false }),
+    ));
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            guard.subagents.is_empty(),
+            "same-name respawn with a missing nonce must STILL reset via the provider-session delta (no #0 collision)"
+        );
+    }
+}
+
+/// #3087 — two distinct spawns with distinct NONCES each reset (the positive
+/// path: a respawn that DOES have a readable nonce changes the instance key, so
+/// the reset fires even when there is no provider-session signal at all).
+#[test]
+fn status_panel_resets_on_two_distinct_nonces_without_provider_id() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(30877);
+
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch30877#nonce-aaaa"),
+        "session_fresh",
+        &json!({ "reason": "first_turn", "tmux_reused": false }),
+    ));
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Task",
+            &json!({"subagent_type": "explorer", "description": "Spawn 1 work"}).to_string(),
+        ),
+    );
+
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch30877#nonce-bbbb"),
+        "session_fresh",
+        &json!({ "reason": "clear", "tmux_reused": false }),
+    ));
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            guard.subagents.is_empty(),
+            "a distinct per-spawn nonce must reset even with no provider session id"
+        );
+    }
+}
+
+/// #3087 P2-2 — a TUI-direct spawn path (Claude-TUI / Codex-TUI) now stamps a
+/// `.spawn_nonce` via `write_spawn_nonce`, exactly like the main provider spawn
+/// sites. This drives the panel through the REAL filesystem chain those paths
+/// use at runtime: each TUI-direct spawn writes a fresh nonce, the panel derives
+/// its instance key from `session_panel_instance_key` (which reads that nonce),
+/// and a second TUI-direct spawn mints a DISTINCT nonce → distinct instance key
+/// → reset — even with no provider-session signal at all.
+#[test]
+fn status_panel_resets_across_two_tui_direct_spawns_via_stamped_nonce() {
+    let _lock = match crate::config::shared_test_env_lock().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(30872);
+
+    let tmux_name = format!(
+        "AgentDesk-claude-tui-issue-3087-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    if let Some(parent) = std::path::Path::new(&crate::services::tmux_common::session_temp_path(
+        &tmux_name,
+        "spawn_nonce",
+    ))
+    .parent()
+    {
+        std::fs::create_dir_all(parent).expect("runtime dir");
+    }
+
+    // TUI-direct spawn #1 stamps a nonce (the exact call the Claude/Codex
+    // TUI-direct paths now make right after `create_session`).
+    crate::services::discord::write_spawn_nonce(&tmux_name).expect("tui spawn 1 nonce");
+    let key1 = crate::services::discord::tmux::session_panel_instance_key(&tmux_name)
+        .expect("tui spawn 1 must produce an instance key");
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some(&key1),
+        "session_fresh",
+        &json!({ "reason": "first_turn", "tmux_reused": false }),
+    ));
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Task",
+            &json!({"subagent_type": "explorer", "description": "TUI spawn 1 work"}).to_string(),
+        ),
+    );
+
+    // TUI-direct spawn #2 (same tmux name) mints a DISTINCT nonce → distinct key.
+    crate::services::discord::write_spawn_nonce(&tmux_name).expect("tui spawn 2 nonce");
+    let key2 = crate::services::discord::tmux::session_panel_instance_key(&tmux_name)
+        .expect("tui spawn 2 must produce an instance key");
+    assert_ne!(
+        key1, key2,
+        "a new TUI-direct spawn must change the instance key (fresh nonce)"
+    );
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some(&key2),
+        "session_fresh",
+        &json!({ "reason": "clear", "tmux_reused": false }),
+    ));
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            guard.subagents.is_empty(),
+            "a fresh TUI-direct spawn (distinct stamped nonce) must reset the panel"
+        );
+    }
+
+    unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+}
+
 #[test]
 fn status_panel_renders_session_fresh_and_fallback_distinctly() {
     let events = PlaceholderLiveEvents::default();
     let fresh_channel_id = ChannelId::new(178);
     events.set_session_panel_lifecycle_event(
         fresh_channel_id,
+        None,
         "session_fresh",
         &json!({
             "reason": "first_turn",
@@ -462,6 +1159,7 @@ fn status_panel_renders_session_fresh_and_fallback_distinctly() {
     let fallback_channel_id = ChannelId::new(179);
     events.set_session_panel_lifecycle_event(
         fallback_channel_id,
+        None,
         "session_resume_failed_with_recovery",
         &json!({
             "reason": "resume_failed",
@@ -483,6 +1181,7 @@ fn status_panel_appends_recovery_message_count_line_when_present() {
     let channel_id = ChannelId::new(1781);
     assert!(events.set_session_panel_lifecycle_event(
         channel_id,
+        None,
         "session_fresh",
         &json!({
             "reason": "idle_timeout",
@@ -509,6 +1208,7 @@ fn status_panel_clears_stale_session_line_for_watcher_turn_without_lifecycle() {
     // Turn A: a fresh-session/recovery event sets the channel-scoped snapshot.
     assert!(events.set_session_panel_lifecycle_event(
         channel_id,
+        None,
         "session_fresh",
         &json!({
             "reason": "no_cached_provider_session",
@@ -537,6 +1237,7 @@ fn status_panel_omits_recovery_line_when_count_is_zero_or_missing() {
     let channel_id = ChannelId::new(1782);
     assert!(events.set_session_panel_lifecycle_event(
         channel_id,
+        None,
         "session_fresh",
         &json!({
             "reason": "idle_timeout",
@@ -551,6 +1252,7 @@ fn status_panel_omits_recovery_line_when_count_is_zero_or_missing() {
     let other_channel = ChannelId::new(1783);
     assert!(events.set_session_panel_lifecycle_event(
         other_channel,
+        None,
         "session_fresh",
         &json!({ "reason": "first_turn" }),
     ));
@@ -564,6 +1266,7 @@ fn status_panel_omits_session_line_when_lifecycle_details_are_absent() {
     let channel_id = ChannelId::new(180);
     assert!(events.set_session_panel_lifecycle_event(
         channel_id,
+        None,
         "session_fresh",
         &json!({
             "reason": "idle_timeout",
@@ -576,7 +1279,12 @@ fn status_panel_omits_session_line_when_lifecycle_details_are_absent() {
             .contains("🆕 새 세션 시작")
     );
 
-    assert!(events.set_session_panel_lifecycle_event(channel_id, "session_resumed", &json!({}),));
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        None,
+        "session_resumed",
+        &json!({}),
+    ));
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
     assert!(!rendered.contains("Lifecycle "));

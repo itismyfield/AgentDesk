@@ -152,10 +152,12 @@ impl PlaceholderLiveEvents {
     pub(in crate::services::discord) fn set_session_panel_lifecycle_event(
         &self,
         channel_id: ChannelId,
+        session_instance_key: Option<&str>,
         kind: &str,
         details: &Value,
     ) -> bool {
-        let snapshot = SessionPanelSnapshot::from_lifecycle_event(kind, details);
+        let snapshot =
+            SessionPanelSnapshot::from_lifecycle_event(session_instance_key, kind, details);
         self.set_session_panel_snapshot(channel_id, snapshot)
     }
 
@@ -178,6 +180,88 @@ impl PlaceholderLiveEvents {
         if guard.session == snapshot {
             return false;
         }
+
+        // #3087: detect a TRUE session boundary and reset the accumulated
+        // subagents/tasks/todos/workflows exactly once, on the transition INTO a
+        // new session INSTANCE.
+        //
+        // The boundary is keyed on the snapshot's `session_instance_key` — a
+        // STABLE per-INSTANCE marker derived from the tmux `.spawn_nonce` spawn
+        // file (`"{tmux_session_name}#{nonce}"`, where `nonce` is a per-spawn v4
+        // UUID). That marker is written once per spawn and never rewritten by the
+        // live wrapper, so it is invariant across every status tick and every
+        // TURN of one session, and invariant across the `None`→`Some`
+        // provider-session-id assignment that lands mid-turn on
+        // `StreamMessage::Init`. A genuinely new session is a new tmux spawn
+        // (`/clear`, idle-timeout, turn-cap, cancel→respawn, …) which mints a
+        // fresh nonce, so the instance key changes exactly once on the real
+        // boundary. (Earlier rounds keyed on the `.generation` mtime, which a
+        // missing/duplicate mtime could collapse — the nonce is guaranteed
+        // unique per spawn; see `tmux_session_files::session_panel_instance_key`.)
+        //
+        // This replaces the earlier per-turn `turn_id` keying, which reset on
+        // EVERY turn of a no-provider-id session (each turn carries a new
+        // turn_id) and was therefore BLOCKED. Resetting on a CHANGE of the
+        // stable instance key fixes both false-reset P1s:
+        //   * multi-turn same session (turn_id changes each turn, instance key
+        //     unchanged) — NO reset, and
+        //   * `None`→`Some` provider-id within one session (instance key
+        //     unchanged) — NO reset.
+        //
+        // The provider-session delta is retained as a secondary trigger so a
+        // `Some(a)`→`Some(b)` change to a genuinely different provider session
+        // still resets even on the rare path where the instance key is
+        // unavailable (`None`, e.g. headless / no live tmux marker). Unrelated
+        // field churn (tmux/recovery_count) within the same instance must NOT
+        // reset.
+        let old_instance_key = guard
+            .session
+            .as_ref()
+            .and_then(|session| session.session_instance_key())
+            .map(str::to_owned);
+        let old_provider_session_id = guard
+            .session
+            .as_ref()
+            .and_then(|session| session.provider_session_id())
+            .map(str::to_owned);
+
+        // #3087 (codex Edge 5): gate the instance-key boundary on the OLD key
+        // being `Some` too, mirroring the provider-id gate below. The instance
+        // key can transition `None`→`Some` purely because the key became
+        // AVAILABLE (e.g. `tmux_session_name` resolved, or the `.spawn_nonce`
+        // marker became readable mid-turn) — that is NOT a session change and
+        // must preserve the same-session accumulation. Only a `Some(a)`→`Some(b)`
+        // change to a genuinely different spawn nonce is a real new-session
+        // boundary. (A missing nonce yields `None`, so a respawn whose nonce is
+        // unavailable never collides with a stored key here — the provider-id
+        // delta below remains the secondary boundary, never a suppressed reset.)
+        let new_instance_key = snapshot
+            .as_ref()
+            .and_then(|session| session.session_instance_key());
+        let instance_boundary = match (old_instance_key.as_deref(), new_instance_key) {
+            (Some(old), Some(new)) => old != new,
+            // `None`→`Some` (key newly available) and `Some`→`None`/`None`→`None`
+            // (key lost / never present) are availability transitions, not
+            // session changes — never reset on the instance key alone.
+            _ => false,
+        };
+
+        // Secondary trigger: a `Some(a)`→`Some(b)` change to a DIFFERENT
+        // provider session, used only when the instance key cannot decide (e.g.
+        // headless / no live tmux marker on either side). This is deliberately
+        // gated on the OLD id being `Some` too, so a `None`→`Some` assignment
+        // within one instance (the mid-turn `StreamMessage::Init`) never resets
+        // (#3087 P1-B).
+        let provider_session_boundary = old_provider_session_id.is_some()
+            && snapshot
+                .as_ref()
+                .and_then(|session| session.provider_session_id())
+                .is_some_and(|new_id| old_provider_session_id.as_deref() != Some(new_id));
+
+        if instance_boundary || provider_session_boundary {
+            guard.reset_session_content();
+        }
+
         guard.session = snapshot;
         true
     }

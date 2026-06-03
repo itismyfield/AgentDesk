@@ -45,10 +45,38 @@ pub(super) struct SessionPanelSnapshot {
     provider_session_id: Option<String>,
     tmux: Option<TmuxPanelState>,
     recovery_message_count: Option<usize>,
+    /// Stable session-INSTANCE marker for this snapshot, derived from the tmux
+    /// runtime's `.spawn_nonce` spawn marker: `"{tmux_session_name}#{nonce}"`.
+    ///
+    /// `.spawn_nonce` is written exactly once per spawn (a per-spawn v4 UUID) by
+    /// the provider spawn sites right after `tmux::create_session` and is never
+    /// touched by the live wrapper. Its content therefore uniquely identifies
+    /// one wrapper INSTANCE — guaranteed unique per spawn regardless of
+    /// filesystem mtime resolution — and is invariant across:
+    ///   * every status tick and every TURN of the same session (the marker is
+    ///     not rewritten per turn), and
+    ///   * the `None`→`Some` provider-session-id assignment that lands mid-turn
+    ///     on `StreamMessage::Init` (the provider id is orthogonal to the
+    ///     spawn marker).
+    /// A genuinely new session is a new tmux spawn (`/clear`, idle-timeout,
+    /// turn-cap, cancel→respawn, …), which mints a fresh nonce — so the instance
+    /// key changes exactly once, on the real boundary.
+    ///
+    /// Keying the reset on THIS (instead of the per-turn `turn_id`) is what
+    /// fixes #3087's two false-reset P1s: a no-provider-id session running many
+    /// turns keeps one instance key (no per-turn reset), and the `None`→`Some`
+    /// provider-id assignment does not change it (no mid-session reset).
+    /// `None` when the tmux session/marker is unavailable (e.g. headless /
+    /// pre-spawn); the reset then falls back to the provider-session delta.
+    session_instance_key: Option<String>,
 }
 
 impl SessionPanelSnapshot {
-    pub(super) fn from_lifecycle_event(kind: &str, details: &Value) -> Option<Self> {
+    pub(super) fn from_lifecycle_event(
+        session_instance_key: Option<&str>,
+        kind: &str,
+        details: &Value,
+    ) -> Option<Self> {
         if !details.as_object().is_some_and(|object| !object.is_empty()) {
             return None;
         }
@@ -70,13 +98,43 @@ impl SessionPanelSnapshot {
         .map(str::to_string);
         let tmux = parse_tmux_panel_state(details);
         let recovery_message_count = parse_recovery_message_count(details);
+        let session_instance_key = session_instance_key
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
 
         Some(Self {
             kind,
             provider_session_id,
             tmux,
             recovery_message_count,
+            session_instance_key,
         })
+    }
+
+    /// The provider-issued session id carried by this snapshot, normalized to
+    /// `None` when absent or blank. Used to detect a true session boundary
+    /// (provider session delta) so the status panel can reset its accumulated
+    /// subagents/tasks without reacting to unrelated field churn.
+    pub(super) fn provider_session_id(&self) -> Option<&str> {
+        self.provider_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    /// The stable session-INSTANCE marker (`"{tmux_session_name}#{nonce}"`,
+    /// derived from the `.spawn_nonce` spawn marker) used to detect a genuine
+    /// new-session boundary even when `provider_session_id` is `None`, WITHOUT
+    /// re-resetting on every status tick / turn of an ongoing session or on the
+    /// `None`→`Some` provider-id assignment (#3087). Normalized to `None` when
+    /// absent or blank (no live tmux marker — the reset then relies on the
+    /// provider-session delta alone).
+    pub(super) fn session_instance_key(&self) -> Option<&str> {
+        self.session_instance_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
     }
 }
 

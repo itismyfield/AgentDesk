@@ -1730,6 +1730,13 @@ fn execute_streaming_local_tui_tmux(
 
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
+    // #3087: stamp a per-spawn nonce on the Codex-TUI DIRECT spawn path too.
+    // Without it this path produces no `.spawn_nonce`, so the status-panel
+    // instance key is `None` and the new-session boundary cannot be detected.
+    if let Err(e) = crate::services::discord::write_spawn_nonce(tmux_session_name) {
+        tracing::warn!("failed to write spawn nonce for {tmux_session_name} (codex-tui): {e}");
+    }
+
     if let Some(ref token) = cancel_token {
         *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(tmux_session_name.to_string());
@@ -2204,6 +2211,13 @@ fn execute_streaming_local_tmux(
         crate::services::tmux_common::session_temp_path(tmux_session_name, "generation");
     let current_gen = crate::services::discord::runtime_store::load_generation();
     let _ = std::fs::write(&gen_marker_path, current_gen.to_string());
+
+    // #3087: stamp a per-spawn nonce in a SEPARATE marker (see claude.rs). The
+    // status-panel session-instance key reads this unique nonce instead of the
+    // `.generation` mtime, eliminating mtime missing/duplicate collisions.
+    if let Err(e) = crate::services::discord::write_spawn_nonce(tmux_session_name) {
+        tracing::warn!("failed to write spawn nonce for {tmux_session_name}: {e}");
+    }
 
     if let Some(ref token) = cancel_token {
         *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =

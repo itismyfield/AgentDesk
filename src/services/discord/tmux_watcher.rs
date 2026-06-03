@@ -1517,6 +1517,7 @@ async fn refresh_watcher_session_panel_from_lifecycle(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     user_msg_id: u64,
+    tmux_session_name: &str,
 ) {
     if !shared.status_panel_v2_enabled {
         return;
@@ -1525,6 +1526,7 @@ async fn refresh_watcher_session_panel_from_lifecycle(
         return;
     };
     let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id);
+    let session_instance_key = session_panel_instance_key(tmux_session_name);
     let channel_id_text = channel_id.get().to_string();
     match crate::services::observability::turn_lifecycle::load_latest_session_lifecycle_event(
         pg_pool,
@@ -1536,7 +1538,12 @@ async fn refresh_watcher_session_panel_from_lifecycle(
         Ok(Some(event)) => {
             shared
                 .placeholder_live_events
-                .set_session_panel_lifecycle_event(channel_id, &event.kind, &event.details_json);
+                .set_session_panel_lifecycle_event(
+                    channel_id,
+                    session_instance_key.as_deref(),
+                    &event.kind,
+                    &event.details_json,
+                );
         }
         Ok(None) => {
             shared
@@ -3978,6 +3985,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 .as_ref()
                                 .map(|identity| identity.user_msg_id)
                                 .unwrap_or(0),
+                            &tmux_session_name,
                         )
                         .await;
                         let panel_text = shared.placeholder_live_events.render_status_panel(
@@ -6785,6 +6793,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &shared,
                 channel_id,
                 session_panel_lifecycle_user_msg_id,
+                &tmux_session_name,
             )
             .await;
             let completion_committed = complete_watcher_status_panel_v2(

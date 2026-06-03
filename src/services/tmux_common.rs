@@ -445,6 +445,13 @@ pub fn cleanup_session_temp_files(session_name: &str) {
         "owner",
         "sh",
         "generation",
+        // #3087: the per-spawn status-panel instance nonce. Must be swept on
+        // teardown like the other session temp files — otherwise a respawn whose
+        // fresh nonce write fails (logged, non-fatal) would leave the PRIOR
+        // spawn's nonce readable, yielding the same instance key as the old
+        // spawn and suppressing the panel reset on a genuinely new session.
+        // (Mirrors `SPAWN_NONCE_SUFFIX` in discord::tmux_session_files.)
+        "spawn_nonce",
         "exit_reason",
         TMUX_RUNTIME_KIND_TEMP_EXT,
         TMUX_DEAD_MARKER_TEMP_EXT,

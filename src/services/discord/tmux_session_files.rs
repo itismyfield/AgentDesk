@@ -12,7 +12,10 @@ use super::SharedData;
 /// `.generation` is written exactly once per spawn by `claude.rs` after
 /// `tmux::create_session` and never touched by the live wrapper, so its
 /// mtime uniquely identifies the wrapper instance even when jsonl
-/// rotation changes the jsonl inode (#1270).
+/// rotation changes the jsonl inode (#1270). NOTE: this mtime signal is the
+/// #1270 wrapper-identity consumer ONLY. The status-panel session-instance
+/// key (#3087) no longer reads this mtime — it reads the dedicated
+/// `.spawn_nonce` marker content instead (see `session_panel_instance_key`).
 pub(in crate::services::discord) fn read_generation_file_mtime_ns(tmux_session_name: &str) -> i64 {
     let Some(path) =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "generation")
@@ -30,6 +33,109 @@ pub(in crate::services::discord) fn read_generation_file_mtime_ns(tmux_session_n
         .ok()
         .and_then(|d| i64::try_from(d.as_nanos()).ok())
         .unwrap_or(0)
+}
+
+/// The per-spawn marker-file suffix carrying the status-panel session-INSTANCE
+/// nonce (#3087). Distinct from `.generation`, whose mtime is the #1270
+/// wrapper-identity signal and whose CONTENT is the runtime generation number
+/// parsed by the adoption path (`watchers::lifecycle`). The nonce lives in its
+/// own file so neither of those `.generation` consumers is perturbed.
+const SPAWN_NONCE_SUFFIX: &str = "spawn_nonce";
+
+/// Write a fresh, globally-unique per-spawn nonce to the `.spawn_nonce` marker.
+///
+/// Called once at each provider spawn site (claude/codex/qwen) right after
+/// `tmux::create_session` stamps `.generation`. The nonce is the stability key
+/// the status panel uses to detect a genuine new-session boundary (#3087): it
+/// is guaranteed unique per spawn (a v4 UUID — no reliance on filesystem mtime
+/// resolution or `fsync` ordering), invariant across every status tick and
+/// every TURN of one session (the marker is never rewritten by the live
+/// wrapper), and orthogonal to both the runtime generation number and the
+/// provider-session id.
+///
+/// Errors are propagated to the caller (a missing/short write would degrade the
+/// panel-reset boundary to best-effort, so it is logged rather than silently
+/// swallowed — best-effort writes are exactly what made the earlier mtime key
+/// fragile). The `.generation` marker and its mtime are left untouched.
+///
+/// The write is atomic and stale-safe (#3087 P2): the nonce is written to a
+/// sibling temp file and `rename`d over `.spawn_nonce`, so a reader never sees a
+/// torn/short nonce. If ANY step fails, the destination is removed before the
+/// error returns, so a respawn whose write fails leaves NO readable nonce at all
+/// — the instance key degrades to `None` (panel may redundantly reset) rather
+/// than reading the PRIOR spawn's stale nonce (which would wrongly SUPPRESS the
+/// reset on a genuinely new session). "Absent → None key" is always preferred
+/// over "stale → colliding key".
+pub(crate) fn write_spawn_nonce(tmux_session_name: &str) -> std::io::Result<String> {
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let path =
+        crate::services::tmux_common::session_temp_path(tmux_session_name, SPAWN_NONCE_SUFFIX);
+    // Distinct per-process temp sibling to avoid clobbering across concurrent
+    // spawns; replaced atomically into `path` on success.
+    let tmp_path = format!("{path}.tmp.{}", std::process::id());
+
+    let write_then_rename = || -> std::io::Result<()> {
+        std::fs::write(&tmp_path, nonce.as_bytes())?;
+        std::fs::rename(&tmp_path, &path)
+    };
+
+    if let Err(e) = write_then_rename() {
+        // Leave NO stale/torn nonce behind: remove both the temp sibling and any
+        // pre-existing destination so the key resolves to `None`, never to a
+        // prior spawn's nonce.
+        let _ = std::fs::remove_file(&tmp_path);
+        let _ = std::fs::remove_file(&path);
+        return Err(e);
+    }
+    Ok(nonce)
+}
+
+/// Read the per-spawn nonce from the `.spawn_nonce` marker CONTENT. Returns
+/// `None` when the marker is missing/unreadable/empty in BOTH the canonical
+/// persistent location and the legacy `/tmp/` fallback. Unlike a missing mtime
+/// (which the prior design folded into a `#0` key that COLLIDED across
+/// respawns of the same tmux session name), a missing nonce yields `None` so
+/// the key is simply unavailable — never a colliding key that would suppress a
+/// real reset (#3087 Edge 3).
+pub(in crate::services::discord) fn read_spawn_nonce(tmux_session_name: &str) -> Option<String> {
+    let path = crate::services::tmux_common::resolve_session_temp_path(
+        tmux_session_name,
+        SPAWN_NONCE_SUFFIX,
+    )?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let nonce = raw.trim();
+    if nonce.is_empty() {
+        return None;
+    }
+    Some(nonce.to_string())
+}
+
+/// Build the stable session-INSTANCE key the status panel uses to detect a
+/// genuine new-session boundary (#3087): `"{tmux_session_name}#{nonce}"`, where
+/// `nonce` is the per-spawn `.spawn_nonce` marker CONTENT (a v4 UUID). The nonce
+/// is written once per spawn and never touched by the live wrapper, so this key
+/// is invariant across every status tick and every TURN of one session, and
+/// across the `None`→`Some` provider-session-id assignment — yet it changes on a
+/// real respawn (`/clear`, idle-timeout, cancel→respawn, …) because each spawn
+/// mints a fresh UUID.
+///
+/// Returns `None` when `tmux_session_name` is blank OR no readable nonce exists
+/// yet (headless / pre-spawn / unreadable marker). Crucially, a missing nonce
+/// yields `None` rather than a `{name}#0` key: a `None` key is gated NOT to
+/// reset on the `None`→`Some` availability transition (so no false reset) AND
+/// does not collide across respawns of the same name (so no suppressed real
+/// reset — the provider-session delta remains the secondary boundary). This is
+/// the codex Edge-3/Edge-4 fix: switching from mtime (non-unique, missing→`#0`
+/// collision) to a per-spawn nonce (unique, missing→`None`).
+pub(in crate::services::discord) fn session_panel_instance_key(
+    tmux_session_name: &str,
+) -> Option<String> {
+    let name = tmux_session_name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let nonce = read_spawn_nonce(name)?;
+    Some(format!("{name}#{nonce}"))
 }
 
 /// Rewrite a file's contents while preserving its prior modified time. Used
