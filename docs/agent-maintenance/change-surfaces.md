@@ -155,7 +155,15 @@
     transient pane-probe flake can never tombstone a LIVE session's mirror; +26
     from #3105 codex-P2 followup: the blocking rehydrate pass (sync `tmux`
     subprocess probes + the multi-sample `std::thread::sleep`) is now dispatched
-    via `tokio::task::spawn_blocking` so it never stalls a Tokio executor worker).
+    via `tokio::task::spawn_blocking` so it never stalls a Tokio executor worker);
+    net -1 from #3075: the `<task-notification>` TaskNotificationEvent class now
+    renders a structured, deduped card (the `terminal injected input` raw block
+    is replaced for that class only) — the card render/parse/dedupe-store logic
+    lives in the new `tui_task_card.rs` module, and the shared
+    `strip_terminal_controls` + ASCII `truncate_chars` helpers were consolidated
+    there too, so this file's surface shrank by one line overall; the new
+    `tui_task_card.rs` module (543 prod LoC, below the giant threshold) hosts the
+    card render/parse/JSON-aggregate/dedupe-store logic).
   - `src/services/codex_tmux_wrapper.rs` (1222 lines; Codex tmux wrapper JSON
     event parser and relay bridge for native Codex session events — bugfix only
     outside an extraction plan).

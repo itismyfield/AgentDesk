@@ -82,6 +82,7 @@ mod tmux_reaper;
 #[cfg(unix)]
 mod tmux_restart_handoff;
 mod tui_prompt_relay;
+mod tui_task_card;
 mod turn_bridge;
 mod turn_finalizer;
 mod voice_background_driver;

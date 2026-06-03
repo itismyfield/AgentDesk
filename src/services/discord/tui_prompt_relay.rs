@@ -468,11 +468,30 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             }
         }
     } else {
-        let content = format_ssh_direct_prompt_notification(
-            &prompt.provider,
-            &prompt.tmux_session_name,
-            &prompt.prompt,
-        );
+        // #3075: a `<task-notification>` auto-turn is a MACHINE event — render it
+        // as a compact structured card and DEDUPE repeats by task-id (a repeat
+        // edits its live card and returns None → no new ⏳/turn; the first sighting
+        // returns content to post as the #3099 anchor). HumanTuiDirect keeps the
+        // raw render; SystemContinuation is handled above (#3100).
+        let content = if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
+            match super::tui_task_card::resolve_task_card_content(
+                &notify_http,
+                shared,
+                channel_id,
+                &prompt.prompt,
+            )
+            .await
+            {
+                Some(card) => card,
+                None => return,
+            }
+        } else {
+            format_ssh_direct_prompt_notification(
+                &prompt.provider,
+                &prompt.tmux_session_name,
+                &prompt.prompt,
+            )
+        };
         let anchor_message = match channel_id.say(&*notify_http, content).await {
             Ok(message) => message,
             Err(error) => {
@@ -489,6 +508,14 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                 return;
             }
         };
+        if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
+            // #3075: remember this card so a repeat completion edits it.
+            super::tui_task_card::record_posted_card(
+                channel_id.get(),
+                &prompt.prompt,
+                anchor_message.id.get(),
+            );
+        }
         crate::services::tui_prompt_dedupe::record_prompt_anchor(
             &prompt.provider,
             &prompt.tmux_session_name,
@@ -3757,38 +3784,10 @@ fn sanitize_inline_code(value: &str) -> String {
     value.replace('`', "'")
 }
 
-fn strip_terminal_controls(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
-    let mut chars = value.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' {
-            if chars.peek().copied() == Some('[') {
-                chars.next();
-                for next in chars.by_ref() {
-                    if ('@'..='~').contains(&next) {
-                        break;
-                    }
-                }
-            }
-            continue;
-        }
-        if ch.is_control() && ch != '\n' && ch != '\r' && ch != '\t' {
-            continue;
-        }
-        output.push(ch);
-    }
-    output
-}
-
-fn truncate_chars(value: &str, limit: usize) -> String {
-    let mut chars = value.chars();
-    let truncated = chars.by_ref().take(limit).collect::<String>();
-    if chars.next().is_some() {
-        format!("{truncated}...")
-    } else {
-        truncated
-    }
-}
+// #3075: `strip_terminal_controls` and the ASCII `truncate_chars` are shared
+// with the task-card renderer; the single definitions now live in
+// `tui_task_card` so the classifier, formatters, and card parser stay in sync.
+use super::tui_task_card::{strip_terminal_controls, truncate_chars_ascii as truncate_chars};
 
 #[cfg(test)]
 mod tests {

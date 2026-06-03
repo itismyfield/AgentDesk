@@ -527,6 +527,7 @@ src/
 │   │   ├── tmux_session_files.rs
 │   │   ├── tmux_watcher.rs
 │   │   ├── tui_prompt_relay.rs
+│   │   ├── tui_task_card.rs
 │   │   ├── turn_finalizer.rs
 │   │   ├── voice_background_driver.rs
 │   │   ├── voice_barge_in.rs
