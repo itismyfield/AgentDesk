@@ -380,9 +380,19 @@ pub(super) enum CardSlot {
     /// returned `update_count` is 1; the caller must record the posted message
     /// id via [`record_card_message`].
     Post { update_count: u32 },
-    /// A live card exists for this task-id: EDIT it in place rather than posting
-    /// a new message. `update_count` is the new (incremented) count.
+    /// A live card exists for this task-id WITH a recorded message id: EDIT it in
+    /// place rather than posting a new message. `update_count` is the new
+    /// (incremented) count.
     Edit { message_id: u64, update_count: u32 },
+    /// A card for this task-id has been RESERVED (a [`CardSlot::Post`] was handed
+    /// out) but its real message id has not been recorded yet via
+    /// [`record_card_message`] — another post for the same task-id is still in
+    /// flight. The caller MUST treat this as a no-op (drop this repeat) rather
+    /// than attempting to edit: there is no real message id to target, and
+    /// constructing `MessageId::new(0)` would panic. The reserved slot is left
+    /// intact so the in-flight post still records its id and subsequent repeats
+    /// resolve to [`CardSlot::Edit`].
+    Pending,
 }
 
 /// Reserve the card slot for `(channel_id, task_id)`.
@@ -403,6 +413,15 @@ pub(super) fn reserve_card_slot(channel_id: u64, task_id: Option<&str>) -> CardS
     let channel = store.by_channel.entry(channel_id).or_default();
     if let Some(entry) = channel.get_mut(task_id) {
         if now.duration_since(entry.touched_at) <= CARD_STALE_AFTER {
+            // A reserved-but-not-yet-recorded slot (placeholder message_id == 0)
+            // means the first post for this task-id is still in flight. We cannot
+            // edit a nonexistent message (and `MessageId::new(0)` panics), so this
+            // repeat is dropped as a no-op. The placeholder is left intact and its
+            // count is NOT advanced: the in-flight post will record its real id and
+            // any later repeat then resolves to `Edit { real_id }`.
+            if entry.message_id == 0 {
+                return CardSlot::Pending;
+            }
             entry.update_count = entry.update_count.saturating_add(1);
             entry.touched_at = now;
             return CardSlot::Edit {
@@ -489,27 +508,56 @@ fn purge_and_bound(store: &mut TaskCardStore, channel_id: u64, now: Instant) {
     }
 }
 
+/// Outcome of resolving a `<task-notification>` against the #3075 dedupe store.
+#[derive(Debug)]
+pub(super) enum TaskCardOutcome {
+    /// First sighting: the caller must POST `content` as a fresh anchor and run
+    /// the normal active-turn lifecycle, then record the posted message id via
+    /// [`record_posted_card`].
+    Post { content: String },
+    /// A repeat sighting was handled in place (edited the live card, or dropped
+    /// because another post for this task-id is still in flight). The caller must
+    /// NOT post a new anchor and must early-return — but, unlike the post path, it
+    /// must first clear/resolve any external-input turn lease it recorded for this
+    /// observation so a dangling lease cannot block session-bound / bridge-tail
+    /// delivery (#3075 codex P1 #2).
+    Repeat,
+}
+
 /// Render the structured card for a `<task-notification>` and apply the #3075
-/// dedupe policy, returning the content to POST as a fresh anchor — or `None`
-/// when the notification was an UPDATE that edited an existing card in place
-/// (the caller must then return early without the active-turn lifecycle).
+/// dedupe policy.
 ///
-/// On the first sighting of a task-id this reserves the slot and returns the
-/// card content; the caller is expected to post it and call
-/// [`record_card_message`] with the resulting message id. On a repeat sighting
-/// it edits the live card (or, if that message is gone, forgets it and reposts
-/// once), and returns `None`.
+/// On the first sighting of a task-id this reserves the slot and returns
+/// [`TaskCardOutcome::Post`] with the card content; the caller is expected to
+/// post it and call [`record_card_message`] / [`record_posted_card`] with the
+/// resulting message id. On a repeat sighting it edits the live card in place
+/// (or, if that message is gone, forgets it and reposts once; or, if the first
+/// post is still in flight, drops the repeat as a no-op) and returns
+/// [`TaskCardOutcome::Repeat`].
 pub(super) async fn resolve_task_card_content(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     raw_prompt: &str,
-) -> Option<String> {
+) -> TaskCardOutcome {
     let parsed = parse_task_notification(raw_prompt);
     let task_id = parsed.task_id.clone();
     match reserve_card_slot(channel_id.get(), task_id.as_deref()) {
-        CardSlot::Post { update_count } => {
-            Some(format_task_notification_card(&parsed, update_count))
+        CardSlot::Post { update_count } => TaskCardOutcome::Post {
+            content: format_task_notification_card(&parsed, update_count),
+        },
+        CardSlot::Pending => {
+            // The first post for this task-id is still in flight; another post is
+            // racing ahead of `record_posted_card`. There is no real message id to
+            // edit yet (the placeholder is 0, and `MessageId::new(0)` would panic),
+            // so this repeat is a safe no-op. Treat as a handled repeat so the
+            // caller early-returns AND clears its just-recorded lease.
+            tracing::debug!(
+                channel_id = channel_id.get(),
+                task_id = task_id.as_deref().unwrap_or(""),
+                "task-notification repeat arrived before first post recorded its id; dropping repeat as no-op"
+            );
+            TaskCardOutcome::Repeat
         }
         CardSlot::Edit {
             message_id,
@@ -536,7 +584,7 @@ pub(super) async fn resolve_task_card_content(
                     record_card_message(channel_id.get(), task_id.as_deref(), message.id.get());
                 }
             }
-            None
+            TaskCardOutcome::Repeat
         }
     }
 }
@@ -721,6 +769,55 @@ mod tests {
             count <= MAX_CARDS_PER_CHANNEL,
             "channel card map must stay bounded, got {count}"
         );
+    }
+
+    // #3075 codex P1 #1: the SAME task-id fires twice BEFORE the first post
+    // records its real message id. The repeat must NOT resolve to
+    // `Edit { message_id: 0 }` (which would feed `MessageId::new(0)` → panic); it
+    // must be a `Pending` no-op. After the real id is recorded, a later repeat
+    // edits the real card.
+    #[test]
+    fn repeat_before_first_post_recorded_is_pending_not_edit_zero() {
+        reset_card_store_for_tests();
+        let channel = 314_159_u64;
+        let task = Some("race-task-id");
+
+        // First sighting reserves the slot (placeholder message_id == 0).
+        assert_eq!(
+            reserve_card_slot(channel, task),
+            CardSlot::Post { update_count: 1 },
+        );
+
+        // A second notification for the SAME task-id arrives BEFORE
+        // record_card_message runs: must be Pending (a safe no-op), never
+        // Edit { message_id: 0 }.
+        match reserve_card_slot(channel, task) {
+            CardSlot::Pending => {}
+            CardSlot::Edit { message_id, .. } => {
+                panic!(
+                    "repeat before record must not Edit; got message_id={message_id} (0 panics MessageId::new)"
+                );
+            }
+            other => panic!("expected Pending, got {other:?}"),
+        }
+        // A third pre-record repeat is also Pending, and the placeholder count is
+        // NOT advanced.
+        assert_eq!(reserve_card_slot(channel, task), CardSlot::Pending);
+
+        // The in-flight first post finally records its real id.
+        record_card_message(channel, task, 7_777);
+
+        // Now a repeat correctly edits the REAL card; count climbs from 1.
+        match reserve_card_slot(channel, task) {
+            CardSlot::Edit {
+                message_id,
+                update_count,
+            } => {
+                assert_eq!(message_id, 7_777, "must edit the recorded real id");
+                assert_eq!(update_count, 2, "first real edit increments to 2");
+            }
+            other => panic!("expected Edit after record, got {other:?}"),
+        }
     }
 
     #[test]
