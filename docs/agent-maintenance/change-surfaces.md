@@ -127,7 +127,7 @@
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset; split loop helpers
     further before adding behavior).
-  - `src/services/discord/tui_prompt_relay.rs` (3241 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (3247 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3082 queued-only answer-flush gate
     (`is_queued_notice = false` for the TUI idle-response placeholder)).

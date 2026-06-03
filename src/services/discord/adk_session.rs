@@ -899,6 +899,49 @@ mod context_usage_tests {
     }
 }
 
+#[cfg(test)]
+mod compact_threshold_tests {
+    use super::ContextThresholds;
+    use crate::services::provider::ProviderKind;
+
+    /// #3097: a configured `context_compact_percent_claude` value must be the
+    /// value `compact_pct_for(Claude)` returns — this is exactly the number that
+    /// flows into the claude spawn's `compact_percent` and thus sets
+    /// `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` (the spawn only sets the env var when
+    /// the value is `> 0`).
+    #[test]
+    fn compact_pct_for_claude_uses_claude_specific_override() {
+        let thresholds = ContextThresholds {
+            compact_pct: 80,
+            compact_pct_codex: 100,
+            compact_pct_claude: 60,
+            context_window: 1_000_000,
+        };
+        // Claude takes its own override, distinct from the generic value.
+        assert_eq!(thresholds.compact_pct_for(&ProviderKind::Claude), 60);
+        // Codex still uses its own override.
+        assert_eq!(thresholds.compact_pct_for(&ProviderKind::Codex), 100);
+        // Other providers fall back to the generic value.
+        assert_eq!(thresholds.compact_pct_for(&ProviderKind::Gemini), 80);
+        // A configured Claude value is > 0, so the override env var would be set.
+        assert!(thresholds.compact_pct_for(&ProviderKind::Claude) > 0);
+    }
+
+    /// When only the generic threshold is configured, Claude inherits it.
+    /// `fetch_context_thresholds` defaults `compact_pct_claude` to the generic
+    /// `compact_pct`, so this mirrors the runtime fallback behaviour.
+    #[test]
+    fn compact_pct_for_claude_falls_back_to_generic() {
+        let thresholds = ContextThresholds {
+            compact_pct: 55,
+            compact_pct_codex: 100,
+            compact_pct_claude: 55,
+            context_window: 1_000_000,
+        };
+        assert_eq!(thresholds.compact_pct_for(&ProviderKind::Claude), 55);
+    }
+}
+
 /// Context window management thresholds.
 /// Single source of truth used by Rust turn-end compact logic.
 /// Provider-specific overrides: `context_compact_percent_codex`, `context_compact_percent_claude`, etc.
@@ -906,6 +949,9 @@ pub(super) struct ContextThresholds {
     pub compact_pct: u64,
     /// Provider-specific override (if set). Falls back to compact_pct.
     pub compact_pct_codex: u64,
+    /// Claude-specific override (if set). Falls back to compact_pct.
+    /// Flows to `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` on the claude spawn (#3097).
+    pub compact_pct_claude: u64,
     pub context_window: u64,
 }
 
@@ -914,6 +960,9 @@ impl Default for ContextThresholds {
         Self {
             compact_pct: 60,
             compact_pct_codex: 100,
+            // Default to the generic compact_pct default so Claude inherits the
+            // shared threshold unless `context_compact_percent_claude` is set.
+            compact_pct_claude: 60,
             context_window: 1_000_000,
         }
     }
@@ -924,6 +973,7 @@ impl ContextThresholds {
     pub fn compact_pct_for(&self, provider: &crate::services::provider::ProviderKind) -> u64 {
         match provider {
             crate::services::provider::ProviderKind::Codex => self.compact_pct_codex,
+            crate::services::provider::ProviderKind::Claude => self.compact_pct_claude,
             _ => self.compact_pct,
         }
     }
@@ -954,10 +1004,16 @@ pub(super) async fn fetch_context_thresholds(_api_port: u16) -> ContextThreshold
     let compact_pct = find_u64("context_compact_percent").unwrap_or(defaults.compact_pct);
     let compact_pct_codex =
         find_u64("context_compact_percent_codex").unwrap_or(defaults.compact_pct_codex);
+    // #3097: read the Claude-specific override. Fall back to the *generic*
+    // `compact_pct` (not a fixed default) so a user who only sets the generic
+    // value still applies it to Claude, while `context_compact_percent_claude`
+    // takes precedence when present.
+    let compact_pct_claude = find_u64("context_compact_percent_claude").unwrap_or(compact_pct);
 
     ContextThresholds {
         compact_pct,
         compact_pct_codex,
+        compact_pct_claude,
         context_window: defaults.context_window,
     }
 }

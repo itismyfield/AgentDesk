@@ -2853,6 +2853,12 @@ async fn relay_tui_idle_response_through_bridge(
             provider.as_str()
         ));
     };
+    // #3097: resolve the provider-specific compact threshold so the status
+    // panel reflects the configured value (e.g. `context_compact_percent_claude`)
+    // instead of the hardcoded 0 it used previously.
+    let context_compact_percent = super::adk_session::fetch_context_thresholds(shared.api_port)
+        .await
+        .compact_pct_for(&provider);
     let anchor = prompt_anchor_for_response_after_wait(
         provider.as_str(),
         tmux_session_name,
@@ -2912,7 +2918,7 @@ async fn relay_tui_idle_response_through_bridge(
         dispatch_kind: None,
         memory_recall_usage: TokenUsage::default(),
         context_window_tokens: 0,
-        context_compact_percent: 0,
+        context_compact_percent,
         current_msg_id: Some(current_msg_id),
         response_sent_offset: 0,
         full_response: String::new(),
