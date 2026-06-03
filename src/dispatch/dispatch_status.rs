@@ -397,6 +397,69 @@ fn log_phase_gate_reconciliation(
     }
 }
 
+/// Pure decision: infer an effective `result` override when a caller pushes a
+/// phase-gate dispatch into `completed` directly through this path without an
+/// explicit verdict. Mirrors the inference that
+/// `complete_dispatch_inner_with_backends` (the finalize path) performs so the
+/// downstream phase-gate reconciliation does not observe a verdict-less result
+/// and park/fail the gate row (#2045 Finding 14, P1).
+///
+/// Returns `Some(value)` only when an override should replace the caller's
+/// `result`; `None` means "keep whatever the caller supplied". This function is
+/// side-effect free: it reads the already-decoded dispatch context text and
+/// never touches the transaction.
+fn infer_effective_completion_result(
+    dispatch_id: &str,
+    to_status: &str,
+    context_text: Option<&str>,
+    result: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    if to_status != "completed" {
+        return None;
+    }
+    let res = result?;
+    context_text
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|ctx| ctx.get("phase_gate").and_then(|v| v.as_object()).cloned())
+        .and_then(|phase_gate_ctx| infer_phase_gate_verdict(dispatch_id, &phase_gate_ctx, res))
+}
+
+/// Pure decision describing which transition side effects the durable write
+/// must perform after the row UPDATE. Computed once from the resolved flags so
+/// the effect-execution block below stays a flat, ordered sequence whose
+/// conditions and lock/tx boundaries are never reordered.
+struct TransitionEffectPlan {
+    /// The status write actually moved the row to a new status, so transition
+    /// events + downstream terminal/gate side effects must run.
+    record_transition: bool,
+    /// `to_status` is one of the terminal states.
+    is_terminal: bool,
+    /// A `status_reaction` outbox row should be enqueued.
+    enqueue_status_reaction: bool,
+    /// Durable phase-gate reconciliation should run in this path (i.e. the
+    /// caller does not own the gate-row lifecycle).
+    reconcile_phase_gate: bool,
+}
+
+/// Pure decision: resolve the boolean gates that drive the post-UPDATE side
+/// effects. Side-effect free; takes only already-computed scalars.
+fn plan_transition_effects(
+    changed: usize,
+    current_status: &str,
+    to_status: &str,
+    transition_source: &str,
+    assume_external_phase_gate_lifecycle: bool,
+) -> TransitionEffectPlan {
+    let record_transition = changed > 0 && current_status != to_status;
+    let is_terminal = matches!(to_status, "completed" | "failed" | "cancelled");
+    TransitionEffectPlan {
+        record_transition,
+        is_terminal,
+        enqueue_status_reaction: should_enqueue_status_reaction(to_status, transition_source),
+        reconcile_phase_gate: is_terminal && !assume_external_phase_gate_lifecycle,
+    }
+}
+
 async fn set_dispatch_status_on_pg_with_sync(
     pool: &PgPool,
     dispatch_id: &str,
@@ -455,28 +518,24 @@ async fn set_dispatch_status_on_pg_with_sync(
     // does. Without this, the downstream
     // `reconcile_phase_gate_for_terminal_dispatch_on_pg_tx` call observes a
     // verdict-less result and either parks the gate row or marks it failed.
-    let effective_result_owned: Option<serde_json::Value> = if to_status == "completed" {
-        if let Some(res) = result {
+    let effective_result_owned: Option<serde_json::Value> =
+        if to_status == "completed" && result.is_some() {
             let ctx_text_for_verdict = current
-                .try_get::<Option<String>, _>("context_text")
-                .map_err(|error| {
-                    anyhow::anyhow!(
-                        "decode postgres dispatch context for verdict inference {dispatch_id}: {error}"
-                    )
-                })?;
-            ctx_text_for_verdict
-                .as_deref()
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-                .and_then(|ctx| ctx.get("phase_gate").and_then(|v| v.as_object()).cloned())
-                .and_then(|phase_gate_ctx| {
-                    infer_phase_gate_verdict(dispatch_id, &phase_gate_ctx, res)
-                })
+            .try_get::<Option<String>, _>("context_text")
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "decode postgres dispatch context for verdict inference {dispatch_id}: {error}"
+                )
+            })?;
+            infer_effective_completion_result(
+                dispatch_id,
+                to_status,
+                ctx_text_for_verdict.as_deref(),
+                result,
+            )
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
     let result: Option<&serde_json::Value> = effective_result_owned.as_ref().or(result);
 
     let result_json = result.map(|value| value.to_string());
@@ -555,7 +614,18 @@ async fn set_dispatch_status_on_pg_with_sync(
         .rows_affected() as usize,
     };
 
-    if changed > 0 && current_status != to_status {
+    // Resolve every side-effect gate once. The block below then executes the
+    // side effects in a fixed order with these precomputed conditions; the
+    // ordering and tx boundaries are intentionally left inline and unchanged.
+    let plan = plan_transition_effects(
+        changed,
+        &current_status,
+        to_status,
+        transition_source,
+        assume_external_phase_gate_lifecycle,
+    );
+
+    if plan.record_transition {
         let kanban_card_id = current
             .try_get::<Option<String>, _>("kanban_card_id")
             .map_err(|error| {
@@ -621,7 +691,7 @@ async fn set_dispatch_status_on_pg_with_sync(
                 .as_ref(),
         );
 
-        if should_enqueue_status_reaction(to_status, transition_source) {
+        if plan.enqueue_status_reaction {
             sqlx::query(
                 "INSERT INTO dispatch_outbox (dispatch_id, action)
                  SELECT $1, 'status_reaction'
@@ -659,9 +729,7 @@ async fn set_dispatch_status_on_pg_with_sync(
             sync_auto_queue_terminal_entries,
             auto_queue_review_disabled,
         );
-        if matches!(to_status, "completed" | "failed" | "cancelled")
-            && !skip_auto_queue_terminal_sync
-        {
+        if plan.is_terminal && !skip_auto_queue_terminal_sync {
             match to_status {
                 "completed" => {
                     crate::db::auto_queue::finalize_completed_dispatch_terminal_entry_on_pg_tx(
@@ -701,9 +769,7 @@ async fn set_dispatch_status_on_pg_with_sync(
             }
         }
 
-        if matches!(to_status, "completed" | "failed" | "cancelled")
-            && !assume_external_phase_gate_lifecycle
-        {
+        if plan.reconcile_phase_gate {
             // #1980: phase-gate reconciliation in the durable Postgres path so
             // sidecar gate dispatches are cleared/marked-failed even when the
             // JS `onDispatchCompleted` hook does not fire (CRUD route, recovery
@@ -745,7 +811,7 @@ async fn set_dispatch_status_on_pg_with_sync(
             log_phase_gate_reconciliation(dispatch_id, &outcome);
         }
 
-        if matches!(to_status, "completed" | "failed" | "cancelled") {
+        if plan.is_terminal {
             crate::db::dispatch_semaphores::release_dispatch_semaphores_on_pg_tx(
                 &mut tx,
                 dispatch_id,
@@ -801,7 +867,10 @@ async fn set_dispatch_status_on_pg_with_sync(
     tx.commit()
         .await
         .map_err(|error| anyhow::anyhow!("commit postgres dispatch status tx: {error}"))?;
-    if changed > 0 && matches!(to_status, "completed" | "failed" | "cancelled") {
+    // NOTE: deliberately gated on `changed > 0` (not `plan.record_transition`):
+    // an idempotent re-write into the same terminal status (`current == to`)
+    // must still wake constraint-release waiters.
+    if changed > 0 && plan.is_terminal {
         crate::services::dispatches::wait_queue::spawn_cached_constraint_release_wake(
             pool.clone(),
             "constraint_release",
