@@ -122,11 +122,12 @@
   - `src/services/discord/tmux.rs` (2206 lines after #2558 dead-code sweep;
     failover guard; #3087 `session_panel_instance_key`/`write_spawn_nonce`
     re-exports; still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (6870 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (6897 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
-    refresh + #3087 session-instance-key panel reset; split loop helpers
-    further before adding behavior).
+    refresh + #3087 session-instance-key panel reset + #3095 durable
+    provider-selector fallback to the in-memory cache on resume turns;
+    split loop helpers further before adding behavior).
   - `src/services/discord/tui_prompt_relay.rs` (3247 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3082 queued-only answer-flush gate
