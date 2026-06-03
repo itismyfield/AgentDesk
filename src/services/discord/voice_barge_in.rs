@@ -1102,15 +1102,84 @@ fn progress_feedback_channel_id(channel_id: u64, playback_channel_id: Option<u64
     playback_channel_id.unwrap_or(channel_id)
 }
 
-pub(in crate::services::discord) struct VoiceBargeInRuntime {
-    enabled: bool,
-    barge_in_enabled: bool,
+/// Cohesive sub-concern of [`VoiceBargeInRuntime`]: the live barge-in
+/// sensitivity state (#3038 STT/TTS/playback/routing split, sensitivity slice).
+///
+/// Bundles the three sensitivity-related fields that previously lived directly
+/// on `VoiceBargeInRuntime`. Behavior is preserved exactly: the atomic mirror is
+/// always stored *before* the `RwLock` write (F18, #2046), and `current` falls
+/// back to the atomic mirror on `try_read` contention.
+struct SensitivityState {
+    // F18 (#2046): boot-time default. Retained for parity with the original
+    // field layout; never read after construction.
+    #[allow(dead_code)]
     default_sensitivity: BargeInSensitivity,
     // F18 (#2046): RwLock try_read 실패 시 default 로 폴백하면 사용자가 설정한
     // Conservative 가 잠깐 Normal 로 잘못 평가될 수 있다. 최신 값을 lock-free 로
     // 읽을 수 있도록 atomic mirror 유지.
-    sensitivity_atom: std::sync::atomic::AtomicU8,
-    sensitivity_state: Arc<RwLock<BargeInSensitivityState>>,
+    atom: std::sync::atomic::AtomicU8,
+    state: Arc<RwLock<BargeInSensitivityState>>,
+}
+
+impl SensitivityState {
+    fn new(default_sensitivity: BargeInSensitivity, conservative_ttl: Duration) -> Self {
+        Self {
+            default_sensitivity,
+            atom: std::sync::atomic::AtomicU8::new(default_sensitivity.as_u8()),
+            state: Arc::new(RwLock::new(BargeInSensitivityState::new(
+                default_sensitivity,
+                conservative_ttl,
+            ))),
+        }
+    }
+
+    fn disabled() -> Self {
+        let default_sensitivity = BargeInSensitivity::Normal;
+        Self {
+            default_sensitivity,
+            atom: std::sync::atomic::AtomicU8::new(default_sensitivity.as_u8()),
+            state: Arc::new(RwLock::new(BargeInSensitivityState::default())),
+        }
+    }
+
+    /// Clone the shared `RwLock` handle for the TTL reset background task.
+    fn state_handle(&self) -> Arc<RwLock<BargeInSensitivityState>> {
+        self.state.clone()
+    }
+
+    /// F18 (#2046): atomic mirror 를 먼저 갱신해 두면 try_read 충돌 윈도우에서도
+    /// `current` 가 최신 값을 본다.
+    async fn set(&self, sensitivity: BargeInSensitivity) {
+        self.atom.store(sensitivity.as_u8(), Ordering::Relaxed);
+        self.state
+            .write()
+            .await
+            .set_sensitivity(sensitivity, Instant::now());
+    }
+
+    async fn apply_voice_command(&self, transcript: &str) -> Option<BargeInSensitivity> {
+        self.state
+            .write()
+            .await
+            .apply_voice_command(transcript, Instant::now())
+    }
+
+    /// F18 (#2046): try_read 실패 시 boot-time default 가 아닌 가장 최근에
+    /// 설정된 sensitivity 를 반환하도록 atomic mirror 로 폴백한다.
+    fn current(&self) -> BargeInSensitivity {
+        self.state
+            .try_read()
+            .map(|state| state.sensitivity())
+            .unwrap_or_else(|_| BargeInSensitivity::from_u8(self.atom.load(Ordering::Relaxed)))
+    }
+}
+
+pub(in crate::services::discord) struct VoiceBargeInRuntime {
+    enabled: bool,
+    barge_in_enabled: bool,
+    // #3038: sensitivity 관심사를 sub-struct 로 격리. default_sensitivity /
+    // atomic mirror / RwLock 상태를 하나로 묶어 락 순서와 폴백 동작을 보존.
+    sensitivity: SensitivityState,
     acknowledgement_enabled: bool,
     acknowledgement_text: String,
     transcript_dirs: Vec<PathBuf>,
@@ -1171,12 +1240,7 @@ impl VoiceBargeInRuntime {
         Self {
             enabled: config.enabled,
             barge_in_enabled: config.enabled && config.barge_in.enabled,
-            default_sensitivity,
-            sensitivity_atom: std::sync::atomic::AtomicU8::new(default_sensitivity.as_u8()),
-            sensitivity_state: Arc::new(RwLock::new(BargeInSensitivityState::new(
-                default_sensitivity,
-                conservative_ttl,
-            ))),
+            sensitivity: SensitivityState::new(default_sensitivity, conservative_ttl),
             acknowledgement_enabled: config.barge_in.acknowledgement_enabled,
             acknowledgement_text: config.barge_in.acknowledgement_text.clone(),
             transcript_dirs: transcript_dirs_from_config(config),
@@ -1210,9 +1274,7 @@ impl VoiceBargeInRuntime {
         Self {
             enabled: false,
             barge_in_enabled: false,
-            default_sensitivity: BargeInSensitivity::Normal,
-            sensitivity_atom: std::sync::atomic::AtomicU8::new(BargeInSensitivity::Normal.as_u8()),
-            sensitivity_state: Arc::new(RwLock::new(BargeInSensitivityState::default())),
+            sensitivity: SensitivityState::disabled(),
             acknowledgement_enabled: false,
             acknowledgement_text: String::new(),
             transcript_dirs: Vec::new(),
@@ -1723,7 +1785,7 @@ impl VoiceBargeInRuntime {
             return;
         }
 
-        let state = self.sensitivity_state.clone();
+        let state = self.sensitivity.state_handle();
         let token = CancellationToken::new();
         let reset_token = token.clone();
         tokio::spawn(run_sensitivity_ttl_reset(state, reset_token));
@@ -2102,14 +2164,7 @@ impl VoiceBargeInRuntime {
         &self,
         sensitivity: BargeInSensitivity,
     ) {
-        // F18 (#2046): atomic mirror 를 먼저 갱신해 두면 try_read 충돌 윈도우에서도
-        // current_sensitivity 가 최신 값을 본다.
-        self.sensitivity_atom
-            .store(sensitivity.as_u8(), Ordering::Relaxed);
-        self.sensitivity_state
-            .write()
-            .await
-            .set_sensitivity(sensitivity, Instant::now());
+        self.sensitivity.set(sensitivity).await;
         self.update_existing_monitor_sensitivity(sensitivity);
     }
 
@@ -2120,11 +2175,7 @@ impl VoiceBargeInRuntime {
         if !self.barge_in_enabled {
             return None;
         }
-        let sensitivity = self
-            .sensitivity_state
-            .write()
-            .await
-            .apply_voice_command(transcript, Instant::now())?;
+        let sensitivity = self.sensitivity.apply_voice_command(transcript).await?;
         self.update_existing_monitor_sensitivity(sensitivity);
         Some(sensitivity)
     }
@@ -4454,12 +4505,7 @@ impl VoiceBargeInRuntime {
         // 설정된 sensitivity 를 반환하도록 atomic mirror 로 폴백한다. TTL reset
         // 이 일어나는 짧은 윈도우라도 사용자가 설정한 Conservative 가 잠깐
         // Normal 로 평가되는 회귀를 막는다.
-        self.sensitivity_state
-            .try_read()
-            .map(|state| state.sensitivity())
-            .unwrap_or_else(|_| {
-                BargeInSensitivity::from_u8(self.sensitivity_atom.load(Ordering::Relaxed))
-            })
+        self.sensitivity.current()
     }
 
     fn update_existing_monitor_sensitivity(&self, sensitivity: BargeInSensitivity) {

@@ -252,7 +252,7 @@
     inline — its move-captured locals make a clean extraction risky and is
     deferred).
   - `src/services/discord/session_runtime.rs` (1396 lines).
-  - `src/services/discord/voice_barge_in.rs` (4653 lines; voice STT/TTS,
+  - `src/services/discord/voice_barge_in.rs` (4699 lines; voice STT/TTS,
     lobby routing, progress mirroring, and barge-in orchestration surface;
     tracked decompose target — see `giant-file-registry.md` (owner
     `voice-runtime`, deadline 2026-08-31, #3036)).
