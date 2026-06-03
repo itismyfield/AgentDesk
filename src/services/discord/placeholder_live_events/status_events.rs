@@ -373,27 +373,33 @@ fn content_block_start_status_events(value: &Value) -> Vec<StatusEvent> {
 }
 
 fn user_status_events(value: &Value) -> Vec<StatusEvent> {
-    // #3086: a `tool_result` whose record carries a top-level `toolUseResult`
-    // with subagent accounting (`agentId` / `total*`) is a finished subagent.
-    // Surface a TUI-parity `Done (N tools · M tokens · Xs)` summary by pairing
-    // the result to its slot via the content block's `tool_use_id`. The
-    // accounting comes from the in-stream `toolUseResult` first (no IO).
+    // #3086: a finished subagent's `tool_result` carries a `toolUseResult`
+    // aggregate with subagent accounting (`agentId` / `total*`). Surface a
+    // TUI-parity `Done (N tools · M tokens · Xs)` summary by pairing the result
+    // to its slot via the content block's own `tool_use_id`. The accounting
+    // comes from the in-stream `toolUseResult` (no IO).
     //
-    // The `toolUseResult` aggregate describes exactly ONE finished subagent
-    // (it carries a single `agentId`), so the summary must attach to exactly
-    // ONE `tool_result` block — the one whose `tool_use_id` identifies that
-    // subagent. We never clone the aggregate onto every block: a `user` record
-    // may batch the Task result alongside other parallel tool results, and
-    // cloning would mark unrelated subagents Done with the wrong accounting.
+    // #3086 P1: a single `user` record may BATCH several finished subagents'
+    // `tool_result` blocks, and each Task subagent result carries its OWN
+    // `toolUseResult` aggregate (its own `agentId`/`total*`). The aggregate for
+    // subagent A lives in A's own block; B's lives in B's. We therefore compute
+    // each block's summary FROM THAT SAME BLOCK and key it by THAT block's
+    // `tool_use_id` — the slot key the panel pairs on (#3084). We must NOT
+    // attach a single record-level aggregate to "the first id-bearing block":
+    // with multiple aggregate-bearing blocks that would put subagent A's Done
+    // summary on subagent B's slot.
     //
-    // We cannot read slot state here (it lives in the panel), so we only emit a
-    // summary-bearing `SubagentEnd` for a block that actually carries a
-    // `tool_use_id`, and we attach the summary to a single block. The panel
-    // (status_panel.rs) then requires that id to match a tracked subagent slot
-    // before applying it — a summary-bearing end with an unmatched id is
-    // dropped rather than mis-routed to the last unfinished slot.
-    let subagent_summary = subagent_summary_from_user_record(value);
-
+    // Legacy single-subagent records put the aggregate at the RECORD top level
+    // (one `tool_result` block, top-level `toolUseResult`). When no block
+    // carries its own aggregate, we fall back to attaching that record-level
+    // aggregate to the first id-bearing `tool_result` block (there is exactly
+    // one finished subagent in that shape, so a single owner is correct).
+    //
+    // We cannot read slot state here (it lives in the panel), so each
+    // summary-bearing `SubagentEnd` is keyed by the block's `tool_use_id`; the
+    // panel (status_panel.rs) requires that id to match a tracked subagent slot
+    // before applying it — a summary-bearing end with an unmatched id is dropped
+    // rather than mis-routed to the last unfinished slot.
     let blocks = value
         .get("message")
         .and_then(|message| message.get("content"))
@@ -401,10 +407,25 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
         .map(Vec::as_slice)
         .unwrap_or(&[]);
 
-    // Pick the single block that owns the subagent summary: the first
-    // `tool_result` carrying a `tool_use_id`. The aggregate is for one
-    // subagent, so it must be attributed to one block only.
-    let summary_owner_idx = subagent_summary.as_ref().and_then(|_| {
+    // Per-block aggregates take precedence: when ANY `tool_result` block carries
+    // its own `toolUseResult` aggregate, attribute each summary to its own block
+    // and never fall back to the record-level aggregate (which, in the batched
+    // shape, would be absent or ambiguous).
+    let any_block_aggregate = blocks.iter().any(|block| {
+        block.get("type").and_then(Value::as_str) == Some("tool_result")
+            && super::subagent_rollout::summary_from_tool_use_result(block).is_some()
+    });
+
+    // Legacy single-subagent fallback: the aggregate sits at the record top
+    // level. Attribute it to the first id-bearing `tool_result` block (only one
+    // finished subagent exists in that shape). Disabled when blocks carry their
+    // own aggregates, to avoid double-counting / mis-attribution.
+    let record_summary = if any_block_aggregate {
+        None
+    } else {
+        subagent_summary_from_record(value)
+    };
+    let record_summary_owner_idx = record_summary.as_ref().and_then(|_| {
         blocks.iter().position(|block| {
             block.get("type").and_then(Value::as_str) == Some("tool_result")
                 && block
@@ -426,12 +447,23 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
 
-            // Attach the subagent summary to ONLY the owning block, paired by
-            // its `tool_use_id`. The panel will refuse to apply it if the id
-            // does not match a real, tracked subagent slot, so a stray summary
-            // can never land on an unrelated running slot.
-            if Some(idx) == summary_owner_idx {
-                let summary = subagent_summary.clone().expect("owner implies summary");
+            // This block's OWN aggregate (batched multi-subagent case): attach
+            // the per-subagent summary here, keyed by THIS block's tool_use_id.
+            let block_summary = subagent_summary_from_record(block);
+            // Or, for the legacy single-subagent shape, the record-level
+            // aggregate owned by the first id-bearing block.
+            let summary = block_summary.or_else(|| {
+                if Some(idx) == record_summary_owner_idx {
+                    record_summary.clone()
+                } else {
+                    None
+                }
+            });
+
+            if let Some(summary) = summary {
+                // Pair by this block's own tool_use_id. The panel refuses to
+                // apply the summary unless the id matches a real, tracked slot,
+                // so a stray summary can never land on an unrelated running slot.
                 let tool_use_id = block
                     .get("tool_use_id")
                     .and_then(Value::as_str)
@@ -452,9 +484,11 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
 }
 
 /// Builds the subagent [`SubagentSummary`](crate::services::agent_protocol::SubagentSummary)
-/// for a `user` transcript record when it represents a finished subagent
-/// (`toolUseResult` carries `agentId`/`total*`). Returns `None` for ordinary
-/// (non-subagent) tool results.
+/// from a JSON object's `toolUseResult` aggregate. The object may be either an
+/// individual `tool_result` content block (batched multi-subagent case, where
+/// each Task result carries its own `toolUseResult`) or the whole `user` record
+/// (legacy single-subagent case, where the aggregate sits at the record top
+/// level). Returns `None` for ordinary (non-subagent) tool results.
 ///
 /// #3086 P1: this runs on the live relay/status hot path, so it uses ONLY the
 /// in-stream `toolUseResult` aggregate — no disk IO. The aggregate is the exact
@@ -465,7 +499,7 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
 /// unbounded blocking read on the async relay loop and is removed from this
 /// path. The IO-free rollout parser (`summary_from_rollout_str`) remains
 /// available for any off-hot-path / offline use.
-fn subagent_summary_from_user_record(
+fn subagent_summary_from_record(
     value: &Value,
 ) -> Option<crate::services::agent_protocol::SubagentSummary> {
     let (summary, _agent_id) = super::subagent_rollout::summary_from_tool_use_result(value)?;

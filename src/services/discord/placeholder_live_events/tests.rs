@@ -1970,6 +1970,99 @@ fn status_panel_subagent_summary_attaches_only_to_matching_slot() {
     );
 }
 
+// #3086 P1: a single `user` record may BATCH multiple finished subagents, each
+// `tool_result` block carrying its OWN `toolUseResult` aggregate. Each Done
+// summary must land on ITS OWN slot (keyed by that block's tool_use_id), not all
+// on the first id-bearing block. Subagent A (tuA, summaryA) and subagent B (tuB,
+// summaryB) both finish in one batched record: A's summary → slot tuA, B's → tuB.
+#[test]
+fn status_panel_batched_multi_subagent_summaries_land_on_own_slots() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(392);
+
+    // Two subagents start in parallel.
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({"subagent_type": "alpha", "description": "Task A"}).to_string(),
+            Some("toolu_a"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({"subagent_type": "beta", "description": "Task B"}).to_string(),
+            Some("toolu_b"),
+        ),
+    );
+
+    // ONE `user` record batches BOTH finished subagents. Each `tool_result`
+    // block carries its OWN `toolUseResult` aggregate (its own agentId/total*).
+    events.push_status_events(
+        channel_id,
+        status_events_from_json(&json!({
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_a",
+                        "is_error": false,
+                        "toolUseResult": {
+                            "agentId": "aalpha00000000000",
+                            "totalToolUseCount": 12,
+                            "totalTokens": 5000,
+                            "totalDurationMs": 30_000
+                        }
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_b",
+                        "is_error": false,
+                        "toolUseResult": {
+                            "agentId": "abeta000000000000",
+                            "totalToolUseCount": 81,
+                            "totalTokens": 28824,
+                            "totalDurationMs": 1_140_000
+                        }
+                    }
+                ]
+            }
+        })),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let alpha_line = rendered
+        .lines()
+        .find(|line| line.contains("alpha Task A"))
+        .unwrap_or_else(|| panic!("alpha slot missing in: {rendered}"));
+    let beta_line = rendered
+        .lines()
+        .find(|line| line.contains("beta Task B"))
+        .unwrap_or_else(|| panic!("beta slot missing in: {rendered}"));
+
+    // A's aggregate lands on A's slot (tuA), B's on B's slot (tuB) — NOT both on
+    // the first block.
+    assert!(
+        alpha_line.contains("Done (12 tools · 5k tokens · 30s)"),
+        "alpha must carry its OWN summary, got: {alpha_line}"
+    );
+    assert!(
+        alpha_line.contains('✓'),
+        "alpha must be marked done, got: {alpha_line}"
+    );
+    assert!(
+        beta_line.contains("Done (81 tools · 28.8k tokens · 19m)"),
+        "beta must carry its OWN summary, got: {beta_line}"
+    );
+    assert!(
+        beta_line.contains('✓'),
+        "beta must be marked done, got: {beta_line}"
+    );
+}
+
 // #3086 P1 #1: a summary-bearing `SubagentEnd` whose `tool_use_id` matches NO
 // tracked slot must be dropped, not mis-routed to the last unfinished slot.
 #[test]
