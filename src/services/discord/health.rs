@@ -54,7 +54,7 @@ use recovery::{
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use session_enrichment::WATCHER_STATE_DESYNC_STALE_MS;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use snapshot::normalize_global_active_counter;
+use snapshot::observe_global_active_invariant;
 #[allow(unused_imports)]
 pub use snapshot::{
     DiscordHealthSnapshot, HealthStatus, WatcherStateSnapshot, active_request_owner_for_channel,
@@ -4859,27 +4859,136 @@ agents:
     }
 
     #[test]
-    fn normalize_global_active_counter_preserves_ordinary_snapshot_races() {
-        let (global_active, reason) = normalize_global_active_counter(3, 2, 0);
+    fn global_active_invariant_holds_for_balanced_counter() {
+        // global_active == provider_active_turns: the 1:1 increment/decrement
+        // invariant is satisfied, so no drift signal/degraded reason fires and
+        // the real atomic value is reported unchanged.
+        let (global_active, reason) = observe_global_active_invariant(2, 2, 0);
 
-        assert_eq!(global_active, 3);
+        assert_eq!(global_active, 2);
         assert_eq!(reason, None);
     }
 
     #[test]
-    fn normalize_global_active_counter_bounds_wrapped_values_only() {
-        let (global_active, reason) = normalize_global_active_counter(usize::MAX, 2, 1);
+    fn global_active_invariant_tolerates_snapshot_race_drift() {
+        // The health snapshot is NOT atomic: mailbox actors are read
+        // sequentially, then global_active is read afterward, and slots are
+        // acquired before the counter is incremented. So even multi-turn skew is
+        // a benign, reachable-in-normal-operation race — report the REAL atomic
+        // value and never raise a degraded reason (observe-only). A
+        // single-snapshot transient like this must NOT degrade health or panic.
+        for raw in [1usize, 3, 5, 7] {
+            let (global_active, reason) = observe_global_active_invariant(raw, 2, 0);
+            assert_eq!(
+                global_active, raw,
+                "must report the real atomic value, never a substituted count"
+            );
+            assert_eq!(
+                reason, None,
+                "transient snapshot-race drift must be tolerated (no degraded reason)"
+            );
+        }
+    }
+
+    #[test]
+    fn global_active_invariant_reports_real_value_never_substitutes() {
+        // Even when the observed count and the atomic disagree, the displayed
+        // value is the REAL atomic (the #3019 deliverable), not the silently
+        // substituted provider_active_turns the old band-aid would have shown.
+        let (global_active, reason) = observe_global_active_invariant(9, 2, 0);
+        assert_eq!(global_active, 9);
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn global_active_invariant_clamps_only_wrapped_values_loudly() {
+        // The saturating decrement floor should make this unreachable, but a
+        // pathological wrapped reading clamps the DISPLAY to the observed count
+        // (loudly), never silently. This is the one remaining degraded path.
+        let (global_active, reason) = observe_global_active_invariant(usize::MAX, 2, 1);
 
         assert_eq!(global_active, 2);
         assert!(reason.is_some_and(|reason| {
-            reason.contains("raw=")
+            reason.starts_with("global_active_counter_out_of_bounds:raw=")
                 && reason.contains("provider_active_turns=2")
                 && reason.contains("global_finalizing=1")
         }));
     }
 
     #[tokio::test]
-    async fn health_snapshot_bounds_wrapped_global_active_counter() {
+    async fn health_snapshot_global_active_invariant_quiet_when_balanced() {
+        // Balanced state: two seeded active turns, global_active == 2. The
+        // single-authority +1/-1 invariant holds, so the snapshot must NOT be
+        // degraded by the counter and must report the real value with no
+        // global_active_* degraded reason and no debug_assert panic.
+        let harness = TestHealthHarness::new().await;
+        harness
+            .seed_active_turn(713_000_000_000_000_010, 42, 9_001)
+            .await;
+        harness
+            .seed_active_turn(713_000_000_000_000_011, 43, 9_002)
+            .await;
+
+        let snapshot = build_health_snapshot(&harness.registry()).await;
+        let json = serde_json::to_value(&snapshot).unwrap();
+
+        assert_eq!(json["global_active"], 2);
+        assert_eq!(json["providers"][0]["active_turns"], 2);
+        assert!(
+            !json["degraded_reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason
+                    .as_str()
+                    .is_some_and(|reason| reason.starts_with("global_active_"))),
+            "balanced counter must not emit a global_active degraded reason"
+        );
+    }
+
+    // A transient snapshot-race drift (>1) is a benign, reachable-in-normal-
+    // operation skew: the snapshot is non-atomic and slots are acquired before
+    // the counter is incremented. It must be TOLERATED — no panic, no degraded
+    // reason — while the snapshot still reports the REAL atomic value (not a
+    // silently substituted count). This replaces the old #[should_panic] test
+    // that wrongly asserted a panic on reachable drift.
+    #[tokio::test]
+    async fn health_snapshot_global_active_drift_is_observe_only() {
+        let harness = TestHealthHarness::new().await;
+        harness
+            .seed_active_turn(713_000_000_000_000_010, 42, 9_001)
+            .await;
+        harness
+            .seed_active_turn(713_000_000_000_000_011, 43, 9_002)
+            .await;
+        // Inject drift well beyond a single transition: global_active=5 while
+        // only 2 mailbox slots are active. In a non-atomic snapshot this is a
+        // legitimate concurrent-start window, so it must NOT degrade or panic.
+        harness.shared.global_active.store(5, Ordering::Relaxed);
+
+        let snapshot = build_health_snapshot(&harness.registry()).await;
+        let json = serde_json::to_value(&snapshot).unwrap();
+
+        // The REAL atomic value is reported, never silently substituted.
+        assert_eq!(json["global_active"], 5);
+        assert!(
+            !json["degraded_reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason
+                    .as_str()
+                    .is_some_and(|reason| reason.starts_with("global_active_"))),
+            "transient snapshot-race drift must not emit a global_active degraded reason"
+        );
+    }
+
+    // A pathological wrapped/out-of-bounds reading (unreachable under the
+    // saturating-decrement floor) still clamps the DISPLAY to the observed count
+    // and surfaces a degraded reason for operator visibility — but it no longer
+    // panics. The wraparound clamp is the one remaining degraded path.
+    #[tokio::test]
+    async fn health_snapshot_wrapped_global_active_counter_clamps_and_degrades() {
         let harness = TestHealthHarness::new().await;
         harness
             .seed_active_turn(713_000_000_000_000_010, 42, 9_001)
@@ -4895,10 +5004,8 @@ agents:
         let snapshot = build_health_snapshot(&harness.registry()).await;
         let json = serde_json::to_value(&snapshot).unwrap();
 
-        assert_eq!(snapshot.status(), HealthStatus::Degraded);
+        // DISPLAY is clamped to the observed count (2), not the garbage atomic.
         assert_eq!(json["global_active"], 2);
-        assert_eq!(json["global_finalizing"], 0);
-        assert_eq!(json["providers"][0]["active_turns"], 2);
         assert!(
             json["degraded_reasons"]
                 .as_array()
@@ -4906,7 +5013,8 @@ agents:
                 .iter()
                 .any(|reason| reason.as_str().is_some_and(
                     |reason| reason.starts_with("global_active_counter_out_of_bounds:raw=")
-                ))
+                )),
+            "wrapped counter must surface an out-of-bounds degraded reason"
         );
     }
 

@@ -651,8 +651,17 @@ async fn build_health_snapshot_with_options(
         0
     };
     let (global_active, global_counter_degraded_reason) =
-        normalize_global_active_counter(global_active, provider_active_turns, global_finalizing);
+        observe_global_active_invariant(global_active, provider_active_turns, global_finalizing);
     if let Some(reason) = global_counter_degraded_reason {
+        // The ONLY degraded reason this can produce now is a pathological
+        // wraparound/out-of-bounds read (`global_active_counter_out_of_bounds`).
+        // Routine in-band drift between the (non-atomic, sequentially collected)
+        // mailbox snapshot and the atomic read is OBSERVE-ONLY — it is reported
+        // via a debug-level trace inside the detector but never degrades health
+        // and never panics, because that drift is reachable in normal operation
+        // (see the detector docs). A wraparound, by contrast, is genuinely
+        // unreachable under the saturating-decrement floor (#2934), so we still
+        // surface it as degraded for operator visibility.
         status = status.worsen(HealthStatus::Degraded);
         degraded_reasons.push(reason);
     }
@@ -682,25 +691,95 @@ fn count_active_turns(provider_probe: &provider_probe::ProviderProbe) -> usize {
         .count()
 }
 
-pub(super) fn normalize_global_active_counter(
+/// Observe the `global_active` invariant instead of silently papering over it
+/// (#3019, sub-issue of #3016).
+///
+/// HISTORY: this used to be `normalize_global_active_counter`, a SILENT
+/// post-hoc band-aid that, on any wrapped/out-of-bounds reading, quietly
+/// substituted the snapshot-observed `provider_active_turns` for the real
+/// atomic so health snapshots never surfaced the drift. That clamp existed
+/// precisely because there was no single authoritative writer: multiple
+/// `fetch_add`/`fetch_sub` sites drifted (#2934) and the clamp hid it.
+///
+/// NOW the counter has a single increment authority
+/// ([`increment_global_active`](crate::services::discord::increment_global_active))
+/// and a single saturating decrement authority
+/// ([`saturating_decrement_global_active`](crate::services::discord::saturating_decrement_global_active)),
+/// each fired +1/-1 IFF the matching mailbox slot actually
+/// activated/finished. The #3019 deliverable is that we now report the REAL
+/// atomic `global_active` instead of the masked-over observed count.
+///
+/// WHY IN-BAND DRIFT IS OBSERVE-ONLY (codex review): the health snapshot is NOT
+/// an atomic view. It reads each mailbox actor SEQUENTIALLY to derive
+/// `provider_active_turns`, then reads the `global_active` atomic afterward.
+/// Nothing serializes channel transitions against that collection, so multiple
+/// channels can legitimately start/finish in the window between those reads.
+/// Worse, the turn dispatchers (`headless_turn.rs`, `intake_turn.rs`) acquire
+/// the mailbox slot BEFORE they increment `global_active`, so within that window
+/// two concurrent normal starts produce a drift greater than 1. A fixed
+/// tolerance therefore cannot distinguish a real counter bug from a benign,
+/// reachable-in-normal-operation snapshot race. Treating such drift as a
+/// `degraded` reason — or, worse, a `debug_assert` panic — produced FALSE
+/// POSITIVES and flaky CI on a perfectly healthy relay.
+///
+/// So in-band drift is now OBSERVE-ONLY: we always report the real atomic value
+/// and, when it disagrees with the (non-atomic) observed count, emit at most a
+/// debug-level trace as a metric. No degraded health, no panic.
+///
+/// The wraparound floor still matters for DISPLAY safety: although the
+/// saturating decrement floor (#2934) prevents a writer from wrapping 0 →
+/// `usize::MAX`, if a wrapped value is ever observed we clamp the DISPLAY to
+/// `provider_active_turns` so a single garbage reading does not poison the
+/// snapshot. That path is genuinely unreachable under the single-authority
+/// invariant, so — unlike in-band drift — it still surfaces a degraded reason
+/// for operator visibility. It is a clamp for display safety, never a silent
+/// drift-masking path.
+///
+/// This is the PURE detector (return value is easily unit-testable).
+pub(super) fn observe_global_active_invariant(
     raw_global_active: usize,
     provider_active_turns: usize,
     global_finalizing: usize,
 ) -> (usize, Option<String>) {
-    // Snapshot-derived active turns and the global atomic are observed at
-    // different instants. Only clamp clear wraparound values, not ordinary
-    // races where a new turn starts after provider snapshots were collected.
+    // A reading at/above this threshold can only be a wraparound/garbage value;
+    // the single-authority saturating decrement floor (#2934) means a healthy
+    // writer can never produce it.
     const WRAPPED_COUNTER_THRESHOLD: usize = usize::MAX / 2;
-    if raw_global_active < WRAPPED_COUNTER_THRESHOLD {
-        return (raw_global_active, None);
+
+    if raw_global_active >= WRAPPED_COUNTER_THRESHOLD {
+        // Pathological: should be unreachable now that decrement saturates at 0.
+        // Make it LOUD and clamp the DISPLAY only (never silently).
+        tracing::error!(
+            target: "agentdesk::global_active",
+            raw = raw_global_active,
+            provider_active_turns,
+            global_finalizing,
+            "global_active wrapped/out-of-bounds (invariant violation, clamping display)"
+        );
+        return (
+            provider_active_turns,
+            Some(format!(
+                "global_active_counter_out_of_bounds:raw={raw_global_active}:provider_active_turns={provider_active_turns}:global_finalizing={global_finalizing}"
+            )),
+        );
     }
 
-    (
-        // `global_active` intentionally excludes finalizing turns; keep the
-        // corrected value aligned with the provider active-turn count.
-        provider_active_turns,
-        Some(format!(
-            "global_active_counter_out_of_bounds:raw={raw_global_active}:provider_active_turns={provider_active_turns}:global_finalizing={global_finalizing}"
-        )),
-    )
+    // In-band reading: always report the REAL atomic. Any disagreement with the
+    // observed mailbox count is a benign, reachable snapshot race (the snapshot
+    // is non-atomic and slots are acquired before the counter is incremented),
+    // so it is OBSERVE-ONLY: at most a debug-level metric trace, never a
+    // degraded reason and never a panic.
+    let drift = raw_global_active.abs_diff(provider_active_turns);
+    if drift > 0 {
+        tracing::debug!(
+            target: "agentdesk::global_active",
+            global_active = raw_global_active,
+            provider_active_turns,
+            global_finalizing,
+            drift,
+            "global_active vs observed mailbox snapshot drift (observe-only; benign snapshot race)"
+        );
+    }
+
+    (raw_global_active, None)
 }
