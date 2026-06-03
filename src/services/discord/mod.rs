@@ -1125,6 +1125,20 @@ pub(super) struct TmuxWatcherRegistry {
     by_tmux_session: dashmap::DashMap<String, TmuxWatcherHandle>,
     tmux_session_by_channel: dashmap::DashMap<ChannelId, String>,
     owner_channel_by_tmux_session: dashmap::DashMap<String, ChannelId>,
+    /// #3105: authoritative owner-channel bindings re-registered for LIVE tmux
+    /// sessions that currently have no live watcher handle — e.g. a Claude TUI
+    /// session the user is typing into directly whose watcher slot was evicted
+    /// by a compact/restart/rebind and never re-claimed (no foreground turn).
+    ///
+    /// This is part of the authoritative registry, NOT the `tui_prompt_dedupe`
+    /// mirror: it is sourced only from the configured channel→provider bindings
+    /// (`settings::list_registered_channel_bindings`), which deterministically
+    /// resolve a session's owner channel from its (base or thread-suffixed)
+    /// tmux name. Kept in a separate map so the strict 1:1 watcher-handle
+    /// invariant across the three maps above is untouched; the live watcher map
+    /// always wins on lookup, and a real watcher claim for the session clears
+    /// the restored entry so it can never shadow live truth.
+    restored_owner_by_tmux_session: dashmap::DashMap<String, ChannelId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1139,6 +1153,7 @@ impl TmuxWatcherRegistry {
             by_tmux_session: dashmap::DashMap::new(),
             tmux_session_by_channel: dashmap::DashMap::new(),
             owner_channel_by_tmux_session: dashmap::DashMap::new(),
+            restored_owner_by_tmux_session: dashmap::DashMap::new(),
         }
     }
 
@@ -1188,6 +1203,12 @@ impl TmuxWatcherRegistry {
         {
             self.tmux_session_by_channel.remove(&old_owner_channel_id);
         }
+
+        // #3105: a live watcher handle is now the authoritative owner for this
+        // session — drop any restored owner-only binding so it can never shadow
+        // or contradict live truth.
+        self.restored_owner_by_tmux_session
+            .remove(&tmux_session_name);
 
         self.tmux_session_by_channel
             .insert(channel_id, tmux_session_name.clone());
@@ -1265,9 +1286,66 @@ impl TmuxWatcherRegistry {
         &self,
         tmux_session_name: &str,
     ) -> Option<ChannelId> {
+        // The live watcher-handle binding is the primary authority. When no live
+        // watcher owns the session (e.g. a TUI-direct session whose slot was
+        // evicted by compact/restart/rebind), fall back to the #3105 restored
+        // owner map — still authoritative (settings-derived), unlike the dedupe
+        // mirror, which is never consulted here.
         self.owner_channel_by_tmux_session
             .get(tmux_session_name)
             .map(|entry| *entry.value())
+            .or_else(|| {
+                self.restored_owner_by_tmux_session
+                    .get(tmux_session_name)
+                    .map(|entry| *entry.value())
+            })
+    }
+
+    /// #3105: re-register the authoritative owner channel for a LIVE tmux
+    /// session that currently has no live watcher handle.
+    ///
+    /// This is the self-heal path for the permanent relay drop described in
+    /// #3105: the idle transcript relay resolves a session's owner channel
+    /// deterministically from the configured channel→provider bindings (which
+    /// handle both base and thread-suffixed tmux names) and promotes that
+    /// evidence into the authoritative registry here, instead of routing from
+    /// the `tui_prompt_dedupe` mirror (which #3018 forbids as a reverse
+    /// authority).
+    ///
+    /// No-ops when a live watcher already owns the session (live truth wins) or
+    /// when the binding is unchanged. Returns `true` only on the first/changed
+    /// registration so callers can emit a single bounded incident instead of a
+    /// per-poll log.
+    pub(super) fn restore_owner_channel_for_tmux_session(
+        &self,
+        tmux_session_name: &str,
+        channel_id: ChannelId,
+    ) -> bool {
+        let _guard = lock_tmux_watcher_registry();
+        if self
+            .owner_channel_by_tmux_session
+            .contains_key(tmux_session_name)
+        {
+            // A live watcher handle already owns this session authoritatively.
+            self.restored_owner_by_tmux_session
+                .remove(tmux_session_name);
+            return false;
+        }
+        let changed = self
+            .restored_owner_by_tmux_session
+            .get(tmux_session_name)
+            .map(|entry| *entry.value())
+            != Some(channel_id);
+        self.restored_owner_by_tmux_session
+            .insert(tmux_session_name.to_string(), channel_id);
+        changed
+    }
+
+    /// #3105: drop a restored owner-only binding (e.g. once the session is no
+    /// longer live). Idempotent.
+    pub(super) fn clear_restored_owner_for_tmux_session(&self, tmux_session_name: &str) {
+        self.restored_owner_by_tmux_session
+            .remove(tmux_session_name);
     }
 
     pub(super) fn tmux_session_is_stale(&self, tmux_session_name: &str) -> Option<bool> {
@@ -1286,6 +1364,149 @@ impl TmuxWatcherRegistry {
         self.by_tmux_session
             .get(tmux_session_name)
             .map(|entry| entry.output_path.clone())
+    }
+}
+
+#[cfg(test)]
+mod tmux_watcher_registry_restore_tests {
+    use super::*;
+
+    fn live_watcher_handle(tmux_session_name: &str) -> TmuxWatcherHandle {
+        TmuxWatcherHandle {
+            tmux_session_name: tmux_session_name.to_string(),
+            output_path: format!("/tmp/{tmux_session_name}.jsonl"),
+            paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_heartbeat_ts_ms: Arc::new(
+                std::sync::atomic::AtomicI64::new(tmux_watcher_now_ms()),
+            ),
+            mailbox_finalize_owed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    // #3105: a LIVE TUI session whose authoritative watcher-handle binding is
+    // missing (slot evicted by compact/restart/rebind, never re-claimed) must be
+    // self-healable via an authoritative re-registration so the idle relay can
+    // route again — instead of dropping every poll forever. This is the
+    // registry-side half of the fix; it asserts the restore is treated as
+    // authoritative on lookup and does NOT depend on the dedupe mirror.
+    #[test]
+    fn restored_owner_makes_missing_registry_resolve_for_live_session() {
+        let registry = TmuxWatcherRegistry::new();
+        let tmux = "AgentDesk-claude-adk-cc-t1504468805772902471";
+        let channel = ChannelId::new(1_504_468_805_772_902_471);
+
+        // No live watcher handle yet → registry misses (the #3018 drop trigger).
+        assert_eq!(registry.owner_channel_for_tmux_session(tmux), None);
+
+        // Authoritative (settings-derived) re-registration repairs the miss.
+        assert!(
+            registry.restore_owner_channel_for_tmux_session(tmux, channel),
+            "first restore must report a change so a single bounded incident is emitted"
+        );
+        assert_eq!(
+            registry.owner_channel_for_tmux_session(tmux),
+            Some(channel),
+            "restored owner must resolve authoritatively from the registry"
+        );
+
+        // Re-applying the same binding is a no-op (no repeated per-poll incident).
+        assert!(
+            !registry.restore_owner_channel_for_tmux_session(tmux, channel),
+            "unchanged restore must not re-report a change"
+        );
+    }
+
+    // A real live watcher handle is the primary authority and must win over (and
+    // evict) any restored owner-only binding — restored entries can never shadow
+    // or contradict live truth.
+    #[test]
+    fn live_watcher_handle_overrides_and_evicts_restored_owner() {
+        let registry = TmuxWatcherRegistry::new();
+        let tmux = "AgentDesk-claude-adk-cc-t1504468805772902471";
+        let restored_channel = ChannelId::new(111_000_000_000_000);
+        let live_channel = ChannelId::new(222_000_000_000_000);
+
+        registry.restore_owner_channel_for_tmux_session(tmux, restored_channel);
+        assert_eq!(
+            registry.owner_channel_for_tmux_session(tmux),
+            Some(restored_channel)
+        );
+
+        // Claiming a live watcher handle takes over and drops the restored entry.
+        registry.insert(live_channel, live_watcher_handle(tmux));
+        assert_eq!(
+            registry.owner_channel_for_tmux_session(tmux),
+            Some(live_channel),
+            "live watcher handle must win over a restored owner-only binding"
+        );
+
+        // Removing the live watcher must NOT resurrect the evicted restored entry.
+        registry.remove(&live_channel);
+        assert_eq!(
+            registry.owner_channel_for_tmux_session(tmux),
+            None,
+            "evicted restored entry must not resurrect after the live watcher is removed"
+        );
+    }
+
+    // Restoring an owner while a live watcher already owns the session must be a
+    // no-op (and clear any leftover restored entry) — never override live truth.
+    #[test]
+    fn restore_is_noop_when_live_watcher_owns_session() {
+        let registry = TmuxWatcherRegistry::new();
+        let tmux = "AgentDesk-claude-adk-cc";
+        let live_channel = ChannelId::new(333_000_000_000_000);
+
+        registry.insert(live_channel, live_watcher_handle(tmux));
+        assert!(
+            !registry
+                .restore_owner_channel_for_tmux_session(tmux, ChannelId::new(444_000_000_000_000)),
+            "restore must not report a change when a live watcher owns the session"
+        );
+        assert_eq!(
+            registry.owner_channel_for_tmux_session(tmux),
+            Some(live_channel),
+            "live watcher owner must be unchanged by a restore attempt"
+        );
+    }
+
+    // The base and thread-suffixed tmux names are distinct registry keys; a
+    // restored owner for the thread-suffixed live session resolves on its own
+    // exact key (the relay resolves the channel from the suffixed name).
+    #[test]
+    fn base_and_thread_suffixed_names_resolve_independently() {
+        let registry = TmuxWatcherRegistry::new();
+        let base = "AgentDesk-claude-adk-cc";
+        let suffixed = "AgentDesk-claude-adk-cc-t1504468805772902471";
+        let channel = ChannelId::new(1_504_468_805_772_902_471);
+
+        registry.restore_owner_channel_for_tmux_session(suffixed, channel);
+        assert_eq!(
+            registry.owner_channel_for_tmux_session(suffixed),
+            Some(channel)
+        );
+        assert_eq!(
+            registry.owner_channel_for_tmux_session(base),
+            None,
+            "the base name must not borrow the thread-suffixed session's owner"
+        );
+    }
+
+    // Clearing a restored owner (e.g. when the pane is no longer live) must drop
+    // the binding so a dead session can never resolve.
+    #[test]
+    fn clear_restored_owner_drops_binding() {
+        let registry = TmuxWatcherRegistry::new();
+        let tmux = "AgentDesk-claude-adk-cc-t1504468805772902471";
+        let channel = ChannelId::new(1_504_468_805_772_902_471);
+
+        registry.restore_owner_channel_for_tmux_session(tmux, channel);
+        registry.clear_restored_owner_for_tmux_session(tmux);
+        assert_eq!(registry.owner_channel_for_tmux_session(tmux), None);
     }
 }
 

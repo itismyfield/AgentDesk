@@ -1327,7 +1327,7 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
         loop {
             let now = tokio::time::Instant::now();
             if now >= next_rehydrate {
-                rehydrate_existing_claude_tui_bindings();
+                rehydrate_existing_claude_tui_bindings(&shared);
                 next_rehydrate = now + CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL;
             }
             for (tmux_session_name, binding) in
@@ -1516,7 +1516,7 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
 }
 
 #[cfg(unix)]
-fn rehydrate_existing_claude_tui_bindings() {
+fn rehydrate_existing_claude_tui_bindings(shared: &Arc<SharedData>) {
     let sessions = match crate::services::platform::tmux::list_session_names() {
         Ok(sessions) => sessions,
         Err(error) => {
@@ -1535,14 +1535,46 @@ fn rehydrate_existing_claude_tui_bindings() {
         let existing_channel =
             crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(&tmux_session_name);
         let fresh_binding = rehydrated_claude_tui_binding_for_tmux_session(&tmux_session_name);
-        let channel_id = match resolve_rehydrated_claude_tmux_channel_id(&tmux_session_name)
-            .or(existing_channel)
-        {
+        // #3105: prefer the settings-derived (authoritative) channel; only fall
+        // back to the dedupe mirror's last-seen channel for the dedupe binding
+        // refresh below. The mirror's value must NOT be promoted into the
+        // authoritative registry — see the repair gate below.
+        let authoritative_channel = resolve_rehydrated_claude_tmux_channel_id(&tmux_session_name);
+        let channel_id = match authoritative_channel.or(existing_channel) {
             Some(channel_id) => channel_id,
             None => continue,
         };
         if !crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_session_name) {
+            // #3105: the restored owner binding is only valid for a LIVE session;
+            // drop it once the pane is gone so a dead session can never resolve.
+            shared
+                .tmux_watchers
+                .clear_restored_owner_for_tmux_session(&tmux_session_name);
             continue;
+        }
+        // #3105: self-heal the authoritative tmux-session→channel registry for a
+        // LIVE Claude TUI session that has no live watcher handle (e.g. the slot
+        // was evicted by a compact/restart/rebind and never re-claimed because
+        // the user is typing directly into the pane). Without this the #3018
+        // "registry is the single authority, never fall back to the mirror" rule
+        // turns a transient registry miss into a PERMANENT relay drop. We promote
+        // ONLY the settings-derived channel (authoritative, resolves both base
+        // and thread-suffixed tmux names) — never the dedupe mirror — and emit a
+        // single bounded incident instead of the per-poll drift warning.
+        if let Some(authoritative_channel) = authoritative_channel {
+            let repaired = shared.tmux_watchers.restore_owner_channel_for_tmux_session(
+                &tmux_session_name,
+                ChannelId::new(authoritative_channel),
+            );
+            if repaired {
+                tracing::warn!(
+                    tmux_session_name = %tmux_session_name,
+                    channel_id = authoritative_channel,
+                    provider = "claude",
+                    "repaired authoritative tmux-session→channel registry for live TUI session \
+                     (no live watcher slot); idle relay can route again"
+                );
+            }
         }
         if let (Some(existing), Some(_)) = (&existing_binding, existing_channel) {
             if existing.runtime_kind == RuntimeHandoffKind::ClaudeTui
@@ -3618,6 +3650,52 @@ mod tests {
         assert_eq!(
             resolve_owner_channel_authoritatively("tmux-empty", None, None),
             None,
+        );
+    }
+
+    // #3105: a LIVE TUI session where the dedupe mirror holds a channel but the
+    // `tmux_watchers` registry is missing must NOT be permanently dropped. The
+    // fix self-heals by promoting the authoritative (settings-derived) channel
+    // into the registry — NOT by routing from the mirror. This end-to-end relay
+    // test asserts: (1) before repair the resolver drops (registry single
+    // authority); (2) the dedupe mirror alone is never used as the routing
+    // owner; (3) after an authoritative registry restore the relay routes again.
+    #[test]
+    fn live_session_relay_self_heals_via_authoritative_registry_not_mirror() {
+        let shared = super::super::make_shared_data_for_tests();
+        let tmux = "AgentDesk-claude-adk-cc-t1504468805772902471";
+        let owner = ChannelId::new(1_504_468_805_772_902_471);
+
+        // The dedupe mirror has a mapping (live TUI session), but the
+        // authoritative registry misses (slot evicted by compact/restart/rebind).
+        crate::services::tui_prompt_dedupe::register_tmux_channel(tmux, owner.get());
+        assert_eq!(
+            crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux),
+            Some(owner.get()),
+            "precondition: dedupe mirror holds the live session's channel"
+        );
+
+        // (1)+(2): the mirror alone must never be used as the delivery owner —
+        // the resolver drops (the #3018 single-authority rule stays intact).
+        assert_eq!(
+            owner_channel_for_tmux_session(&shared, tmux),
+            None,
+            "registry miss + dedupe mirror hit must drop, never route from the mirror"
+        );
+
+        // (3): an authoritative registry restore (what the rehydrate loop does
+        // from the settings-derived channel) makes the live session route again.
+        let repaired = shared
+            .tmux_watchers
+            .restore_owner_channel_for_tmux_session(tmux, owner);
+        assert!(
+            repaired,
+            "first restore reports a change (single bounded incident)"
+        );
+        assert_eq!(
+            owner_channel_for_tmux_session(&shared, tmux),
+            Some(owner),
+            "after authoritative re-registration the live session must route again"
         );
     }
 
