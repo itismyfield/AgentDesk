@@ -583,22 +583,6 @@ async fn load_memento_feedback_counts(state: &AppState) -> Option<(i64, i64)> {
     load_memento_feedback_counts_legacy(state)
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn load_memento_feedback_counts_legacy(state: &AppState) -> Option<(i64, i64)> {
-    let db = state.legacy_db()?;
-    let conn = db.lock().ok()?;
-    let stats = crate::db::memento_feedback_stats::list_daily_stats(&conn).ok()?;
-
-    Some((
-        stats.iter().map(|stat| stat.auto_tool_feedback_count).sum(),
-        stats
-            .iter()
-            .map(|stat| stat.manual_tool_feedback_count)
-            .sum(),
-    ))
-}
-
-#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 fn load_memento_feedback_counts_legacy(_state: &AppState) -> Option<(i64, i64)> {
     None
 }

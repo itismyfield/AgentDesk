@@ -834,15 +834,3 @@ mod forget_ratio_tests {
         assert!(snapshot.forget_count >= 1);
     }
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) fn reset_memento_throttle_for_tests() {
-    with_state(|state| {
-        *state = MementoThrottleState::default();
-    });
-    FULL_CONTEXT_BYTES_TOTAL.store(0, Ordering::Relaxed);
-    FULL_CONTEXT_TURNS.store(0, Ordering::Relaxed);
-    IDENTITY_CONTEXT_BYTES_TOTAL.store(0, Ordering::Relaxed);
-    IDENTITY_CONTEXT_TURNS.store(0, Ordering::Relaxed);
-    SKIPPED_CONTEXT_TURNS.store(0, Ordering::Relaxed);
-}

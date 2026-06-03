@@ -76,8 +76,3 @@ pub(super) fn matching_recent_watcher_reattach_offset(
         })
         .cloned()
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(super) fn clear_recent_watcher_reattach_offsets_for_tests() {
-    recent_watcher_reattach_offsets().clear();
-}

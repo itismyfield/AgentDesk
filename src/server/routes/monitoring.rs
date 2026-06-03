@@ -94,18 +94,3 @@ fn schedule_render(state: &AppState, channel_id: u64) {
         ChannelId::new(channel_id),
     );
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn upsert_body_deserializes_payload_shape() -> Result<(), serde_json::Error> {
-        let body: UpsertMonitoringBody =
-            serde_json::from_str(r#"{"key":"m1","description":"waiting"}"#)?;
-
-        assert_eq!(body.key, "m1");
-        assert_eq!(body.description, "waiting");
-        Ok(())
-    }
-}

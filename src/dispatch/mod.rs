@@ -9,10 +9,6 @@ mod dispatch_summary;
 pub(crate) mod test_support;
 mod types;
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) use dispatch_cancel::{
-    cancel_active_dispatches_for_card_on_conn, cancel_dispatch_and_reset_auto_queue_on_conn,
-};
 pub use dispatch_cancel::{
     cancel_dispatch_and_reset_auto_queue_on_pg, cancel_dispatch_and_reset_auto_queue_on_pg_tx,
 };
@@ -42,13 +38,6 @@ pub use dispatch_create::{
     create_dispatch_core_with_id_and_options, create_dispatch_core_with_options,
     create_dispatch_pg_only, create_dispatch_with_options, create_dispatch_with_options_pg_only,
 };
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) use dispatch_create::{
-    create_dispatch_record_sqlite_test, create_dispatch_record_with_id_sqlite_test,
-};
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[allow(unused_imports)]
-pub use dispatch_query::query_dispatch_row;
 pub(crate) use dispatch_query::query_dispatch_row_pg;
 #[allow(unused_imports)]
 pub(crate) use dispatch_status::set_dispatch_status_without_queue_sync_with_backends;
@@ -59,13 +48,6 @@ pub use dispatch_status::{
     load_dispatch_row_pg_first, load_dispatch_row_with_backends, mark_dispatch_completed_pg_first,
     set_dispatch_status_on_pg_async, set_dispatch_status_pg_first,
     set_dispatch_status_with_backends,
-};
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[allow(unused_imports)]
-pub(crate) use dispatch_status::{
-    ensure_dispatch_notify_outbox_on_conn, ensure_dispatch_status_reaction_outbox_on_conn,
-    record_dispatch_status_event_on_conn, set_dispatch_status_on_conn,
-    set_dispatch_status_without_queue_sync_on_conn,
 };
 pub(crate) use dispatch_summary::{summarize_dispatch_from_text, summarize_dispatch_result};
 pub use types::{DispatchCreateOptions, Source};

@@ -30,16 +30,7 @@ pub(crate) use memento_throttle::{
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use memento_throttle::{ForgetRatioSnapshot, observe_memento_forget_recall};
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) use memento_throttle::{
-    note_memento_dedup_hit, note_memento_remote_call, note_memento_tool_feedback_trigger,
-    note_memento_tool_request, reset_memento_throttle_for_tests,
-};
 pub(crate) use runtime_state::{backend_is_active, backend_state, refresh_backend_health};
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) use runtime_state::{
-    last_refresh_reason_for_tests, reset_for_tests as reset_backend_health_for_tests,
-};
 
 pub(crate) const UNBOUND_MEMORY_ROLE_ID: &str = "__unbound_role__";
 
@@ -271,111 +262,5 @@ pub(crate) fn extract_token_usage(value: &Value) -> Option<TokenUsage> {
         }
         Value::Array(items) => items.iter().find_map(extract_token_usage),
         _ => None,
-    }
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::*;
-    use crate::services::discord::settings::{
-        MemoryBackendKind, ResolvedMemorySettings, RoleBinding,
-    };
-    use crate::services::provider::ProviderKind;
-    use serde_json::json;
-
-    #[test]
-    fn test_build_resolved_memory_backend_file_and_memento() {
-        let file = build_resolved_memory_backend(&ResolvedMemorySettings::default());
-        let _ = file;
-
-        let memento = build_resolved_memory_backend(&ResolvedMemorySettings {
-            backend: MemoryBackendKind::Memento,
-            ..ResolvedMemorySettings::default()
-        });
-        let _ = memento;
-    }
-
-    #[test]
-    fn test_build_memory_backend_resolves_binding_memory_settings_before_building() {
-        let binding = RoleBinding {
-            role_id: "codex".to_string(),
-            prompt_file: "/tmp/codex.md".to_string(),
-            provider: Some(ProviderKind::Codex),
-            model: None,
-            reasoning_effort: None,
-            peer_agents_enabled: true,
-            quality_feedback_injection_enabled: true,
-            memory: ResolvedMemorySettings {
-                backend: MemoryBackendKind::Memento,
-                ..ResolvedMemorySettings::default()
-            },
-        };
-
-        let (resolved, backend) = build_memory_backend(Some(&binding));
-        let _ = backend;
-        assert_eq!(resolved.backend, MemoryBackendKind::Memento);
-
-        let (default_settings, default_backend) = build_memory_backend(None);
-        let _ = default_backend;
-        assert_eq!(default_settings.backend, MemoryBackendKind::File);
-    }
-
-    #[test]
-    fn test_resolve_memory_role_id_uses_sentinel_when_binding_missing() {
-        assert_eq!(resolve_memory_role_id(None), UNBOUND_MEMORY_ROLE_ID);
-
-        let binding = RoleBinding {
-            role_id: "codex".to_string(),
-            prompt_file: "/tmp/codex.md".to_string(),
-            provider: Some(ProviderKind::Codex),
-            model: None,
-            reasoning_effort: None,
-            peer_agents_enabled: true,
-            quality_feedback_injection_enabled: true,
-            memory: ResolvedMemorySettings::default(),
-        };
-        assert_eq!(resolve_memory_role_id(Some(&binding)), "codex");
-    }
-
-    #[test]
-    fn test_resolve_memory_session_id_falls_back_to_channel_id() {
-        assert_eq!(resolve_memory_session_id(None, 42), "42");
-        assert_eq!(resolve_memory_session_id(Some(""), 42), "42");
-        assert_eq!(resolve_memory_session_id(Some("sess-1"), 42), "sess-1");
-    }
-
-    #[test]
-    fn test_extract_token_usage_prefers_common_usage_shapes() {
-        let usage = extract_token_usage(&json!({
-            "usage": {
-                "inputTokens": 17,
-                "outputTokens": 9
-            }
-        }))
-        .expect("usage should be extracted");
-        assert_eq!(
-            usage,
-            TokenUsage {
-                input_tokens: 17,
-                output_tokens: 9,
-            }
-        );
-
-        let nested = extract_token_usage(&json!({
-            "result": {
-                "meta": {
-                    "prompt_tokens": "23",
-                    "completion_tokens": 4
-                }
-            }
-        }))
-        .expect("nested usage should be extracted");
-        assert_eq!(
-            nested,
-            TokenUsage {
-                input_tokens: 23,
-                output_tokens: 4,
-            }
-        );
     }
 }

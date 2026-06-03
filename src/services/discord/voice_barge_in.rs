@@ -4825,8 +4825,6 @@ mod tests {
             token_hash: "voice-handoff-test-token-hash".to_string(),
             provider: ProviderKind::Claude,
             api_port: 9,
-            #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-            sqlite: None,
             pg_pool,
             engine: None,
             health_registry: std::sync::Weak::new(),

@@ -1557,23 +1557,3 @@ pub fn handle_dcserver(token: Option<String>) {
 fn should_run_http_only_onboarding(token: Option<&str>, launch_config_count: usize) -> bool {
     token.is_none() && launch_config_count == 0
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::should_run_http_only_onboarding;
-
-    #[test]
-    fn onboarding_mode_when_no_explicit_token_and_no_saved_bots() {
-        assert!(should_run_http_only_onboarding(None, 0));
-    }
-
-    #[test]
-    fn explicit_token_disables_http_only_onboarding() {
-        assert!(!should_run_http_only_onboarding(Some("token"), 0));
-    }
-
-    #[test]
-    fn saved_bot_configs_disable_http_only_onboarding() {
-        assert!(!should_run_http_only_onboarding(None, 1));
-    }
-}

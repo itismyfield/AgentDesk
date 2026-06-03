@@ -157,37 +157,3 @@ impl From<&str> for AppError {
 }
 
 pub type AppResult<T> = Result<T, AppError>;
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn http_error_json_includes_code_and_context() {
-        let (status, Json(body)) = AppError::bad_request("invalid input")
-            .with_code(ErrorCode::Dispatch)
-            .with_context("dispatch_id", "dispatch-123")
-            .into_json_response();
-
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], "invalid input");
-        assert_eq!(body["code"], "dispatch");
-        assert_eq!(body["context"]["dispatch_id"], "dispatch-123");
-    }
-
-    #[test]
-    fn policy_error_json_sets_ok_false() {
-        let body = AppError::internal("policy bridge unavailable")
-            .with_code(ErrorCode::Policy)
-            .with_operation("emit_signal_json.runtime_supervisor")
-            .to_policy_json_value();
-
-        assert_eq!(body["ok"], false);
-        assert_eq!(body["error"], "policy bridge unavailable");
-        assert_eq!(body["code"], "policy");
-        assert_eq!(
-            body["context"]["operation"],
-            "emit_signal_json.runtime_supervisor"
-        );
-    }
-}

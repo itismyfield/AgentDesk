@@ -181,10 +181,6 @@ fn db_query_raw_with_json_mode(
     };
 
     let Some(pg_pool) = pg_pool else {
-        #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-        if let Some(db) = _legacy_db {
-            return db_query_raw_sqlite(db, sql, &params, started);
-        }
         let backend_operation = format!("{origin}.pg_backend");
         return policy_db_error_json(
             &backend_operation,
@@ -273,93 +269,6 @@ fn db_query_raw_pg_with_json_mode(
     })
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn db_query_raw_sqlite(
-    db: &Db,
-    sql: &str,
-    params: &[serde_json::Value],
-    started: std::time::Instant,
-) -> String {
-    let conn = match db.separate_conn() {
-        Ok(conn) => conn,
-        Err(error) => {
-            return policy_db_error_json(
-                "agentdesk.db.query.sqlite_open",
-                sql,
-                format!("open sqlite connection: {error}"),
-            );
-        }
-    };
-    let values = sqlite_params(params);
-    let mut stmt = match conn.prepare(sql) {
-        Ok(stmt) => stmt,
-        Err(error) => {
-            return policy_db_error_json(
-                "agentdesk.db.query.sqlite_prepare",
-                sql,
-                format!("prepare sqlite query: {error}"),
-            );
-        }
-    };
-    let column_names: Vec<String> = stmt
-        .column_names()
-        .iter()
-        .map(|name| name.to_string())
-        .collect();
-    let mut rows = match stmt.query(sqlite_test::params_from_iter(values.iter())) {
-        Ok(rows) => rows,
-        Err(error) => {
-            return policy_db_error_json(
-                "agentdesk.db.query.sqlite_fetch",
-                sql,
-                format!("query sqlite rows: {error}"),
-            );
-        }
-    };
-    let mut result = Vec::new();
-    loop {
-        match rows.next() {
-            Ok(Some(row)) => {
-                let mut object = serde_json::Map::new();
-                for (idx, name) in column_names.iter().enumerate() {
-                    let value = row
-                        .get_ref(idx)
-                        .map(sqlite_value_ref_to_json)
-                        .unwrap_or(serde_json::Value::Null);
-                    object.insert(name.clone(), value);
-                }
-                result.push(serde_json::Value::Object(object));
-            }
-            Ok(None) => break,
-            Err(error) => {
-                return policy_db_error_json(
-                    "agentdesk.db.query.sqlite_collect",
-                    sql,
-                    format!("collect sqlite row: {error}"),
-                );
-            }
-        }
-    }
-
-    let elapsed = started.elapsed();
-    if elapsed >= POLICY_DB_WARN_THRESHOLD {
-        tracing::warn!(
-            elapsed_ms = elapsed.as_millis(),
-            row_count = result.len(),
-            sql = %compact_sql(sql),
-            "policy db query slow"
-        );
-    }
-
-    serde_json::to_string(&result).unwrap_or_else(|error| {
-        policy_db_error_json(
-            "agentdesk.db.query.serialize_sqlite",
-            sql,
-            format!("serialize query result: {error}"),
-        )
-    })
-}
-
 fn db_execute_raw(
     _legacy_db: Option<&Db>,
     pg_pool: Option<PgPool>,
@@ -379,10 +288,6 @@ fn db_execute_raw(
         };
 
     let Some(pg_pool) = pg_pool else {
-        #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-        if let Some(db) = _legacy_db {
-            return db_execute_raw_sqlite(db, sql, &params, started);
-        }
         return policy_db_error_json(
             "agentdesk.db.execute.pg_backend",
             sql,
@@ -391,45 +296,6 @@ fn db_execute_raw(
     };
 
     db_execute_raw_pg(&pg_pool, sql, &params, started)
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn db_execute_raw_sqlite(
-    db: &Db,
-    sql: &str,
-    params: &[serde_json::Value],
-    started: std::time::Instant,
-) -> String {
-    let conn = match db.separate_conn() {
-        Ok(conn) => conn,
-        Err(error) => {
-            return policy_db_error_json(
-                "agentdesk.db.execute.sqlite_open",
-                sql,
-                format!("open sqlite connection: {error}"),
-            );
-        }
-    };
-    let values = sqlite_params(params);
-    match conn.execute(sql, sqlite_test::params_from_iter(values.iter())) {
-        Ok(rows_affected) => {
-            let elapsed = started.elapsed();
-            if elapsed >= POLICY_DB_WARN_THRESHOLD {
-                tracing::warn!(
-                    elapsed_ms = elapsed.as_millis(),
-                    rows_affected,
-                    sql = %compact_sql(sql),
-                    "policy db execute slow"
-                );
-            }
-            serde_json::json!({ "rows_affected": rows_affected }).to_string()
-        }
-        Err(error) => policy_db_error_json(
-            "agentdesk.db.execute.sqlite_execute",
-            sql,
-            format!("execute sqlite policy SQL: {error}"),
-        ),
-    }
 }
 
 pub(crate) fn execute_policy_sql(
@@ -514,47 +380,6 @@ fn parse_params_json(
             .with_context("sql", compact_sql(sql))
             .into_policy_json_string()
     })
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn sqlite_params(params: &[serde_json::Value]) -> Vec<sqlite_test::types::Value> {
-    params.iter().map(sqlite_param).collect()
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn sqlite_param(value: &serde_json::Value) -> sqlite_test::types::Value {
-    match value {
-        serde_json::Value::Null => sqlite_test::types::Value::Null,
-        serde_json::Value::Bool(value) => sqlite_test::types::Value::Integer(i64::from(*value)),
-        serde_json::Value::Number(value) => {
-            if let Some(int_value) = value.as_i64() {
-                sqlite_test::types::Value::Integer(int_value)
-            } else if let Some(float_value) = value.as_f64() {
-                sqlite_test::types::Value::Real(float_value)
-            } else {
-                sqlite_test::types::Value::Text(value.to_string())
-            }
-        }
-        serde_json::Value::String(value) => sqlite_test::types::Value::Text(value.clone()),
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            sqlite_test::types::Value::Text(value.to_string())
-        }
-    }
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn sqlite_value_ref_to_json(value: sqlite_test::types::ValueRef<'_>) -> serde_json::Value {
-    match value {
-        sqlite_test::types::ValueRef::Null => serde_json::Value::Null,
-        sqlite_test::types::ValueRef::Integer(value) => serde_json::json!(value),
-        sqlite_test::types::ValueRef::Real(value) => serde_json::json!(value),
-        sqlite_test::types::ValueRef::Text(value) => {
-            serde_json::Value::String(String::from_utf8_lossy(value).to_string())
-        }
-        sqlite_test::types::ValueRef::Blob(value) => {
-            serde_json::Value::String(format!("{value:?}"))
-        }
-    }
 }
 
 fn policy_db_error_json(operation: &str, sql: &str, message: impl Into<String>) -> String {

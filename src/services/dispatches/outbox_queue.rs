@@ -174,25 +174,6 @@ fn generic_outbox_delivery_result(
     DispatchNotifyDeliveryResult::success(dispatch_id, action, detail)
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn dispatch_notify_delivery_suppressed_sqlite(
-    conn: &sqlite_test::Connection,
-    dispatch_id: &str,
-) -> bool {
-    let status: Option<String> = conn
-        .query_row(
-            "SELECT status FROM task_dispatches WHERE id = ?1",
-            [dispatch_id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten();
-    matches!(
-        status.as_deref(),
-        Some("completed") | Some("failed") | Some("cancelled")
-    )
-}
-
 /// Process one batch of pending outbox entries.
 /// Returns the number of entries processed (0 if queue was empty).
 ///
@@ -206,223 +187,10 @@ pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
     db: &crate::db::Db,
     notifier: &N,
 ) -> usize {
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    {
-        return process_outbox_batch_with_pg(Some(db), None, notifier, None).await;
-    }
-    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     {
         let _ = (db, notifier);
         0
     }
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-async fn process_outbox_batch_sqlite<N: OutboxNotifier>(db: &crate::db::Db, notifier: &N) -> usize {
-    let pending: Vec<DispatchOutboxRow> = {
-        let conn = match db.lock() {
-            Ok(c) => c,
-            Err(_) => return 0,
-        };
-        let mut stmt = match conn.prepare(
-            "SELECT id, dispatch_id, action, agent_id, card_id, title, retry_count
-             FROM dispatch_outbox
-             WHERE status = 'pending'
-               AND (next_attempt_at IS NULL OR next_attempt_at <= datetime('now'))
-             ORDER BY id ASC LIMIT 5",
-        ) {
-            Ok(s) => s,
-            Err(_) => return 0,
-        };
-        stmt.query_map([], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-                None,
-            ))
-        })
-        .ok()
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default()
-    };
-
-    let count = pending.len();
-    for (id, dispatch_id, action, agent_id, card_id, title, retry_count, _) in pending {
-        check_dispatch_outbox_retry_count_in_bounds(id, &dispatch_id, retry_count);
-
-        if action == "notify" {
-            let suppress_delivery = db
-                .lock()
-                .map(|conn| dispatch_notify_delivery_suppressed_sqlite(&conn, &dispatch_id))
-                .unwrap_or(false);
-            if suppress_delivery {
-                let delivery_result = generic_outbox_delivery_result(
-                    &dispatch_id,
-                    "notify",
-                    "suppressed because dispatch is already terminal",
-                );
-                let delivery_result_json = dispatch_delivery_result_json(&delivery_result);
-                if let Ok(conn) = db.lock() {
-                    conn.execute(
-                        "UPDATE dispatch_outbox
-                            SET status = 'done',
-                                processed_at = datetime('now'),
-                                error = NULL,
-                                delivery_status = ?2,
-                                delivery_result = ?3
-                          WHERE id = ?1",
-                        sqlite_test::params![id, delivery_result.status, delivery_result_json],
-                    )
-                    .ok();
-                }
-                continue;
-            }
-        }
-
-        if let Ok(conn) = db.lock() {
-            conn.execute(
-                "UPDATE dispatch_outbox SET status = 'processing' WHERE id = ?1",
-                [id],
-            )
-            .ok();
-        }
-
-        let result = match action.as_str() {
-            "notify" => {
-                if let (Some(aid), Some(cid), Some(t)) =
-                    (agent_id.clone(), card_id.clone(), title.clone())
-                {
-                    notifier
-                        .notify_dispatch(Some(db.clone()), aid, t, cid, dispatch_id.clone())
-                        .await
-                } else {
-                    Err("missing agent_id, card_id, or title for notify action".into())
-                }
-            }
-            "followup" => notifier
-                .handle_followup(Some(db.clone()), dispatch_id.clone())
-                .await
-                .map(|()| {
-                    generic_outbox_delivery_result(
-                        &dispatch_id,
-                        "followup",
-                        "followup handler completed",
-                    )
-                }),
-            "status_reaction" => notifier
-                .sync_status_reaction(Some(db.clone()), dispatch_id.clone())
-                .await
-                .map(|()| {
-                    generic_outbox_delivery_result(
-                        &dispatch_id,
-                        "status_reaction",
-                        "status reaction sync completed",
-                    )
-                }),
-            other => {
-                tracing::warn!("[dispatch-outbox] Unknown action: {other}");
-                Err(format!("unknown action: {other}"))
-            }
-        };
-
-        match result {
-            Ok(delivery_result) => {
-                let delivery_result_json = dispatch_delivery_result_json(&delivery_result);
-                if let Ok(conn) = db.lock() {
-                    conn.execute(
-                        "UPDATE dispatch_outbox
-                            SET status = 'done',
-                                processed_at = datetime('now'),
-                                error = NULL,
-                                delivery_status = ?2,
-                                delivery_result = ?3
-                          WHERE id = ?1",
-                        sqlite_test::params![id, delivery_result.status, delivery_result_json],
-                    )
-                    .ok();
-                    if action == "notify" {
-                        crate::dispatch::set_dispatch_status_on_conn(
-                            &conn,
-                            &dispatch_id,
-                            "dispatched",
-                            None,
-                            "dispatch_outbox_notify",
-                            Some(&["pending"]),
-                            false,
-                        )
-                        .ok();
-                    }
-                }
-            }
-            Err(err) => {
-                if is_transient_slot_busy_error(&err) {
-                    if let Ok(conn) = db.lock() {
-                        conn.execute(
-                            "UPDATE dispatch_outbox
-                                SET status = 'pending',
-                                    error = ?1,
-                                    next_attempt_at = datetime('now', '+' || ?2 || ' seconds')
-                              WHERE id = ?3",
-                            sqlite_test::params![err, SLOT_BUSY_RETRY_SECS, id],
-                        )
-                        .ok();
-                    }
-                    continue;
-                }
-                let new_count = retry_count + 1;
-                if new_count > MAX_RETRY_COUNT {
-                    let delivery_result = DispatchNotifyDeliveryResult::permanent_failure(
-                        &dispatch_id,
-                        &action,
-                        &err,
-                    );
-                    let delivery_result_json = dispatch_delivery_result_json(&delivery_result);
-                    if let Ok(conn) = db.lock() {
-                        conn.execute(
-                            "UPDATE dispatch_outbox
-                                SET status = 'failed',
-                                    error = ?1,
-                                    retry_count = ?2,
-                                    processed_at = datetime('now'),
-                                    delivery_status = ?4,
-                                    delivery_result = ?5
-                              WHERE id = ?3",
-                            sqlite_test::params![
-                                err,
-                                new_count,
-                                id,
-                                delivery_result.status,
-                                delivery_result_json
-                            ],
-                        )
-                        .ok();
-                    }
-                } else {
-                    let backoff_idx = (new_count - 1) as usize;
-                    let backoff_secs = RETRY_BACKOFF_SECS.get(backoff_idx).copied().unwrap_or(3600);
-                    if let Ok(conn) = db.lock() {
-                        conn.execute(
-                            "UPDATE dispatch_outbox
-                                SET status = 'pending',
-                                    error = ?1,
-                                    retry_count = ?2,
-                                    next_attempt_at = datetime('now', '+' || ?3 || ' seconds')
-                              WHERE id = ?4",
-                            sqlite_test::params![err, new_count, backoff_secs, id],
-                        )
-                        .ok();
-                    }
-                }
-            }
-        }
-    }
-
-    count
 }
 
 pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
@@ -431,15 +199,6 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
     notifier: &N,
     claim_owner: Option<&str>,
 ) -> usize {
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    if pg_pool.is_none() {
-        return match db {
-            Some(db) => process_outbox_batch_sqlite(db, notifier).await,
-            None => 0,
-        };
-    }
-
-    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     let _ = (db, notifier);
     let Some(pool) = pg_pool else {
         return 0;
@@ -566,15 +325,6 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
         }
     }
     count
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) async fn process_outbox_batch_with_real_notifier(
-    db: Option<&crate::db::Db>,
-    pg_pool: &PgPool,
-) -> usize {
-    let notifier = RealOutboxNotifier::new(Arc::new(pg_pool.clone()));
-    process_outbox_batch_with_pg(db, Some(pg_pool), &notifier, None).await
 }
 
 /// Worker loop that drains dispatch_outbox and executes Discord side-effects.

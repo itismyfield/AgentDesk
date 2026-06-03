@@ -9,12 +9,7 @@ use sqlx::PgPool;
 // Creates a task_dispatch row + updates kanban card to "requested".
 // Discord notification is handled by posting to the local /api/discord/send endpoint.
 
-pub(super) fn register_dispatch_ops<'js>(
-    ctx: &Ctx<'js>,
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))] db: Option<Db>,
-    pg_pool: Option<PgPool>,
-) -> JsResult<()> {
-    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
+pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
     let db: Option<Db> = None;
 
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
@@ -341,83 +336,6 @@ fn dispatch_create_raw(
     r#"{"error":"backend unavailable for dispatch.create in JS hook"}"#.to_string()
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn dispatch_create_raw_sqlite_test(
-    db: &Db,
-    card_id: &str,
-    agent_id: &str,
-    dispatch_type: &str,
-    title: &str,
-    context_json: &str,
-) -> String {
-    let context: serde_json::Value = match serde_json::from_str(context_json) {
-        Ok(value) => value,
-        Err(error) => {
-            return format!(
-                r#"{{"error":"invalid dispatch context JSON: {}"}}"#,
-                error.to_string().replace('"', "'")
-            );
-        }
-    };
-    let options = crate::dispatch::DispatchCreateOptions {
-        skip_outbox: false,
-        sidecar_dispatch: context
-            .get("sidecar_dispatch")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false)
-            || context
-                .get("phase_gate")
-                .and_then(|value| value.as_object())
-                .is_some(),
-    };
-    match crate::dispatch::create_dispatch_record_sqlite_test(
-        db,
-        card_id,
-        agent_id,
-        dispatch_type,
-        title,
-        &context,
-        options,
-    ) {
-        Ok((dispatch_id, _old_status, reused)) => {
-            if dispatch_type == "review-decision" {
-                let conn = match db.separate_conn() {
-                    Ok(conn) => conn,
-                    Err(error) => {
-                        return format!(
-                            r#"{{"error":"open sqlite connection for dispatch.create: {}"}}"#,
-                            error.to_string().replace('"', "'")
-                        );
-                    }
-                };
-                if let Err(error) = conn.execute(
-                    "INSERT INTO card_review_state (
-                        card_id,
-                        state,
-                        pending_dispatch_id,
-                        updated_at
-                     ) VALUES (?1, 'suggestion_pending', ?2, datetime('now'))
-                     ON CONFLICT(card_id) DO UPDATE
-                     SET state = 'suggestion_pending',
-                         pending_dispatch_id = excluded.pending_dispatch_id,
-                         updated_at = datetime('now')",
-                    sqlite_test::params![card_id, dispatch_id],
-                ) {
-                    return format!(r#"{{"error":"{}"}}"#, error.to_string().replace('"', "'"));
-                }
-            }
-            if reused {
-                return format!(r#"{{"dispatch_id":"{dispatch_id}","reused":true}}"#);
-            }
-            format!(r#"{{"dispatch_id":"{dispatch_id}"}}"#)
-        }
-        Err(error) => {
-            format!(r#"{{"error":"{}"}}"#, error.to_string().replace('"', "'"))
-        }
-    }
-}
-
-#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 fn dispatch_create_raw_sqlite_test(
     _db: &Db,
     _card_id: &str,
@@ -453,29 +371,6 @@ fn dispatch_has_active_work_raw_pg(pool: &PgPool, card_id: &str) -> String {
     }
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn dispatch_has_active_work_raw_sqlite_test(db: &Db, card_id: &str) -> String {
-    let conn = match db.separate_conn() {
-        Ok(conn) => conn,
-        Err(error) => {
-            return format!(r#"{{"error":"{}"}}"#, error.to_string().replace('"', "'"));
-        }
-    };
-    match conn.query_row(
-        "SELECT COUNT(*)
-         FROM task_dispatches
-         WHERE kanban_card_id = ?1
-           AND dispatch_type IN ('implementation', 'rework')
-           AND status IN ('pending', 'dispatched')",
-        [card_id],
-        |row| row.get::<_, i64>(0),
-    ) {
-        Ok(count) => format!(r#"{{"count":{count}}}"#),
-        Err(error) => format!(r#"{{"error":"{}"}}"#, error.to_string().replace('"', "'")),
-    }
-}
-
-#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 fn dispatch_has_active_work_raw_sqlite_test(_db: &Db, _card_id: &str) -> String {
     r#"{"error":"sqlite backend is unavailable for dispatch.hasActiveWork in production"}"#
         .to_string()
@@ -503,24 +398,6 @@ fn dispatch_set_retry_count_raw_pg(pool: &PgPool, dispatch_id: &str, count: i32)
     }
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn dispatch_set_retry_count_raw_sqlite_test(db: &Db, dispatch_id: &str, count: i32) -> String {
-    let conn = match db.separate_conn() {
-        Ok(conn) => conn,
-        Err(error) => {
-            return format!(r#"{{"error":"{}"}}"#, error.to_string().replace('"', "'"));
-        }
-    };
-    match conn.execute(
-        "UPDATE task_dispatches SET retry_count = ?1 WHERE id = ?2",
-        sqlite_test::params![count, dispatch_id],
-    ) {
-        Ok(rows_affected) => format!(r#"{{"ok":true,"rows_affected":{rows_affected}}}"#),
-        Err(error) => format!(r#"{{"error":"{}"}}"#, error.to_string().replace('"', "'")),
-    }
-}
-
-#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 fn dispatch_set_retry_count_raw_sqlite_test(_db: &Db, _dispatch_id: &str, _count: i32) -> String {
     r#"{"error":"sqlite backend is unavailable for dispatch.setRetryCount in production"}"#
         .to_string()
@@ -557,36 +434,6 @@ fn dispatch_set_status_raw_pg(
     }
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn dispatch_set_status_raw_sqlite_test(
-    db: &Db,
-    dispatch_id: &str,
-    to_status: &str,
-    result: Option<serde_json::Value>,
-    transition_source: &str,
-    touch_completed_at: bool,
-) -> String {
-    let conn = match db.separate_conn() {
-        Ok(conn) => conn,
-        Err(error) => {
-            return format!(r#"{{"error":"{}"}}"#, error.to_string().replace('"', "'"));
-        }
-    };
-    match crate::dispatch::set_dispatch_status_on_conn(
-        &conn,
-        dispatch_id,
-        to_status,
-        result.as_ref(),
-        transition_source,
-        Some(&["pending", "dispatched"]),
-        touch_completed_at,
-    ) {
-        Ok(rows_affected) => format!(r#"{{"ok":true,"rows_affected":{rows_affected}}}"#),
-        Err(error) => format!(r#"{{"error":"{}"}}"#, error.to_string().replace('"', "'")),
-    }
-}
-
-#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 fn dispatch_set_status_raw_sqlite_test(
     _db: &Db,
     _dispatch_id: &str,

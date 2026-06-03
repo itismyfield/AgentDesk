@@ -1315,11 +1315,6 @@ async fn assign_transition_to_dispatchable_pg(
 
 // reason: legacy-sqlite parity wrapper keeping `kanban_db::card_row_to_json`
 // reachable from the test backend; PG paths build card JSON directly. See #3034.
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[allow(dead_code)]
-pub(super) fn card_row_to_json(row: &sqlite_test::Row) -> sqlite_test::Result<serde_json::Value> {
-    kanban_db::card_row_to_json(row)
-}
 
 pub(super) async fn load_card_json_pg(
     pool: &sqlx::PgPool,
@@ -1784,11 +1779,6 @@ pub async fn pm_decision(
 // reason: legacy-sqlite parity wrapper keeping
 // `kanban_db::find_active_review_dispatch_id_on_conn` reachable from the test
 // backend; PG paths call the `_pg` variant directly. See #3034.
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[allow(dead_code)]
-fn find_active_review_dispatch_id(conn: &sqlite_test::Connection, card_id: &str) -> Option<String> {
-    kanban_db::find_active_review_dispatch_id_on_conn(conn, card_id)
-}
 
 fn trimmed_header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers
@@ -1843,35 +1833,12 @@ pub(crate) fn require_explicit_bearer_token(
 // `kanban_db::resolve_agent_id_from_channel_id_on_conn` /
 // `resolve_existing_agent_id_on_conn` reachable from the test backend; PG paths
 // use the `_with_pg` variants below. See #3034.
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[allow(dead_code)]
-fn resolve_agent_id_from_channel_id_on_conn(
-    conn: &sqlite_test::Connection,
-    channel_id: &str,
-) -> Option<String> {
-    kanban_db::resolve_agent_id_from_channel_id_on_conn(conn, channel_id)
-}
 
 async fn resolve_agent_id_from_channel_id_with_pg(
     pool: &sqlx::PgPool,
     channel_id: &str,
 ) -> Option<String> {
     kanban_db::resolve_agent_id_from_channel_id_with_pg(pool, channel_id).await
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[allow(dead_code)]
-pub(super) fn resolve_requesting_agent_id_on_conn(
-    conn: &sqlite_test::Connection,
-    headers: &HeaderMap,
-) -> Option<String> {
-    if let Some(agent_id) = trimmed_header_value(headers, "x-agent-id") {
-        return kanban_db::resolve_existing_agent_id_on_conn(conn, agent_id)
-            .or_else(|| Some(agent_id.to_string()));
-    }
-
-    trimmed_header_value(headers, "x-channel-id")
-        .and_then(|channel_id| resolve_agent_id_from_channel_id_on_conn(conn, channel_id))
 }
 
 pub(crate) async fn resolve_requesting_agent_id_with_pg(
@@ -2475,108 +2442,6 @@ fn force_transition_force_intent_present(body: &ForceTransitionBody) -> bool {
 // production paths call `kanban_db::*` directly, so these read as dead in the
 // default lib build. They keep the `db::kanban_cards` `_on_conn` test helpers
 // reachable from one place. See #3034.
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[allow(dead_code)]
-fn count_live_auto_queue_entries_for_card_on_conn(
-    conn: &sqlite_test::Connection,
-    card_id: &str,
-) -> anyhow::Result<usize> {
-    kanban_db::count_live_auto_queue_entries_for_card_on_conn(conn, card_id)
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[allow(dead_code)]
-fn clear_force_transition_terminalized_links_on_conn(
-    conn: &sqlite_test::Connection,
-    card_id: &str,
-) -> anyhow::Result<()> {
-    kanban_db::clear_force_transition_terminalized_links_on_conn(conn, card_id)
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[allow(dead_code)]
-fn cleanup_force_transition_revert_on_conn(
-    conn: &sqlite_test::Connection,
-    card_id: &str,
-    target_status: &str,
-) -> anyhow::Result<(usize, usize)> {
-    kanban_db::cleanup_force_transition_revert_on_conn(conn, card_id, target_status)
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[allow(dead_code)]
-fn skip_live_auto_queue_entries_for_card_legacy(
-    conn: &sqlite_test::Connection,
-    card_id: &str,
-) -> sqlite_test::Result<usize> {
-    kanban_db::skip_live_auto_queue_entries_for_card_legacy(conn, card_id)
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[allow(dead_code)]
-fn move_auto_queue_entry_to_dispatched_on_conn(
-    conn: &sqlite_test::Connection,
-    entry_id: &str,
-    trigger_source: &str,
-    options: &crate::db::auto_queue::EntryStatusUpdateOptions,
-) -> sqlite_test::Result<()> {
-    kanban_db::move_auto_queue_entry_to_dispatched_on_conn(conn, entry_id, trigger_source, options)
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[allow(dead_code)]
-fn load_card_metadata_map_on_conn(
-    conn: &sqlite_test::Connection,
-    card_id: &str,
-) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
-    kanban_db::load_card_metadata_map_on_conn(conn, card_id)
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[allow(dead_code)]
-fn save_card_metadata_map_on_conn(
-    conn: &sqlite_test::Connection,
-    card_id: &str,
-    metadata: &serde_json::Map<String, serde_json::Value>,
-) -> anyhow::Result<()> {
-    kanban_db::save_card_metadata_map_on_conn(conn, card_id, metadata)
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[allow(dead_code)]
-fn mark_api_reopen_skip_preflight_on_conn(
-    conn: &sqlite_test::Connection,
-    card_id: &str,
-) -> anyhow::Result<()> {
-    kanban_db::mark_api_reopen_skip_preflight_on_conn(conn, card_id)
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[allow(dead_code)]
-fn clear_api_reopen_skip_preflight_on_conn(
-    conn: &sqlite_test::Connection,
-    card_id: &str,
-) -> anyhow::Result<()> {
-    kanban_db::clear_api_reopen_skip_preflight_on_conn(conn, card_id)
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[allow(dead_code)]
-fn consume_api_reopen_preflight_skip_on_conn(
-    conn: &sqlite_test::Connection,
-    card_id: &str,
-) -> anyhow::Result<()> {
-    kanban_db::consume_api_reopen_preflight_skip_on_conn(conn, card_id)
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[allow(dead_code)]
-fn clear_reopen_preflight_cache_on_conn(
-    conn: &sqlite_test::Connection,
-    card_id: &str,
-) -> anyhow::Result<()> {
-    kanban_db::clear_reopen_preflight_cache_on_conn(conn, card_id)
-}
 
 /// POST /api/kanban-cards/:id/force-transition
 ///

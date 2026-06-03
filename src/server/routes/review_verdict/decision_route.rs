@@ -1,15 +1,12 @@
 use axum::{Json, extract::State, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use sqlite_test::OptionalExtension;
 
 use super::super::AppState;
 use super::review_state_repo::update_card_review_state;
 use super::tuning_aggregate::{record_decision_tuning, spawn_aggregate_if_needed_with_pg};
 
 /// PG-only wrapper for kanban transitions after #1384.
-#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 async fn transition_status_pg_first(
     state: &AppState,
     card_id: &str,
@@ -31,94 +28,15 @@ async fn transition_status_pg_first(
     .await
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-async fn transition_status_pg_first(
-    state: &AppState,
-    card_id: &str,
-    new_status: &str,
-    _source: &str,
-    _force_intent: crate::engine::transition::ForceIntent,
-) -> anyhow::Result<crate::kanban::TransitionResult> {
-    if let Some(pool) = state.pg_pool_ref() {
-        return crate::kanban::transition_status_with_opts_pg_only(
-            pool,
-            &state.engine,
-            card_id,
-            new_status,
-            _source,
-            _force_intent,
-        )
-        .await;
-    }
-    let db = state
-        .legacy_db()
-        .ok_or_else(|| anyhow::anyhow!("sqlite test backend unavailable for kanban transition"))?;
-    let conn = db
-        .separate_conn()
-        .map_err(|error| anyhow::anyhow!("open sqlite transition connection: {error}"))?;
-    let old_status: String = conn.query_row(
-        "SELECT status FROM kanban_cards WHERE id = ?1",
-        [card_id],
-        |row| row.get(0),
-    )?;
-    let changed = old_status != new_status;
-    if changed {
-        conn.execute(
-            "UPDATE kanban_cards SET status = ?1, updated_at = datetime('now') WHERE id = ?2",
-            sqlite_test::params![new_status, card_id],
-        )?;
-        crate::kanban::fire_transition_hooks_with_backends(
-            Some(db),
-            None,
-            &state.engine,
-            card_id,
-            &old_status,
-            new_status,
-        );
-    }
-    Ok(crate::kanban::TransitionResult {
-        changed,
-        from: old_status,
-        to: new_status.to_string(),
-    })
-}
-
 fn spawn_review_tuning_aggregate_pg_first(state: &AppState) {
     spawn_aggregate_if_needed_with_pg(state.pg_pool_ref().cloned());
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn review_state_db(state: &AppState) -> Option<&crate::db::Db> {
-    state.legacy_db()
-}
-
-#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 fn review_state_db(_state: &AppState) -> Option<&crate::db::Db> {
     None
 }
 
 // ── Review Decision (agent's response to counter-model review) ──────────────
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn test_worktree_commit_override_slot() -> &'static std::sync::Mutex<Option<Option<String>>> {
-    static OVERRIDE: std::sync::OnceLock<std::sync::Mutex<Option<Option<String>>>> =
-        std::sync::OnceLock::new();
-    OVERRIDE.get_or_init(|| std::sync::Mutex::new(None))
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) fn set_test_worktree_commit_override(commit: Option<String>) {
-    if let Ok(mut slot) = test_worktree_commit_override_slot().lock() {
-        *slot = Some(commit);
-    }
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) fn clear_test_worktree_commit_override() {
-    if let Ok(mut slot) = test_worktree_commit_override_slot().lock() {
-        *slot = None;
-    }
-}
 
 #[derive(Debug, Clone)]
 struct IssueWorktreeTarget {
@@ -132,18 +50,6 @@ async fn current_issue_worktree_target(
     issue_num: i64,
     context: Option<&serde_json::Value>,
 ) -> Option<IssueWorktreeTarget> {
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    {
-        if let Ok(slot) = test_worktree_commit_override_slot().lock() {
-            if let Some(override_commit) = slot.clone() {
-                return override_commit.map(|commit| IssueWorktreeTarget {
-                    worktree_path: String::new(),
-                    commit,
-                });
-            }
-        }
-    }
-
     let Some(pool) = pg_pool else {
         tracing::warn!(
             "[review-decision] current_issue_worktree_commit: card {} issue #{}: postgres pool unavailable",
@@ -267,28 +173,6 @@ async fn active_accept_followups_pg_first(
         };
     }
 
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    if let Some(db) = state.legacy_db() {
-        if let Ok(conn) = db.separate_conn() {
-            if let Ok((review, rework, review_decision)) = conn.query_row(
-                "SELECT
-                     COALESCE(SUM(CASE WHEN dispatch_type = 'review' AND status IN ('pending', 'dispatched') THEN 1 ELSE 0 END), 0),
-                     COALESCE(SUM(CASE WHEN dispatch_type = 'rework' AND status IN ('pending', 'dispatched') THEN 1 ELSE 0 END), 0),
-                     COALESCE(SUM(CASE WHEN dispatch_type = 'review-decision' AND status IN ('pending', 'dispatched') THEN 1 ELSE 0 END), 0)
-                 FROM task_dispatches
-                 WHERE kanban_card_id = ?1",
-                [card_id],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
-            ) {
-                return ActiveAcceptFollowups {
-                    review,
-                    rework,
-                    review_decision,
-                };
-            }
-        }
-    }
-
     ActiveAcceptFollowups::default()
 }
 
@@ -356,20 +240,6 @@ async fn current_card_status_pg_first(state: &AppState, card_id: &str) -> Option
                 None
             }
         };
-    }
-
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    if let Some(db) = state.legacy_db() {
-        return db.separate_conn().ok().and_then(|conn| {
-            conn.query_row(
-                "SELECT status FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .ok()
-            .flatten()
-        });
     }
 
     None
@@ -459,22 +329,6 @@ async fn card_exists_pg_first(state: &AppState, card_id: &str) -> bool {
                 false
             }
         };
-    }
-
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    if let Some(db) = state.legacy_db() {
-        return db
-            .separate_conn()
-            .ok()
-            .and_then(|conn| {
-                conn.query_row(
-                    "SELECT 1 FROM kanban_cards WHERE id = ?1",
-                    [card_id],
-                    |_| Ok(()),
-                )
-                .ok()
-            })
-            .is_some();
     }
 
     false
@@ -614,50 +468,6 @@ async fn lookup_review_decision_dispatch_by_id(
             _ => ReviewDecisionDispatchLookup::Terminal,
         }
     } else {
-        #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-        if let Some(db) = state.legacy_db() {
-            if let Ok(conn) = db.separate_conn() {
-                let row: Option<(String, String)> = conn
-                    .query_row(
-                        "SELECT status, created_at
-                         FROM task_dispatches
-                         WHERE id = ?1
-                           AND kanban_card_id = ?2
-                           AND dispatch_type = 'review-decision'",
-                        [dispatch_id, card_id],
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                    )
-                    .optional()
-                    .ok()
-                    .flatten();
-                let Some((status, created_at)) = row else {
-                    return ReviewDecisionDispatchLookup::NotFound;
-                };
-                return match status.as_str() {
-                    "pending" | "dispatched" => {
-                        let newer_count: i64 = conn
-                            .query_row(
-                                "SELECT COUNT(*)
-                                 FROM task_dispatches
-                                 WHERE kanban_card_id = ?1
-                                   AND dispatch_type = 'review-decision'
-                                   AND status IN ('pending', 'dispatched')
-                                   AND id <> ?2
-                                   AND created_at >= ?3",
-                                [card_id, dispatch_id, created_at.as_str()],
-                                |row| row.get::<_, i64>(0),
-                            )
-                            .unwrap_or(1);
-                        if newer_count == 0 {
-                            ReviewDecisionDispatchLookup::LiveAndCurrent
-                        } else {
-                            ReviewDecisionDispatchLookup::LiveButSuperseded
-                        }
-                    }
-                    _ => ReviewDecisionDispatchLookup::Terminal,
-                };
-            }
-        }
         ReviewDecisionDispatchLookup::NotFound
     }
 }
@@ -713,40 +523,6 @@ pub(super) async fn pending_review_decision_dispatch_id_pg_first(
                 None
             }
         };
-    }
-
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    if let Some(db) = state.legacy_db() {
-        let conn = db.separate_conn().ok()?;
-        if let Ok(Some(dispatch_id)) = conn
-            .query_row(
-                "SELECT td.id
-                 FROM task_dispatches td
-                 JOIN card_review_state crs ON crs.pending_dispatch_id = td.id
-                 WHERE crs.card_id = ?1
-                   AND td.dispatch_type = 'review-decision'
-                   AND td.status IN ('pending', 'dispatched')",
-                [card_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-        {
-            return Some(dispatch_id);
-        }
-        return conn
-            .query_row(
-                "SELECT td.id
-                 FROM task_dispatches td
-                 JOIN kanban_cards kc ON kc.latest_dispatch_id = td.id
-                 WHERE kc.id = ?1
-                   AND td.dispatch_type = 'review-decision'
-                   AND td.status IN ('pending', 'dispatched')",
-                [card_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .ok()
-            .flatten();
     }
 
     None
@@ -983,57 +759,6 @@ async fn finalized_review_decision_info_pg_first(
         }
 
         return info;
-    }
-
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    if let Some(db) = state.legacy_db() {
-        if let Ok(conn) = db.separate_conn() {
-            if let Ok(row) = conn
-                .query_row(
-                    "SELECT id, status, result
-                     FROM task_dispatches
-                     WHERE kanban_card_id = ?1
-                       AND dispatch_type = 'review-decision'
-                     ORDER BY created_at DESC
-                     LIMIT 1",
-                    [card_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, Option<String>>(2)?,
-                        ))
-                    },
-                )
-                .optional()
-            {
-                if let Some((id, status, result)) = row {
-                    info.latest_dispatch_id = Some(id);
-                    info.latest_dispatch_status = Some(status);
-                    info.latest_dispatch_result = result;
-                }
-            }
-            if let Ok(row) = conn
-                .query_row(
-                    "SELECT last_decision, state
-                     FROM card_review_state
-                     WHERE card_id = ?1",
-                    [card_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, Option<String>>(0)?,
-                            row.get::<_, Option<String>>(1)?,
-                        ))
-                    },
-                )
-                .optional()
-            {
-                if let Some((last_decision, review_state)) = row {
-                    info.last_decision = last_decision;
-                    info.review_state = review_state;
-                }
-            }
-        }
     }
 
     info
@@ -1466,28 +1191,6 @@ async fn latest_completed_review_context_pg_first(
         };
     }
 
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    if let Some(db) = state.legacy_db() {
-        return db.separate_conn().ok().and_then(|conn| {
-            conn.query_row(
-                "SELECT context
-                 FROM task_dispatches
-                 WHERE kanban_card_id = ?1
-                   AND dispatch_type = 'review'
-                   AND status = 'completed'
-                 ORDER BY COALESCE(completed_at, updated_at) DESC, updated_at DESC, rowid DESC
-                 LIMIT 1",
-                [card_id],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()
-            .ok()
-            .flatten()
-            .flatten()
-            .and_then(|ctx| serde_json::from_str::<serde_json::Value>(&ctx).ok())
-        });
-    }
-
     None
 }
 
@@ -1547,38 +1250,6 @@ async fn latest_completed_review_dispatch_pg_first(
         };
     }
 
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    if let Some(db) = state.legacy_db() {
-        return db.separate_conn().ok().and_then(|conn| {
-            conn.query_row(
-                "SELECT id, context
-                 FROM task_dispatches
-                 WHERE kanban_card_id = ?1
-                   AND dispatch_type = 'review'
-                   AND status = 'completed'
-                 ORDER BY COALESCE(completed_at, updated_at) DESC, updated_at DESC, rowid DESC
-                 LIMIT 1",
-                [card_id],
-                |row| {
-                    let id: String = row.get(0)?;
-                    let context_raw: Option<String> = row.get(1)?;
-                    Ok((id, context_raw))
-                },
-            )
-            .optional()
-            .ok()
-            .flatten()
-            .map(|(id, context_raw)| {
-                let active = build_active_review_dispatch(id, context_raw);
-                CompletedReviewDispatch {
-                    id: active.id,
-                    reviewed_commit: active.reviewed_commit,
-                    target_repo: active.target_repo,
-                }
-            })
-        });
-    }
-
     None
 }
 
@@ -1631,27 +1302,7 @@ async fn source_review_dispatch_for_decision_pg_first(
         .flatten()
         .flatten()
     } else {
-        #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-        {
-            state
-                .legacy_db()
-                .and_then(|db| db.separate_conn().ok())
-                .and_then(|conn| {
-                    conn.query_row(
-                        "SELECT context FROM task_dispatches WHERE id = ?1 AND kanban_card_id = ?2 AND dispatch_type = 'review-decision'",
-                        [rd_id, card_id],
-                        |row| row.get::<_, Option<String>>(0),
-                    )
-                    .optional()
-                    .ok()
-                    .flatten()
-                    .flatten()
-                })
-        }
-        #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
-        {
-            None
-        }
+        None
     };
 
     let source_review_dispatch_id: Option<String> = rd_context_raw
@@ -1677,26 +1328,7 @@ async fn source_review_dispatch_for_decision_pg_first(
             .ok()
             .flatten()
         } else {
-            #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-            {
-                state
-                    .legacy_db()
-                    .and_then(|db| db.separate_conn().ok())
-                    .and_then(|conn| {
-                        conn.query_row(
-                            "SELECT id, context FROM task_dispatches WHERE id = ?1 AND kanban_card_id = ?2 AND dispatch_type = 'review' AND status = 'completed'",
-                            [srid.as_str(), card_id],
-                            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-                        )
-                        .optional()
-                        .ok()
-                        .flatten()
-                    })
-            }
-            #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
-            {
-                None
-            }
+            None
         };
 
         if let Some((id, context_raw)) = row {
@@ -1788,45 +1420,6 @@ async fn card_lifecycle_snapshot_pg_first(
         };
     }
 
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    if let Some(db) = state.legacy_db() {
-        if let Ok(conn) = db.separate_conn() {
-            let latest_dispatch_id: Option<String> = conn
-                .query_row(
-                    "SELECT latest_dispatch_id FROM kanban_cards WHERE id = ?1",
-                    [card_id],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-                .optional()
-                .ok()
-                .flatten()
-                .flatten();
-            let review_fields: Option<(Option<i64>, Option<String>)> = conn
-                .query_row(
-                    "SELECT review_round, review_entered_at FROM card_review_state WHERE card_id = ?1",
-                    [card_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, Option<i64>>(0)?,
-                            row.get::<_, Option<String>>(1)?,
-                        ))
-                    },
-                )
-                .optional()
-                .ok()
-                .flatten();
-            let (review_round, review_entered_at_iso) = match review_fields {
-                Some((r, t)) => (r, t),
-                None => (None, None),
-            };
-            return CardLifecycleSnapshot {
-                latest_dispatch_id,
-                review_round,
-                review_entered_at_iso,
-            };
-        }
-    }
-
     CardLifecycleSnapshot::default()
 }
 
@@ -1847,16 +1440,6 @@ async fn commit_belongs_to_card_issue_pg_first_tri(
             target_repo,
         )
         .await;
-    }
-
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    if let Some(db) = state.legacy_db() {
-        return crate::dispatch::commit_belongs_to_card_issue_tri(
-            &db,
-            card_id,
-            commit_sha,
-            target_repo,
-        );
     }
 
     crate::dispatch::ScopeCheck::Unknown
@@ -1905,45 +1488,6 @@ async fn recent_scope_mismatch_finalized_pg_first(
                 None
             }
         }
-    } else {
-        None
-    };
-
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    let raw = if raw.is_some() {
-        raw
-    } else if let Some(db) = state.legacy_db() {
-        db.separate_conn().ok().and_then(|conn| {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, result
-                     FROM task_dispatches
-                     WHERE kanban_card_id = ?1
-                       AND dispatch_type = 'review-decision'
-                       AND status = 'completed'
-                       AND result IS NOT NULL
-                     ORDER BY COALESCE(completed_at, updated_at) DESC, rowid DESC
-                     LIMIT 8",
-                )
-                .ok()?;
-            let mut rows = stmt
-                .query_map([card_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-                })
-                .ok()?;
-            while let Some(Ok((id, result_raw))) = rows.next() {
-                if let Some(raw) = result_raw.as_deref() {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
-                        if value.get("outcome").and_then(|v| v.as_str())
-                            == Some("scope_mismatch_closed")
-                        {
-                            return Some((id, result_raw));
-                        }
-                    }
-                }
-            }
-            None
-        })
     } else {
         None
     };
@@ -2099,33 +1643,7 @@ async fn atomic_finalize_scope_mismatch_close_pg(
     // No PG pool: fall back to the legacy `set_dispatch_status_with_backends`
     // path so the sqlite test fixture exercises the same close shape. The
     // lifecycle re-check is best-effort here (sqlite has no FOR UPDATE).
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    {
-        let actual = card_lifecycle_snapshot_pg_first(state, card_id).await;
-        if &actual != expected_lifecycle {
-            return Err(ScopeMismatchCloseError::LifecycleStale {
-                expected: expected_lifecycle.clone(),
-                actual,
-            });
-        }
-        let status_db = state.legacy_db();
-        match crate::dispatch::set_dispatch_status_with_backends(
-            status_db,
-            state.pg_pool_ref(),
-            rd_id,
-            "completed",
-            Some(&result_json),
-            "mark_dispatch_completed",
-            Some(&["pending", "dispatched"]),
-            true,
-        ) {
-            Ok(1) => return Ok(1),
-            Ok(_) => return Err(ScopeMismatchCloseError::DispatchConsumed),
-            Err(e) => return Err(ScopeMismatchCloseError::Internal(e.to_string())),
-        }
-    }
 
-    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     {
         let _ = state;
         let _ = card_id;
@@ -2205,21 +1723,6 @@ async fn card_issue_number_pg_first(state: &AppState, card_id: &str) -> Option<i
                 None
             }
         };
-    }
-
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    if let Some(db) = state.legacy_db() {
-        return db.separate_conn().ok().and_then(|conn| {
-            conn.query_row(
-                "SELECT github_issue_number FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |row| row.get::<_, Option<i64>>(0),
-            )
-            .optional()
-            .ok()
-            .flatten()
-            .flatten()
-        });
     }
 
     None
@@ -2569,38 +2072,6 @@ async fn finalize_accept_cleanup_pg_first(
     clear_review_status: bool,
 ) -> Result<(), String> {
     let Some(pool) = state.pg_pool_ref() else {
-        #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-        if let Some(db) = state.legacy_db() {
-            let conn = db
-                .separate_conn()
-                .map_err(|error| format!("open sqlite accept cleanup connection: {error}"))?;
-            let rows = if clear_review_status {
-                conn.execute(
-                    "UPDATE kanban_cards
-                     SET suggestion_pending_at = NULL,
-                         review_status = NULL,
-                         updated_at = datetime('now')
-                     WHERE id = ?1",
-                    [card_id],
-                )
-            } else {
-                conn.execute(
-                    "UPDATE kanban_cards
-                     SET suggestion_pending_at = NULL,
-                         updated_at = datetime('now')
-                     WHERE id = ?1",
-                    [card_id],
-                )
-            }
-            .map_err(|error| format!("sqlite accept cleanup for {card_id}: {error}"))?;
-            if rows == 0 {
-                return Err(format!(
-                    "sqlite accept cleanup touched no card row for {card_id}"
-                ));
-            }
-            return Ok(());
-        }
-
         return Err("postgres pool unavailable for accept cleanup".to_string());
     };
     let mut tx = pool
@@ -2661,67 +2132,11 @@ async fn cancel_dispatch_pg_first(
         .await;
     }
 
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    if let Some(db) = state.legacy_db() {
-        let conn = db
-            .separate_conn()
-            .map_err(|error| format!("open sqlite cancel dispatch connection: {error}"))?;
-        return crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
-            &conn,
-            dispatch_id,
-            reason,
-        )
-        .map_err(|error| format!("sqlite cancel dispatch {dispatch_id}: {error}"));
-    }
-
     Err("postgres pool unavailable for cancel dispatch".to_string())
 }
 
 async fn dismiss_review_cleanup_pg_first(state: &AppState, card_id: &str) -> Result<(), String> {
     let Some(pool) = state.pg_pool_ref() else {
-        #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-        if let Some(db) = state.legacy_db() {
-            let conn = db
-                .separate_conn()
-                .map_err(|error| format!("open sqlite dismiss cleanup connection: {error}"))?;
-            let dispatch_ids = conn
-                .prepare(
-                    "SELECT id FROM task_dispatches
-                     WHERE kanban_card_id = ?1
-                       AND status IN ('pending', 'dispatched')
-                       AND dispatch_type IN ('review', 'review-decision')",
-                )
-                .and_then(|mut stmt| {
-                    let rows = stmt.query_map([card_id], |row| row.get::<_, String>(0))?;
-                    rows.collect::<sqlite_test::Result<Vec<_>>>()
-                })
-                .map_err(|error| {
-                    format!("load sqlite dismiss cleanup dispatches for {card_id}: {error}")
-                })?;
-
-            for dispatch_id in &dispatch_ids {
-                crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
-                    &conn,
-                    dispatch_id,
-                    None,
-                )
-                .map_err(|error| {
-                    format!("sqlite dismiss cleanup cancel dispatch {dispatch_id}: {error}")
-                })?;
-            }
-            conn.execute(
-                "UPDATE kanban_cards
-                 SET review_status = NULL,
-                     channel_thread_map = NULL,
-                     active_thread_id = NULL,
-                     updated_at = datetime('now')
-                 WHERE id = ?1",
-                [card_id],
-            )
-            .map_err(|error| format!("clear sqlite dismiss review state for {card_id}: {error}"))?;
-            return Ok(());
-        }
-
         return Err("postgres pool unavailable for dismiss cleanup".to_string());
     };
     let mut tx = pool
@@ -3633,28 +3048,6 @@ pub async fn submit_review_decision(
                                 crate::dispatch::DispatchCreateOptions::default(),
                             )
                         } else {
-                            #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-                            {
-                                state.legacy_db().map_or_else(
-                                    || {
-                                        Err(anyhow::anyhow!(
-                                            "sqlite test backend unavailable for rework dispatch"
-                                        ))
-                                    },
-                                    |db| {
-                                        crate::dispatch::create_dispatch(
-                                            db,
-                                            &state.engine,
-                                            &body.card_id,
-                                            agent_id,
-                                            "rework",
-                                            &rework_title,
-                                            &json!({}),
-                                        )
-                                    },
-                                )
-                            }
-                            #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
                             {
                                 Err(anyhow::anyhow!(
                                     "postgres pool unavailable for rework dispatch"
@@ -3834,9 +3227,6 @@ pub async fn submit_review_decision(
             }
 
             if !rd_consumed && let Some(ref rd_id) = pending_rd_id {
-                #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-                let status_db = state.legacy_db();
-                #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
                 let status_db = None;
                 match crate::dispatch::set_dispatch_status_with_backends(
                     status_db,
@@ -4582,9 +3972,6 @@ pub async fn submit_review_decision(
             }
 
             if !rd_consumed && let Some(ref rd_id) = pending_rd_id {
-                #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-                let status_db = state.legacy_db();
-                #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
                 let status_db = None;
                 match crate::dispatch::set_dispatch_status_with_backends(
                     status_db,

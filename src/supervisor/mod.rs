@@ -223,9 +223,6 @@ impl RuntimeSupervisor {
                     note = Some("dispatch already terminal or missing".to_string());
                     chosen_action = SupervisorAction::Probe;
                 } else {
-                    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-                    self.apply_orphan_fault_injection(&dispatch_id, &candidate.card_id);
-
                     // Return card to ready for re-dispatch instead of advancing to review
                     let Some(pool) = self.pg_pool.as_ref() else {
                         return Err(
@@ -591,11 +588,6 @@ impl RuntimeSupervisor {
             return;
         }
     }
-
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    fn apply_orphan_fault_injection(&self, dispatch_id: &str, card_id: &str) {
-        let _ = (dispatch_id, card_id);
-    }
 }
 
 pub fn emit_signal_json(bridge: &BridgeHandle, signal_name: &str, evidence_json: &str) -> String {
@@ -716,31 +708,5 @@ impl std::fmt::Display for SupervisorAction {
             Self::Resume => write!(f, "Resume"),
             Self::Escalate => write!(f, "Escalate"),
         }
-    }
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn emit_signal_json_returns_unified_policy_error_for_invalid_signal() {
-        let bridge = BridgeHandle::new();
-
-        let value: Value =
-            serde_json::from_str(&emit_signal_json(&bridge, "Nope", r#"{}"#)).unwrap();
-
-        assert_eq!(value["ok"], false);
-        assert_eq!(value["code"], "policy");
-        assert_eq!(
-            value["context"]["operation"],
-            "emit_signal_json.parse_signal"
-        );
-        assert!(
-            value["error"]
-                .as_str()
-                .unwrap_or("")
-                .contains("unknown supervisor signal")
-        );
     }
 }

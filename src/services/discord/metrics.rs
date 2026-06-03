@@ -120,34 +120,3 @@ pub(super) fn build_metrics_report(metrics: &[TurnMetric], label: &str) -> Strin
 
     lines.join("\n")
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn build_metrics_report_separates_model_and_memory_tokens() {
-        let report = build_metrics_report(
-            &[TurnMetric {
-                channel_id: 42,
-                provider: "codex".to_string(),
-                timestamp: "2026-04-08T12:00:00+09:00".to_string(),
-                duration_secs: 12.0,
-                model: None,
-                input_tokens: Some(100),
-                output_tokens: Some(40),
-                memory_input_tokens: Some(15),
-                memory_output_tokens: Some(5),
-            }],
-            "today",
-        );
-
-        assert!(report.contains("Local Turn Metrics (today)"));
-        assert!(report.contains("Tokens: model 100↓ 40↑ | memory 15↓ 5↑"));
-        assert!(
-            report.contains("Scope: AgentDesk-recorded turns grouped by channel for this date.")
-        );
-        assert!(report.contains("#42"));
-        assert!(report.contains("model 100↓ 40↑, memory 15↓ 5↑"));
-    }
-}

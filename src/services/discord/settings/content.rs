@@ -291,68 +291,6 @@ fn strip_non_matching_profile_sections(raw: &str, profile: &str) -> String {
     compact.trim_end().to_string()
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod profile_tests {
-    use super::strip_non_matching_profile_sections;
-
-    const SAMPLE: &str = "head\n\
-        <!-- profile: all -->\n\
-        always\n\
-        <!-- /profile -->\n\
-        <!-- profile: full -->\n\
-        only-full\n\
-        <!-- /profile -->\n\
-        <!-- profile: review-lite -->\n\
-        only-review\n\
-        <!-- /profile -->\n\
-        <!-- profile: headless -->\n\
-        only-headless\n\
-        <!-- /profile -->\n\
-        tail\n";
-
-    #[test]
-    fn full_profile_keeps_full_section() {
-        let out = strip_non_matching_profile_sections(SAMPLE, "full");
-        assert!(out.contains("only-full"));
-        assert!(!out.contains("only-review"));
-        assert!(!out.contains("only-headless"));
-        assert!(out.contains("always"));
-        assert!(out.contains("tail"));
-    }
-
-    #[test]
-    fn review_lite_profile_strips_full_section() {
-        let out = strip_non_matching_profile_sections(SAMPLE, "review-lite");
-        assert!(!out.contains("only-full"));
-        assert!(out.contains("only-review"));
-        assert!(!out.contains("only-headless"));
-        assert!(out.contains("always"));
-    }
-
-    #[test]
-    fn headless_profile_strips_full_and_review() {
-        let out = strip_non_matching_profile_sections(SAMPLE, "headless");
-        assert!(!out.contains("only-full"));
-        assert!(!out.contains("only-review"));
-        assert!(out.contains("only-headless"));
-        assert!(out.contains("always"));
-    }
-
-    #[test]
-    fn unmarked_content_is_preserved_for_any_profile() {
-        let raw = "## Code Principles\n- DRY\n";
-        let out = strip_non_matching_profile_sections(raw, "review-lite");
-        assert!(out.contains("DRY"));
-    }
-
-    #[test]
-    fn marker_lines_are_stripped_from_output() {
-        let out = strip_non_matching_profile_sections(SAMPLE, "full");
-        assert!(!out.contains("<!-- profile:"));
-        assert!(!out.contains("<!-- /profile -->"));
-    }
-}
-
 pub(in crate::services::discord) fn load_review_tuning_guidance() -> Option<String> {
     let root = runtime_store::agentdesk_root()?;
     let path = root.join("runtime").join("review-tuning-guidance.txt");

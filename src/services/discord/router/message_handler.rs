@@ -5,8 +5,6 @@ use super::super::*;
 pub(in crate::services::discord) use super::authorization::{
     TurnKind, classify_turn_kind_from_author,
 };
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use super::dispatch_trigger::evaluate_dispatch_cwd_policy;
 use super::dispatch_trigger::{
     dispatch_session_path_should_update, dispatch_should_recover_session_worktree,
     parse_dispatch_context_hints, resolve_dispatch_target_repo_dir,
@@ -17,12 +15,8 @@ use super::response_format::{
     merge_reply_contexts, should_note_memento_context_loaded, wrap_user_prompt_with_author,
 };
 pub(in crate::services::discord) use super::turn_start::reserve_headless_turn;
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use super::turn_start::resolve_session_id_for_current_turn;
 #[cfg(test)]
 use super::turn_start::session_strategy_lifecycle_event;
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use super::turn_start::{HEADLESS_TURN_MESSAGE_ID_BASE, headless_turn_message_id_seed};
 pub(crate) use super::turn_start::{
     HeadlessTurnReservation, HeadlessTurnStartError, HeadlessTurnStartOutcome,
     HeadlessTurnStartStatus,
@@ -36,8 +30,6 @@ use super::turn_start::{
     take_session_retry_context,
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use crate::services::git::GitCommand;
 use crate::services::memory::{
     RecallMode, RecallRequest, RecallResponse, RecallSizeBucket, build_memory_backend,
     note_recall_context_size, resolve_memory_role_id, resolve_memory_session_id,
@@ -79,11 +71,5 @@ pub(in crate::services::discord) use self::headless_turn::{
 pub(in crate::services::discord) use self::intake_turn::{IntakeDeps, handle_text_message};
 pub(crate) use self::intake_turn::{IntakeRequest, execute_intake_turn_core};
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) use self::watchdog::test_harness_exports;
-
 #[cfg(test)]
 mod session_strategy_lifecycle_tests;
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests;

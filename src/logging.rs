@@ -371,54 +371,6 @@ fn find_string<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a st
         .find_map(|key| value.get(key).and_then(|v| v.as_str()))
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::tracing_env_filter;
-    use std::io;
-    use std::sync::{Arc, Mutex};
-    use tracing_subscriber::fmt::writer::MakeWriter;
-
-    #[derive(Clone, Default)]
-    struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
-
-    struct SharedBufferGuard(Arc<Mutex<Vec<u8>>>);
-
-    impl io::Write for SharedBufferGuard {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> MakeWriter<'a> for SharedBuffer {
-        type Writer = SharedBufferGuard;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            SharedBufferGuard(self.0.clone())
-        }
-    }
-
-    #[test]
-    fn tracing_env_filter_writes_agentdesk_info_logs() {
-        let buffer = SharedBuffer::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_env_filter(tracing_env_filter().unwrap())
-            .with_writer(buffer.clone())
-            .finish();
-
-        tracing::subscriber::with_default(subscriber, || {
-            tracing::info!(target: "agentdesk::services::discord::tmux", "watcher started");
-        });
-
-        let output = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
-        assert!(output.contains("watcher started"));
-    }
-}
-
 #[cfg(test)]
 mod rotation_tests {
     use super::{RotatingLogWriter, redacted_log_bytes};
