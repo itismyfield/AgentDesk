@@ -239,7 +239,53 @@ fn tmux_line_is_claude_tui_spinner_progress(line: &str) -> bool {
         "crunching",
         "churning",
     ];
-    WORK_VERBS.iter().any(|verb| lower.starts_with(verb))
+    if !WORK_VERBS.iter().any(|verb| lower.starts_with(verb)) {
+        return false;
+    }
+    // #3107 codex re-review (F2): the leading glyph + work verb alone is NOT
+    // enough — a plain assistant sentence that happens to begin with a spinner
+    // glyph and a verb (e.g. `· Thinking through the problem and running the
+    // tests`) would otherwise read as the streaming footer. The REAL Claude TUI
+    // spinner line ALWAYS carries a status SUFFIX — it renders like
+    // `✻ Thinking… (12s · ↑ 1.2k tokens · esc to interrupt)`. Require at least
+    // one of those status markers so assistant prose can't trip it:
+    //   - the literal `esc to interrupt`, OR
+    //   - a parenthesized TUI status group containing a duration (`<N>s` /
+    //     `<N>m`), a `tokens` count, and/or the `·` separator the TUI uses.
+    if lower.contains("esc to interrupt") {
+        return true;
+    }
+    line_has_claude_tui_spinner_status_group(line)
+}
+
+/// `true` when `line` contains the parenthesized status group the Claude TUI
+/// spinner footer renders next to the work verb, e.g.
+/// `(12s · ↑ 1.2k tokens · esc to interrupt)`. The group must carry at least one
+/// of: a duration token (`<N>s` / `<N>m`), a `tokens` count, or the interior `·`
+/// separator the TUI draws between status fields. A bare parenthetical in
+/// assistant prose (no such marker) does NOT qualify.
+fn line_has_claude_tui_spinner_status_group(line: &str) -> bool {
+    let Some(open) = line.find('(') else {
+        return false;
+    };
+    let after_open = &line[open + 1..];
+    let Some(close_rel) = after_open.find(')') else {
+        return false;
+    };
+    let group = &after_open[..close_rel];
+    let lower = group.to_ascii_lowercase();
+    if lower.contains("esc to interrupt") || lower.contains("tokens") || group.contains('·') {
+        return true;
+    }
+    // A standalone duration token such as `12s` / `4m` inside the group.
+    group
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|tok| {
+            let bytes = tok.as_bytes();
+            bytes.len() >= 2
+                && matches!(bytes[bytes.len() - 1], b's' | b'm')
+                && bytes[..bytes.len() - 1].iter().all(|b| b.is_ascii_digit())
+        })
 }
 
 pub(crate) fn tmux_capture_indicates_claude_tui_prompt_draft(capture: &str) -> bool {
@@ -1304,6 +1350,73 @@ some earlier assistant prose still on screen
 (13s · ↓ 1.2k tokens · esc to interrupt)";
         assert!(tmux_capture_indicates_claude_tui_busy(capture));
         assert!(tmux_capture_indicates_claude_tui_actively_streaming(
+            capture
+        ));
+    }
+
+    // #3107 codex re-review (F2 PARTIAL close): a spinner-progress line keyed on
+    // ONLY the leading glyph + work verb still false-positived on assistant prose
+    // that happens to begin with a spinner glyph and a verb. The real Claude TUI
+    // spinner footer ALWAYS carries a status SUFFIX (`esc to interrupt`, a
+    // duration, a token count, and/or the `·` separator). The recognizer now
+    // requires that suffix, so bare prose can no longer trip it.
+    #[test]
+    fn actively_streaming_rejects_glyph_verb_prose_without_status_suffix() {
+        // Assistant body line: leading spinner glyph + work verb, but NO Claude
+        // TUI status suffix → NOT a spinner-progress footer → NOT busy.
+        let capture = "\
+· Thinking through the problem and running the tests
+some more scrolled-back assistant prose
+another line of prior output";
+        assert!(!tmux_line_is_claude_tui_spinner_progress(
+            "· Thinking through the problem and running the tests"
+        ));
+        assert!(!tmux_capture_indicates_claude_tui_busy(capture));
+        assert!(!tmux_capture_indicates_claude_tui_actively_streaming(
+            capture
+        ));
+    }
+
+    #[test]
+    fn actively_streaming_accepts_real_spinner_with_status_suffix() {
+        // The genuine Claude TUI spinner footer: glyph + verb + parenthesized
+        // status group with a duration, token count, and `esc to interrupt`.
+        let line = "✻ Thinking… (12s · ↑ 1.2k tokens · esc to interrupt)";
+        assert!(tmux_line_is_claude_tui_spinner_progress(line));
+        let capture = format!("earlier assistant prose\n{line}");
+        assert!(tmux_capture_indicates_claude_tui_busy(&capture));
+        assert!(tmux_capture_indicates_claude_tui_actively_streaming(
+            &capture
+        ));
+    }
+
+    #[test]
+    fn actively_streaming_accepts_spinner_with_duration_only_status() {
+        // A spinner footer whose status group carries only a bare duration token
+        // (no `esc to interrupt`, no `tokens`) still qualifies.
+        let line = "✻ Thinking… (12s)";
+        assert!(tmux_line_is_claude_tui_spinner_progress(line));
+    }
+
+    #[test]
+    fn actively_streaming_rejects_glyph_verb_with_plain_parenthetical() {
+        // Glyph + verb followed by an ordinary parenthetical with no TUI status
+        // marker (no duration, no `tokens`, no `·`) must NOT qualify.
+        let line = "· Thinking about the design (a fresh idea here)";
+        assert!(!tmux_line_is_claude_tui_spinner_progress(line));
+    }
+
+    #[test]
+    fn actively_streaming_rejects_glyph_verb_past_tense_completion() {
+        // Past-tense `<verb> for <duration>` completion summary stays excluded.
+        let line = "· Running for 3s";
+        assert!(!tmux_line_is_claude_tui_spinner_progress(line));
+        let capture = "\
+· Running for 3s
+some scrolled-back prose line
+another scrolled-back prose line";
+        assert!(!tmux_capture_indicates_claude_tui_busy(capture));
+        assert!(!tmux_capture_indicates_claude_tui_actively_streaming(
             capture
         ));
     }
