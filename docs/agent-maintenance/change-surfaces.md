@@ -215,10 +215,10 @@
 - legacy_modules: none, but several routes still call `legacy_db()` against
   the SQLite compat handle (see `known-legacy.md`).
 - do_not_edit_without_migration_plan (giant-file routes):
-  - `src/server/routes/kanban.rs` (3222 lines).
-  - `src/server/routes/docs.rs` (5877 lines).
-  - `src/server/routes/escalation.rs` (2344 lines).
-  - `src/server/routes/meetings.rs` (1705 lines).
+  - `src/server/routes/kanban.rs` (2887 lines).
+  - `src/server/routes/docs.rs` (5880 lines).
+  - `src/server/routes/escalation.rs` (2310 lines).
+  - `src/server/routes/meetings.rs` (1709 lines).
   - `src/server/routes/review_verdict/decision_route.rs` (4804 lines).
   - `src/server/routes/{agents,agents_crud,agents_setup,v1,resume,
     dispatches/thread_reuse}.rs` (all 1000+ production lines).

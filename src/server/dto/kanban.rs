@@ -66,14 +66,6 @@ pub struct DeferDodBody {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct BulkActionBody {
-    pub action: String,
-    pub card_ids: Vec<String>,
-    /// Target status for "transition" action (e.g. "ready", "backlog").
-    pub target_status: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct AssignIssueBody {
     pub github_repo: String,
     pub github_issue_number: i64,
@@ -108,14 +100,6 @@ pub struct ReopenBody {
     pub dispatch_type: Option<String>,
     pub reason: Option<String>,
     pub reset_full: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct BatchTransitionBody {
-    pub issue_numbers: Option<Vec<i64>>,
-    pub card_ids: Option<Vec<String>>,
-    pub status: String,
-    pub cancel_dispatches: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -14,22 +14,6 @@ use super::parse_channel_id;
 
 // ── Channel-thread map helpers ────────────────────────────────
 
-fn parse_channel_thread_map(
-    raw: Option<&str>,
-) -> Option<serde_json::Map<String, serde_json::Value>> {
-    raw.and_then(|value| {
-        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(value).ok()
-    })
-}
-
-fn lookup_thread_for_channel_from_map(map_json: Option<&str>, channel_id: u64) -> Option<String> {
-    parse_channel_thread_map(map_json).and_then(|map| {
-        map.get(&channel_id.to_string())
-            .and_then(|value| value.as_str())
-            .map(|value| value.to_string())
-    })
-}
-
 fn json_value_kind(value: &serde_json::Value) -> &'static str {
     match value {
         serde_json::Value::Null => "null",
@@ -89,16 +73,6 @@ fn lookup_thread_for_channel_from_map_pg(
         }
         None => None,
     }
-}
-
-/// Look up the thread_id for a specific channel from channel_thread_map.
-/// Falls back to active_thread_id for backward compatibility.
-pub(super) fn get_thread_for_channel<T>(
-    _conn: &T,
-    _card_id: &str,
-    _channel_id: u64,
-) -> Option<String> {
-    None
 }
 
 pub(crate) async fn get_thread_for_channel_pg(
@@ -173,16 +147,6 @@ pub(crate) async fn get_mapped_thread_for_channel_pg(
     ))
 }
 
-/// Set the thread_id for a specific channel in channel_thread_map.
-/// Also updates active_thread_id for backward compatibility.
-pub(super) fn set_thread_for_channel<T>(
-    _conn: &T,
-    _card_id: &str,
-    _channel_id: u64,
-    _thread_id: &str,
-) {
-}
-
 pub(crate) async fn set_thread_for_channel_pg(
     pool: &PgPool,
     card_id: &str,
@@ -225,9 +189,6 @@ async fn set_thread_for_channel_pg_with_active(
     .map_err(|error| format!("save postgres thread map for {card_id}: {error}"))?;
     Ok(())
 }
-
-/// Clear thread mapping for a specific channel.
-pub(super) fn clear_thread_for_channel<T>(_conn: &T, _card_id: &str, _channel_id: u64) {}
 
 pub(crate) async fn clear_thread_for_channel_pg(
     pool: &PgPool,
@@ -295,16 +256,6 @@ pub(crate) async fn clear_thread_for_channel_pg(
     .map_err(|error| format!("clear postgres thread map for {card_id}: {error}"))?;
     Ok(())
 }
-
-pub(crate) async fn should_defer_thread_archive_pg(
-    pg_pool: Option<&PgPool>,
-    thread_id: &str,
-) -> Result<bool, String> {
-    crate::services::discord::should_defer_thread_archive_pg(pg_pool, thread_id).await
-}
-
-/// Clear ALL thread mappings (card done).
-pub(in crate::server::routes) fn clear_all_threads<T>(_conn: &T, _card_id: &str) {}
 
 #[derive(Debug)]
 struct ThreadMapValidationRow {

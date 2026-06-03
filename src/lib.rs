@@ -115,9 +115,6 @@ pub(crate) mod reconcile;
 pub(crate) mod runtime;
 // Runtime layout exposes migration helpers used by setup and repair commands.
 pub(crate) mod runtime_layout;
-// Server route modules include API endpoints whose handlers are selected by
-// router composition and integration tests.
-#[allow(dead_code)]
 mod server;
 // Service modules contain provider, Discord, maintenance, and observability
 // feature surfaces that are enabled by runtime config rather than all targets.

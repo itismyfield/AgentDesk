@@ -246,6 +246,9 @@ fn body_param(kind: &'static str, required: bool, description: &'static str) -> 
 // Endpoints not in this list may rely on `// TODO: example` markers in their
 // description text while paired coverage expands in follow-up issues.
 // ---------------------------------------------------------------------------
+// reason: fixture table asserted by the `#[cfg(test)]` api_docs paired-coverage
+// test; it has no production reader, so the lib build flags it as dead. See #3034.
+#[allow(dead_code)]
 pub(crate) const TOP_40_PAIRED_PATHS: &[(&str, &str)] = &[
     ("GET", "/api/health"),
     ("POST", "/api/discord/send"),

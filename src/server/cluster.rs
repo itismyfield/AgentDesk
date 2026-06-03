@@ -113,6 +113,11 @@ impl ClusterRuntime {
         }
     }
 
+    // reason: cluster-runtime leadership-wait API exercised directly by the
+    // `#[cfg(test)]` leadership-transition test; the production supervisor path
+    // now blocks via `wait_until_leader_or_shutdown`, so the lib build sees no
+    // caller. See #3034.
+    #[allow(dead_code)]
     pub(crate) async fn wait_until_leader(&self) {
         if !self.enabled {
             return;
@@ -716,17 +721,6 @@ pub(crate) async fn list_worker_nodes(
             })
         })
         .collect())
-}
-
-pub(crate) async fn worker_node_snapshot_by_instance(
-    pool: &PgPool,
-    instance_id: &str,
-    lease_ttl_secs: u64,
-) -> Result<Option<Value>, String> {
-    Ok(list_worker_nodes(pool, lease_ttl_secs)
-        .await?
-        .into_iter()
-        .find(|node| node.get("instance_id").and_then(|value| value.as_str()) == Some(instance_id)))
 }
 
 pub(crate) fn explain_capability_match(

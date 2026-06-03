@@ -331,22 +331,6 @@ pub async fn card_id_by_issue_number_pg(
         .map_err(|error| format!("postgres lookup failed: {error}"))
 }
 
-pub async fn card_ids_by_issue_number_pg(
-    pool: &PgPool,
-    issue_number: i64,
-) -> Result<Vec<String>, String> {
-    sqlx::query_scalar::<_, String>(
-        "SELECT id
-         FROM kanban_cards
-         WHERE github_issue_number = $1
-         ORDER BY id ASC",
-    )
-    .bind(issue_number)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| format!("{error}"))
-}
-
 pub async fn load_card_pipeline_context_pg(
     pool: &PgPool,
     card_id: &str,
