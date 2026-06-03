@@ -434,6 +434,31 @@ async fn complete_recovery_visible_turn(
     let persisted_inflight = super::inflight::load_inflight_state(provider, channel_id.get());
     let status_msg_id =
         recovery_status_panel_message_id_for_completion(state, persisted_inflight.as_ref());
+
+    // EPIC #3078 PR-2 — route recovery completion through the
+    // `StatusPanelController` behind a parity check (shadow mode). The
+    // controller adopts the recovered panel id and reports the id it WOULD
+    // finalize; it must equal the legacy `status_msg_id`. The legacy
+    // `complete_status_panel_v2_with_http` below still executes the actual
+    // Discord edit/delete, so behaviour is verifiably unchanged — only the
+    // (shadow) controller decision is observed. The real cutover (controller
+    // executes the IO) lands in a later PR. The controller actor is only
+    // spawned when v2 is enabled (we are already inside the v2-enabled branch),
+    // so this is inert and untouched when v2 is off.
+    let controller_id = shared
+        .status_panel_controller
+        .recovery_completion_parity_id(
+            super::turn_finalizer::TurnKey::new(
+                channel_id,
+                state.user_msg_id,
+                super::runtime_store::load_generation(),
+            ),
+            provider.clone(),
+            status_msg_id,
+        )
+        .await;
+    assert_recovery_completion_parity(controller_id, status_msg_id, channel_id, source);
+
     let mut last_status_panel_text = String::new();
     let _committed = super::turn_bridge::complete_status_panel_v2_with_http(
         shared,
@@ -472,6 +497,36 @@ fn recovery_status_panel_message_id_for_completion(
         })
 }
 
+/// EPIC #3078 PR-2 — the parity gate between the legacy recovery
+/// status-panel-completion id and the id the `StatusPanelController` chooses for
+/// the same turn. They must agree: a divergence means the controller would
+/// finalize a different (or no) panel, so routing the IO through it later would
+/// change behaviour. `debug_assert` so test/dev builds fail loudly; release
+/// builds emit a bounded `warn!` (no `panic!`) so a never-before-seen recovery
+/// shape can never crash a production restart sweep over the legacy path, which
+/// continues to execute regardless.
+fn assert_recovery_completion_parity(
+    controller_id: Option<MessageId>,
+    legacy_id: Option<MessageId>,
+    channel_id: ChannelId,
+    source: &'static str,
+) {
+    if controller_id == legacy_id {
+        return;
+    }
+    debug_assert_eq!(
+        controller_id, legacy_id,
+        "#3078 PR-2 recovery status-panel completion parity mismatch (channel {channel_id}, source {source}): controller chose {controller_id:?}, legacy chose {legacy_id:?}"
+    );
+    tracing::warn!(
+        channel = channel_id.get(),
+        source = source,
+        controller_id = ?controller_id,
+        legacy_id = ?legacy_id,
+        "#3078 PR-2 recovery status-panel completion parity mismatch — StatusPanelController chose a different completion id than the legacy path; legacy path executed (no behaviour change), divergence logged for the later controller-executes cutover"
+    );
+}
+
 #[cfg(test)]
 mod recovery_dispatch_gate_tests {
     #[test]
@@ -483,7 +538,10 @@ mod recovery_dispatch_gate_tests {
 
 #[cfg(test)]
 mod recovery_completion_outcome_tests {
-    use super::{RecoveryCompletionOutcome, recovery_status_panel_message_id_for_completion};
+    use super::{
+        RecoveryCompletionOutcome, assert_recovery_completion_parity,
+        recovery_status_panel_message_id_for_completion,
+    };
     use crate::services::provider::ProviderKind;
 
     fn state_for_recovery(user_msg_id: u64) -> super::inflight::InflightTurnState {
@@ -540,6 +598,76 @@ mod recovery_completion_outcome_tests {
             recovery_status_panel_message_id_for_completion(&snapshot, Some(&persisted));
 
         assert_eq!(status_msg_id, Some(super::MessageId::new(3003)));
+    }
+
+    // EPIC #3078 PR-2: for representative recovery-completion inputs, the
+    // `StatusPanelController`'s chosen completion id (adopt + read-back through
+    // the live actor) equals the legacy
+    // `recovery_status_panel_message_id_for_completion` result, so the parity
+    // gate passes and `complete_recovery_visible_turn` keeps executing the
+    // legacy path with no behaviour change.
+    #[tokio::test(flavor = "current_thread")]
+    async fn controller_chosen_completion_id_matches_legacy_for_representative_inputs() {
+        use super::ChannelId;
+        use super::status_panel_controller::StatusPanelController;
+        use super::turn_finalizer::TurnKey;
+
+        // Case A: real user_msg_id, persisted id from the SAME turn wins.
+        let mut snapshot = state_for_recovery(9101);
+        snapshot.status_message_id = Some(3003);
+        let mut persisted = state_for_recovery(9101);
+        persisted.status_message_id = Some(4004);
+        let legacy = recovery_status_panel_message_id_for_completion(&snapshot, Some(&persisted));
+        assert_eq!(legacy, Some(super::MessageId::new(4004)));
+
+        let ctl = StatusPanelController::spawn(true);
+        let key = TurnKey::new(ChannelId::new(4243), snapshot.user_msg_id, 0);
+        let controller = ctl
+            .recovery_completion_parity_id(key, ProviderKind::Claude, legacy)
+            .await;
+        assert_eq!(
+            controller, legacy,
+            "controller's chosen completion id must equal the legacy id (real user_msg_id case)"
+        );
+
+        // Case B: channel-only (user_msg_id == 0) recovery turn — the controller
+        // collapses onto the single live entry it adopted, choosing the same id.
+        let mut snapshot0 = state_for_recovery(0);
+        snapshot0.status_message_id = Some(5005);
+        let legacy0 = recovery_status_panel_message_id_for_completion(&snapshot0, None);
+        assert_eq!(legacy0, Some(super::MessageId::new(5005)));
+
+        let ctl0 = StatusPanelController::spawn(true);
+        let key0 = TurnKey::new(ChannelId::new(7777), 0, 0);
+        let controller0 = ctl0
+            .recovery_completion_parity_id(key0, ProviderKind::Claude, legacy0)
+            .await;
+        assert_eq!(
+            controller0, legacy0,
+            "controller's chosen completion id must equal the legacy id (channel-only case)"
+        );
+
+        // Case C: no panel id at all (None) — both agree on None.
+        let snapshot_none = state_for_recovery(9300);
+        let legacy_none = recovery_status_panel_message_id_for_completion(&snapshot_none, None);
+        assert_eq!(legacy_none, None);
+
+        let ctl_none = StatusPanelController::spawn(true);
+        let key_none = TurnKey::new(ChannelId::new(8888), 9300, 0);
+        let controller_none = ctl_none
+            .recovery_completion_parity_id(key_none, ProviderKind::Claude, legacy_none)
+            .await;
+        assert_eq!(controller_none, legacy_none);
+
+        // The parity assert itself must not fire for any of these.
+        assert_recovery_completion_parity(controller, legacy, ChannelId::new(4243), "test");
+        assert_recovery_completion_parity(controller0, legacy0, ChannelId::new(7777), "test");
+        assert_recovery_completion_parity(
+            controller_none,
+            legacy_none,
+            ChannelId::new(8888),
+            "test",
+        );
     }
 }
 

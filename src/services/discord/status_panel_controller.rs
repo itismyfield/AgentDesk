@@ -198,6 +198,17 @@ enum PanelMsg {
         key: TurnKey,
         ack: oneshot::Sender<Option<MessageId>>,
     },
+    /// Adopt an ALREADY-EXISTING panel message into the ledger as the live panel
+    /// for this turn (the post-restart recovery/orphan case: the panel was sent
+    /// by a previous process, so there is nothing to create — the controller
+    /// only needs to learn the id so it can own the finalize). Idempotent and
+    /// non-resurrecting: a terminal entry is left untouched.
+    AdoptRecovered {
+        key: TurnKey,
+        provider: ProviderKind,
+        owner: PanelOwnerKind,
+        msg_id: Option<MessageId>,
+    },
 }
 
 /// The per-runtime actor, held as `Arc<StatusPanelController>` on `SharedData`.
@@ -360,6 +371,42 @@ impl StatusPanelController {
         }
         rx.await.unwrap_or(None)
     }
+
+    /// Adopt an already-existing panel message into the ledger (post-restart
+    /// recovery: the panel was created by a previous process). The controller
+    /// learns the id so it can own the finalize. Idempotent and
+    /// non-resurrecting: a terminal entry is never reopened. Fire-and-forget;
+    /// observe the resulting id with [`Self::current_panel`].
+    pub(in crate::services::discord) fn adopt_recovered(
+        &self,
+        key: TurnKey,
+        provider: ProviderKind,
+        owner: PanelOwnerKind,
+        msg_id: Option<MessageId>,
+    ) {
+        let _ = self.tx.send(PanelMsg::AdoptRecovered {
+            key,
+            provider,
+            owner,
+            msg_id,
+        });
+    }
+
+    /// EPIC #3078 PR-2 — the controller's chosen status-panel completion id for
+    /// a recovery turn, computed through the ledger collapse so it can be
+    /// asserted equal to the legacy `recovery_status_panel_message_id_for_completion`
+    /// result behind a parity check. Adopts the recovered panel id, then reads
+    /// back the resolved id. Shadow-only: this does NOT finalize or touch the
+    /// durable mirror, so the legacy completion path keeps executing unchanged.
+    pub(in crate::services::discord) async fn recovery_completion_parity_id(
+        &self,
+        key: TurnKey,
+        provider: ProviderKind,
+        recovered_msg_id: Option<MessageId>,
+    ) -> Option<MessageId> {
+        self.adopt_recovered(key, provider, PanelOwnerKind::Recovery, recovered_msg_id);
+        self.current_panel(key).await
+    }
 }
 
 /// Resolve a submission to the ledger entry it acts on, reusing the finalizer's
@@ -455,7 +502,51 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<PanelMsg>) {
                 let id = ledger.get(&lk).and_then(|e| e.msg_id);
                 let _ = ack.send(id);
             }
+            PanelMsg::AdoptRecovered {
+                key,
+                provider,
+                owner,
+                msg_id,
+            } => {
+                adopt_recovered(&mut ledger, key, provider, owner, msg_id);
+            }
         }
+    }
+}
+
+/// Adopt an already-existing (recovery) panel id into the ledger as the live
+/// panel for this turn. Mirrors `Register` but seeds the known `msg_id` and the
+/// `Live` phase, since the panel was created by a previous process and only the
+/// id needs to be learned. Never resurrects a terminal entry; if a live entry
+/// already owns a panel its id is left intact (idempotent re-adopt). No durable
+/// write — adoption only learns the in-memory authority; the durable mirror was
+/// already bound by the process that created the panel.
+fn adopt_recovered(
+    ledger: &mut HashMap<LedgerKey, PanelEntry>,
+    key: TurnKey,
+    provider: ProviderKind,
+    owner: PanelOwnerKind,
+    msg_id: Option<MessageId>,
+) {
+    let lk = resolve_key(ledger, key);
+    let entry = ledger.entry(lk).or_insert_with(|| PanelEntry {
+        msg_id,
+        owner,
+        provider: provider.clone(),
+        phase: PanelPhase::Live,
+        last_text: None,
+    });
+    if entry.phase.is_terminal() {
+        // Never reopen a finalized/reclaimed panel.
+        return;
+    }
+    entry.owner = owner;
+    entry.provider = provider;
+    if entry.msg_id.is_none() {
+        entry.msg_id = msg_id;
+    }
+    if entry.phase == PanelPhase::NotCreated {
+        entry.phase = PanelPhase::Live;
     }
 }
 
@@ -762,6 +853,73 @@ mod tests {
             again,
             PanelCommitOutcome::AlreadyTerminal | PanelCommitOutcome::NoPanel
         ));
+    }
+
+    /// EPIC #3078 PR-2: `adopt_recovered` seeds an existing (recovery) panel id
+    /// into the ledger as Live, is idempotent (a second adopt keeps the first
+    /// id), and never resurrects a terminal entry.
+    #[test]
+    fn adopt_recovered_seeds_idempotent_and_never_resurrects() {
+        let mut ledger: HashMap<LedgerKey, PanelEntry> = HashMap::new();
+        let key = TurnKey::new(ChannelId::new(8), 80, 0);
+        let k = key.exact_key();
+
+        adopt_recovered(
+            &mut ledger,
+            key,
+            ProviderKind::Claude,
+            PanelOwnerKind::Recovery,
+            Some(MessageId::new(800)),
+        );
+        let entry = ledger.get(&k).unwrap();
+        assert_eq!(entry.msg_id, Some(MessageId::new(800)));
+        assert_eq!(entry.phase, PanelPhase::Live);
+        assert_eq!(entry.owner, PanelOwnerKind::Recovery);
+
+        // Idempotent: a second adopt keeps the already-bound id (does not clobber
+        // with a stale id) while still refreshing the owner.
+        adopt_recovered(
+            &mut ledger,
+            key,
+            ProviderKind::Claude,
+            PanelOwnerKind::Watcher,
+            Some(MessageId::new(999)),
+        );
+        let entry = ledger.get(&k).unwrap();
+        assert_eq!(entry.msg_id, Some(MessageId::new(800)));
+        assert_eq!(entry.owner, PanelOwnerKind::Watcher);
+
+        // Non-resurrecting: after a terminal commit, adopt is a no-op on phase.
+        let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+        commit_terminal(&mut ledger, key, PanelPhase::Completed, None, &shared);
+        adopt_recovered(
+            &mut ledger,
+            key,
+            ProviderKind::Claude,
+            PanelOwnerKind::Recovery,
+            Some(MessageId::new(801)),
+        );
+        assert_eq!(ledger.get(&k).unwrap().phase, PanelPhase::Completed);
+    }
+
+    /// EPIC #3078 PR-2: the shadow parity helper adopts the recovered id and
+    /// reports it back as the controller's chosen completion id, exercised
+    /// through the live actor loop.
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_completion_parity_id_reports_adopted_id() {
+        let ctl = StatusPanelController::spawn(true);
+        let key = TurnKey::new(ChannelId::new(9), 90, 0);
+        let chosen = ctl
+            .recovery_completion_parity_id(key, ProviderKind::Claude, Some(MessageId::new(900)))
+            .await;
+        assert_eq!(chosen, Some(MessageId::new(900)));
+
+        // A None recovered id (no panel) reports None.
+        let key2 = TurnKey::new(ChannelId::new(9), 91, 0);
+        let none = ctl
+            .recovery_completion_parity_id(key2, ProviderKind::Claude, None)
+            .await;
+        assert_eq!(none, None);
     }
 
     /// A channel-only (`user_msg_id == 0`) finalize collapses onto the single

@@ -195,9 +195,14 @@
     `reset_state_for_tests` helper; +26 from #3105 codex-P1 sub-case B
     `evict_dead_tmux_mirror` tombstone helper that drops both the runtime and
     channel mirror for a dead/orphaned session and then allows re-registration).
-  - `src/services/discord/recovery_engine.rs` (3978 lines; +36 from #3099
+  - `src/services/discord/recovery_engine.rs` (4033 lines; +36 from #3099
     task-notification anchor `⏳` cleanup for `user_msg_id == 0` recovery; +4
-    from the #3099 re-review pinned-injected-message-id cleanup target).
+    from the #3099 re-review pinned-injected-message-id cleanup target; +55 from
+    #3078 PR-2 routing recovery completion through `StatusPanelController` behind
+    a shadow parity check (the controller adopts the recovered panel id and its
+    chosen completion id is asserted equal to the legacy
+    `recovery_status_panel_message_id_for_completion` result; the legacy path
+    still executes the Discord IO, so behaviour is unchanged)).
   - `src/services/discord/health.rs` (2354 lines after #1879 snapshot/mailbox
     extraction; +3 from #3082 answer-flush-barrier field in the test SharedData
     constructor).
