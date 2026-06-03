@@ -303,7 +303,7 @@
   - `src/server/routes/docs.rs` (5880 lines).
   - `src/server/routes/escalation.rs` (1733 lines).
   - `src/server/routes/meetings.rs` (1708 lines).
-  - `src/server/routes/review_verdict/decision_route.rs` (4191 lines).
+  - `src/server/routes/review_verdict/decision_route.rs` (4315 lines).
   - `src/server/routes/{agents,agents_crud,agents_setup,v1,resume,
     dispatches/thread_reuse}.rs` (all 1000+ production lines).
 - active_callsite_coverage: legacy_db helper coverage tracked separately —
