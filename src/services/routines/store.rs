@@ -915,7 +915,70 @@ impl RoutineStore {
 
         let now = Utc::now();
 
-        // --- Source 1: kv_meta precomputed digests (cap 20) ---
+        // Each source is fetched by a dedicated helper that owns its query, error
+        // fallback (warn + empty Vec), and row->observation mapping. Behavior is
+        // identical to the previous inline form; this only splits responsibilities.
+        let kv_obs = self.fetch_kv_meta_observations(CAP_KV_META, now).await;
+        let friction_obs = self.fetch_api_friction_observations(CAP_API_FRICTION).await;
+        let outbox_obs = self.fetch_outbox_observations(CAP_OUTBOX).await;
+        let run_obs = self
+            .fetch_routine_run_observations(current_script_ref, CAP_ROUTINE_RUNS)
+            .await;
+        let kanban_obs = self.fetch_kanban_stale_observations(CAP_KANBAN).await;
+        let dispatch_obs = self.fetch_dispatch_retry_observations(CAP_DISPATCHES).await;
+        let session_obs = self.fetch_session_pattern_observations(CAP_SESSION).await;
+        let audit_obs = self.fetch_audit_log_observations(CAP_AUDIT_LOGS).await;
+        let kanban_ready_obs = self.fetch_kanban_ready_observations().await;
+        let kanban_dispatched_obs = self.fetch_kanban_dispatched_observations().await;
+
+        // --- Fair merge: round-robin across all sources so no single source starves others ---
+        use std::collections::VecDeque;
+        let mut sources: Vec<VecDeque<serde_json::Value>> = vec![
+            kv_obs.into(),
+            friction_obs.into(),
+            outbox_obs.into(),
+            run_obs.into(),
+            kanban_obs.into(),
+            dispatch_obs.into(),
+            session_obs.into(),
+            audit_obs.into(),
+        ];
+        if include_automation_candidate_card_observations(current_script_ref) {
+            sources.push(kanban_ready_obs.into());
+            sources.push(kanban_dispatched_obs.into());
+        }
+        let mut observations = Vec::with_capacity(max_items.min(100));
+        let mut total_bytes: usize = 0;
+        'merge: loop {
+            let mut any = false;
+            for src in &mut sources {
+                if let Some(obs) = src.pop_front() {
+                    any = true;
+                    if !bounded_observation_push(
+                        &mut observations,
+                        &mut total_bytes,
+                        max_items,
+                        max_payload_bytes,
+                        obs,
+                    ) {
+                        break 'merge;
+                    }
+                }
+            }
+            if !any {
+                break;
+            }
+        }
+
+        Ok(observations)
+    }
+
+    /// Source 1: kv_meta precomputed digests.
+    async fn fetch_kv_meta_observations(
+        &self,
+        cap: i64,
+        now: DateTime<Utc>,
+    ) -> Vec<serde_json::Value> {
         let digest_rows = match sqlx::query(
             r#"
             SELECT key, value
@@ -933,7 +996,7 @@ impl RoutineStore {
             LIMIT $1
             "#,
         )
-        .bind(CAP_KV_META)
+        .bind(cap)
         .fetch_all(&*self.pool)
         .await
         {
@@ -955,10 +1018,13 @@ impl RoutineStore {
                 kv_obs.push(obs);
             }
         }
+        kv_obs
+    }
 
-        // --- Source 2: api_friction_issues (cap 20) ---
+    /// Source 2: api_friction_issues.
+    async fn fetch_api_friction_observations(&self, cap: i64) -> Vec<serde_json::Value> {
         let api_rows = match sqlx::query(API_FRICTION_OBSERVATION_QUERY)
-            .bind(CAP_API_FRICTION)
+            .bind(cap)
             .fetch_all(&*self.pool)
             .await
         {
@@ -996,8 +1062,11 @@ impl RoutineStore {
                 "evidence_ref": format!("api_friction_issues:{fingerprint}"),
             }));
         }
+        friction_obs
+    }
 
-        // --- Source 3: message_outbox grouped failures (cap 20) ---
+    /// Source 3: message_outbox grouped failures.
+    async fn fetch_outbox_observations(&self, cap: i64) -> Vec<serde_json::Value> {
         let outbox_rows = match sqlx::query(
             r#"
             SELECT COALESCE(NULLIF(source, ''), 'message_outbox') AS source,
@@ -1014,7 +1083,7 @@ impl RoutineStore {
             LIMIT $1
             "#,
         )
-        .bind(CAP_OUTBOX)
+        .bind(cap)
         .fetch_all(&*self.pool)
         .await
         {
@@ -1056,11 +1125,19 @@ impl RoutineStore {
                 "evidence_ref": format!("message_outbox:{source}:{reason_code}:{status}"),
             }));
         }
+        outbox_obs
+    }
 
-        // --- Source 4: routine_runs grouped by (script_ref, action, status) (cap 40) ---
-        // Grouped so that repeated failures from the same routine emit one observation with
-        // a stable evidence_ref instead of one raw row per UUID run.  The raw UUID approach
-        // caused evidence_count to inflate ~N/tick and saturated score=100 after one tick.
+    /// Source 4: routine_runs grouped by (script_ref, action, status).
+    ///
+    /// Grouped so that repeated failures from the same routine emit one observation with
+    /// a stable evidence_ref instead of one raw row per UUID run.  The raw UUID approach
+    /// caused evidence_count to inflate ~N/tick and saturated score=100 after one tick.
+    async fn fetch_routine_run_observations(
+        &self,
+        current_script_ref: Option<&str>,
+        cap: i64,
+    ) -> Vec<serde_json::Value> {
         let run_rows = match sqlx::query(
             r#"
             WITH grouped_runs AS (
@@ -1102,7 +1179,7 @@ impl RoutineStore {
             "#,
         )
         .bind(current_script_ref)
-        .bind(CAP_ROUTINE_RUNS)
+        .bind(cap)
         .fetch_all(&*self.pool)
         .await
         {
@@ -1156,8 +1233,11 @@ impl RoutineStore {
                 "sample_evidence_refs": sample_refs,
             }));
         }
+        run_obs
+    }
 
-        // --- Source 5: kanban_cards stale or blocked (cap 10) ---
+    /// Source 5: kanban_cards stale or blocked.
+    async fn fetch_kanban_stale_observations(&self, cap: i64) -> Vec<serde_json::Value> {
         let kanban_rows = match sqlx::query(
             r#"
             SELECT id,
@@ -1181,7 +1261,7 @@ impl RoutineStore {
             "#,
         )
         .bind(PIPELINE_STAGE_ID)
-        .bind(CAP_KANBAN)
+        .bind(cap)
         .fetch_all(&*self.pool)
         .await
         {
@@ -1239,8 +1319,11 @@ impl RoutineStore {
                 "evidence_ref": format!("kanban_cards:{card_id}"),
             }));
         }
+        kanban_obs
+    }
 
-        // --- Source 6: task_dispatches high-retry (cap 10) ---
+    /// Source 6: task_dispatches high-retry.
+    async fn fetch_dispatch_retry_observations(&self, cap: i64) -> Vec<serde_json::Value> {
         let dispatch_rows = match sqlx::query(
             r#"
             SELECT id,
@@ -1258,7 +1341,7 @@ impl RoutineStore {
             LIMIT $1
             "#,
         )
-        .bind(CAP_DISPATCHES)
+        .bind(cap)
         .fetch_all(&*self.pool)
         .await
         {
@@ -1294,8 +1377,11 @@ impl RoutineStore {
                 "evidence_ref": format!("task_dispatches:{dispatch_id}"),
             }));
         }
+        dispatch_obs
+    }
 
-        // --- Source 7: session_transcripts repeated error patterns per agent (cap 10) ---
+    /// Source 7: session_transcripts repeated error patterns per agent.
+    async fn fetch_session_pattern_observations(&self, cap: i64) -> Vec<serde_json::Value> {
         let session_rows = match sqlx::query(
             r#"
             SELECT agent_id,
@@ -1326,7 +1412,7 @@ impl RoutineStore {
             LIMIT $1
             "#,
         )
-        .bind(CAP_SESSION)
+        .bind(cap)
         .fetch_all(&*self.pool)
         .await
         {
@@ -1358,8 +1444,11 @@ impl RoutineStore {
                 "evidence_ref": format!("session_transcripts:{agent_id}"),
             }));
         }
+        session_obs
+    }
 
-        // --- Source 8: audit/log signals grouped by action/source (cap 10) ---
+    /// Source 8: audit/log signals grouped by action/source.
+    async fn fetch_audit_log_observations(&self, cap: i64) -> Vec<serde_json::Value> {
         let audit_rows = match sqlx::query(
             r#"
             WITH grouped_logs AS (
@@ -1404,7 +1493,7 @@ impl RoutineStore {
             LIMIT $1
             "#,
         )
-        .bind(CAP_AUDIT_LOGS)
+        .bind(cap)
         .fetch_all(&*self.pool)
         .await
         {
@@ -1438,8 +1527,11 @@ impl RoutineStore {
                 "evidence_ref": format!("audit_logs:{source_table}:{entity_type}:{action}:{actor}"),
             }));
         }
+        audit_obs
+    }
 
-        // --- Source 9: kanban_ready – automation-candidate cards awaiting execution (cap 20) ---
+    /// Source 9: kanban_ready – automation-candidate cards awaiting execution.
+    async fn fetch_kanban_ready_observations(&self) -> Vec<serde_json::Value> {
         let kanban_ready_rows = match sqlx::query(
             r#"
             SELECT id,
@@ -1498,8 +1590,11 @@ impl RoutineStore {
                 "metadata": metadata,
             }));
         }
+        kanban_ready_obs
+    }
 
-        // --- Source 10: kanban_dispatched – recently completed automation-candidate cards (cap 20) ---
+    /// Source 10: kanban_dispatched – recently completed automation-candidate cards.
+    async fn fetch_kanban_dispatched_observations(&self) -> Vec<serde_json::Value> {
         let kanban_dispatched_rows = match sqlx::query(
             r#"
             SELECT id,
@@ -1550,47 +1645,7 @@ impl RoutineStore {
                 "card_id": card_id,
             }));
         }
-
-        // --- Fair merge: round-robin across all sources so no single source starves others ---
-        use std::collections::VecDeque;
-        let mut sources: Vec<VecDeque<serde_json::Value>> = vec![
-            kv_obs.into(),
-            friction_obs.into(),
-            outbox_obs.into(),
-            run_obs.into(),
-            kanban_obs.into(),
-            dispatch_obs.into(),
-            session_obs.into(),
-            audit_obs.into(),
-        ];
-        if include_automation_candidate_card_observations(current_script_ref) {
-            sources.push(kanban_ready_obs.into());
-            sources.push(kanban_dispatched_obs.into());
-        }
-        let mut observations = Vec::with_capacity(max_items.min(100));
-        let mut total_bytes: usize = 0;
-        'merge: loop {
-            let mut any = false;
-            for src in &mut sources {
-                if let Some(obs) = src.pop_front() {
-                    any = true;
-                    if !bounded_observation_push(
-                        &mut observations,
-                        &mut total_bytes,
-                        max_items,
-                        max_payload_bytes,
-                        obs,
-                    ) {
-                        break 'merge;
-                    }
-                }
-            }
-            if !any {
-                break;
-            }
-        }
-
-        Ok(observations)
+        kanban_dispatched_obs
     }
 
     pub async fn fetch_active_routine_automation_inventory(
