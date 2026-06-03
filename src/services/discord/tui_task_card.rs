@@ -488,6 +488,42 @@ pub(super) fn forget_card(channel_id: u64, task_id: Option<&str>) {
     }
 }
 
+/// Clear ONLY a still-reserved placeholder slot for a task-id — i.e. an entry a
+/// [`CardSlot::Post`] handed out whose real message id was never recorded
+/// (`message_id == 0`) because the first post FAILED (#3075 codex P2).
+///
+/// Unlike [`forget_card`], this is an EXACT-MATCH on the placeholder we own: if
+/// the entry has since recorded a real message id (a concurrent post landed) or
+/// was replaced by a newer reservation that already recorded its id, we leave it
+/// untouched. This is the failure-path counterpart to [`record_card_message`]:
+/// a post either commits its real id (record) or releases its reservation
+/// (this), so a later same-task notification reserves fresh and reposts instead
+/// of being suppressed as `Pending` until the 1h stale purge.
+///
+/// Returns `true` if a placeholder was actually cleared.
+pub(super) fn forget_reserved_card(channel_id: u64, task_id: Option<&str>) -> bool {
+    let Some(task_id) = task_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let mut store = CARD_STORE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(channel) = store.by_channel.get_mut(&channel_id) else {
+        return false;
+    };
+    // Only remove while it is still the unrecorded placeholder (message_id == 0).
+    // A non-zero id means a real post committed (ours late, or a concurrent one);
+    // leave it so that card keeps deduping repeats.
+    let owned_placeholder = channel
+        .get(task_id)
+        .is_some_and(|entry| entry.message_id == 0);
+    if owned_placeholder {
+        channel.remove(task_id);
+        if channel.is_empty() {
+            store.by_channel.remove(&channel_id);
+        }
+    }
+    owned_placeholder
+}
+
 /// Purge stale entries for a channel and evict the least-recently-touched cards
 /// past the per-channel bound.
 fn purge_and_bound(store: &mut TaskCardStore, channel_id: u64, now: Instant) {
@@ -818,6 +854,76 @@ mod tests {
             }
             other => panic!("expected Edit after record, got {other:?}"),
         }
+    }
+
+    // #3075 codex P2: the FIRST post for a task-id FAILS, so its reserved
+    // placeholder (message_id == 0) is never recorded. Releasing it via
+    // `forget_reserved_card` must let the NEXT same-task notification resolve to
+    // `Post` (repost) rather than being suppressed as `Pending` until the 1h
+    // stale purge.
+    #[test]
+    fn failed_first_post_clears_placeholder_so_next_reposts() {
+        reset_card_store_for_tests();
+        let channel = 271_828_u64;
+        let task = Some("post-fail-task");
+
+        // First sighting reserves the placeholder slot.
+        assert_eq!(
+            reserve_card_slot(channel, task),
+            CardSlot::Post { update_count: 1 },
+        );
+
+        // Simulate the post FAILING (no record_card_message). Releasing our owned
+        // placeholder must report that it cleared something.
+        assert!(
+            forget_reserved_card(channel, task),
+            "an unrecorded placeholder we own must be cleared on post failure"
+        );
+
+        // The next notification for the SAME task-id must reserve fresh and POST,
+        // NOT resolve to Pending (which would suppress it for up to 1h).
+        assert_eq!(
+            reserve_card_slot(channel, task),
+            CardSlot::Post { update_count: 1 },
+            "after a failed first post the placeholder must be gone so the next reposts"
+        );
+    }
+
+    // #3075 codex P2 race/exact-match guard: `forget_reserved_card` must NEVER
+    // evict a slot whose real message id was already recorded — only the still-0
+    // placeholder it owns. A late post-failure cleanup that races a concurrent
+    // successful post (which recorded a real id) must be a no-op.
+    #[test]
+    fn forget_reserved_card_preserves_recorded_real_id() {
+        reset_card_store_for_tests();
+        let channel = 161_803_u64;
+        let task = Some("recorded-task");
+
+        reserve_card_slot(channel, task);
+        // A concurrent post landed and recorded a real id.
+        record_card_message(channel, task, 9_001);
+
+        // A stale failure-path cleanup must NOT clear the recorded card.
+        assert!(
+            !forget_reserved_card(channel, task),
+            "a slot with a recorded real id must not be treated as an owned placeholder"
+        );
+
+        // The live card still dedupes repeats (Edit, not Post).
+        match reserve_card_slot(channel, task) {
+            CardSlot::Edit { message_id, .. } => assert_eq!(message_id, 9_001),
+            other => panic!("expected Edit against the preserved real id, got {other:?}"),
+        }
+    }
+
+    // Missing/empty task-id has no placeholder to clear; must be a harmless no-op.
+    #[test]
+    fn forget_reserved_card_noop_for_missing_task_id() {
+        reset_card_store_for_tests();
+        assert!(!forget_reserved_card(1_u64, None));
+        assert!(!forget_reserved_card(1_u64, Some("   ")));
+        // Unknown task-id on an absent channel is also a no-op.
+        assert!(!forget_reserved_card(1_u64, Some("never-seen")));
     }
 
     #[test]

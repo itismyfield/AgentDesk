@@ -508,6 +508,27 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         let anchor_message = match channel_id.say(&*notify_http, content).await {
             Ok(message) => message,
             Err(error) => {
+                // #3075 codex P2: for a TaskNotificationEvent the `Post` outcome
+                // above reserved a placeholder card slot (message_id == 0) BEFORE
+                // this post. If the post fails we early-return without ever calling
+                // `record_posted_card`, so the placeholder would linger and force
+                // every later same-task notification to resolve to `Pending`
+                // (`TaskCardOutcome::Repeat` → no-op), silently suppressing that
+                // task-id until the 1h stale purge. Release the reservation we own
+                // (exact-match: only while message_id is still 0) so the NEXT
+                // same-task notification reserves fresh and reposts. A racing
+                // repeat that legitimately saw `Pending` is still a safe no-op:
+                // its slot read happened against this same placeholder, and clearing
+                // it only changes the *next* reservation's outcome — it never turns
+                // an already-dropped repeat into a double-post.
+                if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
+                    let task_id =
+                        super::tui_task_card::parse_task_notification(&prompt.prompt).task_id;
+                    super::tui_task_card::forget_reserved_card(
+                        channel_id.get(),
+                        task_id.as_deref(),
+                    );
+                }
                 tracing::warn!(
                     provider = %prompt.provider,
                     channel_id = channel_id.get(),

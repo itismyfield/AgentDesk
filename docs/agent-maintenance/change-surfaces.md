@@ -131,7 +131,7 @@
     inflight-missing suppressions, re-acquires a watcher-owned inflight, and
     preserves the panel under an active turn; split loop helpers further before
     adding behavior).
-  - `src/services/discord/tui_prompt_relay.rs` (3828 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (3849 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3082 queued-only answer-flush gate
     (`is_queued_notice = false` for the TUI idle-response placeholder); +139
@@ -167,11 +167,18 @@
     lives in the new `tui_task_card.rs` module, and the shared
     `strip_terminal_controls` + ASCII `truncate_chars` helpers were consolidated
     there too, so this file's surface shrank by one line overall; the new
-    `tui_task_card.rs` module (591 prod LoC, below the giant threshold) hosts the
+    `tui_task_card.rs` module (627 prod LoC, below the giant threshold) hosts the
     card render/parse/JSON-aggregate/dedupe-store logic; +48 from #3075 codex P1
     #1: a `CardSlot::Pending` variant + `TaskCardOutcome` enum so a repeat that
     races ahead of `record_card_message` drops as a no-op instead of building
-    `MessageId::new(0)` (panic), plus the pre-record-repeat regression test).
+    `MessageId::new(0)` (panic), plus the pre-record-repeat regression test);
+    +21 from #3075 codex P2: the TaskNotificationEvent post-failure path now
+    releases the reserved card placeholder via `forget_reserved_card`
+    (exact-match: only while `message_id == 0`, never evicting a concurrently
+    recorded real id) so a transient Discord post failure no longer leaves a
+    stuck `Pending` slot suppressing that task-id for up to 1h; the next
+    same-task notification reserves fresh and reposts (plus failed-post-reposts /
+    preserve-recorded-id / missing-id regression tests).
   - `src/services/codex_tmux_wrapper.rs` (1222 lines; Codex tmux wrapper JSON
     event parser and relay bridge for native Codex session events — bugfix only
     outside an extraction plan).
