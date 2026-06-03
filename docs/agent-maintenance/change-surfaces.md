@@ -119,7 +119,7 @@
   - `src/services/discord/tmux.rs` (2123 lines after #2558 dead-code sweep;
     failover guard; #3087 `session_panel_instance_key`/`write_spawn_nonce`
     re-exports; still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (6912 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (6939 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -127,22 +127,25 @@
     + #3099 task-notification anchor `⏳` cleanup for `user_msg_id == 0`
     external-input turns (+9 from the #3099 re-review pinned-injected-message-id
     cleanup target); split loop helpers further before adding behavior).
-  - `src/services/discord/tui_prompt_relay.rs` (3526 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (3576 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3082 queued-only answer-flush gate
     (`is_queued_notice = false` for the TUI idle-response placeholder); +139
     from #3099/#3100 injected-prompt classifier + neutral system-continuation
     note; +140 from the #3099/#3100 codex re-review: P1 bridge-tail output
     delivery for system-continuation, anchored continuation classifier, and the
-    P2 pinned injected-message-id cleanup helper + regression tests).
-  - `src/services/codex_tmux_wrapper.rs` (1223 lines; Codex tmux wrapper JSON
+    P2 pinned injected-message-id cleanup helper + regression tests; +50 from the
+    #3100 codex P2 fix: strip a leading SSH-direct injection wrapper line before
+    the continuation `starts_with` check so a wrapped/round-tripped banner is not
+    mis-classified as a human turn, plus wrapped/quoted-mid-body regression tests).
+  - `src/services/codex_tmux_wrapper.rs` (1222 lines; Codex tmux wrapper JSON
     event parser and relay bridge for native Codex session events — bugfix only
     outside an extraction plan).
   - `src/services/tui_prompt_dedupe.rs` (1038 lines; shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
     outside an extraction plan; +9 from the #3099 re-review crate-visible
     `reset_state_for_tests` helper).
-  - `src/services/discord/recovery_engine.rs` (3984 lines; +36 from #3099
+  - `src/services/discord/recovery_engine.rs` (3978 lines; +36 from #3099
     task-notification anchor `⏳` cleanup for `user_msg_id == 0` recovery; +4
     from the #3099 re-review pinned-injected-message-id cleanup target).
   - `src/services/discord/health.rs` (2354 lines after #1879 snapshot/mailbox

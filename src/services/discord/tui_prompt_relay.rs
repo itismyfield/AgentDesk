@@ -3444,6 +3444,21 @@ fn is_task_notification_prompt(prompt: &str) -> bool {
 fn is_system_continuation_prompt(prompt: &str) -> bool {
     let normalized = strip_terminal_controls(prompt);
     let normalized = normalized.trim_start();
+    // #3100 codex P2: a real continuation banner can arrive WRAPPED with the
+    // SSH-direct injection envelope (`format_ssh_direct_prompt_notification`),
+    // e.g. when a previously-rendered notification round-trips back into the
+    // terminal and is re-observed. The observed text then begins with
+    // `터미널에 직접 주입된 입력 (tmux : <session>):` followed by a newline (and a
+    // ```text fence) before the actual continuation body. `strip_terminal_controls`
+    // does NOT remove that wrapper, so the canonical `starts_with` below would
+    // fail and the banner would be mis-classified as `HumanTuiDirect` (gaining a
+    // spurious ⏳/anchor/synthetic turn). Strip a LEADING wrapper line — and the
+    // immediately following ```text fence line, if present — so the check runs
+    // against the real banner body. This is anchored to the start: a human merely
+    // quoting the wrapper mid-message keeps its wrapper text deeper in the body
+    // and is not affected.
+    let normalized = strip_leading_injection_wrapper(normalized);
+    let normalized = normalized.trim_start();
     // Canonical opening sentences of the system-injected continuation banner.
     // These are anchored to start-of-prompt (the injection envelope), never
     // matched as an embedded substring.
@@ -3454,6 +3469,41 @@ fn is_system_continuation_prompt(prompt: &str) -> bool {
     SYSTEM_CONTINUATION_OPENINGS
         .iter()
         .any(|opening| normalized.starts_with(opening))
+}
+
+/// #3100 codex P2: removes a LEADING SSH-direct injection wrapper line so the
+/// continuation classifier can inspect the real banner body.
+///
+/// The wrapper is produced by [`format_ssh_direct_prompt_notification`] and
+/// looks like `터미널에 직접 주입된 입력 (tmux : `<session>`):\n```text\n<body>...`.
+/// Only a wrapper at the very START of `text` is stripped (anchored), so a human
+/// message that merely quotes the marker mid-body is never unwrapped. When the
+/// first line is the wrapper, that line (up to and including its newline) is
+/// dropped; if the next line opens a ```text / ``` code fence it is dropped too,
+/// exposing the banner body that follows. Returns the original slice unchanged
+/// when there is no leading wrapper.
+fn strip_leading_injection_wrapper(text: &str) -> &str {
+    const WRAPPER_MARKER: &str = "터미널에 직접 주입된 입력";
+    if !text.starts_with(WRAPPER_MARKER) {
+        return text;
+    }
+    // Drop the wrapper line (through its newline). Without a newline the wrapper
+    // is the whole text and there is no banner body to expose.
+    let Some(after_wrapper_line) = text.find('\n').map(|idx| &text[idx + 1..]) else {
+        return text;
+    };
+    // The wrapper renders the body inside a ```text fence; skip a leading fence
+    // line so the canonical opening (the fence's first content line) is exposed.
+    let trimmed = after_wrapper_line.trim_start_matches(['\r', '\n']);
+    if let Some(rest) = trimmed.strip_prefix("```") {
+        // Drop the rest of the fence-opening line (e.g. ```text) through its
+        // newline; if the fence opener has no newline there is no body to check.
+        if let Some(idx) = rest.find('\n') {
+            return &rest[idx + 1..];
+        }
+        return after_wrapper_line;
+    }
+    after_wrapper_line
 }
 
 pub(super) fn format_ssh_direct_prompt_notification(
@@ -3769,6 +3819,69 @@ mod tests {
             classify_injected_prompt(injected),
             InjectedPromptClass::SystemContinuation,
             "a real banner with leading controls/whitespace must classify as continuation",
+        );
+    }
+
+    // #3100 codex P2: a real machine-injected continuation banner can arrive
+    // WRAPPED with the SSH-direct injection envelope (the
+    // `터미널에 직접 주입된 입력 (tmux : <session>):` line + a ```text fence) when a
+    // previously-rendered notification round-trips back into the terminal and is
+    // re-observed. After stripping the wrapper the banner body still starts with
+    // the canonical opening, so it MUST classify as SystemContinuation — otherwise
+    // it falls into the active-turn handler and wrongly gains a ⏳/anchor/synthetic
+    // turn (the exact #3100 path this PR claims to fix).
+    #[test]
+    fn classify_injected_prompt_wrapped_continuation_is_continuation() {
+        // Wrapper + ```text fence, exactly as `format_ssh_direct_prompt_notification`
+        // renders it.
+        let wrapped = "터미널에 직접 주입된 입력 (tmux : `AgentDesk-claude-adk-cc`):\n```text\n\
+                       This session is being continued from a previous conversation that ran out \
+                       of context.\nAnalysis: ... summary body ...\n```";
+        assert_eq!(
+            classify_injected_prompt(wrapped),
+            InjectedPromptClass::SystemContinuation,
+            "a wrapped continuation banner must classify as SystemContinuation",
+        );
+        assert!(!classify_injected_prompt(wrapped).is_human_active_turn());
+
+        // Wrapper without a ```text fence (banner body directly on the next line).
+        let wrapped_no_fence = "터미널에 직접 주입된 입력 (tmux : `s`):\n\
+                                Please continue the conversation from where we left it off";
+        assert_eq!(
+            classify_injected_prompt(wrapped_no_fence),
+            InjectedPromptClass::SystemContinuation,
+        );
+
+        // Wrapper + leading control codes the injector may prepend before the body.
+        let wrapped_with_controls = "터미널에 직접 주입된 입력 (tmux : `s`):\n```text\n\u{1b}[2K  \
+                                     This session is being continued from a previous conversation.";
+        assert_eq!(
+            classify_injected_prompt(wrapped_with_controls),
+            InjectedPromptClass::SystemContinuation,
+        );
+    }
+
+    // #3100 codex P2: stripping the wrapper is anchored to the START. A human
+    // message whose body merely contains/quotes the wrapper marker (not as the
+    // leading line) must NOT be unwrapped and must stay a human turn.
+    #[test]
+    fn classify_injected_prompt_wrapper_quoted_mid_body_is_not_continuation() {
+        let human = "Why does \"터미널에 직접 주입된 입력 (tmux : `s`):\" appear, then \
+                     This session is being continued from a previous conversation in my logs?";
+        assert_eq!(
+            classify_injected_prompt(human),
+            InjectedPromptClass::HumanTuiDirect,
+            "a human quoting the wrapper mid-body must stay a human turn",
+        );
+        assert!(classify_injected_prompt(human).is_human_active_turn());
+
+        // A leading wrapper line whose body is NOT a continuation banner stays a
+        // human turn (the wrapper alone must not force a continuation verdict).
+        let wrapped_human =
+            "터미널에 직접 주입된 입력 (tmux : `s`):\n```text\nplease review PR #1234\n```";
+        assert_eq!(
+            classify_injected_prompt(wrapped_human),
+            InjectedPromptClass::HumanTuiDirect,
         );
     }
 
