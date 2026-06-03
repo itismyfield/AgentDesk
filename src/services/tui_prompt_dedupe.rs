@@ -275,6 +275,15 @@ pub fn owner_channel_for_tmux_session(tmux_session_name: &str) -> Option<u64> {
         .map(|entry| entry.value)
 }
 
+/// Test-only: reset the entire dedupe state. Crate-visible so sibling modules
+/// (e.g. `tui_prompt_relay` regression tests) can isolate the shared
+/// prompt-anchor slot under `TEST_LOCK`.
+#[cfg(test)]
+pub(crate) fn reset_state_for_tests() {
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    *state = TuiPromptDedupeState::default();
+}
+
 pub(crate) fn record_prompt_anchor(
     provider: &str,
     tmux_session_name: &str,

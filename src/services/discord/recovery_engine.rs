@@ -321,6 +321,24 @@ impl RecoveryCompletionOutcome {
     }
 }
 
+/// #3099: a TUI-injected external-input (task-notification) turn can complete
+/// via recovery with `user_msg_id == 0`. The `⏳ → ✅` reaction step is then
+/// skipped (there is no anchored Discord user message), but the hourglass was
+/// added to a real notify-bot message tracked by the prompt anchor. Such a turn
+/// needs the anchor-lifecycle cleanup so the `⏳` is removed from the injected
+/// message instead of going stale.
+fn recovery_inflight_needs_anchor_lifecycle_cleanup(
+    state: &super::inflight::InflightTurnState,
+) -> bool {
+    state.user_msg_id == 0
+        && state.tmux_session_name.is_some()
+        && matches!(
+            state.turn_source,
+            super::inflight::TurnSource::ExternalInput
+                | super::inflight::TurnSource::ExternalAdopted
+        )
+}
+
 async fn complete_recovery_visible_turn(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -373,6 +391,28 @@ async fn complete_recovery_visible_turn(
     if let Some(user_msg_id) = user_msg_id {
         super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳').await;
         super::formatting::add_reaction_raw(http, channel_id, user_msg_id, '✅').await;
+    } else if recovery_inflight_needs_anchor_lifecycle_cleanup(state) {
+        // #3099: a TUI-injected task-notification turn can complete via recovery
+        // with `user_msg_id == 0` (no anchored Discord user message), so the
+        // `⏳ → ✅` step above is skipped. The hourglass, however, was added to a
+        // real notify-bot message, so clean it off that exact injected message
+        // instead of leaving it stale next to the `✅` the completion path applies
+        // elsewhere.
+        //
+        // #3099 codex re-review (P2): target THIS turn's pinned
+        // `injected_prompt_message_id` instead of re-reading the single shared
+        // prompt-anchor slot, which a later injection may already own.
+        if let Some(tmux_session_name) = state.tmux_session_name.as_deref() {
+            let _ = super::tui_prompt_relay::complete_tui_direct_anchor_lifecycle_for_inflight(
+                http,
+                provider.as_str(),
+                tmux_session_name,
+                channel_id,
+                state.injected_prompt_message_id,
+                "recovery_task_notification_anchor_cleanup_user_msg_zero",
+            )
+            .await;
+        }
     }
 
     if !shared.status_panel_v2_enabled {
@@ -538,6 +578,45 @@ mod no_anchored_placeholder_recovery_tests {
             None,
             0,
         )
+    }
+
+    // #3099: a TUI-injected task-notification turn recovered with
+    // `user_msg_id == 0` skips the `⏳ → ✅` reaction step, so it must route to
+    // the anchor-lifecycle cleanup that removes the hourglass from the injected
+    // notify-bot message.
+    #[test]
+    fn recovery_external_input_zero_user_msg_needs_anchor_cleanup() {
+        let mut state = tui_direct_no_anchor_state();
+        state.turn_source = super::inflight::TurnSource::ExternalInput;
+        assert!(super::recovery_inflight_needs_anchor_lifecycle_cleanup(
+            &state
+        ));
+
+        let mut adopted = tui_direct_no_anchor_state();
+        adopted.turn_source = super::inflight::TurnSource::ExternalAdopted;
+        assert!(super::recovery_inflight_needs_anchor_lifecycle_cleanup(
+            &adopted
+        ));
+    }
+
+    // A managed turn, or an external turn with a real anchored user message id,
+    // must NOT use the injected-anchor cleanup path.
+    #[test]
+    fn recovery_managed_or_anchored_turn_skips_anchor_cleanup() {
+        // Default turn_source (Managed) with user_msg_id == 0 is not external.
+        let managed = tui_direct_no_anchor_state();
+        assert!(!super::recovery_inflight_needs_anchor_lifecycle_cleanup(
+            &managed
+        ));
+
+        // External-input turn WITH a real anchored user message uses the normal
+        // ⏳ → ✅ block, not the anchor cleanup.
+        let mut anchored = tui_direct_no_anchor_state();
+        anchored.turn_source = super::inflight::TurnSource::ExternalInput;
+        anchored.user_msg_id = 777;
+        assert!(!super::recovery_inflight_needs_anchor_lifecycle_cleanup(
+            &anchored
+        ));
     }
 
     #[test]

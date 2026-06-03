@@ -248,6 +248,19 @@ pub(super) struct InflightTurnState {
     /// `Managed` for legacy rows that pre-date this field.
     #[serde(default)]
     pub turn_source: TurnSource,
+    /// #3099 codex re-review (P2): the Discord notify-bot message id that carries
+    /// this turn's `⏳` reaction, when the turn was injected with a
+    /// `user_msg_id == 0` (no anchored Discord *user* message — e.g. a
+    /// `<task-notification>` auto-turn). The `⏳ → ✅` completion cleanup for such
+    /// turns previously read whatever was in the single shared prompt-anchor slot
+    /// (`prompt_anchor_by_tmux`), so a *later* injection that overwrote that slot
+    /// would steal the cleanup: turn A's completion would `⏳→✅` turn B's message
+    /// while B was still running, and A's `⏳` would never clear. Pinning the
+    /// injected message id on the inflight row makes each turn clean up its OWN
+    /// message regardless of how the shared slot has since been overwritten.
+    /// `None` for turns with a real `user_msg_id` or legacy rows.
+    #[serde(default)]
+    pub injected_prompt_message_id: Option<u64>,
 }
 
 /// Origin of a turn whose state is captured in [`InflightTurnState`]. Pure
@@ -576,6 +589,7 @@ impl InflightTurnState {
             watcher_owns_live_relay: false,
             relay_owner_kind: RelayOwnerKind::None,
             turn_source: TurnSource::Managed,
+            injected_prompt_message_id: None,
         }
     }
 

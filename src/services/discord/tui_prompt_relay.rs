@@ -423,66 +423,125 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             return;
         }
     };
-    let content = format_ssh_direct_prompt_notification(
-        &prompt.provider,
-        &prompt.tmux_session_name,
-        &prompt.prompt,
+    // #3099 / #3100: classify the injected text before it enters the active-turn
+    // reaction/inflight machinery. A compact/system continuation prologue is NOT
+    // a human request — it must be rendered as a neutral session note with no
+    // `⏳`, no prompt anchor, and no synthetic turn ownership.
+    //
+    // #3099 codex re-review (P1): SystemContinuation must NOT short-circuit the
+    // whole relay. The compact continuation IS fed to the provider and Claude
+    // produces assistant output; that output still has to reach Discord via the
+    // bridge tail. So a SystemContinuation suppresses ONLY the user-turn
+    // lifecycle (the `⏳` reaction, the prompt anchor, and the synthetic
+    // user-turn/inflight ownership) — the assistant-output delivery path (the
+    // Claude bridge tail below) still runs exactly as for any other injection.
+    let injected_class = classify_injected_prompt(&prompt.prompt);
+    // #3099 codex re-review (P1): suppressing the user-turn lifecycle (⏳ + anchor
+    // + synthetic ownership) is decoupled from output delivery. The bridge tail
+    // below runs regardless so the provider's assistant output still reaches
+    // Discord even for a SystemContinuation.
+    let is_system_continuation = injected_class.suppresses_user_turn_lifecycle();
+    debug_assert!(
+        injected_class.still_delivers_assistant_output(),
+        "every injected class must still deliver assistant output via the bridge tail",
     );
-    let anchor_message = match channel_id.say(&*notify_http, content).await {
-        Ok(message) => message,
-        Err(error) => {
-            tracing::warn!(
-                provider = %prompt.provider,
-                channel_id = channel_id.get(),
-                turn_id = lease.turn_id.as_deref().unwrap_or(""),
-                session_key = lease.session_key.as_deref().unwrap_or(""),
-                relay_owner = lease.relay_owner.as_str(),
-                runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
-                error = %error,
-                "failed to send SSH-direct TUI prompt notify"
-            );
-            return;
+    if is_system_continuation {
+        let note = format_system_continuation_note(&prompt.tmux_session_name, &prompt.prompt);
+        match channel_id.say(&*notify_http, note).await {
+            Ok(message) => {
+                tracing::info!(
+                    provider = %prompt.provider,
+                    channel_id = channel_id.get(),
+                    tmux_session_name = %prompt.tmux_session_name,
+                    note_message_id = message.id.get(),
+                    "rendered system/compact continuation injection as neutral session note; no active-turn lifecycle, assistant output still relayed via bridge tail"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    provider = %prompt.provider,
+                    channel_id = channel_id.get(),
+                    tmux_session_name = %prompt.tmux_session_name,
+                    error = %error,
+                    "failed to send system/compact continuation session note"
+                );
+            }
         }
-    };
-    crate::services::tui_prompt_dedupe::record_prompt_anchor(
-        &prompt.provider,
-        &prompt.tmux_session_name,
-        channel_id.get(),
-        anchor_message.id.get(),
-    );
-    super::formatting::add_reaction_raw(&notify_http, channel_id, anchor_message.id, '⏳').await;
-    if let Some(provider) = ProviderKind::from_str(&prompt.provider) {
-        let claim = claim_tui_direct_synthetic_turn(
-            shared,
-            &provider,
-            channel_id,
+    } else {
+        let content = format_ssh_direct_prompt_notification(
+            &prompt.provider,
             &prompt.tmux_session_name,
             &prompt.prompt,
-            anchor_message.id,
-            &lease,
-        )
-        .await;
-        if claim.claimed && lease.relay_owner != claim.relay_owner {
-            lease.relay_owner = claim.relay_owner;
-            crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
-                provider.as_str(),
+        );
+        let anchor_message = match channel_id.say(&*notify_http, content).await {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::warn!(
+                    provider = %prompt.provider,
+                    channel_id = channel_id.get(),
+                    turn_id = lease.turn_id.as_deref().unwrap_or(""),
+                    session_key = lease.session_key.as_deref().unwrap_or(""),
+                    relay_owner = lease.relay_owner.as_str(),
+                    runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
+                    error = %error,
+                    "failed to send SSH-direct TUI prompt notify"
+                );
+                return;
+            }
+        };
+        crate::services::tui_prompt_dedupe::record_prompt_anchor(
+            &prompt.provider,
+            &prompt.tmux_session_name,
+            channel_id.get(),
+            anchor_message.id.get(),
+        );
+        super::formatting::add_reaction_raw(&notify_http, channel_id, anchor_message.id, '⏳')
+            .await;
+        // #3099: a `<task-notification>` auto-turn is still a real provider turn
+        // that earns the same synthetic ownership as human direct input — the
+        // difference is purely that its `⏳` completion cleanup must be anchored on
+        // this injected message's own id (handled in the watcher/recovery
+        // completion paths), so it does NOT short-circuit here. Only
+        // SystemContinuation skips this active-turn block (but still relays output
+        // via the bridge tail below).
+        debug_assert!(
+            injected_class.is_human_active_turn()
+                || matches!(injected_class, InjectedPromptClass::TaskNotificationEvent),
+            "system-continuation injections must not reach active-turn handling",
+        );
+        if let Some(provider) = ProviderKind::from_str(&prompt.provider) {
+            let claim = claim_tui_direct_synthetic_turn(
+                shared,
+                &provider,
+                channel_id,
                 &prompt.tmux_session_name,
-                lease.clone(),
-            );
+                &prompt.prompt,
+                anchor_message.id,
+                &lease,
+            )
+            .await;
+            if claim.claimed && lease.relay_owner != claim.relay_owner {
+                lease.relay_owner = claim.relay_owner;
+                crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+                    provider.as_str(),
+                    &prompt.tmux_session_name,
+                    lease.clone(),
+                );
+            }
         }
+        tracing::info!(
+            provider = %prompt.provider,
+            channel_id = channel_id.get(),
+            tmux_session_name = %prompt.tmux_session_name,
+            turn_id = lease.turn_id.as_deref().unwrap_or(""),
+            session_key = lease.session_key.as_deref().unwrap_or(""),
+            relay_owner = lease.relay_owner.as_str(),
+            runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
+            anchor_message_id = anchor_message.id.get(),
+            synthetic_inflight = tui_direct_synthetic_inflight_active_for_prompt(&prompt.provider, channel_id, &prompt.tmux_session_name),
+            "SSH-direct TUI prompt notified; runtime relay attached synthetic ownership when possible"
+        );
     }
-    tracing::info!(
-        provider = %prompt.provider,
-        channel_id = channel_id.get(),
-        tmux_session_name = %prompt.tmux_session_name,
-        turn_id = lease.turn_id.as_deref().unwrap_or(""),
-        session_key = lease.session_key.as_deref().unwrap_or(""),
-        relay_owner = lease.relay_owner.as_str(),
-        runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
-        anchor_message_id = anchor_message.id.get(),
-        synthetic_inflight = tui_direct_synthetic_inflight_active_for_prompt(&prompt.provider, channel_id, &prompt.tmux_session_name),
-        "SSH-direct TUI prompt notified; runtime relay attached synthetic ownership when possible"
-    );
 
     #[cfg(unix)]
     {
@@ -807,6 +866,10 @@ async fn claim_tui_direct_synthetic_turn(
         existing.set_relay_owner_kind(relay_owner_kind);
         existing.session_key = lease.session_key.clone();
         existing.runtime_kind = lease.runtime_kind;
+        // #3099 codex re-review (P2): keep this turn's own injected `⏳` message id
+        // pinned so completion cleanup never reads a later injection's overwrite of
+        // the shared prompt-anchor slot.
+        existing.injected_prompt_message_id = Some(anchor_message_id.get());
         if let Err(error) = super::inflight::save_inflight_state(&existing) {
             tracing::warn!(
                 provider = %provider.as_str(),
@@ -3024,6 +3087,11 @@ fn build_tui_direct_synthetic_inflight_state(
     state.runtime_kind = lease.runtime_kind;
     state.turn_source = TurnSource::ExternalInput;
     state.set_relay_owner_kind(relay_owner_kind);
+    // #3099 codex re-review (P2): pin THIS turn's injected `⏳` message id onto
+    // the inflight so the `user_msg_id == 0` completion cleanup can target this
+    // turn's own message instead of whatever later injection has since
+    // overwritten the single shared prompt-anchor slot.
+    state.injected_prompt_message_id = Some(user_msg_id.get());
     state
 }
 
@@ -3136,6 +3204,86 @@ pub(super) async fn complete_tui_direct_prompt_anchor_lifecycle_if_present(
     Some(anchor)
 }
 
+/// #3099 codex re-review (P2): complete the `⏳ → ✅` lifecycle for a turn that
+/// finished with `user_msg_id == 0`, targeting THIS turn's own injected message.
+///
+/// The shared prompt-anchor slot (`prompt_anchor_by_tmux`) holds a single value
+/// per provider/tmux and is overwritten by each new injection. Reading it at
+/// completion time is unsafe under rapid/parallel injection: turn A's completion
+/// would land the `✅` on turn B's still-running message (and A's `⏳` would never
+/// clear). When the inflight row carries its own pinned `injected_prompt_message_id`
+/// (recorded when the synthetic turn claimed `⏳`), we swap the reaction on that
+/// exact message instead, and only clear the shared slot when it still points at
+/// the same message. Falls back to the shared-slot behaviour for legacy inflight
+/// rows that pre-date the pinned id.
+/// Pure selector for which injected message id the `user_msg_id == 0` completion
+/// cleanup should target. Returns `Some(id)` to swap reactions on that exact
+/// pinned message (this turn's own id), or `None` to fall back to the legacy
+/// shared prompt-anchor slot. A zero pinned id is treated as absent.
+pub(super) fn pinned_anchor_cleanup_target(pinned_injected_message_id: Option<u64>) -> Option<u64> {
+    pinned_injected_message_id.filter(|id| *id != 0)
+}
+
+pub(super) async fn complete_tui_direct_anchor_lifecycle_for_inflight(
+    http: &serenity::Http,
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: ChannelId,
+    pinned_injected_message_id: Option<u64>,
+    reason: &str,
+) -> Option<crate::services::tui_prompt_dedupe::TuiPromptAnchor> {
+    let Some(message_id) = pinned_anchor_cleanup_target(pinned_injected_message_id) else {
+        // Legacy row without a pinned id — preserve the prior shared-slot path.
+        return complete_tui_direct_prompt_anchor_lifecycle_if_present(
+            http,
+            provider,
+            tmux_session_name,
+            channel_id,
+            reason,
+        )
+        .await;
+    };
+    let anchor = crate::services::tui_prompt_dedupe::TuiPromptAnchor {
+        channel_id: channel_id.get(),
+        message_id,
+    };
+    let anchor_channel_id = ChannelId::new(anchor.channel_id);
+    let anchor_message_id = MessageId::new(anchor.message_id);
+    super::formatting::remove_reaction_raw(http, anchor_channel_id, anchor_message_id, '⏳').await;
+    let completion_reaction = serenity::ReactionType::Unicode('✅'.to_string());
+    if let Err(error) = anchor_channel_id
+        .create_reaction(http, anchor_message_id, completion_reaction)
+        .await
+    {
+        tracing::warn!(
+            provider = %provider,
+            channel_id = anchor.channel_id,
+            tmux_session_name = %tmux_session_name,
+            anchor_message_id = anchor.message_id,
+            reason,
+            error = %error,
+            "failed to complete pinned TUI-direct injected-message reaction lifecycle; keeping for retry"
+        );
+        return None;
+    }
+    // Only clear the shared slot if it still points at THIS turn's message — a
+    // later injection may already own it and must keep its own `⏳`.
+    crate::services::tui_prompt_dedupe::clear_prompt_anchor_for_response(
+        provider,
+        tmux_session_name,
+        anchor,
+    );
+    tracing::info!(
+        provider = %provider,
+        channel_id = anchor.channel_id,
+        tmux_session_name = %tmux_session_name,
+        anchor_message_id = anchor.message_id,
+        reason,
+        "completed pinned TUI-direct injected-message reaction lifecycle"
+    );
+    Some(anchor)
+}
+
 fn owner_channel_for_prompt(
     shared: &Arc<SharedData>,
     prompt: &ObservedTuiPrompt,
@@ -3193,6 +3341,171 @@ fn resolve_owner_channel_authoritatively(
     }
 }
 
+/// Classification of TUI-injected prompt text (#3099, #3100).
+///
+/// Injected terminal input arrives through a single observation path
+/// (`relay_observed_prompt`) regardless of origin, but the three origins must
+/// drive different ⏳/turn-lifecycle behaviour:
+///
+/// * [`HumanTuiDirect`](InjectedPromptClass::HumanTuiDirect) — a person typed
+///   into the TUI. This is a real active turn: it earns a `⏳` reaction, claims
+///   queue/inflight ownership, and cleans `⏳ → ✅` on completion.
+/// * [`TaskNotificationEvent`](InjectedPromptClass::TaskNotificationEvent) — a
+///   `<task-notification>` auto-turn (e.g. a background `run_in_background`
+///   completing) that Claude Code / Codex inject into their own session. These
+///   ARE real Discord messages with their own id, so they get a `⏳`, but the
+///   completion of that auto-turn must remove the `⏳` from the injected
+///   message itself (#3099) — not from a synthetic `user_msg_id == 0`.
+/// * [`SystemContinuation`](InjectedPromptClass::SystemContinuation) — a
+///   compact / "this session is being continued from a previous conversation"
+///   system prologue. This is NOT a human request and must not occupy the
+///   user-turn lifecycle: no `⏳`, no queue/inflight ownership, no
+///   cancel-on-hourglass semantics (#3100). It is rendered as a neutral
+///   session note if visible at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum InjectedPromptClass {
+    HumanTuiDirect,
+    TaskNotificationEvent,
+    SystemContinuation,
+}
+
+impl InjectedPromptClass {
+    /// Whether this class represents a human-driven active turn that should
+    /// receive a `⏳` reaction and claim queue/inflight ownership.
+    pub(super) fn is_human_active_turn(self) -> bool {
+        matches!(self, InjectedPromptClass::HumanTuiDirect)
+    }
+
+    /// #3099 codex re-review (P1): whether this class must SKIP the user-turn
+    /// lifecycle — the `⏳` reaction, the prompt anchor, and the synthetic
+    /// user-turn/inflight ownership. Only [`SystemContinuation`] does; it is a
+    /// system event, not a human request.
+    pub(super) fn suppresses_user_turn_lifecycle(self) -> bool {
+        matches!(self, InjectedPromptClass::SystemContinuation)
+    }
+
+    /// #3099 codex re-review (P1): whether the provider turn's assistant OUTPUT
+    /// must still be delivered (via the Claude bridge tail / transcript path)
+    /// for this class. This is true for EVERY class — a `SystemContinuation`
+    /// suppresses the user-turn lifecycle but the compact continuation is still
+    /// fed to Claude, which produces assistant output that MUST reach Discord.
+    /// The original early-return regressed this by orphaning that output.
+    pub(super) fn still_delivers_assistant_output(self) -> bool {
+        true
+    }
+}
+
+/// Pure classifier for injected TUI prompt text (#3099, #3100).
+///
+/// Order matters: a compact-continuation prologue can itself embed an
+/// arbitrary summary, so the system-continuation predicate is checked first
+/// (it is the most specific "not a human turn" signal), then the
+/// task-notification tag, otherwise it is treated as human direct input.
+pub(super) fn classify_injected_prompt(prompt: &str) -> InjectedPromptClass {
+    if is_system_continuation_prompt(prompt) {
+        InjectedPromptClass::SystemContinuation
+    } else if is_task_notification_prompt(prompt) {
+        InjectedPromptClass::TaskNotificationEvent
+    } else {
+        InjectedPromptClass::HumanTuiDirect
+    }
+}
+
+/// Detects the `<task-notification>` auto-turn tag injected by Claude Code /
+/// Codex when a background task reaches a terminal state.
+fn is_task_notification_prompt(prompt: &str) -> bool {
+    let trimmed = prompt.trim_start();
+    // Skip a leading terminal-control prefix some injectors prepend before the
+    // tag (strip_terminal_controls is applied for display, not classification).
+    let normalized = strip_terminal_controls(trimmed);
+    let normalized = normalized.trim_start();
+    normalized.contains("<task-notification>") || normalized.contains("<task-notification ")
+}
+
+/// Detects compact / system-injected continuation prologues that resume a
+/// session from a previous conversation. These are system events, never human
+/// requests, so they must not occupy the user-turn lifecycle (#3100).
+///
+/// #3100 codex re-review (P2): the compact continuation banner is *machine
+/// injected* — Claude Code emits it as the ENTIRE prompt body when a session
+/// resumes after a context compaction, and it always BEGINS with the canonical
+/// opening sentence. The previous implementation used unanchored case-sensitive
+/// `contains()` on three free-text fragments, which:
+///   * false-positives on a human message that merely *quotes* the banner mid
+///     sentence (the human then silently loses its `⏳`/turn), and
+///   * false-negatives on a banner with slightly different trailing summary text
+///     or newline layout.
+/// We instead anchor on provenance: a real continuation banner is the whole
+/// injected text and STARTS with the canonical opening. A human quoting the
+/// banner inside a normal request will not have it at the very start, so it can
+/// never trip the classifier. The opening sentence is the stable machine
+/// envelope; everything after it (the summary body) is free-form and is NOT
+/// matched, so trailing/newline variation cannot cause a false negative.
+fn is_system_continuation_prompt(prompt: &str) -> bool {
+    let normalized = strip_terminal_controls(prompt);
+    let normalized = normalized.trim_start();
+    // #3100 codex P2: a real continuation banner can arrive WRAPPED with the
+    // SSH-direct injection envelope (`format_ssh_direct_prompt_notification`),
+    // e.g. when a previously-rendered notification round-trips back into the
+    // terminal and is re-observed. The observed text then begins with
+    // `터미널에 직접 주입된 입력 (tmux : <session>):` followed by a newline (and a
+    // ```text fence) before the actual continuation body. `strip_terminal_controls`
+    // does NOT remove that wrapper, so the canonical `starts_with` below would
+    // fail and the banner would be mis-classified as `HumanTuiDirect` (gaining a
+    // spurious ⏳/anchor/synthetic turn). Strip a LEADING wrapper line — and the
+    // immediately following ```text fence line, if present — so the check runs
+    // against the real banner body. This is anchored to the start: a human merely
+    // quoting the wrapper mid-message keeps its wrapper text deeper in the body
+    // and is not affected.
+    let normalized = strip_leading_injection_wrapper(normalized);
+    let normalized = normalized.trim_start();
+    // Canonical opening sentences of the system-injected continuation banner.
+    // These are anchored to start-of-prompt (the injection envelope), never
+    // matched as an embedded substring.
+    const SYSTEM_CONTINUATION_OPENINGS: &[&str] = &[
+        "This session is being continued from a previous conversation",
+        "Please continue the conversation from where we left it off",
+    ];
+    SYSTEM_CONTINUATION_OPENINGS
+        .iter()
+        .any(|opening| normalized.starts_with(opening))
+}
+
+/// #3100 codex P2: removes a LEADING SSH-direct injection wrapper line so the
+/// continuation classifier can inspect the real banner body.
+///
+/// The wrapper is produced by [`format_ssh_direct_prompt_notification`] and
+/// looks like `터미널에 직접 주입된 입력 (tmux : `<session>`):\n```text\n<body>...`.
+/// Only a wrapper at the very START of `text` is stripped (anchored), so a human
+/// message that merely quotes the marker mid-body is never unwrapped. When the
+/// first line is the wrapper, that line (up to and including its newline) is
+/// dropped; if the next line opens a ```text / ``` code fence it is dropped too,
+/// exposing the banner body that follows. Returns the original slice unchanged
+/// when there is no leading wrapper.
+fn strip_leading_injection_wrapper(text: &str) -> &str {
+    const WRAPPER_MARKER: &str = "터미널에 직접 주입된 입력";
+    if !text.starts_with(WRAPPER_MARKER) {
+        return text;
+    }
+    // Drop the wrapper line (through its newline). Without a newline the wrapper
+    // is the whole text and there is no banner body to expose.
+    let Some(after_wrapper_line) = text.find('\n').map(|idx| &text[idx + 1..]) else {
+        return text;
+    };
+    // The wrapper renders the body inside a ```text fence; skip a leading fence
+    // line so the canonical opening (the fence's first content line) is exposed.
+    let trimmed = after_wrapper_line.trim_start_matches(['\r', '\n']);
+    if let Some(rest) = trimmed.strip_prefix("```") {
+        // Drop the rest of the fence-opening line (e.g. ```text) through its
+        // newline; if the fence opener has no newline there is no body to check.
+        if let Some(idx) = rest.find('\n') {
+            return &rest[idx + 1..];
+        }
+        return after_wrapper_line;
+    }
+    after_wrapper_line
+}
+
 pub(super) fn format_ssh_direct_prompt_notification(
     _provider: &str,
     tmux_session_name: &str,
@@ -3203,6 +3516,22 @@ pub(super) fn format_ssh_direct_prompt_notification(
         truncate_chars(prompt.trim(), SSH_DIRECT_PROMPT_PREVIEW_LIMIT).replace("```", "` ` `");
     format!(
         "터미널에 직접 주입된 입력 (tmux : `{}`):\n```text\n{}\n```",
+        sanitize_inline_code(tmux_session_name),
+        preview,
+    )
+}
+
+/// Neutral session note for a system/compact continuation injection (#3100).
+///
+/// Unlike [`format_ssh_direct_prompt_notification`], this does NOT present the
+/// text as "터미널에 직접 주입된 입력" (an active-turn marker); it is a passive
+/// session event so a reader does not mistake it for a pending human request.
+pub(super) fn format_system_continuation_note(tmux_session_name: &str, prompt: &str) -> String {
+    let prompt = strip_terminal_controls(prompt);
+    let preview =
+        truncate_chars(prompt.trim(), SSH_DIRECT_PROMPT_PREVIEW_LIMIT).replace("```", "` ` `");
+    format!(
+        "🧩 세션 컨텍스트 이어가기 (tmux : `{}`) — 시스템 주입 (활성 턴 아님):\n```text\n{}\n```",
         sanitize_inline_code(tmux_session_name),
         preview,
     )
@@ -3352,6 +3681,305 @@ mod tests {
             );
         }
         assert!(output.contains("ringpagedelc1\n\tkeep"));
+    }
+
+    // #3100: a human typing directly into the TUI is a real active turn.
+    #[test]
+    fn classify_injected_prompt_human_direct_input() {
+        assert_eq!(
+            classify_injected_prompt("please review PR #1234"),
+            InjectedPromptClass::HumanTuiDirect,
+        );
+        assert!(classify_injected_prompt("hi").is_human_active_turn());
+    }
+
+    // #3099: a `<task-notification>` auto-turn is a real provider turn (it earns
+    // a `⏳`) but is not human-driven; its completion cleanup is anchored on the
+    // injected message id, so it is classified distinctly from human input.
+    #[test]
+    fn classify_injected_prompt_task_notification_event() {
+        assert_eq!(
+            classify_injected_prompt(
+                "<task-notification><status>completed</status><task_id>codex-background-event</task_id></task-notification>"
+            ),
+            InjectedPromptClass::TaskNotificationEvent,
+        );
+        // Tolerates a leading terminal-control prefix some injectors prepend.
+        assert_eq!(
+            classify_injected_prompt(
+                "\u{1b}[0m<task-notification><status>completed</status></task-notification>"
+            ),
+            InjectedPromptClass::TaskNotificationEvent,
+        );
+        // An attribute-form opening tag is still recognised.
+        assert_eq!(
+            classify_injected_prompt("<task-notification kind=\"background\"></task-notification>"),
+            InjectedPromptClass::TaskNotificationEvent,
+        );
+        assert!(
+            !classify_injected_prompt(
+                "<task-notification><status>completed</status></task-notification>"
+            )
+            .is_human_active_turn()
+        );
+    }
+
+    // #3100: a compact/system continuation prologue is NOT a human request and
+    // must classify away from the active-turn lifecycle.
+    #[test]
+    fn classify_injected_prompt_system_continuation() {
+        assert_eq!(
+            classify_injected_prompt(
+                "This session is being continued from a previous conversation that ran out of context... Summary:"
+            ),
+            InjectedPromptClass::SystemContinuation,
+        );
+        assert_eq!(
+            classify_injected_prompt("Please continue the conversation from where we left it off"),
+            InjectedPromptClass::SystemContinuation,
+        );
+        assert!(
+            !classify_injected_prompt(
+                "This session is being continued from a previous conversation"
+            )
+            .is_human_active_turn()
+        );
+    }
+
+    // #3100: the system-continuation predicate is the most specific signal and
+    // must win even if the continuation summary embeds a `<task-notification>`.
+    #[test]
+    fn classify_injected_prompt_continuation_wins_over_embedded_task_tag() {
+        let mixed = "This session is being continued from a previous conversation.\nSummary: \
+                     the agent ran <task-notification><status>completed</status></task-notification>";
+        assert_eq!(
+            classify_injected_prompt(mixed),
+            InjectedPromptClass::SystemContinuation,
+        );
+    }
+
+    // #3099 codex re-review (P1): a SystemContinuation must suppress ONLY the
+    // user-turn lifecycle (⏳ + anchor + synthetic ownership) — it must STILL
+    // deliver the provider's assistant output via the bridge tail. The original
+    // early-return ran before the bridge tail spawn, orphaning Claude's output.
+    // This guards the contract that drives the restructured relay flow.
+    #[test]
+    fn system_continuation_suppresses_user_turn_but_still_delivers_output() {
+        let cont = InjectedPromptClass::SystemContinuation;
+        assert!(
+            cont.suppresses_user_turn_lifecycle(),
+            "SystemContinuation must drop the ⏳/user-turn lifecycle"
+        );
+        assert!(
+            cont.still_delivers_assistant_output(),
+            "SystemContinuation must still relay Claude's assistant output (no orphaning)"
+        );
+        assert!(!cont.is_human_active_turn());
+
+        // Human + task-notification turns keep their user-turn lifecycle AND
+        // deliver output.
+        for active in [
+            InjectedPromptClass::HumanTuiDirect,
+            InjectedPromptClass::TaskNotificationEvent,
+        ] {
+            assert!(
+                !active.suppresses_user_turn_lifecycle(),
+                "{active:?} must keep its user-turn lifecycle"
+            );
+            assert!(active.still_delivers_assistant_output());
+        }
+    }
+
+    // #3100 codex re-review (P2): a human message that merely *quotes* the
+    // continuation banner inside a normal request must NOT be mis-classified as
+    // SystemContinuation — otherwise the human silently loses their `⏳`/turn.
+    // Detection is anchored to start-of-prompt, so an embedded quote never trips.
+    #[test]
+    fn classify_injected_prompt_human_quote_of_banner_is_not_continuation() {
+        let human = "Can you check why \"This session is being continued from a previous \
+                     conversation\" keeps showing up in my logs? Please continue the \
+                     conversation from where we left it off was also printed.";
+        assert_eq!(
+            classify_injected_prompt(human),
+            InjectedPromptClass::HumanTuiDirect,
+            "a human quoting the banner mid-message must stay a human turn",
+        );
+        assert!(classify_injected_prompt(human).is_human_active_turn());
+    }
+
+    // #3100 codex re-review (P2): a real machine-injected continuation banner is
+    // the WHOLE prompt body and starts with the canonical opening — even with a
+    // leading terminal-control prefix or leading whitespace the injector may
+    // prepend, it must still classify as SystemContinuation (no false negative).
+    #[test]
+    fn classify_injected_prompt_real_injection_with_leading_controls_is_continuation() {
+        let injected = "\u{1b}[2K\u{1b}[0m  \n\tThis session is being continued from a previous \
+                        conversation that ran out of context.\nAnalysis:\n... summary body ...";
+        assert_eq!(
+            classify_injected_prompt(injected),
+            InjectedPromptClass::SystemContinuation,
+            "a real banner with leading controls/whitespace must classify as continuation",
+        );
+    }
+
+    // #3100 codex P2: a real machine-injected continuation banner can arrive
+    // WRAPPED with the SSH-direct injection envelope (the
+    // `터미널에 직접 주입된 입력 (tmux : <session>):` line + a ```text fence) when a
+    // previously-rendered notification round-trips back into the terminal and is
+    // re-observed. After stripping the wrapper the banner body still starts with
+    // the canonical opening, so it MUST classify as SystemContinuation — otherwise
+    // it falls into the active-turn handler and wrongly gains a ⏳/anchor/synthetic
+    // turn (the exact #3100 path this PR claims to fix).
+    #[test]
+    fn classify_injected_prompt_wrapped_continuation_is_continuation() {
+        // Wrapper + ```text fence, exactly as `format_ssh_direct_prompt_notification`
+        // renders it.
+        let wrapped = "터미널에 직접 주입된 입력 (tmux : `AgentDesk-claude-adk-cc`):\n```text\n\
+                       This session is being continued from a previous conversation that ran out \
+                       of context.\nAnalysis: ... summary body ...\n```";
+        assert_eq!(
+            classify_injected_prompt(wrapped),
+            InjectedPromptClass::SystemContinuation,
+            "a wrapped continuation banner must classify as SystemContinuation",
+        );
+        assert!(!classify_injected_prompt(wrapped).is_human_active_turn());
+
+        // Wrapper without a ```text fence (banner body directly on the next line).
+        let wrapped_no_fence = "터미널에 직접 주입된 입력 (tmux : `s`):\n\
+                                Please continue the conversation from where we left it off";
+        assert_eq!(
+            classify_injected_prompt(wrapped_no_fence),
+            InjectedPromptClass::SystemContinuation,
+        );
+
+        // Wrapper + leading control codes the injector may prepend before the body.
+        let wrapped_with_controls = "터미널에 직접 주입된 입력 (tmux : `s`):\n```text\n\u{1b}[2K  \
+                                     This session is being continued from a previous conversation.";
+        assert_eq!(
+            classify_injected_prompt(wrapped_with_controls),
+            InjectedPromptClass::SystemContinuation,
+        );
+    }
+
+    // #3100 codex P2: stripping the wrapper is anchored to the START. A human
+    // message whose body merely contains/quotes the wrapper marker (not as the
+    // leading line) must NOT be unwrapped and must stay a human turn.
+    #[test]
+    fn classify_injected_prompt_wrapper_quoted_mid_body_is_not_continuation() {
+        let human = "Why does \"터미널에 직접 주입된 입력 (tmux : `s`):\" appear, then \
+                     This session is being continued from a previous conversation in my logs?";
+        assert_eq!(
+            classify_injected_prompt(human),
+            InjectedPromptClass::HumanTuiDirect,
+            "a human quoting the wrapper mid-body must stay a human turn",
+        );
+        assert!(classify_injected_prompt(human).is_human_active_turn());
+
+        // A leading wrapper line whose body is NOT a continuation banner stays a
+        // human turn (the wrapper alone must not force a continuation verdict).
+        let wrapped_human =
+            "터미널에 직접 주입된 입력 (tmux : `s`):\n```text\nplease review PR #1234\n```";
+        assert_eq!(
+            classify_injected_prompt(wrapped_human),
+            InjectedPromptClass::HumanTuiDirect,
+        );
+    }
+
+    // #3100: the neutral session note must not present the system continuation
+    // as "터미널에 직접 주입된 입력" (an active-turn marker).
+    #[test]
+    fn system_continuation_note_is_neutral_not_active_turn() {
+        let note = format_system_continuation_note(
+            "AgentDesk-claude-adk-cc",
+            "This session is being continued from a previous conversation. Summary: ...",
+        );
+        assert!(!note.contains("터미널에 직접 주입된 입력"));
+        assert!(note.contains("세션 컨텍스트 이어가기"));
+        assert!(note.contains("활성 턴 아님"));
+        assert!(note.contains("(tmux : `AgentDesk-claude-adk-cc`)"));
+    }
+
+    // #3099 codex re-review (P2): the `user_msg_id == 0` completion cleanup must
+    // target THIS turn's pinned injected message id, not whatever the single
+    // shared prompt-anchor slot currently holds. A non-zero pinned id selects the
+    // pinned-message path; an absent / zero pinned id falls back to the slot.
+    #[test]
+    fn pinned_anchor_cleanup_target_prefers_pinned_id_over_shared_slot() {
+        assert_eq!(pinned_anchor_cleanup_target(Some(9001)), Some(9001));
+        assert_eq!(pinned_anchor_cleanup_target(Some(0)), None);
+        assert_eq!(pinned_anchor_cleanup_target(None), None);
+    }
+
+    // #3099 codex re-review (P2): the cross-turn A/B race. Injection A records the
+    // shared anchor slot, then injection B overwrites it. When A completes
+    // (`user_msg_id == 0`) it must clean up A's OWN message — the shared slot now
+    // belongs to B, so reading it would `✅` B's still-running message and leave
+    // A's `⏳` stale. The pinned-id cleanup clears the shared slot ONLY if it
+    // still matches this turn, so B's anchor survives until B completes.
+    #[test]
+    fn cross_turn_anchor_cleanup_targets_own_message_and_preserves_later_turn() {
+        use crate::services::tui_prompt_dedupe::{
+            TuiPromptAnchor, clear_prompt_anchor_for_response, prompt_anchor_for_response,
+            record_prompt_anchor,
+        };
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+
+        let tmux = "AgentDesk-claude-anchor-race";
+        let channel = 42_u64;
+        let msg_a = 1001_u64;
+        let msg_b = 2002_u64;
+
+        // A injected: records the shared slot. A's inflight pins msg_a.
+        record_prompt_anchor("claude", tmux, channel, msg_a);
+        // B injected: overwrites the single shared slot with msg_b. B pins msg_b.
+        record_prompt_anchor("claude", tmux, channel, msg_b);
+        assert_eq!(
+            prompt_anchor_for_response("claude", tmux, channel),
+            Some(TuiPromptAnchor {
+                channel_id: channel,
+                message_id: msg_b,
+            }),
+            "shared slot now holds B (the latest injection)"
+        );
+
+        // A completes first. The cleanup selects A's pinned id (not the slot).
+        assert_eq!(pinned_anchor_cleanup_target(Some(msg_a)), Some(msg_a));
+        // The pinned-id path attempts to clear the shared slot for A's anchor; the
+        // slot holds B, so the match guard refuses to clear it — B keeps its `⏳`.
+        assert!(
+            !clear_prompt_anchor_for_response(
+                "claude",
+                tmux,
+                TuiPromptAnchor {
+                    channel_id: channel,
+                    message_id: msg_a,
+                },
+            ),
+            "A's cleanup must NOT clear B's shared slot"
+        );
+        assert_eq!(
+            prompt_anchor_for_response("claude", tmux, channel),
+            Some(TuiPromptAnchor {
+                channel_id: channel,
+                message_id: msg_b,
+            }),
+            "B's anchor survives A's completion"
+        );
+
+        // B completes: it owns the slot, so its pinned cleanup clears it.
+        assert_eq!(pinned_anchor_cleanup_target(Some(msg_b)), Some(msg_b));
+        assert!(clear_prompt_anchor_for_response(
+            "claude",
+            tmux,
+            TuiPromptAnchor {
+                channel_id: channel,
+                message_id: msg_b,
+            },
+        ));
+        assert_eq!(prompt_anchor_for_response("claude", tmux, channel), None);
     }
 
     #[test]

@@ -286,6 +286,17 @@ fn watcher_inflight_represents_external_input(inflight: Option<&InflightTurnStat
     })
 }
 
+/// #3099: an external-input (TUI-direct / task-notification) inflight whose
+/// `user_msg_id == 0` (or a `rebind_origin` synthetic) will be SKIPPED by the
+/// `⏳ → ✅` reaction block (it targets `state.user_msg_id`, and `0` is no real
+/// message). When such a turn completes, the `⏳` was added to a real notify-bot
+/// message tracked by the prompt anchor, so the anchor-lifecycle cleanup must
+/// run instead — otherwise the hourglass goes stale next to a `✅`.
+fn watcher_inflight_needs_anchor_lifecycle_cleanup(inflight: &InflightTurnState) -> bool {
+    watcher_inflight_represents_external_input(Some(inflight))
+        && (inflight.user_msg_id == 0 || inflight.rebind_origin)
+}
+
 fn watcher_direct_terminal_should_commit_session_idle(
     direct_send_delivered: bool,
     inflight_present: bool,
@@ -843,6 +854,40 @@ mod pane_dead_identity_tests {
         assert!(!watcher_should_create_external_input_status_panel(
             false, false, true
         ));
+    }
+
+    // #3099: a TUI-injected task-notification turn completes with an inflight
+    // whose `user_msg_id == 0`; the `⏳ → ✅` reaction block skips it (no real
+    // anchored user message), so it must route to the anchor-lifecycle cleanup
+    // that removes `⏳` from the injected notify-bot message itself.
+    #[test]
+    fn watcher_external_input_user_msg_zero_needs_anchor_cleanup() {
+        let mut external = state_for_turn(0, "AgentDesk-claude-adk-cc");
+        external.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
+        assert!(watcher_inflight_needs_anchor_lifecycle_cleanup(&external));
+
+        // A rebind_origin synthetic (also user_msg_id == 0) likewise needs it.
+        let mut rebind = state_for_turn(0, "AgentDesk-claude-adk-cc");
+        rebind.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
+        rebind.rebind_origin = true;
+        assert!(watcher_inflight_needs_anchor_lifecycle_cleanup(&rebind));
+    }
+
+    // An external-input turn that DOES carry a real anchored message id is
+    // handled by the `⏳ → ✅` block directly, so it must NOT also run the
+    // anchor-lifecycle cleanup (which would double-react / clear the anchor).
+    #[test]
+    fn watcher_external_input_with_real_user_msg_skips_anchor_cleanup() {
+        let mut external = state_for_turn(900, "AgentDesk-claude-adk-cc");
+        external.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
+        assert!(!watcher_inflight_needs_anchor_lifecycle_cleanup(&external));
+    }
+
+    // A normal managed (Discord-intake) turn never uses the injected-anchor path.
+    #[test]
+    fn watcher_managed_turn_never_needs_anchor_cleanup() {
+        let managed = state_for_turn(0, "AgentDesk-claude-adk-cc");
+        assert!(!watcher_inflight_needs_anchor_lifecycle_cleanup(&managed));
     }
 
     #[test]
@@ -6953,6 +6998,37 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 } else {
                     "watcher_terminal_delivery_visible_without_inflight"
                 },
+            )
+            .await;
+        } else if terminal_output_committed
+            && !lifecycle_stage_paused
+            && inflight_state
+                .as_ref()
+                .is_some_and(watcher_inflight_needs_anchor_lifecycle_cleanup)
+        {
+            // #3099: the `⏳ → ✅` block below targets `state.user_msg_id`, but a
+            // TUI-injected task-notification turn can complete with an inflight
+            // whose `user_msg_id == 0` (no anchored Discord user message) while a
+            // real notify-bot message still carries the `⏳`. The
+            // `should_complete_tui_direct_anchor_lifecycle` gate above does not
+            // fire here because an inflight is still present, so clean the
+            // hourglass off the injected message's OWN id.
+            //
+            // #3099 codex re-review (P2): target THIS turn's pinned
+            // `injected_prompt_message_id` rather than re-reading the single shared
+            // prompt-anchor slot — under rapid/parallel injection that slot may
+            // already belong to a later turn, and reading it would `✅` the wrong
+            // (still-running) message.
+            let pinned_injected_message_id = inflight_state
+                .as_ref()
+                .and_then(|state| state.injected_prompt_message_id);
+            let _ = crate::services::discord::tui_prompt_relay::complete_tui_direct_anchor_lifecycle_for_inflight(
+                &http,
+                watcher_provider.as_str(),
+                &tmux_session_name,
+                channel_id,
+                pinned_injected_message_id,
+                "watcher_task_notification_anchor_cleanup_user_msg_zero",
             )
             .await;
         }
