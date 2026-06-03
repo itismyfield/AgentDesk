@@ -453,4 +453,56 @@ mod tests {
             "queued card releases with true once the edit/replace flush finishes — it lands as a trailing notice, never interleaved"
         );
     }
+
+    /// P1-2 residual: in the edit/replace path the FIRST chunk is delivered via
+    /// `edit_channel_message`, and only the continuation loop bumps progress.
+    /// On a multi-chunk answer there is a real gap between acquiring the guard
+    /// (which seeds `last_progress`) and the first continuation send: the first
+    /// edit itself takes time (rate-limit wait + HTTP round-trip). If that gap
+    /// exceeds the waiter's inactivity grace, the queued-card waiter would
+    /// spuriously expire mid-flush. The fix bumps `note_progress` right after the
+    /// first edit succeeds (multi-chunk path only). This test models that bridge:
+    /// guard acquired, then a delay LONGER than the inactivity grace, then the
+    /// first-edit progress bump — the waiter must NOT have expired across the gap.
+    #[tokio::test]
+    async fn first_edit_progress_bump_bridges_gap_before_first_continuation() {
+        let barrier = Arc::new(AnswerFlushBarrier::default());
+        let channel = ChannelId::new(11);
+
+        // begin_flush seeds last_progress at acquire time.
+        let guard = barrier.begin_flush(channel);
+
+        let barrier_for_card = barrier.clone();
+        // Short 100ms inactivity grace so the first-edit gap can exceed it.
+        let queued_card = tokio::spawn(async move {
+            barrier_for_card
+                .wait_for_flush(channel, Duration::from_millis(100), Duration::from_secs(30))
+                .await
+        });
+
+        // The first edit is in flight for ~80ms (under grace so far)...
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        // ...the first edit SUCCEEDS — this is the new multi-chunk bump that the
+        // residual fix adds. Without it, the next progress signal would only come
+        // from the first continuation send, and the cumulative gap below would
+        // trip the 100ms inactivity grace.
+        barrier.note_progress(channel);
+
+        // The first continuation is then itself in flight for another ~80ms. The
+        // total elapsed (≈160ms) now exceeds the 100ms grace, but because the
+        // first-edit bump reset the window the waiter must still be blocked.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(
+            !queued_card.is_finished(),
+            "first-edit progress bump must keep the queued-card waiter blocked across the edit→continuation gap (multi-chunk path)"
+        );
+
+        // First continuation lands (continuation-loop bump), then the answer ends.
+        barrier.note_progress(channel);
+        drop(guard);
+        assert!(
+            queued_card.await.unwrap(),
+            "queued card releases with true once the multi-chunk edit/replace answer finishes — never cut short mid-flush"
+        );
+    }
 }

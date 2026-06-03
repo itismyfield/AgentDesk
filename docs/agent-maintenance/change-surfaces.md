@@ -157,11 +157,14 @@
     split before adding non-bugfix behavior).
   - `src/services/discord/turn_bridge/completion_guard.rs` (1909 lines).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (1243 lines).
-  - `src/services/discord/formatting.rs` (2755 lines; +35 from #3082
+  - `src/services/discord/formatting.rs` (2766 lines; +46 from #3082
     answer-flush-barrier guards (+11 around the plain multi-chunk send loops;
     +24 from the #3082 codex follow-up that also guards the edit/replace path
     `replace_long_message_raw_with_outcome` and bumps `note_progress` after each
-    delivered chunk for the progress-aware flush wait)).
+    delivered chunk for the progress-aware flush wait; +11 from the codex P1-2
+    residual that bumps `note_progress` after the FIRST edited chunk too, on the
+    multi-chunk path only, so the queued-card waiter's inactivity grace cannot
+    expire between the first edit and the first continuation)).
   - `src/services/discord/settings.rs` (2479 lines).
   - `src/services/discord/prompt_builder/` (directory, refactored).
   - `src/services/discord/runtime_bootstrap.rs` (2567 lines after #2558

@@ -3146,6 +3146,17 @@ pub(super) async fn replace_long_message_raw_with_outcome(
         return Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error });
     }
 
+    // #3082 P1-2 residual: the FIRST edited chunk also delivers answer payload
+    // while the multi-chunk barrier guard is held. Mirror the continuation loop
+    // (and the two send loops) by bumping the answer-flush barrier's inactivity
+    // window here too, so a queued-card waiter's inactivity grace cannot
+    // spuriously expire between this first edit and the first continuation send.
+    // Only on the multi-chunk path (guard active) — single-chunk edits hold no
+    // guard and have no continuation to race against.
+    if total > 1 {
+        shared.answer_flush_barrier.note_progress(channel_id);
+    }
+
     if total == 1 {
         tracing::debug!(
             target: "discord::chunker",
