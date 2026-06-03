@@ -651,21 +651,17 @@ async fn build_health_snapshot_with_options(
         0
     };
     let (global_active, global_counter_degraded_reason) =
-        assert_global_active_invariant(global_active, provider_active_turns, global_finalizing);
+        observe_global_active_invariant(global_active, provider_active_turns, global_finalizing);
     if let Some(reason) = global_counter_degraded_reason {
-        // Single-authority +1/-1 gating (#3019) makes `global_active` ==
-        // observed mailbox active-turn count an invariant. A degraded reason
-        // here means that invariant broke (real drift) or a pathological
-        // wraparound was read. Fail fast loudly in dev/CI so a regression is
-        // caught at its source instead of being silently papered over the way
-        // the old `normalize_global_active_counter` band-aid did. Release
-        // builds (debug_assert compiled out) still surface it via the degraded
-        // reason + the tracing::error metric emitted inside the detector.
-        debug_assert!(
-            false,
-            "global_active invariant violation: {reason} \
-             (single-authority increment/decrement drifted from mailbox state)"
-        );
+        // The ONLY degraded reason this can produce now is a pathological
+        // wraparound/out-of-bounds read (`global_active_counter_out_of_bounds`).
+        // Routine in-band drift between the (non-atomic, sequentially collected)
+        // mailbox snapshot and the atomic read is OBSERVE-ONLY — it is reported
+        // via a debug-level trace inside the detector but never degrades health
+        // and never panics, because that drift is reachable in normal operation
+        // (see the detector docs). A wraparound, by contrast, is genuinely
+        // unreachable under the saturating-decrement floor (#2934), so we still
+        // surface it as degraded for operator visibility.
         status = status.worsen(HealthStatus::Degraded);
         degraded_reasons.push(reason);
     }
@@ -710,40 +706,41 @@ fn count_active_turns(provider_probe: &provider_probe::ProviderProbe) -> usize {
 /// and a single saturating decrement authority
 /// ([`saturating_decrement_global_active`](crate::services::discord::saturating_decrement_global_active)),
 /// each fired +1/-1 IFF the matching mailbox slot actually
-/// activated/finished. With that 1:1 gating the invariant holds:
+/// activated/finished. The #3019 deliverable is that we now report the REAL
+/// atomic `global_active` instead of the masked-over observed count.
 ///
-///   `global_active` == number of mailbox slots in started-not-finished state
-///                   == `provider_active_turns`
+/// WHY IN-BAND DRIFT IS OBSERVE-ONLY (codex review): the health snapshot is NOT
+/// an atomic view. It reads each mailbox actor SEQUENTIALLY to derive
+/// `provider_active_turns`, then reads the `global_active` atomic afterward.
+/// Nothing serializes channel transitions against that collection, so multiple
+/// channels can legitimately start/finish in the window between those reads.
+/// Worse, the turn dispatchers (`headless_turn.rs`, `intake_turn.rs`) acquire
+/// the mailbox slot BEFORE they increment `global_active`, so within that window
+/// two concurrent normal starts produce a drift greater than 1. A fixed
+/// tolerance therefore cannot distinguish a real counter bug from a benign,
+/// reachable-in-normal-operation snapshot race. Treating such drift as a
+/// `degraded` reason — or, worse, a `debug_assert` panic — produced FALSE
+/// POSITIVES and flaky CI on a perfectly healthy relay.
 ///
-/// so the silent auto-correction is redundant. We therefore stop substituting
-/// the observed count on the routine path and instead make any real drift LOUD:
-/// a `tracing::error` metric, a degraded health reason, AND — at the snapshot
-/// callsite — a `debug_assert` so CI/dev builds fail fast. The displayed value
-/// is the REAL atomic so operators see the truth rather than a masked-over
-/// number.
+/// So in-band drift is now OBSERVE-ONLY: we always report the real atomic value
+/// and, when it disagrees with the (non-atomic) observed count, emit at most a
+/// debug-level trace as a metric. No degraded health, no panic.
 ///
-/// The wraparound floor still matters for display safety: although the
+/// The wraparound floor still matters for DISPLAY safety: although the
 /// saturating decrement floor (#2934) prevents a writer from wrapping 0 →
 /// `usize::MAX`, if a wrapped value is ever observed we clamp the DISPLAY to
 /// `provider_active_turns` so a single garbage reading does not poison the
-/// snapshot — but loudly, never silently. The clamp is no longer a routine
-/// drift-masking path; it only triggers on a pathological out-of-bounds read
-/// that should never happen under the single-authority invariant.
+/// snapshot. That path is genuinely unreachable under the single-authority
+/// invariant, so — unlike in-band drift — it still surfaces a degraded reason
+/// for operator visibility. It is a clamp for display safety, never a silent
+/// drift-masking path.
 ///
-/// This is the PURE detector (return value is easily unit-testable). The
-/// fail-fast `debug_assert` lives at the snapshot callsite so the routine path
-/// here can also be exercised for its returned degraded reason without
-/// panicking the test binary.
-pub(super) fn assert_global_active_invariant(
+/// This is the PURE detector (return value is easily unit-testable).
+pub(super) fn observe_global_active_invariant(
     raw_global_active: usize,
     provider_active_turns: usize,
     global_finalizing: usize,
 ) -> (usize, Option<String>) {
-    // Snapshot-derived active turns and the global atomic are observed at
-    // different instants, so a small transient skew (a turn started/finished
-    // between collecting the provider snapshots and reading the atomic) is a
-    // benign race, NOT drift. Tolerate one in-flight transition either way.
-    const SNAPSHOT_RACE_TOLERANCE: usize = 1;
     // A reading at/above this threshold can only be a wraparound/garbage value;
     // the single-authority saturating decrement floor (#2934) means a healthy
     // writer can never produce it.
@@ -767,26 +764,20 @@ pub(super) fn assert_global_active_invariant(
         );
     }
 
-    // In-band reading: report the REAL atomic. If it disagrees with the
-    // observed mailbox count beyond the snapshot-race tolerance the 1:1
-    // increment/decrement invariant has drifted — surface it loudly instead of
-    // masking it. (The drift is reported but the real value is still shown so
-    // operators are not fed a fabricated count.)
+    // In-band reading: always report the REAL atomic. Any disagreement with the
+    // observed mailbox count is a benign, reachable snapshot race (the snapshot
+    // is non-atomic and slots are acquired before the counter is incremented),
+    // so it is OBSERVE-ONLY: at most a debug-level metric trace, never a
+    // degraded reason and never a panic.
     let drift = raw_global_active.abs_diff(provider_active_turns);
-    if drift > SNAPSHOT_RACE_TOLERANCE {
-        tracing::error!(
+    if drift > 0 {
+        tracing::debug!(
             target: "agentdesk::global_active",
             global_active = raw_global_active,
             provider_active_turns,
             global_finalizing,
             drift,
-            "global_active drift vs observed mailbox state (invariant assertion fired)"
-        );
-        return (
-            raw_global_active,
-            Some(format!(
-                "global_active_drift:global_active={raw_global_active}:provider_active_turns={provider_active_turns}:global_finalizing={global_finalizing}"
-            )),
+            "global_active vs observed mailbox snapshot drift (observe-only; benign snapshot race)"
         );
     }
 
