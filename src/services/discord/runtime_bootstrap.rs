@@ -962,33 +962,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         &voice_config,
     ));
 
-    // #2274: rehydrate the process-local voice-background handoff store
-    // from the durable PG side table. Long background turns may have been
-    // in flight when this process last exited; their markers will live in
-    // PG and need to be reinstated in memory before terminal-delivery
-    // callbacks consult the hot path. Best-effort — a PG error here is
-    // logged and the terminal-delivery path falls back to a per-call
-    // `load_handoff_durable` lookup.
-    if let Some(pool) = pg_pool.as_ref() {
-        match crate::voice::announce_meta::rehydrate_handoffs_from_pg(pool).await {
-            Ok(count) => {
-                if count > 0 {
-                    tracing::info!(
-                        rehydrated = count,
-                        "voice_background_handoff_meta rehydrated from durable PG store"
-                    );
-                } else {
-                    tracing::debug!("voice_background_handoff_meta rehydrate found no live rows");
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "voice_background_handoff_meta rehydrate failed; terminal-delivery will fall back to per-call durable load"
-                );
-            }
-        }
-    }
+    run_bot_rehydrate_voice_handoffs(&pg_pool).await;
 
     // Cleanup stale Discord uploads on process start
     cleanup_old_uploads(UPLOAD_MAX_AGE);
@@ -1017,129 +991,28 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     let restored_codex_goals_channels = restored_codex_goals_enabled_channels(&bot_settings);
     let restored_codex_goals_reset_channels = restored_codex_goals_reset_channels(&bot_settings);
 
-    let shared = Arc::new(SharedData {
-        core: Mutex::new(CoreState {
-            sessions: HashMap::new(),
-            active_meetings: HashMap::new(),
-        }),
-        mailboxes: ChannelMailboxRegistry::default(),
-        settings: tokio::sync::RwLock::new(bot_settings),
-        api_timestamps: dashmap::DashMap::new(),
-        skills_cache: tokio::sync::RwLock::new(initial_skills),
-        tmux_watchers: super::TmuxWatcherRegistry::new(),
-        tmux_relay_coords: dashmap::DashMap::new(),
-        placeholder_cleanup: Arc::new(
-            super::placeholder_cleanup::PlaceholderCleanupRegistry::default(),
-        ),
-        placeholder_controller: Arc::new(
-            super::placeholder_controller::PlaceholderController::default(),
-        ),
-        placeholder_live_events: Arc::new(
-            super::placeholder_live_events::PlaceholderLiveEvents::default(),
-        ),
-        placeholder_live_events_enabled,
-        status_panel_v2_enabled,
-        queued_placeholders: dashmap::DashMap::new(),
-        queue_exit_placeholder_clears: {
-            let map = dashmap::DashMap::new();
-            for (key, placeholder_msg_id) in
-                super::queued_placeholders_store::load_queue_exit_placeholder_clears(
-                    &provider,
-                    &token_hash,
-                )
-            {
-                map.insert(key, placeholder_msg_id);
-            }
-            map
-        },
-        queued_placeholders_persist_locks: dashmap::DashMap::new(),
-        answer_flush_barrier: std::sync::Arc::new(
-            super::answer_flush_barrier::AnswerFlushBarrier::default(),
-        ),
-        recovering_channels: dashmap::DashMap::new(),
-        shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        current_generation: runtime_store::load_generation(),
-        restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),
-        recovery_started_at: std::time::Instant::now(),
-        recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
+    let shared = run_bot_build_shared_data(
+        bot_settings,
+        initial_skills,
+        &provider,
+        &token_hash,
+        &voice_barge_in,
         global_active,
-        turn_finalizer: super::turn_finalizer::TurnFinalizer::spawn(),
-        status_panel_controller: super::status_panel_controller::StatusPanelController::spawn(
-            status_panel_v2_enabled,
-        ),
         global_finalizing,
-        shutdown_remaining: shutdown_remaining.clone(),
-        shutdown_counted: std::sync::atomic::AtomicBool::new(false),
-        intake_dedup: dashmap::DashMap::new(),
-        dispatch_thread_parents: dashmap::DashMap::new(),
-        bot_connected: std::sync::atomic::AtomicBool::new(false),
-        last_turn_at: std::sync::Mutex::new(None),
-        model_overrides: {
-            let map = dashmap::DashMap::new();
-            for (channel_id, model) in &restored_model_overrides {
-                map.insert(*channel_id, model.clone());
-            }
-            map
-        },
-        fast_mode_channels: {
-            let set = dashmap::DashSet::new();
-            for channel_id in &restored_fast_mode_channels {
-                set.insert(*channel_id);
-            }
-            set
-        },
-        fast_mode_session_reset_pending: {
-            let set = dashmap::DashSet::new();
-            for entry in &restored_fast_mode_reset_entries {
-                set.insert(entry.clone());
-            }
-            set
-        },
-        codex_goals_channels: {
-            let set = dashmap::DashSet::new();
-            for channel_id in &restored_codex_goals_channels {
-                set.insert(*channel_id);
-            }
-            set
-        },
-        codex_goals_session_reset_pending: {
-            let set = dashmap::DashSet::new();
-            for channel_id in &restored_codex_goals_reset_channels {
-                set.insert(*channel_id);
-            }
-            set
-        },
-        model_session_reset_pending: dashmap::DashSet::new(),
-        session_reset_pending: bootstrap_session_reset_pending_channels(
-            &restored_model_overrides,
-            &restored_fast_mode_reset_channels,
-            &restored_codex_goals_reset_channels,
-        ),
-        model_picker_pending: dashmap::DashMap::new(),
-        dispatch_role_overrides: dashmap::DashMap::new(),
-        voice_barge_in: voice_barge_in.clone(),
-        voice_pairings: Arc::new(voice_routing::VoiceChannelPairingStore::load_default()),
-        last_message_ids: dashmap::DashMap::new(),
-        catch_up_retry_pending: dashmap::DashMap::new(),
-        turn_start_times: dashmap::DashMap::new(),
-        channel_rosters: dashmap::DashMap::new(),
-        cached_serenity_ctx: tokio::sync::OnceCell::new(),
-        cached_bot_token: tokio::sync::OnceCell::new(),
-        token_hash: token_hash.clone(),
-        provider: provider.clone(),
-        api_port,
+        &shutdown_remaining,
+        &health_registry,
         pg_pool,
         engine,
-        health_registry: Arc::downgrade(&health_registry),
-        known_slash_commands: tokio::sync::OnceCell::new(),
-        // #2448: capacity 256 gives ~hundreds of in-flight turns headroom
-        // before a slow listener triggers `RecvError::Lagged`. The standby
-        // relay subscriber falls back to file polling on lag.
-        inflight_signals: tokio::sync::broadcast::channel(256).0,
-    });
+        api_port,
+        placeholder_live_events_enabled,
+        status_panel_v2_enabled,
+        &restored_model_overrides,
+        &restored_fast_mode_channels,
+        &restored_fast_mode_reset_entries,
+        &restored_fast_mode_reset_channels,
+        &restored_codex_goals_channels,
+        &restored_codex_goals_reset_channels,
+    );
     super::tui_prompt_relay::spawn_tui_prompt_relay(shared.clone(), provider.clone());
 
     // Phase 5.2 of intake-node-routing (issue #2009): populate
@@ -1155,18 +1028,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // semantics.
     let _ = shared.cached_bot_token.set(token.to_string());
 
-    let voice_hook: Option<Arc<dyn crate::voice::VoiceReceiveHook>> =
-        voice_barge_in.enabled().then(|| {
-            Arc::new(voice_barge_in::DiscordVoiceBargeInHook::new(
-                voice_barge_in.clone(),
-                shared.clone(),
-                provider.clone(),
-            )) as Arc<dyn crate::voice::VoiceReceiveHook>
-        });
     let voice_receiver =
-        crate::voice::VoiceReceiver::from_voice_config_with_hook(&voice_config, voice_hook);
-    voice_barge_in.spawn_sensitivity_ttl_reset(shared.shutting_down.clone());
-    voice_barge_in.spawn_progress_worker(shared.clone(), shared.shutting_down.clone());
+        run_bot_init_voice_workers(&voice_config, &voice_barge_in, &shared, &provider);
 
     // Phase 5.1 of intake-node-routing (issue #2007): only spawn the
     // intake_worker poll loop when routing is explicitly enforced. In the
@@ -1184,105 +1047,30 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // On standby today no signal handler is wired; the worker exits
     // when launchd kills the process during deploy. A follow-up could
     // add SIGTERM handling on the standby path for graceful drain.
-    if matches!(
-        crate::services::cluster::intake_router_hook::IntakeRoutingMode::from_env(),
-        crate::services::cluster::intake_router_hook::IntakeRoutingMode::Enforce
-    ) {
-        if let Some(pool_for_intake_worker) = shared.pg_pool.clone() {
-            let intake_worker_http = std::sync::Arc::new(serenity::http::Http::new(token));
-            let intake_worker_shared = shared.clone();
-            let intake_worker_token = token.to_string();
-            let intake_worker_provider = provider.as_str().to_string();
-            let intake_worker_cancel = shared.shutting_down.clone();
-            // The intake_worker spawn runs concurrently with `cluster::bootstrap`
-            // which is the writer of `SELF_INSTANCE_ID`. Resolving
-            // `target_instance_id` eagerly here would race and pick up the
-            // hostname+PID fallback (e.g. `itismyfieldui-Macmini-46662`)
-            // instead of the configured cluster id (e.g. `mac-mini-release`).
-            // The leader hook (`intake_router_hook::try_route_intake`) resolves
-            // the same function later, by which time bootstrap has populated
-            // the OnceLock — the two ids must match or every claim misses.
-            // Bridge the race by awaiting the OnceLock inside the spawned task
-            // before the worker logs "poll loop started".
-            tokio::spawn(async move {
-                let resolved_target_id =
-                    crate::services::cluster::node_registry::wait_for_self_instance_id(
-                        std::time::Duration::from_secs(30),
-                    )
-                    .await;
-                // claim_owner appends provider so multi-bot deployments
-                // surface which token's worker holds a row in
-                // observability dashboards.
-                let resolved_claim_owner =
-                    format!("{}:{}", resolved_target_id, intake_worker_provider);
-                crate::services::cluster::intake_worker::run_intake_worker_loop(
-                    pool_for_intake_worker,
-                    intake_worker_http,
-                    intake_worker_shared,
-                    intake_worker_token,
-                    resolved_target_id,
-                    intake_worker_provider,
-                    resolved_claim_owner,
-                    crate::services::cluster::intake_worker::IntakeWorkerConfig::default(),
-                    intake_worker_cancel,
-                )
-                .await;
-            });
-        } else {
-            tracing::info!(
-                "[intake_worker] postgres pool unavailable — intake-node-routing worker not started"
-            );
-        }
-    }
+    run_bot_maybe_spawn_intake_worker(&shared, token, &provider);
 
     // After optional worker setup, do the gateway lease check. Standby nodes
     // (lease held elsewhere) early-return below; when intake routing is
     // enforced, the detached worker task keeps polling using `Arc<SharedData>`.
-    let gateway_lease = match shared.pg_pool.as_ref() {
-        Some(pool) => match try_acquire_discord_gateway_lease(pool, &token_hash, &provider).await {
-            Ok(Some(lease)) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] 🔐 GATEWAY-LEASE: {} acquired singleton lease",
-                    provider.display_name()
-                );
-                Some(lease)
-            }
-            Ok(None) => {
-                run_startup_diagnostic_after_reconcile_barrier(
-                    startup_reconcile_remaining,
-                    startup_doctor_started,
-                    health_registry,
-                    api_port,
-                )
-                .await;
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⏭ GATEWAY-LEASE: {} launch skipped — singleton lease held elsewhere",
-                    provider.display_name()
-                );
-                shutdown_remaining.fetch_sub(1, Ordering::AcqRel);
-                return;
-            }
-            Err(error) => {
-                run_startup_diagnostic_after_reconcile_barrier(
-                    startup_reconcile_remaining,
-                    startup_doctor_started,
-                    health_registry,
-                    api_port,
-                )
-                .await;
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⏭ GATEWAY-LEASE: {} launch skipped — failed to acquire singleton lease: {}",
-                    provider.display_name(),
-                    error
-                );
-                shutdown_remaining.fetch_sub(1, Ordering::AcqRel);
-                return;
-            }
-        },
-        None => None,
+    let gateway_lease = match run_bot_acquire_gateway_lease(
+        &shared,
+        &token_hash,
+        &provider,
+        &startup_reconcile_remaining,
+        &startup_doctor_started,
+        &health_registry,
+        api_port,
+    )
+    .await
+    {
+        GatewayLeaseOutcome::Proceed(lease) => lease,
+        GatewayLeaseOutcome::Skip => {
+            // Standby / lease-held-elsewhere / acquire-error: the diagnostic
+            // already ran inside the helper. Decrement the shutdown barrier
+            // and abort startup exactly as the original early-returns did.
+            shutdown_remaining.fetch_sub(1, Ordering::AcqRel);
+            return;
+        }
     };
 
     {
@@ -1315,51 +1103,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     let voice_config_for_setup = voice_config.clone();
     let voice_receiver_for_setup = voice_receiver.clone();
 
-    let mut slash_commands = vec![
-        commands::cmd_start(),
-        commands::cmd_pwd(),
-        commands::cmd_status(),
-        commands::cmd_inflight(),
-        commands::cmd_clear(),
-        commands::cmd_stop(),
-        commands::cmd_down(),
-        commands::cmd_shell(),
-        commands::cmd_skill(),
-        commands::cmd_cc(),
-        commands::cmd_metrics(),
-        commands::cmd_model(),
-        commands::cmd_fast(),
-        commands::cmd_goals(),
-        commands::cmd_effort(),
-        commands::cmd_compact(),
-        commands::cmd_cost(),
-        commands::cmd_context(),
-        commands::cmd_adk(),
-        commands::cmd_voice(),
-        commands::cmd_vc_join(),
-        commands::cmd_vc_leave(),
-    ];
-    slash_commands.extend([
-        commands::cmd_queue(),
-        commands::cmd_health(),
-        commands::cmd_sessions(),
-        commands::cmd_deletesession(),
-        commands::cmd_allowedtools(),
-        commands::cmd_allowed(),
-        commands::cmd_debug(),
-        commands::cmd_allowall(),
-        commands::cmd_adduser(),
-        commands::cmd_removeuser(),
-        commands::cmd_usage(),
-        commands::cmd_receipt(),
-        commands::cmd_help(),
-        commands::cmd_meeting(),
-        commands::cmd_restart(),
-        commands::cmd_deadlock_recover(),
-        commands::cmd_machine_flip(),
-        commands::cmd_stuck_pr_rebase(),
-        commands::cmd_adk_phase(),
-    ]);
+    let slash_commands = run_bot_build_slash_commands();
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
@@ -2144,84 +1888,18 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
     let intents = discord_gateway_intents();
 
-    let mut client = commands::register_songbird(serenity::ClientBuilder::new(token, intents))
+    let client = commands::register_songbird(serenity::ClientBuilder::new(token, intents))
         .framework(framework)
         .await
         .expect("Failed to create Discord client");
 
-    let gateway_lease_task = gateway_lease.map(|mut lease| {
-        let shared_for_lease = shared.clone();
-        let provider_for_lease = provider.clone();
-        let shard_manager = client.shard_manager.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(DISCORD_GATEWAY_LEASE_KEEPALIVE_INTERVAL);
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-
-                if shared_for_lease
-                    .shutting_down
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    let _ = lease.unlock().await;
-                    return;
-                }
-
-                if let Err(error) = lease.keepalive().await {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::error!(
-                        "  [{ts}] ⛔ GATEWAY-LEASE: {} lost singleton lease: {} — self-fencing",
-                        provider_for_lease.display_name(),
-                        error
-                    );
-
-                    shared_for_lease
-                        .bot_connected
-                        .store(false, std::sync::atomic::Ordering::SeqCst);
-                    shared_for_lease
-                        .shutting_down
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                    shared_for_lease
-                        .restart_pending
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-
-                    for entry in shared_for_lease.tmux_watchers.iter() {
-                        entry
-                            .value()
-                            .cancel
-                            .store(true, std::sync::atomic::Ordering::SeqCst);
-                    }
-
-                    let drain =
-                        mailbox_restart_drain_all(&shared_for_lease, &provider_for_lease).await;
-                    let queue_count = drain.queued_count;
-                    if !drain.persistence_errors.is_empty() {
-                        tracing::error!(
-                            failures = drain.persistence_errors.len(),
-                            "gateway lease self-fence observed pending-queue persistence failure(s)"
-                        );
-                    }
-                    if queue_count > 0 {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!(
-                            "  [{ts}] 📋 GATEWAY-LEASE: persisted {queue_count} pending queue item(s) before self-fence"
-                        );
-                    }
-
-                    let ids: std::collections::HashMap<u64, u64> = shared_for_lease
-                        .last_message_ids
-                        .iter()
-                        .map(|entry| (entry.key().get(), *entry.value()))
-                        .collect();
-                    if !ids.is_empty() {
-                        runtime_store::save_all_last_message_ids(provider_for_lease.as_str(), &ids);
-                    }
-
-                    shard_manager.shutdown_all().await;
-                    return;
-                }
-            }
-        })
+    let gateway_lease_task = gateway_lease.map(|lease| {
+        run_bot_spawn_gateway_lease_keepalive(
+            lease,
+            &shared,
+            &provider,
+            client.shard_manager.clone(),
+        )
     });
 
     // Graceful shutdown: on SIGTERM, persist queue/inflight/last_message state
@@ -2229,6 +1907,507 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // rehydrates the channel bindings (see rehydrate_existing_claude_tui_bindings;
     // polled every CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL ≈ 5s) and resumes transcript
     // tailing from the persisted last_offset.
+    run_bot_spawn_sigterm_handler(&shared, provider_for_shutdown);
+
+    run_bot_run_gateway_backend(
+        client,
+        &provider_for_error,
+        gateway_lease_task,
+        startup_reconcile_remaining_for_client_start,
+        startup_doctor_started_for_client_start,
+        health_registry_for_client_start,
+        api_port,
+    )
+    .await;
+}
+
+// ── run_bot startup-phase helpers (decomposition of the run_bot
+// god-function, issue #3038). These are behavior-preserving extractions:
+// each helper runs the exact statements it replaced, in the same order,
+// and run_bot calls them in the same order with the same threaded state.
+// INITIALIZATION/SPAWN ORDER IS LOAD-BEARING — do not reorder. ──
+
+/// #2274: rehydrate the process-local voice-background handoff store from the
+/// durable PG side table. Best-effort — a PG error is logged and the
+/// terminal-delivery path falls back to a per-call `load_handoff_durable`
+/// lookup. Runs early in run_bot, before upload cleanup and SharedData build.
+async fn run_bot_rehydrate_voice_handoffs(pg_pool: &Option<sqlx::PgPool>) {
+    if let Some(pool) = pg_pool.as_ref() {
+        match crate::voice::announce_meta::rehydrate_handoffs_from_pg(pool).await {
+            Ok(count) => {
+                if count > 0 {
+                    tracing::info!(
+                        rehydrated = count,
+                        "voice_background_handoff_meta rehydrated from durable PG store"
+                    );
+                } else {
+                    tracing::debug!("voice_background_handoff_meta rehydrate found no live rows");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "voice_background_handoff_meta rehydrate failed; terminal-delivery will fall back to per-call durable load"
+                );
+            }
+        }
+    }
+}
+
+/// Outcome of the gateway singleton-lease acquisition phase.
+enum GatewayLeaseOutcome {
+    /// Either the lease was acquired (`Some`) or there is no PG pool (`None`,
+    /// the standalone/no-DB path). Either way, startup proceeds.
+    Proceed(Option<crate::db::postgres::AdvisoryLockLease>),
+    /// Lease is held elsewhere, or acquisition failed. The startup diagnostic
+    /// has already run; run_bot must decrement the shutdown barrier and return.
+    Skip,
+}
+
+/// Build all owned `SharedData` fields and wrap in an `Arc`. Side-effecting
+/// initializers (`TurnFinalizer::spawn`, `StatusPanelController::spawn`,
+/// `runtime_store::load_generation`, `load_queue_exit_placeholder_clears`,
+/// the `inflight_signals` broadcast channel) run here in the exact same order
+/// as the original inline struct literal. `bot_settings`, `initial_skills`,
+/// `global_active`, `global_finalizing`, `pg_pool`, and `engine` are consumed
+/// by move; the `restored_*` slices are borrowed (they are reused later in
+/// run_bot for logging and session-reset bootstrap).
+#[allow(clippy::too_many_arguments)]
+fn run_bot_build_shared_data(
+    bot_settings: DiscordBotSettings,
+    initial_skills: Vec<(String, String)>,
+    provider: &ProviderKind,
+    token_hash: &str,
+    voice_barge_in: &Arc<voice_barge_in::VoiceBargeInRuntime>,
+    global_active: Arc<std::sync::atomic::AtomicUsize>,
+    global_finalizing: Arc<std::sync::atomic::AtomicUsize>,
+    shutdown_remaining: &Arc<std::sync::atomic::AtomicUsize>,
+    health_registry: &Arc<health::HealthRegistry>,
+    pg_pool: Option<sqlx::PgPool>,
+    engine: Option<crate::engine::PolicyEngine>,
+    api_port: u16,
+    placeholder_live_events_enabled: bool,
+    status_panel_v2_enabled: bool,
+    restored_model_overrides: &[(ChannelId, String)],
+    restored_fast_mode_channels: &[ChannelId],
+    restored_fast_mode_reset_entries: &[String],
+    restored_fast_mode_reset_channels: &[ChannelId],
+    restored_codex_goals_channels: &[ChannelId],
+    restored_codex_goals_reset_channels: &[ChannelId],
+) -> Arc<SharedData> {
+    Arc::new(SharedData {
+        core: Mutex::new(CoreState {
+            sessions: HashMap::new(),
+            active_meetings: HashMap::new(),
+        }),
+        mailboxes: ChannelMailboxRegistry::default(),
+        settings: tokio::sync::RwLock::new(bot_settings),
+        api_timestamps: dashmap::DashMap::new(),
+        skills_cache: tokio::sync::RwLock::new(initial_skills),
+        tmux_watchers: super::TmuxWatcherRegistry::new(),
+        tmux_relay_coords: dashmap::DashMap::new(),
+        placeholder_cleanup: Arc::new(
+            super::placeholder_cleanup::PlaceholderCleanupRegistry::default(),
+        ),
+        placeholder_controller: Arc::new(
+            super::placeholder_controller::PlaceholderController::default(),
+        ),
+        placeholder_live_events: Arc::new(
+            super::placeholder_live_events::PlaceholderLiveEvents::default(),
+        ),
+        placeholder_live_events_enabled,
+        status_panel_v2_enabled,
+        queued_placeholders: dashmap::DashMap::new(),
+        queue_exit_placeholder_clears: {
+            let map = dashmap::DashMap::new();
+            for (key, placeholder_msg_id) in
+                super::queued_placeholders_store::load_queue_exit_placeholder_clears(
+                    provider, token_hash,
+                )
+            {
+                map.insert(key, placeholder_msg_id);
+            }
+            map
+        },
+        queued_placeholders_persist_locks: dashmap::DashMap::new(),
+        answer_flush_barrier: std::sync::Arc::new(
+            super::answer_flush_barrier::AnswerFlushBarrier::default(),
+        ),
+        recovering_channels: dashmap::DashMap::new(),
+        shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        current_generation: runtime_store::load_generation(),
+        restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),
+        recovery_started_at: std::time::Instant::now(),
+        recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
+        global_active,
+        turn_finalizer: super::turn_finalizer::TurnFinalizer::spawn(),
+        status_panel_controller: super::status_panel_controller::StatusPanelController::spawn(
+            status_panel_v2_enabled,
+        ),
+        global_finalizing,
+        shutdown_remaining: shutdown_remaining.clone(),
+        shutdown_counted: std::sync::atomic::AtomicBool::new(false),
+        intake_dedup: dashmap::DashMap::new(),
+        dispatch_thread_parents: dashmap::DashMap::new(),
+        bot_connected: std::sync::atomic::AtomicBool::new(false),
+        last_turn_at: std::sync::Mutex::new(None),
+        model_overrides: {
+            let map = dashmap::DashMap::new();
+            for (channel_id, model) in restored_model_overrides {
+                map.insert(*channel_id, model.clone());
+            }
+            map
+        },
+        fast_mode_channels: {
+            let set = dashmap::DashSet::new();
+            for channel_id in restored_fast_mode_channels {
+                set.insert(*channel_id);
+            }
+            set
+        },
+        fast_mode_session_reset_pending: {
+            let set = dashmap::DashSet::new();
+            for entry in restored_fast_mode_reset_entries {
+                set.insert(entry.clone());
+            }
+            set
+        },
+        codex_goals_channels: {
+            let set = dashmap::DashSet::new();
+            for channel_id in restored_codex_goals_channels {
+                set.insert(*channel_id);
+            }
+            set
+        },
+        codex_goals_session_reset_pending: {
+            let set = dashmap::DashSet::new();
+            for channel_id in restored_codex_goals_reset_channels {
+                set.insert(*channel_id);
+            }
+            set
+        },
+        model_session_reset_pending: dashmap::DashSet::new(),
+        session_reset_pending: bootstrap_session_reset_pending_channels(
+            restored_model_overrides,
+            restored_fast_mode_reset_channels,
+            restored_codex_goals_reset_channels,
+        ),
+        model_picker_pending: dashmap::DashMap::new(),
+        dispatch_role_overrides: dashmap::DashMap::new(),
+        voice_barge_in: voice_barge_in.clone(),
+        voice_pairings: Arc::new(voice_routing::VoiceChannelPairingStore::load_default()),
+        last_message_ids: dashmap::DashMap::new(),
+        catch_up_retry_pending: dashmap::DashMap::new(),
+        turn_start_times: dashmap::DashMap::new(),
+        channel_rosters: dashmap::DashMap::new(),
+        cached_serenity_ctx: tokio::sync::OnceCell::new(),
+        cached_bot_token: tokio::sync::OnceCell::new(),
+        token_hash: token_hash.to_string(),
+        provider: provider.clone(),
+        api_port,
+        pg_pool,
+        engine,
+        health_registry: Arc::downgrade(health_registry),
+        known_slash_commands: tokio::sync::OnceCell::new(),
+        // #2448: capacity 256 gives ~hundreds of in-flight turns headroom
+        // before a slow listener triggers `RecvError::Lagged`. The standby
+        // relay subscriber falls back to file polling on lag.
+        inflight_signals: tokio::sync::broadcast::channel(256).0,
+    })
+}
+
+/// Build the voice receive hook (when barge-in is enabled), construct the
+/// `VoiceReceiver`, and spawn the barge-in sensitivity-TTL-reset and progress
+/// workers. Returns the `VoiceReceiver` so run_bot can hand it to the poise
+/// framework setup. Runs after SharedData is built and before the intake
+/// worker spawn — order preserved.
+fn run_bot_init_voice_workers(
+    voice_config: &crate::voice::VoiceConfig,
+    voice_barge_in: &Arc<voice_barge_in::VoiceBargeInRuntime>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+) -> crate::voice::VoiceReceiver {
+    let voice_hook: Option<Arc<dyn crate::voice::VoiceReceiveHook>> =
+        voice_barge_in.enabled().then(|| {
+            Arc::new(voice_barge_in::DiscordVoiceBargeInHook::new(
+                voice_barge_in.clone(),
+                shared.clone(),
+                provider.clone(),
+            )) as Arc<dyn crate::voice::VoiceReceiveHook>
+        });
+    let voice_receiver =
+        crate::voice::VoiceReceiver::from_voice_config_with_hook(voice_config, voice_hook);
+    voice_barge_in.spawn_sensitivity_ttl_reset(shared.shutting_down.clone());
+    voice_barge_in.spawn_progress_worker(shared.clone(), shared.shutting_down.clone());
+    voice_receiver
+}
+
+/// Phase 5.1 of intake-node-routing (issue #2007): when intake routing is in
+/// Enforce mode and a PG pool exists, spawn the REST-only intake_worker poll
+/// loop (resolves `target_instance_id` inside the task to avoid racing
+/// `cluster::bootstrap`). No-op in disabled/observe modes. Spawned after the
+/// voice workers and before the gateway lease check — order preserved.
+fn run_bot_maybe_spawn_intake_worker(
+    shared: &Arc<SharedData>,
+    token: &str,
+    provider: &ProviderKind,
+) {
+    if matches!(
+        crate::services::cluster::intake_router_hook::IntakeRoutingMode::from_env(),
+        crate::services::cluster::intake_router_hook::IntakeRoutingMode::Enforce
+    ) {
+        if let Some(pool_for_intake_worker) = shared.pg_pool.clone() {
+            let intake_worker_http = std::sync::Arc::new(serenity::http::Http::new(token));
+            let intake_worker_shared = shared.clone();
+            let intake_worker_token = token.to_string();
+            let intake_worker_provider = provider.as_str().to_string();
+            let intake_worker_cancel = shared.shutting_down.clone();
+            // The intake_worker spawn runs concurrently with `cluster::bootstrap`
+            // which is the writer of `SELF_INSTANCE_ID`. Resolving
+            // `target_instance_id` eagerly here would race and pick up the
+            // hostname+PID fallback (e.g. `itismyfieldui-Macmini-46662`)
+            // instead of the configured cluster id (e.g. `mac-mini-release`).
+            // The leader hook (`intake_router_hook::try_route_intake`) resolves
+            // the same function later, by which time bootstrap has populated
+            // the OnceLock — the two ids must match or every claim misses.
+            // Bridge the race by awaiting the OnceLock inside the spawned task
+            // before the worker logs "poll loop started".
+            tokio::spawn(async move {
+                let resolved_target_id =
+                    crate::services::cluster::node_registry::wait_for_self_instance_id(
+                        std::time::Duration::from_secs(30),
+                    )
+                    .await;
+                // claim_owner appends provider so multi-bot deployments
+                // surface which token's worker holds a row in
+                // observability dashboards.
+                let resolved_claim_owner =
+                    format!("{}:{}", resolved_target_id, intake_worker_provider);
+                crate::services::cluster::intake_worker::run_intake_worker_loop(
+                    pool_for_intake_worker,
+                    intake_worker_http,
+                    intake_worker_shared,
+                    intake_worker_token,
+                    resolved_target_id,
+                    intake_worker_provider,
+                    resolved_claim_owner,
+                    crate::services::cluster::intake_worker::IntakeWorkerConfig::default(),
+                    intake_worker_cancel,
+                )
+                .await;
+            });
+        } else {
+            tracing::info!(
+                "[intake_worker] postgres pool unavailable — intake-node-routing worker not started"
+            );
+        }
+    }
+}
+
+/// Acquire the Discord gateway singleton lease (advisory lock) when a PG pool
+/// is present. Returns `Proceed(Some(lease))` on success, `Proceed(None)` when
+/// there is no PG pool (standalone path), or `Skip` when the lease is held
+/// elsewhere / acquisition failed. On the `Skip` paths this runs the
+/// post-reconcile startup diagnostic exactly as the original early-returns did,
+/// before returning; run_bot then decrements the shutdown barrier and returns.
+#[allow(clippy::too_many_arguments)]
+async fn run_bot_acquire_gateway_lease(
+    shared: &Arc<SharedData>,
+    token_hash: &str,
+    provider: &ProviderKind,
+    startup_reconcile_remaining: &Arc<std::sync::atomic::AtomicUsize>,
+    startup_doctor_started: &Arc<std::sync::atomic::AtomicBool>,
+    health_registry: &Arc<health::HealthRegistry>,
+    api_port: u16,
+) -> GatewayLeaseOutcome {
+    match shared.pg_pool.as_ref() {
+        Some(pool) => match try_acquire_discord_gateway_lease(pool, token_hash, provider).await {
+            Ok(Some(lease)) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 🔐 GATEWAY-LEASE: {} acquired singleton lease",
+                    provider.display_name()
+                );
+                GatewayLeaseOutcome::Proceed(Some(lease))
+            }
+            Ok(None) => {
+                run_startup_diagnostic_after_reconcile_barrier(
+                    startup_reconcile_remaining.clone(),
+                    startup_doctor_started.clone(),
+                    health_registry.clone(),
+                    api_port,
+                )
+                .await;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⏭ GATEWAY-LEASE: {} launch skipped — singleton lease held elsewhere",
+                    provider.display_name()
+                );
+                GatewayLeaseOutcome::Skip
+            }
+            Err(error) => {
+                run_startup_diagnostic_after_reconcile_barrier(
+                    startup_reconcile_remaining.clone(),
+                    startup_doctor_started.clone(),
+                    health_registry.clone(),
+                    api_port,
+                )
+                .await;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⏭ GATEWAY-LEASE: {} launch skipped — failed to acquire singleton lease: {}",
+                    provider.display_name(),
+                    error
+                );
+                GatewayLeaseOutcome::Skip
+            }
+        },
+        None => GatewayLeaseOutcome::Proceed(None),
+    }
+}
+
+/// Build the full ordered list of poise slash commands registered by the bot.
+/// Order is preserved exactly as it was inline in run_bot.
+fn run_bot_build_slash_commands() -> Vec<poise::Command<Data, Error>> {
+    let mut slash_commands = vec![
+        commands::cmd_start(),
+        commands::cmd_pwd(),
+        commands::cmd_status(),
+        commands::cmd_inflight(),
+        commands::cmd_clear(),
+        commands::cmd_stop(),
+        commands::cmd_down(),
+        commands::cmd_shell(),
+        commands::cmd_skill(),
+        commands::cmd_cc(),
+        commands::cmd_metrics(),
+        commands::cmd_model(),
+        commands::cmd_fast(),
+        commands::cmd_goals(),
+        commands::cmd_effort(),
+        commands::cmd_compact(),
+        commands::cmd_cost(),
+        commands::cmd_context(),
+        commands::cmd_adk(),
+        commands::cmd_voice(),
+        commands::cmd_vc_join(),
+        commands::cmd_vc_leave(),
+    ];
+    slash_commands.extend([
+        commands::cmd_queue(),
+        commands::cmd_health(),
+        commands::cmd_sessions(),
+        commands::cmd_deletesession(),
+        commands::cmd_allowedtools(),
+        commands::cmd_allowed(),
+        commands::cmd_debug(),
+        commands::cmd_allowall(),
+        commands::cmd_adduser(),
+        commands::cmd_removeuser(),
+        commands::cmd_usage(),
+        commands::cmd_receipt(),
+        commands::cmd_help(),
+        commands::cmd_meeting(),
+        commands::cmd_restart(),
+        commands::cmd_deadlock_recover(),
+        commands::cmd_machine_flip(),
+        commands::cmd_stuck_pr_rebase(),
+        commands::cmd_adk_phase(),
+    ]);
+    slash_commands
+}
+
+/// Spawn the gateway singleton-lease keepalive loop. On lease loss this
+/// self-fences: flips shutdown flags, cancels tmux watchers, drains pending
+/// queues, persists last_message_ids, and shuts down all shards. Spawned
+/// after the client is built (needs `shard_manager`) and before the gateway
+/// backend run. Returns the JoinHandle so run_bot can abort it on backend exit.
+fn run_bot_spawn_gateway_lease_keepalive(
+    mut lease: crate::db::postgres::AdvisoryLockLease,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    shard_manager: Arc<serenity::gateway::ShardManager>,
+) -> tokio::task::JoinHandle<()> {
+    let shared_for_lease = shared.clone();
+    let provider_for_lease = provider.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(DISCORD_GATEWAY_LEASE_KEEPALIVE_INTERVAL);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+
+            if shared_for_lease
+                .shutting_down
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                let _ = lease.unlock().await;
+                return;
+            }
+
+            if let Err(error) = lease.keepalive().await {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::error!(
+                    "  [{ts}] ⛔ GATEWAY-LEASE: {} lost singleton lease: {} — self-fencing",
+                    provider_for_lease.display_name(),
+                    error
+                );
+
+                shared_for_lease
+                    .bot_connected
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                shared_for_lease
+                    .shutting_down
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                shared_for_lease
+                    .restart_pending
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+
+                for entry in shared_for_lease.tmux_watchers.iter() {
+                    entry
+                        .value()
+                        .cancel
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+
+                let drain = mailbox_restart_drain_all(&shared_for_lease, &provider_for_lease).await;
+                let queue_count = drain.queued_count;
+                if !drain.persistence_errors.is_empty() {
+                    tracing::error!(
+                        failures = drain.persistence_errors.len(),
+                        "gateway lease self-fence observed pending-queue persistence failure(s)"
+                    );
+                }
+                if queue_count > 0 {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] 📋 GATEWAY-LEASE: persisted {queue_count} pending queue item(s) before self-fence"
+                    );
+                }
+
+                let ids: std::collections::HashMap<u64, u64> = shared_for_lease
+                    .last_message_ids
+                    .iter()
+                    .map(|entry| (entry.key().get(), *entry.value()))
+                    .collect();
+                if !ids.is_empty() {
+                    runtime_store::save_all_last_message_ids(provider_for_lease.as_str(), &ids);
+                }
+
+                shard_manager.shutdown_all().await;
+                return;
+            }
+        }
+    })
+}
+
+/// Spawn the SIGTERM graceful-shutdown handler. On SIGTERM it persists queue /
+/// inflight / last_message state then quick-exits; tmux/TUI processes survive
+/// for the next dcserver instance to rehydrate. Spawned after the lease
+/// keepalive task and before the gateway backend run.
+fn run_bot_spawn_sigterm_handler(shared: &Arc<SharedData>, provider_for_shutdown: ProviderKind) {
     let shared_for_signal = shared.clone();
     tokio::spawn(async move {
         #[cfg(unix)]
@@ -2360,7 +2539,22 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             }
         }
     });
+}
 
+/// Run the Discord gateway backend (`client.start()`) to completion, classify
+/// the exit, run the post-reconcile startup diagnostic on failure, then abort
+/// and join the gateway-lease keepalive task. This is the final event-loop
+/// entry of run_bot. Consumes `client`.
+#[allow(clippy::too_many_arguments)]
+async fn run_bot_run_gateway_backend(
+    mut client: serenity::Client,
+    provider_for_error: &ProviderKind,
+    gateway_lease_task: Option<tokio::task::JoinHandle<()>>,
+    startup_reconcile_remaining_for_client_start: Arc<std::sync::atomic::AtomicUsize>,
+    startup_doctor_started_for_client_start: Arc<std::sync::atomic::AtomicBool>,
+    health_registry_for_client_start: Arc<health::HealthRegistry>,
+    api_port: u16,
+) {
     let gateway_backend_task = tokio::spawn(async move { client.start().await });
     let gateway_backend_failed = match gateway_backend_task.await {
         Ok(Ok(())) => {
