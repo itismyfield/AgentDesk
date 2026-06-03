@@ -3493,6 +3493,25 @@ async fn decision_route_dispute(
     // atomically with a stale re-check inside the close
     // transaction.
     if body.out_of_scope == Some(true) {
+        return decision_route_dispute_scope_mismatch_close(state, body, pending_rd_id).await;
+    }
+
+    decision_route_dispute_re_review(state, body, pending_rd_id, resume_side_effects_pending).await
+}
+
+/// Phase 3b-i of `submit_review_decision` dispute branch: the out-of-scope
+/// (`body.out_of_scope == Some(true)`) close path. Pure extraction of the
+/// original `if body.out_of_scope == Some(true) { ... }` block (steps 1–8).
+/// Every original early `return` inside the block is preserved verbatim as a
+/// `return` from this helper; the parent dispatches to it unconditionally
+/// inside the same `if`, so control flow, side-effect ordering, and error
+/// paths are identical.
+async fn decision_route_dispute_scope_mismatch_close(
+    state: &AppState,
+    body: &ReviewDecisionBody,
+    pending_rd_id: &Option<String>,
+) -> DecisionResponse {
+    {
         // 1. Caller must prove ownership of the pending review-decision
         //    dispatch via `dispatch_id` matching `pending_rd_id`.
         let rd_id = match (body.dispatch_id.as_deref(), pending_rd_id.as_deref()) {
@@ -3865,7 +3884,24 @@ async fn decision_route_dispute(
             })),
         );
     }
+}
 
+/// Phase 3b-ii of `submit_review_decision` dispute branch: the regular
+/// (non-out-of-scope) re-review path. Pure extraction of the original code
+/// that followed the `if body.out_of_scope` block — consume the pending
+/// review-decision, prepare the dispute re-review entry, record tuning,
+/// cancel stale dispatches, re-fire `OnReviewEnter`, validate the live
+/// review dispatch, update review state, finalize the pending
+/// review-decision, and return. Every original early `return` is preserved
+/// verbatim; the trailing value (originally the function tail) becomes this
+/// helper's tail and is returned by the parent. Control flow, side-effect
+/// ordering, and error paths are identical.
+async fn decision_route_dispute_re_review(
+    state: &AppState,
+    body: &ReviewDecisionBody,
+    pending_rd_id: &Option<String>,
+    resume_side_effects_pending: bool,
+) -> DecisionResponse {
     let rd_consumed = if resume_side_effects_pending {
         true
     } else {
