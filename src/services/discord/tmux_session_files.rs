@@ -57,11 +57,36 @@ const SPAWN_NONCE_SUFFIX: &str = "spawn_nonce";
 /// panel-reset boundary to best-effort, so it is logged rather than silently
 /// swallowed — best-effort writes are exactly what made the earlier mtime key
 /// fragile). The `.generation` marker and its mtime are left untouched.
+///
+/// The write is atomic and stale-safe (#3087 P2): the nonce is written to a
+/// sibling temp file and `rename`d over `.spawn_nonce`, so a reader never sees a
+/// torn/short nonce. If ANY step fails, the destination is removed before the
+/// error returns, so a respawn whose write fails leaves NO readable nonce at all
+/// — the instance key degrades to `None` (panel may redundantly reset) rather
+/// than reading the PRIOR spawn's stale nonce (which would wrongly SUPPRESS the
+/// reset on a genuinely new session). "Absent → None key" is always preferred
+/// over "stale → colliding key".
 pub(crate) fn write_spawn_nonce(tmux_session_name: &str) -> std::io::Result<String> {
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     let path =
         crate::services::tmux_common::session_temp_path(tmux_session_name, SPAWN_NONCE_SUFFIX);
-    std::fs::write(&path, nonce.as_bytes())?;
+    // Distinct per-process temp sibling to avoid clobbering across concurrent
+    // spawns; replaced atomically into `path` on success.
+    let tmp_path = format!("{path}.tmp.{}", std::process::id());
+
+    let write_then_rename = || -> std::io::Result<()> {
+        std::fs::write(&tmp_path, nonce.as_bytes())?;
+        std::fs::rename(&tmp_path, &path)
+    };
+
+    if let Err(e) = write_then_rename() {
+        // Leave NO stale/torn nonce behind: remove both the temp sibling and any
+        // pre-existing destination so the key resolves to `None`, never to a
+        // prior spawn's nonce.
+        let _ = std::fs::remove_file(&tmp_path);
+        let _ = std::fs::remove_file(&path);
+        return Err(e);
+    }
     Ok(nonce)
 }
 

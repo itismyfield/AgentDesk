@@ -3743,6 +3743,114 @@ mod tests {
         unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
     }
 
+    // ─── #3087 P2-1: a FAILED nonce write must leave NO stale nonce ──────────
+    //
+    // The stale-nonce false-non-reset: if a respawn's fresh nonce write fails
+    // (logged, non-fatal) while a PRIOR spawn's nonce is still on disk, the key
+    // would read the OLD nonce → same instance key as the old spawn → the panel
+    // reset is wrongly SUPPRESSED on a genuinely new session. The atomic write
+    // must guarantee "failed write → absent nonce → None key", never "failed
+    // write → stale nonce → colliding key".
+    #[test]
+    fn failed_nonce_write_leaves_no_stale_nonce_so_key_is_none() {
+        let _lock = match test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let tmux_name = format!(
+            "AgentDesk-claude-adk-issue-3087-stale-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let nonce_path = crate::services::tmux_common::session_temp_path(&tmux_name, "spawn_nonce");
+        if let Some(parent) = std::path::Path::new(&nonce_path).parent() {
+            std::fs::create_dir_all(parent).expect("runtime dir");
+        }
+
+        // Prior spawn stamped a nonce.
+        let prior = super::write_spawn_nonce(&tmux_name).expect("prior nonce write");
+        assert_eq!(
+            super::session_panel_instance_key(&tmux_name),
+            Some(format!("{tmux_name}#{prior}")),
+            "prior spawn key must read the prior nonce"
+        );
+
+        // Force the respawn's write to FAIL: replace the destination with a
+        // DIRECTORY so the atomic `rename` over it cannot succeed. (write goes to
+        // the `.tmp` sibling; rename onto a non-empty dir fails on every OS.)
+        std::fs::remove_file(&nonce_path).expect("remove prior nonce file");
+        std::fs::create_dir(&nonce_path).expect("make dir at nonce path");
+        // Make the directory non-empty so the rename is guaranteed to fail.
+        std::fs::write(format!("{nonce_path}/blocker"), b"x").expect("blocker file");
+
+        let result = super::write_spawn_nonce(&tmux_name);
+        assert!(result.is_err(), "the forced respawn nonce write must fail");
+
+        // Tear down the blocking directory so the read path sees only whatever
+        // the failed write left behind (which must be NOTHING readable).
+        std::fs::remove_dir_all(&nonce_path).expect("clear blocking dir");
+
+        // The crux: a failed write must NOT leave the PRIOR nonce (or a torn
+        // partial) readable. The key degrades to None, never to a stale key.
+        assert!(
+            super::session_panel_instance_key(&tmux_name).is_none(),
+            "a failed respawn nonce write must leave NO readable nonce (None key), \
+             never the prior spawn's stale nonce"
+        );
+
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+    }
+
+    // ─── #3087 P2-1: cleanup_session_temp_files sweeps the nonce ─────────────
+    //
+    // On teardown the nonce must be removed like every other session temp file.
+    // Otherwise a respawn reusing the same tmux name whose fresh write fails
+    // would inherit the prior spawn's nonce and suppress the reset.
+    #[test]
+    fn cleanup_session_temp_files_removes_spawn_nonce() {
+        let _lock = match test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let tmux_name = format!(
+            "AgentDesk-claude-adk-issue-3087-cleanup-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let nonce_path = crate::services::tmux_common::session_temp_path(&tmux_name, "spawn_nonce");
+        if let Some(parent) = std::path::Path::new(&nonce_path).parent() {
+            std::fs::create_dir_all(parent).expect("runtime dir");
+        }
+
+        super::write_spawn_nonce(&tmux_name).expect("write nonce");
+        assert!(
+            std::path::Path::new(&nonce_path).exists(),
+            "nonce marker should exist after a spawn"
+        );
+
+        crate::services::tmux_common::cleanup_session_temp_files(&tmux_name);
+        assert!(
+            !std::path::Path::new(&nonce_path).exists(),
+            "cleanup_session_temp_files must sweep the .spawn_nonce marker"
+        );
+        assert!(
+            super::session_panel_instance_key(&tmux_name).is_none(),
+            "after cleanup the instance key must be None (no stale nonce survives teardown)"
+        );
+
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+    }
+
     // ─── #1275 P2 #2: resume_offset path snapshots `.generation` mtime ────
     //
     // The race itself is in the watcher loop body, which is hundreds of

@@ -1730,6 +1730,13 @@ fn execute_streaming_local_tui_tmux(
 
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
+    // #3087: stamp a per-spawn nonce on the Codex-TUI DIRECT spawn path too.
+    // Without it this path produces no `.spawn_nonce`, so the status-panel
+    // instance key is `None` and the new-session boundary cannot be detected.
+    if let Err(e) = crate::services::discord::write_spawn_nonce(tmux_session_name) {
+        tracing::warn!("failed to write spawn nonce for {tmux_session_name} (codex-tui): {e}");
+    }
+
     if let Some(ref token) = cancel_token {
         *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(tmux_session_name.to_string());

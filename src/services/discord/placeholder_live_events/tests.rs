@@ -1051,6 +1051,91 @@ fn status_panel_resets_on_two_distinct_nonces_without_provider_id() {
     }
 }
 
+/// #3087 P2-2 — a TUI-direct spawn path (Claude-TUI / Codex-TUI) now stamps a
+/// `.spawn_nonce` via `write_spawn_nonce`, exactly like the main provider spawn
+/// sites. This drives the panel through the REAL filesystem chain those paths
+/// use at runtime: each TUI-direct spawn writes a fresh nonce, the panel derives
+/// its instance key from `session_panel_instance_key` (which reads that nonce),
+/// and a second TUI-direct spawn mints a DISTINCT nonce → distinct instance key
+/// → reset — even with no provider-session signal at all.
+#[test]
+fn status_panel_resets_across_two_tui_direct_spawns_via_stamped_nonce() {
+    let _lock = match crate::config::shared_test_env_lock().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(30872);
+
+    let tmux_name = format!(
+        "AgentDesk-claude-tui-issue-3087-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    if let Some(parent) = std::path::Path::new(&crate::services::tmux_common::session_temp_path(
+        &tmux_name,
+        "spawn_nonce",
+    ))
+    .parent()
+    {
+        std::fs::create_dir_all(parent).expect("runtime dir");
+    }
+
+    // TUI-direct spawn #1 stamps a nonce (the exact call the Claude/Codex
+    // TUI-direct paths now make right after `create_session`).
+    crate::services::discord::write_spawn_nonce(&tmux_name).expect("tui spawn 1 nonce");
+    let key1 = crate::services::discord::tmux::session_panel_instance_key(&tmux_name)
+        .expect("tui spawn 1 must produce an instance key");
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some(&key1),
+        "session_fresh",
+        &json!({ "reason": "first_turn", "tmux_reused": false }),
+    ));
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Task",
+            &json!({"subagent_type": "explorer", "description": "TUI spawn 1 work"}).to_string(),
+        ),
+    );
+
+    // TUI-direct spawn #2 (same tmux name) mints a DISTINCT nonce → distinct key.
+    crate::services::discord::write_spawn_nonce(&tmux_name).expect("tui spawn 2 nonce");
+    let key2 = crate::services::discord::tmux::session_panel_instance_key(&tmux_name)
+        .expect("tui spawn 2 must produce an instance key");
+    assert_ne!(
+        key1, key2,
+        "a new TUI-direct spawn must change the instance key (fresh nonce)"
+    );
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some(&key2),
+        "session_fresh",
+        &json!({ "reason": "clear", "tmux_reused": false }),
+    ));
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            guard.subagents.is_empty(),
+            "a fresh TUI-direct spawn (distinct stamped nonce) must reset the panel"
+        );
+    }
+
+    unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+}
+
 #[test]
 fn status_panel_renders_session_fresh_and_fallback_distinctly() {
     let events = PlaceholderLiveEvents::default();

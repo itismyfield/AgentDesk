@@ -351,8 +351,8 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
 - `src/services/dispatches/outbox_route.rs` (1118) — dispatch outbox route
   support extracted from the route layer; split before adding non-bugfix
   behavior.
-- `src/services/claude.rs` (3777), `src/services/gemini.rs` (1406),
-  `src/services/qwen.rs` (2189), `src/services/codex.rs` (2900),
+- `src/services/claude.rs` (3787), `src/services/gemini.rs` (1406),
+  `src/services/qwen.rs` (2189), `src/services/codex.rs` (2907),
   `src/services/opencode.rs` (1862), `src/services/provider.rs` (1739) —
   provider adapters.
 - `src/services/codex_tui/rollout_tail.rs` (1726) — Codex TUI rollout tail
