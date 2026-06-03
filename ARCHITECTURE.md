@@ -337,11 +337,13 @@ src/
 │   │   ├── intake_routing.rs
 │   │   ├── intake_worker.rs
 │   │   ├── mod.rs
+│   │   ├── node_registry.rs
 │   │   ├── registry_adapter_sink.rs
 │   │   ├── relay_producer_registry.rs
 │   │   ├── session_discovery.rs
 │   │   ├── session_matcher.rs
 │   │   ├── session_registry.rs
+│   │   ├── session_routing.rs
 │   │   ├── stream_relay.rs
 │   │   └── watcher_supervisor.rs
 │   ├── codex_tui/

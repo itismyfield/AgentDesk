@@ -53,7 +53,7 @@ pub(crate) struct CandidateNode {
 }
 
 /// Build `CandidateNode` rows from the JSON snapshot returned by
-/// `crate::server::cluster::list_worker_nodes`. Defensive against missing
+/// `crate::services::cluster::node_registry::list_worker_nodes`. Defensive against missing
 /// fields — bad rows simply do not become candidates.
 ///
 /// `list_worker_nodes` emits the staleness-corrected status under JSON
@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn pick_intake_target_routes_to_worker_for_real_list_worker_nodes_shape() {
         // Regression for the round-1 codex blocker: ensure the JSON shape
-        // emitted by `server::cluster::list_worker_nodes` (which uses the
+        // emitted by `services::cluster::node_registry::list_worker_nodes` (which uses the
         // key `"status"`, not `"computed_status"`) actually drives the
         // routing decision instead of falling through to NoEligibleWorker.
         let json_nodes = vec![

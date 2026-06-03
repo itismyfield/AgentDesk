@@ -1,8 +1,3 @@
-pub(crate) use crate::server::dto::dispatches::{
-    DispatchMessagePostError, DispatchMessagePostErrorKind, DispatchMessagePostOutcome,
-    DispatchNotifyDeliveryResult, ReviewFollowupKind,
-};
-
 mod guard;
 mod orchestration;
 mod transport;
@@ -17,8 +12,10 @@ pub(crate) use orchestration::{
     sync_dispatch_status_reaction_with_pg,
 };
 pub(crate) use transport::{
-    DispatchTransport, archive_duplicate_slot_threads, discord_api_base_url, discord_api_url,
-    edit_raw_message_once, is_discord_length_error, maybe_add_owner_to_dispatch_thread,
+    DispatchMessagePostError, DispatchMessagePostErrorKind, DispatchMessagePostOutcome,
+    DispatchNotifyDeliveryResult, DispatchTransport, ReviewFollowupKind,
+    archive_duplicate_slot_threads, discord_api_base_url, discord_api_url, edit_raw_message_once,
+    is_discord_length_error, maybe_add_owner_to_dispatch_thread,
     post_dispatch_message_to_channel_with_delivery, post_raw_message_once,
     reset_stale_slot_thread_if_needed,
 };

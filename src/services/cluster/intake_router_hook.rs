@@ -201,17 +201,21 @@ pub(crate) async fn try_route_intake(
         };
     }
 
-    let candidates =
-        match crate::server::cluster::list_worker_nodes(pool, WORKER_HEARTBEAT_LEASE_SECS).await {
-            Ok(nodes) => candidates_from_worker_nodes_json(&nodes),
-            Err(error) => {
-                return IntakeRouterDecision::RanLocal {
-                    reason: RanLocalReason::DbErrorFellBackToLocal {
-                        detail: format!("list worker_nodes: {error}"),
-                    },
-                };
-            }
-        };
+    let candidates = match crate::services::cluster::node_registry::list_worker_nodes(
+        pool,
+        WORKER_HEARTBEAT_LEASE_SECS,
+    )
+    .await
+    {
+        Ok(nodes) => candidates_from_worker_nodes_json(&nodes),
+        Err(error) => {
+            return IntakeRouterDecision::RanLocal {
+                reason: RanLocalReason::DbErrorFellBackToLocal {
+                    detail: format!("list worker_nodes: {error}"),
+                },
+            };
+        }
+    };
 
     let target = match pick_intake_target(&candidates, &preferred_labels, ctx.leader_instance_id) {
         IntakeRouteTarget::Worker { instance_id } => instance_id,

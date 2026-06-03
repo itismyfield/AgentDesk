@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use crate::config::{
     ClusterBlackoutWindowConfig, ClusterConfig, ClusterDispatchRoutingConfig, ClusterNodeConfig,
 };
-use crate::server::cluster::CapabilityRouteCandidate;
+use crate::services::cluster::node_registry::CapabilityRouteCandidate;
 
 pub(crate) const NOOP_CONSTRAINT_NAME: &str = "noop";
 pub(crate) const NODE_CONCURRENCY_CAP_CONSTRAINT_NAME: &str = "node_concurrency_cap";
@@ -79,7 +79,7 @@ pub(crate) struct ConstraintCheckResult {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct RoutingEngineCandidate {
-    pub(crate) decision: crate::server::cluster::CapabilityRouteDecision,
+    pub(crate) decision: crate::services::cluster::node_registry::CapabilityRouteDecision,
     pub(crate) score: i64,
     pub(crate) last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
     pub(crate) constraints: Vec<ConstraintCheckResult>,
@@ -164,7 +164,10 @@ impl RoutingEngine {
         dispatch: &RoutingDispatch,
     ) -> RoutingEngineDecision {
         let capability_candidates =
-            crate::server::cluster::select_capability_route(nodes, required_capabilities);
+            crate::services::cluster::node_registry::select_capability_route(
+                nodes,
+                required_capabilities,
+            );
         let mut selected = None;
         let mut candidates = Vec::new();
 

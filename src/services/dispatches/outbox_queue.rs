@@ -334,7 +334,7 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
 pub(crate) async fn dispatch_outbox_loop(
     pg_pool: Arc<PgPool>,
     claim_owner: String,
-    cluster_runtime: crate::server::cluster::ClusterRuntime,
+    cluster_runtime: crate::services::cluster::node_registry::ClusterRuntime,
     cluster_config: crate::config::ClusterConfig,
 ) {
     use std::time::{Duration, Instant};

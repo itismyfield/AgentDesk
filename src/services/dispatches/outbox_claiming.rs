@@ -13,7 +13,7 @@ use crate::db::dispatches::outbox::{
     select_pending_dispatch_outbox_claim_candidates_pg,
     select_stale_dispatch_outbox_claim_owner_candidates_pg, update_dispatch_outbox_claim_owner_pg,
 };
-use crate::server::cluster::CapabilityRouteDecision;
+use crate::services::cluster::node_registry::CapabilityRouteDecision;
 use crate::services::dispatches::routing_constraint::{
     RoutingDispatch, RoutingEngine, RoutingEngineDecision,
 };
@@ -33,18 +33,22 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_with_cluster_config_pg(
     cluster_config: &crate::config::ClusterConfig,
 ) -> Vec<DispatchOutboxRow> {
     let lease_ttl_secs = cluster_config.lease_ttl_secs.max(1);
-    let mut worker_nodes =
-        match crate::server::cluster::list_worker_nodes(pool, lease_ttl_secs).await {
-            Ok(nodes) => nodes,
-            Err(error) => {
-                tracing::warn!(
-                    claim_owner,
-                    error,
-                    "[dispatch-outbox] failed to list worker nodes for routing"
-                );
-                Vec::new()
-            }
-        };
+    let mut worker_nodes = match crate::services::cluster::node_registry::list_worker_nodes(
+        pool,
+        lease_ttl_secs,
+    )
+    .await
+    {
+        Ok(nodes) => nodes,
+        Err(error) => {
+            tracing::warn!(
+                claim_owner,
+                error,
+                "[dispatch-outbox] failed to list worker nodes for routing"
+            );
+            Vec::new()
+        }
+    };
     let owner_node = worker_nodes
         .iter()
         .find(|node| node.get("instance_id").and_then(|value| value.as_str()) == Some(claim_owner))
@@ -229,8 +233,11 @@ pub(crate) async fn reassign_stale_dispatch_outbox_claim_owners_with_cluster_con
     cluster_config: &crate::config::ClusterConfig,
 ) -> Result<usize, String> {
     let stale_threshold_secs = stale_claim_owner_threshold_secs(cluster_config);
-    let worker_nodes =
-        crate::server::cluster::list_worker_nodes(pool, stale_threshold_secs as u64).await?;
+    let worker_nodes = crate::services::cluster::node_registry::list_worker_nodes(
+        pool,
+        stale_threshold_secs as u64,
+    )
+    .await?;
     let routing_config = &cluster_config.dispatch_routing;
     let cluster_default = cluster_default_required_capabilities(routing_config);
     let routing_engine = RoutingEngine::from_cluster_config(cluster_config);
@@ -432,7 +439,12 @@ pub(crate) fn capability_decision_for_claim_owner(
     required_capabilities: &Value,
 ) -> CapabilityRouteDecision {
     owner_node
-        .map(|node| crate::server::cluster::explain_capability_match(node, required_capabilities))
+        .map(|node| {
+            crate::services::cluster::node_registry::explain_capability_match(
+                node,
+                required_capabilities,
+            )
+        })
         .unwrap_or_else(|| CapabilityRouteDecision {
             instance_id: Some(claim_owner.to_string()),
             eligible: false,
