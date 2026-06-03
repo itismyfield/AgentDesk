@@ -1878,6 +1878,205 @@ fn status_panel_subagent_without_accounting_has_no_done_summary() {
     );
 }
 
+// #3086 P1 #1: a `user` record carrying the subagent `toolUseResult` aggregate
+// PLUS multiple `tool_result` blocks (the finished subagent's Task result + an
+// unrelated foreground tool result) while ANOTHER subagent is still running must
+// attribute the Done summary ONLY to the matching subagent slot. The unrelated
+// block must NOT emit a Done/summary, and the aggregate must NOT mis-route to
+// the still-running slot via the last-unfinished fallback.
+#[test]
+fn status_panel_subagent_summary_attaches_only_to_matching_slot() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(389);
+
+    // Two subagents start in parallel: "done" (will finish) and "running"
+    // (stays running). A foreground Bash also runs concurrently.
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({"subagent_type": "finisher", "description": "Finishing work"}).to_string(),
+            Some("toolu_done"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({"subagent_type": "worker", "description": "Still running"}).to_string(),
+            Some("toolu_running"),
+        ),
+    );
+
+    // One `user` record carries the subagent aggregate (for toolu_done) AND a
+    // second, unrelated foreground tool_result in the same batch.
+    events.push_status_events(
+        channel_id,
+        status_events_from_json(&json!({
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_done",
+                        "is_error": false
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_bash_unrelated",
+                        "is_error": false
+                    }
+                ]
+            },
+            "toolUseResult": {
+                "agentId": "afinisher00000000",
+                "totalToolUseCount": 12,
+                "totalTokens": 5000,
+                "totalDurationMs": 30_000
+            }
+        })),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let finisher_line = rendered
+        .lines()
+        .find(|line| line.contains("finisher Finishing work"))
+        .unwrap_or_else(|| panic!("finisher slot missing in: {rendered}"));
+    let worker_line = rendered
+        .lines()
+        .find(|line| line.contains("worker Still running"))
+        .unwrap_or_else(|| panic!("worker slot missing in: {rendered}"));
+
+    // The matching subagent gets the Done summary and is marked done.
+    assert!(
+        finisher_line.contains("Done (12 tools · 5k tokens · 30s)"),
+        "matching subagent must carry the Done summary, got: {finisher_line}"
+    );
+    assert!(
+        finisher_line.contains('✓'),
+        "matching subagent must be marked done, got: {finisher_line}"
+    );
+
+    // The still-running subagent must NOT be touched: no Done summary, no
+    // done/fail marker. The unrelated block + the aggregate must never mis-route
+    // here via the last-unfinished fallback.
+    assert!(
+        !worker_line.contains("Done ("),
+        "running subagent must not get a stray Done summary, got: {worker_line}"
+    );
+    assert!(
+        !worker_line.contains('✓') && !worker_line.contains('✗'),
+        "running subagent must stay running (no marker), got: {worker_line}"
+    );
+}
+
+// #3086 P1 #1: a summary-bearing `SubagentEnd` whose `tool_use_id` matches NO
+// tracked slot must be dropped, not mis-routed to the last unfinished slot.
+#[test]
+fn status_panel_unmatched_summary_end_is_dropped_not_misrouted() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(390);
+
+    // A single running subagent with a known id.
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({"subagent_type": "worker", "description": "Long task"}).to_string(),
+            Some("toolu_real"),
+        ),
+    );
+
+    // A summary-bearing end arrives with an id that does NOT match the slot.
+    events.push_status_events(
+        channel_id,
+        vec![StatusEvent::SubagentEnd {
+            success: true,
+            tool_use_id: Some("toolu_ghost".to_string()),
+            summary: Some(crate::services::agent_protocol::SubagentSummary {
+                tool_count: Some(99),
+                tokens: Some(99_999),
+                duration_secs: Some(99),
+            }),
+        }],
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let worker_line = rendered
+        .lines()
+        .find(|line| line.contains("worker Long task"))
+        .unwrap_or_else(|| panic!("worker slot missing in: {rendered}"));
+    assert!(
+        !worker_line.contains("Done ("),
+        "unmatched summary must not land on the running slot, got: {worker_line}"
+    );
+    assert!(
+        !worker_line.contains('✓') && !worker_line.contains('✗'),
+        "unmatched summary-bearing end must not close the slot, got: {worker_line}"
+    );
+}
+
+// #3086 P1 #2: the hot-path summary extraction (`subagent_summary_from_user_record`
+// via `status_events_from_json`) must rely ONLY on the in-stream `toolUseResult`
+// aggregate — no synchronous rollout file read. With `cwd`/`sessionId`/`agentId`
+// present but accounting fields missing, the previous code would have read a
+// rollout file off disk; now it must return a partial summary from in-stream
+// fields alone (no IO), omitting the missing parts.
+#[test]
+fn status_panel_subagent_summary_no_rollout_io_on_hot_path() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(391);
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({"subagent_type": "partial", "description": "Partial accounting"}).to_string(),
+            Some("toolu_partial"),
+        ),
+    );
+
+    // Aggregate has agentId + cwd + sessionId (the old fallback trigger) and
+    // ONLY tool_count — tokens/duration are absent. No rollout file is read, so
+    // the missing fields are simply omitted from the Done line.
+    events.push_status_events(
+        channel_id,
+        status_events_from_json(&json!({
+            "type": "user",
+            "cwd": "/tmp/some/project",
+            "sessionId": "f525f356-9cf1-4c45-b992-4e1210ee68be",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_partial",
+                    "is_error": false
+                }]
+            },
+            "toolUseResult": {
+                "agentId": "apartialrollout00",
+                "totalToolUseCount": 7
+            }
+        })),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let line = rendered
+        .lines()
+        .find(|line| line.contains("partial Partial accounting"))
+        .unwrap_or_else(|| panic!("subagent slot missing in: {rendered}"));
+    // Only the in-stream tool_count survives; tokens/duration are omitted (no IO
+    // fallback computed them).
+    assert!(
+        line.contains("Done (7 tools)"),
+        "partial in-stream summary expected, got: {line}"
+    );
+    assert!(
+        !line.contains("tokens") && !line.contains('·'),
+        "no rollout-derived fields should appear (no IO), got: {line}"
+    );
+    assert!(line.contains('✓'), "slot must still close as done: {line}");
+}
+
 #[test]
 fn status_events_from_json_captures_workflow_progress_array() {
     let events = status_events_from_json(&json!({

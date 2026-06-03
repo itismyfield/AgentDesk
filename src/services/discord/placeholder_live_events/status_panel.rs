@@ -166,19 +166,29 @@ impl StatusPanelState {
                 // parallel subagents. Fall back to the first unfinished slot
                 // only when no id is available or no slot matches (e.g.
                 // backends that cannot surface a tool-use id).
-                let matched = tool_use_id.as_deref().and_then(|id| {
-                    self.subagents.iter_mut().rev().find(|slot| {
+                let id = tool_use_id.as_deref();
+                let matched = id.and_then(|id| {
+                    self.subagents.iter().rposition(|slot| {
                         slot.finished.is_none() && slot.tool_use_id.as_deref() == Some(id)
                     })
                 });
-                let slot = match matched {
-                    Some(slot) => Some(slot),
+                // #3086 P1: a summary-bearing end carries accounting for ONE
+                // specific subagent (identified by its `tool_use_id`). If that
+                // id does not match a tracked slot, the end MUST NOT fall back
+                // to the last-unfinished slot — doing so would mark an unrelated
+                // running subagent Done with the wrong summary. Drop the unmatched
+                // summary-bearing end entirely. A plain (no-summary) end keeps the
+                // legacy fallback so #3084 id-less backends still close a slot.
+                let has_summary = summary.as_ref().is_some_and(|s| !s.is_empty());
+                let target = match matched {
+                    Some(index) => Some(index),
+                    None if has_summary && id.is_some() => None,
                     None => self
                         .subagents
-                        .iter_mut()
-                        .rev()
-                        .find(|slot| slot.finished.is_none()),
+                        .iter()
+                        .rposition(|slot| slot.finished.is_none()),
                 };
+                let slot = target.map(|index| &mut self.subagents[index]);
                 if let Some(slot) = slot {
                     slot.finished = Some(success);
                     // #3086: attach the TUI-parity Done summary to the closing

@@ -1,22 +1,27 @@
 //! Subagent rollout consumer (#3086).
 //!
 //! Reconstructs the Claude TUI's `Done (N tool uses · M tokens · Xs)` summary
-//! for a finished subagent. Two sources, both defensive (partial/malformed
-//! lines, missing fields → graceful partial/empty summary, never a panic):
+//! for a finished subagent. The live relay/status hot path uses ONLY the
+//! in-stream fast path (no disk IO):
 //!
 //! 1. **In-stream fast path** — the parent transcript's Task `tool_result`
 //!    record carries a top-level `toolUseResult` object with `totalToolUseCount`
 //!    / `totalTokens` / `totalDurationMs` (and `agentId`). This is the exact
-//!    same accounting the TUI renders and needs no disk IO.
-//! 2. **Rollout parity path** — the per-subagent
-//!    `<project>/<sessionId>/subagents/agent-<agentId>.jsonl` rollout. Used when
-//!    the in-stream totals are absent. `tool_count` = number of `tool_use`
-//!    blocks; `duration_secs` = last−first timestamp span; `tokens` = the LAST
-//!    assistant message's full usage (input + cache_creation + cache_read +
-//!    output), which mirrors `toolUseResult.totalTokens` (verified against real
-//!    rollouts).
-
-use std::path::{Path, PathBuf};
+//!    same accounting the TUI renders and needs no disk IO. Any field the
+//!    aggregate omits is simply left empty and the render layer degrades to a
+//!    partial `Done (...)` line.
+//!
+//! 2. **Rollout parity parser** — [`summary_from_rollout_str`] computes the same
+//!    summary from a per-subagent `agent-<id>.jsonl` rollout body:
+//!    `tool_count` = number of `tool_use` blocks; `duration_secs` = last−first
+//!    timestamp span; `tokens` = the LAST assistant message's full usage
+//!    (input + cache_creation + cache_read + output), which mirrors
+//!    `toolUseResult.totalTokens` (verified against real rollouts). This parser
+//!    is IO-free and reusable, but is intentionally NOT invoked on the hot path:
+//!    reading the (potentially large) rollout file would be an unbounded,
+//!    blocking read on the async relay loop (#3086 P1). Defensive throughout
+//!    (partial/malformed lines, missing fields → graceful partial/empty summary,
+//!    never a panic).
 
 use chrono::DateTime;
 use serde_json::Value;
@@ -65,73 +70,11 @@ pub(super) fn summary_from_tool_use_result(
     Some((summary, agent_id))
 }
 
-/// Resolves the per-subagent rollout file for `agent_id` under the Claude
-/// project directory derived from `cwd` + `session_id`, then computes the
-/// summary from it. Returns an empty/partial summary on any IO or parse trouble
-/// (never panics). `claude_home` is overridable for tests.
-pub(super) fn summary_from_rollout_for(
-    cwd: &Path,
-    session_id: &str,
-    agent_id: &str,
-    claude_home: Option<&Path>,
-) -> SubagentSummary {
-    match rollout_path_for(cwd, session_id, agent_id, claude_home) {
-        Some(path) => summary_from_rollout_file(&path),
-        None => SubagentSummary::default(),
-    }
-}
-
-/// Builds the candidate `subagents/agent-<id>.jsonl` path. Picks the first
-/// project-dir candidate whose file exists, else the first candidate.
-fn rollout_path_for(
-    cwd: &Path,
-    session_id: &str,
-    agent_id: &str,
-    claude_home: Option<&Path>,
-) -> Option<PathBuf> {
-    if session_id.trim().is_empty() || agent_id.trim().is_empty() {
-        return None;
-    }
-    // Defensive: agent ids and session ids are filename components; reject any
-    // value that could escape the subagents directory.
-    if !is_safe_path_component(session_id) || !is_safe_path_component(agent_id) {
-        return None;
-    }
-    let candidates =
-        crate::services::claude_tui::transcript_tail::claude_project_dir_candidates_for_cwd(
-            cwd,
-            claude_home,
-        )
-        .ok()?;
-    let rel = Path::new(session_id)
-        .join("subagents")
-        .join(format!("agent-{agent_id}.jsonl"));
-    let paths: Vec<PathBuf> = candidates.into_iter().map(|dir| dir.join(&rel)).collect();
-    paths
-        .iter()
-        .find(|path| path.exists())
-        .cloned()
-        .or_else(|| paths.into_iter().next())
-}
-
-fn is_safe_path_component(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
-}
-
-/// Parses a `subagents/agent-<id>.jsonl` rollout file into a [`SubagentSummary`].
-/// Malformed/partial lines are skipped individually; a missing file yields an
-/// empty summary. Never panics.
-fn summary_from_rollout_file(path: &Path) -> SubagentSummary {
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return SubagentSummary::default();
-    };
-    summary_from_rollout_str(&contents)
-}
-
-/// Core, IO-free rollout parser (testable directly).
+/// Core, IO-free rollout parser. Parses a `subagents/agent-<id>.jsonl` rollout
+/// body into a [`SubagentSummary`]: malformed/partial lines are skipped
+/// individually and missing fields degrade to an empty/partial summary. Never
+/// panics. Kept reusable but intentionally off the live relay/status hot path —
+/// see the module docs (#3086 P1).
 pub(super) fn summary_from_rollout_str(contents: &str) -> SubagentSummary {
     let mut tool_count: u64 = 0;
     let mut last_usage_tokens: Option<u64> = None;
@@ -335,15 +278,5 @@ mod tests {
     fn rollout_str_empty_is_empty_summary() {
         assert!(summary_from_rollout_str("").is_empty());
         assert!(summary_from_rollout_str("\n\n   \n").is_empty());
-    }
-
-    #[test]
-    fn rejects_unsafe_path_components() {
-        assert!(!is_safe_path_component("../escape"));
-        assert!(!is_safe_path_component("with/slash"));
-        assert!(is_safe_path_component("a5e810f97737bf4bd"));
-        assert!(is_safe_path_component(
-            "f525f356-9cf1-4c45-b992-4e1210ee68be"
-        ));
     }
 }

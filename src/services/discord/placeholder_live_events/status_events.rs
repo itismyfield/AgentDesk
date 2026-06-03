@@ -377,17 +377,47 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
     // with subagent accounting (`agentId` / `total*`) is a finished subagent.
     // Surface a TUI-parity `Done (N tools · M tokens · Xs)` summary by pairing
     // the result to its slot via the content block's `tool_use_id`. The
-    // accounting comes from the in-stream `toolUseResult` first (no IO); when a
-    // field is missing we fall back to the per-subagent rollout file.
+    // accounting comes from the in-stream `toolUseResult` first (no IO).
+    //
+    // The `toolUseResult` aggregate describes exactly ONE finished subagent
+    // (it carries a single `agentId`), so the summary must attach to exactly
+    // ONE `tool_result` block — the one whose `tool_use_id` identifies that
+    // subagent. We never clone the aggregate onto every block: a `user` record
+    // may batch the Task result alongside other parallel tool results, and
+    // cloning would mark unrelated subagents Done with the wrong accounting.
+    //
+    // We cannot read slot state here (it lives in the panel), so we only emit a
+    // summary-bearing `SubagentEnd` for a block that actually carries a
+    // `tool_use_id`, and we attach the summary to a single block. The panel
+    // (status_panel.rs) then requires that id to match a tracked subagent slot
+    // before applying it — a summary-bearing end with an unmatched id is
+    // dropped rather than mis-routed to the last unfinished slot.
     let subagent_summary = subagent_summary_from_user_record(value);
 
-    value
+    let blocks = value
         .get("message")
         .and_then(|message| message.get("content"))
         .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .flat_map(|block| {
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    // Pick the single block that owns the subagent summary: the first
+    // `tool_result` carrying a `tool_use_id`. The aggregate is for one
+    // subagent, so it must be attributed to one block only.
+    let summary_owner_idx = subagent_summary.as_ref().and_then(|_| {
+        blocks.iter().position(|block| {
+            block.get("type").and_then(Value::as_str) == Some("tool_result")
+                && block
+                    .get("tool_use_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !id.trim().is_empty())
+        })
+    });
+
+    blocks
+        .iter()
+        .enumerate()
+        .flat_map(|(idx, block)| {
             if block.get("type").and_then(Value::as_str) != Some("tool_result") {
                 return Vec::new();
             }
@@ -396,7 +426,12 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
 
-            if let Some(summary) = subagent_summary.clone() {
+            // Attach the subagent summary to ONLY the owning block, paired by
+            // its `tool_use_id`. The panel will refuse to apply it if the id
+            // does not match a real, tracked subagent slot, so a stray summary
+            // can never land on an unrelated running slot.
+            if Some(idx) == summary_owner_idx {
+                let summary = subagent_summary.clone().expect("owner implies summary");
                 let tool_use_id = block
                     .get("tool_use_id")
                     .and_then(Value::as_str)
@@ -418,34 +453,22 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
 
 /// Builds the subagent [`SubagentSummary`](crate::services::agent_protocol::SubagentSummary)
 /// for a `user` transcript record when it represents a finished subagent
-/// (`toolUseResult` carries `agentId`/`total*`). Prefers the in-stream totals;
-/// for any field still missing it consults the per-subagent rollout file
-/// resolved from the record's `cwd` + `sessionId` + `agentId`. Returns `None`
-/// for ordinary (non-subagent) tool results.
+/// (`toolUseResult` carries `agentId`/`total*`). Returns `None` for ordinary
+/// (non-subagent) tool results.
+///
+/// #3086 P1: this runs on the live relay/status hot path, so it uses ONLY the
+/// in-stream `toolUseResult` aggregate — no disk IO. The aggregate is the exact
+/// accounting the TUI renders and is normally complete; any field it omits is
+/// simply left empty, and the render layer degrades to a partial `Done (...)`
+/// line. The previous synchronous per-subagent rollout fallback
+/// (`std::fs::read_to_string` of a potentially large `agent-<id>.jsonl`) was an
+/// unbounded blocking read on the async relay loop and is removed from this
+/// path. The IO-free rollout parser (`summary_from_rollout_str`) remains
+/// available for any off-hot-path / offline use.
 fn subagent_summary_from_user_record(
     value: &Value,
 ) -> Option<crate::services::agent_protocol::SubagentSummary> {
-    let (mut summary, agent_id) = super::subagent_rollout::summary_from_tool_use_result(value)?;
-
-    // Fill any gap from the rollout file when we can resolve it.
-    if summary.tool_count.is_none() || summary.tokens.is_none() || summary.duration_secs.is_none() {
-        if let (Some(agent_id), Some(cwd), Some(session_id)) = (
-            agent_id.as_deref(),
-            value.get("cwd").and_then(Value::as_str),
-            value.get("sessionId").and_then(Value::as_str),
-        ) {
-            let rollout = super::subagent_rollout::summary_from_rollout_for(
-                std::path::Path::new(cwd),
-                session_id,
-                agent_id,
-                None,
-            );
-            summary.tool_count = summary.tool_count.or(rollout.tool_count);
-            summary.tokens = summary.tokens.or(rollout.tokens);
-            summary.duration_secs = summary.duration_secs.or(rollout.duration_secs);
-        }
-    }
-
+    let (summary, _agent_id) = super::subagent_rollout::summary_from_tool_use_result(value)?;
     Some(summary)
 }
 
