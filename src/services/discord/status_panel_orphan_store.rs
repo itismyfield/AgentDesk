@@ -213,11 +213,43 @@ fn delete_error_is_permanent(err: &serenity::Error) -> bool {
             .is_some_and(|status| matches!(status.as_u16(), 404 | 403 | 410)))
 }
 
+/// EPIC #3078 PR-3 — the parity gate between the legacy orphan-store turn-aware
+/// defer gate (the inflight-row `status_message_id == panel_msg_id` read) and the
+/// `StatusPanelController`'s view of whether the live turn still owns this exact
+/// orphan. They must agree: a divergence means the controller would defer (or not
+/// defer) a delete the legacy gate would not, so routing the gate through it later
+/// would change behaviour. `debug_assert` so test/dev builds fail loudly; release
+/// builds emit a bounded `warn!` (no `panic!`) so a never-before-seen orphan shape
+/// can never crash a production drain over the legacy gate, which continues to
+/// decide the defer regardless.
+fn assert_orphan_gate_parity(
+    controller_owns: bool,
+    legacy_owns: bool,
+    channel_id: u64,
+    panel_msg_id: u64,
+) {
+    if controller_owns == legacy_owns {
+        return;
+    }
+    debug_assert_eq!(
+        controller_owns, legacy_owns,
+        "#3078 PR-3 orphan-store drain turn-aware-defer parity mismatch (channel {channel_id}, panel {panel_msg_id}): controller owns={controller_owns}, legacy owns={legacy_owns}"
+    );
+    tracing::warn!(
+        channel = channel_id,
+        panel = panel_msg_id,
+        controller_owns,
+        legacy_owns,
+        "#3078 PR-3 orphan-store drain turn-aware-defer parity mismatch — StatusPanelController disagreed with the legacy inflight-row gate on panel ownership; legacy gate decided the defer (no behaviour change), divergence logged for the later controller-executes cutover"
+    );
+}
+
 /// Retry every pending panel delete once. A committed delete, or a permanent
 /// "message gone" (404/403/410), drops the record; a transient failure keeps it
 /// for the next pass. Returns the number of records cleared this pass.
 pub(in crate::services::discord) async fn drain(
     http: &Arc<serenity::Http>,
+    shared: &Arc<crate::services::discord::SharedData>,
     provider: &ProviderKind,
     token_hash: &str,
 ) -> usize {
@@ -247,10 +279,40 @@ pub(in crate::services::discord) async fn drain(
         // tmux pane — would defer an OLD turn's orphan forever (the store is its only
         // reclaim path). A different/absent `status_message_id` means the live turn
         // does not own this orphan, so it is safe to delete now.
-        if crate::services::discord::inflight::load_inflight_state(provider, channel_id)
-            .and_then(|state| state.status_message_id)
-            == Some(panel_msg_id)
-        {
+        let inflight_panel_id =
+            crate::services::discord::inflight::load_inflight_state(provider, channel_id)
+                .and_then(|state| state.status_message_id);
+        let legacy_owns = inflight_panel_id == Some(panel_msg_id);
+        // EPIC #3078 PR-3 — route this turn-aware defer gate through the
+        // `StatusPanelController` behind a SHADOW parity check. The controller
+        // seeds its ledger from the inflight row's currently-owned panel id and
+        // reports whether the live turn still owns THIS EXACT orphan; it must agree
+        // with the legacy inflight-row read above, INCLUDING the channel-only
+        // (`user_msg_id == 0`) collapse for the #3003 turn-aware defer. The legacy
+        // `legacy_owns` gate below still decides the actual defer/delete, so the
+        // delete behaviour is verifiably unchanged — only the (shadow) controller
+        // agreement is observed. The controller actor is only spawned when v2 is
+        // enabled, so this is inert and the legacy gate is byte-for-byte unchanged
+        // when v2 is off. The controller actor task is NOT spawned when v2 is off,
+        // so we MUST skip the awaited shadow read (its ack oneshot would never be
+        // answered) — this guard is the v2-off short-circuit.
+        if shared.status_panel_v2_enabled {
+            let controller_owns = shared
+                .status_panel_controller
+                .orphan_gate_owns_panel(
+                    crate::services::discord::turn_finalizer::TurnKey::new(
+                        serenity::ChannelId::new(channel_id),
+                        0,
+                        crate::services::discord::runtime_store::load_generation(),
+                    ),
+                    provider.clone(),
+                    inflight_panel_id.map(serenity::MessageId::new),
+                    serenity::MessageId::new(panel_msg_id),
+                )
+                .await;
+            assert_orphan_gate_parity(controller_owns, legacy_owns, channel_id, panel_msg_id);
+        }
+        if legacy_owns {
             continue;
         }
         let channel = serenity::ChannelId::new(channel_id);
@@ -301,6 +363,75 @@ mod tests {
         // Removing the last id deletes the channel file → empty pending.
         remove_in_root(root, &provider, token, 100, 5002);
         assert!(load_pending_in_root(root, &provider, token).is_empty());
+    }
+
+    /// EPIC #3078 PR-3: for representative drain-gate inputs, the
+    /// `StatusPanelController`'s turn-aware-defer decision (seed ledger from the
+    /// inflight-row panel id, then ask whether it owns the orphan) equals the
+    /// legacy inflight-row gate (`inflight.status_message_id == Some(candidate)`),
+    /// so `assert_orphan_gate_parity` never fires and the legacy delete behaviour is
+    /// unchanged. Covers the #3003 channel-only (`user_msg_id == 0`) collapse, the
+    /// different-panel case, and the row-gone (`None`) case.
+    #[tokio::test(flavor = "current_thread")]
+    async fn controller_drain_gate_matches_legacy_for_representative_inputs() {
+        use crate::services::discord::status_panel_controller::StatusPanelController;
+        use crate::services::discord::turn_finalizer::TurnKey;
+
+        // The orphan-store drain keys on the channel only (`user_msg_id == 0`) and
+        // the controller collapses onto the single adopted live entry.
+        let candidate = serenity::MessageId::new(7001);
+
+        // Case A: inflight row still owns THIS exact panel → both defer (true).
+        let ctl = StatusPanelController::spawn(true);
+        let key = TurnKey::new(serenity::ChannelId::new(900), 0, 0);
+        let inflight_a = Some(7001u64);
+        let legacy_a = inflight_a == Some(candidate.get());
+        let controller_a = ctl
+            .orphan_gate_owns_panel(
+                key,
+                ProviderKind::Claude,
+                inflight_a.map(serenity::MessageId::new),
+                candidate,
+            )
+            .await;
+        assert_eq!(controller_a, legacy_a);
+        assert!(legacy_a);
+        assert_orphan_gate_parity(controller_a, legacy_a, 900, candidate.get());
+
+        // Case B: inflight row owns a DIFFERENT panel → both do not defer (false).
+        let ctl_b = StatusPanelController::spawn(true);
+        let key_b = TurnKey::new(serenity::ChannelId::new(901), 0, 0);
+        let inflight_b = Some(8002u64);
+        let legacy_b = inflight_b == Some(candidate.get());
+        let controller_b = ctl_b
+            .orphan_gate_owns_panel(
+                key_b,
+                ProviderKind::Claude,
+                inflight_b.map(serenity::MessageId::new),
+                candidate,
+            )
+            .await;
+        assert_eq!(controller_b, legacy_b);
+        assert!(!legacy_b);
+        assert_orphan_gate_parity(controller_b, legacy_b, 901, candidate.get());
+
+        // Case C: inflight row gone (`None`) → both do not defer (false), so the
+        // orphan store (the only reclaim path here) does not defer forever.
+        let ctl_c = StatusPanelController::spawn(true);
+        let key_c = TurnKey::new(serenity::ChannelId::new(902), 0, 0);
+        let inflight_c: Option<u64> = None;
+        let legacy_c = inflight_c == Some(candidate.get());
+        let controller_c = ctl_c
+            .orphan_gate_owns_panel(
+                key_c,
+                ProviderKind::Claude,
+                inflight_c.map(serenity::MessageId::new),
+                candidate,
+            )
+            .await;
+        assert_eq!(controller_c, legacy_c);
+        assert!(!legacy_c);
+        assert_orphan_gate_parity(controller_c, legacy_c, 902, candidate.get());
     }
 
     #[test]

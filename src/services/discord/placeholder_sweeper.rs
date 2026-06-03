@@ -790,6 +790,32 @@ fn placeholder_sweep_leaves_row_unevicted(state: &InflightTurnState) -> bool {
             && (!state.full_response.is_empty() || state.response_sent_offset > 0))
 }
 
+/// EPIC #3078 PR-3 — parity gate between the legacy sweeper reclaim target
+/// (`panel_reclaim_target` + `clear_status_panel_if_current`) and the id the
+/// `StatusPanelController` chooses for the same row; they must agree or routing
+/// the IO through it later would change behaviour. `debug_assert` (test/dev fail
+/// loud) + bounded `warn!` in release (never `panic!`, so an unseen orphan shape
+/// cannot crash a prod sweep over the still-executing legacy path).
+fn assert_sweeper_reclaim_parity(
+    controller_target: Option<serenity::MessageId>,
+    legacy_target: Option<serenity::MessageId>,
+    channel_id: u64,
+) {
+    if controller_target == legacy_target {
+        return;
+    }
+    debug_assert_eq!(
+        controller_target, legacy_target,
+        "#3078 PR-3 sweeper status-panel reclaim parity mismatch (channel {channel_id}): controller chose {controller_target:?}, legacy chose {legacy_target:?}"
+    );
+    tracing::warn!(
+        channel = channel_id,
+        controller_target = ?controller_target,
+        legacy_target = ?legacy_target,
+        "#3078 PR-3 sweeper status-panel reclaim parity mismatch — StatusPanelController chose a different reclaim target than the legacy sweeper; legacy path executed (no behaviour change), divergence logged for the later controller-executes cutover"
+    );
+}
+
 async fn sweep_orphan_status_panel(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -806,6 +832,29 @@ async fn sweep_orphan_status_panel(
     // already completed (state file gone).
     if !inflight_state_still_same_turn(provider, state, age_secs) {
         return;
+    }
+    // EPIC #3078 PR-3 — route the panel reclaim + clear through the
+    // `StatusPanelController` behind a SHADOW parity check: the controller adopts
+    // the persisted orphan id and reports the id it WOULD reclaim/clear, asserted
+    // == the legacy `panel_reclaim_target`. The legacy delete + clear below still
+    // execute the real Discord IO + durable clear, so behaviour is unchanged (the
+    // executing cutover needs the async `PanelSink` PR-2 deferred). The actor is
+    // NOT spawned when v2 is off, so this v2 guard short-circuits the awaited
+    // shadow read (whose ack would never be answered), mirroring `recovery_engine`.
+    if shared.status_panel_v2_enabled {
+        let controller_target = shared
+            .status_panel_controller
+            .sweeper_reclaim_parity_id(
+                super::turn_finalizer::TurnKey::new(
+                    serenity::ChannelId::new(state.channel_id),
+                    state.user_msg_id,
+                    state.born_generation,
+                ),
+                provider.clone(),
+                Some(panel_msg),
+            )
+            .await;
+        assert_sweeper_reclaim_parity(controller_target, Some(panel_msg), state.channel_id);
     }
     let channel = serenity::ChannelId::new(state.channel_id);
     let committed = match channel.delete_message(http, panel_msg).await {
@@ -918,8 +967,13 @@ pub(super) fn spawn_placeholder_sweeper(
             // #3003: retry any durably-queued orphan status-panel deletes whose
             // inline reclaim failed transiently (and whose inflight row is gone, so
             // there is no per-turn handle left). Independent of inflight lifecycle.
-            let drained =
-                super::status_panel_orphan_store::drain(&http, &provider, &shared.token_hash).await;
+            let drained = super::status_panel_orphan_store::drain(
+                &http,
+                &shared,
+                &provider,
+                &shared.token_hash,
+            )
+            .await;
             sweeps_since_heartbeat = sweeps_since_heartbeat.saturating_add(1);
             if should_log_sweep_report(report, sweeps_since_heartbeat) || drained > 0 {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1144,6 +1198,55 @@ mod is_message_still_placeholder_tests {
         assert!(!is_message_still_placeholder(
             "지난 알림 인용:\n> **시작**: <t:123:R>"
         ));
+    }
+}
+
+#[cfg(test)]
+mod sweeper_reclaim_parity_tests {
+    //! EPIC #3078 PR-3: the `StatusPanelController`'s chosen reclaim target
+    //! (adopt the persisted orphan panel id → read back through the live actor)
+    //! equals the legacy `panel_reclaim_target` result for representative orphan
+    //! rows, so `assert_sweeper_reclaim_parity` never fires and the legacy
+    //! delete/clear keeps executing with no behaviour change.
+    use super::assert_sweeper_reclaim_parity;
+    use crate::services::discord::status_panel_controller::StatusPanelController;
+    use crate::services::discord::turn_finalizer::TurnKey;
+    use crate::services::provider::ProviderKind;
+    use poise::serenity_prelude as serenity;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn controller_chosen_reclaim_target_matches_legacy_for_representative_inputs() {
+        // Case A: a real persisted orphan panel id is the legacy reclaim target;
+        // the controller adopts it and chooses the same id.
+        let legacy = Some(serenity::MessageId::new(2200));
+        let ctl = StatusPanelController::spawn(true);
+        let key = TurnKey::new(serenity::ChannelId::new(500), 5001, 0);
+        let controller = ctl
+            .sweeper_reclaim_parity_id(key, ProviderKind::Claude, legacy)
+            .await;
+        assert_eq!(controller, legacy);
+        assert_sweeper_reclaim_parity(controller, legacy, 500);
+
+        // Case B: channel-only (`user_msg_id == 0`) orphan row — the controller
+        // collapses onto the single adopted live entry, choosing the same id.
+        let legacy0 = Some(serenity::MessageId::new(3300));
+        let ctl0 = StatusPanelController::spawn(true);
+        let key0 = TurnKey::new(serenity::ChannelId::new(501), 0, 0);
+        let controller0 = ctl0
+            .sweeper_reclaim_parity_id(key0, ProviderKind::Claude, legacy0)
+            .await;
+        assert_eq!(controller0, legacy0);
+        assert_sweeper_reclaim_parity(controller0, legacy0, 501);
+
+        // Case C: no panel id (the row is not panel-bearing) — both agree on None.
+        let legacy_none: Option<serenity::MessageId> = None;
+        let ctl_none = StatusPanelController::spawn(true);
+        let key_none = TurnKey::new(serenity::ChannelId::new(502), 5002, 0);
+        let controller_none = ctl_none
+            .sweeper_reclaim_parity_id(key_none, ProviderKind::Claude, legacy_none)
+            .await;
+        assert_eq!(controller_none, legacy_none);
+        assert_sweeper_reclaim_parity(controller_none, legacy_none, 502);
     }
 }
 
