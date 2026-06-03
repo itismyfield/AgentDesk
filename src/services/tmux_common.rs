@@ -121,6 +121,36 @@ pub(crate) fn tmux_capture_indicates_claude_tui_ready_for_input(capture: &str) -
         })
 }
 
+/// #3107: inflight-INDEPENDENT "the pane is in an active TUI turn" signal.
+///
+/// A multi-step agentic Claude TUI turn can lose its dcserver inflight mid-turn
+/// (a momentary idle observation between tool calls trips the completion gate,
+/// commits, and clears inflight) while the pane keeps producing assistant
+/// output. Once inflight is gone every later batch is treated as ownerless and
+/// suppressed (`should_skip_streaming_placeholder_without_inflight` /
+/// `should_suppress_post_terminal_output_without_inflight`), so the live turn
+/// goes dark even though the watcher is still alive.
+///
+/// This predicate gives the suppression/reclaim paths a way to tell a genuinely
+/// finished turn (returned to ready-for-input, or showing idle-suggestion
+/// chrome — the real post-finish ghost noise we DO want to suppress) apart from
+/// a live turn that merely lost its inflight. `true` means: the pane is neither
+/// ready-for-input NOR showing idle-suggestion chrome ⇒ it is actively
+/// producing ⇒ an active turn (that lost its inflight). `false` means the pane
+/// looks finished/idle, so existing suppression must stand.
+pub(crate) fn tmux_capture_indicates_claude_tui_actively_streaming(capture: &str) -> bool {
+    if capture.trim().is_empty() {
+        return false;
+    }
+    if tmux_capture_indicates_claude_tui_ready_for_input(capture) {
+        return false;
+    }
+    if tmux_capture_indicates_claude_tui_idle_suggestion(capture) {
+        return false;
+    }
+    true
+}
+
 pub(crate) fn tmux_capture_indicates_claude_tui_prompt_draft(capture: &str) -> bool {
     tmux_capture_claude_tui_prompt_draft_backspace_budget(capture).is_some()
 }
@@ -1019,5 +1049,69 @@ assistant output
 
         assert!(tmux_capture_indicates_claude_tui_prompt_draft(capture));
         assert!(tmux_capture_indicates_claude_tui_idle_suggestion(capture));
+    }
+
+    #[test]
+    fn actively_streaming_detects_busy_pane_with_esc_to_interrupt() {
+        // #3107: a live agentic turn that lost its inflight — the pane still
+        // shows the busy/"esc to interrupt" marker and is producing.
+        let capture = "\
+⏺ Running 1 shell command…
+· Actioning… (4m 7s · esc to interrupt)
+─────────────────────────────────────────────────────────────────────────────
+❯\u{00a0}
+─────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ █░░░░░░░░░ │ 7%";
+
+        assert!(!tmux_capture_indicates_claude_tui_ready_for_input(capture));
+        assert!(tmux_capture_indicates_claude_tui_actively_streaming(
+            capture
+        ));
+    }
+
+    #[test]
+    fn actively_streaming_rejects_ready_for_input_pane() {
+        // A genuinely finished turn returned to ready-for-input: not streaming.
+        let capture = "\
+✻ Churned for 4m 56s
+─────────────────────────────────────────────────────────────────────────────
+❯\u{00a0}
+─────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ █░░░░░░░░░ │ 7%
+  CLAUDE.md: 1, MCP: 2 │ Tools: 17 done
+  ⏵⏵ bypass permissions on";
+
+        assert!(tmux_capture_indicates_claude_tui_ready_for_input(capture));
+        assert!(!tmux_capture_indicates_claude_tui_actively_streaming(
+            capture
+        ));
+    }
+
+    #[test]
+    fn actively_streaming_rejects_idle_suggestion_chrome() {
+        // Idle-suggestion chrome is real post-finish ghost noise, not a live
+        // turn — must not be treated as actively streaming.
+        let capture = "\
+⏺ TUI-E2E marker
+✻ Worked for 2s
+────────────────────────────────────────────────────────────────────────────
+❯\u{00a0}좋아, 잘 동작하네
+────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ ░░░░░░░░░░ │ 4%
+  CLAUDE.md: 1, MCP: 2 │ Tools: 0 done
+  ⏵⏵ bypass permissions on";
+
+        assert!(tmux_capture_indicates_claude_tui_idle_suggestion(capture));
+        assert!(!tmux_capture_indicates_claude_tui_actively_streaming(
+            capture
+        ));
+    }
+
+    #[test]
+    fn actively_streaming_rejects_empty_capture() {
+        assert!(!tmux_capture_indicates_claude_tui_actively_streaming(""));
+        assert!(!tmux_capture_indicates_claude_tui_actively_streaming(
+            "   \n  \n"
+        ));
     }
 }

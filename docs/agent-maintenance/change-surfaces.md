@@ -113,20 +113,23 @@
   parsing), `src/services/discord/inflight.rs` (state file contract).
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/services/discord/watchers/lifecycle.rs` (2286 lines — canonical
+  - `src/services/discord/watchers/lifecycle.rs` (2301 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior).
   - `src/services/discord/tmux.rs` (2123 lines after #2558 dead-code sweep;
     failover guard; #3087 `session_panel_instance_key`/`write_spawn_nonce`
     re-exports; still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (6939 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (7114 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
     provider-selector fallback to the in-memory cache on resume turns
     + #3099 task-notification anchor `⏳` cleanup for `user_msg_id == 0`
     external-input turns (+9 from the #3099 re-review pinned-injected-message-id
-    cleanup target); split loop helpers further before adding behavior).
+    cleanup target) + #3107 self-heal: throttled live-pane-busy probe gates the
+    inflight-missing suppressions, re-acquires a watcher-owned inflight, and
+    preserves the panel under an active turn; split loop helpers further before
+    adding behavior).
   - `src/services/discord/tui_prompt_relay.rs` (3792 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3082 queued-only answer-flush gate
