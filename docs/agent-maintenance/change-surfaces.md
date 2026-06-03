@@ -300,10 +300,15 @@
   its query/command/view/FSM behavior lives under
   `src/services/auto_queue/{query,command,view,fsm,phase_gate}.rs` plus
   smaller route-delegation slices.
-  `src/services/auto_queue/activate_command.rs` (1221 lines, post-#1444
-  idempotency-guard expansion) is the canonical activate/dispatch-next
-  command surface; it is intentionally above the giant-file threshold and
-  tracked here. Further growth requires a split issue.
+  `src/services/auto_queue/activate_command.rs` (1351 lines, post-#1444
+  idempotency-guard expansion + #3038 phase-helper decomposition) is the
+  canonical activate/dispatch-next command surface; it is intentionally above
+  the giant-file threshold and tracked here. The `activate_with_deps_pg`
+  orchestrator was decomposed into named phase helpers (resolve-run-id,
+  acquire-lock, promote, empty-run completion, capacity, group planning,
+  finalize) under #3038 — the added doc-commented scaffolding nets a small
+  file-LoC increase while shrinking the god-function from ~1158 to ~559 lines.
+  Further growth requires a split issue.
   `src/services/auto_queue/cancel_run.rs` (1032 lines) is the canonical
   auto-queue cancellation and run-stop command surface; split before adding
   non-bugfix behavior.
@@ -428,7 +433,7 @@ Line counts are *production* LoC (the `Prod` column in `module-inventory.md`,
 which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync.
 
 - `src/services/auto_queue.rs` (1626) and
-  `src/services/auto_queue/activate_command.rs` (1221); auto-queue route
+  `src/services/auto_queue/activate_command.rs` (1351); auto-queue route
   behavior is split across `src/services/auto_queue/*` slices, with
   `activate_command.rs` now giant-file territory.
   `src/services/auto_queue/cancel_run.rs` (1032) is also giant-file territory;

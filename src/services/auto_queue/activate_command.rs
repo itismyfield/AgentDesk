@@ -1,5 +1,22 @@
 use super::*;
 
+/// Early-return HTTP payload shared by `activate_with_deps_pg` and the phase
+/// helpers extracted from it (Part of #3038). Helpers signal an early exit by
+/// returning `Err(ActivateResponse)`; the orchestrator propagates it verbatim
+/// with `?`, preserving the exact `(StatusCode, Json)` and control-flow of the
+/// original monolithic function.
+type ActivateResponse = (StatusCode, Json<serde_json::Value>);
+
+/// Plan produced by `compute_activate_groups_to_dispatch`: the ordered list of
+/// thread groups to attempt dispatching plus the concurrency counters the
+/// dispatch loop consults.
+struct ActivateGroupsPlan {
+    groups_to_dispatch: Vec<i64>,
+    active_group_count: i64,
+    active_turn_count: i64,
+    current_phase: Option<i64>,
+}
+
 pub(crate) async fn activate_with_deps_pg(
     deps: &AutoQueueActivateDeps,
     body: ActivateBody,
@@ -12,492 +29,36 @@ pub(crate) async fn activate_with_deps_pg(
         );
     };
     let active_only = body.active_only.unwrap_or(false);
-    let run_id = if let Some(run_id) = body.run_id {
-        run_id
-    } else {
-        let repo = body
-            .repo
-            .as_deref()
-            .filter(|value| !value.trim().is_empty());
-        let agent_id = body
-            .agent_id
-            .as_deref()
-            .filter(|value| !value.trim().is_empty());
-        let status_clause = if active_only {
-            "status = 'active'"
-        } else {
-            "status IN ('active', 'generated', 'pending')"
-        };
-        let query = format!(
-            "SELECT id
-             FROM auto_queue_runs
-             WHERE ($1::TEXT IS NULL OR repo = $1 OR repo IS NULL OR repo = '')
-               AND ($2::TEXT IS NULL OR agent_id = $2 OR agent_id IS NULL OR agent_id = '')
-               AND {status_clause}
-             ORDER BY created_at DESC
-             LIMIT 1"
-        );
-        match sqlx::query_scalar::<_, String>(&query)
-            .bind(repo)
-            .bind(agent_id)
-            .fetch_optional(pool)
-            .await
-        {
-            Ok(Some(run_id)) => run_id,
-            Ok(None) => {
-                return (
-                    StatusCode::OK,
-                    Json(json!({ "dispatched": [], "count": 0, "message": "No active run" })),
-                );
-            }
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("load postgres auto-queue run: {error}")})),
-                );
-            }
-        }
+    let run_id = match resolve_activate_target_run_id(pool, &body, active_only).await {
+        Ok(run_id) => run_id,
+        Err(response) => return response,
     };
     let run_log_ctx = AutoQueueLogContext::new().run(&run_id);
-    // #2048 F4: serialize per-run activate so concurrent
-    // `POST /api/queue/activate` and `policy::activateRun` invocations cannot
-    // both observe the same `active_turn_count` snapshot and each create
-    // `(max_concurrent_threads - N)` dispatches, exceeding the cap. Lock is
-    // session-scoped, pinned to a dedicated connection so it survives the
-    // multi-step pool-based loop. A drop guard releases the lock on every
-    // early-return path.
-    let activate_lock_conn_result = pool.acquire().await;
-    let mut activate_lock_conn = match activate_lock_conn_result {
-        Ok(conn) => conn,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"error": format!("acquire activate lock connection for {run_id}: {error}")}),
-                ),
-            );
-        }
+    let _activate_lock_guard = match acquire_activate_run_lock(pool, &run_id).await {
+        Ok(guard) => guard,
+        Err(response) => return response,
     };
-    if let Err(error) = sqlx::query("SELECT pg_advisory_lock(hashtext($1), hashtext($2))")
-        .bind("aq_activate")
-        .bind(&run_id)
-        .execute(&mut *activate_lock_conn)
-        .await
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("acquire activate advisory lock for {run_id}: {error}")})),
-        );
-    }
-    let _activate_lock_guard = ActivateLockReleaseGuard::new(activate_lock_conn, run_id.clone());
-    if !active_only
-        && let Err(error) = sqlx::query(
-            "UPDATE auto_queue_runs
-             SET status = 'active'
-             WHERE id = $1
-               AND status IN ('generated', 'pending')",
-        )
-        .bind(&run_id)
-        .execute(pool)
-        .await
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("promote postgres auto-queue run {run_id}: {error}")})),
-        );
-    }
-    if let Err(error) = crate::db::auto_queue::clear_inactive_slot_assignments_pg(pool).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                json!({"error": format!("clear inactive postgres auto-queue slots for {run_id}: {error}")}),
-            ),
-        );
+    if let Err(response) = promote_run_and_clear_inactive_slots(pool, &run_id, active_only).await {
+        return response;
     }
     let mut cleared_slots: HashSet<(String, i64)> = HashSet::new();
-    let entry_count = match sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::BIGINT
-         FROM auto_queue_entries
-         WHERE run_id = $1",
-    )
-    .bind(&run_id)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(count) => count,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"error": format!("count postgres auto-queue entries for {run_id}: {error}")}),
-                ),
-            );
-        }
-    };
-    if entry_count == 0 {
-        if let Err(error) = sqlx::query(
-            // #2048 F18: only auto-complete runs that are still active /
-            // promotable. A caller passing a cancelled/completed run_id
-            // should not flip its status — only the explicit cancel/complete
-            // paths may finalize. The activate path is best-effort.
-            "UPDATE auto_queue_runs
-             SET status = 'completed',
-                 completed_at = NOW()
-             WHERE id = $1
-               AND status IN ('active', 'paused', 'generated', 'pending')",
-        )
-        .bind(&run_id)
-        .execute(pool)
-        .await
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"error": format!("complete stale postgres auto-queue run {run_id}: {error}")}),
-                ),
-            );
-        }
-        crate::auto_queue_log!(
-            info,
-            "activate_stale_empty_run_completed_pg",
-            run_log_ctx.clone(),
-            "[auto-queue] Completed stale empty PG run {run_id} — no entries, skipping fallback populate (#85)"
-        );
-        return (
-            StatusCode::OK,
-            Json(
-                json!({ "dispatched": [], "count": 0, "message": "Stale empty run completed — no entries to dispatch" }),
-            ),
-        );
+    if let Err(response) = complete_run_if_empty(pool, &run_id, &run_log_ctx).await {
+        return response;
     }
-    let (max_concurrent, _thread_group_count) = match sqlx::query(
-        "SELECT COALESCE(max_concurrent_threads, 1)::BIGINT AS max_concurrent_threads,
-                COALESCE(thread_group_count, 1)::BIGINT AS thread_group_count
-         FROM auto_queue_runs
-         WHERE id = $1",
-    )
-    .bind(&run_id)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(row) => {
-            let max_concurrent = match row.try_get::<i64, _>("max_concurrent_threads") {
-                Ok(value) => value,
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(
-                            json!({"error": format!("decode postgres auto-queue max_concurrent_threads for {run_id}: {error}")}),
-                        ),
-                    );
-                }
-            };
-            let thread_group_count = match row.try_get::<i64, _>("thread_group_count") {
-                Ok(value) => value,
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(
-                            json!({"error": format!("decode postgres auto-queue thread_group_count for {run_id}: {error}")}),
-                        ),
-                    );
-                }
-            };
-            (max_concurrent, thread_group_count)
-        }
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"error": format!("load postgres auto-queue run capacity for {run_id}: {error}")}),
-                ),
-            );
-        }
-    };
-    let run_agents_rows = match sqlx::query(
-        "SELECT DISTINCT agent_id
-         FROM auto_queue_entries
-         WHERE run_id = $1",
-    )
-    .bind(&run_id)
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"error": format!("load postgres auto-queue run agents for {run_id}: {error}")}),
-                ),
-            );
-        }
-    };
-    for row in run_agents_rows {
-        let agent_id: String = match row.try_get("agent_id") {
-            Ok(value) => value,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(
-                        json!({"error": format!("decode postgres auto-queue run agent for {run_id}: {error}")}),
-                    ),
-                );
-            }
-        };
-        if let Err(error) =
-            crate::db::auto_queue::ensure_agent_slot_pool_rows_pg(pool, &agent_id, max_concurrent)
-                .await
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"error": format!("prepare postgres slot pool rows for run {run_id} agent {agent_id}: {error}")}),
-                ),
-            );
-        }
-    }
-    let current_phase = match crate::db::auto_queue::current_batch_phase_pg(pool, &run_id).await {
+    let max_concurrent = match load_activate_capacity_and_prepare_slots(pool, &run_id).await {
         Ok(value) => value,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"error": format!("load postgres auto-queue current phase for {run_id}: {error}")}),
-                ),
-            );
-        }
+        Err(response) => return response,
     };
-    let active_groups_rows = match sqlx::query(
-        "SELECT DISTINCT COALESCE(thread_group, 0)::BIGINT AS thread_group
-         FROM auto_queue_entries
-         WHERE run_id = $1
-           AND status = 'dispatched'
-         ORDER BY thread_group ASC",
-    )
-    .bind(&run_id)
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"error": format!("load postgres active groups for {run_id}: {error}")}),
-                ),
-            );
-        }
-    };
-    let active_groups: Vec<i64> = {
-        let mut groups = Vec::with_capacity(active_groups_rows.len());
-        for row in active_groups_rows {
-            match row.try_get::<i64, _>("thread_group") {
-                Ok(value) => groups.push(value),
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(
-                            json!({"error": format!("decode postgres active group for {run_id}: {error}")}),
-                        ),
-                    );
-                }
-            }
-        }
-        groups
-    };
-    let active_group_count = active_groups.len() as i64;
-    // #2034: max_concurrent_threads now caps the total active turn count
-    // across implementation + review + review-decision + rework + create-pr
-    // dispatches (not just impl thread groups). Count any non-phase-gate
-    // task_dispatch row in 'pending' or 'dispatched' status that belongs to
-    // the run's agent(s). Phase-gate sidecar dispatches stay excluded so
-    // gate evaluation does not occupy a concurrency slot.
-    let active_turn_count = match sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::BIGINT
-         FROM task_dispatches d
-         WHERE d.status IN ('pending', 'dispatched')
-           AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
-           AND (COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->'phase_gate' IS NULL
-           AND EXISTS (
-               SELECT 1
-               FROM auto_queue_entries e
-               WHERE e.run_id = $1
-                 AND e.agent_id = d.to_agent_id
-           )",
-    )
-    .bind(&run_id)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(value) => value,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"error": format!("load postgres active turn count for {run_id}: {error}")}),
-                ),
-            );
-        }
-    };
-    let pending_group_rows = match sqlx::query(
-        "SELECT DISTINCT COALESCE(thread_group, 0)::BIGINT AS thread_group,
-                         COALESCE(batch_phase, 0)::BIGINT AS batch_phase
-         FROM auto_queue_entries
-         WHERE run_id = $1
-           AND status = 'pending'
-         ORDER BY thread_group ASC, batch_phase ASC",
-    )
-    .bind(&run_id)
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"error": format!("load postgres pending groups for {run_id}: {error}")}),
-                ),
-            );
-        }
-    };
-    let pending_groups: Vec<i64> = {
-        let active_set: HashSet<i64> = active_groups.iter().copied().collect();
-        let mut groups = Vec::new();
-        let mut seen = HashSet::new();
-        for row in pending_group_rows {
-            let thread_group = match row.try_get::<i64, _>("thread_group") {
-                Ok(value) => value,
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(
-                            json!({"error": format!("decode postgres pending group for {run_id}: {error}")}),
-                        ),
-                    );
-                }
-            };
-            let batch_phase = match row.try_get::<i64, _>("batch_phase") {
-                Ok(value) => value,
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(
-                            json!({"error": format!("decode postgres pending batch_phase for {run_id}: {error}")}),
-                        ),
-                    );
-                }
-            };
-            if !active_set.contains(&thread_group)
-                && crate::db::auto_queue::batch_phase_is_eligible(batch_phase, current_phase)
-                && seen.insert(thread_group)
-            {
-                groups.push(thread_group);
-            }
-        }
-        groups
+    let ActivateGroupsPlan {
+        groups_to_dispatch,
+        active_group_count,
+        active_turn_count,
+        current_phase,
+    } = match compute_activate_groups_to_dispatch(pool, &run_id, &body).await {
+        Ok(plan) => plan,
+        Err(response) => return response,
     };
     let mut dispatched = Vec::new();
-    let mut groups_to_dispatch = Vec::new();
-    if let Some(group) = body.thread_group {
-        let has_pending = match crate::db::auto_queue::group_has_pending_entries_pg(
-            pool,
-            &run_id,
-            group,
-            current_phase,
-        )
-        .await
-        {
-            Ok(value) => value,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(
-                        json!({"error": format!("load postgres pending group eligibility for {run_id}:{group}: {error}")}),
-                    ),
-                );
-            }
-        };
-        let has_dispatched = match group_has_dispatched_entries_pg(pool, &run_id, group).await {
-            Ok(value) => value,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(
-                        json!({"error": format!("load postgres dispatched group state for {run_id}:{group}: {error}")}),
-                    ),
-                );
-            }
-        };
-        if has_pending && !has_dispatched {
-            groups_to_dispatch.push(group);
-        }
-    }
-    match crate::db::auto_queue::assigned_groups_with_pending_entries_pg(
-        pool,
-        &run_id,
-        current_phase,
-    )
-    .await
-    {
-        Ok(groups) => {
-            for group in groups {
-                if !groups_to_dispatch.contains(&group) {
-                    groups_to_dispatch.push(group);
-                }
-            }
-        }
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"error": format!("load postgres assigned groups for {run_id}: {error}")}),
-                ),
-            );
-        }
-    }
-
-    for &group in &active_groups {
-        let has_pending = match crate::db::auto_queue::group_has_pending_entries_pg(
-            pool,
-            &run_id,
-            group,
-            current_phase,
-        )
-        .await
-        {
-            Ok(value) => value,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(
-                        json!({"error": format!("load postgres continuation eligibility for {run_id}:{group}: {error}")}),
-                    ),
-                );
-            }
-        };
-        let has_dispatched = match group_has_dispatched_entries_pg(pool, &run_id, group).await {
-            Ok(value) => value,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(
-                        json!({"error": format!("load postgres dispatched continuation state for {run_id}:{group}: {error}")}),
-                    ),
-                );
-            }
-        };
-        if has_pending && !has_dispatched && !groups_to_dispatch.contains(&group) {
-            groups_to_dispatch.push(group);
-        }
-    }
-
-    for group in pending_groups {
-        if !groups_to_dispatch.contains(&group) {
-            groups_to_dispatch.push(group);
-        }
-    }
 
     let mut new_dispatches_this_activate = 0_i64;
     for group in &groups_to_dispatch {
@@ -635,7 +196,7 @@ pub(crate) async fn activate_with_deps_pg(
             let dispatch_id = initial_state
                 .latest_dispatch_id
                 .as_ref()
-                .expect("active dispatch state requires dispatch id")
+                .expect("active dispatch state requires dispatch id") // agentdesk-audit: allow-unwrap pre-existing invariant relocated unchanged during #3038 phase extraction; has_active_dispatch() guarantees latest_dispatch_id is Some
                 .clone();
             // #1444 idempotency log: emit a clearly-tagged DISPATCH-NEXT skip
             // marker so the operator can correlate "no new dispatch was
@@ -1011,28 +572,597 @@ pub(crate) async fn activate_with_deps_pg(
         dispatched.push(deps.entry_json_pg(pool, &entry_id).await);
     }
 
+    match finalize_activate_run_and_build_response(pool, &run_id, &run_log_ctx, dispatched).await {
+        Ok(response) | Err(response) => response,
+    }
+}
+
+/// Resolves the target `run_id` for the activate request: prefers the explicit
+/// `body.run_id`, otherwise selects the most recent matching run. An empty
+/// match short-circuits with the canonical "No active run" OK response, and DB
+/// errors short-circuit with a 500 — both returned as `Err(ActivateResponse)`.
+async fn resolve_activate_target_run_id(
+    pool: &sqlx::PgPool,
+    body: &ActivateBody,
+    active_only: bool,
+) -> Result<String, ActivateResponse> {
+    if let Some(run_id) = body.run_id.clone() {
+        return Ok(run_id);
+    }
+    let repo = body
+        .repo
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let agent_id = body
+        .agent_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let status_clause = if active_only {
+        "status = 'active'"
+    } else {
+        "status IN ('active', 'generated', 'pending')"
+    };
+    let query = format!(
+        "SELECT id
+         FROM auto_queue_runs
+         WHERE ($1::TEXT IS NULL OR repo = $1 OR repo IS NULL OR repo = '')
+           AND ($2::TEXT IS NULL OR agent_id = $2 OR agent_id IS NULL OR agent_id = '')
+           AND {status_clause}
+         ORDER BY created_at DESC
+         LIMIT 1"
+    );
+    match sqlx::query_scalar::<_, String>(&query)
+        .bind(repo)
+        .bind(agent_id)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(Some(run_id)) => Ok(run_id),
+        Ok(None) => Err((
+            StatusCode::OK,
+            Json(json!({ "dispatched": [], "count": 0, "message": "No active run" })),
+        )),
+        Err(error) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("load postgres auto-queue run: {error}")})),
+        )),
+    }
+}
+
+/// #2048 F4: serialize per-run activate so concurrent
+/// `POST /api/queue/activate` and `policy::activateRun` invocations cannot
+/// both observe the same `active_turn_count` snapshot and each create
+/// `(max_concurrent_threads - N)` dispatches, exceeding the cap. Lock is
+/// session-scoped, pinned to a dedicated connection so it survives the
+/// multi-step pool-based loop. A drop guard releases the lock on every
+/// early-return path.
+async fn acquire_activate_run_lock(
+    pool: &sqlx::PgPool,
+    run_id: &str,
+) -> Result<ActivateLockReleaseGuard, ActivateResponse> {
+    let activate_lock_conn_result = pool.acquire().await;
+    let mut activate_lock_conn = match activate_lock_conn_result {
+        Ok(conn) => conn,
+        Err(error) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("acquire activate lock connection for {run_id}: {error}")}),
+                ),
+            ));
+        }
+    };
+    if let Err(error) = sqlx::query("SELECT pg_advisory_lock(hashtext($1), hashtext($2))")
+        .bind("aq_activate")
+        .bind(run_id)
+        .execute(&mut *activate_lock_conn)
+        .await
+    {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("acquire activate advisory lock for {run_id}: {error}")})),
+        ));
+    }
+    Ok(ActivateLockReleaseGuard::new(
+        activate_lock_conn,
+        run_id.to_string(),
+    ))
+}
+
+/// Promotes a generated/pending run to `active` (skipped when `active_only`)
+/// and clears inactive slot assignments. Either DB failure short-circuits the
+/// request with a 500 returned as `Err(ActivateResponse)`.
+async fn promote_run_and_clear_inactive_slots(
+    pool: &sqlx::PgPool,
+    run_id: &str,
+    active_only: bool,
+) -> Result<(), ActivateResponse> {
+    if !active_only
+        && let Err(error) = sqlx::query(
+            "UPDATE auto_queue_runs
+             SET status = 'active'
+             WHERE id = $1
+               AND status IN ('generated', 'pending')",
+        )
+        .bind(run_id)
+        .execute(pool)
+        .await
+    {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("promote postgres auto-queue run {run_id}: {error}")})),
+        ));
+    }
+    if let Err(error) = crate::db::auto_queue::clear_inactive_slot_assignments_pg(pool).await {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                json!({"error": format!("clear inactive postgres auto-queue slots for {run_id}: {error}")}),
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Counts the run's entries; when zero, best-effort completes the stale run
+/// and short-circuits the activate request. Both the "stale empty run
+/// completed" OK response and any DB failure are returned as
+/// `Err(ActivateResponse)`; `Ok(())` means the run has entries to dispatch.
+async fn complete_run_if_empty(
+    pool: &sqlx::PgPool,
+    run_id: &str,
+    run_log_ctx: &AutoQueueLogContext<'_>,
+) -> Result<(), ActivateResponse> {
+    let entry_count = match sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT
+         FROM auto_queue_entries
+         WHERE run_id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(count) => count,
+        Err(error) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("count postgres auto-queue entries for {run_id}: {error}")}),
+                ),
+            ));
+        }
+    };
+    if entry_count == 0 {
+        if let Err(error) = sqlx::query(
+            // #2048 F18: only auto-complete runs that are still active /
+            // promotable. A caller passing a cancelled/completed run_id
+            // should not flip its status — only the explicit cancel/complete
+            // paths may finalize. The activate path is best-effort.
+            "UPDATE auto_queue_runs
+             SET status = 'completed',
+                 completed_at = NOW()
+             WHERE id = $1
+               AND status IN ('active', 'paused', 'generated', 'pending')",
+        )
+        .bind(run_id)
+        .execute(pool)
+        .await
+        {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("complete stale postgres auto-queue run {run_id}: {error}")}),
+                ),
+            ));
+        }
+        crate::auto_queue_log!(
+            info,
+            "activate_stale_empty_run_completed_pg",
+            run_log_ctx.clone(),
+            "[auto-queue] Completed stale empty PG run {run_id} — no entries, skipping fallback populate (#85)"
+        );
+        return Err((
+            StatusCode::OK,
+            Json(
+                json!({ "dispatched": [], "count": 0, "message": "Stale empty run completed — no entries to dispatch" }),
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Loads the run's `max_concurrent_threads` capacity and ensures slot-pool
+/// rows exist for every agent referenced by the run's entries. Returns the
+/// capacity on success; any DB/decode failure short-circuits with a 500
+/// returned as `Err(ActivateResponse)`.
+async fn load_activate_capacity_and_prepare_slots(
+    pool: &sqlx::PgPool,
+    run_id: &str,
+) -> Result<i64, ActivateResponse> {
+    let (max_concurrent, _thread_group_count) = match sqlx::query(
+        "SELECT COALESCE(max_concurrent_threads, 1)::BIGINT AS max_concurrent_threads,
+                COALESCE(thread_group_count, 1)::BIGINT AS thread_group_count
+         FROM auto_queue_runs
+         WHERE id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(row) => {
+            let max_concurrent = match row.try_get::<i64, _>("max_concurrent_threads") {
+                Ok(value) => value,
+                Err(error) => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(
+                            json!({"error": format!("decode postgres auto-queue max_concurrent_threads for {run_id}: {error}")}),
+                        ),
+                    ));
+                }
+            };
+            let thread_group_count = match row.try_get::<i64, _>("thread_group_count") {
+                Ok(value) => value,
+                Err(error) => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(
+                            json!({"error": format!("decode postgres auto-queue thread_group_count for {run_id}: {error}")}),
+                        ),
+                    ));
+                }
+            };
+            (max_concurrent, thread_group_count)
+        }
+        Err(error) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("load postgres auto-queue run capacity for {run_id}: {error}")}),
+                ),
+            ));
+        }
+    };
+    let run_agents_rows = match sqlx::query(
+        "SELECT DISTINCT agent_id
+         FROM auto_queue_entries
+         WHERE run_id = $1",
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("load postgres auto-queue run agents for {run_id}: {error}")}),
+                ),
+            ));
+        }
+    };
+    for row in run_agents_rows {
+        let agent_id: String = match row.try_get("agent_id") {
+            Ok(value) => value,
+            Err(error) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("decode postgres auto-queue run agent for {run_id}: {error}")}),
+                    ),
+                ));
+            }
+        };
+        if let Err(error) =
+            crate::db::auto_queue::ensure_agent_slot_pool_rows_pg(pool, &agent_id, max_concurrent)
+                .await
+        {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("prepare postgres slot pool rows for run {run_id} agent {agent_id}: {error}")}),
+                ),
+            ));
+        }
+    }
+    Ok(max_concurrent)
+}
+
+/// Computes the ordered set of thread groups to attempt dispatching for this
+/// activate call, alongside the concurrency counters (`active_turn_count`,
+/// `active_group_count`) and `current_phase` the dispatch loop consults. The
+/// group ordering and dedup semantics mirror the original inline logic exactly:
+/// explicit `body.thread_group` first, then assigned-with-pending groups, then
+/// active-group continuations, then phase-eligible pending groups. Any DB or
+/// decode failure short-circuits with a 500 returned as `Err(ActivateResponse)`.
+async fn compute_activate_groups_to_dispatch(
+    pool: &sqlx::PgPool,
+    run_id: &str,
+    body: &ActivateBody,
+) -> Result<ActivateGroupsPlan, ActivateResponse> {
+    let current_phase = match crate::db::auto_queue::current_batch_phase_pg(pool, run_id).await {
+        Ok(value) => value,
+        Err(error) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("load postgres auto-queue current phase for {run_id}: {error}")}),
+                ),
+            ));
+        }
+    };
+    let active_groups_rows = match sqlx::query(
+        "SELECT DISTINCT COALESCE(thread_group, 0)::BIGINT AS thread_group
+         FROM auto_queue_entries
+         WHERE run_id = $1
+           AND status = 'dispatched'
+         ORDER BY thread_group ASC",
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("load postgres active groups for {run_id}: {error}")}),
+                ),
+            ));
+        }
+    };
+    let active_groups: Vec<i64> = {
+        let mut groups = Vec::with_capacity(active_groups_rows.len());
+        for row in active_groups_rows {
+            match row.try_get::<i64, _>("thread_group") {
+                Ok(value) => groups.push(value),
+                Err(error) => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(
+                            json!({"error": format!("decode postgres active group for {run_id}: {error}")}),
+                        ),
+                    ));
+                }
+            }
+        }
+        groups
+    };
+    let active_group_count = active_groups.len() as i64;
+    // #2034: max_concurrent_threads now caps the total active turn count
+    // across implementation + review + review-decision + rework + create-pr
+    // dispatches (not just impl thread groups). Count any non-phase-gate
+    // task_dispatch row in 'pending' or 'dispatched' status that belongs to
+    // the run's agent(s). Phase-gate sidecar dispatches stay excluded so
+    // gate evaluation does not occupy a concurrency slot.
+    let active_turn_count = match sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT
+         FROM task_dispatches d
+         WHERE d.status IN ('pending', 'dispatched')
+           AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
+           AND (COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->'phase_gate' IS NULL
+           AND EXISTS (
+               SELECT 1
+               FROM auto_queue_entries e
+               WHERE e.run_id = $1
+                 AND e.agent_id = d.to_agent_id
+           )",
+    )
+    .bind(run_id)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("load postgres active turn count for {run_id}: {error}")}),
+                ),
+            ));
+        }
+    };
+    let pending_group_rows = match sqlx::query(
+        "SELECT DISTINCT COALESCE(thread_group, 0)::BIGINT AS thread_group,
+                         COALESCE(batch_phase, 0)::BIGINT AS batch_phase
+         FROM auto_queue_entries
+         WHERE run_id = $1
+           AND status = 'pending'
+         ORDER BY thread_group ASC, batch_phase ASC",
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("load postgres pending groups for {run_id}: {error}")}),
+                ),
+            ));
+        }
+    };
+    let pending_groups: Vec<i64> = {
+        let active_set: HashSet<i64> = active_groups.iter().copied().collect();
+        let mut groups = Vec::new();
+        let mut seen = HashSet::new();
+        for row in pending_group_rows {
+            let thread_group = match row.try_get::<i64, _>("thread_group") {
+                Ok(value) => value,
+                Err(error) => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(
+                            json!({"error": format!("decode postgres pending group for {run_id}: {error}")}),
+                        ),
+                    ));
+                }
+            };
+            let batch_phase = match row.try_get::<i64, _>("batch_phase") {
+                Ok(value) => value,
+                Err(error) => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(
+                            json!({"error": format!("decode postgres pending batch_phase for {run_id}: {error}")}),
+                        ),
+                    ));
+                }
+            };
+            if !active_set.contains(&thread_group)
+                && crate::db::auto_queue::batch_phase_is_eligible(batch_phase, current_phase)
+                && seen.insert(thread_group)
+            {
+                groups.push(thread_group);
+            }
+        }
+        groups
+    };
+    let mut groups_to_dispatch = Vec::new();
+    if let Some(group) = body.thread_group {
+        let has_pending = match crate::db::auto_queue::group_has_pending_entries_pg(
+            pool,
+            run_id,
+            group,
+            current_phase,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("load postgres pending group eligibility for {run_id}:{group}: {error}")}),
+                    ),
+                ));
+            }
+        };
+        let has_dispatched = match group_has_dispatched_entries_pg(pool, run_id, group).await {
+            Ok(value) => value,
+            Err(error) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("load postgres dispatched group state for {run_id}:{group}: {error}")}),
+                    ),
+                ));
+            }
+        };
+        if has_pending && !has_dispatched {
+            groups_to_dispatch.push(group);
+        }
+    }
+    match crate::db::auto_queue::assigned_groups_with_pending_entries_pg(
+        pool,
+        run_id,
+        current_phase,
+    )
+    .await
+    {
+        Ok(groups) => {
+            for group in groups {
+                if !groups_to_dispatch.contains(&group) {
+                    groups_to_dispatch.push(group);
+                }
+            }
+        }
+        Err(error) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("load postgres assigned groups for {run_id}: {error}")}),
+                ),
+            ));
+        }
+    }
+
+    for &group in &active_groups {
+        let has_pending = match crate::db::auto_queue::group_has_pending_entries_pg(
+            pool,
+            run_id,
+            group,
+            current_phase,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("load postgres continuation eligibility for {run_id}:{group}: {error}")}),
+                    ),
+                ));
+            }
+        };
+        let has_dispatched = match group_has_dispatched_entries_pg(pool, run_id, group).await {
+            Ok(value) => value,
+            Err(error) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("load postgres dispatched continuation state for {run_id}:{group}: {error}")}),
+                    ),
+                ));
+            }
+        };
+        if has_pending && !has_dispatched && !groups_to_dispatch.contains(&group) {
+            groups_to_dispatch.push(group);
+        }
+    }
+
+    for group in pending_groups {
+        if !groups_to_dispatch.contains(&group) {
+            groups_to_dispatch.push(group);
+        }
+    }
+
+    Ok(ActivateGroupsPlan {
+        groups_to_dispatch,
+        active_group_count,
+        active_turn_count,
+        current_phase,
+    })
+}
+
+/// Final activate phase: drains the run if no entries remain (releasing slots
+/// and best-effort completing the run), recomputes the active/pending group
+/// counts and post-activate turn count, and builds the success payload. Count
+/// failures short-circuit with a 500 returned as `Err(ActivateResponse)`; the
+/// success payload is returned as `Ok(ActivateResponse)`.
+async fn finalize_activate_run_and_build_response(
+    pool: &sqlx::PgPool,
+    run_id: &str,
+    run_log_ctx: &AutoQueueLogContext<'_>,
+    dispatched: Vec<serde_json::Value>,
+) -> Result<ActivateResponse, ActivateResponse> {
     let remaining = match sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::BIGINT
          FROM auto_queue_entries
          WHERE run_id = $1
            AND status IN ('pending', 'dispatched')",
     )
-    .bind(&run_id)
+    .bind(run_id)
     .fetch_one(pool)
     .await
     {
         Ok(value) => value,
         Err(error) => {
-            return (
+            return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(
                     json!({"error": format!("count postgres remaining entries for {run_id}: {error}")}),
                 ),
-            );
+            ));
         }
     };
     if remaining == 0 {
-        if let Err(error) = crate::db::auto_queue::release_run_slots_pg(pool, &run_id).await {
+        if let Err(error) = crate::db::auto_queue::release_run_slots_pg(pool, run_id).await {
             crate::auto_queue_log!(
                 warn,
                 "activate_release_run_slots_failed_pg",
@@ -1048,18 +1178,18 @@ pub(crate) async fn activate_with_deps_pg(
              WHERE run_id = $1
                AND status = 'dispatched'",
         )
-        .bind(&run_id)
+        .bind(run_id)
         .fetch_one(pool)
         .await
         {
             Ok(value) => value,
             Err(error) => {
-                return (
+                return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(
                         json!({"error": format!("count postgres dispatched entries for {run_id}: {error}")}),
                     ),
-                );
+                ));
             }
         };
         if still_dispatched == 0
@@ -1070,7 +1200,7 @@ pub(crate) async fn activate_with_deps_pg(
                  WHERE id = $1
                    AND status IN ('active', 'paused', 'generated', 'pending')",
             )
-            .bind(&run_id)
+            .bind(run_id)
             .execute(pool)
             .await
         {
@@ -1091,18 +1221,18 @@ pub(crate) async fn activate_with_deps_pg(
          WHERE run_id = $1
            AND status = 'dispatched'",
     )
-    .bind(&run_id)
+    .bind(run_id)
     .fetch_one(pool)
     .await
     {
         Ok(value) => value,
         Err(error) => {
-            return (
+            return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(
                     json!({"error": format!("count postgres active groups for {run_id}: {error}")}),
                 ),
-            );
+            ));
         }
     };
     let pending_group_count = match sqlx::query_scalar::<_, i64>(
@@ -1111,18 +1241,18 @@ pub(crate) async fn activate_with_deps_pg(
          WHERE run_id = $1
            AND status = 'pending'",
     )
-    .bind(&run_id)
+    .bind(run_id)
     .fetch_one(pool)
     .await
     {
         Ok(value) => value,
         Err(error) => {
-            return (
+            return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(
                     json!({"error": format!("count postgres pending groups for {run_id}: {error}")}),
                 ),
-            );
+            ));
         }
     };
 
@@ -1142,12 +1272,12 @@ pub(crate) async fn activate_with_deps_pg(
                  AND e.agent_id = d.to_agent_id
            )",
     )
-    .bind(&run_id)
+    .bind(run_id)
     .fetch_one(pool)
     .await
     .unwrap_or(0);
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "dispatched": dispatched,
@@ -1156,7 +1286,7 @@ pub(crate) async fn activate_with_deps_pg(
             "active_turn_count": active_turn_count_after,
             "pending_groups": pending_group_count,
         })),
-    )
+    ))
 }
 
 fn activate_fallback_capacity_reached(
