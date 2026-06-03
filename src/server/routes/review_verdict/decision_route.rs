@@ -2218,44 +2218,76 @@ pub struct ReviewDecisionBody {
     pub out_of_scope: Option<bool>,
 }
 
-/// POST /api/reviews/decision
+/// Shared response shape for the `submit_review_decision` handler and its
+/// extracted phase helpers: `(HTTP status, JSON body)`.
+type DecisionResponse = (StatusCode, Json<serde_json::Value>);
+
+/// #3038 god-function decomposition: validated, normalized inputs threaded from
+/// `decision_route_validate_input` into the rest of `submit_review_decision`.
+/// Behavior-preserving — carries exactly the values the original inline
+/// validation produced.
+struct DecisionInput {
+    /// Normalized `commit_sha` from the request body (`None` when absent).
+    submitted_commit: Option<String>,
+}
+
+/// Phase 1 of `submit_review_decision`: input classification + existence guards.
 ///
-/// Agent's decision on counter-model review feedback.
-/// - accept: agent will rework based on review → card to in_progress
-/// - dispute: agent disagrees, sends back for re-review → new review dispatch
-/// - dismiss: agent ignores review → card to done
-pub async fn submit_review_decision(
-    State(state): State<AppState>,
-    Json(body): Json<ReviewDecisionBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+/// Pure extraction of the original inline preamble. Returns `Err(response)` to
+/// short-circuit the handler with the identical early-return body, or
+/// `Ok(DecisionInput)` to continue. Side-effect ordering (decision whitelist →
+/// commit normalization → card existence) is preserved exactly.
+async fn decision_route_validate_input(
+    state: &AppState,
+    body: &ReviewDecisionBody,
+) -> Result<DecisionInput, DecisionResponse> {
     let valid = ["accept", "dispute", "dismiss"];
     if !valid.contains(&body.decision.as_str()) {
-        return (
+        return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({"error": format!("decision must be one of: {}", valid.join(", "))})),
-        );
+        ));
     }
 
     let submitted_commit = match normalize_optional_commit_sha(body.commit_sha.as_deref()) {
         Ok(commit) => commit,
         Err(error) => {
-            return (
+            return Err((
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": error, "field": "commit_sha"})),
-            );
+            ));
         }
     };
 
-    if !card_exists_pg_first(&state, &body.card_id).await {
-        return (
+    if !card_exists_pg_first(state, &body.card_id).await {
+        return Err((
             StatusCode::NOT_FOUND,
             Json(json!({"error": "card not found"})),
-        );
+        ));
     }
 
-    let mut pending_rd_id =
-        pending_review_decision_dispatch_id_pg_first(&state, &body.card_id).await;
+    Ok(DecisionInput { submitted_commit })
+}
 
+/// Phase 2 of `submit_review_decision`: pending review-decision dispatch
+/// resolution + idempotency recovery.
+///
+/// Pure extraction of the original `pending_rd_id.is_none()` recovery block
+/// (#2200 sub-fix 4 by-id recovery, #2341/#2200 sub-3 scope_mismatch_closed
+/// idempotent resume, and #2200 sub-fix 1 stale-state idempotency). Behavior,
+/// branch ordering, logging, and side-effect ordering are identical to the
+/// inline original.
+///
+/// `pending_rd_id` is the canonical pending lookup result; this helper may
+/// recover it from the submitted `dispatch_id` or claim a stale side-effects
+/// resume. On success returns the (possibly updated) `pending_rd_id` together
+/// with `resume_side_effects_pending`; `Err(response)` short-circuits the
+/// handler with the identical early-return body.
+async fn decision_route_resolve_pending(
+    state: &AppState,
+    body: &ReviewDecisionBody,
+    mut pending_rd_id: Option<String>,
+) -> Result<(Option<String>, bool), DecisionResponse> {
     // #2200 sub-fix 4 (`stale-dispatch-mismatch`):
     // If the caller submitted an explicit `dispatch_id` and the canonical
     // pending lookup missed it, fall back to a by-id lookup scoped to the
@@ -2277,8 +2309,7 @@ pub async fn submit_review_decision(
 
     if pending_rd_id.is_none() {
         if let Some(ref submitted_did) = body.dispatch_id {
-            match lookup_review_decision_dispatch_by_id(&state, &body.card_id, submitted_did).await
-            {
+            match lookup_review_decision_dispatch_by_id(state, &body.card_id, submitted_did).await {
                 ReviewDecisionDispatchLookup::LiveAndCurrent => {
                     tracing::info!(
                         card_id = %body.card_id,
@@ -2288,14 +2319,14 @@ pub async fn submit_review_decision(
                     pending_rd_id = Some(submitted_did.clone());
                 }
                 ReviewDecisionDispatchLookup::LiveButSuperseded => {
-                    return (
+                    return Err((
                         StatusCode::CONFLICT,
                         Json(json!({
                             "error": "review-decision dispatch is superseded by a newer live dispatch for this card",
                             "card_id": body.card_id,
                             "dispatch_id": submitted_did,
                         })),
-                    );
+                    ));
                 }
                 ReviewDecisionDispatchLookup::Terminal => {
                     // Intentional fall-through: the row is terminal, which is
@@ -2305,18 +2336,18 @@ pub async fn submit_review_decision(
                     // promote to 200 already_finalized once merged.
                 }
                 ReviewDecisionDispatchLookup::NotFound => {
-                    if !finalized_review_decision_info_pg_first(&state, &body.card_id)
+                    if !finalized_review_decision_info_pg_first(state, &body.card_id)
                         .await
                         .has_originating_dispatch()
                     {
-                        return (
+                        return Err((
                             StatusCode::NOT_FOUND,
                             Json(json!({
                                 "error": "review-decision dispatch not found for this card",
                                 "card_id": body.card_id,
                                 "dispatch_id": submitted_did,
                             })),
-                        );
+                        ));
                     }
                 }
             }
@@ -2343,14 +2374,14 @@ pub async fn submit_review_decision(
         // first and short-circuit before sub-1's branch runs.
         if body.decision == "dispute" && body.out_of_scope == Some(true) {
             if let Some(prior) =
-                recent_scope_mismatch_finalized_pg_first(&state, &body.card_id).await
+                recent_scope_mismatch_finalized_pg_first(state, &body.card_id).await
             {
                 // dispatch_id must match the finalized dispatch — closes the
                 // probing oracle that would let a caller learn which
                 // dispatch_id terminalized this card.
                 if let Some(submitted) = body.dispatch_id.as_deref() {
                     if submitted != prior.dispatch_id {
-                        return (
+                        return Err((
                             StatusCode::CONFLICT,
                             Json(json!({
                                 "error": format!(
@@ -2359,18 +2390,18 @@ pub async fn submit_review_decision(
                                 ),
                                 "card_id": body.card_id,
                             })),
-                        );
+                        ));
                     }
                 } else {
                     // No dispatch_id supplied — refuse with the generic 409
                     // rather than disclosing the prior close.
-                    return (
+                    return Err((
                         StatusCode::CONFLICT,
                         Json(json!({
                             "error": "no pending review-decision dispatch for this card",
                             "card_id": body.card_id,
                         })),
-                    );
+                    ));
                 }
 
                 // Determine whether the card already reached terminal in a
@@ -2387,9 +2418,9 @@ pub async fn submit_review_decision(
                 //     not run). Strict generation comparison is then the
                 //     correct guard against terminalizing a re-opened card.
                 let card_ctx =
-                    load_review_decision_card_context_pg_first(&state, &body.card_id).await;
+                    load_review_decision_card_context_pg_first(state, &body.card_id).await;
                 let effective_pipeline = resolve_effective_pipeline_pg_first(
-                    &state,
+                    state,
                     card_ctx.repo_id.as_deref(),
                     card_ctx.agent_id.as_deref(),
                 )
@@ -2416,7 +2447,7 @@ pub async fn submit_review_decision(
                             pending_rd_id = %prior.dispatch_id,
                             "[review-decision] #2341 idempotent resume refused: prior scope_mismatch_closed proof has no lifecycle_generation"
                         );
-                        return (
+                        return Err((
                             StatusCode::CONFLICT,
                             Json(json!({
                                 "error": "prior scope_mismatch_closed proof is missing lifecycle_generation; refusing idempotent close on a non-terminal card",
@@ -2424,9 +2455,9 @@ pub async fn submit_review_decision(
                                 "pending_dispatch_id": prior.dispatch_id,
                                 "reason": "missing_lifecycle_generation",
                             })),
-                        );
+                        ));
                     };
-                    let actual = card_lifecycle_snapshot_pg_first(&state, &body.card_id).await;
+                    let actual = card_lifecycle_snapshot_pg_first(state, &body.card_id).await;
                     if actual != expected {
                         tracing::warn!(
                             card_id = %body.card_id,
@@ -2434,7 +2465,7 @@ pub async fn submit_review_decision(
                             ?actual,
                             "[review-decision] #2341 idempotent resume refused: card lifecycle advanced since prior scope_mismatch_closed (non-terminal card)"
                         );
-                        return (
+                        return Err((
                             StatusCode::CONFLICT,
                             Json(json!({
                                 "error": "card lifecycle has advanced since the prior scope_mismatch_closed; refusing idempotent close on a re-opened card",
@@ -2442,7 +2473,7 @@ pub async fn submit_review_decision(
                                 "pending_dispatch_id": prior.dispatch_id,
                                 "reason": "lifecycle_generation_mismatch",
                             })),
-                        );
+                        ));
                     }
                 }
 
@@ -2465,7 +2496,7 @@ pub async fn submit_review_decision(
                         .expect("non-terminal scope_mismatch resume already required lifecycle");
                     let cancelled_stale =
                         match cancel_stale_review_dispatches_for_scope_mismatch_pg_first(
-                            &state,
+                            state,
                             &body.card_id,
                             "scope_mismatch_closed_resume",
                             expected,
@@ -2474,7 +2505,7 @@ pub async fn submit_review_decision(
                         {
                             Ok(count) => count,
                             Err(error) => {
-                                return (
+                                return Err((
                                     StatusCode::INTERNAL_SERVER_ERROR,
                                     Json(json!({
                                         "error": error,
@@ -2482,7 +2513,7 @@ pub async fn submit_review_decision(
                                         "pending_dispatch_id": prior.dispatch_id,
                                         "resumed_steps": resumed_steps,
                                     })),
-                                );
+                                ));
                             }
                         };
                     if cancelled_stale > 0 {
@@ -2490,7 +2521,7 @@ pub async fn submit_review_decision(
                     }
 
                     match transition_status_pg_first(
-                        &state,
+                        state,
                         &body.card_id,
                         &terminal_state,
                         "dispute_scope_mismatch_closed_resume",
@@ -2509,7 +2540,7 @@ pub async fn submit_review_decision(
                                 error = %e,
                                 "[review-decision] #2341 resume failed to transition card to terminal"
                             );
-                            return (
+                            return Err((
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 Json(json!({
                                     "error": format!(
@@ -2519,13 +2550,13 @@ pub async fn submit_review_decision(
                                     "pending_dispatch_id": prior.dispatch_id,
                                     "resumed_steps": resumed_steps,
                                 })),
-                            );
+                            ));
                         }
                     }
 
-                    if let Err(error) = dismiss_review_cleanup_pg_first(&state, &body.card_id).await
+                    if let Err(error) = dismiss_review_cleanup_pg_first(state, &body.card_id).await
                     {
-                        return (
+                        return Err((
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(json!({
                                 "error": error,
@@ -2533,18 +2564,18 @@ pub async fn submit_review_decision(
                                 "pending_dispatch_id": prior.dispatch_id,
                                 "resumed_steps": resumed_steps,
                             })),
-                        );
+                        ));
                     }
                     resumed_steps.push("dismiss_cleanup");
 
                     if let Err(error) = update_card_review_state(
-                        review_state_db(&state),
+                        review_state_db(state),
                         state.pg_pool_ref(),
                         &body.card_id,
                         "dispute_scope_mismatch_closed",
                         Some(&prior.dispatch_id),
                     ) {
-                        return (
+                        return Err((
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(json!({
                                 "error": error,
@@ -2552,10 +2583,10 @@ pub async fn submit_review_decision(
                                 "pending_dispatch_id": prior.dispatch_id,
                                 "resumed_steps": resumed_steps,
                             })),
-                        );
+                        ));
                     }
 
-                    emit_card_updated(&state, &body.card_id).await;
+                    emit_card_updated(state, &body.card_id).await;
                 }
 
                 tracing::info!(
@@ -2565,7 +2596,7 @@ pub async fn submit_review_decision(
                     resumed_steps = ?resumed_steps,
                     "[review-decision] #2341 idempotent: returning 200 already_finalized for retried scope_mismatch_closed"
                 );
-                return (
+                return Err((
                     StatusCode::OK,
                     Json(json!({
                         "ok": true,
@@ -2583,7 +2614,7 @@ pub async fn submit_review_decision(
                             "scope_mismatch_closed resumed: card transitioned to terminal after prior partial close"
                         },
                     })),
-                );
+                ));
             }
         }
         // No pending review-decision dispatch → stale or duplicate call.
@@ -2608,16 +2639,16 @@ pub async fn submit_review_decision(
         // Without dispatch_id, return the generic legacy 409 — no card-
         // history-specific body shapes, no probing oracle.
         let Some(submitted_did) = body.dispatch_id.as_deref() else {
-            return (
+            return Err((
                 StatusCode::CONFLICT,
                 Json(json!({
                     "error": "no pending review-decision dispatch for this card",
                     "card_id": body.card_id,
                 })),
-            );
+            ));
         };
 
-        let finalized = finalized_review_decision_info_pg_first(&state, &body.card_id).await;
+        let finalized = finalized_review_decision_info_pg_first(state, &body.card_id).await;
 
         // dispatch_id must match the latest originating review-decision
         // dispatch on file. Mismatch or no originating dispatch at all →
@@ -2627,26 +2658,26 @@ pub async fn submit_review_decision(
             .as_deref()
             .is_some_and(|id| id == submitted_did);
         if !matches_latest {
-            return (
+            return Err((
                 StatusCode::CONFLICT,
                 Json(json!({
                     "error": "no pending review-decision dispatch for this card",
                     "card_id": body.card_id,
                 })),
-            );
+            ));
         }
 
         if let Some(pending_decision) = finalized.pending_side_effects_decision() {
             if pending_decision == body.decision.as_str() {
                 if !finalized.side_effects_resume_is_stale_enough() {
-                    return (
+                    return Err((
                         StatusCode::CONFLICT,
                         Json(json!({
                             "error": "review-decision side effects are already in progress",
                             "card_id": body.card_id,
                             "dispatch_id": submitted_did,
                         })),
-                    );
+                    ));
                 }
                 tracing::warn!(
                     card_id = %body.card_id,
@@ -2656,7 +2687,7 @@ pub async fn submit_review_decision(
                     "[review-decision] resuming review-decision side effects after prior in-progress completion proof"
                 );
                 match claim_review_decision_side_effects_resume_pg_first(
-                    &state,
+                    state,
                     &body.card_id,
                     submitted_did,
                     &body.decision,
@@ -2665,14 +2696,14 @@ pub async fn submit_review_decision(
                 {
                     Ok(true) => {}
                     Ok(false) => {
-                        return (
+                        return Err((
                             StatusCode::CONFLICT,
                             Json(json!({
                                 "error": "review-decision side effects are already in progress",
                                 "card_id": body.card_id,
                                 "dispatch_id": submitted_did,
                             })),
-                        );
+                        ));
                     }
                     Err(error) => {
                         tracing::error!(
@@ -2682,7 +2713,7 @@ pub async fn submit_review_decision(
                             %error,
                             "[review-decision] failed to claim stale side-effects resume"
                         );
-                        return (
+                        return Err((
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(json!({
                                 "error": format!(
@@ -2691,7 +2722,7 @@ pub async fn submit_review_decision(
                                 "card_id": body.card_id,
                                 "dispatch_id": submitted_did,
                             })),
-                        );
+                        ));
                     }
                 }
                 pending_rd_id = Some(submitted_did.to_string());
@@ -2703,13 +2734,13 @@ pub async fn submit_review_decision(
                     pending_decision = %pending_decision,
                     "[review-decision] rejecting decision-mismatch replay against side-effects-pending dispatch"
                 );
-                return (
+                return Err((
                     StatusCode::CONFLICT,
                     Json(json!({
                         "error": "no pending review-decision dispatch for this card",
                         "card_id": body.card_id,
                     })),
-                );
+                ));
             }
         } else if let Some(proven) = finalized.proven_finalized_decision() {
             if proven == body.decision.as_str() {
@@ -2721,7 +2752,7 @@ pub async fn submit_review_decision(
                     review_state = ?finalized.review_state,
                     "[review-decision] #2200 stale-state: returning already_finalized for idempotent re-POST"
                 );
-                return (
+                return Err((
                     StatusCode::OK,
                     Json(json!({
                         "ok": true,
@@ -2730,7 +2761,7 @@ pub async fn submit_review_decision(
                         "outcome": "already_finalized",
                         "message": "review-decision was already finalized; idempotent no-op",
                     })),
-                );
+                ));
             }
             tracing::warn!(
                 card_id = %body.card_id,
@@ -2744,15 +2775,45 @@ pub async fn submit_review_decision(
             // Originating dispatch matches but proof of finalization is missing
             // (e.g. status=failed, missing completion_source, or recorded decision
             // does not match). Return the legacy 409.
-            return (
+            return Err((
                 StatusCode::CONFLICT,
                 Json(json!({
                     "error": "no pending review-decision dispatch for this card",
                     "card_id": body.card_id,
                 })),
-            );
+            ));
         }
     }
+
+    Ok((pending_rd_id, resume_side_effects_pending))
+}
+
+/// POST /api/reviews/decision
+///
+/// Agent's decision on counter-model review feedback.
+/// - accept: agent will rework based on review → card to in_progress
+/// - dispute: agent disagrees, sends back for re-review → new review dispatch
+/// - dismiss: agent ignores review → card to done
+///
+/// #3038: this is the orchestrator. Each logical phase lives in a
+/// `decision_route_*` helper; behavior, control flow, side-effect ordering, and
+/// response bodies are identical to the original monolithic implementation.
+pub async fn submit_review_decision(
+    State(state): State<AppState>,
+    Json(body): Json<ReviewDecisionBody>,
+) -> DecisionResponse {
+    let submitted_commit = match decision_route_validate_input(&state, &body).await {
+        Ok(input) => input.submitted_commit,
+        Err(response) => return response,
+    };
+
+    let pending_rd_id = pending_review_decision_dispatch_id_pg_first(&state, &body.card_id).await;
+
+    let (pending_rd_id, resume_side_effects_pending) =
+        match decision_route_resolve_pending(&state, &body, pending_rd_id).await {
+            Ok(resolved) => resolved,
+            Err(response) => return response,
+        };
 
     // #109: When dispatch_id is provided, validate it matches the pending
     // review-decision dispatch. This prevents replayed or stale decisions from
@@ -2777,1354 +2838,1417 @@ pub async fn submit_review_decision(
             );
         }
     }
-    let mut fallthrough_rd_consumed: Option<bool> = None;
-    match body.decision.as_str() {
+    let fallthrough_rd_consumed: Option<bool> = match body.decision.as_str() {
         "accept" => {
-            // #195: Agent accepts review feedback — create a rework dispatch so the
-            // agent can address the findings. When the rework dispatch completes,
-            // OnDispatchCompleted (kanban-rules.js) transitions to review for re-review.
-            let card_ctx = load_review_decision_card_context_pg_first(&state, &body.card_id).await;
-            let card_status_now = card_ctx.status.clone().unwrap_or_default();
-            let card_repo_id = card_ctx.repo_id.clone();
-            let card_agent_id = card_ctx.agent_id.clone();
-            let card_title = card_ctx.title.clone();
-            let effective_pipeline = resolve_effective_pipeline_pg_first(
+            return decision_route_accept(
                 &state,
-                card_repo_id.as_deref(),
-                card_agent_id.as_deref(),
+                &body,
+                &submitted_commit,
+                &pending_rd_id,
+                resume_side_effects_pending,
             )
             .await;
-
-            // Guard: terminal card
-            if effective_pipeline.is_terminal(&card_status_now) {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(json!({
-                        "error": "card is terminal, cannot accept review feedback",
-                        "card_id": body.card_id,
-                    })),
-                );
-            }
-
-            let rd_consumed = if resume_side_effects_pending {
-                true
-            } else {
-                match consume_pending_review_decision_or_response(
-                    &state,
-                    &body.card_id,
-                    pending_rd_id.as_deref(),
-                    "accept",
-                )
+        }
+        "dispute" => {
+            return decision_route_dispute(
+                &state,
+                &body,
+                &pending_rd_id,
+                resume_side_effects_pending,
+            )
+            .await;
+        }
+        "dismiss" => {
+            match decision_route_dismiss(&state, &body, &pending_rd_id, resume_side_effects_pending)
                 .await
-                {
-                    Ok(consumed) => consumed,
-                    Err(response) => return response,
-                }
-            };
+            {
+                Ok(rd_consumed) => Some(rd_consumed),
+                Err(response) => return response,
+            }
+        }
+        _ => None,
+    };
 
-            // Find rework target via review_rework gate (same logic as timeouts.js section E)
-            let rework_target = effective_pipeline
-                .transitions
-                .iter()
-                .find(|t| {
-                    t.from == card_status_now
-                        && t.transition_type == crate::pipeline::TransitionType::Gated
-                        && t.gates.iter().any(|g| g == "review_rework")
-                })
-                .map(|t| t.to.clone())
-                .unwrap_or_else(|| {
-                    effective_pipeline
-                        .dispatchable_states()
-                        .first()
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| effective_pipeline.initial_state().to_string())
-                });
+    decision_route_finalize(
+        &state,
+        &body,
+        &pending_rd_id,
+        resume_side_effects_pending,
+        fallthrough_rd_consumed,
+    )
+    .await
+}
 
-            // #246: Check if the agent already committed new work during the
-            // review-decision turn. If the worktree HEAD differs from the
-            // reviewed_commit of the last review, skip rework and go straight
-            // to review (the agent already addressed the feedback).
-            let skip_rework_diagnostics =
-                evaluate_accept_skip_rework(&state, &body.card_id, submitted_commit.as_deref())
-                    .await;
-            let remote_visibility_block = skip_rework_diagnostics.skip_rework
-                && skip_rework_diagnostics.current_commit_remote_visible == Some(false);
-            let skip_rework = skip_rework_diagnostics.skip_rework && !remote_visibility_block;
+/// Phase 3a of `submit_review_decision`: the `accept` decision branch (#195
+/// rework dispatch + #246 direct-review-skip-rework + #483 terminal
+/// auto-approval). Pure extraction of the original `"accept" =>` match arm;
+/// every path returns a `DecisionResponse` exactly as before. Behavior,
+/// logging, and side-effect ordering are unchanged.
+async fn decision_route_accept(
+    state: &AppState,
+    body: &ReviewDecisionBody,
+    submitted_commit: &Option<String>,
+    pending_rd_id: &Option<String>,
+    resume_side_effects_pending: bool,
+) -> DecisionResponse {
+    // #195: Agent accepts review feedback — create a rework dispatch so the
+    // agent can address the findings. When the rework dispatch completes,
+    // OnDispatchCompleted (kanban-rules.js) transitions to review for re-review.
+    let card_ctx = load_review_decision_card_context_pg_first(state, &body.card_id).await;
+    let card_status_now = card_ctx.status.clone().unwrap_or_default();
+    let card_repo_id = card_ctx.repo_id.clone();
+    let card_agent_id = card_ctx.agent_id.clone();
+    let card_title = card_ctx.title.clone();
+    let effective_pipeline = resolve_effective_pipeline_pg_first(
+        state,
+        card_repo_id.as_deref(),
+        card_agent_id.as_deref(),
+    )
+    .await;
 
-            let mut accept_failures = Vec::new();
-            if remote_visibility_block {
-                accept_failures.push(format!(
+    // Guard: terminal card
+    if effective_pipeline.is_terminal(&card_status_now) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "card is terminal, cannot accept review feedback",
+                "card_id": body.card_id,
+            })),
+        );
+    }
+
+    let rd_consumed = if resume_side_effects_pending {
+        true
+    } else {
+        match consume_pending_review_decision_or_response(
+            state,
+            &body.card_id,
+            pending_rd_id.as_deref(),
+            "accept",
+        )
+        .await
+        {
+            Ok(consumed) => consumed,
+            Err(response) => return response,
+        }
+    };
+
+    // Find rework target via review_rework gate (same logic as timeouts.js section E)
+    let rework_target = effective_pipeline
+        .transitions
+        .iter()
+        .find(|t| {
+            t.from == card_status_now
+                && t.transition_type == crate::pipeline::TransitionType::Gated
+                && t.gates.iter().any(|g| g == "review_rework")
+        })
+        .map(|t| t.to.clone())
+        .unwrap_or_else(|| {
+            effective_pipeline
+                .dispatchable_states()
+                .first()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| effective_pipeline.initial_state().to_string())
+        });
+
+    // #246: Check if the agent already committed new work during the
+    // review-decision turn. If the worktree HEAD differs from the
+    // reviewed_commit of the last review, skip rework and go straight
+    // to review (the agent already addressed the feedback).
+    let skip_rework_diagnostics =
+        evaluate_accept_skip_rework(state, &body.card_id, submitted_commit.as_deref()).await;
+    let remote_visibility_block = skip_rework_diagnostics.skip_rework
+        && skip_rework_diagnostics.current_commit_remote_visible == Some(false);
+    let skip_rework = skip_rework_diagnostics.skip_rework && !remote_visibility_block;
+
+    let mut accept_failures = Vec::new();
+    if remote_visibility_block {
+        accept_failures.push(format!(
                     "direct review suppressed: accepted commit {} is not visible on origin mainline from {}",
                     skip_rework_diagnostics.current_commit.as_deref().unwrap_or("(unknown)"),
                     skip_rework_diagnostics.current_commit_repo.as_deref().unwrap_or("(unknown repo)")
                 ));
+    }
+    let mut direct_review_auto_approved = false;
+
+    // #246: If agent already committed new work, skip rework and re-enter
+    // review via a two-step transition (rework_target → review) so that
+    // OnReviewEnter fires naturally (increments review_round, sets
+    // review_status, creates review dispatch via review-automation.js).
+    let direct_review_attempted = skip_rework;
+    let mut direct_review_created = if skip_rework {
+        // Find the review state from the pipeline (gated transition from rework_target)
+        let review_state = effective_pipeline
+            .transitions
+            .iter()
+            .find(|t| {
+                t.from == rework_target
+                    && t.transition_type == crate::pipeline::TransitionType::Gated
+            })
+            .map(|t| t.to.clone());
+
+        if let Some(ref review_st) = review_state {
+            if let Err(error) = mark_next_review_round_advance_pg_first(state, &body.card_id).await
+            {
+                accept_failures.push(format!(
+                    "failed to mark review round advance before direct review: {error}"
+                ));
+                tracing::warn!(
+                    "[review-decision] failed to mark direct-review round advance for card {}: {}",
+                    body.card_id,
+                    error
+                );
             }
-            let mut direct_review_auto_approved = false;
-
-            // #246: If agent already committed new work, skip rework and re-enter
-            // review via a two-step transition (rework_target → review) so that
-            // OnReviewEnter fires naturally (increments review_round, sets
-            // review_status, creates review dispatch via review-automation.js).
-            let direct_review_attempted = skip_rework;
-            let mut direct_review_created = if skip_rework {
-                // Find the review state from the pipeline (gated transition from rework_target)
-                let review_state = effective_pipeline
-                    .transitions
-                    .iter()
-                    .find(|t| {
-                        t.from == rework_target
-                            && t.transition_type == crate::pipeline::TransitionType::Gated
-                    })
-                    .map(|t| t.to.clone());
-
-                if let Some(ref review_st) = review_state {
-                    if let Err(error) =
-                        mark_next_review_round_advance_pg_first(&state, &body.card_id).await
-                    {
-                        accept_failures.push(format!(
-                            "failed to mark review round advance before direct review: {error}"
-                        ));
-                        tracing::warn!(
-                            "[review-decision] failed to mark direct-review round advance for card {}: {}",
-                            body.card_id,
-                            error
-                        );
-                    }
-                    // Step 1: Transition to rework_target (e.g., in_progress)
+            // Step 1: Transition to rework_target (e.g., in_progress)
+            match transition_status_pg_first(
+                state,
+                &body.card_id,
+                &rework_target,
+                "review_decision_accept_skip_rework_step1",
+                crate::engine::transition::ForceIntent::SystemRecovery,
+            )
+            .await
+            {
+                Ok(_) => {
+                    // Step 2: Transition to review — fires OnReviewEnter
                     match transition_status_pg_first(
-                        &state,
+                        state,
                         &body.card_id,
-                        &rework_target,
-                        "review_decision_accept_skip_rework_step1",
+                        review_st,
+                        "review_decision_accept_skip_rework_step2",
                         crate::engine::transition::ForceIntent::SystemRecovery,
                     )
                     .await
                     {
                         Ok(_) => {
-                            // Step 2: Transition to review — fires OnReviewEnter
-                            match transition_status_pg_first(
-                                &state,
-                                &body.card_id,
-                                review_st,
-                                "review_decision_accept_skip_rework_step2",
-                                crate::engine::transition::ForceIntent::SystemRecovery,
-                            )
-                            .await
+                            // Materialize any follow-up transitions queued by
+                            // OnReviewEnter (for example, single-provider
+                            // auto-approval to terminal) before checking
+                            // whether a live review dispatch exists.
+                            crate::kanban::drain_hook_side_effects_with_backends(
+                                None,
+                                &state.engine,
+                            );
+                            let followups =
+                                active_accept_followups_pg_first(state, &body.card_id).await;
+                            if followups.review > 0 {
+                                tracing::info!(
+                                    "[review-decision] #246 Direct review re-entry for card {}: {} → {} → {} (rework skipped)",
+                                    body.card_id,
+                                    card_status_now,
+                                    rework_target,
+                                    review_st
+                                );
+                                true
+                            } else if current_card_status_pg_first(state, &body.card_id)
+                                .await
+                                .as_deref()
+                                .map(|status| effective_pipeline.is_terminal(status))
+                                .unwrap_or(false)
                             {
-                                Ok(_) => {
-                                    // Materialize any follow-up transitions queued by
-                                    // OnReviewEnter (for example, single-provider
-                                    // auto-approval to terminal) before checking
-                                    // whether a live review dispatch exists.
-                                    crate::kanban::drain_hook_side_effects_with_backends(
-                                        None,
-                                        &state.engine,
-                                    );
-                                    let followups =
-                                        active_accept_followups_pg_first(&state, &body.card_id)
-                                            .await;
-                                    if followups.review > 0 {
-                                        tracing::info!(
-                                            "[review-decision] #246 Direct review re-entry for card {}: {} → {} → {} (rework skipped)",
-                                            body.card_id,
-                                            card_status_now,
-                                            rework_target,
-                                            review_st
-                                        );
-                                        true
-                                    } else if current_card_status_pg_first(&state, &body.card_id)
-                                        .await
-                                        .as_deref()
-                                        .map(|status| effective_pipeline.is_terminal(status))
-                                        .unwrap_or(false)
-                                    {
-                                        direct_review_auto_approved = true;
-                                        tracing::info!(
-                                            "[review-decision] #483 Direct review re-entry for card {} auto-approved without review dispatch (no alternate reviewer)",
-                                            body.card_id
-                                        );
-                                        false
-                                    } else {
-                                        accept_failures.push(format!(
+                                direct_review_auto_approved = true;
+                                tracing::info!(
+                                    "[review-decision] #483 Direct review re-entry for card {} auto-approved without review dispatch (no alternate reviewer)",
+                                    body.card_id
+                                );
+                                false
+                            } else {
+                                accept_failures.push(format!(
                                         "direct review transition reached {} but no active review dispatch was created",
                                         review_st
                                     ));
-                                        tracing::warn!(
-                                            "[review-decision] #339 Direct review re-entry for card {} reached {} but no active review dispatch exists",
-                                            body.card_id,
-                                            review_st
-                                        );
-                                        false
-                                    }
-                                }
-                                Err(e) => {
-                                    accept_failures.push(format!(
-                                        "direct review step2 transition to {} failed: {e}",
-                                        review_st
-                                    ));
-                                    tracing::warn!(
-                                        "[review-decision] #246 Step 2 transition to {} failed for card {}: {e}",
-                                        review_st,
-                                        body.card_id
-                                    );
-                                    false
-                                }
+                                tracing::warn!(
+                                    "[review-decision] #339 Direct review re-entry for card {} reached {} but no active review dispatch exists",
+                                    body.card_id,
+                                    review_st
+                                );
+                                false
                             }
                         }
                         Err(e) => {
                             accept_failures.push(format!(
-                                "direct review step1 transition to {} failed: {e}",
-                                rework_target
+                                "direct review step2 transition to {} failed: {e}",
+                                review_st
                             ));
                             tracing::warn!(
-                                "[review-decision] #339 Step 1 transition to {} failed for card {} during direct review: {e}",
-                                rework_target,
+                                "[review-decision] #246 Step 2 transition to {} failed for card {}: {e}",
+                                review_st,
                                 body.card_id
                             );
                             false
                         }
                     }
-                } else {
+                }
+                Err(e) => {
                     accept_failures.push(format!(
-                        "skip_rework requested but no review state could be resolved from rework target {}",
+                        "direct review step1 transition to {} failed: {e}",
                         rework_target
                     ));
+                    tracing::warn!(
+                        "[review-decision] #339 Step 1 transition to {} failed for card {} during direct review: {e}",
+                        rework_target,
+                        body.card_id
+                    );
                     false
                 }
-            } else {
-                false
+            }
+        } else {
+            accept_failures.push(format!(
+                "skip_rework requested but no review state could be resolved from rework target {}",
+                rework_target
+            ));
+            false
+        }
+    } else {
+        false
+    };
+
+    // Create rework dispatch on the normal accept path, or as a fallback when
+    // direct review re-entry fails / produces no active review dispatch.
+    let existing_followups_before_rework =
+        active_accept_followups_pg_first(state, &body.card_id).await;
+    if !existing_followups_before_rework.has_followup()
+        && !direct_review_created
+        && !direct_review_auto_approved
+    {
+        let card_status_before_rework = current_card_status_pg_first(state, &body.card_id).await;
+        let rework_transition_ready = card_status_before_rework.as_deref()
+            == Some(rework_target.as_str())
+            || match transition_status_pg_first(
+                state,
+                &body.card_id,
+                &rework_target,
+                "review_decision_accept",
+                crate::engine::transition::ForceIntent::SystemRecovery,
+            )
+            .await
+            {
+                Ok(_) => true,
+                Err(e) => {
+                    accept_failures.push(format!(
+                        "transition to rework target {} failed: {e}",
+                        rework_target
+                    ));
+                    tracing::warn!(
+                        "[review-decision] #195 Transition to rework target failed for card {}: {e}",
+                        body.card_id
+                    );
+                    false
+                }
             };
 
-            // Create rework dispatch on the normal accept path, or as a fallback when
-            // direct review re-entry fails / produces no active review dispatch.
-            let existing_followups_before_rework =
-                active_accept_followups_pg_first(&state, &body.card_id).await;
-            if !existing_followups_before_rework.has_followup()
-                && !direct_review_created
-                && !direct_review_auto_approved
-            {
-                let card_status_before_rework =
-                    current_card_status_pg_first(&state, &body.card_id).await;
-                let rework_transition_ready = card_status_before_rework.as_deref()
-                    == Some(rework_target.as_str())
-                    || match transition_status_pg_first(
-                        &state,
+        if rework_transition_ready {
+            if let Some(ref agent_id) = card_agent_id {
+                let rework_title = format!(
+                    "[Rework] {}",
+                    card_title.as_deref().unwrap_or(&body.card_id)
+                );
+                let rework_dispatch_result = if let Some(pool) = state.pg_pool_ref() {
+                    crate::dispatch::create_dispatch_with_options_pg_only(
+                        pool,
+                        &state.engine,
                         &body.card_id,
-                        &rework_target,
-                        "review_decision_accept",
-                        crate::engine::transition::ForceIntent::SystemRecovery,
+                        agent_id,
+                        "rework",
+                        &rework_title,
+                        &json!({}),
+                        crate::dispatch::DispatchCreateOptions::default(),
                     )
-                    .await
+                } else {
                     {
-                        Ok(_) => true,
-                        Err(e) => {
-                            accept_failures.push(format!(
-                                "transition to rework target {} failed: {e}",
-                                rework_target
-                            ));
-                            tracing::warn!(
-                                "[review-decision] #195 Transition to rework target failed for card {}: {e}",
-                                body.card_id
-                            );
-                            false
-                        }
-                    };
-
-                if rework_transition_ready {
-                    if let Some(ref agent_id) = card_agent_id {
-                        let rework_title = format!(
-                            "[Rework] {}",
-                            card_title.as_deref().unwrap_or(&body.card_id)
-                        );
-                        let rework_dispatch_result = if let Some(pool) = state.pg_pool_ref() {
-                            crate::dispatch::create_dispatch_with_options_pg_only(
-                                pool,
-                                &state.engine,
-                                &body.card_id,
-                                agent_id,
-                                "rework",
-                                &rework_title,
-                                &json!({}),
-                                crate::dispatch::DispatchCreateOptions::default(),
-                            )
-                        } else {
-                            {
-                                Err(anyhow::anyhow!(
-                                    "postgres pool unavailable for rework dispatch"
-                                ))
-                            }
-                        };
-                        match rework_dispatch_result {
-                            Ok(dispatch) => {
-                                let dispatch_id = dispatch
-                                    .get("id")
-                                    .and_then(|value| value.as_str())
-                                    .unwrap_or("(unknown)");
-                                tracing::info!(
-                                    "[review-decision] #195 Rework dispatch created: card={} dispatch={}",
-                                    body.card_id,
-                                    dispatch_id
-                                );
-                            }
-                            Err(e) => {
-                                accept_failures
-                                    .push(format!("rework dispatch creation failed: {e}"));
-                                tracing::warn!(
-                                    "[review-decision] #195 Rework dispatch creation failed for card {}: {e}",
-                                    body.card_id
-                                );
-                            }
-                        }
-                    } else {
-                        accept_failures.push(format!(
-                            "no assigned agent for rework dispatch on card {}",
-                            body.card_id
-                        ));
-                        tracing::warn!(
-                            "[review-decision] #195 No agent assigned to card {} — cannot create rework dispatch",
-                            body.card_id
-                        );
+                        Err(anyhow::anyhow!(
+                            "postgres pool unavailable for rework dispatch"
+                        ))
                     }
-                }
-            }
-
-            let followups = active_accept_followups_pg_first(&state, &body.card_id).await;
-            direct_review_created = followups.review > 0;
-            if direct_review_created
-                && skip_rework
-                && let Some(current_commit) = skip_rework_diagnostics.current_commit.as_deref()
-                && let Err(error) = restamp_latest_active_review_target_pg_first(
-                    &state,
-                    &body.card_id,
-                    current_commit,
-                    skip_rework_diagnostics.current_commit_repo.as_deref(),
-                )
-                .await
-            {
-                accept_failures.push(format!(
-                    "direct review target restamp failed for {current_commit}: {error}"
-                ));
-                tracing::warn!(
-                    card_id = %body.card_id,
-                    current_commit,
-                    %error,
-                    "[review-decision] failed to restamp direct review target after accept"
-                );
-            }
-            let rework_dispatch_created = followups.rework > 0;
-            let terminal_auto_approved = direct_review_attempted
-                && (direct_review_auto_approved
-                    || (!direct_review_created
-                        && !rework_dispatch_created
-                        && current_card_status_pg_first(&state, &body.card_id)
-                            .await
-                            .as_deref()
-                            .map(|status| effective_pipeline.is_terminal(status))
-                            .unwrap_or(false)));
-
-            if !followups.has_followup() && !terminal_auto_approved {
-                let card_status_after = current_card_status_pg_first(&state, &body.card_id).await;
-                tracing::error!(
-                    card_id = %body.card_id,
-                    pending_rd_id = pending_rd_id.as_deref().unwrap_or(""),
-                    card_status_before = %card_status_now,
-                    card_status_after = card_status_after.as_deref().unwrap_or("(unknown)"),
-                    rework_target = %rework_target,
-                    skip_rework,
-                    direct_review_attempted,
-                    direct_review_created,
-                    rework_dispatch_created,
-                    active_review = followups.review,
-                    active_rework = followups.rework,
-                    active_review_decision = followups.review_decision,
-                    failures = ?accept_failures,
-                    "[review-decision] #339 accept failed closed: no follow-up dispatch created"
-                );
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": "review-decision accept failed: no follow-up dispatch created",
-                        "card_id": body.card_id,
-                        "pending_dispatch_id": pending_rd_id,
-                        "skip_rework": skip_rework,
-                        "skip_rework_diagnostics": skip_rework_diagnostics.to_json(),
-                        "card_status_before": card_status_now,
-                        "card_status_after": card_status_after,
-                        "rework_target": rework_target,
-                        "followups": {
-                            "review": followups.review,
-                            "rework": followups.rework,
-                            "review_decision": followups.review_decision,
-                        },
-                        "failures": accept_failures,
-                    })),
-                );
-            }
-
-            // Clear suggestion_pending_at (always) and review_status (rework path only).
-            // #266: review_status was left as "suggestion_pending" because the
-            // review→in_progress rework transition is non-terminal and
-            // ClearTerminalFields never fires.
-            // Guard: when direct_review_created, OnReviewEnter already set
-            // review_status='reviewing' — clearing it would break the live review.
-            if let Err(error) = finalize_accept_cleanup_pg_first(
-                &state,
-                &body.card_id,
-                !direct_review_created && !terminal_auto_approved,
-            )
-            .await
-            {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": error,
-                        "card_id": body.card_id,
-                        "pending_dispatch_id": pending_rd_id,
-                    })),
-                );
-            }
-
-            // #119: Record tuning outcome
-            if let Err(error) = record_decision_tuning(
-                state.pg_pool_ref(),
-                &body.card_id,
-                "accept",
-                pending_rd_id.as_deref(),
-            )
-            .await
-            {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": error,
-                        "card_id": body.card_id,
-                        "pending_dispatch_id": pending_rd_id,
-                    })),
-                );
-            }
-            spawn_review_tuning_aggregate_pg_first(&state);
-
-            // #117: Update canonical review state.
-            // For direct review: OnReviewEnter already set the state, so skip the
-            // rework_pending override that would conflict with the live review dispatch.
-            if !direct_review_created && !terminal_auto_approved {
-                if let Err(error) = update_card_review_state(
-                    review_state_db(&state),
-                    state.pg_pool_ref(),
-                    &body.card_id,
-                    "accept",
-                    pending_rd_id.as_deref(),
-                ) {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({
-                            "error": error,
-                            "card_id": body.card_id,
-                            "pending_dispatch_id": pending_rd_id,
-                        })),
-                    );
-                }
-            }
-
-            if !rd_consumed && let Some(ref rd_id) = pending_rd_id {
-                let status_db = None;
-                match crate::dispatch::set_dispatch_status_with_backends(
-                    status_db,
-                    state.pg_pool_ref(),
-                    rd_id,
-                    "completed",
-                    Some(
-                        &json!({"decision": "accept", "completion_source": "review_decision_api"}),
-                    ),
-                    "mark_dispatch_completed",
-                    Some(&["pending", "dispatched"]),
-                    true,
-                ) {
-                    Ok(1) => {}
-                    Ok(_) => {
-                        let dispatch_consumed_by_terminal_cleanup = terminal_auto_approved
-                            && dispatch_status_and_result_pg_first(&state, rd_id)
-                                .await
-                                .map(|(status, result)| {
-                                    if status == "completed" {
-                                        return true;
-                                    }
-                                    if status != "cancelled" {
-                                        return false;
-                                    }
-                                    result
-                                        .as_deref()
-                                        .and_then(|raw| {
-                                            serde_json::from_str::<serde_json::Value>(raw).ok()
-                                        })
-                                        .and_then(|value| {
-                                            value
-                                                .get("reason")
-                                                .and_then(|reason| reason.as_str())
-                                                .map(str::to_string)
-                                        })
-                                        .as_deref()
-                                        .is_some_and(|reason| {
-                                            reason == "auto_cancelled_on_terminal_card"
-                                                || reason == "js_terminal_cleanup"
-                                        })
-                                })
-                                .unwrap_or(false);
-                        let dispatch_no_longer_active = terminal_auto_approved
-                            && active_accept_followups_pg_first(&state, &body.card_id)
-                                .await
-                                .review_decision
-                                == 0;
-                        if dispatch_consumed_by_terminal_cleanup || dispatch_no_longer_active {
-                            tracing::info!(
-                                "[review-decision] #483 pending review-decision {} for card {} was already consumed by terminal auto-approval",
-                                rd_id,
-                                body.card_id
-                            );
-                        } else {
-                            let live_dispatches =
-                                active_accept_followups_pg_first(&state, &body.card_id).await;
-                            tracing::error!(
-                                card_id = %body.card_id,
-                                pending_rd_id = %rd_id,
-                                active_review = live_dispatches.review,
-                                active_rework = live_dispatches.rework,
-                                active_review_decision = live_dispatches.review_decision,
-                                "[review-decision] #339 accept created a follow-up dispatch but failed to finalize the pending review-decision"
-                            );
-                            return (
-                                StatusCode::CONFLICT,
-                                Json(json!({
-                                    "error": "failed to finalize pending review-decision after follow-up dispatch creation",
-                                    "card_id": body.card_id,
-                                    "pending_dispatch_id": rd_id,
-                                })),
-                            );
-                        }
+                };
+                match rework_dispatch_result {
+                    Ok(dispatch) => {
+                        let dispatch_id = dispatch
+                            .get("id")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("(unknown)");
+                        tracing::info!(
+                            "[review-decision] #195 Rework dispatch created: card={} dispatch={}",
+                            body.card_id,
+                            dispatch_id
+                        );
                     }
                     Err(e) => {
-                        tracing::error!(
-                            card_id = %body.card_id,
-                            pending_rd_id = %rd_id,
-                            active_review = followups.review,
-                            active_rework = followups.rework,
-                            error = %e,
-                            "[review-decision] #339 accept created a follow-up dispatch but mark_dispatch_completed errored"
-                        );
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({
-                                "error": format!("failed to finalize pending review-decision: {e}"),
-                                "card_id": body.card_id,
-                                "pending_dispatch_id": rd_id,
-                            })),
+                        accept_failures.push(format!("rework dispatch creation failed: {e}"));
+                        tracing::warn!(
+                            "[review-decision] #195 Rework dispatch creation failed for card {}: {e}",
+                            body.card_id
                         );
                     }
                 }
-            }
-
-            if let Err(response) = mark_consumed_review_decision_complete_or_response(
-                &state,
-                &body.card_id,
-                pending_rd_id.as_deref(),
-                "accept",
-                rd_consumed,
-                if resume_side_effects_pending {
-                    "side_effects_resuming"
-                } else {
-                    "side_effects_pending"
-                },
-            )
-            .await
-            {
-                return response;
-            }
-
-            emit_card_updated(&state, &body.card_id).await;
-            let message = if terminal_auto_approved {
-                "Review-decision accepted, review auto-approved (no alternate reviewer)"
-            } else if direct_review_created {
-                "Review-decision accepted, direct review dispatch created (rework skipped)"
             } else {
-                "Review-decision accepted, rework dispatch created"
-            };
+                accept_failures.push(format!(
+                    "no assigned agent for rework dispatch on card {}",
+                    body.card_id
+                ));
+                tracing::warn!(
+                    "[review-decision] #195 No agent assigned to card {} — cannot create rework dispatch",
+                    body.card_id
+                );
+            }
+        }
+    }
+
+    let followups = active_accept_followups_pg_first(state, &body.card_id).await;
+    direct_review_created = followups.review > 0;
+    if direct_review_created
+        && skip_rework
+        && let Some(current_commit) = skip_rework_diagnostics.current_commit.as_deref()
+        && let Err(error) = restamp_latest_active_review_target_pg_first(
+            state,
+            &body.card_id,
+            current_commit,
+            skip_rework_diagnostics.current_commit_repo.as_deref(),
+        )
+        .await
+    {
+        accept_failures.push(format!(
+            "direct review target restamp failed for {current_commit}: {error}"
+        ));
+        tracing::warn!(
+            card_id = %body.card_id,
+            current_commit,
+            %error,
+            "[review-decision] failed to restamp direct review target after accept"
+        );
+    }
+    let rework_dispatch_created = followups.rework > 0;
+    let terminal_auto_approved = direct_review_attempted
+        && (direct_review_auto_approved
+            || (!direct_review_created
+                && !rework_dispatch_created
+                && current_card_status_pg_first(state, &body.card_id)
+                    .await
+                    .as_deref()
+                    .map(|status| effective_pipeline.is_terminal(status))
+                    .unwrap_or(false)));
+
+    if !followups.has_followup() && !terminal_auto_approved {
+        let card_status_after = current_card_status_pg_first(state, &body.card_id).await;
+        tracing::error!(
+            card_id = %body.card_id,
+            pending_rd_id = pending_rd_id.as_deref().unwrap_or(""),
+            card_status_before = %card_status_now,
+            card_status_after = card_status_after.as_deref().unwrap_or("(unknown)"),
+            rework_target = %rework_target,
+            skip_rework,
+            direct_review_attempted,
+            direct_review_created,
+            rework_dispatch_created,
+            active_review = followups.review,
+            active_rework = followups.rework,
+            active_review_decision = followups.review_decision,
+            failures = ?accept_failures,
+            "[review-decision] #339 accept failed closed: no follow-up dispatch created"
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": "review-decision accept failed: no follow-up dispatch created",
+                "card_id": body.card_id,
+                "pending_dispatch_id": pending_rd_id,
+                "skip_rework": skip_rework,
+                "skip_rework_diagnostics": skip_rework_diagnostics.to_json(),
+                "card_status_before": card_status_now,
+                "card_status_after": card_status_after,
+                "rework_target": rework_target,
+                "followups": {
+                    "review": followups.review,
+                    "rework": followups.rework,
+                    "review_decision": followups.review_decision,
+                },
+                "failures": accept_failures,
+            })),
+        );
+    }
+
+    // Clear suggestion_pending_at (always) and review_status (rework path only).
+    // #266: review_status was left as "suggestion_pending" because the
+    // review→in_progress rework transition is non-terminal and
+    // ClearTerminalFields never fires.
+    // Guard: when direct_review_created, OnReviewEnter already set
+    // review_status='reviewing' — clearing it would break the live review.
+    if let Err(error) = finalize_accept_cleanup_pg_first(
+        state,
+        &body.card_id,
+        !direct_review_created && !terminal_auto_approved,
+    )
+    .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": error,
+                "card_id": body.card_id,
+                "pending_dispatch_id": pending_rd_id,
+            })),
+        );
+    }
+
+    // #119: Record tuning outcome
+    if let Err(error) = record_decision_tuning(
+        state.pg_pool_ref(),
+        &body.card_id,
+        "accept",
+        pending_rd_id.as_deref(),
+    )
+    .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": error,
+                "card_id": body.card_id,
+                "pending_dispatch_id": pending_rd_id,
+            })),
+        );
+    }
+    spawn_review_tuning_aggregate_pg_first(state);
+
+    // #117: Update canonical review state.
+    // For direct review: OnReviewEnter already set the state, so skip the
+    // rework_pending override that would conflict with the live review dispatch.
+    if !direct_review_created && !terminal_auto_approved {
+        if let Err(error) = update_card_review_state(
+            review_state_db(state),
+            state.pg_pool_ref(),
+            &body.card_id,
+            "accept",
+            pending_rd_id.as_deref(),
+        ) {
             return (
-                StatusCode::OK,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
-                    "ok": true,
+                    "error": error,
                     "card_id": body.card_id,
-                    "decision": "accept",
-                    "rework_dispatch_created": rework_dispatch_created,
-                    "direct_review_created": direct_review_created,
-                    "review_auto_approved": terminal_auto_approved,
-                    "skip_rework": skip_rework,
-                    "skip_rework_diagnostics": skip_rework_diagnostics.to_json(),
-                    "message": message,
+                    "pending_dispatch_id": pending_rd_id,
                 })),
             );
         }
-        "dispute" => {
-            // #2341 / #2200 sub-3 redesign: out-of-scope dispute close path.
-            //
-            // Production reality (per #2341 Codex round-3): at /api/review-decision
-            // time the review dispatch is **completed** (not active/pending).
-            // PR #2336's close path bound to `latest_active_review_dispatch`
-            // and therefore never fired in production. This redesign binds
-            // to the latest **completed** review dispatch, verifies its
-            // `reviewed_commit` is proven out-of-scope (fail-closed on
-            // Unknown — carried forward from PR #2336 HIGH 1), captures a
-            // card-lifecycle generation marker (HIGH 2 reworked to bind to
-            // card lifecycle, not just dispatch existence), and runs the
-            // finalize + cancel-stale + transition + cleanup sequence
-            // atomically with a stale re-check inside the close
-            // transaction.
-            if body.out_of_scope == Some(true) {
-                // 1. Caller must prove ownership of the pending review-decision
-                //    dispatch via `dispatch_id` matching `pending_rd_id`.
-                let rd_id = match (body.dispatch_id.as_deref(), pending_rd_id.as_deref()) {
-                    (Some(submitted), Some(pending)) if submitted == pending => {
-                        submitted.to_string()
-                    }
-                    (Some(submitted), Some(pending)) => {
-                        return (
-                            StatusCode::CONFLICT,
-                            Json(json!({
-                                "error": format!(
-                                    "dispatch_id mismatch: submitted {submitted} but pending is {pending}"
-                                ),
-                                "card_id": body.card_id,
-                            })),
-                        );
-                    }
-                    (None, _) => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(json!({
-                                "error": "out_of_scope dispute requires dispatch_id to prove ownership of the pending review-decision",
-                                "card_id": body.card_id,
-                            })),
-                        );
-                    }
-                    (Some(_), None) => {
-                        // Already guarded above; defensive only.
-                        return (
-                            StatusCode::CONFLICT,
-                            Json(json!({
-                                "error": "no pending review-decision dispatch for this card",
-                                "card_id": body.card_id,
-                            })),
-                        );
-                    }
-                };
+    }
 
-                // 2. Bind to the **source** review dispatch that produced THIS
-                //    review-decision (loaded by id from the review-decision's
-                //    `context.source_review_dispatch_id`), not to the latest
-                //    completed review for the card. This closes Codex r1 [medium]:
-                //    a duplicate or delayed completed review row could otherwise
-                //    bind the close to the wrong reviewed_commit.
-                //    Codex r2 [medium]: if the source id is present but does
-                //    not resolve, fail closed — no silent latest-completed
-                //    fallback.
-                let completed_review = match source_review_dispatch_for_decision_pg_first(
-                    &state,
-                    &body.card_id,
-                    &rd_id,
-                )
-                .await
-                {
-                    SourceReviewLookup::ResolvedById(d) => d,
-                    SourceReviewLookup::LegacyFallback(Some(d)) => d,
-                    SourceReviewLookup::LegacyFallback(None) => {
-                        return (
-                            StatusCode::CONFLICT,
-                            Json(json!({
-                                "error": "out_of_scope dispute requires a completed review dispatch whose reviewed_commit can be verified against the card issue",
-                                "card_id": body.card_id,
-                                "pending_dispatch_id": rd_id,
-                            })),
-                        );
-                    }
-                    SourceReviewLookup::UnresolvedSourceId(srid) => {
-                        return (
-                            StatusCode::CONFLICT,
-                            Json(json!({
-                                "error": "out_of_scope dispute refused: review-decision context references a source review that does not resolve to a completed review row; cannot verify scope",
-                                "card_id": body.card_id,
-                                "pending_dispatch_id": rd_id,
-                                "source_review_dispatch_id": srid,
-                                "reason": "source_review_unresolved",
-                            })),
-                        );
-                    }
-                };
-                let reviewed_commit = match completed_review.reviewed_commit.clone() {
-                    Some(c) if !c.trim().is_empty() => c,
-                    _ => {
-                        return (
-                            StatusCode::CONFLICT,
-                            Json(json!({
-                                "error": "out_of_scope dispute requires the completed review to expose reviewed_commit for scope verification",
-                                "card_id": body.card_id,
-                                "pending_dispatch_id": rd_id,
-                                "review_dispatch_id": completed_review.id,
-                            })),
-                        );
-                    }
-                };
-
-                // 3. HIGH 1 fail-closed: tri-state scope verification. Only a
-                //    proven OutOfScope is allowed to take the close shortcut.
-                //    Unknown — transient PG/git failure — refuses with 503.
-                match commit_belongs_to_card_issue_pg_first_tri(
-                    &state,
-                    &body.card_id,
-                    &reviewed_commit,
-                    completed_review.target_repo.as_deref(),
-                )
-                .await
-                {
-                    crate::dispatch::ScopeCheck::OutOfScope => {}
-                    crate::dispatch::ScopeCheck::InScope => {
-                        tracing::warn!(
-                            card_id = %body.card_id,
-                            pending_rd_id = %rd_id,
-                            review_dispatch_id = %completed_review.id,
-                            reviewed_commit = %reviewed_commit,
-                            "[review-decision] #2341 rejected out_of_scope claim: reviewed_commit belongs to the card issue"
-                        );
-                        return (
-                            StatusCode::CONFLICT,
-                            Json(json!({
-                                "error": "out_of_scope dispute refused: reviewed_commit belongs to this card's issue; submit a regular dispute instead",
-                                "card_id": body.card_id,
-                                "pending_dispatch_id": rd_id,
-                                "review_dispatch_id": completed_review.id,
-                                "reviewed_commit": reviewed_commit,
-                            })),
-                        );
-                    }
-                    crate::dispatch::ScopeCheck::Unknown => {
-                        tracing::warn!(
-                            card_id = %body.card_id,
-                            pending_rd_id = %rd_id,
-                            review_dispatch_id = %completed_review.id,
-                            reviewed_commit = %reviewed_commit,
-                            target_repo = %completed_review.target_repo.as_deref().unwrap_or(""),
-                            "[review-decision] #2341 refused out_of_scope: scope verification inconclusive (repo/git transient failure); fail-closed"
-                        );
-                        return (
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            Json(json!({
-                                "error": "scope verification inconclusive; cannot close as out-of-scope. Retry once the repo is reachable, or submit a regular dispute.",
-                                "card_id": body.card_id,
-                                "pending_dispatch_id": rd_id,
-                                "review_dispatch_id": completed_review.id,
-                                "reviewed_commit": reviewed_commit,
-                                "reason": "scope_check_unknown",
-                            })),
-                        );
-                    }
-                }
-
-                // 4. Capture the card lifecycle generation snapshot. The
-                //    atomic close re-reads this inside its transaction and
-                //    rolls back if it has changed (= card re-opened between
-                //    snapshot and tx).
-                let lifecycle_snapshot =
-                    card_lifecycle_snapshot_pg_first(&state, &body.card_id).await;
-
-                // 5. Atomic finalize: in one tx, re-check lifecycle + flip
-                //    the review-decision dispatch to completed +
-                //    scope_mismatch_closed + update card_review_state.
-                match atomic_finalize_scope_mismatch_close_pg(
-                    &state,
-                    &body.card_id,
-                    &rd_id,
-                    &completed_review.id,
-                    &reviewed_commit,
-                    &lifecycle_snapshot,
-                )
-                .await
-                {
-                    Ok(_) => {}
-                    Err(ScopeMismatchCloseError::LifecycleStale { expected, actual }) => {
-                        tracing::warn!(
-                            card_id = %body.card_id,
-                            pending_rd_id = %rd_id,
-                            review_dispatch_id = %completed_review.id,
-                            ?expected,
-                            ?actual,
-                            "[review-decision] #2341 refused out_of_scope close: card lifecycle generation changed (card re-opened)"
-                        );
-                        return (
-                            StatusCode::CONFLICT,
-                            Json(json!({
-                                "error": "card lifecycle has advanced since the completed review; refusing to close as out-of-scope",
-                                "card_id": body.card_id,
-                                "pending_dispatch_id": rd_id,
-                                "review_dispatch_id": completed_review.id,
-                                "reason": "lifecycle_generation_mismatch",
-                            })),
-                        );
-                    }
-                    Err(ScopeMismatchCloseError::DispatchConsumed) => {
-                        tracing::warn!(
-                            card_id = %body.card_id,
-                            pending_rd_id = %rd_id,
-                            "[review-decision] #2341 race: pending review-decision dispatch was already consumed before scope_mismatch_closed could finalize it"
-                        );
-                        return (
-                            StatusCode::CONFLICT,
-                            Json(json!({
-                                "error": "race: pending review-decision dispatch was already consumed",
-                                "card_id": body.card_id,
-                                "pending_dispatch_id": rd_id,
-                            })),
-                        );
-                    }
-                    Err(ScopeMismatchCloseError::Internal(e)) => {
-                        tracing::error!(
-                            card_id = %body.card_id,
-                            pending_rd_id = %rd_id,
-                            error = %e,
-                            "[review-decision] #2341 atomic finalize failed for scope_mismatch_closed"
-                        );
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({
-                                "error": format!(
-                                    "failed to atomically finalize scope_mismatch_closed: {e}"
-                                ),
-                                "card_id": body.card_id,
-                                "pending_dispatch_id": rd_id,
-                            })),
-                        );
-                    }
-                }
-
-                // 6. Re-check lifecycle BEFORE any destructive action.
-                //    Codex round-2 [high]: cancel-stale must NOT run before
-                //    the lifecycle re-check, otherwise a re-open that
-                //    happened between the tx commit and this point would
-                //    have its fresh review dispatch cancelled by
-                //    stale_review_dispatch_ids_pg_first before we discover
-                //    the re-open and refuse. Re-checking first means the
-                //    409 refusal triggers before any side effects.
-                let post_tx_lifecycle =
-                    card_lifecycle_snapshot_pg_first(&state, &body.card_id).await;
-                if post_tx_lifecycle != lifecycle_snapshot {
-                    tracing::warn!(
+    if !rd_consumed && let Some(rd_id) = pending_rd_id {
+        let status_db = None;
+        match crate::dispatch::set_dispatch_status_with_backends(
+            status_db,
+            state.pg_pool_ref(),
+            rd_id,
+            "completed",
+            Some(&json!({"decision": "accept", "completion_source": "review_decision_api"})),
+            "mark_dispatch_completed",
+            Some(&["pending", "dispatched"]),
+            true,
+        ) {
+            Ok(1) => {}
+            Ok(_) => {
+                let dispatch_consumed_by_terminal_cleanup = terminal_auto_approved
+                    && dispatch_status_and_result_pg_first(state, rd_id)
+                        .await
+                        .map(|(status, result)| {
+                            if status == "completed" {
+                                return true;
+                            }
+                            if status != "cancelled" {
+                                return false;
+                            }
+                            result
+                                .as_deref()
+                                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                                .and_then(|value| {
+                                    value
+                                        .get("reason")
+                                        .and_then(|reason| reason.as_str())
+                                        .map(str::to_string)
+                                })
+                                .as_deref()
+                                .is_some_and(|reason| {
+                                    reason == "auto_cancelled_on_terminal_card"
+                                        || reason == "js_terminal_cleanup"
+                                })
+                        })
+                        .unwrap_or(false);
+                let dispatch_no_longer_active = terminal_auto_approved
+                    && active_accept_followups_pg_first(state, &body.card_id)
+                        .await
+                        .review_decision
+                        == 0;
+                if dispatch_consumed_by_terminal_cleanup || dispatch_no_longer_active {
+                    tracing::info!(
+                        "[review-decision] #483 pending review-decision {} for card {} was already consumed by terminal auto-approval",
+                        rd_id,
+                        body.card_id
+                    );
+                } else {
+                    let live_dispatches =
+                        active_accept_followups_pg_first(state, &body.card_id).await;
+                    tracing::error!(
                         card_id = %body.card_id,
                         pending_rd_id = %rd_id,
-                        ?lifecycle_snapshot,
-                        ?post_tx_lifecycle,
-                        "[review-decision] #2341 lifecycle changed after tx commit but before cleanup; leaving dispatch finalized for idempotent resume, no destructive actions taken"
+                        active_review = live_dispatches.review,
+                        active_rework = live_dispatches.rework,
+                        active_review_decision = live_dispatches.review_decision,
+                        "[review-decision] #339 accept created a follow-up dispatch but failed to finalize the pending review-decision"
                     );
                     return (
                         StatusCode::CONFLICT,
                         Json(json!({
-                            "error": "card lifecycle advanced after scope_mismatch_closed finalize; transition refused",
-                            "card_id": body.card_id,
-                            "pending_dispatch_id": rd_id,
-                            "review_dispatch_id": completed_review.id,
-                            "reason": "lifecycle_generation_mismatch_post_tx",
-                        })),
-                    );
-                }
-
-                // 7. Cancel stale review/review-decision dispatches so the
-                //    dedup guard doesn't strand them. Outside the tx because
-                //    cancel touches multiple rows + may dispatch outbox
-                //    messages. Safe to run now: the post-tx lifecycle
-                //    re-check above guaranteed no fresh generation exists.
-                let cancelled_stale =
-                    match cancel_stale_review_dispatches_for_scope_mismatch_pg_first(
-                        &state,
-                        &body.card_id,
-                        "scope_mismatch_closed",
-                        &lifecycle_snapshot,
-                    )
-                    .await
-                    {
-                        Ok(count) => count,
-                        Err(error) => {
-                            return (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(json!({
-                                    "error": error,
-                                    "card_id": body.card_id,
-                                    "pending_dispatch_id": rd_id,
-                                })),
-                            );
-                        }
-                    };
-
-                let card_ctx =
-                    load_review_decision_card_context_pg_first(&state, &body.card_id).await;
-                let effective_pipeline = resolve_effective_pipeline_pg_first(
-                    &state,
-                    card_ctx.repo_id.as_deref(),
-                    card_ctx.agent_id.as_deref(),
-                )
-                .await;
-                let terminal_state = effective_pipeline
-                    .states
-                    .iter()
-                    .find(|state| state.terminal)
-                    .map(|state| state.id.clone())
-                    .unwrap_or_else(|| "done".to_string());
-                match transition_status_pg_first(
-                    &state,
-                    &body.card_id,
-                    &terminal_state,
-                    "dispute_scope_mismatch_closed",
-                    crate::engine::transition::ForceIntent::SystemRecovery,
-                )
-                .await
-                {
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::error!(
-                            card_id = %body.card_id,
-                            pending_rd_id = %rd_id,
-                            terminal_state = %terminal_state,
-                            error = %e,
-                            "[review-decision] #2341 finalized review-decision but failed to transition card to terminal"
-                        );
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({
-                                "error": format!(
-                                    "scope_mismatch_closed: review-decision finalized but card transition to {terminal_state} failed: {e}"
-                                ),
-                                "card_id": body.card_id,
-                                "pending_dispatch_id": rd_id,
-                            })),
-                        );
-                    }
-                }
-
-                // 8. Reuse dismiss cleanup to clear any leftover pending
-                //    review dispatches and review_status.
-                if let Err(error) = dismiss_review_cleanup_pg_first(&state, &body.card_id).await {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": error})),
-                    );
-                }
-
-                if let Err(error) = record_decision_tuning(
-                    state.pg_pool_ref(),
-                    &body.card_id,
-                    "dispute_scope_mismatch_closed",
-                    Some(&rd_id),
-                )
-                .await
-                {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({
-                            "error": error,
+                            "error": "failed to finalize pending review-decision after follow-up dispatch creation",
                             "card_id": body.card_id,
                             "pending_dispatch_id": rd_id,
                         })),
                     );
                 }
-                spawn_review_tuning_aggregate_pg_first(&state);
+            }
+            Err(e) => {
+                tracing::error!(
+                    card_id = %body.card_id,
+                    pending_rd_id = %rd_id,
+                    active_review = followups.review,
+                    active_rework = followups.rework,
+                    error = %e,
+                    "[review-decision] #339 accept created a follow-up dispatch but mark_dispatch_completed errored"
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": format!("failed to finalize pending review-decision: {e}"),
+                        "card_id": body.card_id,
+                        "pending_dispatch_id": rd_id,
+                    })),
+                );
+            }
+        }
+    }
 
-                emit_card_updated(&state, &body.card_id).await;
-                tracing::info!(
+    if let Err(response) = mark_consumed_review_decision_complete_or_response(
+        state,
+        &body.card_id,
+        pending_rd_id.as_deref(),
+        "accept",
+        rd_consumed,
+        if resume_side_effects_pending {
+            "side_effects_resuming"
+        } else {
+            "side_effects_pending"
+        },
+    )
+    .await
+    {
+        return response;
+    }
+
+    emit_card_updated(state, &body.card_id).await;
+    let message = if terminal_auto_approved {
+        "Review-decision accepted, review auto-approved (no alternate reviewer)"
+    } else if direct_review_created {
+        "Review-decision accepted, direct review dispatch created (rework skipped)"
+    } else {
+        "Review-decision accepted, rework dispatch created"
+    };
+    return (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "card_id": body.card_id,
+            "decision": "accept",
+            "rework_dispatch_created": rework_dispatch_created,
+            "direct_review_created": direct_review_created,
+            "review_auto_approved": terminal_auto_approved,
+            "skip_rework": skip_rework,
+            "skip_rework_diagnostics": skip_rework_diagnostics.to_json(),
+            "message": message,
+        })),
+    );
+}
+
+/// Phase 3b of `submit_review_decision`: the `dispute` decision branch. Covers
+/// both the #2341/#2200 sub-3 `out_of_scope` scope_mismatch_closed close path
+/// and the normal re-review path (#229 cancel-stale, OnReviewEnter re-fire,
+/// #491 fail-closed re-review-target verification). Pure extraction of the
+/// original `"dispute" =>` match arm; every path returns a `DecisionResponse`
+/// exactly as before, with identical ordering and logging.
+async fn decision_route_dispute(
+    state: &AppState,
+    body: &ReviewDecisionBody,
+    pending_rd_id: &Option<String>,
+    resume_side_effects_pending: bool,
+) -> DecisionResponse {
+    // #2341 / #2200 sub-3 redesign: out-of-scope dispute close path.
+    //
+    // Production reality (per #2341 Codex round-3): at /api/review-decision
+    // time the review dispatch is **completed** (not active/pending).
+    // PR #2336's close path bound to `latest_active_review_dispatch`
+    // and therefore never fired in production. This redesign binds
+    // to the latest **completed** review dispatch, verifies its
+    // `reviewed_commit` is proven out-of-scope (fail-closed on
+    // Unknown — carried forward from PR #2336 HIGH 1), captures a
+    // card-lifecycle generation marker (HIGH 2 reworked to bind to
+    // card lifecycle, not just dispatch existence), and runs the
+    // finalize + cancel-stale + transition + cleanup sequence
+    // atomically with a stale re-check inside the close
+    // transaction.
+    if body.out_of_scope == Some(true) {
+        // 1. Caller must prove ownership of the pending review-decision
+        //    dispatch via `dispatch_id` matching `pending_rd_id`.
+        let rd_id = match (body.dispatch_id.as_deref(), pending_rd_id.as_deref()) {
+            (Some(submitted), Some(pending)) if submitted == pending => submitted.to_string(),
+            (Some(submitted), Some(pending)) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": format!(
+                            "dispatch_id mismatch: submitted {submitted} but pending is {pending}"
+                        ),
+                        "card_id": body.card_id,
+                    })),
+                );
+            }
+            (None, _) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": "out_of_scope dispute requires dispatch_id to prove ownership of the pending review-decision",
+                        "card_id": body.card_id,
+                    })),
+                );
+            }
+            (Some(_), None) => {
+                // Already guarded above; defensive only.
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "no pending review-decision dispatch for this card",
+                        "card_id": body.card_id,
+                    })),
+                );
+            }
+        };
+
+        // 2. Bind to the **source** review dispatch that produced THIS
+        //    review-decision (loaded by id from the review-decision's
+        //    `context.source_review_dispatch_id`), not to the latest
+        //    completed review for the card. This closes Codex r1 [medium]:
+        //    a duplicate or delayed completed review row could otherwise
+        //    bind the close to the wrong reviewed_commit.
+        //    Codex r2 [medium]: if the source id is present but does
+        //    not resolve, fail closed — no silent latest-completed
+        //    fallback.
+        let completed_review = match source_review_dispatch_for_decision_pg_first(
+            state,
+            &body.card_id,
+            &rd_id,
+        )
+        .await
+        {
+            SourceReviewLookup::ResolvedById(d) => d,
+            SourceReviewLookup::LegacyFallback(Some(d)) => d,
+            SourceReviewLookup::LegacyFallback(None) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "out_of_scope dispute requires a completed review dispatch whose reviewed_commit can be verified against the card issue",
+                        "card_id": body.card_id,
+                        "pending_dispatch_id": rd_id,
+                    })),
+                );
+            }
+            SourceReviewLookup::UnresolvedSourceId(srid) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "out_of_scope dispute refused: review-decision context references a source review that does not resolve to a completed review row; cannot verify scope",
+                        "card_id": body.card_id,
+                        "pending_dispatch_id": rd_id,
+                        "source_review_dispatch_id": srid,
+                        "reason": "source_review_unresolved",
+                    })),
+                );
+            }
+        };
+        let reviewed_commit = match completed_review.reviewed_commit.clone() {
+            Some(c) if !c.trim().is_empty() => c,
+            _ => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "out_of_scope dispute requires the completed review to expose reviewed_commit for scope verification",
+                        "card_id": body.card_id,
+                        "pending_dispatch_id": rd_id,
+                        "review_dispatch_id": completed_review.id,
+                    })),
+                );
+            }
+        };
+
+        // 3. HIGH 1 fail-closed: tri-state scope verification. Only a
+        //    proven OutOfScope is allowed to take the close shortcut.
+        //    Unknown — transient PG/git failure — refuses with 503.
+        match commit_belongs_to_card_issue_pg_first_tri(
+            state,
+            &body.card_id,
+            &reviewed_commit,
+            completed_review.target_repo.as_deref(),
+        )
+        .await
+        {
+            crate::dispatch::ScopeCheck::OutOfScope => {}
+            crate::dispatch::ScopeCheck::InScope => {
+                tracing::warn!(
                     card_id = %body.card_id,
                     pending_rd_id = %rd_id,
                     review_dispatch_id = %completed_review.id,
                     reviewed_commit = %reviewed_commit,
-                    cancelled_stale,
-                    "[review-decision] #2341 closed dispute as scope_mismatch_closed (completed-review-context binding)"
+                    "[review-decision] #2341 rejected out_of_scope claim: reviewed_commit belongs to the card issue"
                 );
                 return (
-                    StatusCode::OK,
+                    StatusCode::CONFLICT,
                     Json(json!({
-                        "ok": true,
+                        "error": "out_of_scope dispute refused: reviewed_commit belongs to this card's issue; submit a regular dispute instead",
                         "card_id": body.card_id,
-                        "decision": "dispute",
-                        "outcome": "scope_mismatch_closed",
                         "pending_dispatch_id": rd_id,
                         "review_dispatch_id": completed_review.id,
                         "reviewed_commit": reviewed_commit,
-                        "cancelled_stale_dispatches": cancelled_stale,
-                        "message": "Dispute closed: completed review verified as out-of-scope for this card",
                     })),
                 );
             }
-
-            let rd_consumed = if resume_side_effects_pending {
-                true
-            } else {
-                match consume_pending_review_decision_or_response(
-                    &state,
-                    &body.card_id,
-                    pending_rd_id.as_deref(),
-                    "dispute",
-                )
-                .await
-                {
-                    Ok(consumed) => consumed,
-                    Err(response) => return response,
-                }
-            };
-
-            if let Err(error) = prepare_dispute_review_entry_pg_first(&state, &body.card_id).await {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
+            crate::dispatch::ScopeCheck::Unknown => {
+                tracing::warn!(
+                    card_id = %body.card_id,
+                    pending_rd_id = %rd_id,
+                    review_dispatch_id = %completed_review.id,
+                    reviewed_commit = %reviewed_commit,
+                    target_repo = %completed_review.target_repo.as_deref().unwrap_or(""),
+                    "[review-decision] #2341 refused out_of_scope: scope verification inconclusive (repo/git transient failure); fail-closed"
                 );
-            }
-
-            // #119: Record tuning outcome BEFORE OnReviewEnter (which increments review_round)
-            if let Err(error) = record_decision_tuning(
-                state.pg_pool_ref(),
-                &body.card_id,
-                "dispute",
-                pending_rd_id.as_deref(),
-            )
-            .await
-            {
                 return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
+                    StatusCode::SERVICE_UNAVAILABLE,
                     Json(json!({
-                        "error": error,
+                        "error": "scope verification inconclusive; cannot close as out-of-scope. Retry once the repo is reachable, or submit a regular dispute.",
                         "card_id": body.card_id,
-                        "pending_dispatch_id": pending_rd_id,
+                        "pending_dispatch_id": rd_id,
+                        "review_dispatch_id": completed_review.id,
+                        "reviewed_commit": reviewed_commit,
+                        "reason": "scope_check_unknown",
                     })),
                 );
             }
-            spawn_review_tuning_aggregate_pg_first(&state);
-
-            // #229: Cancel stale pending/dispatched review dispatches for this card.
-            // Without this, the dispatch-core dedup guard blocks
-            // OnReviewEnter from creating a fresh review dispatch after dispute.
-            let cancelled = match cancel_stale_review_dispatches_required_pg_first(
-                &state,
-                &body.card_id,
-                "superseded_by_dispute_re_review",
-            )
-            .await
-            {
-                Ok(count) => count,
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({
-                            "error": error,
-                            "card_id": body.card_id,
-                            "pending_dispatch_id": pending_rd_id,
-                        })),
-                    );
-                }
-            };
-            if cancelled > 0 {
-                tracing::info!(
-                    "[review-decision] #229 Cancelled {} stale review dispatch(es) for card {} before dispute re-review",
-                    cancelled,
-                    body.card_id
-                );
-            }
-
-            // Fire on_enter hooks for current state (should be a review-like state with OnReviewEnter)
-            let dispute_status = current_card_status_pg_first(&state, &body.card_id)
-                .await
-                .unwrap_or_else(|| "review".to_string());
-            crate::kanban::fire_enter_hooks_with_backends(
-                None,
-                &state.engine,
-                &body.card_id,
-                &dispute_status,
-            );
-
-            // #108: Drain all pending intents and transitions from OnReviewEnter hooks.
-            // drain_hook_side_effects handles both transition processing (e.g. setStatus
-            // for review/manual-intervention follow-up on max rounds) and Discord notifications for any
-            // dispatches created by the hooks, eliminating the previous manual drain loop
-            // that only handled transitions and missed dispatch notifications.
-            crate::kanban::drain_hook_side_effects_with_backends(None, &state.engine);
-
-            // #229: Safety net — if card is still in a review-like state but no
-            // pending review dispatch exists (OnReviewEnter hook may have failed
-            // due to lock contention or JS error), re-fire with blocking lock.
-            {
-                let card_ctx =
-                    load_review_decision_card_context_pg_first(&state, &body.card_id).await;
-                let has_review_dispatch = if let Some(pool) = state.pg_pool_ref() {
-                    sqlx::query_scalar::<_, bool>(
-                        "SELECT COUNT(*) > 0
-                         FROM task_dispatches
-                         WHERE kanban_card_id = $1
-                           AND dispatch_type IN ('review', 'review-decision')
-                           AND status IN ('pending', 'dispatched')",
-                    )
-                    .bind(&body.card_id)
-                    .fetch_one(pool)
-                    .await
-                    .unwrap_or(false)
-                } else {
-                    false
-                };
-                let effective_pipeline = resolve_effective_pipeline_pg_first(
-                    &state,
-                    card_ctx.repo_id.as_deref(),
-                    card_ctx.agent_id.as_deref(),
-                )
-                .await;
-                let needs_review = card_ctx.status.as_deref().is_some_and(|status| {
-                    effective_pipeline
-                        .hooks_for_state(status)
-                        .is_some_and(|hooks| {
-                            hooks.on_enter.iter().any(|name| name == "OnReviewEnter")
-                        })
-                }) && !has_review_dispatch;
-
-                if needs_review {
-                    tracing::warn!(
-                        "[review-decision] Card {} in review state but no review dispatch after dispute — re-firing OnReviewEnter (#229)",
-                        body.card_id
-                    );
-                    let _ = state.engine.fire_hook_by_name_blocking(
-                        "OnReviewEnter",
-                        json!({ "card_id": body.card_id }),
-                    );
-                    crate::kanban::drain_hook_side_effects_with_backends(None, &state.engine);
-                }
-            }
-
-            let live_review = match latest_active_review_dispatch_pg_first(&state, &body.card_id)
-                .await
-            {
-                Some(dispatch) => dispatch,
-                None => {
-                    tracing::error!(
-                        card_id = %body.card_id,
-                        pending_rd_id = pending_rd_id.as_deref().unwrap_or(""),
-                        "[review-decision] #491 dispute failed closed: no live review dispatch after re-review entry"
-                    );
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({
-                            "error": "review-decision dispute failed: no follow-up review dispatch created",
-                            "card_id": body.card_id,
-                            "pending_dispatch_id": pending_rd_id,
-                        })),
-                    );
-                }
-            };
-
-            if let Some(ref reviewed_commit) = live_review.reviewed_commit {
-                if !commit_belongs_to_card_issue_pg_first(
-                    &state,
-                    &body.card_id,
-                    reviewed_commit,
-                    live_review.target_repo.as_deref(),
-                )
-                .await
-                {
-                    let _ = cancel_dispatch_pg_first(
-                        &state,
-                        &live_review.id,
-                        Some("invalid_dispute_rereview_target"),
-                    )
-                    .await;
-                    tracing::error!(
-                        card_id = %body.card_id,
-                        pending_rd_id = pending_rd_id.as_deref().unwrap_or(""),
-                        review_dispatch_id = %live_review.id,
-                        reviewed_commit = %reviewed_commit,
-                        "[review-decision] #491 dispute failed closed: re-review target does not belong to the card issue"
-                    );
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({
-                            "error": "review-decision dispute failed: re-review target is stale or unrelated to the card issue",
-                            "card_id": body.card_id,
-                            "pending_dispatch_id": pending_rd_id,
-                            "review_dispatch_id": live_review.id,
-                            "reviewed_commit": reviewed_commit,
-                        })),
-                    );
-                }
-            }
-
-            // #117: Update canonical review state before returning
-            if let Err(error) = update_card_review_state(
-                review_state_db(&state),
-                state.pg_pool_ref(),
-                &body.card_id,
-                "dispute",
-                pending_rd_id.as_deref(),
-            ) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": error,
-                        "card_id": body.card_id,
-                        "pending_dispatch_id": pending_rd_id,
-                    })),
-                );
-            }
-
-            if !rd_consumed && let Some(ref rd_id) = pending_rd_id {
-                let status_db = None;
-                match crate::dispatch::set_dispatch_status_with_backends(
-                    status_db,
-                    state.pg_pool_ref(),
-                    rd_id,
-                    "completed",
-                    Some(
-                        &json!({"decision": "dispute", "completion_source": "review_decision_api"}),
-                    ),
-                    "mark_dispatch_completed",
-                    Some(&["pending", "dispatched"]),
-                    true,
-                ) {
-                    Ok(1) => {}
-                    Ok(_) => {
-                        tracing::error!(
-                            card_id = %body.card_id,
-                            pending_rd_id = %rd_id,
-                            review_dispatch_id = %live_review.id,
-                            "[review-decision] #491 dispute created a follow-up review dispatch but failed to finalize the pending review-decision"
-                        );
-                        return (
-                            StatusCode::CONFLICT,
-                            Json(json!({
-                                "error": "failed to finalize pending review-decision after re-review dispatch creation",
-                                "card_id": body.card_id,
-                                "pending_dispatch_id": rd_id,
-                                "review_dispatch_id": live_review.id,
-                            })),
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            card_id = %body.card_id,
-                            pending_rd_id = %rd_id,
-                            review_dispatch_id = %live_review.id,
-                            error = %e,
-                            "[review-decision] #491 dispute created a follow-up review dispatch but mark_dispatch_completed errored"
-                        );
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({
-                                "error": format!("failed to finalize pending review-decision: {e}"),
-                                "card_id": body.card_id,
-                                "pending_dispatch_id": rd_id,
-                                "review_dispatch_id": live_review.id,
-                            })),
-                        );
-                    }
-                }
-            }
-
-            if let Err(response) = mark_consumed_review_decision_complete_or_response(
-                &state,
-                &body.card_id,
-                pending_rd_id.as_deref(),
-                "dispute",
-                rd_consumed,
-                if resume_side_effects_pending {
-                    "side_effects_resuming"
-                } else {
-                    "side_effects_pending"
-                },
-            )
-            .await
-            {
-                return response;
-            }
-
-            emit_card_updated(&state, &body.card_id).await;
-            return (
-                StatusCode::OK,
-                Json(json!({
-                    "ok": true,
-                    "card_id": body.card_id,
-                    "decision": "dispute",
-                    "review_dispatch_id": live_review.id,
-                    "reviewed_commit": live_review.reviewed_commit,
-                    "message": "Re-review dispatched to counter-model",
-                })),
-            );
         }
-        "dismiss" => {
-            // Agent dismisses review → transition to terminal state, then clean up stale state.
-            // Order matters: transition_status requires an active dispatch, so we must
-            // transition BEFORE cancelling pending dispatches.
-            let card_ctx = load_review_decision_card_context_pg_first(&state, &body.card_id).await;
-            let effective_pipeline = resolve_effective_pipeline_pg_first(
-                &state,
-                card_ctx.repo_id.as_deref(),
-                card_ctx.agent_id.as_deref(),
-            )
-            .await;
-            let terminal_state = effective_pipeline
-                .states
-                .iter()
-                .find(|state| state.terminal)
-                .map(|state| state.id.clone())
-                .unwrap_or_else(|| "done".to_string());
-            let rd_consumed = if resume_side_effects_pending {
-                true
-            } else {
-                match consume_pending_review_decision_or_response(
-                    &state,
-                    &body.card_id,
-                    pending_rd_id.as_deref(),
-                    "dismiss",
-                )
-                .await
-                {
-                    Ok(consumed) => consumed,
-                    Err(response) => return response,
-                }
-            };
-            let current_status = card_ctx.status.clone().unwrap_or_default();
-            if !effective_pipeline.is_terminal(&current_status)
-                && let Err(error) = transition_status_pg_first(
-                    &state,
-                    &body.card_id,
-                    &terminal_state,
-                    "dismiss",
-                    crate::engine::transition::ForceIntent::SystemRecovery, // dismiss bypasses review_passed gate
-                )
-                .await
-            {
+
+        // 4. Capture the card lifecycle generation snapshot. The
+        //    atomic close re-reads this inside its transaction and
+        //    rolls back if it has changed (= card re-opened between
+        //    snapshot and tx).
+        let lifecycle_snapshot = card_lifecycle_snapshot_pg_first(state, &body.card_id).await;
+
+        // 5. Atomic finalize: in one tx, re-check lifecycle + flip
+        //    the review-decision dispatch to completed +
+        //    scope_mismatch_closed + update card_review_state.
+        match atomic_finalize_scope_mismatch_close_pg(
+            state,
+            &body.card_id,
+            &rd_id,
+            &completed_review.id,
+            &reviewed_commit,
+            &lifecycle_snapshot,
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(ScopeMismatchCloseError::LifecycleStale { expected, actual }) => {
+                tracing::warn!(
+                    card_id = %body.card_id,
+                    pending_rd_id = %rd_id,
+                    review_dispatch_id = %completed_review.id,
+                    ?expected,
+                    ?actual,
+                    "[review-decision] #2341 refused out_of_scope close: card lifecycle generation changed (card re-opened)"
+                );
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "card lifecycle has advanced since the completed review; refusing to close as out-of-scope",
+                        "card_id": body.card_id,
+                        "pending_dispatch_id": rd_id,
+                        "review_dispatch_id": completed_review.id,
+                        "reason": "lifecycle_generation_mismatch",
+                    })),
+                );
+            }
+            Err(ScopeMismatchCloseError::DispatchConsumed) => {
+                tracing::warn!(
+                    card_id = %body.card_id,
+                    pending_rd_id = %rd_id,
+                    "[review-decision] #2341 race: pending review-decision dispatch was already consumed before scope_mismatch_closed could finalize it"
+                );
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "race: pending review-decision dispatch was already consumed",
+                        "card_id": body.card_id,
+                        "pending_dispatch_id": rd_id,
+                    })),
+                );
+            }
+            Err(ScopeMismatchCloseError::Internal(e)) => {
+                tracing::error!(
+                    card_id = %body.card_id,
+                    pending_rd_id = %rd_id,
+                    error = %e,
+                    "[review-decision] #2341 atomic finalize failed for scope_mismatch_closed"
+                );
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({
                         "error": format!(
-                            "dismiss: card transition to {terminal_state} failed: {error}"
+                            "failed to atomically finalize scope_mismatch_closed: {e}"
                         ),
                         "card_id": body.card_id,
-                        "pending_dispatch_id": pending_rd_id,
+                        "pending_dispatch_id": rd_id,
                     })),
                 );
             }
+        }
 
-            // Post-transition cleanup: cancel remaining pending review dispatches to prevent
-            // stale dispatches from re-triggering review loops after dismiss.
-            if let Err(error) = dismiss_review_cleanup_pg_first(&state, &body.card_id).await {
+        // 6. Re-check lifecycle BEFORE any destructive action.
+        //    Codex round-2 [high]: cancel-stale must NOT run before
+        //    the lifecycle re-check, otherwise a re-open that
+        //    happened between the tx commit and this point would
+        //    have its fresh review dispatch cancelled by
+        //    stale_review_dispatch_ids_pg_first before we discover
+        //    the re-open and refuse. Re-checking first means the
+        //    409 refusal triggers before any side effects.
+        let post_tx_lifecycle = card_lifecycle_snapshot_pg_first(state, &body.card_id).await;
+        if post_tx_lifecycle != lifecycle_snapshot {
+            tracing::warn!(
+                card_id = %body.card_id,
+                pending_rd_id = %rd_id,
+                ?lifecycle_snapshot,
+                ?post_tx_lifecycle,
+                "[review-decision] #2341 lifecycle changed after tx commit but before cleanup; leaving dispatch finalized for idempotent resume, no destructive actions taken"
+            );
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "card lifecycle advanced after scope_mismatch_closed finalize; transition refused",
+                    "card_id": body.card_id,
+                    "pending_dispatch_id": rd_id,
+                    "review_dispatch_id": completed_review.id,
+                    "reason": "lifecycle_generation_mismatch_post_tx",
+                })),
+            );
+        }
+
+        // 7. Cancel stale review/review-decision dispatches so the
+        //    dedup guard doesn't strand them. Outside the tx because
+        //    cancel touches multiple rows + may dispatch outbox
+        //    messages. Safe to run now: the post-tx lifecycle
+        //    re-check above guaranteed no fresh generation exists.
+        let cancelled_stale = match cancel_stale_review_dispatches_for_scope_mismatch_pg_first(
+            state,
+            &body.card_id,
+            "scope_mismatch_closed",
+            &lifecycle_snapshot,
+        )
+        .await
+        {
+            Ok(count) => count,
+            Err(error) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
+                    Json(json!({
+                        "error": error,
+                        "card_id": body.card_id,
+                        "pending_dispatch_id": rd_id,
+                    })),
                 );
             }
-            fallthrough_rd_consumed = Some(rd_consumed);
+        };
+
+        let card_ctx = load_review_decision_card_context_pg_first(state, &body.card_id).await;
+        let effective_pipeline = resolve_effective_pipeline_pg_first(
+            state,
+            card_ctx.repo_id.as_deref(),
+            card_ctx.agent_id.as_deref(),
+        )
+        .await;
+        let terminal_state = effective_pipeline
+            .states
+            .iter()
+            .find(|state| state.terminal)
+            .map(|state| state.id.clone())
+            .unwrap_or_else(|| "done".to_string());
+        match transition_status_pg_first(
+            state,
+            &body.card_id,
+            &terminal_state,
+            "dispute_scope_mismatch_closed",
+            crate::engine::transition::ForceIntent::SystemRecovery,
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!(
+                    card_id = %body.card_id,
+                    pending_rd_id = %rd_id,
+                    terminal_state = %terminal_state,
+                    error = %e,
+                    "[review-decision] #2341 finalized review-decision but failed to transition card to terminal"
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": format!(
+                            "scope_mismatch_closed: review-decision finalized but card transition to {terminal_state} failed: {e}"
+                        ),
+                        "card_id": body.card_id,
+                        "pending_dispatch_id": rd_id,
+                    })),
+                );
+            }
         }
-        _ => {}
+
+        // 8. Reuse dismiss cleanup to clear any leftover pending
+        //    review dispatches and review_status.
+        if let Err(error) = dismiss_review_cleanup_pg_first(state, &body.card_id).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
+        }
+
+        if let Err(error) = record_decision_tuning(
+            state.pg_pool_ref(),
+            &body.card_id,
+            "dispute_scope_mismatch_closed",
+            Some(&rd_id),
+        )
+        .await
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": error,
+                    "card_id": body.card_id,
+                    "pending_dispatch_id": rd_id,
+                })),
+            );
+        }
+        spawn_review_tuning_aggregate_pg_first(state);
+
+        emit_card_updated(state, &body.card_id).await;
+        tracing::info!(
+            card_id = %body.card_id,
+            pending_rd_id = %rd_id,
+            review_dispatch_id = %completed_review.id,
+            reviewed_commit = %reviewed_commit,
+            cancelled_stale,
+            "[review-decision] #2341 closed dispute as scope_mismatch_closed (completed-review-context binding)"
+        );
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "card_id": body.card_id,
+                "decision": "dispute",
+                "outcome": "scope_mismatch_closed",
+                "pending_dispatch_id": rd_id,
+                "review_dispatch_id": completed_review.id,
+                "reviewed_commit": reviewed_commit,
+                "cancelled_stale_dispatches": cancelled_stale,
+                "message": "Dispute closed: completed review verified as out-of-scope for this card",
+            })),
+        );
     }
 
+    let rd_consumed = if resume_side_effects_pending {
+        true
+    } else {
+        match consume_pending_review_decision_or_response(
+            state,
+            &body.card_id,
+            pending_rd_id.as_deref(),
+            "dispute",
+        )
+        .await
+        {
+            Ok(consumed) => consumed,
+            Err(response) => return response,
+        }
+    };
+
+    if let Err(error) = prepare_dispute_review_entry_pg_first(state, &body.card_id).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        );
+    }
+
+    // #119: Record tuning outcome BEFORE OnReviewEnter (which increments review_round)
+    if let Err(error) = record_decision_tuning(
+        state.pg_pool_ref(),
+        &body.card_id,
+        "dispute",
+        pending_rd_id.as_deref(),
+    )
+    .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": error,
+                "card_id": body.card_id,
+                "pending_dispatch_id": pending_rd_id,
+            })),
+        );
+    }
+    spawn_review_tuning_aggregate_pg_first(state);
+
+    // #229: Cancel stale pending/dispatched review dispatches for this card.
+    // Without this, the dispatch-core dedup guard blocks
+    // OnReviewEnter from creating a fresh review dispatch after dispute.
+    let cancelled = match cancel_stale_review_dispatches_required_pg_first(
+        state,
+        &body.card_id,
+        "superseded_by_dispute_re_review",
+    )
+    .await
+    {
+        Ok(count) => count,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": error,
+                    "card_id": body.card_id,
+                    "pending_dispatch_id": pending_rd_id,
+                })),
+            );
+        }
+    };
+    if cancelled > 0 {
+        tracing::info!(
+            "[review-decision] #229 Cancelled {} stale review dispatch(es) for card {} before dispute re-review",
+            cancelled,
+            body.card_id
+        );
+    }
+
+    // Fire on_enter hooks for current state (should be a review-like state with OnReviewEnter)
+    let dispute_status = current_card_status_pg_first(state, &body.card_id)
+        .await
+        .unwrap_or_else(|| "review".to_string());
+    crate::kanban::fire_enter_hooks_with_backends(
+        None,
+        &state.engine,
+        &body.card_id,
+        &dispute_status,
+    );
+
+    // #108: Drain all pending intents and transitions from OnReviewEnter hooks.
+    // drain_hook_side_effects handles both transition processing (e.g. setStatus
+    // for review/manual-intervention follow-up on max rounds) and Discord notifications for any
+    // dispatches created by the hooks, eliminating the previous manual drain loop
+    // that only handled transitions and missed dispatch notifications.
+    crate::kanban::drain_hook_side_effects_with_backends(None, &state.engine);
+
+    // #229: Safety net — if card is still in a review-like state but no
+    // pending review dispatch exists (OnReviewEnter hook may have failed
+    // due to lock contention or JS error), re-fire with blocking lock.
+    {
+        let card_ctx = load_review_decision_card_context_pg_first(state, &body.card_id).await;
+        let has_review_dispatch = if let Some(pool) = state.pg_pool_ref() {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT COUNT(*) > 0
+                         FROM task_dispatches
+                         WHERE kanban_card_id = $1
+                           AND dispatch_type IN ('review', 'review-decision')
+                           AND status IN ('pending', 'dispatched')",
+            )
+            .bind(&body.card_id)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(false)
+        } else {
+            false
+        };
+        let effective_pipeline = resolve_effective_pipeline_pg_first(
+            state,
+            card_ctx.repo_id.as_deref(),
+            card_ctx.agent_id.as_deref(),
+        )
+        .await;
+        let needs_review = card_ctx.status.as_deref().is_some_and(|status| {
+            effective_pipeline
+                .hooks_for_state(status)
+                .is_some_and(|hooks| hooks.on_enter.iter().any(|name| name == "OnReviewEnter"))
+        }) && !has_review_dispatch;
+
+        if needs_review {
+            tracing::warn!(
+                "[review-decision] Card {} in review state but no review dispatch after dispute — re-firing OnReviewEnter (#229)",
+                body.card_id
+            );
+            let _ = state
+                .engine
+                .fire_hook_by_name_blocking("OnReviewEnter", json!({ "card_id": body.card_id }));
+            crate::kanban::drain_hook_side_effects_with_backends(None, &state.engine);
+        }
+    }
+
+    let live_review = match latest_active_review_dispatch_pg_first(state, &body.card_id).await {
+        Some(dispatch) => dispatch,
+        None => {
+            tracing::error!(
+                card_id = %body.card_id,
+                pending_rd_id = pending_rd_id.as_deref().unwrap_or(""),
+                "[review-decision] #491 dispute failed closed: no live review dispatch after re-review entry"
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "review-decision dispute failed: no follow-up review dispatch created",
+                    "card_id": body.card_id,
+                    "pending_dispatch_id": pending_rd_id,
+                })),
+            );
+        }
+    };
+
+    if let Some(ref reviewed_commit) = live_review.reviewed_commit {
+        if !commit_belongs_to_card_issue_pg_first(
+            state,
+            &body.card_id,
+            reviewed_commit,
+            live_review.target_repo.as_deref(),
+        )
+        .await
+        {
+            let _ = cancel_dispatch_pg_first(
+                state,
+                &live_review.id,
+                Some("invalid_dispute_rereview_target"),
+            )
+            .await;
+            tracing::error!(
+                card_id = %body.card_id,
+                pending_rd_id = pending_rd_id.as_deref().unwrap_or(""),
+                review_dispatch_id = %live_review.id,
+                reviewed_commit = %reviewed_commit,
+                "[review-decision] #491 dispute failed closed: re-review target does not belong to the card issue"
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "review-decision dispute failed: re-review target is stale or unrelated to the card issue",
+                    "card_id": body.card_id,
+                    "pending_dispatch_id": pending_rd_id,
+                    "review_dispatch_id": live_review.id,
+                    "reviewed_commit": reviewed_commit,
+                })),
+            );
+        }
+    }
+
+    // #117: Update canonical review state before returning
+    if let Err(error) = update_card_review_state(
+        review_state_db(state),
+        state.pg_pool_ref(),
+        &body.card_id,
+        "dispute",
+        pending_rd_id.as_deref(),
+    ) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": error,
+                "card_id": body.card_id,
+                "pending_dispatch_id": pending_rd_id,
+            })),
+        );
+    }
+
+    if !rd_consumed && let Some(rd_id) = pending_rd_id {
+        let status_db = None;
+        match crate::dispatch::set_dispatch_status_with_backends(
+            status_db,
+            state.pg_pool_ref(),
+            rd_id,
+            "completed",
+            Some(&json!({"decision": "dispute", "completion_source": "review_decision_api"})),
+            "mark_dispatch_completed",
+            Some(&["pending", "dispatched"]),
+            true,
+        ) {
+            Ok(1) => {}
+            Ok(_) => {
+                tracing::error!(
+                    card_id = %body.card_id,
+                    pending_rd_id = %rd_id,
+                    review_dispatch_id = %live_review.id,
+                    "[review-decision] #491 dispute created a follow-up review dispatch but failed to finalize the pending review-decision"
+                );
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "failed to finalize pending review-decision after re-review dispatch creation",
+                        "card_id": body.card_id,
+                        "pending_dispatch_id": rd_id,
+                        "review_dispatch_id": live_review.id,
+                    })),
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    card_id = %body.card_id,
+                    pending_rd_id = %rd_id,
+                    review_dispatch_id = %live_review.id,
+                    error = %e,
+                    "[review-decision] #491 dispute created a follow-up review dispatch but mark_dispatch_completed errored"
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": format!("failed to finalize pending review-decision: {e}"),
+                        "card_id": body.card_id,
+                        "pending_dispatch_id": rd_id,
+                        "review_dispatch_id": live_review.id,
+                    })),
+                );
+            }
+        }
+    }
+
+    if let Err(response) = mark_consumed_review_decision_complete_or_response(
+        state,
+        &body.card_id,
+        pending_rd_id.as_deref(),
+        "dispute",
+        rd_consumed,
+        if resume_side_effects_pending {
+            "side_effects_resuming"
+        } else {
+            "side_effects_pending"
+        },
+    )
+    .await
+    {
+        return response;
+    }
+
+    emit_card_updated(state, &body.card_id).await;
+    return (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "card_id": body.card_id,
+            "decision": "dispute",
+            "review_dispatch_id": live_review.id,
+            "reviewed_commit": live_review.reviewed_commit,
+            "message": "Re-review dispatched to counter-model",
+        })),
+    );
+}
+
+/// Phase 3c of `submit_review_decision`: the `dismiss` decision branch (move to
+/// terminal, then cancel stale pending review dispatches). Pure extraction of
+/// the original `"dismiss" =>` match arm. Unlike accept/dispute this branch
+/// does NOT terminate the handler: it returns `Ok(rd_consumed)` to continue to
+/// the shared finalize phase, or `Err(response)` to short-circuit with the
+/// identical early-return body. Side-effect ordering (transition before
+/// cleanup) is preserved exactly.
+async fn decision_route_dismiss(
+    state: &AppState,
+    body: &ReviewDecisionBody,
+    pending_rd_id: &Option<String>,
+    resume_side_effects_pending: bool,
+) -> Result<bool, DecisionResponse> {
+    // Agent dismisses review → transition to terminal state, then clean up stale state.
+    // Order matters: transition_status requires an active dispatch, so we must
+    // transition BEFORE cancelling pending dispatches.
+    let card_ctx = load_review_decision_card_context_pg_first(state, &body.card_id).await;
+    let effective_pipeline = resolve_effective_pipeline_pg_first(
+        state,
+        card_ctx.repo_id.as_deref(),
+        card_ctx.agent_id.as_deref(),
+    )
+    .await;
+    let terminal_state = effective_pipeline
+        .states
+        .iter()
+        .find(|state| state.terminal)
+        .map(|state| state.id.clone())
+        .unwrap_or_else(|| "done".to_string());
+    let rd_consumed = if resume_side_effects_pending {
+        true
+    } else {
+        match consume_pending_review_decision_or_response(
+            state,
+            &body.card_id,
+            pending_rd_id.as_deref(),
+            "dismiss",
+        )
+        .await
+        {
+            Ok(consumed) => consumed,
+            Err(response) => return Err(response),
+        }
+    };
+    let current_status = card_ctx.status.clone().unwrap_or_default();
+    if !effective_pipeline.is_terminal(&current_status)
+        && let Err(error) = transition_status_pg_first(
+            state,
+            &body.card_id,
+            &terminal_state,
+            "dismiss",
+            crate::engine::transition::ForceIntent::SystemRecovery, // dismiss bypasses review_passed gate
+        )
+        .await
+    {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": format!(
+                    "dismiss: card transition to {terminal_state} failed: {error}"
+                ),
+                "card_id": body.card_id,
+                "pending_dispatch_id": pending_rd_id,
+            })),
+        ));
+    }
+
+    // Post-transition cleanup: cancel remaining pending review dispatches to prevent
+    // stale dispatches from re-triggering review loops after dismiss.
+    if let Err(error) = dismiss_review_cleanup_pg_first(state, &body.card_id).await {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        ));
+    }
+    return Ok(rd_consumed);
+}
+
+/// Phase 4 of `submit_review_decision`: shared finalize for branches that fall
+/// through (currently `dismiss` and the no-op `_` arm). Updates canonical review
+/// state (#117), records tuning (#119), marks the consumed review-decision
+/// complete for the dismiss path, emits the card-updated event, and returns the
+/// generic 200 body. Pure extraction; ordering and early-return bodies are
+/// identical to the original tail of the function.
+async fn decision_route_finalize(
+    state: &AppState,
+    body: &ReviewDecisionBody,
+    pending_rd_id: &Option<String>,
+    resume_side_effects_pending: bool,
+    fallthrough_rd_consumed: Option<bool>,
+) -> DecisionResponse {
     // #117: Update canonical review state for all decision paths
     if let Err(error) = update_card_review_state(
-        review_state_db(&state),
+        review_state_db(state),
         state.pg_pool_ref(),
         &body.card_id,
         &body.decision,
@@ -4157,11 +4281,11 @@ pub async fn submit_review_decision(
             })),
         );
     }
-    spawn_review_tuning_aggregate_pg_first(&state);
+    spawn_review_tuning_aggregate_pg_first(state);
 
     if let Some(rd_consumed) = fallthrough_rd_consumed {
         if let Err(response) = mark_consumed_review_decision_complete_or_response(
-            &state,
+            state,
             &body.card_id,
             pending_rd_id.as_deref(),
             &body.decision,
@@ -4178,7 +4302,7 @@ pub async fn submit_review_decision(
         }
     }
 
-    emit_card_updated(&state, &body.card_id).await;
+    emit_card_updated(state, &body.card_id).await;
 
     (
         StatusCode::OK,
