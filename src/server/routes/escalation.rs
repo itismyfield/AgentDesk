@@ -466,33 +466,6 @@ async fn load_cached_thread_id_pg_async(
     .map_err(|error| format!("load postgres cached escalation thread {key}: {error}"))
 }
 
-fn save_cached_thread_id_pg(
-    pool: &sqlx::PgPool,
-    card_id: &str,
-    thread_id: &str,
-) -> Result<(), String> {
-    let key = escalation_thread_key(card_id);
-    let thread_id = thread_id.to_string();
-    crate::utils::async_bridge::block_on_pg_result(
-        pool,
-        move |bridge_pool| async move {
-            sqlx::query(
-                "INSERT INTO kv_meta (key, value)
-                 VALUES ($1, $2)
-                 ON CONFLICT (key) DO UPDATE
-                 SET value = EXCLUDED.value",
-            )
-            .bind(&key)
-            .bind(&thread_id)
-            .execute(&bridge_pool)
-            .await
-            .map_err(|error| format!("save postgres cached escalation thread {key}: {error}"))?;
-            Ok(())
-        },
-        |error| error,
-    )
-}
-
 fn clear_cached_thread_id_pg(pool: &sqlx::PgPool, card_id: &str) -> Result<(), String> {
     let key = escalation_thread_key(card_id);
     crate::utils::async_bridge::block_on_pg_result(
@@ -1836,13 +1809,6 @@ mod tests {
 
     fn test_db() -> crate::db::Db {
         crate::db::test_db()
-    }
-
-    fn test_engine(db: &crate::db::Db) -> crate::engine::PolicyEngine {
-        let mut config = crate::config::Config::default();
-        config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
-        config.policies.hot_reload = false;
-        crate::engine::PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
     }
 
     fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> crate::engine::PolicyEngine {

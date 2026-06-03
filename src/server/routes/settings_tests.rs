@@ -13,13 +13,6 @@ fn test_db() -> db::Db {
     db::wrap_conn(conn)
 }
 
-fn test_engine(db: &db::Db) -> PolicyEngine {
-    let mut config = crate::config::Config::default();
-    config.policies.dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
-    config.policies.hot_reload = false;
-    PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
-}
-
 fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> PolicyEngine {
     let mut config = crate::config::Config::default();
     config.policies.dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");

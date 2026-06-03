@@ -382,11 +382,6 @@ mod tests {
         crate::db::wrap_conn(conn)
     }
 
-    fn test_engine(db: &Db) -> PolicyEngine {
-        let config = crate::config::Config::default();
-        PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
-    }
-
     fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> PolicyEngine {
         let mut config = crate::config::Config::default();
         config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");

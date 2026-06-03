@@ -10,9 +10,9 @@ use super::AppState;
 use crate::db::kanban_cards as kanban_db;
 use crate::db::kanban_cards::{IssueCardUpsert, upsert_card_from_issue_pg};
 pub use crate::server::dto::kanban::{
-    AssignCardBody, AssignIssueBody, BatchRereviewBody, BatchTransitionBody, BulkActionBody,
-    CreateCardBody, DeferDodBody, ForceTransitionBody, ListCardsQuery, PmDecisionBody,
-    RedispatchCardBody, ReopenBody, RereviewBody, RetryCardBody, UpdateCardBody,
+    AssignCardBody, AssignIssueBody, BatchRereviewBody, CreateCardBody, DeferDodBody,
+    ForceTransitionBody, ListCardsQuery, PmDecisionBody, RedispatchCardBody, ReopenBody,
+    RereviewBody, RetryCardBody, UpdateCardBody,
 };
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
@@ -1119,79 +1119,6 @@ pub async fn stalled_cards(State(state): State<AppState>) -> (StatusCode, Json<s
     (StatusCode::OK, Json(json!(cards)))
 }
 
-/// POST /api/kanban-cards/bulk-action
-pub async fn bulk_action(
-    State(state): State<AppState>,
-    Json(body): Json<BulkActionBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    // Pipeline-driven target status for bulk actions
-    crate::pipeline::ensure_loaded();
-    let pipeline = crate::pipeline::get();
-    let terminal_state = pipeline
-        .states
-        .iter()
-        .find(|s| s.terminal)
-        .map(|s| s.id.as_str())
-        .expect("Pipeline must have at least one terminal state");
-    let initial_state = pipeline.initial_state();
-    let target_status = match body.action.as_str() {
-        "pass" => terminal_state.to_string(),
-        "reset" => initial_state.to_string(),
-        "cancel" => terminal_state.to_string(),
-        "transition" => match body.target_status {
-            Some(ref s) => s.clone(),
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": "transition action requires target_status field"})),
-                );
-            }
-        },
-        other => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": format!("unknown action: {other}")})),
-            );
-        }
-    };
-
-    let mut results: Vec<serde_json::Value> = Vec::new();
-    for card_id in &body.card_ids {
-        let Some(pool) = state.pg_pool_ref() else {
-            return pg_pool_required_error();
-        };
-        let transition_result = if target_status == "backlog" {
-            transition_card_to_backlog_with_cleanup(&state, card_id, "bulk-action:backlog").await
-        } else {
-            crate::kanban::transition_status_with_opts_pg_only(
-                pool,
-                &state.engine,
-                card_id,
-                &target_status,
-                "bulk-action",
-                crate::engine::transition::ForceIntent::OperatorOverride,
-            )
-            .await
-        };
-
-        match transition_result {
-            Ok(_) => {
-                // Emit updated card for each successful transition
-                if let Ok(Some(card)) = load_card_json_pg(pool, card_id).await {
-                    crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
-                }
-                results.push(json!({"id": card_id, "ok": true}));
-            }
-            Err(e) => results.push(json!({"id": card_id, "ok": false, "error": format!("{e}")})),
-        }
-    }
-
-    (
-        StatusCode::OK,
-        Json(json!({"action": body.action, "results": results})),
-    )
-}
-
 /// POST /api/kanban-cards/assign-issue
 pub async fn assign_issue(
     State(state): State<AppState>,
@@ -1386,7 +1313,10 @@ async fn assign_transition_to_dispatchable_pg(
     })
 }
 
+// reason: legacy-sqlite parity wrapper keeping `kanban_db::card_row_to_json`
+// reachable from the test backend; PG paths build card JSON directly. See #3034.
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[allow(dead_code)]
 pub(super) fn card_row_to_json(row: &sqlite_test::Row) -> sqlite_test::Result<serde_json::Value> {
     kanban_db::card_row_to_json(row)
 }
@@ -1851,13 +1781,13 @@ pub async fn pm_decision(
 
 // ── Administrative review recovery helpers ───────────────────────
 
+// reason: legacy-sqlite parity wrapper keeping
+// `kanban_db::find_active_review_dispatch_id_on_conn` reachable from the test
+// backend; PG paths call the `_pg` variant directly. See #3034.
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[allow(dead_code)]
 fn find_active_review_dispatch_id(conn: &sqlite_test::Connection, card_id: &str) -> Option<String> {
     kanban_db::find_active_review_dispatch_id_on_conn(conn, card_id)
-}
-
-async fn find_active_review_dispatch_id_pg(pool: &sqlx::PgPool, card_id: &str) -> Option<String> {
-    kanban_db::find_active_review_dispatch_id_pg(pool, card_id).await
 }
 
 fn trimmed_header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -1909,7 +1839,12 @@ pub(crate) fn require_explicit_bearer_token(
     Ok(())
 }
 
+// reason: legacy-sqlite parity wrappers keeping
+// `kanban_db::resolve_agent_id_from_channel_id_on_conn` /
+// `resolve_existing_agent_id_on_conn` reachable from the test backend; PG paths
+// use the `_with_pg` variants below. See #3034.
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[allow(dead_code)]
 fn resolve_agent_id_from_channel_id_on_conn(
     conn: &sqlite_test::Connection,
     channel_id: &str,
@@ -1925,6 +1860,7 @@ async fn resolve_agent_id_from_channel_id_with_pg(
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[allow(dead_code)]
 pub(super) fn resolve_requesting_agent_id_on_conn(
     conn: &sqlite_test::Connection,
     headers: &HeaderMap,
@@ -2521,215 +2457,6 @@ pub async fn reopen_card(
     pg_pool_required_error()
 }
 
-/// POST /api/kanban-cards/batch-transition
-///
-/// Administrative endpoint. Applies the same force semantics as force-transition to
-/// multiple cards, resolving targets by either explicit card IDs or GitHub
-/// issue numbers. Returns per-card success/failure details.
-pub async fn batch_transition(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<BatchTransitionBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    if let Err(response) = require_explicit_bearer_token(&headers, "batch-transition") {
-        return response;
-    }
-
-    let has_issue_numbers = body
-        .issue_numbers
-        .as_ref()
-        .is_some_and(|nums| !nums.is_empty());
-    let has_card_ids = body.card_ids.as_ref().is_some_and(|ids| !ids.is_empty());
-    if !has_issue_numbers && !has_card_ids {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "batch-transition requires issue_numbers or card_ids"})),
-        );
-    }
-
-    let Some(pg_pool) = state.pg_pool_ref() else {
-        return pg_pool_required_error();
-    };
-    let caller_source = resolve_requesting_agent_id_with_pg(pg_pool, &headers)
-        .await
-        .unwrap_or_else(|| "api".to_string());
-    let batch_transition_source = format!("{caller_source}:batch-transition");
-    let mut targets: Vec<(String, Option<i64>)> = Vec::new();
-    let mut results = Vec::new();
-
-    if let Some(card_ids) = body.card_ids.as_ref() {
-        for card_id in card_ids {
-            targets.push((card_id.clone(), None));
-        }
-    }
-
-    if let Some(issue_numbers) = body.issue_numbers.as_ref() {
-        for issue_number in issue_numbers {
-            let card_ids: Vec<String> =
-                match kanban_db::card_ids_by_issue_number_pg(pg_pool, *issue_number).await {
-                    Ok(ids) => ids,
-                    Err(error) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": error})),
-                        );
-                    }
-                };
-            if card_ids.is_empty() {
-                results.push(json!({
-                    "issue_number": issue_number,
-                    "ok": false,
-                    "error": format!("card not found for issue #{issue_number}"),
-                }));
-                continue;
-            }
-            for card_id in card_ids {
-                targets.push((card_id, Some(*issue_number)));
-            }
-        }
-    }
-
-    for (card_id, issue_number) in targets {
-        let pool = pg_pool;
-        let terminal_cleanup = match kanban_db::load_card_pipeline_context_pg(pool, &card_id).await
-        {
-            Ok(Some(card_context)) => {
-                match crate::kanban::resolve_pipeline_with_pg(
-                    pool,
-                    card_context.repo_id.as_deref(),
-                    card_context.assigned_agent_id.as_deref(),
-                )
-                .await
-                {
-                    Ok(effective) => {
-                        effective.is_terminal(&body.status)
-                            && body.cancel_dispatches.unwrap_or(true)
-                    }
-                    Err(error) => {
-                        results.push(json!({
-                            "card_id": card_id,
-                            "issue_number": issue_number,
-                            "ok": false,
-                            "error": format!("{error}"),
-                        }));
-                        continue;
-                    }
-                }
-            }
-            Ok(None) => false,
-            Err(error) => {
-                results.push(json!({
-                    "card_id": card_id,
-                    "issue_number": issue_number,
-                    "ok": false,
-                    "error": error,
-                }));
-                continue;
-            }
-        };
-
-        let transition_result =
-            if force_transition_needs_cleanup(&body.status, body.cancel_dispatches) {
-                crate::kanban::transition_status_with_opts_and_allowed_cleanup_pg_only(
-                    pool,
-                    &state.engine,
-                    &card_id,
-                    &body.status,
-                    &batch_transition_source,
-                    crate::engine::transition::ForceIntent::OperatorOverride,
-                    crate::kanban::AllowedOnConnMutation::ForceTransitionRevertCleanup,
-                )
-                .await
-                .map(|(result, counts)| {
-                    (
-                        result,
-                        (
-                            counts.cancelled_dispatches,
-                            counts.skipped_auto_queue_entries,
-                        ),
-                    )
-                })
-            } else if terminal_cleanup {
-                crate::kanban::transition_status_with_opts_and_allowed_cleanup_pg_only(
-                    pool,
-                    &state.engine,
-                    &card_id,
-                    &body.status,
-                    &batch_transition_source,
-                    crate::engine::transition::ForceIntent::OperatorOverride,
-                    crate::kanban::AllowedOnConnMutation::ForceTransitionTerminalCleanup,
-                )
-                .await
-                .map(|(result, counts)| {
-                    (
-                        result,
-                        (
-                            counts.cancelled_dispatches,
-                            counts.skipped_auto_queue_entries,
-                        ),
-                    )
-                })
-            } else {
-                crate::kanban::transition_status_with_opts_pg_only(
-                    pool,
-                    &state.engine,
-                    &card_id,
-                    &body.status,
-                    &batch_transition_source,
-                    crate::engine::transition::ForceIntent::OperatorOverride,
-                )
-                .await
-                .map(|result| (result, (0, 0)))
-            };
-
-        match transition_result {
-            Ok(result) => {
-                crate::kanban::drain_hook_side_effects_with_backends(None, &state.engine);
-                let card = match load_card_json_pg(pg_pool, &card_id).await {
-                    Ok(Some(card)) => {
-                        crate::server::ws::emit_event(
-                            &state.broadcast_tx,
-                            "kanban_card_updated",
-                            card.clone(),
-                        );
-                        Some(card)
-                    }
-                    Ok(None) => None,
-                    Err(error) => {
-                        results.push(json!({
-                            "card_id": card_id,
-                            "issue_number": issue_number,
-                            "ok": false,
-                            "error": error,
-                        }));
-                        continue;
-                    }
-                };
-                results.push(json!({
-                    "card_id": card_id,
-                    "issue_number": issue_number,
-                    "ok": true,
-                    "from": result.0.from,
-                    "to": result.0.to,
-                    "cancelled_dispatches": result.1.0,
-                    "skipped_auto_queue_entries": result.1.1,
-                    "card": card,
-                }));
-            }
-            Err(e) => {
-                results.push(json!({
-                    "card_id": card_id,
-                    "issue_number": issue_number,
-                    "ok": false,
-                    "error": format!("{e}"),
-                }));
-            }
-        }
-    }
-
-    (StatusCode::OK, Json(json!({ "results": results })))
-}
-
 // ── Administrative force transition ──────────────────────────────
 
 fn force_transition_needs_cleanup(target_status: &str, cancel_dispatches: Option<bool>) -> bool {
@@ -2743,7 +2470,13 @@ fn force_transition_force_intent_present(body: &ForceTransitionBody) -> bool {
     body.force.unwrap_or(false) || body.cancel_dispatches.unwrap_or(false)
 }
 
+// reason: legacy-sqlite parity wrappers retained so the `legacy-sqlite-tests`
+// backend keeps a single call surface mirroring the `_pg` route paths; the PG
+// production paths call `kanban_db::*` directly, so these read as dead in the
+// default lib build. They keep the `db::kanban_cards` `_on_conn` test helpers
+// reachable from one place. See #3034.
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[allow(dead_code)]
 fn count_live_auto_queue_entries_for_card_on_conn(
     conn: &sqlite_test::Connection,
     card_id: &str,
@@ -2752,6 +2485,7 @@ fn count_live_auto_queue_entries_for_card_on_conn(
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[allow(dead_code)]
 fn clear_force_transition_terminalized_links_on_conn(
     conn: &sqlite_test::Connection,
     card_id: &str,
@@ -2760,6 +2494,7 @@ fn clear_force_transition_terminalized_links_on_conn(
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[allow(dead_code)]
 fn cleanup_force_transition_revert_on_conn(
     conn: &sqlite_test::Connection,
     card_id: &str,
@@ -2769,6 +2504,7 @@ fn cleanup_force_transition_revert_on_conn(
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[allow(dead_code)]
 fn skip_live_auto_queue_entries_for_card_legacy(
     conn: &sqlite_test::Connection,
     card_id: &str,
@@ -2777,6 +2513,7 @@ fn skip_live_auto_queue_entries_for_card_legacy(
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[allow(dead_code)]
 fn move_auto_queue_entry_to_dispatched_on_conn(
     conn: &sqlite_test::Connection,
     entry_id: &str,
@@ -2786,24 +2523,8 @@ fn move_auto_queue_entry_to_dispatched_on_conn(
     kanban_db::move_auto_queue_entry_to_dispatched_on_conn(conn, entry_id, trigger_source, options)
 }
 
-async fn move_auto_queue_entry_to_dispatched_on_pg(
-    pool: &sqlx::PgPool,
-    entry_id: &str,
-    trigger_source: &str,
-    options: &crate::db::auto_queue::EntryStatusUpdateOptions,
-) -> Result<(), String> {
-    kanban_db::move_auto_queue_entry_to_dispatched_on_pg(pool, entry_id, trigger_source, options)
-        .await
-}
-
-async fn reactivate_done_auto_queue_entries_pg(
-    pool: &sqlx::PgPool,
-    card_id: &str,
-) -> anyhow::Result<()> {
-    kanban_db::reactivate_done_auto_queue_entries_pg(pool, card_id).await
-}
-
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[allow(dead_code)]
 fn load_card_metadata_map_on_conn(
     conn: &sqlite_test::Connection,
     card_id: &str,
@@ -2811,14 +2532,8 @@ fn load_card_metadata_map_on_conn(
     kanban_db::load_card_metadata_map_on_conn(conn, card_id)
 }
 
-async fn load_card_metadata_map_pg(
-    pool: &sqlx::PgPool,
-    card_id: &str,
-) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
-    kanban_db::load_card_metadata_map_pg(pool, card_id).await
-}
-
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[allow(dead_code)]
 fn save_card_metadata_map_on_conn(
     conn: &sqlite_test::Connection,
     card_id: &str,
@@ -2827,15 +2542,8 @@ fn save_card_metadata_map_on_conn(
     kanban_db::save_card_metadata_map_on_conn(conn, card_id, metadata)
 }
 
-async fn save_card_metadata_map_pg(
-    pool: &sqlx::PgPool,
-    card_id: &str,
-    metadata: &serde_json::Map<String, serde_json::Value>,
-) -> anyhow::Result<()> {
-    kanban_db::save_card_metadata_map_pg(pool, card_id, metadata).await
-}
-
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[allow(dead_code)]
 fn mark_api_reopen_skip_preflight_on_conn(
     conn: &sqlite_test::Connection,
     card_id: &str,
@@ -2843,14 +2551,8 @@ fn mark_api_reopen_skip_preflight_on_conn(
     kanban_db::mark_api_reopen_skip_preflight_on_conn(conn, card_id)
 }
 
-async fn mark_api_reopen_skip_preflight_on_pg(
-    pool: &sqlx::PgPool,
-    card_id: &str,
-) -> anyhow::Result<()> {
-    kanban_db::mark_api_reopen_skip_preflight_on_pg(pool, card_id).await
-}
-
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[allow(dead_code)]
 fn clear_api_reopen_skip_preflight_on_conn(
     conn: &sqlite_test::Connection,
     card_id: &str,
@@ -2858,14 +2560,8 @@ fn clear_api_reopen_skip_preflight_on_conn(
     kanban_db::clear_api_reopen_skip_preflight_on_conn(conn, card_id)
 }
 
-async fn clear_api_reopen_skip_preflight_on_pg(
-    pool: &sqlx::PgPool,
-    card_id: &str,
-) -> anyhow::Result<()> {
-    kanban_db::clear_api_reopen_skip_preflight_on_pg(pool, card_id).await
-}
-
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[allow(dead_code)]
 fn consume_api_reopen_preflight_skip_on_conn(
     conn: &sqlite_test::Connection,
     card_id: &str,
@@ -2873,44 +2569,13 @@ fn consume_api_reopen_preflight_skip_on_conn(
     kanban_db::consume_api_reopen_preflight_skip_on_conn(conn, card_id)
 }
 
-async fn consume_api_reopen_preflight_skip_on_pg(
-    pool: &sqlx::PgPool,
-    card_id: &str,
-) -> anyhow::Result<()> {
-    kanban_db::consume_api_reopen_preflight_skip_on_pg(pool, card_id).await
-}
-
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[allow(dead_code)]
 fn clear_reopen_preflight_cache_on_conn(
     conn: &sqlite_test::Connection,
     card_id: &str,
 ) -> anyhow::Result<()> {
     kanban_db::clear_reopen_preflight_cache_on_conn(conn, card_id)
-}
-
-async fn clear_reopen_preflight_cache_on_pg(
-    pool: &sqlx::PgPool,
-    card_id: &str,
-) -> anyhow::Result<()> {
-    kanban_db::clear_reopen_preflight_cache_on_pg(pool, card_id).await
-}
-
-async fn active_dispatch_ids_for_card_pg(
-    pool: &sqlx::PgPool,
-    card_id: &str,
-) -> anyhow::Result<Vec<String>> {
-    kanban_db::active_dispatch_ids_for_card_pg(pool, card_id).await
-}
-
-async fn cancelled_dispatch_ids_among_pg(
-    pool: &sqlx::PgPool,
-    dispatch_ids: &[String],
-) -> anyhow::Result<Vec<String>> {
-    kanban_db::cancelled_dispatch_ids_among_pg(pool, dispatch_ids).await
-}
-
-async fn clear_all_threads_pg(pool: &sqlx::PgPool, card_id: &str) -> anyhow::Result<()> {
-    kanban_db::clear_all_threads_pg(pool, card_id).await
 }
 
 /// POST /api/kanban-cards/:id/force-transition

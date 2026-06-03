@@ -41,19 +41,6 @@ pub fn tier_descriptors() -> Vec<CronJobDescriptor> {
         .collect()
 }
 
-pub fn tier_descriptor_by_label(label: &str) -> Option<CronJobDescriptor> {
-    TIER_DEFINITIONS
-        .iter()
-        .find_map(|(job_id, name, every_ms, kv_label)| {
-            (*kv_label == label).then(|| CronJobDescriptor {
-                job_id: (*job_id).to_string(),
-                name: (*name).to_string(),
-                every_ms: *every_ms,
-                kv_label: (*kv_label).to_string(),
-            })
-        })
-}
-
 pub fn legacy_policy_descriptors(engine: &PolicyEngine) -> Vec<CronJobDescriptor> {
     engine
         .list_policies()
@@ -77,16 +64,4 @@ pub fn github_issue_sync_descriptor(interval_minutes: u64) -> Option<CronJobDesc
         every_ms: (interval_minutes as i64) * 60_000,
         kv_label: "github_sync".to_string(),
     })
-}
-
-/// #1072 Turn-lifecycle SLO aggregation (Epic #905 Phase 1).
-/// Piggybacks on the 5-minute tier — exposed separately so the cron-jobs API
-/// can surface the aggregator as a distinct job for observability.
-pub fn slo_aggregation_descriptor() -> CronJobDescriptor {
-    CronJobDescriptor {
-        job_id: "slo_aggregation".to_string(),
-        name: "SLO aggregation — 3 turn-lifecycle metrics (success rate, duplicate relays, avg latency) + threshold alerter".to_string(),
-        every_ms: 300_000,
-        kv_label: "5min".to_string(),
-    }
 }

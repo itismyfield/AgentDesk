@@ -128,6 +128,11 @@ pub(crate) async fn cached_or_collect_token_analytics(
 /// onto the same blocking pool slot at the same moment, and we tolerate
 /// individual failures so a transient parse error in one period doesn't
 /// kill the prewarm for the others.
+// reason: boot-time token-analytics cache prewarm entry point. The detached
+// `tokio::spawn` boot hook described above is not currently wired, so the lib
+// build flags it as dead; retained as a ready entry point rather than silently
+// dropping the prewarm capability. See #3034.
+#[allow(dead_code)]
 pub async fn prewarm_token_analytics_cache() {
     for period in ["7d", "30d", "90d"] {
         let (days, label) = match period {

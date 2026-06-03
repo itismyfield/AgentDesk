@@ -93,10 +93,6 @@ impl AppState {
         self.pg_pool.as_ref()
     }
 
-    pub fn kanban_service(&self) -> crate::services::kanban::KanbanService {
-        crate::services::kanban::KanbanService::new(self.pg_pool.clone())
-    }
-
     pub fn dispatch_service(&self) -> crate::services::dispatches::DispatchService {
         crate::services::dispatches::DispatchService::new(self.engine.clone())
     }
@@ -317,6 +313,9 @@ pub fn api_router(
     )
 }
 
+// reason: PG-pool router constructor used only by the `#[cfg(test)]` router
+// builders in health_api/route tests; the lib build sees no caller. See #3034.
+#[allow(dead_code)]
 pub fn api_router_with_pg(
     engine: PolicyEngine,
     config: crate::config::Config,
