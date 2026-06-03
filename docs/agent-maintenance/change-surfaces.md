@@ -234,12 +234,23 @@
     `finalize_stale_streaming_footer` / `text_ends_with_streaming_footer` shared
     terminal-idle reconciliation helpers + their unit tests).
   - `src/services/discord/prompt_builder/` (directory, refactored).
-  - `src/services/discord/runtime_bootstrap.rs` (2568 lines after #2558
+  - `src/services/discord/runtime_bootstrap.rs` (2762 lines after #2558
     thread-session GC loopback shim cleanup; +3 from #3082 answer-flush-barrier
     field in the SharedData constructor; +1 from #3037 cluster backflow path
     rewrite wrapping a longer `services::cluster::node_registry::*` call; +3 from
     #3078 PR-1 spawning the dormant `StatusPanelController` next to the finalizer
-    in the SharedData constructor).
+    in the SharedData constructor; +194 from #3038 behavior-preserving
+    decomposition of the `run_bot` god-function — `run_bot`'s own body dropped
+    from ~1515 to ~1028 lines by extracting eight ordered startup-phase helpers
+    (`run_bot_rehydrate_voice_handoffs`, `run_bot_build_shared_data`,
+    `run_bot_init_voice_workers`, `run_bot_maybe_spawn_intake_worker`,
+    `run_bot_acquire_gateway_lease`, `run_bot_build_slash_commands`,
+    `run_bot_spawn_gateway_lease_keepalive`, `run_bot_spawn_sigterm_handler`,
+    `run_bot_run_gateway_backend`); the file-level count rose only from the
+    helper signatures + ordering-guarantee doc comments since the moved bodies
+    are net-zero. The poise framework-builder/setup closure (~580 lines) is left
+    inline — its move-captured locals make a clean extraction risky and is
+    deferred).
   - `src/services/discord/session_runtime.rs` (1396 lines).
   - `src/services/discord/voice_barge_in.rs` (4653 lines; voice STT/TTS,
     lobby routing, progress mirroring, and barge-in orchestration surface;
