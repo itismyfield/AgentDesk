@@ -1515,6 +1515,22 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
     )));
 }
 
+/// #3105 (codex P2): the eviction in `evict_dead_orphaned_claude_tui_mirrors` is
+/// destructive (it tombstones the dedupe mirror and so removes self-heal), so the
+/// liveness check that gates it must be conservative against a TRANSIENT
+/// pane-probe flake. We require the "no live pane" verdict to hold across multiple
+/// samples (with a short delay between them) — a single negative read must never
+/// declare a session dead. `1` would reproduce the original single-sample bug.
+#[cfg(unix)]
+const DEAD_ORPHANED_PANE_PROBE_SAMPLES: usize = 3;
+
+/// Delay between consecutive pane probes. A genuinely-live session that briefly
+/// flaked recovers within one of these windows; a genuinely-gone session stays
+/// dead across all of them. Kept small so the (rare) eviction path adds at most
+/// a few hundred ms to a single rehydrate pass that runs every 5s.
+#[cfg(unix)]
+const DEAD_ORPHANED_PANE_PROBE_DELAY: Duration = Duration::from_millis(75);
+
 /// #3105 (codex P1 sub-case B): a tmux session whose dedupe mirror still holds a
 /// stale ClaudeTui binding but which is genuinely dead/orphaned — its pane is
 /// gone AND no LIVE watcher handle owns it. This is the precise gate under which
@@ -1529,12 +1545,70 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
 /// entry is NOT treated as proof of life here, because that map is precisely the
 /// stale residue we must reclaim for a session that has since died; it is
 /// cleared as part of the eviction.
+///
+/// #3105 (codex P2): because eviction is destructive, the dead verdict is made
+/// resistant to a transient pane-probe flake (sub-case A false-positive risk for a
+/// LIVE thread-suffixed session that has not yet been claimed): the pane must read
+/// dead across `DEAD_ORPHANED_PANE_PROBE_SAMPLES` consecutive samples, AND — since
+/// "no watcher handle" is the weakest possible signal — the hard
+/// `tmux_session_exists` (`tmux has-session`) check must confirm the session truly
+/// does not exist on this host. A single soft "no live pane" read can NEVER evict.
 #[cfg(unix)]
 fn claude_tui_session_is_dead_orphaned(shared: &Arc<SharedData>, tmux_session_name: &str) -> bool {
-    !crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name)
-        && !shared
-            .tmux_watchers
-            .has_live_watcher_handle(tmux_session_name)
+    // A live watcher handle is conclusive proof of life: never evict, never probe.
+    if shared
+        .tmux_watchers
+        .has_live_watcher_handle(tmux_session_name)
+    {
+        return false;
+    }
+    pane_is_confirmed_dead_orphaned(
+        || crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name),
+        || crate::services::tmux_diagnostics::tmux_session_exists(tmux_session_name),
+        DEAD_ORPHANED_PANE_PROBE_SAMPLES,
+        Some(DEAD_ORPHANED_PANE_PROBE_DELAY),
+    )
+}
+
+/// #3105 (codex P2): pure, testable core of the dead/orphaned pane decision (no
+/// watcher-handle dependency — the caller short-circuits on a live handle first).
+///
+/// Conservative by construction so a LIVE session is NEVER classified dead from a
+/// transient flake:
+///   1. `has_live_pane` is sampled up to `samples` times; the moment ANY sample
+///      reports a live pane the session is declared NOT dead (self-heal preserved).
+///      Only if ALL `samples` agree the pane is dead do we proceed.
+///   2. Even then, the hard `session_exists` (`tmux has-session`) check must
+///      confirm the session is truly gone from this host. "No watcher handle" is
+///      the weakest signal, so a soft "no live pane" alone never evicts; the
+///      session must be confirmed absent.
+///
+/// Sub-case B (the production `AgentDesk-claude-adk-cc-t1504468805772902471` case)
+/// still evicts: a genuinely-gone session reports no live pane on every sample AND
+/// `session_exists` is false, so this returns true and the WARN spam stops.
+#[cfg(unix)]
+fn pane_is_confirmed_dead_orphaned(
+    mut has_live_pane: impl FnMut() -> bool,
+    session_exists: impl FnOnce() -> bool,
+    samples: usize,
+    inter_probe_delay: Option<Duration>,
+) -> bool {
+    let samples = samples.max(1);
+    for sample in 0..samples {
+        if has_live_pane() {
+            // Any live observation across the window means the session is alive
+            // (or recovered from a flake): never evict.
+            return false;
+        }
+        if sample + 1 < samples {
+            if let Some(delay) = inter_probe_delay {
+                std::thread::sleep(delay);
+            }
+        }
+    }
+    // Every soft probe agreed the pane is dead. Require the hard has-session check
+    // to confirm the session truly does not exist before declaring it orphaned.
+    !session_exists()
 }
 
 /// #3105 (codex P1 sub-case B): evict the stale dedupe mirror for every Claude
@@ -3902,6 +3976,82 @@ mod tests {
         assert!(
             !claude_tui_session_is_dead_orphaned(&shared, tmux),
             "a session with a live watcher handle must never be tombstoned as dead/orphaned"
+        );
+    }
+
+    // #3105 (codex P2): a LIVE session with no watcher handle whose FIRST pane
+    // probe flakes (reads not-live) but whose subsequent probes report live must
+    // NOT be classified dead/orphaned. A single transient negative read can never
+    // trigger the destructive eviction, so the live session keeps its mirror and
+    // self-heal path. We drive the pure predicate with a scripted probe sequence
+    // [false, true] so the flake is deterministic (no real tmux needed).
+    #[cfg(unix)]
+    #[test]
+    fn transient_pane_flake_on_live_session_is_not_dead_orphaned() {
+        use std::cell::RefCell;
+
+        // First probe flakes (not live), second probe reports live.
+        let live_reads = RefCell::new(vec![false, true].into_iter());
+        let is_dead = pane_is_confirmed_dead_orphaned(
+            || live_reads.borrow_mut().next().unwrap_or(true),
+            // session_exists must NOT even be consulted once a live pane is seen.
+            || panic!("session_exists must not be probed once a live pane is observed"),
+            DEAD_ORPHANED_PANE_PROBE_SAMPLES,
+            None,
+        );
+        assert!(
+            !is_dead,
+            "a single flaky negative pane read followed by a live read must NOT be dead/orphaned"
+        );
+    }
+
+    // #3105 (codex P2 / sub-case B regression): a genuinely-gone session reads no
+    // live pane on EVERY sample AND the hard has-session check confirms it does
+    // not exist → it is still classified dead/orphaned, so the per-poll WARN spam
+    // is still stopped. The retries must not make the real dead session immortal.
+    #[cfg(unix)]
+    #[test]
+    fn genuinely_gone_session_is_still_dead_orphaned_after_retries() {
+        use std::cell::Cell;
+
+        let probe_count = Cell::new(0usize);
+        let is_dead = pane_is_confirmed_dead_orphaned(
+            || {
+                probe_count.set(probe_count.get() + 1);
+                false // never a live pane
+            },
+            || false, // hard has-session: session truly gone
+            DEAD_ORPHANED_PANE_PROBE_SAMPLES,
+            None,
+        );
+        assert!(
+            is_dead,
+            "a session with no live pane across all samples AND no has-session must still evict"
+        );
+        assert_eq!(
+            probe_count.get(),
+            DEAD_ORPHANED_PANE_PROBE_SAMPLES,
+            "all configured samples must be taken before declaring a session dead"
+        );
+    }
+
+    // #3105 (codex P2): the weakest-signal guard. Even when every soft pane probe
+    // reports dead, if the hard `tmux has-session` check still finds the session
+    // present on this host (a transient pane read with the session very much
+    // alive), it must NOT be evicted — "no live pane" alone is never sufficient
+    // when there is no watcher handle.
+    #[cfg(unix)]
+    #[test]
+    fn confirmed_existing_session_is_not_dead_even_if_pane_probes_flake() {
+        let is_dead = pane_is_confirmed_dead_orphaned(
+            || false, // soft pane probe: reads dead on every sample
+            || true,  // hard has-session: the session IS present on this host
+            DEAD_ORPHANED_PANE_PROBE_SAMPLES,
+            None,
+        );
+        assert!(
+            !is_dead,
+            "a session still present per has-session must not be evicted on soft pane reads alone"
         );
     }
 
