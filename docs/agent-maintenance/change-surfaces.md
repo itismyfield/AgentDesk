@@ -8,7 +8,7 @@
 > [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-06-03 (against #3099 codex re-review: P1 system-continuation bridge-tail output delivery + anchored continuation classifier + P2 pinned injected-message-id cleanup).
+> Last refreshed: 2026-06-03 (against #3105 dead/orphaned TUI-session mirror eviction made flake-resistant and run off the Tokio executor, on top of #3099/#3100/#3103 system-continuation bridge-tail output delivery + anchored continuation classifier + injection-wrapper strip + pinned injected-message-id cleanup).
 
 ## Read This First
 
@@ -127,7 +127,7 @@
     + #3099 task-notification anchor `⏳` cleanup for `user_msg_id == 0`
     external-input turns (+9 from the #3099 re-review pinned-injected-message-id
     cleanup target); split loop helpers further before adding behavior).
-  - `src/services/discord/tui_prompt_relay.rs` (3576 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (3792 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3082 queued-only answer-flush gate
     (`is_queued_notice = false` for the TUI idle-response placeholder); +139
@@ -137,14 +137,30 @@
     P2 pinned injected-message-id cleanup helper + regression tests; +50 from the
     #3100 codex P2 fix: strip a leading SSH-direct injection wrapper line before
     the continuation `starts_with` check so a wrapped/round-tripped banner is not
-    mis-classified as a human turn, plus wrapped/quoted-mid-body regression tests).
+    mis-classified as a human turn, plus wrapped/quoted-mid-body regression tests;
+    +32 from #3105 self-heal of the authoritative tmux-session→channel registry
+    for live thread-suffixed TUI sessions whose watcher slot was evicted
+    (rehydrate loop re-registers the settings-derived owner channel + a bounded
+    incident, never routes from the dedupe mirror); +84 from #3105 codex-P1
+    sub-case B: rehydrate now tombstone-evicts the stale dedupe mirror for
+    dead/orphaned sessions (pane gone + no live watcher) so the idle relay loop
+    stops re-emitting the per-poll drift/skip WARN; +74 from #3105 codex-P2: the
+    dead/orphaned verdict is now flake-resistant — `has_live_pane` is sampled
+    across multiple probes (any live read aborts eviction) and a session is only
+    evicted once the hard `tmux has-session` check confirms it is truly gone, so a
+    transient pane-probe flake can never tombstone a LIVE session's mirror; +26
+    from #3105 codex-P2 followup: the blocking rehydrate pass (sync `tmux`
+    subprocess probes + the multi-sample `std::thread::sleep`) is now dispatched
+    via `tokio::task::spawn_blocking` so it never stalls a Tokio executor worker).
   - `src/services/codex_tmux_wrapper.rs` (1222 lines; Codex tmux wrapper JSON
     event parser and relay bridge for native Codex session events — bugfix only
     outside an extraction plan).
-  - `src/services/tui_prompt_dedupe.rs` (1038 lines; shared TUI prompt
+  - `src/services/tui_prompt_dedupe.rs` (1064 lines; shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
     outside an extraction plan; +9 from the #3099 re-review crate-visible
-    `reset_state_for_tests` helper).
+    `reset_state_for_tests` helper; +26 from #3105 codex-P1 sub-case B
+    `evict_dead_tmux_mirror` tombstone helper that drops both the runtime and
+    channel mirror for a dead/orphaned session and then allows re-registration).
   - `src/services/discord/recovery_engine.rs` (3978 lines; +36 from #3099
     task-notification anchor `⏳` cleanup for `user_msg_id == 0` recovery; +4
     from the #3099 re-review pinned-injected-message-id cleanup target).
@@ -400,11 +416,15 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   execution are the canonical scheduled JS routine surfaces. Split focused
   helper modules before growing these files again.
 - `src/services/platform/binary_resolver.rs` (1246).
-- `src/services/discord/mod.rs` (4378; +34 from #3019 added the
+- `src/services/discord/mod.rs` (4465; +34 from #3019 added the
   single-authority `increment_global_active` helper + doc mirroring the
   existing decrement helper — offset by removing 6 inline raw `fetch_add`
   blocks across the relay turn-start sites that now route through it; +12 from
-  #3082 answer-flush-barrier field/init/doc),
+  #3082 answer-flush-barrier field/init/doc; +81 from #3105 the authoritative
+  `TmuxWatcherRegistry` gained a `restored_owner_by_tmux_session` map plus
+  `restore_owner_channel_for_tmux_session`/`clear_restored_owner_for_tmux_session`
+  so a live thread-suffixed TUI session with no live watcher slot can be
+  re-registered authoritatively instead of dropped forever),
   `src/services/discord_config_audit.rs` (1459).
 - `src/services/turn_orchestrator.rs` (2760).
 

@@ -1327,7 +1327,28 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
         loop {
             let now = tokio::time::Instant::now();
             if now >= next_rehydrate {
-                rehydrate_existing_claude_tui_bindings(&shared);
+                // #3105 (codex P2): `rehydrate_existing_claude_tui_bindings` is a
+                // fully BLOCKING pass — it issues synchronous `tmux` subprocess
+                // calls (`list-sessions`, `has-session`, `has-live-pane`) and, via
+                // `pane_is_confirmed_dead_orphaned`, a `std::thread::sleep` between
+                // multi-sample pane probes. Running it inline on this Tokio worker
+                // would stall the executor (and every other async task scheduled on
+                // the same worker) for samples×delay PLUS the tmux subprocess
+                // latency on each pass. Move ALL of that blocking work onto the
+                // blocking pool with `spawn_blocking` so the executor stays free;
+                // the sync core (and its unit-testable multi-sample logic) is
+                // unchanged.
+                let shared_for_rehydrate = shared.clone();
+                let rehydrate_result = tokio::task::spawn_blocking(move || {
+                    rehydrate_existing_claude_tui_bindings(&shared_for_rehydrate);
+                })
+                .await;
+                if let Err(error) = rehydrate_result {
+                    tracing::warn!(
+                        error = %error,
+                        "Claude TUI binding rehydrate task panicked or was cancelled"
+                    );
+                }
                 next_rehydrate = now + CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL;
             }
             for (tmux_session_name, binding) in
@@ -1602,6 +1623,11 @@ fn pane_is_confirmed_dead_orphaned(
         }
         if sample + 1 < samples {
             if let Some(delay) = inter_probe_delay {
+                // Blocking sleep is intentional here: this sync core (and the
+                // sync `tmux` subprocess probes it drives) only ever runs off
+                // the Tokio executor — the sole async caller dispatches the
+                // whole rehydrate pass via `spawn_blocking` (#3105 codex P2), so
+                // this never stalls an executor worker.
                 std::thread::sleep(delay);
             }
         }
