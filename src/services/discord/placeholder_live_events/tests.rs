@@ -1624,6 +1624,127 @@ fn status_panel_tracks_one_level_subagents() {
     assert!(rendered.contains("✓"));
 }
 
+// #3084: a long-running Task subagent returns its result AFTER intervening
+// short foreground tools. With FIFO pairing the wrong tool was popped and the
+// real subagent's SubagentEnd never fired, leaving a ghost "running" marker
+// (no ✓/✗). With tool_use_id pairing the delayed result must still close the
+// correct slot as done.
+#[test]
+fn status_panel_pairs_subagent_by_tool_use_id_despite_interleaving() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(384);
+
+    // Task A starts (long-running), id "task-a".
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({"subagent_type": "explorer", "description": "Investigate #3084"}).to_string(),
+            Some("task-a"),
+        ),
+    );
+    // Foreground Bash use + result resolves first (id "bash-1").
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Bash",
+            &json!({"command": "cargo test"}).to_string(),
+            Some("bash-1"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Bash"), false, Some("bash-1")),
+    );
+    // Foreground Read use + result resolves next (id "read-1").
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Read",
+            &json!({"file_path": "/tmp/x"}).to_string(),
+            Some("read-1"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Read"), false, Some("read-1")),
+    );
+    // Finally Task A's own delayed result arrives, paired by id "task-a".
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Task"), false, Some("task-a")),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(rendered.contains("Subagents"));
+    assert!(rendered.contains("explorer Investigate #3084"));
+    // The subagent must be marked done — no ghost running marker.
+    assert!(
+        rendered.contains('✓'),
+        "subagent should be closed as done, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains('✗'),
+        "successful subagent must not show failure marker, got: {rendered}"
+    );
+}
+
+// #3084: two parallel subagents whose results return in reverse order must each
+// close their own slot. The previous "first unfinished slot" logic closed the
+// wrong slot, mis-attributing success/failure across parallel subagents.
+#[test]
+fn status_panel_parallel_subagents_close_correct_slots_in_reverse_order() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(385);
+
+    // Task A and Task B both start.
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({"subagent_type": "alpha", "description": "Task A work"}).to_string(),
+            Some("task-a"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({"subagent_type": "beta", "description": "Task B work"}).to_string(),
+            Some("task-b"),
+        ),
+    );
+    // B finishes first (success), then A finishes (failure) — reverse order.
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Task"), false, Some("task-b")),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Task"), true, Some("task-a")),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    // Each slot rendered on its own line; assert per-slot markers so we catch
+    // mis-attribution (e.g. A's failure landing on B).
+    let alpha_line = rendered
+        .lines()
+        .find(|line| line.contains("alpha Task A work"))
+        .unwrap_or_else(|| panic!("alpha slot missing in: {rendered}"));
+    let beta_line = rendered
+        .lines()
+        .find(|line| line.contains("beta Task B work"))
+        .unwrap_or_else(|| panic!("beta slot missing in: {rendered}"));
+    assert!(
+        alpha_line.contains('✗'),
+        "Task A failed and must show ✗, got: {alpha_line}"
+    );
+    assert!(
+        beta_line.contains('✓'),
+        "Task B succeeded and must show ✓, got: {beta_line}"
+    );
+}
+
 #[test]
 fn status_events_from_json_captures_workflow_progress_array() {
     let events = status_events_from_json(&json!({
@@ -2150,7 +2271,10 @@ fn status_tool_result_closes_subagent_only_for_task_tools() {
         status_events_from_tool_result(Some("Task"), true),
         vec![
             StatusEvent::ToolEnd { success: false },
-            StatusEvent::SubagentEnd { success: false }
+            StatusEvent::SubagentEnd {
+                success: false,
+                tool_use_id: None
+            }
         ]
     );
 }

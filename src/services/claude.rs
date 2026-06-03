@@ -1242,14 +1242,16 @@ IMPORTANT: Format your responses using Markdown for better readability:
                             preview
                         ));
                     }
-                    StreamMessage::ToolUse { name, input } => {
+                    StreamMessage::ToolUse { name, input, .. } => {
                         let input_preview: String = input.chars().take(200).collect();
                         debug_log(&format!(
                             "  >>> ToolUse: name={}, input_preview={:?}",
                             name, input_preview
                         ));
                     }
-                    StreamMessage::ToolResult { content, is_error } => {
+                    StreamMessage::ToolResult {
+                        content, is_error, ..
+                    } => {
                         let content_preview: String = content.chars().take(200).collect();
                         debug_log(&format!(
                             "  >>> ToolResult: is_error={}, content_len={}, preview={:?}",
@@ -5016,7 +5018,7 @@ mod tests {
         ).unwrap();
 
         match parse_stream_message(&json) {
-            Some(StreamMessage::ToolUse { name, input }) => {
+            Some(StreamMessage::ToolUse { name, input, .. }) => {
                 assert_eq!(name, "Bash");
                 assert!(input.contains("ls"));
             }
@@ -5031,7 +5033,9 @@ mod tests {
         ).unwrap();
 
         match parse_stream_message(&json) {
-            Some(StreamMessage::ToolResult { content, is_error }) => {
+            Some(StreamMessage::ToolResult {
+                content, is_error, ..
+            }) => {
                 assert_eq!(content, "file.txt");
                 assert!(!is_error);
             }
@@ -5046,7 +5050,9 @@ mod tests {
         ).unwrap();
 
         match parse_stream_message(&json) {
-            Some(StreamMessage::ToolResult { content, is_error }) => {
+            Some(StreamMessage::ToolResult {
+                content, is_error, ..
+            }) => {
                 assert_eq!(content, "Error: not found");
                 assert!(is_error);
             }

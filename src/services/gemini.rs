@@ -1346,7 +1346,17 @@ fn build_gemini_tool_use_message(json: &Value) -> Option<StreamMessage> {
     Some(StreamMessage::ToolUse {
         name: mapped_name,
         input,
+        tool_use_id: gemini_tool_call_id(json),
     })
+}
+
+/// Extracts a Gemini tool-call identifier so a `ToolResult` can be paired back
+/// to its `ToolUse` instead of relying on FIFO ordering.
+fn gemini_tool_call_id(json: &Value) -> Option<String> {
+    ["call_id", "tool_call_id", "callId", "id"]
+        .into_iter()
+        .find_map(|key| json.get(key).and_then(|v| v.as_str()))
+        .map(str::to_string)
 }
 
 fn build_gemini_tool_result_message(json: &Value) -> Option<StreamMessage> {
@@ -1364,6 +1374,7 @@ fn build_gemini_tool_result_message(json: &Value) -> Option<StreamMessage> {
     Some(StreamMessage::ToolResult {
         content,
         is_error: status != "success",
+        tool_use_id: gemini_tool_call_id(json),
     })
 }
 
@@ -1869,7 +1880,7 @@ Available sessions for this project (2):
         });
 
         match build_gemini_tool_use_message(&event) {
-            Some(StreamMessage::ToolUse { name, input }) => {
+            Some(StreamMessage::ToolUse { name, input, .. }) => {
                 assert_eq!(name, "Bash");
                 assert!(input.contains("\"command\":\"pwd\""));
             }
@@ -1886,7 +1897,9 @@ Available sessions for this project (2):
         });
 
         match build_gemini_tool_result_message(&event) {
-            Some(StreamMessage::ToolResult { content, is_error }) => {
+            Some(StreamMessage::ToolResult {
+                content, is_error, ..
+            }) => {
                 assert_eq!(content, "/tmp/example");
                 assert!(!is_error);
             }
@@ -1910,14 +1923,16 @@ Available sessions for this project (2):
         );
 
         match rx.recv().unwrap() {
-            StreamMessage::ToolUse { name, input } => {
+            StreamMessage::ToolUse { name, input, .. } => {
                 assert_eq!(name, "Bash");
                 assert!(input.contains("\"command\":\"pwd\""));
             }
             other => panic!("expected ToolUse, got {:?}", other),
         }
         match rx.recv().unwrap() {
-            StreamMessage::ToolResult { content, is_error } => {
+            StreamMessage::ToolResult {
+                content, is_error, ..
+            } => {
                 assert_eq!(content, "/tmp/example");
                 assert!(!is_error);
             }
@@ -2076,7 +2091,9 @@ Available sessions for this project (2):
             other => panic!("expected ToolUse, got {:?}", other),
         }
         match rx.recv().unwrap() {
-            StreamMessage::ToolResult { content, is_error } => {
+            StreamMessage::ToolResult {
+                content, is_error, ..
+            } => {
                 assert_eq!(content, "/tmp/example");
                 assert!(!is_error);
             }

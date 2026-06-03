@@ -1595,9 +1595,15 @@ fn tool_call_message(payload: &Value) -> Option<StreamMessage> {
         .or_else(|| payload.get("action"))
         .map(compact_json_or_string)
         .unwrap_or_else(|| "{}".to_string());
+    let tool_use_id = payload
+        .get("call_id")
+        .or_else(|| payload.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
     Some(StreamMessage::ToolUse {
         name: name.to_string(),
         input,
+        tool_use_id,
     })
 }
 
@@ -1609,6 +1615,11 @@ fn tool_result_message(payload: &Value) -> Option<StreamMessage> {
     if content.is_empty() {
         return None;
     }
+    let tool_use_id = payload
+        .get("call_id")
+        .or_else(|| payload.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
     Some(StreamMessage::ToolResult {
         content,
         is_error: payload
@@ -1616,6 +1627,7 @@ fn tool_result_message(payload: &Value) -> Option<StreamMessage> {
             .or_else(|| payload.get("isError"))
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        tool_use_id,
     })
 }
 
@@ -1807,7 +1819,7 @@ mod tests {
         for payload in [&modern, &legacy_input, &legacy_action] {
             let msg = tool_call_message(payload).expect("tool_call_message emits");
             match msg {
-                StreamMessage::ToolUse { name, input } => {
+                StreamMessage::ToolUse { name, input, .. } => {
                     assert_eq!(name, "exec");
                     assert!(!input.is_empty());
                 }
@@ -1837,7 +1849,9 @@ mod tests {
             serde_json::json!({ "output": "boom", "isError": true }),
         ] {
             match tool_result_message(&payload).expect("tool_result_message emits") {
-                StreamMessage::ToolResult { is_error, content } => {
+                StreamMessage::ToolResult {
+                    is_error, content, ..
+                } => {
                     assert!(is_error);
                     assert_eq!(content, "boom");
                 }
@@ -1894,12 +1908,12 @@ mod tests {
         ));
         assert!(matches!(
             &messages[1],
-            StreamMessage::ToolUse { name, input }
+            StreamMessage::ToolUse { name, input, .. }
                 if name == "exec_command" && input.contains("\"cmd\":\"date\"")
         ));
         assert!(matches!(
             &messages[2],
-            StreamMessage::ToolResult { content, is_error }
+            StreamMessage::ToolResult { content, is_error, .. }
                 if content.contains("Process exited with code 0") && !is_error
         ));
         assert!(matches!(

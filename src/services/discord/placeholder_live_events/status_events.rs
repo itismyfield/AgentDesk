@@ -14,6 +14,14 @@ pub(in crate::services::discord) fn status_events_from_tool_use(
     name: &str,
     input: &str,
 ) -> Vec<StatusEvent> {
+    status_events_from_tool_use_with_id(name, input, None)
+}
+
+pub(in crate::services::discord) fn status_events_from_tool_use_with_id(
+    name: &str,
+    input: &str,
+    tool_use_id: Option<&str>,
+) -> Vec<StatusEvent> {
     let args_summary = format_tool_input(name, input)
         .trim()
         .is_empty()
@@ -55,6 +63,7 @@ pub(in crate::services::discord) fn status_events_from_tool_use(
                 .map(str::to_string)
                 .or_else(|| Some(name.to_string())),
             desc: subagent_description(&value).or(args_summary.clone()),
+            tool_use_id: tool_use_id.map(str::to_string),
         });
     }
     if is_todo_write_tool(name) {
@@ -82,9 +91,20 @@ pub(in crate::services::discord) fn status_events_from_tool_result(
     tool_name: Option<&str>,
     is_error: bool,
 ) -> Vec<StatusEvent> {
+    status_events_from_tool_result_with_id(tool_name, is_error, None)
+}
+
+pub(in crate::services::discord) fn status_events_from_tool_result_with_id(
+    tool_name: Option<&str>,
+    is_error: bool,
+    tool_use_id: Option<&str>,
+) -> Vec<StatusEvent> {
     let mut events = vec![StatusEvent::ToolEnd { success: !is_error }];
     if tool_name.is_some_and(tool_result_completes_subagent) {
-        events.push(StatusEvent::SubagentEnd { success: !is_error });
+        events.push(StatusEvent::SubagentEnd {
+            success: !is_error,
+            tool_use_id: tool_use_id.map(str::to_string),
+        });
     }
     events
 }
@@ -105,6 +125,7 @@ pub(in crate::services::discord) fn status_events_from_task_notification(
             if task_notification_is_terminal(status) {
                 events.push(StatusEvent::SubagentEnd {
                     success: !task_notification_is_error(status),
+                    tool_use_id: None,
                 });
             }
         }
