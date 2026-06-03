@@ -91,7 +91,7 @@
 - do_not_edit_without_migration_plan (giant-file, awaiting split issue):
   - `src/dispatch/dispatch_context.rs` (2805 lines).
   - `src/dispatch/dispatch_create.rs` (1381 lines).
-  - `src/dispatch/dispatch_status.rs` (1448 lines).
+  - `src/dispatch/dispatch_status.rs` (1517 lines).
   - `src/services/dispatches/outbox_route.rs` (1118 lines; route extraction
     orchestration surface from #1722, split before adding non-bugfix behavior).
   - `src/services/dispatches/discord_delivery/orchestration.rs` (1652 lines;
