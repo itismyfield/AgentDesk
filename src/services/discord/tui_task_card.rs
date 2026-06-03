@@ -723,6 +723,9 @@ mod tests {
     // card (edit, not 5 posts).
     #[test]
     fn repeated_same_task_id_dedupes_to_single_card() {
+        let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         reset_card_store_for_tests();
         let channel = 1_479_671_298_497_183_835_u64;
         let task = Some("aa37b21a7adafc7c0");
@@ -764,6 +767,9 @@ mod tests {
     // render; a missing task-id simply cannot dedupe (always Post).
     #[test]
     fn missing_task_id_always_posts_and_never_panics() {
+        let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         reset_card_store_for_tests();
         let channel = 42_u64;
         for _ in 0..3 {
@@ -788,6 +794,9 @@ mod tests {
 
     #[test]
     fn store_is_bounded_per_channel() {
+        let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         reset_card_store_for_tests();
         let channel = 7_u64;
         for i in 0..(MAX_CARDS_PER_CHANNEL + 50) {
@@ -814,6 +823,9 @@ mod tests {
     // edits the real card.
     #[test]
     fn repeat_before_first_post_recorded_is_pending_not_edit_zero() {
+        let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         reset_card_store_for_tests();
         let channel = 314_159_u64;
         let task = Some("race-task-id");
@@ -863,6 +875,9 @@ mod tests {
     // stale purge.
     #[test]
     fn failed_first_post_clears_placeholder_so_next_reposts() {
+        let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         reset_card_store_for_tests();
         let channel = 271_828_u64;
         let task = Some("post-fail-task");
@@ -895,6 +910,9 @@ mod tests {
     // successful post (which recorded a real id) must be a no-op.
     #[test]
     fn forget_reserved_card_preserves_recorded_real_id() {
+        let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         reset_card_store_for_tests();
         let channel = 161_803_u64;
         let task = Some("recorded-task");
@@ -919,6 +937,9 @@ mod tests {
     // Missing/empty task-id has no placeholder to clear; must be a harmless no-op.
     #[test]
     fn forget_reserved_card_noop_for_missing_task_id() {
+        let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         reset_card_store_for_tests();
         assert!(!forget_reserved_card(1_u64, None));
         assert!(!forget_reserved_card(1_u64, Some("   ")));
@@ -928,6 +949,9 @@ mod tests {
 
     #[test]
     fn forget_card_lets_next_notification_post_fresh() {
+        let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         reset_card_store_for_tests();
         let channel = 9_u64;
         let task = Some("ghost-task");
