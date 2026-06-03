@@ -1,6 +1,7 @@
 mod adk_session;
 pub(crate) mod agent_handoff;
 pub(crate) mod agentdesk_config;
+mod answer_flush_barrier;
 mod commands;
 mod discord_io;
 pub(crate) mod formatting;
@@ -1609,6 +1610,17 @@ pub(crate) struct SharedData {
     /// without blocking the runtime worker.
     pub(in crate::services::discord) queued_placeholders_persist_locks:
         dashmap::DashMap<ChannelId, Arc<tokio::sync::Mutex<()>>>,
+    /// #3082 part B — per-channel answer-flush barrier. Set while a multi-chunk
+    /// final answer is being delivered (>1 Discord chunk) by
+    /// `send_long_message_raw*`, so a queued-turn notice POST
+    /// (`send_intake_placeholder`) does NOT interleave between the answer's
+    /// chunks. The queued-card POST path waits on this gate with a BOUNDED
+    /// timeout and proceeds regardless once it elapses, so a stuck/errored
+    /// flush can never permanently suppress the queued card. The gate is
+    /// cleared by an RAII guard on every exit path (success, error, panic) so
+    /// it never strands set.
+    pub(in crate::services::discord) answer_flush_barrier:
+        Arc<answer_flush_barrier::AnswerFlushBarrier>,
     /// Per-channel in-flight turn recovery marker (restart resume in progress)
     /// Value is the Instant when recovery started, used for stale-recovery timeout.
     pub(super) recovering_channels: dashmap::DashMap<ChannelId, std::time::Instant>,
@@ -2409,6 +2421,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         queued_placeholders: dashmap::DashMap::new(),
         queue_exit_placeholder_clears: dashmap::DashMap::new(),
         queued_placeholders_persist_locks: dashmap::DashMap::new(),
+        answer_flush_barrier: Arc::new(answer_flush_barrier::AnswerFlushBarrier::default()),
         recovering_channels: dashmap::DashMap::new(),
         shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),

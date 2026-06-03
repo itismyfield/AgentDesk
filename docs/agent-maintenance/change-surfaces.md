@@ -135,8 +135,9 @@
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
     outside an extraction plan).
   - `src/services/discord/recovery_engine.rs` (3944 lines).
-  - `src/services/discord/health.rs` (2817 lines after #1879 snapshot/mailbox
-    extraction).
+  - `src/services/discord/health.rs` (2820 lines after #1879 snapshot/mailbox
+    extraction; +3 from #3082 answer-flush-barrier field in the test SharedData
+    constructor).
   - `src/services/discord/health/recovery.rs` (2425 lines; health recovery
     extraction surface, split further before adding non-bugfix behavior).
   - `src/services/discord/router/message_handler/intake_turn.rs` (3611 lines;
@@ -151,11 +152,13 @@
     split before adding non-bugfix behavior).
   - `src/services/discord/turn_bridge/completion_guard.rs` (1909 lines).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (1243 lines).
-  - `src/services/discord/formatting.rs` (2720 lines).
+  - `src/services/discord/formatting.rs` (2731 lines; +11 from #3082
+    answer-flush-barrier guard around the multi-chunk send loops).
   - `src/services/discord/settings.rs` (2479 lines).
   - `src/services/discord/prompt_builder/` (directory, refactored).
-  - `src/services/discord/runtime_bootstrap.rs` (2564 lines after #2558
-    thread-session GC loopback shim cleanup).
+  - `src/services/discord/runtime_bootstrap.rs` (2567 lines after #2558
+    thread-session GC loopback shim cleanup; +3 from #3082 answer-flush-barrier
+    field in the SharedData constructor).
   - `src/services/discord/session_runtime.rs` (1418 lines).
   - `src/services/discord/voice_barge_in.rs` (4653 lines; voice STT/TTS,
     lobby routing, progress mirroring, and barge-in orchestration surface;
@@ -380,10 +383,11 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   execution are the canonical scheduled JS routine surfaces. Split focused
   helper modules before growing these files again.
 - `src/services/platform/binary_resolver.rs` (1936).
-- `src/services/discord/mod.rs` (5871; +34 from #3019 added the
+- `src/services/discord/mod.rs` (5883; +34 from #3019 added the
   single-authority `increment_global_active` helper + doc mirroring the
   existing decrement helper — offset by removing 6 inline raw `fetch_add`
-  blocks across the relay turn-start sites that now route through it),
+  blocks across the relay turn-start sites that now route through it; +12 from
+  #3082 answer-flush-barrier field/init/doc),
   `src/services/discord_config_audit.rs` (1318).
 - `src/services/turn_orchestrator.rs` (2932).
 

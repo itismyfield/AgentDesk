@@ -1053,6 +1053,9 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             map
         },
         queued_placeholders_persist_locks: dashmap::DashMap::new(),
+        answer_flush_barrier: std::sync::Arc::new(
+            super::answer_flush_barrier::AnswerFlushBarrier::default(),
+        ),
         recovering_channels: dashmap::DashMap::new(),
         shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),

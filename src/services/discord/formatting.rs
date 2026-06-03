@@ -2661,6 +2661,11 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference(
 
     let chunks = split_message(text);
     let total = chunks.len();
+    // #3082 part B: hold the per-channel answer-flush barrier for the whole
+    // multi-chunk send so a queued-turn notice POST cannot interleave between
+    // chunks. The guard clears the gate on every exit path (Ok, `?`, panic).
+    let _answer_flush_guard =
+        (total > 1).then(|| shared.answer_flush_barrier.begin_flush(channel_id));
     tracing::debug!(
         target: "discord::chunker",
         path = "send_long_message_raw",
@@ -2789,6 +2794,12 @@ pub(super) async fn send_long_message_raw_with_rollback(
     if total == 0 {
         return Ok(Vec::new());
     }
+
+    // #3082 part B: same answer-flush barrier as `send_long_message_raw` so a
+    // queued-turn notice POST cannot interleave between this turn's final-answer
+    // chunks. RAII guard clears the gate on every exit path.
+    let _answer_flush_guard =
+        (total > 1).then(|| shared.answer_flush_barrier.begin_flush(channel_id));
 
     tracing::debug!(
         target: "discord::chunker",

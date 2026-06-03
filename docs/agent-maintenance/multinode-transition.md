@@ -370,3 +370,12 @@
 - If a new worker, durable queue, provider, MCP integration, or exclusive test
   resource is added, classify it as leader-only, PG-lease-backed, or worker-local
   before merging.
+
+### Audited touches
+
+- #3082 (queued-card / answer-flush barrier): `runtime_bootstrap.rs` changed
+  only to initialize the new in-process `answer_flush_barrier` field on
+  `SharedData`. The barrier is **worker-local** (a per-process, per-channel
+  in-memory gate guarding queued-card ordering) — it owns no leader-only side
+  effect, no durable queue, and no PG lease, so it introduces no new multinode
+  ownership/singleton/lease assumption.

@@ -4782,6 +4782,9 @@ mod tests {
             queued_placeholders: dashmap::DashMap::new(),
             queue_exit_placeholder_clears: dashmap::DashMap::new(),
             queued_placeholders_persist_locks: dashmap::DashMap::new(),
+            answer_flush_barrier: std::sync::Arc::new(
+                super::super::answer_flush_barrier::AnswerFlushBarrier::default(),
+            ),
             recovering_channels: dashmap::DashMap::new(),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),

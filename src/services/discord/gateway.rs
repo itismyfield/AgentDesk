@@ -411,6 +411,28 @@ pub(super) async fn send_intake_placeholder(
     channel_id: ChannelId,
     reference: Option<(ChannelId, MessageId)>,
 ) -> Result<MessageId, String> {
+    // #3082 part B: never let the queued-turn notice interleave between the
+    // active turn's multi-chunk final answer. Wait (bounded) for any in-flight
+    // multi-chunk answer flush on this channel to finish first, so the notice
+    // lands as a single TRAILING card after the last chunk. The wait is
+    // bounded and the barrier guard is RAII-cleared, so a stuck/errored flush
+    // can never permanently suppress the queued card — we proceed regardless
+    // once the timeout elapses.
+    if !shared
+        .answer_flush_barrier
+        .wait_for_flush(
+            channel_id,
+            super::answer_flush_barrier::ANSWER_FLUSH_WAIT_TIMEOUT,
+        )
+        .await
+    {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⏱ INTAKE: answer-flush barrier timed out for channel {}; posting queued card anyway (no deadlock)",
+            channel_id
+        );
+    }
+
     let client = SerenityTurnOutboundClient { http, shared };
     let mut msg = gateway_outbound_message(channel_id, "...");
     if let Some((reference_channel, reference_message)) = reference {

@@ -994,6 +994,177 @@ async fn reuse_merged_queued_placeholder(
     MergedPlaceholderReuse::Handled
 }
 
+/// #3082 part A — pure decision helper: of the existing queued cards on a
+/// channel (`(owner_msg_id, placeholder_msg_id)` pairs), pick the single card to
+/// re-key onto `new_head` so the channel keeps AT MOST ONE visible queued card.
+///
+/// * Never reuse a card already owned by `new_head` (it has no card yet / would
+///   be a self-reuse).
+/// * Prefer a card whose owner is still present in the live queue (`queued_ids`)
+///   — that is the canonical waiting card; fall back to any other channel card
+///   (e.g. a stale owner whose intervention already drained but whose card has
+///   not been cleaned up yet) so we coalesce rather than stack.
+/// * `None` when there is no other channel card to reuse → caller posts fresh.
+fn pick_channel_queued_placeholder(
+    channel_cards: &[(serenity::MessageId, serenity::MessageId)],
+    new_head: serenity::MessageId,
+    queued_ids: &std::collections::HashSet<serenity::MessageId>,
+) -> Option<(serenity::MessageId, serenity::MessageId)> {
+    let mut fallback: Option<(serenity::MessageId, serenity::MessageId)> = None;
+    for &(owner, placeholder) in channel_cards {
+        if owner == new_head {
+            continue;
+        }
+        if queued_ids.contains(&owner) {
+            return Some((owner, placeholder));
+        }
+        fallback.get_or_insert((owner, placeholder));
+    }
+    fallback
+}
+
+/// #3082 part A — generalize "AT MOST ONE queued card per channel/active turn".
+///
+/// `reuse_merged_queued_placeholder` only collapses *merge-eligible*
+/// follow-ups (same author, no reply boundary, within the merge rules). Messages
+/// that skip merge — a different author, a reply-boundary message, or an
+/// identical re-send outside the 10s dedup window — each used to POST their own
+/// fresh `📬` card, leaving multiple waiting cards in the timeline. This helper
+/// closes that gap: before POSTing a fresh card, reuse ANY existing queued card
+/// already owned by this channel's active turn, re-keying it onto the new head
+/// id and re-rendering it with the latest request text.
+///
+/// Returns:
+/// * `Some(true)`  — an existing card was successfully re-keyed/re-rendered onto
+///   `user_msg_id`. Caller must NOT post a fresh card.
+/// * `Some(false)` — we found a card and tried to reuse it but the re-render
+///   failed; the mapping was rolled back. Caller should fall through to the
+///   fresh POST path (which deletes/replaces as needed).
+/// * `None`        — there is no existing queued card to reuse on this channel.
+///   Caller posts a fresh card as before.
+async fn reuse_any_queued_placeholder_for_channel(
+    ctx: &serenity::Context,
+    data: &Data,
+    channel_id: serenity::ChannelId,
+    user_msg_id: serenity::MessageId,
+    text: &str,
+) -> Option<bool> {
+    // Serialize against every other `queued_placeholders` mutation on this
+    // channel (dispatch hand-off, queue-exit drain, merged reuse) — same TOCTOU
+    // guard as `reuse_merged_queued_placeholder`.
+    let persist_lock = data.shared.queued_placeholders_persist_lock(channel_id);
+    let persist_guard = persist_lock.lock_owned().await;
+
+    let snapshot = mailbox_snapshot(&data.shared, channel_id).await;
+    // Only reuse while this message is genuinely still queued behind an active
+    // turn. If it already started, the dispatch hand-off owns its card; if it is
+    // no longer queued, there is nothing to represent.
+    let still_queued = snapshot.intervention_queue.iter().any(|intervention| {
+        intervention.message_id == user_msg_id
+            || intervention.source_message_ids.contains(&user_msg_id)
+    });
+    if snapshot.active_user_message_id == Some(user_msg_id) || !still_queued {
+        return None;
+    }
+
+    // Find ANY existing queued card on this channel that does not already belong
+    // to `user_msg_id`. Prefer the card owned by a message still present in the
+    // queue (the live waiting head) so we re-key the canonical card; fall back to
+    // any other channel-scoped card otherwise. Either way the invariant is "one
+    // visible card", so reusing whichever exists is correct.
+    let queued_ids: std::collections::HashSet<serenity::MessageId> = snapshot
+        .intervention_queue
+        .iter()
+        .flat_map(|intervention| {
+            std::iter::once(intervention.message_id)
+                .chain(intervention.source_message_ids.iter().copied())
+        })
+        .collect();
+
+    let channel_cards: Vec<(serenity::MessageId, serenity::MessageId)> = data
+        .shared
+        .queued_placeholders
+        .iter()
+        .filter_map(|entry| {
+            let (ch, owner) = *entry.key();
+            (ch == channel_id).then_some((owner, *entry.value()))
+        })
+        .collect();
+
+    let Some((prior_owner, placeholder_msg_id)) =
+        pick_channel_queued_placeholder(&channel_cards, user_msg_id, &queued_ids)
+    else {
+        return None;
+    };
+
+    // Re-key the single card onto this message id so the dispatch hand-off /
+    // queue-exit drain track exactly one card per active turn.
+    data.shared
+        .remove_queued_placeholder_locked(channel_id, prior_owner);
+    data.shared
+        .insert_queued_placeholder_locked(channel_id, user_msg_id, placeholder_msg_id);
+
+    let gateway = super::super::gateway::DiscordGateway::new(
+        ctx.http.clone(),
+        data.shared.clone(),
+        data.provider.clone(),
+        None,
+    );
+    let key = super::super::placeholder_controller::PlaceholderKey {
+        provider: data.provider.clone(),
+        channel_id,
+        message_id: placeholder_msg_id,
+    };
+    let queued_input = super::super::placeholder_controller::PlaceholderActiveInput {
+        reason: super::super::formatting::MonitorHandoffReason::Queued,
+        started_at_unix: chrono::Utc::now().timestamp(),
+        tool_summary: None,
+        command_summary: None,
+        reason_detail: None,
+        context_line: None,
+        request_line: Some(text.to_string()),
+        progress_line: None,
+    };
+    let outcome = data
+        .shared
+        .placeholder_controller
+        .ensure_queued(&gateway, key, queued_input)
+        .await;
+
+    if !matches!(
+        outcome,
+        super::super::placeholder_controller::PlaceholderControllerOutcome::Edited
+            | super::super::placeholder_controller::PlaceholderControllerOutcome::Coalesced
+    ) {
+        // Render failed — roll back the re-key so the prior owner keeps the card,
+        // and let the caller post a fresh one (which handles deletion/cleanup).
+        data.shared
+            .remove_queued_placeholder_locked(channel_id, user_msg_id);
+        data.shared
+            .insert_queued_placeholder_locked(channel_id, prior_owner, placeholder_msg_id);
+        drop(persist_guard);
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ QUEUE-ACK: channel-wide reuse of placeholder {} for message {} in channel {} failed to render ({:?}); kept prior mapping, falling back to fresh card",
+            placeholder_msg_id,
+            user_msg_id,
+            channel_id,
+            outcome,
+        );
+        return Some(false);
+    }
+    drop(persist_guard);
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!(
+        "  [{ts}] ➕ QUEUE-ACK: coalesced queued message {} into existing channel placeholder {} in channel {} (one card per active turn)",
+        user_msg_id,
+        placeholder_msg_id,
+        channel_id
+    );
+    Some(true)
+}
+
 async fn render_visible_queued_ack(
     ctx: &serenity::Context,
     data: &Data,
@@ -1013,6 +1184,17 @@ async fn render_visible_queued_ack(
             MergedPlaceholderReuse::Handled => return true,
             MergedPlaceholderReuse::PostFresh => {}
         }
+    }
+    // #3082 part A: even when this message did NOT merge (different author, a
+    // reply-boundary message, or an identical re-send outside the dedup window),
+    // enforce a single visible queued card per active turn by reusing any card
+    // already owned by this channel's active turn instead of POSTing a second
+    // one. `Some(true)` => handled (no fresh card); `Some(false)`/`None` => fall
+    // through to the fresh POST below.
+    if let Some(true) =
+        reuse_any_queued_placeholder_for_channel(ctx, data, channel_id, user_msg_id, text).await
+    {
+        return true;
     }
     let post_result = super::super::gateway::send_intake_placeholder(
         ctx.http.clone(),
@@ -3097,6 +3279,136 @@ mod merged_placeholder_reuse_pure_tests {
         let picked = pick_reusable_merged_placeholder(&[a, b], b, |id| map.get(&id).copied());
 
         assert_eq!(picked, None);
+    }
+}
+
+/// #3082 part A pure decision tests for `pick_channel_queued_placeholder` — the
+/// "one card per active turn" coalescing that closes the gaps merge cannot
+/// (different author, reply-boundary, identical re-send outside the dedup
+/// window). These don't need a live serenity ctx.
+#[cfg(test)]
+mod channel_queued_placeholder_pure_tests {
+    use super::*;
+    use poise::serenity_prelude::MessageId;
+    use std::collections::HashSet;
+
+    fn ids(items: &[MessageId]) -> HashSet<MessageId> {
+        items.iter().copied().collect()
+    }
+
+    #[test]
+    fn different_author_reuses_existing_channel_card() {
+        // Author A queued first (card CA, still in queue). Author B's message —
+        // which does NOT merge with A — must reuse CA, not POST a second card.
+        let a = MessageId::new(900_000_000_000_001);
+        let b = MessageId::new(900_000_000_000_002);
+        let card_a = MessageId::new(710_000_000_000_001);
+        let cards = vec![(a, card_a)];
+        let queued = ids(&[a, b]);
+
+        let picked = pick_channel_queued_placeholder(&cards, b, &queued);
+        assert_eq!(picked, Some((a, card_a)), "B must coalesce onto A's card");
+    }
+
+    #[test]
+    fn reply_boundary_message_reuses_existing_card() {
+        // Same author, but the new message has a reply boundary so merge was
+        // skipped. Still must coalesce onto the single channel card.
+        let a = MessageId::new(900_000_000_000_010);
+        let b = MessageId::new(900_000_000_000_011);
+        let card_a = MessageId::new(710_000_000_000_010);
+        let cards = vec![(a, card_a)];
+        let queued = ids(&[a, b]);
+
+        let picked = pick_channel_queued_placeholder(&cards, b, &queued);
+        assert_eq!(picked, Some((a, card_a)));
+    }
+
+    #[test]
+    fn identical_resend_outside_dedup_window_reuses_card() {
+        // The identical-resend dedup only fires within 10s; a later identical
+        // re-send is enqueued as a new head but must still coalesce.
+        let a = MessageId::new(900_000_000_000_020);
+        let b = MessageId::new(900_000_000_000_021);
+        let card_a = MessageId::new(710_000_000_000_020);
+        let cards = vec![(a, card_a)];
+        let queued = ids(&[a, b]);
+
+        let picked = pick_channel_queued_placeholder(&cards, b, &queued);
+        assert_eq!(picked, Some((a, card_a)));
+    }
+
+    #[test]
+    fn prefers_live_queue_owner_over_stale_card() {
+        // Two cards exist on the channel: a stale one (owner drained) and the
+        // live waiting head. The live head's card must win so we re-key the
+        // canonical card; the stale one is left for normal cleanup.
+        let stale = MessageId::new(900_000_000_000_030);
+        let live = MessageId::new(900_000_000_000_031);
+        let new = MessageId::new(900_000_000_000_032);
+        let card_stale = MessageId::new(710_000_000_000_030);
+        let card_live = MessageId::new(710_000_000_000_031);
+        // Stale first so the loop would hit it before the live one — preference
+        // logic must still return the live card.
+        let cards = vec![(stale, card_stale), (live, card_live)];
+        let queued = ids(&[live, new]);
+
+        let picked = pick_channel_queued_placeholder(&cards, new, &queued);
+        assert_eq!(picked, Some((live, card_live)));
+    }
+
+    #[test]
+    fn falls_back_to_any_card_when_no_live_owner() {
+        // No card owner is still in the queue (all drained) but a visible card
+        // lingers — coalesce onto it rather than stacking a new one.
+        let stale = MessageId::new(900_000_000_000_040);
+        let new = MessageId::new(900_000_000_000_041);
+        let card_stale = MessageId::new(710_000_000_000_040);
+        let cards = vec![(stale, card_stale)];
+        let queued = ids(&[new]);
+
+        let picked = pick_channel_queued_placeholder(&cards, new, &queued);
+        assert_eq!(picked, Some((stale, card_stale)));
+    }
+
+    #[test]
+    fn no_existing_card_posts_fresh() {
+        // Nothing on the channel yet → None → caller posts the first card.
+        let new = MessageId::new(900_000_000_000_050);
+        let cards: Vec<(MessageId, MessageId)> = Vec::new();
+        let queued = ids(&[new]);
+
+        assert_eq!(pick_channel_queued_placeholder(&cards, new, &queued), None);
+    }
+
+    #[test]
+    fn own_card_is_never_self_reused() {
+        // Defensive: a card already keyed to the new head must be ignored so we
+        // never "reuse" the card we are about to create for it.
+        let new = MessageId::new(900_000_000_000_060);
+        let card_new = MessageId::new(710_000_000_000_060);
+        let cards = vec![(new, card_new)];
+        let queued = ids(&[new]);
+
+        assert_eq!(pick_channel_queued_placeholder(&cards, new, &queued), None);
+    }
+
+    #[test]
+    fn three_queued_messages_collapse_to_one_card() {
+        // Acceptance: queueing 3 messages leaves exactly one visible card.
+        // m1 posts CA. m2 reuses CA (re-keyed to m2). m3 reuses it again.
+        let m1 = MessageId::new(900_000_000_000_070);
+        let m2 = MessageId::new(900_000_000_000_071);
+        let m3 = MessageId::new(900_000_000_000_072);
+        let card = MessageId::new(710_000_000_000_070);
+
+        // m2: only m1 owns the card.
+        let picked_2 = pick_channel_queued_placeholder(&[(m1, card)], m2, &ids(&[m1, m2]));
+        assert_eq!(picked_2, Some((m1, card)), "m2 coalesces onto m1's card");
+
+        // After re-key, the card is owned by m2; m3 coalesces onto it.
+        let picked_3 = pick_channel_queued_placeholder(&[(m2, card)], m3, &ids(&[m1, m2, m3]));
+        assert_eq!(picked_3, Some((m2, card)), "m3 coalesces onto the one card");
     }
 }
 
