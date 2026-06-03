@@ -1451,8 +1451,13 @@ fn emit_tool_part(part: &Value, sender: &Sender<StreamMessage>) {
         .map(stream_value)
         .unwrap_or_default();
 
+    let tool_use_id = opencode_tool_call_id(part);
     if !input.is_empty() || matches!(status, "pending" | "running" | "completed" | "error") {
-        let _ = sender.send(StreamMessage::ToolUse { name, input });
+        let _ = sender.send(StreamMessage::ToolUse {
+            name,
+            input,
+            tool_use_id: tool_use_id.clone(),
+        });
     }
 
     let output = state
@@ -1473,8 +1478,18 @@ fn emit_tool_part(part: &Value, sender: &Sender<StreamMessage>) {
         let _ = sender.send(StreamMessage::ToolResult {
             content: stream_value(output),
             is_error,
+            tool_use_id,
         });
     }
+}
+
+/// Extracts the OpenCode tool-call identifier (`callID`/`callId`/`call_id`/`id`)
+/// from a tool part so a `ToolResult` can be paired back to its `ToolUse`.
+fn opencode_tool_call_id(part: &Value) -> Option<String> {
+    ["callID", "callId", "call_id", "id"]
+        .into_iter()
+        .find_map(|key| part.get(key).and_then(|v| v.as_str()))
+        .map(str::to_string)
 }
 
 fn emit_part(
@@ -1521,6 +1536,7 @@ fn emit_part(
             let _ = sender.send(StreamMessage::ToolUse {
                 name: name.to_string(),
                 input,
+                tool_use_id: opencode_tool_call_id(part),
             });
         }
         "tool-result" => {
@@ -1534,7 +1550,11 @@ fn emit_part(
                 .or_else(|| part.get("is_error"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let _ = sender.send(StreamMessage::ToolResult { content, is_error });
+            let _ = sender.send(StreamMessage::ToolResult {
+                content,
+                is_error,
+                tool_use_id: opencode_tool_call_id(part),
+            });
         }
         _ => {}
     }
@@ -2295,7 +2315,7 @@ mod tests {
         let (msgs, _) = parse_event(data, "s1");
         assert!(msgs
             .iter()
-            .any(|m| matches!(m, StreamMessage::ToolResult { content, is_error } if content == "file.txt" && !is_error)));
+            .any(|m| matches!(m, StreamMessage::ToolResult { content, is_error, .. } if content == "file.txt" && !is_error)));
     }
 
     #[test]
@@ -2305,12 +2325,12 @@ mod tests {
         assert_eq!(stop, Some(false));
         assert!(
             msgs.iter().any(
-                |m| matches!(m, StreamMessage::ToolUse { name, input } if name == "bash" && input.contains("ls"))
+                |m| matches!(m, StreamMessage::ToolUse { name, input, .. } if name == "bash" && input.contains("ls"))
             )
         );
         assert!(msgs
             .iter()
-            .any(|m| matches!(m, StreamMessage::ToolResult { content, is_error } if content == "file.txt" && !is_error)));
+            .any(|m| matches!(m, StreamMessage::ToolResult { content, is_error, .. } if content == "file.txt" && !is_error)));
     }
 
     #[test]

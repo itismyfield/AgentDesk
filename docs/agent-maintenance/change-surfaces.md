@@ -8,8 +8,9 @@
 > [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-06-03 (against #3082 codex follow-up: edit/replace
-> answer-flush coverage + progress-aware flush wait + queued-only gate).
+> Last refreshed: 2026-06-03 (against #3084: pair status-panel subagent slots
+> by tool_use_id — threaded an `Option<String>` tool-use id through
+> `StreamMessage::ToolUse`/`ToolResult` across provider adapters).
 
 ## Read This First
 
@@ -365,11 +366,11 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
 - `src/services/dispatches/outbox_route.rs` (1118) — dispatch outbox route
   support extracted from the route layer; split before adding non-bugfix
   behavior.
-- `src/services/claude.rs` (3787), `src/services/gemini.rs` (1406),
-  `src/services/qwen.rs` (2189), `src/services/codex.rs` (2907),
-  `src/services/opencode.rs` (1862), `src/services/provider.rs` (1739) —
+- `src/services/claude.rs` (3789), `src/services/gemini.rs` (1417),
+  `src/services/qwen.rs` (2201), `src/services/codex.rs` (2929),
+  `src/services/opencode.rs` (1882), `src/services/provider.rs` (1739) —
   provider adapters.
-- `src/services/codex_tui/rollout_tail.rs` (1726) — Codex TUI rollout tail
+- `src/services/codex_tui/rollout_tail.rs` (1738) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
   beyond the #2169 session identity fix.
 - `src/services/codex_tui/input.rs` (1492) — Codex TUI input readiness

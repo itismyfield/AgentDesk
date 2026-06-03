@@ -168,10 +168,30 @@ pub enum StreamMessage {
     RetryBoundary,
     /// Text response chunk
     Text { content: String },
-    /// Tool use started
-    ToolUse { name: String, input: String },
-    /// Tool execution result
-    ToolResult { content: String, is_error: bool },
+    /// Tool use started.
+    ///
+    /// `tool_use_id` is the provider-assigned identifier for this tool
+    /// invocation (Anthropic `id`, etc.). It lets consumers pair a
+    /// `ToolResult` back to the exact `ToolUse` instead of relying on FIFO
+    /// ordering, which mis-pairs when a long-running tool (e.g. a Task
+    /// subagent) returns after intervening short foreground tools. Backends
+    /// that cannot surface an id leave this `None`, in which case consumers
+    /// fall back to FIFO pairing.
+    ToolUse {
+        name: String,
+        input: String,
+        tool_use_id: Option<String>,
+    },
+    /// Tool execution result.
+    ///
+    /// `tool_use_id` mirrors the originating [`StreamMessage::ToolUse`] id so
+    /// the result can be matched to its tool use precisely. `None` when the
+    /// backend does not provide one.
+    ToolResult {
+        content: String,
+        is_error: bool,
+        tool_use_id: Option<String>,
+    },
     /// Provider thinking/reasoning progress marker. Raw reasoning payloads must stay redacted.
     Thinking { summary: Option<String> },
     /// Background task notification
@@ -256,12 +276,21 @@ pub enum StatusEvent {
     SubagentStart {
         subagent_type: Option<String>,
         desc: Option<String>,
+        /// Originating Task tool-use id, used to pair the eventual
+        /// `SubagentEnd` to the exact slot rather than the first unfinished
+        /// one (which mis-attributes across parallel subagents). `None` when
+        /// the backend cannot surface an id.
+        tool_use_id: Option<String>,
     },
     SubagentEvent {
         summary: String,
     },
     SubagentEnd {
         success: bool,
+        /// Tool-use id of the Task whose result closed this subagent. Matched
+        /// against [`StatusEvent::SubagentStart::tool_use_id`]; `None` falls
+        /// back to closing the first unfinished slot.
+        tool_use_id: Option<String>,
     },
     TaskToolUpdate {
         name: String,

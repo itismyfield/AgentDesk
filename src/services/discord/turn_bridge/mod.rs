@@ -4228,7 +4228,15 @@ pub(super) fn spawn_turn_bridge(
         let mut recovery_retry = false;
         let mut last_adk_heartbeat = std::time::Instant::now();
         let mut pending_stream_messages: VecDeque<StreamMessage> = VecDeque::new();
+        // #3084: pair tool_result → tool_use by provider tool-use id when the
+        // backend supplies one. A long-running Task subagent returns its result
+        // after intervening short foreground tools, so the old FIFO queue
+        // popped the wrong tool name and the real subagent's SubagentEnd never
+        // fired (ghost "running" marker). The HashMap pairs precisely by id;
+        // the VecDeque remains the fallback for backends with no tool-use id.
         let mut pending_status_tool_results: VecDeque<String> = VecDeque::new();
+        let mut pending_status_tool_results_by_id: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         // codex round-8 P1 on PR #1308: while a long-running placeholder is
         // active, bump the inflight file's mtime so the sweeper sees the turn
         // as alive. Without this, a healthy 5+ minute background tool would
@@ -4757,8 +4765,22 @@ pub(super) fn spawn_turn_bridge(
                                 redacted_thinking_transcript_event(summary),
                             );
                         }
-                        StreamMessage::ToolUse { name, input } => {
-                            pending_status_tool_results.push_back(name.clone());
+                        StreamMessage::ToolUse {
+                            name,
+                            input,
+                            tool_use_id,
+                        } => {
+                            // #3084: index the tool name by its tool-use id when
+                            // present so the matching ToolResult resolves the
+                            // exact tool regardless of interleaving; otherwise
+                            // fall back to FIFO ordering.
+                            match tool_use_id.as_deref() {
+                                Some(id) => {
+                                    pending_status_tool_results_by_id
+                                        .insert(id.to_string(), name.clone());
+                                }
+                                None => pending_status_tool_results.push_back(name.clone()),
+                            }
                             any_tool_used = true;
                             has_post_tool_text = false;
                             inflight_state.any_tool_used = true;
@@ -4823,8 +4845,10 @@ pub(super) fn spawn_turn_bridge(
                             status_panel_dirty |= record_status_panel_events(
                                 shared_owned.as_ref(),
                                 channel_id,
-                                super::placeholder_live_events::status_events_from_tool_use(
-                                    &name, &input,
+                                super::placeholder_live_events::status_events_from_tool_use_with_id(
+                                    &name,
+                                    &input,
+                                    tool_use_id.as_deref(),
                                 ),
                             );
                             // #1113 implicit-terminate: a new ToolUse arriving
@@ -4985,8 +5009,21 @@ pub(super) fn spawn_turn_bridge(
                                 state_dirty = true;
                             }
                         }
-                        StreamMessage::ToolResult { content, is_error } => {
-                            let status_tool_name = pending_status_tool_results.pop_front();
+                        StreamMessage::ToolResult {
+                            content,
+                            is_error,
+                            tool_use_id,
+                        } => {
+                            // #3084: resolve the originating tool by id when the
+                            // result carries one (pairing a delayed subagent
+                            // result to its own ToolUse); otherwise fall back to
+                            // FIFO order for id-less backends.
+                            let status_tool_name = match tool_use_id.as_deref() {
+                                Some(id) => pending_status_tool_results_by_id
+                                    .remove(id)
+                                    .or_else(|| pending_status_tool_results.pop_front()),
+                                None => pending_status_tool_results.pop_front(),
+                            };
                             if inflight_state.source == crate::dispatch::Source::Voice {
                                 let label = if is_error {
                                     "tool_result:error"
@@ -5020,9 +5057,10 @@ pub(super) fn spawn_turn_bridge(
                             status_panel_dirty |= record_status_panel_events(
                                 shared_owned.as_ref(),
                                 channel_id,
-                                super::placeholder_live_events::status_events_from_tool_result(
+                                super::placeholder_live_events::status_events_from_tool_result_with_id(
                                     status_tool_name.as_deref(),
                                     is_error,
+                                    tool_use_id.as_deref(),
                                 ),
                             );
                             // #1255: a long-running tool's ToolResult means the

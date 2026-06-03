@@ -230,6 +230,7 @@ struct QwenStatusSnapshot {
 struct QwenPartialBlockState {
     kind: String,
     tool_name: Option<String>,
+    tool_id: Option<String>,
     input_json: String,
     thinking_emitted: bool,
 }
@@ -813,6 +814,7 @@ fn process_qwen_partial_event(
                         .get("name")
                         .and_then(|v| v.as_str())
                         .map(str::to_string),
+                    tool_id: block.get("id").and_then(|v| v.as_str()).map(str::to_string),
                     input_json,
                     thinking_emitted: false,
                 },
@@ -882,6 +884,7 @@ fn process_qwen_partial_event(
                     state.buffered_messages.push(StreamMessage::ToolUse {
                         name: block_state.tool_name.unwrap_or_else(|| "tool".to_string()),
                         input: normalize_tool_input(block_state.input_json),
+                        tool_use_id: block_state.tool_id,
                     });
                 } else if block_state.kind == "thinking" && !block_state.thinking_emitted {
                     mark_meaningful_progress(state);
@@ -953,9 +956,12 @@ fn process_qwen_assistant_message(json: &Value, state: &mut QwenAttemptState) {
                     .map(render_qwen_value)
                     .map(normalize_tool_input)
                     .unwrap_or_else(|| "{}".to_string());
-                state
-                    .buffered_messages
-                    .push(StreamMessage::ToolUse { name, input });
+                let tool_use_id = block.get("id").and_then(|v| v.as_str()).map(str::to_string);
+                state.buffered_messages.push(StreamMessage::ToolUse {
+                    name,
+                    input,
+                    tool_use_id,
+                });
             }
             _ => {}
         }
@@ -984,10 +990,16 @@ fn process_qwen_user_message(json: &Value, state: &mut QwenAttemptState) {
             .get("is_error")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let tool_use_id = block
+            .get("tool_use_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         mark_meaningful_progress(state);
-        state
-            .buffered_messages
-            .push(StreamMessage::ToolResult { content, is_error });
+        state.buffered_messages.push(StreamMessage::ToolResult {
+            content,
+            is_error,
+            tool_use_id,
+        });
     }
 }
 
@@ -2658,7 +2670,7 @@ mod tests {
         ));
         assert!(matches!(
             state.buffered_messages.last(),
-            Some(StreamMessage::ToolUse { name, input })
+            Some(StreamMessage::ToolUse { name, input, .. })
                 if name == "Bash" && input == "{\"cmd\":\"pwd\"}"
         ));
     }

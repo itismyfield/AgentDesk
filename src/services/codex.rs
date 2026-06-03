@@ -2811,9 +2811,12 @@ fn handle_codex_json_line(
                     "command_execution" => {
                         let command = item.get("command").and_then(|v| v.as_str()).unwrap_or("");
                         let input = serde_json::json!({ "command": command }).to_string();
+                        let tool_use_id =
+                            item.get("id").and_then(|v| v.as_str()).map(str::to_string);
                         let _ = sender.send(StreamMessage::ToolUse {
                             name: "Bash".to_string(),
                             input,
+                            tool_use_id,
                         });
                     }
                     "reasoning" => {
@@ -2827,15 +2830,28 @@ fn handle_codex_json_line(
             if let Some(invocation) = codex_mcp_invocation(&json)
                 && let Some(name) = codex_mcp_tool_name(invocation)
             {
+                let tool_use_id = json
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
                 let _ = sender.send(StreamMessage::ToolUse {
                     name,
                     input: codex_mcp_arguments(invocation),
+                    tool_use_id,
                 });
             }
         }
         "mcp_tool_call_end" => {
             let (content, is_error) = codex_mcp_result(json.get("result").unwrap_or(&Value::Null));
-            let _ = sender.send(StreamMessage::ToolResult { content, is_error });
+            let tool_use_id = json
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let _ = sender.send(StreamMessage::ToolResult {
+                content,
+                is_error,
+                tool_use_id,
+            });
         }
         "background_event" => {
             if let Some(summary) = codex_background_event_summary(&json) {
@@ -2873,7 +2889,13 @@ fn handle_codex_json_line(
                             .and_then(|v| v.as_i64())
                             .map(|code| code != 0)
                             .unwrap_or(false);
-                        let _ = sender.send(StreamMessage::ToolResult { content, is_error });
+                        let tool_use_id =
+                            item.get("id").and_then(|v| v.as_str()).map(str::to_string);
+                        let _ = sender.send(StreamMessage::ToolResult {
+                            content,
+                            is_error,
+                            tool_use_id,
+                        });
                     }
                     "reasoning" => {
                         let _ = sender.send(StreamMessage::redacted_thinking());
@@ -3682,7 +3704,7 @@ mod tests {
         let items: Vec<StreamMessage> = rx.try_iter().collect();
         assert_eq!(items.len(), 2);
         match &items[0] {
-            StreamMessage::ToolUse { name, input } => {
+            StreamMessage::ToolUse { name, input, .. } => {
                 assert_eq!(name, "mcp__memento__context");
                 assert_eq!(
                     serde_json::from_str::<Value>(input).unwrap(),
@@ -3695,7 +3717,9 @@ mod tests {
             other => panic!("Expected ToolUse, got {:?}", other),
         }
         match &items[1] {
-            StreamMessage::ToolResult { content, is_error } => {
+            StreamMessage::ToolResult {
+                content, is_error, ..
+            } => {
                 assert!(!is_error);
                 assert_eq!(
                     serde_json::from_str::<Value>(content).unwrap(),
@@ -3728,7 +3752,9 @@ mod tests {
         let items: Vec<StreamMessage> = rx.try_iter().collect();
         assert_eq!(items.len(), 1);
         match &items[0] {
-            StreamMessage::ToolResult { content, is_error } => {
+            StreamMessage::ToolResult {
+                content, is_error, ..
+            } => {
                 assert!(*is_error);
                 assert_eq!(
                     serde_json::from_str::<Value>(content).unwrap(),

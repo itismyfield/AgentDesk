@@ -25,6 +25,10 @@ pub(super) struct SubagentSlot {
     pub(super) desc: String,
     recent: Option<String>,
     finished: Option<bool>,
+    /// Task tool-use id that opened this slot. Lets `SubagentEnd` close the
+    /// exact slot it belongs to (#3084) instead of the first unfinished one,
+    /// which mis-attributes completion across parallel subagents.
+    tool_use_id: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum DerivedStatus {
@@ -114,6 +118,7 @@ impl StatusPanelState {
             StatusEvent::SubagentStart {
                 subagent_type,
                 desc,
+                tool_use_id,
             } => {
                 let desc = desc
                     .filter(|value| !value.trim().is_empty())
@@ -126,6 +131,7 @@ impl StatusPanelState {
                     desc: desc.clone(),
                     recent: None,
                     finished: None,
+                    tool_use_id,
                 });
                 self.status = DerivedStatus::SubagentRunning { desc };
                 trim_subagents(&mut self.subagents);
@@ -143,13 +149,31 @@ impl StatusPanelState {
                     };
                 }
             }
-            StatusEvent::SubagentEnd { success } => {
-                if let Some(slot) = self
-                    .subagents
-                    .iter_mut()
-                    .rev()
-                    .find(|slot| slot.finished.is_none())
-                {
+            StatusEvent::SubagentEnd {
+                success,
+                tool_use_id,
+            } => {
+                // #3084: prefer closing the slot whose Task tool-use id matches
+                // the result. This pairs a long-running subagent to its own
+                // result even when shorter foreground tools resolved in
+                // between, and attributes completion to the correct slot among
+                // parallel subagents. Fall back to the first unfinished slot
+                // only when no id is available or no slot matches (e.g.
+                // backends that cannot surface a tool-use id).
+                let matched = tool_use_id.as_deref().and_then(|id| {
+                    self.subagents.iter_mut().rev().find(|slot| {
+                        slot.finished.is_none() && slot.tool_use_id.as_deref() == Some(id)
+                    })
+                });
+                let slot = match matched {
+                    Some(slot) => Some(slot),
+                    None => self
+                        .subagents
+                        .iter_mut()
+                        .rev()
+                        .find(|slot| slot.finished.is_none()),
+                };
+                if let Some(slot) = slot {
                     slot.finished = Some(success);
                 }
                 self.status = DerivedStatus::Running;

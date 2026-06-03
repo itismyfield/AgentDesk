@@ -613,9 +613,14 @@ pub(crate) fn parse_stream_message_with_state(
                                     serde_json::to_string_pretty(value).unwrap_or_default()
                                 })
                                 .unwrap_or_default();
+                            let tool_use_id = item
+                                .get("id")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string);
                             return Some(StreamMessage::ToolUse {
                                 name: name.to_string(),
                                 input,
+                                tool_use_id,
                             });
                         }
                     }
@@ -655,9 +660,14 @@ pub(crate) fn parse_stream_message_with_state(
                         .get("is_error")
                         .and_then(|value| value.as_bool())
                         .unwrap_or(false);
+                    let tool_use_id = item
+                        .get("tool_use_id")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string);
                     return Some(StreamMessage::ToolResult {
                         content: content_text,
                         is_error,
+                        tool_use_id,
                     });
                 }
             }
@@ -850,9 +860,14 @@ pub fn parse_assistant_extra_tool_uses(json: &Value) -> Vec<StreamMessage> {
                         .get("input")
                         .map(|value| serde_json::to_string_pretty(value).unwrap_or_default())
                         .unwrap_or_default();
+                    let tool_use_id = item
+                        .get("id")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string);
                     extras.push(StreamMessage::ToolUse {
                         name: name.to_string(),
                         input,
+                        tool_use_id,
                     });
                 }
             }
