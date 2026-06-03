@@ -1536,7 +1536,12 @@ async fn refresh_watcher_session_panel_from_lifecycle(
         Ok(Some(event)) => {
             shared
                 .placeholder_live_events
-                .set_session_panel_lifecycle_event(channel_id, &event.kind, &event.details_json);
+                .set_session_panel_lifecycle_event(
+                    channel_id,
+                    &turn_id,
+                    &event.kind,
+                    &event.details_json,
+                );
         }
         Ok(None) => {
             shared

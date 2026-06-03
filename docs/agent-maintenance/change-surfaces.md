@@ -120,7 +120,7 @@
     lifecycle behavior).
   - `src/services/discord/tmux.rs` (2204 lines after #2558 dead-code sweep;
     failover guard; still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (6861 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (6866 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh; split loop helpers

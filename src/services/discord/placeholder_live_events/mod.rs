@@ -152,10 +152,11 @@ impl PlaceholderLiveEvents {
     pub(in crate::services::discord) fn set_session_panel_lifecycle_event(
         &self,
         channel_id: ChannelId,
+        turn_id: &str,
         kind: &str,
         details: &Value,
     ) -> bool {
-        let snapshot = SessionPanelSnapshot::from_lifecycle_event(kind, details);
+        let snapshot = SessionPanelSnapshot::from_lifecycle_event(Some(turn_id), kind, details);
         self.set_session_panel_snapshot(channel_id, snapshot)
     }
 
@@ -179,24 +180,58 @@ impl PlaceholderLiveEvents {
             return false;
         }
 
-        // #3087: detect a TRUE session boundary by comparing the OLD vs NEW
-        // provider session id. Only a real provider-session delta (a new/different
-        // non-empty id) resets the accumulated subagents/tasks/todos/workflows;
-        // unrelated field churn (tmux/recovery_count) within the same provider
-        // session must preserve same-session accumulation, and a missing→missing
-        // id must not trigger a spurious reset.
+        // #3087: detect a TRUE session boundary and reset the accumulated
+        // subagents/tasks/todos/workflows exactly once, on the transition INTO a
+        // new session instance.
+        //
+        // There are two kinds of boundary:
+        //   (a) provider-session delta — the new snapshot carries a non-empty
+        //       provider_session_id that differs from the stored one (resume /
+        //       reconnect to a different provider session).
+        //   (b) fresh-session boundary — a genuinely fresh session legitimately
+        //       arrives with provider_session_id == None (the common /clear,
+        //       idle-timeout, turn-cap, goal-fresh, no_cached_provider_session
+        //       paths all normalize to None). For these we cannot key off the
+        //       provider id, so we key off the per-instance `turn_id`: a NEW
+        //       fresh session arrives on a NEW turn, while every status tick of
+        //       the SAME fresh session re-loads the SAME turn's lifecycle row.
+        //
+        // The `turn_id` marker is what prevents the every-tick / mid-session
+        // false-reset: because the Fresh kind PERSISTS across ticks of one fresh
+        // session, a naive "reset whenever kind == Fresh" would wipe live
+        // subagents/tasks on every tick. Gating on a CHANGE of the fresh turn id
+        // resets only on the first tick of each new fresh session and preserves
+        // mid-session accumulation thereafter.
+        //
+        // Unrelated field churn (tmux/recovery_count) within the same session —
+        // same provider id, or same fresh turn id — must NOT reset, and a
+        // missing→missing id with an unchanged fresh turn id must not trigger a
+        // spurious reset.
         let old_provider_session_id = guard
             .session
             .as_ref()
             .and_then(|session| session.provider_session_id())
             .map(str::to_owned);
-        let new_provider_session_id = snapshot
+        let old_fresh_turn_id = guard
+            .session
             .as_ref()
-            .and_then(|session| session.provider_session_id());
-        if let Some(new_id) = new_provider_session_id {
-            if old_provider_session_id.as_deref() != Some(new_id) {
-                guard.reset_session_content();
-            }
+            .filter(|session| session.is_fresh())
+            .and_then(|session| session.turn_id())
+            .map(str::to_owned);
+
+        let provider_session_boundary = snapshot
+            .as_ref()
+            .and_then(|session| session.provider_session_id())
+            .is_some_and(|new_id| old_provider_session_id.as_deref() != Some(new_id));
+
+        let fresh_boundary = snapshot
+            .as_ref()
+            .filter(|session| session.is_fresh() && session.provider_session_id().is_none())
+            .and_then(|session| session.turn_id())
+            .is_some_and(|new_turn_id| old_fresh_turn_id.as_deref() != Some(new_turn_id));
+
+        if provider_session_boundary || fresh_boundary {
+            guard.reset_session_content();
         }
 
         guard.session = snapshot;

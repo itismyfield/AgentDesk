@@ -45,10 +45,24 @@ pub(super) struct SessionPanelSnapshot {
     provider_session_id: Option<String>,
     tmux: Option<TmuxPanelState>,
     recovery_message_count: Option<usize>,
+    /// Per-session instance marker: the turn id (`discord:<channel>:<user_msg_id>`)
+    /// whose lifecycle row produced this snapshot. Two DIFFERENT fresh sessions
+    /// arrive on DIFFERENT turns (a new `user_msg_id`), so their turn ids differ;
+    /// every status tick of the SAME fresh session re-loads the SAME turn's
+    /// lifecycle row, so the turn id is stable across ticks. This lets a
+    /// fresh-session boundary be detected even when `provider_session_id` is
+    /// `None` (the common `/clear`, idle-timeout, turn-cap, goal-fresh,
+    /// no-cached-provider-session paths) WITHOUT re-resetting on every tick of an
+    /// ongoing fresh session (#3087).
+    turn_id: Option<String>,
 }
 
 impl SessionPanelSnapshot {
-    pub(super) fn from_lifecycle_event(kind: &str, details: &Value) -> Option<Self> {
+    pub(super) fn from_lifecycle_event(
+        turn_id: Option<&str>,
+        kind: &str,
+        details: &Value,
+    ) -> Option<Self> {
         if !details.as_object().is_some_and(|object| !object.is_empty()) {
             return None;
         }
@@ -70,12 +84,17 @@ impl SessionPanelSnapshot {
         .map(str::to_string);
         let tmux = parse_tmux_panel_state(details);
         let recovery_message_count = parse_recovery_message_count(details);
+        let turn_id = turn_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
 
         Some(Self {
             kind,
             provider_session_id,
             tmux,
             recovery_message_count,
+            turn_id,
         })
     }
 
@@ -85,6 +104,24 @@ impl SessionPanelSnapshot {
     /// subagents/tasks without reacting to unrelated field churn.
     pub(super) fn provider_session_id(&self) -> Option<&str> {
         self.provider_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    /// Whether this snapshot describes a freshly-started session
+    /// (`🆕 새 세션 시작`). A genuinely fresh session legitimately carries
+    /// `provider_session_id == None`, so the fresh-boundary reset must key off
+    /// the per-instance `turn_id` rather than the (absent) provider id.
+    pub(super) const fn is_fresh(&self) -> bool {
+        matches!(self.kind, SessionPanelKind::Fresh)
+    }
+
+    /// The per-session instance marker (turn id) used to distinguish two
+    /// DIFFERENT fresh sessions that both lack a provider session id. Normalized
+    /// to `None` when absent or blank.
+    pub(super) fn turn_id(&self) -> Option<&str> {
+        self.turn_id
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())

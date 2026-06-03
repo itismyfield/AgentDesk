@@ -427,6 +427,7 @@ fn status_panel_renders_session_resumed_line_from_lifecycle_details() {
     let channel_id = ChannelId::new(177);
     assert!(events.set_session_panel_lifecycle_event(
         channel_id,
+        "discord:177:1",
         "session_resumed",
         &json!({
             "provider_session_id": "8f21abcd12345678",
@@ -453,6 +454,7 @@ fn status_panel_resets_subagents_and_tasks_on_new_provider_session() {
     // Session A: establish a provider session, then accumulate content + context.
     assert!(events.set_session_panel_lifecycle_event(
         channel_id,
+        "discord:3087:1",
         "session_resumed",
         &json!({ "provider_session_id": "session-A", "tmux_reused": true }),
     ));
@@ -489,6 +491,7 @@ fn status_panel_resets_subagents_and_tasks_on_new_provider_session() {
     // the context/token snapshot must survive.
     assert!(events.set_session_panel_lifecycle_event(
         channel_id,
+        "discord:3087:2",
         "session_fresh",
         &json!({ "provider_session_id": "session-B", "tmux_reused": false }),
     ));
@@ -525,6 +528,7 @@ fn status_panel_resets_subagents_and_tasks_on_new_provider_session() {
     );
     assert!(events.set_session_panel_lifecycle_event(
         channel_id,
+        "discord:3087:2",
         "session_fresh",
         &json!({ "provider_session_id": "session-B", "tmux_reused": true }),
     ));
@@ -548,12 +552,245 @@ fn status_panel_resets_subagents_and_tasks_on_new_provider_session() {
     }
 }
 
+/// #3087 (codex P1 — false NON-reset) — a GENUINELY fresh session legitimately
+/// arrives with `provider_session_id == None` (the common `/clear`,
+/// idle-timeout, turn-cap, goal-fresh, `no_cached_provider_session` paths all
+/// normalize to None). Such a fresh session MUST still reset the previous
+/// session's accumulated subagents/tasks; keying the reset on the per-instance
+/// `turn_id` makes the fresh boundary detectable even without a provider id.
+/// Context/token usage must be preserved across the boundary.
+#[test]
+fn status_panel_resets_on_fresh_session_with_no_provider_session_id() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(30871);
+
+    // Prior session (turn 1): accumulate content + context.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        "discord:30871:1",
+        "session_resumed",
+        &json!({ "provider_session_id": "stale-session", "tmux_reused": true }),
+    ));
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Task",
+            &json!({"subagent_type": "explorer", "description": "Stale work"}).to_string(),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "TaskCreate",
+            &json!({"taskId": "task-stale", "subject": "stale task"}).to_string(),
+        ),
+    );
+    assert!(events.set_context_panel_usage(channel_id, None, 4000, 80, 10, 1000, 60));
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(guard.subagents.len(), 1);
+        assert_eq!(guard.tasks.len(), 1);
+        assert!(guard.context.is_some());
+    }
+
+    // Fresh session on a NEW turn with NO provider session id (e.g. /clear).
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        "discord:30871:2",
+        "session_fresh",
+        &json!({ "reason": "no_cached_provider_session", "tmux_reused": false }),
+    ));
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            guard.subagents.is_empty(),
+            "subagents must reset on a fresh session even when provider_session_id is None"
+        );
+        assert!(
+            guard.tasks.is_empty(),
+            "tasks must reset on a fresh session even when provider_session_id is None"
+        );
+        assert!(
+            guard.context.is_some(),
+            "context/token usage must be preserved across the fresh boundary"
+        );
+    }
+}
+
+/// #3087 (guards against an every-tick false-RESET) — `set_session_panel_*` is
+/// invoked on EVERY status tick with the current lifecycle, and the `Fresh`
+/// kind PERSISTS across ticks of the same fresh session. A naive
+/// "reset whenever kind == Fresh" would wipe live subagents/tasks every tick.
+/// Subsequent ticks of the SAME fresh session (same `turn_id`, still None id,
+/// with field churn) must NOT re-reset — mid-session accumulation is preserved.
+#[test]
+fn status_panel_preserves_accumulation_across_ticks_of_same_fresh_session() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(30872);
+
+    // First tick of the fresh session (no provider id) — establishes the marker.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        "discord:30872:1",
+        "session_fresh",
+        &json!({ "reason": "idle_timeout", "tmux_reused": false }),
+    ));
+
+    // Accumulate mid-session content.
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Task",
+            &json!({"subagent_type": "explorer", "description": "Mid-session work"}).to_string(),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "TaskCreate",
+            &json!({"taskId": "task-mid", "subject": "mid task"}).to_string(),
+        ),
+    );
+
+    // Subsequent ticks of the SAME fresh session: same turn_id, still None id,
+    // only unrelated field churn (tmux / recovery count). Must NOT re-reset.
+    for details in [
+        json!({ "reason": "idle_timeout", "tmux_reused": true }),
+        json!({ "reason": "idle_timeout", "tmux_reused": true, "recoveryMessageCount": 3 }),
+    ] {
+        events.set_session_panel_lifecycle_event(
+            channel_id,
+            "discord:30872:1",
+            "session_fresh",
+            &details,
+        );
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            guard.subagents.len(),
+            1,
+            "ticks of the same fresh session must NOT reset accumulated subagents"
+        );
+        assert_eq!(
+            guard.subagents.first().map(|slot| slot.desc.as_str()),
+            Some("Mid-session work")
+        );
+        assert_eq!(
+            guard.tasks.len(),
+            1,
+            "ticks of the same fresh session must NOT reset accumulated tasks"
+        );
+    }
+}
+
+/// #3087 — two CONSECUTIVE distinct fresh sessions, both with
+/// `provider_session_id == None` but different per-instance `turn_id`s (back-to-back
+/// `/clear`s), must EACH reset. The boundary is keyed on the fresh `turn_id`
+/// change, so each new fresh session drops the prior one's accumulation.
+#[test]
+fn status_panel_resets_on_each_of_two_distinct_none_id_fresh_sessions() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(30873);
+
+    // Fresh session #1 (turn 1, no provider id) → accumulate.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        "discord:30873:1",
+        "session_fresh",
+        &json!({ "reason": "first_turn", "tmux_reused": false }),
+    ));
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Task",
+            &json!({"subagent_type": "explorer", "description": "Session 1 work"}).to_string(),
+        ),
+    );
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(guard.subagents.len(), 1);
+    }
+
+    // Fresh session #2 (turn 2, still no provider id, different turn_id) → reset.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        "discord:30873:2",
+        "session_fresh",
+        &json!({ "reason": "goal_fresh", "tmux_reused": false }),
+    ));
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            guard.subagents.is_empty(),
+            "a second distinct None-id fresh session must reset the first session's content"
+        );
+    }
+
+    // Accumulate in session #2, then a THIRD distinct fresh session → reset again.
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Task",
+            &json!({"subagent_type": "explorer", "description": "Session 2 work"}).to_string(),
+        ),
+    );
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        "discord:30873:3",
+        "session_fresh",
+        &json!({ "reason": "turn_cap", "tmux_reused": false }),
+    ));
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            guard.subagents.is_empty(),
+            "a third distinct None-id fresh session must reset again"
+        );
+    }
+}
+
 #[test]
 fn status_panel_renders_session_fresh_and_fallback_distinctly() {
     let events = PlaceholderLiveEvents::default();
     let fresh_channel_id = ChannelId::new(178);
     events.set_session_panel_lifecycle_event(
         fresh_channel_id,
+        "discord:178:1",
         "session_fresh",
         &json!({
             "reason": "first_turn",
@@ -570,6 +807,7 @@ fn status_panel_renders_session_fresh_and_fallback_distinctly() {
     let fallback_channel_id = ChannelId::new(179);
     events.set_session_panel_lifecycle_event(
         fallback_channel_id,
+        "discord:179:1",
         "session_resume_failed_with_recovery",
         &json!({
             "reason": "resume_failed",
@@ -591,6 +829,7 @@ fn status_panel_appends_recovery_message_count_line_when_present() {
     let channel_id = ChannelId::new(1781);
     assert!(events.set_session_panel_lifecycle_event(
         channel_id,
+        "discord:1781:1",
         "session_fresh",
         &json!({
             "reason": "idle_timeout",
@@ -617,6 +856,7 @@ fn status_panel_clears_stale_session_line_for_watcher_turn_without_lifecycle() {
     // Turn A: a fresh-session/recovery event sets the channel-scoped snapshot.
     assert!(events.set_session_panel_lifecycle_event(
         channel_id,
+        "discord:3055:1",
         "session_fresh",
         &json!({
             "reason": "no_cached_provider_session",
@@ -645,6 +885,7 @@ fn status_panel_omits_recovery_line_when_count_is_zero_or_missing() {
     let channel_id = ChannelId::new(1782);
     assert!(events.set_session_panel_lifecycle_event(
         channel_id,
+        "discord:1782:1",
         "session_fresh",
         &json!({
             "reason": "idle_timeout",
@@ -659,6 +900,7 @@ fn status_panel_omits_recovery_line_when_count_is_zero_or_missing() {
     let other_channel = ChannelId::new(1783);
     assert!(events.set_session_panel_lifecycle_event(
         other_channel,
+        "discord:1783:1",
         "session_fresh",
         &json!({ "reason": "first_turn" }),
     ));
@@ -672,6 +914,7 @@ fn status_panel_omits_session_line_when_lifecycle_details_are_absent() {
     let channel_id = ChannelId::new(180);
     assert!(events.set_session_panel_lifecycle_event(
         channel_id,
+        "discord:180:1",
         "session_fresh",
         &json!({
             "reason": "idle_timeout",
@@ -684,7 +927,12 @@ fn status_panel_omits_session_line_when_lifecycle_details_are_absent() {
             .contains("🆕 새 세션 시작")
     );
 
-    assert!(events.set_session_panel_lifecycle_event(channel_id, "session_resumed", &json!({}),));
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        "discord:180:2",
+        "session_resumed",
+        &json!({}),
+    ));
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
     assert!(!rendered.contains("Lifecycle "));
