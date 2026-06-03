@@ -238,8 +238,6 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
     };
 
     Ok(AppState {
-        #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-        legacy_db_override: None,
         pg_pool,
         engine,
         config: Arc::new(config),
@@ -1777,66 +1775,4 @@ pub(crate) async fn cmd_dispatch_redispatch(card_id: &str) -> Result<(), String>
         route_json(status, body)
     })
     .await
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::{extract_issue_numbers, parse_worktree_list, review_decision_mode};
-
-    #[test]
-    fn parse_worktree_list_reads_porcelain_blocks() {
-        let parsed = parse_worktree_list(
-            "worktree /tmp/main\nHEAD abc\nbranch refs/heads/main\n\nworktree /tmp/wt-1\nHEAD def\nbranch refs/heads/wt/439\n",
-        );
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].path, "/tmp/main");
-        assert_eq!(parsed[0].branch.as_deref(), Some("main"));
-        assert_eq!(parsed[1].branch.as_deref(), Some("wt/439"));
-    }
-
-    #[test]
-    fn extract_issue_numbers_deduplicates_multiple_mentions() {
-        let issues = extract_issue_numbers("fix (#12)\nfollow-up #12\nalso #55");
-        assert_eq!(issues, vec!["12".to_string(), "55".to_string()]);
-    }
-
-    #[test]
-    fn review_decision_mode_maps_pm_aliases() {
-        match review_decision_mode("approve", None).unwrap() {
-            super::ReviewDecisionMode::Pm { requested, applied } => {
-                assert_eq!(requested, "approve");
-                assert_eq!(applied, "dismiss");
-            }
-            _ => panic!("expected PM review decision mode"),
-        }
-    }
-
-    #[test]
-    fn review_decision_mode_uses_agent_path_for_dispatch_scoped_dismiss() {
-        match review_decision_mode("dismiss", Some("dispatch-1")).unwrap() {
-            super::ReviewDecisionMode::Agent { decision, .. } => {
-                assert_eq!(decision, "dismiss");
-            }
-            _ => panic!("expected agent review decision mode"),
-        }
-    }
-
-    /// Integration test: exercises `build_app_state(false)` and runs `cmd_docs`,
-    /// catching initialization regressions in the direct CLI module.
-    #[tokio::test]
-    async fn build_app_state_and_cmd_docs_smoke() {
-        // build_app_state(false) skips health registry — lightweight init
-        let state = super::build_app_state(false).await;
-        if let Err(e) = &state {
-            panic!("build_app_state(false) failed: {e}");
-        }
-
-        // Run cmd_docs (read-only, no db writes) to verify the full init path
-        // produces a usable AppState. cmd_docs prints to stdout and returns Ok
-        // on success; we just verify it doesn't panic or error.
-        let result = super::cmd_docs(None, false).await;
-        if let Err(e) = &result {
-            panic!("cmd_docs failed after build_app_state: {e}");
-        }
-    }
 }

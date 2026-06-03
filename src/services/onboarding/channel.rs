@@ -11,8 +11,6 @@ use serde_json::json;
 
 use crate::server::routes::AppState;
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use super::legacy_db;
 use super::{load_onboarding_config, pg_kv_value};
 
 #[derive(Debug, Deserialize)]
@@ -169,7 +167,6 @@ async fn load_channels(
     (StatusCode::OK, Json(json!({"guilds": result_guilds})))
 }
 
-#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 fn saved_onboarding_bot_token_without_pg(_state: &AppState) -> Option<String> {
     crate::cli::agentdesk_runtime_root()
         .as_ref()
@@ -181,18 +178,6 @@ fn saved_onboarding_bot_token_without_pg(_state: &AppState) -> Option<String> {
                 .get("command")
                 .and_then(|bot| bot.token.clone())
         })
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn saved_onboarding_bot_token_without_pg(state: &AppState) -> Option<String> {
-    legacy_db(state).lock().ok().and_then(|conn| {
-        conn.query_row(
-            "SELECT value FROM kv_meta WHERE key = 'onboarding_bot_token'",
-            [],
-            |row| row.get(0),
-        )
-        .ok()
-    })
 }
 
 /// GET /api/onboarding/channels

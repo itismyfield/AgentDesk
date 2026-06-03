@@ -59,8 +59,6 @@ use axum::{
 
 use std::sync::Arc;
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use crate::db::Db;
 use crate::engine::PolicyEngine;
 use crate::error::{AppError, ErrorCode};
 use crate::services::discord::health::HealthRegistry;
@@ -69,8 +67,6 @@ use crate::services::discord::health::HealthRegistry;
 ///
 #[derive(Clone)]
 pub struct AppState {
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    pub(crate) legacy_db_override: Option<Db>,
     pub pg_pool: Option<sqlx::PgPool>,
     pub engine: PolicyEngine,
     pub config: Arc<crate::config::Config>,
@@ -81,14 +77,6 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Returns the optional legacy SQLite handle for test fixtures.
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    pub fn legacy_db(&self) -> Option<&crate::db::Db> {
-        self.legacy_db_override
-            .as_ref()
-            .or_else(|| self.engine.legacy_db())
-    }
-
     pub fn pg_pool_ref(&self) -> Option<&sqlx::PgPool> {
         self.pg_pool.as_ref()
     }
@@ -111,50 +99,6 @@ impl AppState {
 }
 
 pub(crate) type ApiRouter = Router<AppState>;
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-impl AppState {
-    pub fn test_state(db: Db, engine: PolicyEngine) -> Self {
-        Self::test_state_with_config(db, engine, crate::config::Config::default())
-    }
-
-    pub fn test_state_with_config(
-        db: Db,
-        engine: PolicyEngine,
-        config: crate::config::Config,
-    ) -> Self {
-        let tx = crate::server::ws::new_broadcast();
-        let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
-        Self {
-            legacy_db_override: Some(db),
-            pg_pool: None,
-            engine,
-            config: Arc::new(config),
-            broadcast_tx: tx,
-            batch_buffer: buf,
-            health_registry: None,
-            cluster_instance_id: None,
-        }
-    }
-
-    /// PG-aware variant of [`test_state`]. Used by the #1238 PG-fixture
-    /// migration — handler tests that exercise PG-only routes need a state
-    /// whose `pg_pool` slot is populated.
-    pub fn test_state_with_pg(db: Db, engine: PolicyEngine, pg_pool: sqlx::PgPool) -> Self {
-        let tx = crate::server::ws::new_broadcast();
-        let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
-        Self {
-            legacy_db_override: Some(db),
-            pg_pool: Some(pg_pool),
-            engine,
-            config: Arc::new(crate::config::Config::default()),
-            broadcast_tx: tx,
-            batch_buffer: buf,
-            health_registry: None,
-            cluster_instance_id: None,
-        }
-    }
-}
 
 /// Mutation routes that gate themselves with `require_explicit_bearer_token`.
 /// Kept in one place so the boot-time audit emits a complete inventory.
@@ -293,26 +237,6 @@ mod audit_explicit_auth_routes_tests {
     }
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub fn api_router(
-    db: Db,
-    engine: PolicyEngine,
-    config: crate::config::Config,
-    broadcast_tx: crate::server::ws::BroadcastTx,
-    batch_buffer: crate::server::ws::BatchBuffer,
-    health_registry: Option<Arc<HealthRegistry>>,
-) -> Router {
-    api_router_with_pg_for_tests(
-        db,
-        engine,
-        config,
-        broadcast_tx,
-        batch_buffer,
-        health_registry,
-        None,
-    )
-}
-
 // reason: PG-pool router constructor used only by the `#[cfg(test)]` router
 // builders in health_api/route tests; the lib build sees no caller. See #3034.
 #[allow(dead_code)]
@@ -345,8 +269,6 @@ pub fn api_router_with_pg_and_cluster(
     cluster_instance_id: Option<String>,
 ) -> Router {
     let state = AppState {
-        #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-        legacy_db_override: None,
         pg_pool,
         engine,
         config: Arc::new(config),
@@ -356,35 +278,10 @@ pub fn api_router_with_pg_and_cluster(
         cluster_instance_id,
     };
 
-    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     crate::services::discord::monitoring_status::spawn_expiry_sweeper(
         state::global_monitoring_store(),
         state.health_registry.clone(),
     );
-
-    compose_api_router(state.clone()).with_state(state)
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub fn api_router_with_pg_for_tests(
-    db: Db,
-    engine: PolicyEngine,
-    config: crate::config::Config,
-    broadcast_tx: crate::server::ws::BroadcastTx,
-    batch_buffer: crate::server::ws::BatchBuffer,
-    health_registry: Option<Arc<HealthRegistry>>,
-    pg_pool: Option<sqlx::PgPool>,
-) -> Router {
-    let state = AppState {
-        legacy_db_override: Some(db),
-        pg_pool,
-        engine,
-        config: Arc::new(config),
-        broadcast_tx,
-        batch_buffer,
-        health_registry,
-        cluster_instance_id: None,
-    };
 
     compose_api_router(state.clone()).with_state(state)
 }
@@ -436,6 +333,3 @@ fn response_is_json(response: &Response) -> bool {
         .map(|value| value.starts_with("application/json"))
         .unwrap_or(false)
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod routes_tests;

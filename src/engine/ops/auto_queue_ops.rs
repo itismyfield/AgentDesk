@@ -343,10 +343,6 @@ fn pause_run_raw(
     }
 
     let Some(pool) = pg_pool else {
-        #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-        if let Some(db) = db {
-            return update_run_status_raw_sqlite(db, run_id, "paused");
-        }
         let _ = db;
         return r#"{"error":"postgres backend is required for autoQueue.pauseRun"}"#.to_string();
     };
@@ -379,10 +375,6 @@ fn resume_run_raw(
     }
 
     let Some(pool) = pg_pool else {
-        #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-        if let Some(db) = db {
-            return update_run_status_raw_sqlite(db, run_id, "active");
-        }
         let _ = db;
         return r#"{"error":"postgres backend is required for autoQueue.resumeRun"}"#.to_string();
     };
@@ -430,10 +422,6 @@ fn complete_run_raw(
         .unwrap_or(false);
 
     let Some(pool) = pg_pool else {
-        #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-        if let Some(db) = db {
-            return update_run_status_raw_sqlite(db, run_id, "completed");
-        }
         let _ = db;
         return r#"{"error":"postgres backend is required for autoQueue.completeRun"}"#.to_string();
     };
@@ -457,24 +445,6 @@ fn complete_run_raw(
             "error": error.to_string()
         })
         .to_string(),
-    }
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn update_run_status_raw_sqlite(db: &crate::db::Db, run_id: &str, status: &str) -> String {
-    let result = db
-        .separate_conn()
-        .map_err(|error| format!("open sqlite auto-queue run connection: {error}"))
-        .and_then(|conn| {
-            conn.execute(
-                "UPDATE auto_queue_runs SET status = ?1 WHERE id = ?2",
-                sqlite_test::params![status, run_id],
-            )
-            .map_err(|error| format!("update sqlite auto-queue run {run_id}: {error}"))
-        });
-    match result {
-        Ok(changed) => serde_json::json!({ "ok": true, "changed": changed }).to_string(),
-        Err(error) => serde_json::json!({ "error": error }).to_string(),
     }
 }
 
@@ -532,10 +502,6 @@ fn save_phase_gate_state_raw(
     };
 
     let Some(pool) = pg_pool else {
-        #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-        if let Some(db) = db {
-            return save_phase_gate_state_raw_sqlite(db, run_id, phase, &write);
-        }
         let _ = db;
         return r#"{"error":"postgres backend is required for autoQueue.savePhaseGateState"}"#
             .to_string();
@@ -567,10 +533,6 @@ fn clear_phase_gate_state_raw(
     phase: i64,
 ) -> String {
     let Some(pool) = pg_pool else {
-        #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-        if let Some(db) = db {
-            return clear_phase_gate_state_raw_sqlite(db, run_id, phase);
-        }
         let _ = db;
         return r#"{"error":"postgres backend is required for autoQueue.clearPhaseGateState"}"#
             .to_string();
@@ -590,112 +552,6 @@ fn clear_phase_gate_state_raw(
             "error": error.to_string()
         })
         .to_string(),
-    }
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn save_phase_gate_state_raw_sqlite(
-    db: &crate::db::Db,
-    run_id: &str,
-    phase: i64,
-    state: &crate::db::auto_queue::PhaseGateStateWrite,
-) -> String {
-    let result = (|| {
-        let conn = db
-            .separate_conn()
-            .map_err(|error| format!("open sqlite phase gate connection: {error}"))?;
-        let dispatch_ids = state
-            .dispatch_ids
-            .iter()
-            .filter_map(|dispatch_id| {
-                conn.query_row(
-                    "SELECT id FROM task_dispatches WHERE id = ?1",
-                    [dispatch_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .ok()
-            })
-            .collect::<Vec<_>>();
-        let removed_stale_rows = conn
-            .execute(
-                "DELETE FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
-                sqlite_test::params![run_id, phase],
-            )
-            .map_err(|error| format!("delete sqlite phase gate rows for {run_id}: {error}"))?;
-        let final_phase = if state.final_phase { 1 } else { 0 };
-        if dispatch_ids.is_empty() {
-            conn.execute(
-                "INSERT INTO auto_queue_phase_gates (
-                    run_id, phase, status, verdict, dispatch_id, pass_verdict,
-                    next_phase, final_phase, anchor_card_id, failure_reason, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, COALESCE(?10, datetime('now')), datetime('now'))",
-                sqlite_test::params![
-                    run_id,
-                    phase,
-                    state.status,
-                    state.verdict,
-                    state.pass_verdict,
-                    state.next_phase,
-                    final_phase,
-                    state.anchor_card_id,
-                    state.failure_reason,
-                    state.created_at,
-                ],
-            )
-            .map_err(|error| format!("insert sqlite phase gate row for {run_id}: {error}"))?;
-        } else {
-            for dispatch_id in &dispatch_ids {
-                conn.execute(
-                    "INSERT INTO auto_queue_phase_gates (
-                        run_id, phase, status, verdict, dispatch_id, pass_verdict,
-                        next_phase, final_phase, anchor_card_id, failure_reason, created_at, updated_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, COALESCE(?11, datetime('now')), datetime('now'))",
-                    sqlite_test::params![
-                        run_id,
-                        phase,
-                        state.status,
-                        state.verdict,
-                        dispatch_id,
-                        state.pass_verdict,
-                        state.next_phase,
-                        final_phase,
-                        state.anchor_card_id,
-                        state.failure_reason,
-                        state.created_at,
-                    ],
-                )
-                .map_err(|error| {
-                    format!("insert sqlite phase gate row for dispatch {dispatch_id}: {error}")
-                })?;
-            }
-        }
-        Ok::<_, String>(
-            serde_json::json!({
-                "ok": true,
-                "dispatch_ids": dispatch_ids,
-                "removed_stale_rows": removed_stale_rows,
-            })
-            .to_string(),
-        )
-    })();
-    result.unwrap_or_else(|error| serde_json::json!({ "error": error }).to_string())
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn clear_phase_gate_state_raw_sqlite(db: &crate::db::Db, run_id: &str, phase: i64) -> String {
-    let result = db
-        .separate_conn()
-        .map_err(|error| format!("open sqlite clear phase gate connection: {error}"))
-        .and_then(|conn| {
-            conn.execute(
-                "DELETE FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
-                sqlite_test::params![run_id, phase],
-            )
-            .map_err(|error| format!("clear sqlite phase gate rows for {run_id}: {error}"))
-        });
-    match result {
-        Ok(changed) => serde_json::json!({ "ok": true, "changed": changed }).to_string(),
-        Err(error) => serde_json::json!({ "error": error }).to_string(),
     }
 }
 

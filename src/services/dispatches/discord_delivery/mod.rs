@@ -22,7 +22,3 @@ pub(crate) use transport::{
     post_dispatch_message_to_channel_with_delivery, post_raw_message_once,
     reset_stale_slot_thread_if_needed,
 };
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) use transport::{
-    add_thread_member_to_dispatch_thread, post_dispatch_message_to_channel,
-};

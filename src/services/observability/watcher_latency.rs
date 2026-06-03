@@ -193,17 +193,6 @@ impl WatcherLatencyMetrics {
         h.last_sweep_at = Some(now);
     }
 
-    /// Force a sweep at `now`. Test-only escape hatch used by unit tests to
-    /// deterministically advance the timeout window without sleeping.
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    fn sweep_at(&self, now: Instant) {
-        // Bypass the throttle for tests.
-        if let Ok(mut h) = self.histogram.lock() {
-            h.last_sweep_at = None;
-        }
-        self.maybe_sweep(now);
-    }
-
     /// Serializable snapshot for `/api/analytics/observability` output.
     pub fn snapshot(&self) -> WatcherLatencySnapshot {
         let now = Instant::now();
@@ -239,16 +228,6 @@ impl WatcherLatencyMetrics {
                 sum_seconds,
                 count,
             },
-        }
-    }
-
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    pub fn reset(&self) {
-        self.pending.clear();
-        self.attach_total.store(0, Ordering::Relaxed);
-        self.timeout_total.store(0, Ordering::Relaxed);
-        if let Ok(mut h) = self.histogram.lock() {
-            *h = HistogramState::default();
         }
     }
 }
@@ -302,146 +281,4 @@ pub fn record_first_relay(channel_id: u64) {
 /// Convenience: get the process-wide snapshot.
 pub fn snapshot() -> WatcherLatencySnapshot {
     global().snapshot()
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub fn reset_for_tests() {
-    global().reset();
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn attach_then_first_relay_records_histogram_observation() {
-        let m = WatcherLatencyMetrics::new();
-        let t0 = Instant::now();
-        m.record_attach_at(42, t0);
-        // 1.5 s elapsed → falls into the `<= 2.0` bucket.
-        m.record_first_relay_at(42, t0 + Duration::from_millis(1_500));
-
-        let snap = m.snapshot();
-        assert_eq!(snap.attach_total, 1, "attach counter increments");
-        assert_eq!(
-            snap.timeout_total, 0,
-            "no timeout when relay arrives in time"
-        );
-        assert_eq!(
-            snap.histogram.count, 1,
-            "histogram observed exactly one sample"
-        );
-        assert!((snap.histogram.sum_seconds - 1.5).abs() < 1e-6);
-        assert_eq!(snap.pending_attaches, 0, "pending entry drained on relay");
-
-        // Bucket assertions: cumulative counts at the 2 s bucket and beyond
-        // should reflect the single 1.5 s observation.
-        let two_sec = snap
-            .histogram
-            .buckets
-            .iter()
-            .find(|b| (b.le_seconds - 2.0).abs() < f64::EPSILON)
-            .expect("2.0 s bucket exists");
-        assert_eq!(two_sec.cumulative_count, 1);
-        let one_sec = snap
-            .histogram
-            .buckets
-            .iter()
-            .find(|b| (b.le_seconds - 1.0).abs() < f64::EPSILON)
-            .expect("1.0 s bucket exists");
-        assert_eq!(
-            one_sec.cumulative_count, 0,
-            "1.5 s does not fall into <=1.0 bucket"
-        );
-    }
-
-    #[test]
-    fn first_relay_without_attach_is_silent_noop() {
-        let m = WatcherLatencyMetrics::new();
-        m.record_first_relay_at(7, Instant::now());
-        let snap = m.snapshot();
-        assert_eq!(snap.attach_total, 0);
-        assert_eq!(snap.timeout_total, 0);
-        assert_eq!(snap.histogram.count, 0);
-    }
-
-    #[test]
-    fn second_relay_for_same_channel_is_ignored() {
-        let m = WatcherLatencyMetrics::new();
-        let t0 = Instant::now();
-        m.record_attach_at(99, t0);
-        m.record_first_relay_at(99, t0 + Duration::from_millis(200));
-        m.record_first_relay_at(99, t0 + Duration::from_millis(900));
-        let snap = m.snapshot();
-        assert_eq!(snap.histogram.count, 1, "only the first relay counts");
-    }
-
-    #[test]
-    fn pending_attach_older_than_timeout_is_swept_into_timeout_counter() {
-        let m = WatcherLatencyMetrics::new();
-        let t0 = Instant::now();
-        m.record_attach_at(1, t0);
-        m.record_attach_at(2, t0);
-        // Advance virtual time past the 60 s window and force a sweep.
-        let later = t0 + ATTACH_TIMEOUT + Duration::from_secs(1);
-        m.sweep_at(later);
-        let snap = m.snapshot();
-        assert_eq!(snap.attach_total, 2);
-        assert_eq!(snap.timeout_total, 2);
-        assert_eq!(snap.pending_attaches, 0);
-        assert_eq!(
-            snap.histogram.count, 0,
-            "timeouts do not feed the histogram"
-        );
-    }
-
-    #[test]
-    fn late_relay_after_timeout_is_counted_as_timeout_not_histogram() {
-        let m = WatcherLatencyMetrics::new();
-        let t0 = Instant::now();
-        m.record_attach_at(5, t0);
-        // Skip the sweep — exercise the late-relay branch directly.
-        m.record_first_relay_at(5, t0 + ATTACH_TIMEOUT + Duration::from_secs(2));
-        let snap = m.snapshot();
-        assert_eq!(snap.timeout_total, 1);
-        assert_eq!(snap.histogram.count, 0);
-    }
-
-    #[test]
-    fn re_attach_replaces_previous_pending_entry() {
-        let m = WatcherLatencyMetrics::new();
-        let t0 = Instant::now();
-        m.record_attach_at(11, t0);
-        // Re-attach 5 s later. The latency should be measured from the second
-        // attach, not the first.
-        let t1 = t0 + Duration::from_secs(5);
-        m.record_attach_at(11, t1);
-        m.record_first_relay_at(11, t1 + Duration::from_millis(300));
-        let snap = m.snapshot();
-        assert_eq!(snap.attach_total, 2);
-        assert_eq!(snap.histogram.count, 1);
-        assert!((snap.histogram.sum_seconds - 0.3).abs() < 1e-6);
-    }
-
-    #[test]
-    fn snapshot_round_trip_preserves_counters_and_histogram() {
-        let m = WatcherLatencyMetrics::new();
-        let t0 = Instant::now();
-        m.record_attach_at(100, t0);
-        m.record_first_relay_at(100, t0 + Duration::from_millis(750));
-        m.record_attach_at(101, t0);
-        m.record_first_relay_at(101, t0 + Duration::from_millis(1_200));
-
-        let snap = m.snapshot();
-        assert_eq!(snap.attach_total, 2);
-        assert_eq!(snap.histogram.count, 2);
-        assert!((snap.histogram.sum_seconds - (0.75 + 1.2)).abs() < 1e-6);
-
-        // Snapshot is JSON-serializable end-to-end.
-        let json = serde_json::to_value(&snap).expect("snapshot serializes");
-        assert_eq!(json["attach_total"], 2);
-        assert_eq!(json["timeout_total"], 0);
-        assert_eq!(json["histogram"]["count"], 2);
-        assert!(json["histogram"]["buckets"].is_array());
-    }
 }

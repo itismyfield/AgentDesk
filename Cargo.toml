@@ -12,8 +12,6 @@ path = "src/lib.rs"
 name = "agentdesk"
 path = "src/main.rs"
 
-[features]
-legacy-sqlite-tests = ["dep:sqlite_test"]
 
 [lints.clippy]
 # #2954 stage-1 hard gates. Full `-D warnings` is tracked separately because
@@ -103,7 +101,6 @@ rand = "0.8"
 libc = "0.2"
 croner = "3.0.1"
 
-sqlite_test = { package = "rusqlite", version = "0.32", features = ["bundled"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

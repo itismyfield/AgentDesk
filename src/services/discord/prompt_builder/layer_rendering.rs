@@ -165,14 +165,6 @@ fn store_agent_performance_section(cache_key: String, day_bucket: i64, section: 
     }
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(super) fn reset_agent_performance_cache_for_tests() {
-    let cache = AGENT_PERFORMANCE_PROMPT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(mut guard) = cache.lock() {
-        guard.clear();
-    }
-}
-
 /// Resolve the self-feedback section for the supplied role binding using a
 /// caller-provided loader. Extracted so tests can drive the cache without
 /// touching the live database (#1103).

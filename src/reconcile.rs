@@ -358,13 +358,6 @@ pub(crate) async fn reconcile_boot_runtime(
     let mut stats = if let Some(pool) = pg_pool {
         reconcile_boot_db_pg(pool).await?
     } else {
-        #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-        {
-            reconcile_boot_db_sqlite(
-                db.ok_or_else(|| anyhow!("SQLite db required for test boot reconcile"))?,
-            )?
-        }
-        #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
         {
             return Err(anyhow!("Postgres pool required for boot reconcile"));
         }
@@ -1075,75 +1068,6 @@ pub(crate) async fn reconcile_auto_queue_pending_delivery_orphans_pg(
     }
 
     Ok(stats)
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn reconcile_boot_db_sqlite(db: &Db) -> Result<BootReconcileStats> {
-    let conn = db
-        .separate_conn()
-        .map_err(|error| anyhow!("open sqlite boot reconcile connection: {error}"))?;
-    let stale_processing_outbox_reset = conn
-        .execute(
-            "UPDATE dispatch_outbox
-                SET status = 'pending',
-                    claimed_at = NULL,
-                    claim_owner = NULL
-              WHERE status = 'processing'",
-            [],
-        )
-        .unwrap_or(0);
-    let stale_dispatch_reservations_cleared = conn
-        .execute(
-            "DELETE FROM kv_meta WHERE key LIKE 'dispatch_reserving:%'",
-            [],
-        )
-        .unwrap_or(0);
-    let missing_notify_outbox_backfilled = conn
-        .execute(
-            "INSERT INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title, status)
-             SELECT td.id, 'notify', td.to_agent_id, td.kanban_card_id, td.title, 'pending'
-             FROM task_dispatches td
-             WHERE td.status IN ('pending', 'dispatched')
-               AND NOT EXISTS (
-                 SELECT 1 FROM dispatch_outbox o
-                 WHERE o.dispatch_id = td.id AND o.action = 'notify'
-               )",
-            [],
-        )
-        .map_err(|error| anyhow!("backfill sqlite missing notify outbox: {error}"))?;
-    let broken_auto_queue_entries_reset = conn
-        .execute(
-            "UPDATE auto_queue_entries
-             SET status = 'pending',
-                 dispatch_id = NULL,
-                 slot_index = NULL,
-                 dispatched_at = NULL,
-                 completed_at = NULL
-             WHERE status = 'dispatched'
-               AND (
-                 dispatch_id IS NULL
-                 OR TRIM(dispatch_id) = ''
-                 OR NOT EXISTS (
-                   SELECT 1
-                   FROM task_dispatches td
-                   WHERE td.id = auto_queue_entries.dispatch_id
-                     AND td.status NOT IN ('cancelled', 'failed', 'completed')
-                 )
-               )",
-            [],
-        )
-        .map_err(|error| anyhow!("reset sqlite broken auto-queue entries: {error}"))?;
-
-    Ok(BootReconcileStats {
-        stale_processing_outbox_reset,
-        stale_dispatch_reservations_cleared,
-        missing_notify_outbox_backfilled,
-        broken_auto_queue_entries_reset,
-        dispatch_delivery_event_mismatches: 0,
-        stale_channel_thread_map_entries_cleared: 0,
-        missing_review_dispatches_refired: 0,
-        completed_queue_review_drift_recovered: 0,
-    })
 }
 
 async fn backfill_missing_notify_outbox_pg(pool: &PgPool) -> Result<usize> {
@@ -2788,95 +2712,5 @@ mod dispatch_delivery_reconcile_tests {
 
         pool.close().await;
         pg_db.drop().await;
-    }
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::*;
-
-    // ------------------------------------------------------------------
-    // #1076 (905-7): zombie reconcile sweep tests
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn zombie_sweep_removes_old_inflight_files_without_restart_mode() {
-        use std::fs;
-        let tmp = tempfile::tempdir().unwrap();
-        let provider_dir = tmp.path().join("claude");
-        fs::create_dir_all(&provider_dir).unwrap();
-
-        // File with restart_mode = null -> must be removed once max_age=0.
-        let stale = provider_dir.join("stale.json");
-        fs::write(
-            &stale,
-            "{\"channel_id\":1,\"restart_mode\":null,\"updated_at\":\"x\"}",
-        )
-        .unwrap();
-
-        // File WITH restart_mode -> must be preserved even when max_age=0.
-        let planned = provider_dir.join("planned.json");
-        fs::write(
-            &planned,
-            "{\"channel_id\":2,\"restart_mode\":\"DrainRestart\",\"updated_at\":\"x\"}",
-        )
-        .unwrap();
-
-        // Non-json file -> ignored.
-        let stray = provider_dir.join("junk.tmp");
-        fs::write(&stray, "nope").unwrap();
-
-        // max_age = 0 -> every file is "stale" by age, so the restart_mode
-        // branch is the only thing protecting `planned.json`.
-        let removed = sweep_stale_inflight_files_at(tmp.path(), Duration::from_secs(0));
-        assert_eq!(
-            removed, 1,
-            "only the stale unplanned file should be removed"
-        );
-        assert!(!stale.exists(), "stale file must be gone");
-        assert!(planned.exists(), "planned-restart file must survive");
-        assert!(stray.exists(), "non-json files must be ignored");
-    }
-
-    #[test]
-    fn zombie_sweep_preserves_everything_when_max_age_is_far_in_future() {
-        use std::fs;
-        let tmp = tempfile::tempdir().unwrap();
-        let provider_dir = tmp.path().join("codex");
-        fs::create_dir_all(&provider_dir).unwrap();
-        let a = provider_dir.join("a.json");
-        fs::write(&a, "{\"restart_mode\":null}").unwrap();
-        let removed =
-            sweep_stale_inflight_files_at(tmp.path(), Duration::from_secs(365 * 24 * 60 * 60));
-        assert_eq!(removed, 0);
-        assert!(a.exists());
-    }
-
-    #[test]
-    fn zombie_sweep_removes_stale_discord_uploads() {
-        use std::fs;
-        let tmp = tempfile::tempdir().unwrap();
-        let channel_dir = tmp.path().join("999");
-        fs::create_dir_all(&channel_dir).unwrap();
-        let f = channel_dir.join("old.png");
-        fs::write(&f, b"old").unwrap();
-
-        // max_age = 0 -> file qualifies as stale.
-        let removed = sweep_stale_discord_uploads_at(tmp.path(), Duration::from_secs(0));
-        assert_eq!(removed, 1);
-        assert!(!f.exists());
-        // The empty channel dir is pruned.
-        assert!(!channel_dir.exists());
-    }
-
-    #[test]
-    fn zombie_stats_total_sums_all_buckets() {
-        let stats = ZombieReconcileStats {
-            orphan_tmux_killed: 1,
-            stale_inflight_removed: 2,
-            zombie_dashmap_trimmed: 3,
-            stale_uploads_removed: 4,
-        };
-        assert_eq!(stats.total(), 10);
     }
 }

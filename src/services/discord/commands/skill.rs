@@ -399,20 +399,3 @@ pub(in crate::services::discord) async fn cmd_cc(
 ) -> Result<(), Error> {
     run_skill_slash_command(ctx, "/cc", skill, args).await
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::build_provider_skill_prompt;
-    use crate::services::provider::ProviderKind;
-
-    #[test]
-    fn qwen_skill_prompt_variant_mentions_qwen_runtime_skills() {
-        let prompt =
-            build_provider_skill_prompt(&ProviderKind::Qwen, "deploy", "--dry-run").unwrap();
-
-        assert!(prompt.contains("local Qwen skill `/deploy`"));
-        assert!(prompt.contains("`.qwen/skills`"));
-        assert!(prompt.contains("Load its `SKILL.md` first"));
-        assert!(prompt.contains("--dry-run"));
-    }
-}

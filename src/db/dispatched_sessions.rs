@@ -20,22 +20,6 @@ pub(crate) async fn load_dispatch_thread_id_pg(pool: &PgPool, dispatch_id: &str)
     normalize_thread_channel_id(thread_id.as_deref())
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) fn load_dispatch_thread_id_sqlite(
-    conn: &sqlite_test::Connection,
-    dispatch_id: &str,
-) -> Option<String> {
-    let thread_id: Option<String> = conn
-        .query_row(
-            "SELECT thread_id FROM task_dispatches WHERE id = ?1",
-            [dispatch_id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten();
-    normalize_thread_channel_id(thread_id.as_deref())
-}
-
 #[derive(Debug)]
 pub(crate) struct RetryDispatchMeta {
     pub(crate) card_id: String,
@@ -1920,66 +1904,6 @@ pub(crate) async fn upsert_hook_session_pg(
             params.session_key
         )
     })
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) fn upsert_hook_session_sqlite_for_tests(
-    conn: &sqlite_test::Connection,
-    params: HookSessionUpsert<'_>,
-) -> Result<(), String> {
-    conn.execute(
-        "INSERT INTO sessions (
-            session_key,
-            instance_id,
-            agent_id,
-            provider,
-            status,
-            session_info,
-            model,
-            tokens,
-            cwd,
-            active_dispatch_id,
-            thread_channel_id,
-            claude_session_id,
-            raw_provider_session_id,
-            last_heartbeat
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, datetime('now'))
-         ON CONFLICT(session_key) DO UPDATE SET
-            status = excluded.status,
-            instance_id = COALESCE(NULLIF(TRIM(excluded.instance_id), ''), sessions.instance_id),
-            provider = excluded.provider,
-            session_info = COALESCE(excluded.session_info, sessions.session_info),
-            model = COALESCE(excluded.model, sessions.model),
-            tokens = excluded.tokens,
-            cwd = COALESCE(excluded.cwd, sessions.cwd),
-            active_dispatch_id = CASE
-              WHEN lower(excluded.status) IN ('disconnected', 'aborted') THEN NULL
-              WHEN excluded.active_dispatch_id IS NOT NULL THEN excluded.active_dispatch_id
-              ELSE sessions.active_dispatch_id
-            END,
-            agent_id = COALESCE(NULLIF(TRIM(excluded.agent_id), ''), NULLIF(TRIM(sessions.agent_id), '')),
-            thread_channel_id = COALESCE(excluded.thread_channel_id, sessions.thread_channel_id),
-            claude_session_id = COALESCE(excluded.claude_session_id, sessions.claude_session_id),
-            raw_provider_session_id = COALESCE(excluded.raw_provider_session_id, sessions.raw_provider_session_id),
-            last_heartbeat = datetime('now')",
-        sqlite_test::params![
-            params.session_key,
-            params.instance_id,
-            params.agent_id,
-            params.provider,
-            params.status,
-            params.session_info,
-            params.model,
-            params.tokens,
-            params.cwd,
-            params.active_dispatch_id,
-            params.thread_channel_id,
-            params.claude_session_id,
-            params.raw_provider_session_id,
-        ],
-    )
-    .map(|_| ())
-    .map_err(|error| format!("{error}"))
 }
 
 pub(crate) async fn cleanup_disconnected_sessions_pg(pool: &PgPool) -> Result<u64, String> {

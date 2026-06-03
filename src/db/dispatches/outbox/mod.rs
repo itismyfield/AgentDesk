@@ -18,9 +18,6 @@ mod model;
 mod notify;
 mod retry;
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) use super::latest_completed_review_provider_on_conn;
-
 pub(crate) use claim::{
     mark_dispatch_outbox_claimed_pg, select_pending_dispatch_outbox_claim_candidates_pg,
     select_stale_dispatch_outbox_claim_owner_candidates_pg, update_dispatch_outbox_claim_owner_pg,

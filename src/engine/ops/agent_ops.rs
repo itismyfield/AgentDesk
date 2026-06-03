@@ -8,21 +8,13 @@ use sqlx::{PgPool, Row as SqlxRow};
 // Exposes Rust channel resolution logic to JS policies so they don't
 // query legacy columns directly.
 
-pub(super) fn register_agent_ops<'js>(
-    ctx: &Ctx<'js>,
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))] db: Option<Db>,
-    pg_pool: Option<PgPool>,
-) -> JsResult<()> {
-    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
+pub(super) fn register_agent_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
     let db: Option<Db> = None;
 
-    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     let _ = &db;
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let agents_obj = Object::new(ctx.clone())?;
 
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    let db_get = db.clone();
     let pg_get = pg_pool.clone();
     agents_obj.set(
         "__getRaw",
@@ -30,17 +22,11 @@ pub(super) fn register_agent_ops<'js>(
             if let Some(pool) = pg_get.as_ref() {
                 return agent_get_raw_pg(pool, &agent_id);
             }
-            #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-            if let Some(db_get) = db_get.as_ref() {
-                return agent_get_raw_sqlite_test(db_get, &agent_id);
-            }
             json!({ "error": "sqlite backend is unavailable" }).to_string()
         })?,
     )?;
 
     // __resolvePrimaryChannel(agentId) -> channelId | ""
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    let db_primary = db.clone();
     let pg_primary = pg_pool.clone();
     agents_obj.set(
         "__resolvePrimaryChannel",
@@ -48,25 +34,11 @@ pub(super) fn register_agent_ops<'js>(
             if let Some(pool) = pg_primary.as_ref() {
                 return resolve_agent_primary_channel_pg_raw(pool, &agent_id);
             }
-            #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-            if let Some(db_primary) = db_primary.as_ref() {
-                return match db_primary.separate_conn() {
-                    Ok(conn) => match crate::db::agents::resolve_agent_primary_channel_on_conn(
-                        &conn, &agent_id,
-                    ) {
-                        Ok(Some(ch)) => ch,
-                        _ => String::new(),
-                    },
-                    Err(_) => String::new(),
-                };
-            }
             String::new()
         })?,
     )?;
 
     // __resolveCounterModelChannel(agentId) -> channelId | ""
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    let db_counter = db.clone();
     let pg_counter = pg_pool.clone();
     agents_obj.set(
         "__resolveCounterModelChannel",
@@ -74,24 +46,11 @@ pub(super) fn register_agent_ops<'js>(
             if let Some(pool) = pg_counter.as_ref() {
                 return resolve_agent_counter_channel_pg_raw(pool, &agent_id);
             }
-            #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-            if let Some(db_counter) = db_counter.as_ref() {
-                return match db_counter.separate_conn() {
-                    Ok(conn) => crate::db::agents::load_agent_channel_bindings(&conn, &agent_id)
-                        .ok()
-                        .flatten()
-                        .and_then(|bindings| bindings.counter_model_channel())
-                        .unwrap_or_default(),
-                    Err(_) => String::new(),
-                };
-            }
             String::new()
         })?,
     )?;
 
     // __resolveDispatchChannel(agentId, dispatchType) -> channelId | ""
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    let db_dispatch = db;
     let pg_dispatch = pg_pool;
     agents_obj.set(
         "__resolveDispatchChannel",
@@ -108,25 +67,6 @@ pub(super) fn register_agent_ops<'js>(
                             Some(dispatch_type.as_str())
                         },
                     );
-                }
-                #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-                if let Some(db_dispatch) = db_dispatch.as_ref() {
-                    return match db_dispatch.separate_conn() {
-                        Ok(conn) => {
-                            let dtype = if dispatch_type.is_empty() {
-                                None
-                            } else {
-                                Some(dispatch_type.as_str())
-                            };
-                            match crate::db::agents::resolve_agent_dispatch_channel_on_conn(
-                                &conn, &agent_id, dtype,
-                            ) {
-                                Ok(Some(ch)) => ch,
-                                _ => String::new(),
-                            }
-                        }
-                        Err(_) => String::new(),
-                    };
                 }
                 String::new()
             },
@@ -167,58 +107,6 @@ pub(super) fn register_agent_ops<'js>(
     )?;
 
     Ok(())
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn agent_get_raw_sqlite_test(db: &Db, agent_id: &str) -> String {
-    use sqlite_test::OptionalExtension;
-
-    let result = (|| -> anyhow::Result<serde_json::Value> {
-        let conn = db.read_conn()?;
-        let agent = conn
-            .query_row(
-                "SELECT id, name, name_ko, department, provider, avatar_emoji, \
-                        status, xp, description, system_prompt, \
-                        discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx \
-                 FROM agents WHERE id = ?1",
-                [&agent_id],
-                |row| {
-                    let bindings = crate::db::agents::AgentChannelBindings {
-                        provider: row.get(4)?,
-                        discord_channel_id: row.get(10)?,
-                        discord_channel_alt: row.get(11)?,
-                        discord_channel_cc: row.get(12)?,
-                        discord_channel_cdx: row.get(13)?,
-                    };
-                    Ok(json!({
-                        "id": row.get::<_, String>(0)?,
-                        "name": row.get::<_, String>(1)?,
-                        "name_ko": row.get::<_, Option<String>>(2)?,
-                        "department": row.get::<_, Option<String>>(3)?,
-                        "provider": bindings.provider.clone(),
-                        "avatar_emoji": row.get::<_, Option<String>>(5)?,
-                        "status": row.get::<_, Option<String>>(6)?,
-                        "xp": row.get::<_, Option<i64>>(7)?,
-                        "description": row.get::<_, Option<String>>(8)?,
-                        "system_prompt": row.get::<_, Option<String>>(9)?,
-                        "discord_channel_id": bindings.discord_channel_id.clone(),
-                        "discord_channel_alt": bindings.discord_channel_alt.clone(),
-                        "discord_channel_cc": bindings.discord_channel_cc.clone(),
-                        "discord_channel_cdx": bindings.discord_channel_cdx.clone(),
-                        "primary_channel": bindings.primary_channel(),
-                        "counter_model_channel": bindings.counter_model_channel(),
-                        "all_channels": bindings.all_channels(),
-                    }))
-                },
-            )
-            .optional()?;
-        Ok(json!({ "agent": agent }))
-    })();
-
-    match result {
-        Ok(value) => value.to_string(),
-        Err(err) => json!({ "error": err.to_string() }).to_string(),
-    }
 }
 
 fn agent_get_raw_pg(pool: &PgPool, agent_id: &str) -> String {

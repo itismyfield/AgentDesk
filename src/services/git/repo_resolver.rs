@@ -227,28 +227,3 @@ pub fn resolve_repo_dir_for_target(target_repo: Option<&str>) -> Result<Option<S
 
     resolve_repo_dir_for_id(Some(requested))
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolve_repo_dir_returns_some() {
-        let dir = resolve_repo_dir();
-        assert!(dir.is_some(), "resolve_repo_dir should return Some");
-    }
-
-    #[test]
-    fn looks_like_explicit_repo_path_accepts_windows_verbatim_paths() {
-        assert!(looks_like_explicit_repo_path(r"\\?\C:\tmp\repo"));
-        assert!(looks_like_explicit_repo_path(r"\\?\UNC\server\share\repo"));
-    }
-
-    #[test]
-    fn resolve_repo_dir_env_override() {
-        unsafe { std::env::set_var("AGENTDESK_REPO_DIR", "/tmp/fake-repo") };
-        let dir = resolve_repo_dir();
-        unsafe { std::env::remove_var("AGENTDESK_REPO_DIR") };
-        assert_eq!(dir, Some("/tmp/fake-repo".to_string()));
-    }
-}

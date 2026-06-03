@@ -95,17 +95,3 @@ pub fn capture_process_dump(pid: u32, output_path: &str) -> Result<(), String> {
         Err("Process dump not supported on this platform".to_string())
     }
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn capture_dump_for_self_does_not_panic() {
-        let pid = std::process::id();
-        let tmp = std::env::temp_dir().join("adk-dump-test.txt");
-        // This may fail (permissions, tool not available) but should not panic
-        let _ = capture_process_dump(pid, &tmp.display().to_string());
-        let _ = std::fs::remove_file(&tmp);
-    }
-}

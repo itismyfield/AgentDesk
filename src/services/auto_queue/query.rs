@@ -17,61 +17,6 @@ pub(super) fn pg_unavailable_response() -> (StatusCode, Json<serde_json::Value>)
     )
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(super) fn slot_thread_map_has_bindings(
-    conn: &sqlite_test::Connection,
-    agent_id: &str,
-    slot_index: i64,
-) -> bool {
-    let raw_map: Option<String> = conn
-        .query_row(
-            "SELECT thread_id_map
-             FROM auto_queue_slots
-             WHERE agent_id = ?1 AND slot_index = ?2",
-            sqlite_test::params![agent_id, slot_index],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten();
-    raw_map
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|value| value.as_object().cloned())
-        .map(|map| {
-            map.values().any(|value| {
-                value
-                    .as_str()
-                    .map(|raw| !raw.trim().is_empty())
-                    .or_else(|| value.as_u64().map(|_| true))
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(super) fn slot_has_dispatch_thread_history(
-    conn: &sqlite_test::Connection,
-    agent_id: &str,
-    slot_index: i64,
-) -> bool {
-    conn.query_row(
-        "SELECT COUNT(*) > 0
-         FROM task_dispatches
-         WHERE to_agent_id = ?1
-           AND thread_id IS NOT NULL
-           AND TRIM(thread_id) != ''
-           AND CASE
-                 WHEN context IS NULL OR TRIM(context) = '' OR json_valid(context) = 0
-                     THEN NULL
-                 ELSE CAST(json_extract(context, '$.slot_index') AS INTEGER)
-               END = ?2",
-        sqlite_test::params![agent_id, slot_index],
-        |row| row.get(0),
-    )
-    .unwrap_or(false)
-}
-
 fn should_reset_slot_thread_before_reuse(
     newly_assigned: bool,
     reassigned_from_other_group: bool,
@@ -101,22 +46,6 @@ mod tests {
             false, true, false, true
         ));
     }
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(super) fn slot_requires_thread_reset_before_reuse(
-    conn: &sqlite_test::Connection,
-    agent_id: &str,
-    slot_index: i64,
-    newly_assigned: bool,
-    reassigned_from_other_group: bool,
-) -> bool {
-    should_reset_slot_thread_before_reuse(
-        newly_assigned,
-        reassigned_from_other_group,
-        slot_thread_map_has_bindings(conn, agent_id, slot_index),
-        slot_has_dispatch_thread_history(conn, agent_id, slot_index),
-    )
 }
 
 pub(super) fn json_value_kind(value: &serde_json::Value) -> &'static str {

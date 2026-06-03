@@ -779,24 +779,6 @@ pub fn set_option(session_name: &str, key: &str, value: &str) {
         .output();
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn exact_target_includes_trailing_colon_for_pane_context_commands() {
-        // `=name` alone fails for `send-keys` / `display-message` with
-        // "can't find pane"; the trailing colon makes the target resolve to
-        // the default pane in the matched session. Pin this format here so a
-        // future "simplification" doesn't silently re-break user-initiated
-        // turn-stop again.
-        assert_eq!(
-            exact_target("AgentDesk-claude-adk-cc"),
-            "=AgentDesk-claude-adk-cc:"
-        );
-    }
-}
-
 #[cfg(test)]
 mod target_safety_tests {
     use super::*;

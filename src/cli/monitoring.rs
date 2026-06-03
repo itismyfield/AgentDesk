@@ -121,21 +121,3 @@ fn encode_path_segment(value: &str) -> String {
     }
     encoded
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn encode_path_segment_leaves_uuid_like_keys_readable() {
-        assert_eq!(encode_path_segment("monitor-123_abc"), "monitor-123_abc");
-    }
-
-    #[test]
-    fn encode_path_segment_escapes_slashes_and_spaces() {
-        assert_eq!(
-            encode_path_segment("agent one/monitor"),
-            "agent%20one%2Fmonitor"
-        );
-    }
-}

@@ -17,11 +17,6 @@ pub struct SqlGuardViolation {
 }
 
 impl SqlGuardViolation {
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    pub fn target(self) -> SqlGuardTarget {
-        self.target
-    }
-
     pub fn error_message(self) -> &'static str {
         match self.target {
             SqlGuardTarget::KanbanStatus => {
@@ -191,40 +186,4 @@ fn auto_queue_entries_mutation_re() -> &'static Regex {
         )
         .unwrap()
     })
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::{SqlGuardTarget, detect_core_table_write};
-
-    #[test]
-    fn detects_task_dispatches_delete() {
-        let violation = detect_core_table_write("DELETE FROM task_dispatches WHERE id = ?")
-            .expect("task_dispatches DELETE must be guarded");
-        assert_eq!(violation.target(), SqlGuardTarget::TaskDispatches);
-        assert!(violation.error_message().contains("task_dispatches"));
-        let warning = violation.warning_message(
-            "agentdesk.db.execute",
-            "DELETE FROM task_dispatches WHERE id = ?",
-        );
-        assert!(warning.contains("[policy-sql-guard]"));
-        assert!(warning.contains("task_dispatches"));
-    }
-
-    #[test]
-    fn ignores_non_core_table_update() {
-        assert!(
-            detect_core_table_write("UPDATE kanban_cards SET blocked_reason = 'x' WHERE id = ?")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn detects_auto_queue_entry_update() {
-        let violation =
-            detect_core_table_write("UPDATE auto_queue_entries SET status = 'done' WHERE id = ?")
-                .expect("auto_queue_entries UPDATE must be guarded");
-        assert_eq!(violation.target(), SqlGuardTarget::AutoQueueEntries);
-        assert!(violation.error_message().contains("auto_queue_entries"));
-    }
 }

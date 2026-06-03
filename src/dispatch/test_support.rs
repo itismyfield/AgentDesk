@@ -1,6 +1,3 @@
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use crate::db::Db;
-
 pub(crate) struct DispatchPostgresTestDb {
     _lock: crate::db::postgres::PostgresTestLifecycleGuard,
     admin_url: String,
@@ -113,53 +110,4 @@ pub(crate) async fn seed_pg_dispatch(pool: &sqlx::PgPool, dispatch_id: &str, tit
     .execute(pool)
     .await
     .unwrap_or_else(|err| panic!("seed postgres dispatch {dispatch_id}: {err}"));
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) fn test_db() -> Db {
-    let conn = sqlite_test::Connection::open_in_memory().unwrap();
-    conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-    crate::db::schema::migrate(&conn).unwrap();
-    let db = crate::db::wrap_conn(conn);
-    // Seed common test agents with valid primary/alternate channels so the
-    // canonical dispatch target validation can run in unit tests.
-    {
-        let c = db.separate_conn().unwrap();
-        c.execute_batch(
-            "INSERT OR IGNORE INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '111', '222');
-             INSERT OR IGNORE INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-2', 'Agent 2', '333', '444');"
-        ).unwrap();
-    }
-    db
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) fn seed_card(db: &Db, card_id: &str, status: &str) {
-    let conn = db.separate_conn().unwrap();
-    conn.execute(
-        "INSERT INTO kanban_cards (id, title, status, created_at, updated_at) VALUES (?1, 'Test Card', ?2, datetime('now'), datetime('now'))",
-        sqlite_test::params![card_id, status],
-    )
-    .unwrap();
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) fn load_dispatch_events(
-    conn: &sqlite_test::Connection,
-    dispatch_id: &str,
-) -> Vec<(Option<String>, String, String)> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT from_status, to_status, transition_source
-             FROM dispatch_events
-             WHERE dispatch_id = ?1
-             ORDER BY id ASC",
-        )
-        .unwrap();
-    stmt.query_map([dispatch_id], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-    })
-    .unwrap()
-    .filter_map(|row| row.ok())
-    .collect()
 }

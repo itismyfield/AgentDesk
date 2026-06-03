@@ -11,9 +11,6 @@ mod terminal_delivery;
 mod tmux_runtime;
 mod turn_analytics;
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests;
-
 use super::gateway::TurnGateway;
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::*;
@@ -3249,12 +3246,6 @@ fn maybe_refresh_active_turn_activity_heartbeat_at(
     };
     let thread_channel_id = active_turn_thread_channel_id(adk_session_name, inflight_state);
 
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    let legacy_db = {
-        let SharedData { sqlite, .. } = shared;
-        sqlite.as_ref()
-    };
-    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     let legacy_db = None::<&crate::db::Db>;
 
     if super::tmux::refresh_session_heartbeat_from_tmux_output(
@@ -3697,13 +3688,6 @@ pub(super) fn persist_turn_analytics_row_with_handles(
     };
 
     let Some(pg_pool) = pg_pool else {
-        #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-        if let Some(db) = _db {
-            if let Err(error) = crate::db::turns::upsert_turn_owned_sqlite(db, &entry) {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!("  [{ts}] ⚠ failed to persist sqlite turn analytics row: {error}");
-            }
-        }
         return;
     };
     if let Ok(runtime) = tokio::runtime::Handle::try_current() {
@@ -7243,30 +7227,6 @@ pub(super) fn spawn_turn_bridge(
                             "[turn_bridge] failed to cancel dispatch in postgres; preserving inflight for cleanup retry",
                         );
                         preserve_inflight_for_cleanup_retry = true;
-                    }
-                } else {
-                    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-                    if let Some(db) = None::<&crate::db::Db> {
-                        if let Ok(conn) = db.lock() {
-                            if let Err(error) =
-                                crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
-                                    &conn,
-                                    dispatch_id,
-                                    Some(cancel_source.as_str()),
-                                )
-                            {
-                                tracing::warn!(
-                                    "[turn_bridge] failed to cancel dispatch {} during cancelled turn cleanup: {}",
-                                    dispatch_id,
-                                    error
-                                );
-                            }
-                        } else {
-                            tracing::warn!(
-                                "[turn_bridge] failed to lock DB for cancelled turn cleanup on dispatch {}",
-                                dispatch_id
-                            );
-                        }
                     }
                 }
             }

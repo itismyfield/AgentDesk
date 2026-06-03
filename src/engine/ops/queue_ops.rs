@@ -3,31 +3,19 @@ use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use serde_json::json;
 use sqlx::PgPool;
 
-pub(super) fn register_queue_ops<'js>(
-    ctx: &Ctx<'js>,
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))] db: Option<Db>,
-    pg_pool: Option<PgPool>,
-) -> JsResult<()> {
-    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
+pub(super) fn register_queue_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
     let db: Option<Db> = None;
 
-    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     let _ = &db;
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let queue_obj = Object::new(ctx.clone())?;
 
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    let db_status = db;
     let pg_status = pg_pool;
     queue_obj.set(
         "__statusRaw",
         Function::new(ctx.clone(), move || -> String {
             if let Some(pool) = pg_status.as_ref() {
                 return queue_status_raw_pg(pool);
-            }
-            #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-            if let Some(db_status) = db_status.as_ref() {
-                return queue_status_raw_sqlite_test(db_status);
             }
             json!({ "error": "sqlite backend is unavailable" }).to_string()
         })?,
@@ -110,78 +98,6 @@ fn queue_status_raw_pg(pool: &PgPool) -> String {
     match result {
         Ok(value) => value,
         Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
-    }
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn queue_status_raw_sqlite_test(db: &Db) -> String {
-    let result = (|| -> anyhow::Result<serde_json::Value> {
-        let conn = db.read_conn()?;
-        let count = |sql: &str| -> anyhow::Result<i64> {
-            conn.query_row(sql, [], |row| row.get(0))
-                .map_err(anyhow::Error::from)
-        };
-        let table_exists = |table: &str| -> anyhow::Result<bool> {
-            conn.query_row(
-                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-                [table],
-                |row| row.get(0),
-            )
-            .map_err(anyhow::Error::from)
-        };
-        let has_auto_runs = table_exists("auto_queue_runs")?;
-        let has_auto_entries = table_exists("auto_queue_entries")?;
-
-        Ok(json!({
-            "dispatches": {
-                "pending": count("SELECT COUNT(*) FROM task_dispatches WHERE status = 'pending'")?,
-                "dispatched": count("SELECT COUNT(*) FROM task_dispatches WHERE status = 'dispatched'")?,
-            },
-            "legacy_dispatch_queue": {
-                "queued": count("SELECT COUNT(*) FROM dispatch_queue")?,
-            },
-            "message_outbox": {
-                "pending": count("SELECT COUNT(*) FROM message_outbox WHERE status = 'pending'")?,
-                "failed": count("SELECT COUNT(*) FROM message_outbox WHERE status = 'failed'")?,
-            },
-            "dispatch_outbox": {
-                "pending": count("SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'pending'")?,
-                "processing": count("SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'processing'")?,
-                "failed": count("SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'failed'")?,
-            },
-            "auto_queue": {
-                "active_runs": if has_auto_runs {
-                    count("SELECT COUNT(*) FROM auto_queue_runs WHERE status = 'active'")?
-                } else {
-                    0
-                },
-                "paused_runs": if has_auto_runs {
-                    count("SELECT COUNT(*) FROM auto_queue_runs WHERE status = 'paused'")?
-                } else {
-                    0
-                },
-                "pending_entries": if has_auto_entries {
-                    count("SELECT COUNT(*) FROM auto_queue_entries WHERE status = 'pending'")?
-                } else {
-                    0
-                },
-                "dispatched_entries": if has_auto_entries {
-                    count("SELECT COUNT(*) FROM auto_queue_entries WHERE status = 'dispatched'")?
-                } else {
-                    0
-                },
-                "done_entries": if has_auto_entries {
-                    count("SELECT COUNT(*) FROM auto_queue_entries WHERE status = 'done'")?
-                } else {
-                    0
-                },
-            }
-        }))
-    })();
-
-    match result {
-        Ok(value) => value.to_string(),
-        Err(err) => json!({ "error": err.to_string() }).to_string(),
     }
 }
 

@@ -86,17 +86,6 @@ impl ActivateCardState {
                 Some("pending") | Some("dispatched")
             )
     }
-
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    pub(super) fn is_terminal(&self, conn: &sqlite_test::Connection) -> bool {
-        crate::pipeline::ensure_loaded();
-        crate::pipeline::resolve_for_card(
-            conn,
-            self.repo_id.as_deref(),
-            self.assigned_agent_id.as_deref(),
-        )
-        .is_terminal(&self.status)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -139,63 +128,6 @@ pub(super) struct RestoreDispatchAttemptResult {
     pub(super) created_dispatch: bool,
     pub(super) rebound_slot: bool,
     pub(super) unbound_dispatch: bool,
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(super) fn load_activate_card_state(
-    conn: &sqlite_test::Connection,
-    card_id: &str,
-    entry_id: &str,
-) -> sqlite_test::Result<ActivateCardState> {
-    let (status, title, metadata, latest_dispatch_id, repo_id, assigned_agent_id): (
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) = conn.query_row(
-        "SELECT status, title, metadata, latest_dispatch_id, repo_id, assigned_agent_id
-         FROM kanban_cards
-         WHERE id = ?1",
-        [card_id],
-        |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-            ))
-        },
-    )?;
-    let latest_dispatch_status = latest_dispatch_id.as_deref().and_then(|dispatch_id| {
-        conn.query_row(
-            "SELECT status FROM task_dispatches WHERE id = ?1",
-            [dispatch_id],
-            |row| row.get(0),
-        )
-        .ok()
-    });
-    let entry_status = conn
-        .query_row(
-            "SELECT status FROM auto_queue_entries WHERE id = ?1",
-            [entry_id],
-            |row| row.get(0),
-        )
-        .unwrap_or_else(|_| "pending".to_string());
-
-    Ok(ActivateCardState {
-        status,
-        title,
-        metadata,
-        latest_dispatch_id,
-        latest_dispatch_status,
-        entry_status,
-        repo_id,
-        assigned_agent_id,
-    })
 }
 
 pub(super) async fn load_activate_card_state_pg(

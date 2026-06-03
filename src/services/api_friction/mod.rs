@@ -21,13 +21,3 @@ pub(crate) use self::markers::{
 };
 #[allow(unused_imports)]
 pub(crate) use self::patterns::ApiFrictionPattern;
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use self::patterns::{
-    API_FRICTION_MIN_REPEAT_COUNT, DEFAULT_PATTERN_LIMIT, load_pattern_candidates_pg,
-};
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use self::storage::load_dispatch_source_context_pg;
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests;

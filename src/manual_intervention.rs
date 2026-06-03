@@ -33,33 +33,3 @@ pub(crate) fn requires_manual_intervention(
 ) -> bool {
     manual_intervention_fingerprint(review_status, blocked_reason).is_some()
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pr_creating_is_benign_not_manual_intervention() {
-        // #743: `pr:creating` marks a benign in-flight create-pr handoff.
-        assert!(is_benign_blocked_reason("pr:creating"));
-        assert_eq!(
-            manual_intervention_fingerprint(None, Some("pr:creating")),
-            None
-        );
-    }
-
-    #[test]
-    fn pr_create_failed_is_not_benign() {
-        // #743: `pr:create_failed*` marks a real failure needing retry/intervention.
-        assert!(!is_benign_blocked_reason(
-            "pr:create_failed:dispatch_failed"
-        ));
-        assert!(!is_benign_blocked_reason(
-            "pr:create_failed_escalated:max_retries"
-        ));
-        assert!(requires_manual_intervention(
-            None,
-            Some("pr:create_failed:some_error")
-        ));
-    }
-}

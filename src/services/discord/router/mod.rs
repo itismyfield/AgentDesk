@@ -18,11 +18,5 @@ pub(crate) use turn_start::{
     HeadlessTurnReservation, HeadlessTurnStartError, HeadlessTurnStartOutcome,
 };
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) use message_handler::test_harness_exports as message_handler_test_harness_exports;
-
 // Re-export items used across submodules
 use thread_binding::{link_dispatch_thread, lookup_dispatch_info, verify_thread_accessible};
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests;

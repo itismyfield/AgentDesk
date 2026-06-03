@@ -136,14 +136,7 @@ async fn wait_for_turn_end(
 }
 
 fn runtime_stop_wait_timeout() -> std::time::Duration {
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    {
-        std::time::Duration::from_millis(150)
-    }
-    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
-    {
-        std::time::Duration::from_secs(3)
-    }
+    std::time::Duration::from_secs(3)
 }
 
 fn clear_persistent_inflight_for_stop(
@@ -2421,50 +2414,6 @@ async fn maybe_recover_completed_stale_leak(
 /// Always-on (`#[cfg(test)]`) because the helper has no filesystem/runtime
 /// dependencies; the legacy-sqlite-tests gate would prevent these from
 /// running in normal `cargo test --bin agentdesk` invocations.
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod global_active_cleanup_tests {
-    use super::apply_runtime_hard_stop_cleanup;
-    use crate::services::discord;
-    use crate::services::provider::{CancelToken, ProviderKind};
-    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
-    use std::sync::Arc;
-    use std::sync::atomic::Ordering;
-
-    #[tokio::test]
-    async fn hard_stop_cleanup_does_not_underflow_global_active_for_restored_mailbox() {
-        let shared = super::super::super::make_shared_data_for_tests();
-        let provider = ProviderKind::Codex;
-        let channel_id = ChannelId::new(1485506232256984);
-        let token = Arc::new(CancelToken::new());
-
-        assert!(
-            discord::mailbox_try_start_turn(
-                &shared,
-                channel_id,
-                token,
-                UserId::new(343742347365974026),
-                MessageId::new(1487795113240559704),
-            )
-            .await
-        );
-        let finish = discord::mailbox_finish_turn(&shared, &provider, channel_id).await;
-        assert!(finish.removed_token.is_some());
-        assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
-
-        apply_runtime_hard_stop_cleanup(
-            &shared,
-            &provider,
-            channel_id,
-            &finish,
-            "hard_stop_cleanup_does_not_underflow_global_active_for_restored_mailbox",
-            true,
-        )
-        .await;
-
-        assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
-    }
-}
 
 #[cfg(test)]
 mod stall_watchdog_pure_tests {

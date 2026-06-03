@@ -93,37 +93,3 @@ pub fn hostname_short() -> String {
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "localhost".to_string())
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn shell_command_echo_works() {
-        #[cfg(unix)]
-        let output = shell_command("echo hello").unwrap();
-        #[cfg(windows)]
-        let output = shell_command("echo hello").unwrap();
-
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("hello"));
-    }
-
-    #[test]
-    fn shell_command_builder_works() {
-        #[cfg(unix)]
-        let cmd_str = "echo test123";
-        #[cfg(windows)]
-        let cmd_str = "echo test123";
-
-        let output = shell_command_builder(cmd_str).output().unwrap();
-        assert!(output.status.success());
-    }
-
-    #[test]
-    fn hostname_short_returns_non_empty() {
-        let host = hostname_short();
-        assert!(!host.is_empty());
-    }
-}

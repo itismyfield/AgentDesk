@@ -91,7 +91,3 @@ pub async fn put_runtime_config(
         Err(error) => service_error_response(error),
     }
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[path = "settings_tests.rs"]
-mod tests;

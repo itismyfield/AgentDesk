@@ -1,5 +1,3 @@
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use super::add_thread_member_to_dispatch_thread;
 use super::{
     DispatchNotifyDeliveryResult, DispatchTransport, ReviewFollowupKind,
     archive_duplicate_slot_threads, maybe_add_owner_to_dispatch_thread,
@@ -9,8 +7,6 @@ use super::{
 use crate::db::dispatches::{
     CardIssueInfo, DispatchDeliveryMetadata, SlotThreadBinding, dispatch_context_value,
 };
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use crate::dispatch::dispatch_destination_provider_override;
 use crate::server::routes::dispatches::thread_reuse::{
     clear_thread_for_channel_pg, get_thread_for_channel_pg, set_thread_for_channel_map_only_pg,
     set_thread_for_channel_pg, try_reuse_thread,
@@ -621,7 +617,6 @@ async fn latest_work_dispatch_thread_pg(
     crate::db::dispatches::latest_work_dispatch_thread_pg(pool, card_id).await
 }
 
-#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 pub(crate) fn resolve_dispatch_delivery_channel_on_conn<T>(
     _conn: &T,
     _agent_id: &str,
@@ -630,42 +625,6 @@ pub(crate) fn resolve_dispatch_delivery_channel_on_conn<T>(
     _dispatch_context: Option<&str>,
 ) -> Result<Option<String>, String> {
     Ok(None)
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) fn resolve_dispatch_delivery_channel_on_conn(
-    conn: &sqlite_test::Connection,
-    agent_id: &str,
-    card_id: &str,
-    dispatch_type: Option<&str>,
-    dispatch_context: Option<&str>,
-) -> Result<Option<String>, String> {
-    let provider_override = if dispatch_type == Some("review") {
-        dispatch_destination_provider_override(dispatch_type, dispatch_context)
-    } else if dispatch_type == Some("review-decision") {
-        match dispatch_destination_provider_override(dispatch_type, dispatch_context) {
-            Some(provider) => Some(provider),
-            None => crate::db::dispatches::latest_completed_review_provider_on_conn(conn, card_id)?,
-        }
-    } else {
-        None
-    };
-
-    if let Some(provider) = provider_override.filter(|provider| !provider.trim().is_empty()) {
-        if let Some(channel) = crate::db::agents::resolve_agent_channel_for_provider_on_conn(
-            conn,
-            agent_id,
-            Some(&provider),
-        )
-        .map_err(|error| {
-            format!("resolve sqlite provider channel for {agent_id} ({provider}): {error}")
-        })? {
-            return Ok(Some(channel));
-        }
-    }
-
-    crate::db::agents::resolve_agent_dispatch_channel_on_conn(conn, agent_id, dispatch_type)
-        .map_err(|error| format!("resolve sqlite dispatch channel for {agent_id}: {error}"))
 }
 
 // #1693: `latest_completed_review_provider_on_conn` (legacy-sqlite-tests only)
@@ -1712,7 +1671,3 @@ async fn send_review_result_message_via_http(
         },
     }
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[path = "../../../server/routes/dispatches/discord_delivery_tests.rs"]
-mod tests;

@@ -729,32 +729,6 @@ pub(super) fn load_restored_session_cwd(
         .flatten();
     }
 
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    if let Some(db) = db {
-        use sqlite_test::OptionalExtension;
-
-        let Ok(conn) = db.lock() else {
-            return None;
-        };
-        for session_key in session_keys {
-            let path = conn
-                .query_row(
-                    "SELECT cwd FROM sessions WHERE session_key = ?1 LIMIT 1",
-                    sqlite_test::params![session_key],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-                .optional()
-                .ok()
-                .flatten()
-                .flatten();
-            if let Some(path) =
-                path.filter(|path| !path.is_empty() && std::path::Path::new(path).is_dir())
-            {
-                return Some(path);
-            }
-        }
-    }
-
     let _ = (db, session_keys);
     None
 }
@@ -852,29 +826,6 @@ pub(super) fn load_restored_provider_session_id(
         .flatten();
     }
 
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    if let Some(db) = db {
-        use sqlite_test::OptionalExtension;
-
-        let Ok(conn) = db.lock() else {
-            return None;
-        };
-        return conn
-            .query_row(
-                "SELECT claude_session_id
-                 FROM sessions
-                 WHERE session_key = ?1 AND provider = ?2
-                 LIMIT 1",
-                sqlite_test::params![session_keys[0], provider.as_str()],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()
-            .ok()
-            .flatten()
-            .flatten()
-            .filter(|session_id| !session_id.is_empty());
-    }
-
     let _ = (db, session_keys);
     None
 }
@@ -887,12 +838,6 @@ pub(super) fn sqlite_runtime_db(shared: &SharedData) -> Option<&crate::db::Db> {
     if shared.pg_pool.is_some() {
         None
     } else {
-        #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-        {
-            let SharedData { sqlite, .. } = shared;
-            return sqlite.as_ref();
-        }
-        #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
         None::<&crate::db::Db>
     }
 }
@@ -1074,21 +1019,6 @@ pub(super) fn load_human_alert_target(shared: &SharedData) -> Option<String> {
         .and_then(|channel| normalize_human_alert_target(&channel));
     }
 
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    if let Some(db) = sqlite_runtime_db(shared) {
-        let Ok(conn) = db.lock() else {
-            return None;
-        };
-        return conn
-            .query_row(
-                "SELECT value FROM kv_meta WHERE key = 'kanban_human_alert_channel_id'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .ok()
-            .and_then(|channel| normalize_human_alert_target(&channel));
-    }
-
     let _ = shared;
     None
 }
@@ -1154,41 +1084,6 @@ pub(super) async fn update_card_ready_failure_marker_pg(
     Ok(updated > 0)
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(super) fn update_card_ready_failure_marker_sqlite(
-    db: &crate::db::Db,
-    card_id: &str,
-    reason: &str,
-) -> Result<bool, String> {
-    use sqlite_test::OptionalExtension;
-
-    let conn = db
-        .lock()
-        .map_err(|error| format!("lock sqlite db for ready marker: {error}"))?;
-    let existing_metadata = conn
-        .query_row(
-            "SELECT metadata FROM kanban_cards WHERE id = ?1",
-            sqlite_test::params![card_id],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .optional()
-        .map_err(|error| format!("load sqlite card metadata for {card_id}: {error}"))?
-        .flatten();
-    let metadata_json =
-        merge_card_label_metadata(existing_metadata.as_deref(), READY_FOR_INPUT_STUCK_LABEL);
-    let updated = conn
-        .execute(
-            "UPDATE kanban_cards
-             SET metadata = ?1,
-                 blocked_reason = ?2,
-                 updated_at = datetime('now')
-             WHERE id = ?3",
-            sqlite_test::params![metadata_json, reason, card_id],
-        )
-        .map_err(|error| format!("update sqlite ready marker for {card_id}: {error}"))?;
-    Ok(updated > 0)
-}
-
 pub(super) fn load_dispatch_card_id(shared: &SharedData, dispatch_id: &str) -> Option<String> {
     if let Some(pool) = shared.pg_pool.as_ref() {
         let dispatch_id = dispatch_id.to_string();
@@ -1207,20 +1102,6 @@ pub(super) fn load_dispatch_card_id(shared: &SharedData, dispatch_id: &str) -> O
         )
         .ok()
         .flatten();
-    }
-
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    if let Some(db) = sqlite_runtime_db(shared) {
-        let Ok(conn) = db.lock() else {
-            return None;
-        };
-        return conn
-            .query_row(
-                "SELECT kanban_card_id FROM task_dispatches WHERE id = ?1",
-                sqlite_test::params![dispatch_id],
-                |row| row.get::<_, String>(0),
-            )
-            .ok();
     }
 
     let _ = (shared, dispatch_id);
@@ -1264,15 +1145,6 @@ pub(in crate::services::discord) async fn fail_dispatch_for_ready_for_input_stal
             update_card_ready_failure_marker_pg(pool, card_id_ref, READY_FOR_INPUT_STUCK_REASON)
                 .await?
         } else if let Some(db) = sqlite_runtime_db(shared.as_ref()) {
-            #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-            {
-                update_card_ready_failure_marker_sqlite(
-                    db,
-                    card_id_ref,
-                    READY_FOR_INPUT_STUCK_REASON,
-                )?
-            }
-            #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
             {
                 let _ = db;
                 false
@@ -1552,32 +1424,6 @@ pub(in crate::services::discord) fn refresh_session_heartbeat_from_tmux_output_d
             matched: HeartbeatRefreshMatch::NoMatch,
             rows_affected: 0,
         });
-    }
-
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    if let Some(db) = db {
-        let Ok(conn) = db.lock() else {
-            return HeartbeatRefreshOutcome {
-                matched: HeartbeatRefreshMatch::NoMatch,
-                rows_affected: 0,
-            };
-        };
-        let updated = conn
-            .execute(
-                "UPDATE sessions
-                 SET last_heartbeat = datetime('now')
-                 WHERE session_key = ?1 AND provider = ?2",
-                sqlite_test::params![session_keys[0], provider.as_str()],
-            )
-            .unwrap_or(0) as u64;
-        return HeartbeatRefreshOutcome {
-            matched: if updated > 0 {
-                HeartbeatRefreshMatch::SessionKey
-            } else {
-                HeartbeatRefreshMatch::NoMatch
-            },
-            rows_affected: updated,
-        };
     }
 
     let _ = (db, provider, thread_channel_id, session_keys);
@@ -1866,11 +1712,6 @@ impl WatcherClaimOutcome {
             action,
             owner_channel_id,
         }
-    }
-
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    pub(crate) fn action(self) -> WatcherClaimAction {
-        self.action
     }
 
     pub(crate) fn owner_channel_id(self) -> ChannelId {

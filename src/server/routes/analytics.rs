@@ -80,13 +80,6 @@ fn prune_expired_analytics_cache_entries(cache: &mut HashMap<String, CachedJson>
     }
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn reset_analytics_cache() {
-    if let Ok(mut cache) = analytics_response_cache().lock() {
-        cache.clear();
-    }
-}
-
 /// #2049 Finding 10: deterministic ETag computed over a *canonicalized* JSON
 /// rendering of the response (BTreeMap-backed sort) and hashed with BLAKE3.
 /// `serde_json::to_string` of a `Value` whose underlying object is a `Map`
@@ -559,10 +552,3 @@ pub async fn skills_trend(
         analytics_service::skills_trend_from_days(usage.into_iter().map(|record| record.day)),
     )
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) use crate::services::analytics::load_machine_config;
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[path = "analytics_tests.rs"]
-mod tests;

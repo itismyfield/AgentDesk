@@ -942,8 +942,6 @@ mod tests {
         let tx = crate::server::ws::new_broadcast();
         let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
         crate::server::routes::AppState {
-            #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-            legacy_db_override: None,
             pg_pool: Some(pg_pool.clone()),
             engine: test_engine_with_pg(pg_pool),
             config: std::sync::Arc::new(crate::config::Config::default()),

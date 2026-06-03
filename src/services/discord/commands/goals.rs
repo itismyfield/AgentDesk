@@ -70,28 +70,3 @@ pub(in crate::services::discord) async fn cmd_goals(ctx: Context<'_>) -> Result<
     ctx.say(notice).await?;
     Ok(())
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::{build_goals_disabled_notice, build_goals_enabled_notice};
-    use crate::services::discord::commands::config::codex_goals_supported;
-    use crate::services::provider::ProviderKind;
-
-    #[test]
-    fn goals_supported_only_for_codex() {
-        assert!(!codex_goals_supported(&ProviderKind::Claude));
-        assert!(codex_goals_supported(&ProviderKind::Codex));
-        assert!(!codex_goals_supported(&ProviderKind::Gemini));
-        assert!(!codex_goals_supported(&ProviderKind::Qwen));
-    }
-
-    #[test]
-    fn goals_notices_mention_codex_feature_flag() {
-        let enabled = build_goals_enabled_notice(true);
-        assert!(enabled.contains("Codex goals feature flag"));
-        assert!(enabled.contains("--enable goals"));
-
-        let disabled = build_goals_disabled_notice(true);
-        assert!(disabled.contains("--disable goals"));
-    }
-}

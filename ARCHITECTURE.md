@@ -30,8 +30,7 @@ src/
 │   ├── migrate/
 │   │   ├── apply.rs
 │   │   ├── plan.rs
-│   │   ├── source.rs
-│   │   └── tests.rs
+│   │   └── source.rs
 │   ├── provider_cli/
 │   │   └── mod.rs
 │   ├── args.rs
@@ -105,7 +104,6 @@ src/
 │   ├── memento_feedback_stats.rs
 │   ├── mod.rs
 │   ├── postgres.rs
-│   ├── schema.rs
 │   ├── session_agent_resolution.rs
 │   ├── session_observability.rs
 │   ├── session_status.rs
@@ -114,7 +112,6 @@ src/
 │   └── turns.rs
 ├── dispatch/
 │   ├── dispatch_cancel.rs
-│   ├── dispatch_cancel_tests.rs
 │   ├── dispatch_channel.rs
 │   ├── dispatch_context.rs
 │   ├── dispatch_create.rs
@@ -145,8 +142,7 @@ src/
 │   │   ├── queue_ops.rs
 │   │   ├── review_automation_ops.rs
 │   │   ├── review_ops.rs
-│   │   ├── runtime_ops.rs
-│   │   └── tests.rs
+│   │   └── runtime_ops.rs
 │   ├── hooks.rs
 │   ├── intent.rs
 │   ├── loader.rs
@@ -169,7 +165,6 @@ src/
 │   ├── review_tuning.rs
 │   ├── state_machine.rs
 │   ├── terminal_cleanup.rs
-│   ├── test_support.rs
 │   ├── transition_cleanup.rs
 │   └── transition_core.rs
 ├── runtime_layout/
@@ -190,11 +185,8 @@ src/
 │   │   ├── dispatches/
 │   │   │   ├── crud.rs
 │   │   │   ├── discord_delivery.rs
-│   │   │   ├── discord_delivery_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── outbox.rs
-│   │   │   ├── outbox_tests.rs
-│   │   │   ├── tests.rs
 │   │   │   └── thread_reuse.rs
 │   │   ├── domains/
 │   │   │   ├── access.rs
@@ -210,25 +202,12 @@ src/
 │   │   │   ├── decision_route.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── review_state_repo.rs
-│   │   │   ├── tests.rs
 │   │   │   ├── tuning_aggregate.rs
 │   │   │   └── verdict_route.rs
-│   │   ├── routes_tests/
-│   │   │   ├── agents_tests.rs
-│   │   │   ├── api_docs_tests.rs
-│   │   │   ├── auto_queue_tests.rs
-│   │   │   ├── common.rs
-│   │   │   ├── dispatch_tests.rs
-│   │   │   ├── github_tests.rs
-│   │   │   ├── health_tests.rs
-│   │   │   ├── infra_tests.rs
-│   │   │   ├── kanban_tests.rs
-│   │   │   └── mod.rs
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
 │   │   ├── agents_setup.rs
 │   │   ├── analytics.rs
-│   │   ├── analytics_tests.rs
 │   │   ├── auth.rs
 │   │   ├── auto_queue.rs
 │   │   ├── automation_candidates.rs
@@ -267,7 +246,6 @@ src/
 │   │   ├── routines.rs
 │   │   ├── session_activity.rs
 │   │   ├── settings.rs
-│   │   ├── settings_tests.rs
 │   │   ├── skill_usage_analytics.rs
 │   │   ├── skills_api.rs
 │   │   ├── stats.rs
@@ -302,13 +280,6 @@ src/
 │   │   ├── queue_metrics.rs
 │   │   └── session_metrics.rs
 │   ├── api_friction/
-│   │   ├── tests/
-│   │   │   ├── helpers.rs
-│   │   │   ├── memory_sync.rs
-│   │   │   ├── mod.rs
-│   │   │   ├── parser.rs
-│   │   │   ├── pg_storage.rs
-│   │   │   └── processing.rs
 │   │   ├── core.rs
 │   │   ├── issue_body.rs
 │   │   ├── issues.rs
@@ -444,8 +415,7 @@ src/
 │   │   │   ├── manifest.rs
 │   │   │   ├── memory_guidance.rs
 │   │   │   ├── mod.rs
-│   │   │   ├── section_dedupe.rs
-│   │   │   └── tests.rs
+│   │   │   └── section_dedupe.rs
 │   │   ├── recovery_paths/
 │   │   │   ├── mod.rs
 │   │   │   └── shared.rs
@@ -458,7 +428,6 @@ src/
 │   │   │   │   ├── intake_turn.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
-│   │   │   │   ├── tests.rs
 │   │   │   │   ├── tui_followup.rs
 │   │   │   │   ├── turn_lifecycle.rs
 │   │   │   │   └── watchdog.rs
@@ -469,7 +438,6 @@ src/
 │   │   │   ├── message_handler.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── response_format.rs
-│   │   │   ├── tests.rs
 │   │   │   ├── thread_binding.rs
 │   │   │   └── turn_start.rs
 │   │   ├── settings/
@@ -490,7 +458,6 @@ src/
 │   │   │   ├── skill_usage.rs
 │   │   │   ├── stale_resume.rs
 │   │   │   ├── terminal_delivery.rs
-│   │   │   ├── tests.rs
 │   │   │   ├── tmux_runtime.rs
 │   │   │   └── turn_analytics.rs
 │   │   ├── watchers/

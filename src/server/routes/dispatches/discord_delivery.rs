@@ -16,8 +16,3 @@ pub(crate) use crate::services::dispatches::discord_delivery::{
     send_review_result_to_primary, send_review_result_to_primary_with_transport,
     sync_dispatch_status_reaction, sync_dispatch_status_reaction_with_pg,
 };
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[allow(unused_imports)]
-pub(super) use crate::services::dispatches::discord_delivery::{
-    add_thread_member_to_dispatch_thread, post_dispatch_message_to_channel,
-};

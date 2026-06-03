@@ -14,36 +14,3 @@ pub(crate) fn parse_github_repo_from_remote(remote: &str) -> Option<String> {
     }
     Some(format!("{owner}/{repo}"))
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_github_repo_from_remote_accepts_common_forms() {
-        assert_eq!(
-            parse_github_repo_from_remote("git@github.com:owner/repo.git").as_deref(),
-            Some("owner/repo")
-        );
-        assert_eq!(
-            parse_github_repo_from_remote("https://github.com/owner/repo").as_deref(),
-            Some("owner/repo")
-        );
-        assert_eq!(
-            parse_github_repo_from_remote("ssh://git@github.com/owner/repo.git").as_deref(),
-            Some("owner/repo")
-        );
-    }
-
-    #[test]
-    fn parse_github_repo_from_remote_rejects_non_github_or_extra_path() {
-        assert_eq!(
-            parse_github_repo_from_remote("https://example.com/a/b"),
-            None
-        );
-        assert_eq!(
-            parse_github_repo_from_remote("https://github.com/a/b/c"),
-            None
-        );
-    }
-}

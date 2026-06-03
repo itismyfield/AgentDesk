@@ -929,46 +929,4 @@ mod tests {
         assert_eq!(purged, Some(1));
         assert!(handle.snapshot().await.intervention_queue.is_empty());
     }
-
-    #[cfg(feature = "legacy-sqlite-tests")]
-    #[tokio::test]
-    async fn force_purge_channel_mailbox_finishes_cancelled_active_turn() {
-        let provider = ProviderKind::Codex;
-        let channel_id = ChannelId::new(9270602);
-        let harness = crate::services::discord::health::TestHealthHarness::new_with_provider(
-            provider.clone(),
-        )
-        .await;
-        let token = harness
-            .start_active_turn(channel_id.get(), 1, 10, None)
-            .await;
-        token
-            .cancelled
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        harness
-            .seed_queue(channel_id.get(), &[(11, "stale queued prompt")])
-            .await;
-
-        let target = TurnLifecycleTarget {
-            provider: Some(provider),
-            channel_id: Some(channel_id),
-            tmux_name: String::new(),
-        };
-
-        let registry = harness.registry();
-        let purged = force_purge_channel_mailbox(Some(&registry), &target, None).await;
-
-        assert_eq!(purged, Some(1));
-        let (has_active_turn, queue_depth, _) = harness.mailbox_state(channel_id.get()).await;
-        assert!(
-            !has_active_turn,
-            "force purge must finish an already-cancelled active mailbox turn",
-        );
-        assert_eq!(queue_depth, 0);
-        assert_eq!(
-            harness.global_active_count(),
-            0,
-            "global_active must drain with the cancelled active mailbox turn",
-        );
-    }
 }

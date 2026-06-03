@@ -242,27 +242,3 @@ mod health_classification_tests {
         );
     }
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::is_loopback_base_url;
-
-    #[test]
-    fn loopback_base_url_accepts_http_and_https_local_targets() {
-        assert!(is_loopback_base_url("http://127.0.0.1:8791"));
-        assert!(is_loopback_base_url("https://127.0.0.1:8791/api"));
-        assert!(is_loopback_base_url("http://localhost"));
-        assert!(is_loopback_base_url("https://localhost:8791"));
-        assert!(is_loopback_base_url("http://[::1]:8791"));
-        assert!(is_loopback_base_url("https://[::1]/api/health"));
-    }
-
-    #[test]
-    fn loopback_base_url_rejects_remote_and_unsupported_targets() {
-        assert!(!is_loopback_base_url("http://10.0.0.5:8791"));
-        assert!(!is_loopback_base_url("https://example.com"));
-        assert!(!is_loopback_base_url("http://localhost.evil.example:8791"));
-        assert!(!is_loopback_base_url("http://127.0.0.1.evil.example:8791"));
-        assert!(!is_loopback_base_url("ftp://localhost"));
-    }
-}

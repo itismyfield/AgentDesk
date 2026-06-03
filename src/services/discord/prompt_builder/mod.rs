@@ -399,6 +399,3 @@ mod section_dedupe;
 
 #[cfg(test)]
 mod dispatch_contract_tests;
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests;

@@ -623,42 +623,6 @@ pub(crate) fn config_default_seed_actions(config: &crate::config::Config) -> Vec
     actions
 }
 
-/// Seed default values for CONFIG_KEYS into kv_meta on startup.
-///
-/// SQLite-backed; retained as a `cfg(test)`-only helper. Production runtime seeds
-/// kv_meta defaults via `crate::db::postgres::apply_kv_seed_actions` (PG-only since #1306).
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub fn seed_config_defaults(conn: &sqlite_test::Connection, config: &crate::config::Config) {
-    apply_kv_seed_actions(conn, &config_default_seed_actions(config));
-    seed_runtime_config_defaults(conn, config);
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn apply_kv_seed_actions(conn: &sqlite_test::Connection, actions: &[KvSeedAction]) {
-    for action in actions {
-        match action {
-            KvSeedAction::Put { key, value } => {
-                conn.execute(
-                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                    sqlite_test::params![key, value],
-                )
-                .ok();
-            }
-            KvSeedAction::PutIfAbsent { key, value } => {
-                conn.execute(
-                    "INSERT OR IGNORE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                    sqlite_test::params![key, value],
-                )
-                .ok();
-            }
-            KvSeedAction::Delete { key } => {
-                conn.execute("DELETE FROM kv_meta WHERE key = ?1", [key])
-                    .ok();
-            }
-        }
-    }
-}
-
 async fn load_pg_kv_values(pool: &sqlx::PgPool) -> ServiceResult<HashMap<String, String>> {
     let rows = sqlx::query("SELECT key, value FROM kv_meta")
         .fetch_all(pool)
@@ -993,52 +957,6 @@ fn write_runtime_config_pg(
             .with_code(ErrorCode::Database)
             .with_operation("put_runtime_config.write_runtime_config_pg")
     })
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub fn seed_runtime_config_defaults(
-    conn: &sqlite_test::Connection,
-    config: &crate::config::Config,
-) {
-    let saved_obj = conn
-        .query_row(
-            "SELECT value FROM kv_meta WHERE key = 'runtime-config' LIMIT 1",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .and_then(|value| value.as_object().cloned());
-    let target = seeded_runtime_config_map(saved_obj, config);
-    write_runtime_config_sqlite(conn, &target);
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn write_runtime_config_sqlite(conn: &sqlite_test::Connection, values: &Map<String, Value>) {
-    let value_str =
-        serde_json::to_string(&Value::Object(values.clone())).unwrap_or_else(|_| "{}".to_string());
-
-    conn.execute(
-        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-        sqlite_test::params!["runtime-config", value_str],
-    )
-    .ok();
-
-    for key in RUNTIME_CONFIG_KEYS {
-        conn.execute("DELETE FROM kv_meta WHERE key = ?1", [key])
-            .ok();
-    }
-
-    for (key, value) in values {
-        let Some(text) = runtime_scalar_to_string(value) else {
-            continue;
-        };
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            sqlite_test::params![key, text],
-        )
-        .ok();
-    }
 }
 
 pub async fn seed_runtime_config_defaults_pg(

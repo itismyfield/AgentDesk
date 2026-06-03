@@ -79,39 +79,3 @@ pub(in crate::services::discord) async fn cmd_fast(ctx: Context<'_>) -> Result<(
     ctx.say(notice).await?;
     Ok(())
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::{build_fast_disabled_notice, build_fast_enabled_notice, fast_mode_reset_line};
-    use crate::services::discord::commands::config::native_fast_mode_supported;
-    use crate::services::provider::ProviderKind;
-
-    #[test]
-    fn fast_mode_supported_only_for_claude_and_codex() {
-        assert!(native_fast_mode_supported(&ProviderKind::Claude));
-        assert!(native_fast_mode_supported(&ProviderKind::Codex));
-        assert!(!native_fast_mode_supported(&ProviderKind::Gemini));
-        assert!(!native_fast_mode_supported(&ProviderKind::Qwen));
-    }
-
-    #[test]
-    fn fast_mode_reset_line_mentions_next_turn_when_reset_pending() {
-        assert!(fast_mode_reset_line(true).contains("다음 사용자 턴"));
-        assert!(fast_mode_reset_line(false).contains("현재 세션부터"));
-    }
-
-    #[test]
-    fn fast_enabled_notice_mentions_native_mode_and_cost() {
-        let notice = build_fast_enabled_notice(&ProviderKind::Codex, true);
-        assert!(notice.contains("native fast mode"));
-        assert!(notice.contains("더 빨라질 수"));
-        assert!(notice.contains("사용량/비용"));
-    }
-
-    #[test]
-    fn fast_disabled_notice_mentions_default_mode() {
-        let notice = build_fast_disabled_notice(&ProviderKind::Claude, true);
-        assert!(notice.contains("native fast mode를 껐습니다"));
-        assert!(notice.contains("기본 응답 모드"));
-    }
-}

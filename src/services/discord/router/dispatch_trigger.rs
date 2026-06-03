@@ -141,34 +141,6 @@ pub(super) fn dispatch_should_recover_session_worktree(
         && crate::dispatch::dispatch_type_requires_fresh_worktree(dispatch_type)
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct DispatchCwdPolicyDecision {
-    pub(super) log_main_workspace_error: bool,
-    pub(super) reject_for_missing_fresh_worktree: bool,
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(super) fn evaluate_dispatch_cwd_policy(
-    dispatch_type: Option<&str>,
-    current_path: &str,
-    main_workspace: Option<&std::path::Path>,
-    worktrees_root: Option<&std::path::Path>,
-) -> DispatchCwdPolicyDecision {
-    let requires_fresh_worktree =
-        crate::dispatch::dispatch_type_requires_fresh_worktree(dispatch_type);
-    let current_path = std::path::Path::new(current_path);
-    let is_main_workspace = main_workspace.is_some_and(|workspace| current_path == workspace);
-    let is_managed_worktree = worktrees_root.is_some_and(|root| current_path.starts_with(root));
-
-    DispatchCwdPolicyDecision {
-        log_main_workspace_error: requires_fresh_worktree && is_main_workspace,
-        reject_for_missing_fresh_worktree: requires_fresh_worktree
-            && worktrees_root.is_some()
-            && !is_managed_worktree,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::dispatch_session_path_should_update;
