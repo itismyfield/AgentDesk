@@ -888,6 +888,10 @@ mod tests {
     /// across threads; concurrent tests on other OS threads simply block on
     /// `lock()` until this test releases the guard, which is exactly the
     /// serialization we want.
+    // SAFETY (await_holding_lock): the doc comment above explains why the
+    // env-dir Mutex is intentionally held across the test awaits (current-thread
+    // runtime, serialization is the whole point). Test-only.
+    #[allow(clippy::await_holding_lock)]
     async fn with_isolated_runtime_root<F, Fut>(f: F)
     where
         F: FnOnce() -> Fut,

@@ -301,7 +301,7 @@
 - do_not_edit_without_migration_plan (giant-file routes):
   - `src/server/routes/kanban.rs` (2752 lines).
   - `src/server/routes/docs.rs` (5880 lines).
-  - `src/server/routes/escalation.rs` (1728 lines).
+  - `src/server/routes/escalation.rs` (1733 lines).
   - `src/server/routes/meetings.rs` (1708 lines).
   - `src/server/routes/review_verdict/decision_route.rs` (4191 lines).
   - `src/server/routes/{agents,agents_crud,agents_setup,v1,resume,
@@ -393,7 +393,7 @@
     adding new feature logic).
   - `src/db/kanban_cards/` (1932 total lines; kanban card persistence and
     GitHub sync lookup surface).
-  - `src/db/postgres.rs` (1009 lines).
+  - `src/db/postgres.rs` (1018 lines).
   - `src/db/dispatched_sessions.rs` (1554 lines; dispatched session
     persistence helpers).
   - `src/db/session_transcripts.rs` is a retained PG-cleanup surface (now below

@@ -2175,6 +2175,12 @@ mod dispatch_delivery_reconcile_tests {
         pg_db.drop().await;
     }
 
+    // SAFETY (await_holding_lock): `lock_dispatch_delivery_metric_tests()` is a
+    // std Mutex held across awaits to serialize tests that read/reset the
+    // process-global dispatch-delivery mismatch metrics. The hold is required —
+    // releasing before the awaits would let concurrent tests clobber the shared
+    // metric counters. Test-only.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
     async fn dispatch_delivery_reconcile_logs_dispatch_id_and_increments_metric_pg() {
         let _serial = lock_dispatch_delivery_metric_tests();
@@ -2638,6 +2644,10 @@ mod dispatch_delivery_reconcile_tests {
         pg_db.drop().await;
     }
 
+    // SAFETY (await_holding_lock): same rationale as
+    // `dispatch_delivery_reconcile_logs_dispatch_id_and_increments_metric_pg` —
+    // the metric-serialization Mutex must stay held across the awaits. Test-only.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
     async fn dispatch_delivery_reconcile_recovers_and_clears_backlog_pg() {
         let _serial = lock_dispatch_delivery_metric_tests();

@@ -376,6 +376,11 @@ mod policy_observability_tests {
         );
     }
 
+    // SAFETY (await_holding_lock): `observability::test_runtime_lock()` is a std
+    // Mutex held across awaits to serialize tests that reset/init the
+    // process-global observability runtime; the hold must span the awaits to
+    // keep concurrent tests from racing on the shared runtime. Test-only.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn cancel_observability_emits_unknown_noop_direct_fallback() {
         let _guard = crate::services::observability::test_runtime_lock();

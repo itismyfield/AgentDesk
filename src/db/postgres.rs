@@ -845,6 +845,11 @@ pub(crate) async fn connect_test_pool(database_url: &str, label: &str) -> Result
 }
 
 #[cfg(test)]
+// SAFETY (await_holding_lock): `lock_test_setup()` is a std Mutex held across
+// the pool-connect/query awaits *on purpose* — it serializes concurrent
+// PG-backed test DB create/drop so they cannot race. Dropping the guard before
+// the awaits would reintroduce the CI race this lock was added to fix. Test-only.
+#[allow(clippy::await_holding_lock)]
 pub(crate) async fn create_test_database(
     admin_url: &str,
     database_name: &str,
@@ -942,6 +947,10 @@ pub(crate) async fn connect_test_pool_and_migrate_config(
 }
 
 #[cfg(test)]
+// SAFETY (await_holding_lock): same serialization rationale as
+// `create_test_database` — `lock_test_setup()` is held across the teardown
+// awaits to keep concurrent PG test DB drops from racing. Test-only.
+#[allow(clippy::await_holding_lock)]
 pub(crate) async fn drop_test_database(
     admin_url: &str,
     database_name: &str,

@@ -1640,6 +1640,11 @@ mod manual_decision_gate_tests {
         format!("{}/{}", pg_test_base_database_url(), admin_db)
     }
 
+    // SAFETY (await_holding_lock): `env_lock()` is a std Mutex held across awaits
+    // to serialize tests that mutate process-global env vars (AGENTDESK_ROOT_DIR
+    // etc.); the hold must span the awaits so a concurrent test cannot observe or
+    // clobber the env mid-flight. Test-only.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn emit_escalation_pg_rejects_superseded_manual_decision_cards_without_discord_send() {
         let _env_lock = env_lock();

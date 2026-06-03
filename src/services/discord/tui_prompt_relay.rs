@@ -4879,6 +4879,10 @@ mod tests {
             .remove(tmux);
     }
 
+    // SAFETY (await_holding_lock): `tui_prompt_dedupe::TEST_LOCK` is a std Mutex
+    // held across awaits to serialize tests that share the prompt-dedupe global
+    // state; the hold is required for serialization. Test-only.
+    #[allow(clippy::await_holding_lock)]
     #[cfg(unix)]
     #[tokio::test]
     async fn claude_bridge_lease_guard_cleans_no_binding_precondition_skip() {

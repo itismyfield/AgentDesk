@@ -1018,6 +1018,11 @@ mod tests {
         pg_db.drop().await;
     }
 
+    // SAFETY (await_holding_lock): the shared dispatch-delivery metric Mutex is
+    // intentionally held across awaits to serialize tests that mutate the
+    // process-global mismatch metrics; releasing early would race concurrent
+    // tests. Test-only.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows() {
         let _serial = crate::reconcile::lock_dispatch_delivery_metric_tests();

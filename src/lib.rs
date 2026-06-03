@@ -5,10 +5,14 @@
 //
 // `too_many_arguments` is governed solely by this crate-wide allow; per-function
 // `#[allow(clippy::too_many_arguments)]` attributes are redundant and removed.
+//
+// `await_holding_lock` is intentionally NOT suppressed here (#3034): production
+// lock-across-await races must surface in clippy. The only legitimate holders
+// are test-serialization guards (process-global env/metrics/PG-setup Mutexes),
+// each carrying a narrow `#[allow(clippy::await_holding_lock)]` + `// SAFETY:`.
 #![allow(
     clippy::absurd_extreme_comparisons,
     clippy::assertions_on_constants,
-    clippy::await_holding_lock,
     clippy::bind_instead_of_map,
     clippy::bool_assert_comparison,
     clippy::clone_on_copy,

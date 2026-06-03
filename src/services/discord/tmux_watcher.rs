@@ -8789,6 +8789,10 @@ mod tests {
         assert_eq!(persisted.current_msg_id, 54_321);
     }
 
+    // SAFETY (await_holding_lock): see the inline comment — the process-wide
+    // env-dir Mutex is held across awaits to serialize env-mutating tests, which
+    // is sound on the current-thread test runtime. Test-only.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn terminal_delivery_timeout_cleanup_releases_mailbox_and_preserves_followup_queue() {
         // Serialize on the PROCESS-WIDE `AGENTDESK_ROOT_DIR` lock (shared with
