@@ -87,6 +87,14 @@ pub struct WatcherStateSnapshot {
     /// mailbox is idle (no active turn).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mailbox_active_user_msg_id: Option<u64>,
+    /// #3126: `true` when the in-flight row records a turn whose terminal
+    /// assistant response has already been committed
+    /// (`InflightTurnState::terminal_delivery_committed`). A row with this set
+    /// is a completed turn that is now idle (waiting on a `ScheduleWakeup` /
+    /// loop wind-down), NOT a hung provider turn. The stall watchdog uses it as
+    /// a false-positive guard so a normally-finished-then-sleeping session is
+    /// never force-cleaned as a deadlock.
+    pub(in crate::services::discord) inflight_terminal_delivery_committed: bool,
     /// #1455: Pure relay-stall classifier output derived from the nested
     /// relay-health snapshot. Read-only diagnostic; no recovery behavior is
     /// triggered from this value.
@@ -478,6 +486,7 @@ async fn watcher_state_snapshot_for_shared(
         tmux_session_alive,
         has_pending_queue,
         mailbox_active_user_msg_id,
+        inflight_terminal_delivery_committed: session.inflight_terminal_delivery_committed(),
         relay_stall_state,
         relay_health,
     })

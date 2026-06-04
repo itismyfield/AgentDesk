@@ -1198,25 +1198,45 @@ pub fn spawn_watchdog(port: u16) {
 /// invoking the cleanup (so the helper can be exercised by unit tests
 /// without a live `SharedData`).
 ///
-/// Both gates must hold:
+/// All gates must hold:
 /// - `attached == true` and `desynced == true` (snapshot already classified
 ///   the watcher as detached/diverged), AND
 /// - `inflight_updated_at` is older than `threshold_secs` seconds
-///   (defaults to `2 * INFLIGHT_STALENESS_THRESHOLD_SECS`).
+///   (defaults to `2 * INFLIGHT_STALENESS_THRESHOLD_SECS`), AND
+/// - `terminal_delivery_committed == false` (the in-flight row is NOT a
+///   normally-completed turn that is merely sleeping; see below).
 ///
-/// Either signal alone is insufficient — a fresh desynced watcher might
-/// just be mid-stream and a stale-but-synced one might be waiting on an
+/// Either staleness signal alone is insufficient — a fresh desynced watcher
+/// might just be mid-stream and a stale-but-synced one might be waiting on an
 /// idle agent. The conjunction is the actual stall pattern from issue
 /// #1446 (parent channel queues forever because thread inflight stayed
 /// behind after the dispatch terminated).
+///
+/// #3126 false-positive guard: a turn that finished normally commits its
+/// terminal response to the outbound delivery path
+/// (`InflightTurnState::terminal_delivery_committed`) and then leaves the
+/// session idle — e.g. the agent scheduled a `ScheduleWakeup` or the loop
+/// wound down with a `stop_hook_summary`/`turn_duration` transcript record and
+/// no further events. That idle row goes stale (no relay writes) and can read
+/// as `desynced` (#2965: a ready-for-input TUI has capture bytes past the
+/// relay offsets), which previously tripped the desynced force-clean and
+/// killed a perfectly healthy wakeup-waiting session. Excluding committed
+/// turns keeps the watchdog targeting only genuinely hung (never-completed)
+/// turns.
 pub(crate) fn stall_watchdog_should_force_clean(
     attached: bool,
     desynced: bool,
+    inflight_terminal_delivery_committed: bool,
     inflight_updated_at: Option<&str>,
     now_unix_secs: i64,
     threshold_secs: u64,
 ) -> bool {
     if !attached || !desynced {
+        return false;
+    }
+    // #3126: a normally-completed turn that is now idle (wakeup/loop
+    // wind-down) is not a hang — never force-clean it.
+    if inflight_terminal_delivery_committed {
         return false;
     }
     let Some(updated_at) = inflight_updated_at else {
@@ -1374,6 +1394,43 @@ pub(crate) const STALL_WATCHDOG_INITIAL_DELAY_SECS: u64 = 90;
 /// trigger) so the watchdog never races ahead of an in-flight intake call.
 pub(crate) const STALL_WATCHDOG_THRESHOLD_SECS: u64 =
     2 * discord::inflight::INFLIGHT_STALENESS_THRESHOLD_SECS;
+
+/// #3126: snapshot the in-memory provider session selector (`session_id`) for
+/// `channel_id` before the 1446 force-clean tears the channel down. Returns
+/// `None` when there is no session row or no selector to preserve, in which
+/// case the matching `restore_resume_selector_snapshot` is a no-op.
+async fn preserve_resume_selector_snapshot(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+) -> Option<String> {
+    let data = shared.core.lock().await;
+    data.sessions
+        .get(&channel_id)
+        .and_then(|session| session.session_id.clone())
+}
+
+/// #3126: re-assert a selector captured by `preserve_resume_selector_snapshot`
+/// after the 1446 force-clean. The force-clean tears down the tmux pane but
+/// must not invalidate the provider conversation selector; restoring it here
+/// keeps `claude --resume` viable for the user's next message. Only writes when
+/// a selector was captured AND the current row lacks one (so a legitimate
+/// concurrent clear/intake that already established a *different* session is
+/// never clobbered).
+async fn restore_resume_selector_snapshot(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    preserved: Option<String>,
+) {
+    let Some(selector) = preserved else {
+        return;
+    };
+    let mut data = shared.core.lock().await;
+    if let Some(session) = data.sessions.get_mut(&channel_id)
+        && session.session_id.is_none()
+    {
+        session.restore_provider_session(Some(selector));
+    }
+}
 
 /// Run a single stall-watchdog pass against one provider+SharedData.
 ///
@@ -1534,6 +1591,7 @@ pub(crate) async fn run_stall_watchdog_pass(
         let should_clean = stall_watchdog_should_force_clean(
             snapshot.attached,
             snapshot.desynced,
+            snapshot.inflight_terminal_delivery_committed,
             snapshot.inflight_updated_at.as_deref(),
             now_unix_secs,
             STALL_WATCHDOG_THRESHOLD_SECS,
@@ -1649,6 +1707,18 @@ pub(crate) async fn run_stall_watchdog_pass(
             discord::inflight::load_inflight_state(provider, channel_id.get())
                 .filter(|state| state.user_msg_id != 0)
                 .map(|state| state.user_msg_id);
+        // #3126 resume-selector preservation (1446 path ONLY): the force-clean
+        // below tears down the tmux session (`CleanupSession`) so any genuinely
+        // hung provider process is killed. But the *provider session selector*
+        // (the durable `claude_session_id` / in-memory `session_id` used by
+        // `claude --resume`) identifies the conversation, not the dead pane —
+        // it must survive so the user's next message resumes the same session
+        // instead of starting fresh. Snapshot it here and re-assert it after
+        // the mailbox/orphan finalize so this watchdog never invalidates a
+        // resumable selector. This is scoped to `1446_stall_watchdog`; /clear
+        // and genuine stale-resume invalidation paths are unaffected.
+        let preserved_resume_selector =
+            preserve_resume_selector_snapshot(&shared, channel_id).await;
         discord::inflight::delete_inflight_state_file(provider, channel_id.get());
         let cleared = discord::mailbox_clear_channel(&shared, provider, channel_id).await;
         discord::stall_recovery::finalize_orphaned_clear(
@@ -1657,6 +1727,7 @@ pub(crate) async fn run_stall_watchdog_pass(
             cleared.removed_token,
             "1446_stall_watchdog",
         );
+        restore_resume_selector_snapshot(&shared, channel_id, preserved_resume_selector).await;
         shared
             .dispatch_thread_parents
             .retain(|_, thread_id| *thread_id != channel_id);
@@ -3214,10 +3285,11 @@ mod stall_watchdog_pure_tests {
         let stale_str = to_local(stale_unix);
         let fresh_str = to_local(now_unix - 5);
 
-        // Happy path: attached + desynced + stale → clean.
+        // Happy path: attached + desynced + stale + not-committed → clean.
         assert!(stall_watchdog_should_force_clean(
             true,
             true,
+            false,
             Some(stale_str.as_str()),
             now_unix,
             STALL_WATCHDOG_THRESHOLD_SECS,
@@ -3227,6 +3299,7 @@ mod stall_watchdog_pure_tests {
         assert!(!stall_watchdog_should_force_clean(
             false,
             true,
+            false,
             Some(stale_str.as_str()),
             now_unix,
             STALL_WATCHDOG_THRESHOLD_SECS,
@@ -3235,6 +3308,7 @@ mod stall_watchdog_pure_tests {
         // synced → no clean.
         assert!(!stall_watchdog_should_force_clean(
             true,
+            false,
             false,
             Some(stale_str.as_str()),
             now_unix,
@@ -3245,6 +3319,7 @@ mod stall_watchdog_pure_tests {
         assert!(!stall_watchdog_should_force_clean(
             true,
             true,
+            false,
             Some(fresh_str.as_str()),
             now_unix,
             STALL_WATCHDOG_THRESHOLD_SECS,
@@ -3254,6 +3329,7 @@ mod stall_watchdog_pure_tests {
         assert!(!stall_watchdog_should_force_clean(
             true,
             true,
+            false,
             None,
             now_unix,
             STALL_WATCHDOG_THRESHOLD_SECS,
@@ -3263,7 +3339,51 @@ mod stall_watchdog_pure_tests {
         assert!(!stall_watchdog_should_force_clean(
             true,
             true,
+            false,
             Some("not-a-real-timestamp"),
+            now_unix,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+        ));
+    }
+
+    /// #3126 false-positive guard: a normally-completed turn that is now idle
+    /// (wakeup / loop wind-down) carries `terminal_delivery_committed == true`.
+    /// Even when it reads as attached + desynced + stale — exactly the
+    /// otherwise-clean signature — the watchdog must NOT force-clean it,
+    /// because killing a healthy wakeup-waiting session is the regression in
+    /// issue #3126.
+    #[test]
+    fn stall_watchdog_skips_completed_idle_wakeup_turn() {
+        let now_unix = chrono::Utc::now().timestamp();
+        let stale_unix = now_unix - (STALL_WATCHDOG_THRESHOLD_SECS as i64) - 1;
+        let stale_str = chrono::Local
+            .timestamp_opt(stale_unix, 0)
+            .single()
+            .expect("valid local time")
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+
+        // Same attached+desynced+stale signature as the happy path, but the
+        // turn already committed its terminal response → completed-then-idle.
+        assert!(
+            !stall_watchdog_should_force_clean(
+                true,
+                true,
+                /* inflight_terminal_delivery_committed */ true,
+                Some(stale_str.as_str()),
+                now_unix,
+                STALL_WATCHDOG_THRESHOLD_SECS,
+            ),
+            "completed-then-idle (wakeup-waiting) session must not be force-cleaned"
+        );
+
+        // Control: the identical signature with an uncommitted (still hung)
+        // turn IS force-cleaned, proving the guard is the only difference.
+        assert!(stall_watchdog_should_force_clean(
+            true,
+            true,
+            /* inflight_terminal_delivery_committed */ false,
+            Some(stale_str.as_str()),
             now_unix,
             STALL_WATCHDOG_THRESHOLD_SECS,
         ));

@@ -195,6 +195,18 @@ impl SessionEnrichment {
             .is_some_and(|state| state.watcher_owns_live_relay)
     }
 
+    /// #3126: `true` when the in-flight row records a turn whose terminal
+    /// assistant response has already been committed to the outbound delivery
+    /// path (`terminal_delivery_committed`). Such a row is NOT an active
+    /// provider turn — it is a completed turn whose session is now idle
+    /// (e.g. waiting on a `ScheduleWakeup` or loop wind-down). The stall
+    /// watchdog must not mistake this for a hung turn and force-clean it.
+    pub fn inflight_terminal_delivery_committed(&self) -> bool {
+        self.inflight
+            .as_ref()
+            .is_some_and(|state| state.terminal_delivery_committed)
+    }
+
     pub fn active_dispatch_present(&self) -> bool {
         self.inflight
             .as_ref()

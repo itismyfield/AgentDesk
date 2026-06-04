@@ -3038,6 +3038,7 @@ mod thread_guard_stale_pure_tests {
             tmux_session_alive,
             has_pending_queue: false,
             mailbox_active_user_msg_id: Some(user_msg_id),
+            inflight_terminal_delivery_committed: false,
             relay_stall_state,
             relay_health,
         }
