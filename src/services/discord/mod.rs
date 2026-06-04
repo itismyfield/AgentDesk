@@ -1686,8 +1686,11 @@ enum LeaseState {
     /// Held by `holder` for turn identity `turn` until `deadline` (monotonic ms
     /// since process start); covers the half-open byte range `[start, end)`.
     /// The lease key is the FULL `(channel_id, turn, [start,end))` identity
-    /// (#3041 §2): `commit`/`release`/`reclaim` verify it so a stale commit or
-    /// release from an OLDER turn cannot act on a reacquired NEWER lease.
+    /// (#3041 §2): `commit`/`release` verify it so a stale commit or release
+    /// from an OLDER turn (or the same turn with a different range) cannot act
+    /// on a reacquired NEWER lease. `reclaim_if_expired` is intentionally
+    /// deadline-only (identity-agnostic) — it force-returns an expired lease
+    /// regardless of holder/turn so a dead holder cannot strand the cell.
     Leased {
         holder: LeaseHolder,
         turn: turn_finalizer::TurnKey,
