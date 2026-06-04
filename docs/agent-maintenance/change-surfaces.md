@@ -116,12 +116,13 @@
   - `src/services/discord/watchers/lifecycle.rs` (2301 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior).
-  - `src/services/discord/tmux.rs` (2154 lines after #2558 dead-code sweep;
+  - `src/services/discord/tmux.rs` (2228 lines after #2558 dead-code sweep;
     failover guard; #3087 `session_panel_instance_key`/`write_spawn_nonce`
     re-exports; #3107 `RestoredWatcherTurn.injected_prompt_message_id`;
     #3016 option A `normal_completion` finalize-decouple param;
-    still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (7662 lines after #2558
+    #3017 monitor-auto-turn finalizer routing + ledger-generation +
+    relay-watermark reset re-exports; still giant-file territory).
+  - `src/services/discord/tmux_watcher.rs` (7805 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -143,6 +144,10 @@
     (`turn_start_offset.unwrap_or(last_offset) < current_offset`, mirroring the
     yield guard at `tmux.rs:2110-2111`) so a follow-up turn started after this
     range is not released by stale output;
+    +143 from #3017 the no-inflight relay-dedup gate (reads `committed_relay_offset`
+    + generation-aware watermark resets, suppresses a wake/idle terminal already
+    committed by another relay actor) and the monitor-auto-turn synthetic-id /
+    ledger-generation threading through `finish_monitor_auto_turn_if_claimed`;
     split loop helpers further before adding behavior).
   - `src/services/discord/tui_prompt_relay.rs` (3849 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
@@ -201,14 +206,17 @@
     `reset_state_for_tests` helper; +26 from #3105 codex-P1 sub-case B
     `evict_dead_tmux_mirror` tombstone helper that drops both the runtime and
     channel mirror for a dead/orphaned session and then allows re-registration).
-  - `src/services/discord/recovery_engine.rs` (4033 lines; +36 from #3099
+  - `src/services/discord/recovery_engine.rs` (4037 lines; +36 from #3099
     task-notification anchor `⏳` cleanup for `user_msg_id == 0` recovery; +4
     from the #3099 re-review pinned-injected-message-id cleanup target; +55 from
     #3078 PR-2 routing recovery completion through `StatusPanelController` behind
     a shadow parity check (the controller adopts the recovered panel id and its
     chosen completion id is asserted equal to the legacy
     `recovery_status_panel_message_id_for_completion` result; the legacy path
-    still executes the Discord IO, so behaviour is unchanged)).
+    still executes the Discord IO, so behaviour is unchanged); +4 from #3017
+    routing the recovery terminal through the single-authority finalizer
+    (`submit_terminal` + `FinalizeContext::monitor`) instead of inline
+    `mailbox_finish_turn`).
   - `src/services/discord/health.rs` (2354 lines after #1879 snapshot/mailbox
     extraction; +3 from #3082 answer-flush-barrier field in the test SharedData
     constructor).

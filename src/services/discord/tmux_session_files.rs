@@ -217,7 +217,73 @@ pub(super) fn watermark_after_output_regression(
     if same_wrapper { observed_output_end } else { 0 }
 }
 
-pub(super) fn reset_stale_relay_watermark_if_output_regressed(
+/// Reset the shared relay watermark when the `.generation` mtime has CHANGED
+/// since the watermark was committed (#3016 #3017 codex r6/r7). This is the
+/// "different wrapper → reset to 0" case that
+/// `reset_stale_relay_watermark_if_output_regressed` MISSES: that helper only
+/// resets when the current EOF is LOWER than the stored watermark, but a
+/// respawned same-named wrapper whose fresh JSONL has already grown PAST the
+/// previous wrapper's watermark never trips the EOF-regression check. Both the
+/// tmux watcher and the idle-JSONL relay call this before consulting the
+/// committed offset for the no-inflight dedup, so a fresh wake/background result
+/// whose consumed end is below the stale watermark is not wrongly suppressed.
+///
+/// Returns `true` when it reset the watermark. No-op (returns `false`) when the
+/// wrapper identity is unchanged, the watermark is already 0, or either
+/// `.generation` mtime is unavailable (0) — in which case the EOF-regression
+/// path remains the authority.
+pub(in crate::services::discord) fn reset_relay_watermark_on_generation_change(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    context: &str,
+) -> bool {
+    let relay_coord = shared.tmux_relay_coord(channel_id);
+    let stored_gen_mtime_ns = relay_coord
+        .confirmed_end_generation_mtime_ns
+        .load(std::sync::atomic::Ordering::Acquire);
+    let current_gen_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
+    let different_wrapper = stored_gen_mtime_ns != 0
+        && current_gen_mtime_ns != 0
+        && stored_gen_mtime_ns != current_gen_mtime_ns;
+    if !different_wrapper {
+        return false;
+    }
+    let watermark = relay_coord
+        .confirmed_end_offset
+        .load(std::sync::atomic::Ordering::Acquire);
+    if watermark == 0 {
+        return false;
+    }
+    if relay_coord
+        .confirmed_end_offset
+        .compare_exchange(
+            watermark,
+            0,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_ok()
+    {
+        relay_coord
+            .confirmed_end_generation_mtime_ns
+            .store(current_gen_mtime_ns, std::sync::atomic::Ordering::Release);
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] 👁 Reset relay watermark on wrapper generation change for {} (channel {}, context={}, stale_watermark={}, stored_gen_mtime={}, current_gen_mtime={})",
+            tmux_session_name,
+            channel_id.get(),
+            context,
+            watermark,
+            stored_gen_mtime_ns,
+            current_gen_mtime_ns
+        );
+        return true;
+    }
+    false
+}
+
+pub(in crate::services::discord) fn reset_stale_relay_watermark_if_output_regressed(
     shared: &SharedData,
     channel_id: ChannelId,
     tmux_session_name: &str,

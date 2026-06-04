@@ -1234,31 +1234,35 @@ async fn finish_recovered_turn_mailbox(
     channel_id: ChannelId,
     stop_source: &'static str,
 ) {
-    let finish = mailbox_finish_turn(shared, provider, channel_id).await;
-    if let Some(removed_token) = finish.removed_token {
-        removed_token
-            .cancelled
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        super::saturating_decrement_global_active(shared);
-    }
-
-    super::clear_watchdog_deadline_override(channel_id.get()).await;
-    shared
-        .dispatch_thread_parents
-        .retain(|_, thread| *thread != channel_id);
-
-    if !finish.has_pending {
-        shared.dispatch_role_overrides.remove(&channel_id);
-    }
-
-    if finish.mailbox_online && finish.has_pending {
-        super::schedule_deferred_idle_queue_kickoff(
-            shared.clone(),
+    // #3016 phase 4: route the recovery terminal through the single-authority
+    // finalizer. The recovered turn is channel-scoped here (the caller did not
+    // thread its real `user_msg_id`), so we submit `user_msg_id == 0` — the
+    // finalizer resolves it to the channel's single live entry (or finalizes
+    // the orphan directly) and runs the SAME channel-scoped `mailbox_finish_turn`
+    // + gated counter decrement + watchdog-override clear + dispatch_thread_parents
+    // retain + role-override cleanup + queue kickoff this code did inline. The
+    // ledger phase gate keeps a racing watcher/bridge terminal exactly-once safe.
+    // `FinalizeContext::monitor` reproduces the inline side-effect set (no
+    // inflight clear, no completion-cleanup, no voice drain, kick off backlog).
+    //
+    // Recovery is single-turn-per-channel (the channel is being recovered, not
+    // running a fresh turn), so id-0 here is safe: the finalizer's id-0 guard
+    // makes an AMBIGUOUS submission (a recently-Finalized entry AND a different
+    // live turn) a NO-OP — it never releases a newer turn's token — and the
+    // unambiguous case (the recovered turn is the single live entry) finalizes
+    // it exactly as the inline code did. This reproduces the prior
+    // channel-scoped `mailbox_finish_turn` semantics, now ledger-gated.
+    let _ = shared
+        .turn_finalizer
+        .submit_terminal(
+            super::turn_finalizer::TurnKey::new(channel_id, 0, shared.current_generation),
             provider.clone(),
-            channel_id,
-            stop_source,
-        );
-    }
+            super::turn_finalizer::TerminalEvent::Complete,
+            super::turn_finalizer::FinalizeContext::monitor(),
+            shared.clone(),
+        )
+        .await;
+    let _ = stop_source;
 }
 
 pub(super) async fn reregister_active_turn_from_inflight(

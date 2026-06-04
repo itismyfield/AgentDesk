@@ -250,3 +250,14 @@ file = "src/voice/announce_meta.rs"
 owner = "voice-runtime"
 deadline = "2026-08-31"
 decompose_issue = "#3036"
+
+[[entry]]
+# Crossed the 1000-prod-LoC threshold when #3017 re-landed the single
+# output-offset relay-dedup authority: the idle-JSONL relay loop now consults
+# `committed_relay_offset` (read-only) with generation-aware watermark resets to
+# de-duplicate inflight-less wake/background relays against the tmux watcher.
+# Active relay-dedup surface; decompose the idle-relay loop out once stabilized.
+file = "src/services/discord/session_relay_sink.rs"
+owner = "discord-relay"
+deadline = "2026-08-31"
+decompose_issue = "#3036"

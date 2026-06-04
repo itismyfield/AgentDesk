@@ -1558,10 +1558,19 @@ pub(super) struct TmuxRelayCoord {
     /// End offset (exclusive) of the last relay this process has confirmed
     /// delivery for. 0 = no confirmed delivery yet this process lifetime.
     ///
-    /// This is telemetry/stop-state only. Relay dedupe is scoped to the
-    /// watcher instance via its local `last_relayed_offset`; cross-watcher
-    /// ownership is enforced at registration time so a valid owner is never
-    /// suppressed solely because another watcher advanced this watermark.
+    /// #3017: this is the single output-offset authority for the relay-dedup
+    /// paths (read via `SharedData::committed_relay_offset`, advanced by the
+    /// watcher's `advance_watcher_confirmed_end`). For an inflight-less wake /
+    /// idle-background / monitor-auto-turn turn, the secondary relay actors
+    /// (idle-JSONL relay, session-bound sink) CONSULT this watermark so a
+    /// byte-range the watcher already committed is relayed exactly once
+    /// regardless of which actor observes it first (the E-13 dedup invariant).
+    /// For a normal
+    /// Discord-origin turn (inflight present) the watcher remains the sole
+    /// relay owner and relay dedupe is still scoped to the watcher instance via
+    /// its local `last_relayed_offset` — a valid owner is never suppressed
+    /// solely because another watcher advanced this watermark; only the
+    /// no-inflight wake/idle paths gate on it.
     pub(super) confirmed_end_offset: Arc<std::sync::atomic::AtomicU64>,
     /// Wall-clock timestamp (ms since epoch) of the most recent confirmed
     /// relay. 0 = no confirmed relay observed yet. Read by the
@@ -1963,6 +1972,27 @@ impl SharedData {
             .entry(channel_id)
             .or_insert_with(|| Arc::new(TmuxRelayCoord::new()))
             .clone()
+    }
+
+    /// #3017 single output-offset authority for the relay-dedup paths — a
+    /// read-only snapshot of the authoritative committed relayed offset.
+    ///
+    /// The per-channel `confirmed_end_offset` is the ONE authoritative "JSONL
+    /// byte offset (exclusive) past which output has already been relayed to
+    /// Discord". The single committer is the tmux watcher (the primary relay)
+    /// via `advance_watcher_confirmed_end`. The inflight-less wake /
+    /// idle-background / monitor relay paths (idle-JSONL relay, session-bound
+    /// sink) CONSULT this BEFORE relaying so a byte-range the watcher already
+    /// delivered is relayed EXACTLY ONCE regardless of which actor observes it
+    /// first (the E-13 dedup invariant). They do NOT claim it themselves —
+    /// claiming on a secondary path could suppress the primary watcher's own
+    /// delivery on a failed forward and drop the response. It is the
+    /// cross-actor generalization of the watcher's process-local
+    /// `last_relayed_offset`.
+    pub(super) fn committed_relay_offset(&self, channel_id: ChannelId) -> u64 {
+        self.tmux_relay_coord(channel_id)
+            .confirmed_end_offset
+            .load(Ordering::Acquire)
     }
 
     /// Record that this process spawned a watcher during recovery/reattach.

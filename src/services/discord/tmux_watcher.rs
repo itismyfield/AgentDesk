@@ -4180,6 +4180,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let mut monitor_auto_turn_claimed = false;
         let mut monitor_auto_turn_deferred = false;
         let mut monitor_auto_turn_finished = false;
+        // #3016 P1: the synthetic mailbox message id + process-monotonic ledger
+        // generation the active monitor turn started under, threaded to
+        // `finish_monitor_auto_turn_if_claimed` so it finalizes the EXACT monitor
+        // turn (distinct ledger entries for sequential monitor turns even when
+        // the byte-offset-derived synthetic id repeats after a wrapper respawn).
+        let mut monitor_auto_turn_synthetic_msg_id: Option<MessageId> = None;
+        let mut monitor_auto_turn_ledger_generation: Option<u64> = None;
         // #1009: 1-shot tracker for the monitor-auto-turn preamble hint so the
         // hint text is emitted exactly once per watcher turn frame.
         let mut monitor_auto_turn_preamble_injected = false;
@@ -4254,6 +4261,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             .await;
             monitor_auto_turn_claimed = start.acquired;
             monitor_auto_turn_deferred = monitor_auto_turn_deferred || start.deferred;
+            if start.acquired {
+                monitor_auto_turn_synthetic_msg_id = start.synthetic_message_id;
+                monitor_auto_turn_ledger_generation = start.ledger_generation;
+            }
             if !start.acquired {
                 all_data.clear();
                 all_data_start_offset = current_offset;
@@ -4465,6 +4476,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 monitor_auto_turn_claimed = start.acquired;
                                 monitor_auto_turn_deferred =
                                     monitor_auto_turn_deferred || start.deferred;
+                                if start.acquired {
+                                    monitor_auto_turn_synthetic_msg_id = start.synthetic_message_id;
+                                    monitor_auto_turn_ledger_generation = start.ledger_generation;
+                                }
                                 if !start.acquired {
                                     was_paused = true;
                                     break;
@@ -5449,6 +5464,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         channel_id,
                         &mut monitor_auto_turn_claimed,
                         &mut monitor_auto_turn_finished,
+                        &mut monitor_auto_turn_synthetic_msg_id,
+                        &mut monitor_auto_turn_ledger_generation,
                     )
                     .await;
                     continue;
@@ -5585,6 +5602,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     channel_id,
                     &mut monitor_auto_turn_claimed,
                     &mut monitor_auto_turn_finished,
+                    &mut monitor_auto_turn_synthetic_msg_id,
+                    &mut monitor_auto_turn_ledger_generation,
                 )
                 .await;
                 continue;
@@ -5639,6 +5658,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         channel_id,
                         &mut monitor_auto_turn_claimed,
                         &mut monitor_auto_turn_finished,
+                        &mut monitor_auto_turn_synthetic_msg_id,
+                        &mut monitor_auto_turn_ledger_generation,
                     )
                     .await;
                     continue;
@@ -5737,6 +5758,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     channel_id,
                     &mut monitor_auto_turn_claimed,
                     &mut monitor_auto_turn_finished,
+                    &mut monitor_auto_turn_synthetic_msg_id,
+                    &mut monitor_auto_turn_ledger_generation,
                 )
                 .await;
                 continue;
@@ -5774,6 +5797,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 channel_id,
                 &mut monitor_auto_turn_claimed,
                 &mut monitor_auto_turn_finished,
+                &mut monitor_auto_turn_synthetic_msg_id,
+                &mut monitor_auto_turn_ledger_generation,
             )
             .await;
             all_data.clear();
@@ -5836,6 +5861,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 channel_id,
                 &mut monitor_auto_turn_claimed,
                 &mut monitor_auto_turn_finished,
+                &mut monitor_auto_turn_synthetic_msg_id,
+                &mut monitor_auto_turn_ledger_generation,
             )
             .await;
             continue;
@@ -5924,6 +5951,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     channel_id,
                     &mut monitor_auto_turn_claimed,
                     &mut monitor_auto_turn_finished,
+                    &mut monitor_auto_turn_synthetic_msg_id,
+                    &mut monitor_auto_turn_ledger_generation,
                 )
                 .await;
                 continue;
@@ -5975,6 +6004,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 channel_id,
                 &mut monitor_auto_turn_claimed,
                 &mut monitor_auto_turn_finished,
+                &mut monitor_auto_turn_synthetic_msg_id,
+                &mut monitor_auto_turn_ledger_generation,
             )
             .await;
             continue;
@@ -6087,6 +6118,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     channel_id,
                     &mut monitor_auto_turn_claimed,
                     &mut monitor_auto_turn_finished,
+                    &mut monitor_auto_turn_synthetic_msg_id,
+                    &mut monitor_auto_turn_ledger_generation,
                 )
                 .await;
                 continue;
@@ -6177,6 +6210,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 channel_id,
                 &mut monitor_auto_turn_claimed,
                 &mut monitor_auto_turn_finished,
+                &mut monitor_auto_turn_synthetic_msg_id,
+                &mut monitor_auto_turn_ledger_generation,
             )
             .await;
             continue;
@@ -6220,6 +6255,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 channel_id,
                 &mut monitor_auto_turn_claimed,
                 &mut monitor_auto_turn_finished,
+                &mut monitor_auto_turn_synthetic_msg_id,
+                &mut monitor_auto_turn_ledger_generation,
             )
             .await;
             discard_watcher_pending_buffer_after_suppressed_turn(
@@ -6286,6 +6323,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 channel_id,
                 &mut monitor_auto_turn_claimed,
                 &mut monitor_auto_turn_finished,
+                &mut monitor_auto_turn_synthetic_msg_id,
+                &mut monitor_auto_turn_ledger_generation,
             )
             .await;
             discard_watcher_pending_buffer_after_suppressed_turn(
@@ -6346,6 +6385,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     channel_id,
                     &mut monitor_auto_turn_claimed,
                     &mut monitor_auto_turn_finished,
+                    &mut monitor_auto_turn_synthetic_msg_id,
+                    &mut monitor_auto_turn_ledger_generation,
                 )
                 .await;
                 discard_watcher_pending_buffer_after_suppressed_turn(
@@ -6644,6 +6685,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 channel_id,
                 &mut monitor_auto_turn_claimed,
                 &mut monitor_auto_turn_finished,
+                &mut monitor_auto_turn_synthetic_msg_id,
+                &mut monitor_auto_turn_ledger_generation,
             )
             .await;
             continue;
@@ -6712,9 +6755,105 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 channel_id,
                 &mut monitor_auto_turn_claimed,
                 &mut monitor_auto_turn_finished,
+                &mut monitor_auto_turn_synthetic_msg_id,
+                &mut monitor_auto_turn_ledger_generation,
             )
             .await;
             continue;
+        }
+
+        // #3017 single output-offset authority — cross-actor relay dedup for
+        // the inflight-less wake / idle-background / monitor turn (E-13). When
+        // there is NO inflight, the idle-JSONL relay
+        // (`session_relay_sink::run_idle_jsonl_relay_loop`) reads the SAME
+        // JSONL and can relay this exact range. If it already committed the
+        // authoritative relayed offset at/past this turn's END, that range was
+        // already delivered to Discord — so the watcher must SKIP to avoid the
+        // duplicate `[E2E:E13:WAKE]`. This is deliberately gated on
+        // `inflight_missing_before_relay`: a normal Discord-origin turn
+        // (inflight present) keeps the watcher as the sole relay owner and is
+        // NEVER suppressed by the shared watermark (the long-standing
+        // invariant), so this only de-duplicates the un-owned wake/idle paths.
+        if inflight_missing_before_relay
+            && has_current_response
+            && current_offset > turn_data_start_offset
+        {
+            // Codex P1: a stale-high `confirmed_end_offset` left by a PREVIOUS
+            // wrapper (before any actor ran the regression reset) would make a
+            // FRESH wake/idle response with a lower `current_offset` look already
+            // delivered and get dropped. Run the SAME generation-aware
+            // regression reset BEFORE reading the watermark (a truncated /
+            // respawned JSONL resets it to 0 for a fresh wrapper), exactly as
+            // the idle relay path does. The unconditional pre-relay reset below
+            // at `pre_relay` is for the general path; this one guards the
+            // no-inflight dedup read specifically.
+            if let Ok(meta) = std::fs::metadata(&output_path) {
+                reset_stale_relay_watermark_if_output_regressed(
+                    &shared,
+                    channel_id,
+                    &tmux_session_name,
+                    meta.len(),
+                    "no_inflight_dedup",
+                );
+            }
+            // Codex r6 P2: `reset_stale_relay_watermark_if_output_regressed` only
+            // resets when the current EOF is LOWER than the stored watermark. A
+            // respawned same-named wrapper whose fresh JSONL has ALREADY grown
+            // PAST the previous wrapper's watermark would NOT trip that
+            // EOF-regression check, so a fresh no-inflight result whose consumed
+            // end is below the stale watermark would be wrongly suppressed.
+            // Independently reset the watermark when the `.generation` mtime has
+            // CHANGED since the watermark was committed (a fresh wrapper names a
+            // different byte stream). Shared with the idle relay path.
+            reset_relay_watermark_on_generation_change(
+                &shared,
+                channel_id,
+                &tmux_session_name,
+                "watcher_no_inflight_dedup",
+            );
+            // Read-only check against the authority. If the sink (fed by the
+            // idle-JSONL relay or the watcher's own session-bound delegation)
+            // already COMMITTED at/past this turn's END, that range was already
+            // delivered — the watcher skips to avoid the duplicate. The watcher
+            // does NOT claim here (a claim followed by a relay failure would mark
+            // the range delivered while dropping it); it advances the authority
+            // only on a CONFIRMED relay at `advance_watcher_confirmed_end` below.
+            //
+            // Codex r5 P2: compare against this TURN's consumed terminal end, NOT
+            // the whole read batch end (`current_offset`). A batch can contain a
+            // completed turn PLUS trailing JSONL for a later turn —
+            // `process_watcher_lines` stops at the first result, so the turn's
+            // output actually ends at `current_offset - all_data.len()` (the
+            // unprocessed tail), which is exactly what the normal commit path
+            // advances to (`runtime_binding_candidate_offset`). Comparing against
+            // `current_offset` would MISS a prior commit at that smaller consumed
+            // end and re-relay the already-committed terminal.
+            let turn_consumed_offset = terminal_event_consumed_offset(current_offset, &all_data);
+            let committed = shared.committed_relay_offset(channel_id);
+            if committed >= turn_consumed_offset && turn_consumed_offset > turn_data_start_offset {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 👁 watcher: suppressed no-inflight terminal relay for channel {} — range {}..{} already committed by another relay actor (offset authority, committed_end={})",
+                    channel_id.get(),
+                    turn_data_start_offset,
+                    turn_consumed_offset,
+                    committed
+                );
+                last_relayed_offset = Some(current_offset);
+                last_observed_generation_mtime_ns =
+                    Some(read_generation_file_mtime_ns(&tmux_session_name));
+                finish_monitor_auto_turn_if_claimed(
+                    &shared,
+                    &watcher_provider,
+                    channel_id,
+                    &mut monitor_auto_turn_claimed,
+                    &mut monitor_auto_turn_finished,
+                    &mut monitor_auto_turn_synthetic_msg_id,
+                    &mut monitor_auto_turn_ledger_generation,
+                )
+                .await;
+                continue;
+            }
         }
 
         // Relay coordination is limited to serialization plus telemetry. The
@@ -6770,6 +6909,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 channel_id,
                 &mut monitor_auto_turn_claimed,
                 &mut monitor_auto_turn_finished,
+                &mut monitor_auto_turn_synthetic_msg_id,
+                &mut monitor_auto_turn_ledger_generation,
             )
             .await;
             continue;
@@ -7836,6 +7977,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             channel_id,
             &mut monitor_auto_turn_claimed,
             &mut monitor_auto_turn_finished,
+            &mut monitor_auto_turn_synthetic_msg_id,
+            &mut monitor_auto_turn_ledger_generation,
         )
         .await;
 

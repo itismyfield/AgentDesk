@@ -61,11 +61,13 @@ mod watcher_lifecycle;
 
 use self::tmux_reattach_offsets::matching_recent_watcher_reattach_offset;
 pub(super) use self::tmux_session_files::read_generation_file_mtime_ns;
+pub(in crate::services::discord) use self::tmux_session_files::reset_relay_watermark_on_generation_change;
+pub(in crate::services::discord) use self::tmux_session_files::reset_stale_relay_watermark_if_output_regressed;
 pub(super) use self::tmux_session_files::session_panel_instance_key;
 pub(crate) use self::tmux_session_files::write_spawn_nonce;
 use self::tmux_session_files::{
     preserve_mtime_after_write, reset_stale_local_relay_offset_if_output_regressed,
-    reset_stale_relay_watermark_if_output_regressed, sweep_orphan_session_files,
+    sweep_orphan_session_files,
 };
 use self::watcher_lifecycle::*;
 pub(in crate::services::discord) use self::watcher_lifecycle::{
@@ -1093,10 +1095,39 @@ fn enqueue_monitor_auto_turn_deferred_notification(
 struct MonitorAutoTurnStart {
     acquired: bool,
     deferred: bool,
+    /// The synthetic mailbox message id this monitor turn started under
+    /// (`data_start_offset.max(1)`), `Some` only when `acquired`. #3016 P1:
+    /// the finalizer keys its ledger on this so SEQUENTIAL monitor turns in the
+    /// same channel within `FINALIZED_TTL` are DISTINCT entries — a finalized
+    /// monitor turn must not make the next one resolve to `AlreadyFinalized`
+    /// (which would strand its mailbox token + counter).
+    synthetic_message_id: Option<MessageId>,
+    /// #3016 P1 (codex r3): a PROCESS-MONOTONIC ledger generation for this
+    /// monitor turn, `Some` only when `acquired`. The synthetic mailbox message
+    /// id is derived from the JSONL byte offset, which REPEATS after a wrapper
+    /// respawn / JSONL truncation while `current_generation` stays the same — so
+    /// two monitor turns at the same offset within `FINALIZED_TTL` would share a
+    /// finalizer ledger key and the second would resolve to `AlreadyFinalized`,
+    /// stranding its mailbox token + counter. Keying the ledger generation on
+    /// this never-repeating counter makes every monitor turn a DISTINCT entry.
+    /// (It is used ONLY for ledger keying; `do_finalize`'s identity-guarded
+    /// mailbox finish matches on `channel_id` + `synthetic_message_id`, not the
+    /// generation, so this does not affect which mailbox token is released.)
+    ledger_generation: Option<u64>,
 }
 
 const MONITOR_AUTO_TURN_MISSED_SIGNAL_FALLBACK: tokio::time::Duration =
     tokio::time::Duration::from_secs(30);
+
+/// Process-monotonic counter for monitor-auto-turn finalizer ledger
+/// generations (#3016 P1). Starts high to avoid colliding with the
+/// `current_generation` (dcserver restart) namespace used by ordinary turns.
+static MONITOR_AUTO_TURN_LEDGER_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1 << 48);
+
+fn next_monitor_auto_turn_ledger_generation() -> u64 {
+    MONITOR_AUTO_TURN_LEDGER_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 
 async fn start_monitor_auto_turn_when_available(
     shared: &SharedData,
@@ -1113,6 +1144,8 @@ async fn start_monitor_auto_turn_when_available(
             return MonitorAutoTurnStart {
                 acquired: false,
                 deferred,
+                synthetic_message_id: None,
+                ledger_generation: None,
             };
         }
 
@@ -1130,9 +1163,26 @@ async fn start_monitor_auto_turn_when_available(
             shared
                 .turn_start_times
                 .insert(channel_id, std::time::Instant::now());
+            // #3016 P1: register the monitor turn in the finalizer ledger under
+            // its synthetic message id keyed by a PROCESS-MONOTONIC ledger
+            // generation (the byte-offset-derived synthetic id repeats after a
+            // wrapper respawn, so the generation is what guarantees distinct
+            // entries for sequential monitor turns — see `MonitorAutoTurnStart`).
+            let ledger_generation = next_monitor_auto_turn_ledger_generation();
+            shared.turn_finalizer.register_start(
+                super::turn_finalizer::TurnKey::new(
+                    channel_id,
+                    synthetic_message_id.get(),
+                    ledger_generation,
+                ),
+                provider.clone(),
+                crate::services::discord::inflight::RelayOwnerKind::Watcher,
+            );
             return MonitorAutoTurnStart {
                 acquired: true,
                 deferred,
+                synthetic_message_id: Some(synthetic_message_id),
+                ledger_generation: Some(ledger_generation),
             };
         }
 
@@ -1165,25 +1215,38 @@ async fn finish_monitor_auto_turn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
+    synthetic_message_id: Option<MessageId>,
+    ledger_generation: Option<u64>,
 ) {
-    let finish = super::mailbox_finish_turn(shared, provider, channel_id).await;
-    if let Some(token) = finish.removed_token {
-        token
-            .cancelled
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        super::saturating_decrement_global_active(shared);
-    }
+    // #3016 phase 4: route the monitor-auto-turn terminal through the
+    // single-authority finalizer instead of calling mailbox_finish_turn +
+    // counter + kickoff inline. The monitor turn was `register_start`'d under
+    // its synthetic message id keyed by a PROCESS-MONOTONIC ledger generation,
+    // so we finalize under THAT exact key — keeping sequential monitor turns in
+    // the same channel within `FINALIZED_TTL` as DISTINCT ledger entries even
+    // when the byte-offset-derived synthetic id repeats after a wrapper respawn
+    // (codex P1: a colliding key would make the second monitor turn resolve to
+    // `AlreadyFinalized` and strand its mailbox token + counter). `do_finalize`
+    // takes the identity-guarded `mailbox_finish_turn_if_matches` path for the
+    // real id (generation is ledger-keying only). The ledger phase gate makes a
+    // racing watcher/bridge terminal exactly-once safe. `FinalizeContext::monitor`
+    // reproduces the inline side-effect set: no inflight clear, no
+    // completion-cleanup, no voice drain, but kick off any queued backlog.
+    let user_msg_id = synthetic_message_id.map(|id| id.get()).unwrap_or(0);
+    let generation = ledger_generation.unwrap_or(shared.current_generation);
+    let _ = shared
+        .turn_finalizer
+        .submit_terminal(
+            super::turn_finalizer::TurnKey::new(channel_id, user_msg_id, generation),
+            provider.clone(),
+            super::turn_finalizer::TerminalEvent::Complete,
+            super::turn_finalizer::FinalizeContext::monitor(),
+            shared.clone(),
+        )
+        .await;
     shared.turn_start_times.remove(&channel_id);
     if let Ok(mut last) = shared.last_turn_at.lock() {
         *last = Some(chrono::Local::now().to_rfc3339());
-    }
-    if finish.has_pending {
-        super::schedule_deferred_idle_queue_kickoff(
-            shared.clone(),
-            provider.clone(),
-            channel_id,
-            "monitor auto-turn completed with queued backlog",
-        );
     }
 }
 
@@ -1193,11 +1256,22 @@ async fn finish_monitor_auto_turn_if_claimed(
     channel_id: ChannelId,
     claimed: &mut bool,
     finished: &mut bool,
+    synthetic_message_id: &mut Option<MessageId>,
+    ledger_generation: &mut Option<u64>,
 ) {
     if *claimed {
-        finish_monitor_auto_turn(shared, provider, channel_id).await;
+        finish_monitor_auto_turn(
+            shared,
+            provider,
+            channel_id,
+            *synthetic_message_id,
+            *ledger_generation,
+        )
+        .await;
         *claimed = false;
         *finished = true;
+        *synthetic_message_id = None;
+        *ledger_generation = None;
     }
 }
 

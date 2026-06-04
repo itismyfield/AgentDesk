@@ -264,6 +264,22 @@ impl FinalizeContext {
         }
     }
 
+    /// Monitor-auto-turn / recovery terminal (#3016 phase 4): the caller owns
+    /// the inflight clear (or there is none — synthetic monitor turn / recovery
+    /// already cleared it), does NOT mark completion-cleanup, does NOT drain
+    /// voice, but DOES kick off any queued backlog (the pre-#3016
+    /// `finish_monitor_auto_turn` / `finish_recovered_turn_mailbox` both
+    /// scheduled the deferred idle-queue kickoff on `has_pending`). This is
+    /// `watcher()` plus the queue kickoff.
+    pub(in crate::services::discord) fn monitor() -> Self {
+        Self {
+            clear_inflight: false,
+            allow_completion_cleanup: false,
+            drain_voice: false,
+            kickoff_queue: true,
+        }
+    }
+
     /// Deadline-armed gate-timeout backstop, fired from the reconciler with no
     /// caller to have cleared inflight: finalize fully (clear inflight here),
     /// no completion-cleanup or voice drain (watcher semantics), kick off the
