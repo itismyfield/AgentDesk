@@ -261,3 +261,15 @@ file = "src/services/discord/session_relay_sink.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
 decompose_issue = "#3036"
+
+[[entry]]
+# Crossed the 1000-prod-LoC threshold when #3041 P1-0 landed the dormant
+# `DeliveryLeaseCell` finalizer messages/handlers on top of #3143's
+# `FinalizeContext::monitor()` + monitor turn-key/ledger-generation logic. The
+# dormant lease doc comments were already trimmed; the remaining overage is the
+# single owning finalizer state machine (#3016), not removable prose. Decompose
+# the ledger/actor-loop/reconciler surface out as #3016 lands its wired phases.
+file = "src/services/discord/turn_finalizer.rs"
+owner = "discord-finalizer"
+deadline = "2026-08-31"
+decompose_issue = "#3016"

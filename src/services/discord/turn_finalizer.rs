@@ -295,13 +295,10 @@ impl FinalizeContext {
         }
     }
 
-    /// #3041 §3 P1-0 (DORMANT): the context a lease-release-driven finalize will
-    /// use once the watcher terminal is migrated onto the delivery lease
-    /// (P1-1..). It currently mirrors `watcher()` exactly — the watcher path is
-    /// the first to adopt the lease — so adding it changes NO existing behaviour
-    /// (no live caller constructs it). It is a separate constructor (not a reuse
-    /// of `watcher()`) so the wired phases can tune the lease-release knobs
-    /// independently without disturbing the legacy watcher semantics.
+    /// #3041 §3 P1-0 (DORMANT): context for a lease-release-driven finalize once
+    /// the watcher terminal migrates onto the delivery lease (P1-1..). Mirrors
+    /// `watcher()` today (no live caller), but kept as a distinct constructor so
+    /// wired phases can tune the lease-release knobs independently.
     #[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
     pub(in crate::services::discord) fn delivery_lease() -> Self {
         Self {
@@ -547,10 +544,9 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                                 .await;
                         let _ = ack.send(outcome);
                     }
-                    // #3041 §2-§3 P1-0 (DORMANT, UNREACHABLE today). Routing
-                    // these through the actor serializes lease transitions on
-                    // the same owner that arbitrates finalize (P1-1.. relies on
-                    // this). Nothing sends them yet.
+                    // #3041 §2-§3 P1-0 (DORMANT, UNREACHABLE today). Routing these
+                    // through the actor serializes lease transitions on the finalize
+                    // owner (P1-1.. relies on this). Nothing sends them yet.
                     FinalizeMsg::AcquireDelivery {
                         key,
                         lease,
