@@ -1213,6 +1213,129 @@ fn save_inflight_state_if_absent_in_root(
     Ok(true)
 }
 
+/// Outcome of [`save_inflight_state_if_matches_identity`] — the #3041 P1-2 R3
+/// identity-guarded re-save used on a delivery-lease `Skip` epilogue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum GuardedSaveOutcome {
+    /// On-disk row still matched the turn identity; the row was rewritten.
+    Saved,
+    /// No inflight row existed (the lease HOLDER already cleared it on its
+    /// success path). We do NOT resurrect it — the turn is already delivered.
+    Missing,
+    /// A row existed but its identity did NOT match (a newer turn replaced it,
+    /// or a planned-restart / rebind-origin marker now owns the row). We do
+    /// NOT clobber it.
+    IdentityMismatch,
+    /// Filesystem / serialization error during the write.
+    IoError,
+}
+
+/// #3041 P1-2 (codex P1-2 R3): identity-guarded re-save for the bridge's
+/// delivery-lease `Skip` epilogue. On a Skip the live HOLDER (the watcher)
+/// owns this turn's inflight lifecycle and CLEARS the row on its own success.
+/// The bridge's epilogue must therefore NOT blindly `save_inflight_state`: if
+/// the holder's clear (a `remove_file` under the same sidecar lock) won the
+/// race and the bridge's blind re-save ran second, it would resurrect a STALE
+/// inflight row for an already-delivered turn — recovery then sees it as
+/// delivered and returns WITHOUT clearing, leaking the row indefinitely.
+///
+/// This helper closes that window the same way `clear_inflight_state_if_matches`
+/// (#2427 D-wire) does: read the on-disk row under the lock and only write when
+/// it is STILL present AND its `(user_msg_id, started_at, tmux_session_name)`
+/// identity (plus `turn_start_offset`, when known) matches the turn the bridge
+/// is preserving. If the row is gone (holder delivered → `Missing`) or has been
+/// replaced by a newer turn / restart-or-rebind marker (`IdentityMismatch`), we
+/// no-op instead of resurrecting. When the holder FAILED and did NOT clear, the
+/// row is still present + matching, so we refresh it (`Saved`) and retry
+/// survives. Windows-safe: the `lock_inflight_state_path` sidecar flock + the
+/// `atomic_write` rename are the same primitives the rest of the module uses.
+pub(in crate::services::discord) fn save_inflight_state_if_matches_identity(
+    state: &InflightTurnState,
+    expected: &InflightTurnIdentity,
+    expected_turn_start_offset: Option<u64>,
+) -> GuardedSaveOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedSaveOutcome::IoError;
+    };
+    save_inflight_state_if_matches_identity_in_root(
+        &root,
+        state,
+        expected,
+        expected_turn_start_offset,
+    )
+}
+
+/// Root-explicit inner form of [`save_inflight_state_if_matches_identity`] for
+/// unit tests (avoids `AGENTDESK_ROOT_DIR` env-var races).
+pub(super) fn save_inflight_state_if_matches_identity_in_root(
+    root: &Path,
+    state: &InflightTurnState,
+    expected: &InflightTurnIdentity,
+    expected_turn_start_offset: Option<u64>,
+) -> GuardedSaveOutcome {
+    let Some(provider) = state.provider_kind() else {
+        return GuardedSaveOutcome::IoError;
+    };
+    let path = inflight_state_path(root, &provider, state.channel_id);
+    if let Some(parent) = path.parent() {
+        if fs::create_dir_all(parent).is_err() {
+            return GuardedSaveOutcome::IoError;
+        }
+    }
+    // Hold the sidecar flock across the read AND the write so a concurrent
+    // holder `clear_inflight_state` (which takes the same lock) cannot land its
+    // remove between our identity check and our write.
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return GuardedSaveOutcome::IoError;
+    };
+    // Holder already cleared the row on its success path → do NOT resurrect.
+    let Ok(data) = fs::read_to_string(&path) else {
+        return GuardedSaveOutcome::Missing;
+    };
+    let Ok(on_disk) = serde_json::from_str::<InflightTurnState>(&data) else {
+        // Malformed row: treat like a mismatch and do not clobber — the loader
+        // eviction path GCs malformed payloads on the next read.
+        return GuardedSaveOutcome::IdentityMismatch;
+    };
+    // A newer turn (different identity) or a planned-restart / rebind-origin
+    // marker now owns the row — never overwrite it with this preserved turn.
+    if on_disk.restart_mode.is_some() || on_disk.rebind_origin {
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+    if expected.user_msg_id == 0 || !expected.matches_state(&on_disk) {
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+    if let Some(expected_offset) = expected_turn_start_offset {
+        if on_disk.turn_start_offset != Some(expected_offset) {
+            return GuardedSaveOutcome::IdentityMismatch;
+        }
+    }
+    validate_inflight_state_for_save(
+        root,
+        &path,
+        state,
+        "src/services/discord/inflight.rs:save_inflight_state_if_matches_identity_in_root",
+    );
+    let mut updated = state.clone();
+    updated.updated_at = now_string();
+    let Ok(json) = serde_json::to_string_pretty(&updated) else {
+        return GuardedSaveOutcome::IoError;
+    };
+    match atomic_write(&path, &json) {
+        Ok(()) => GuardedSaveOutcome::Saved,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = state.channel_id,
+                expected_user_msg_id = expected.user_msg_id,
+                error = %error,
+                "inflight identity-guarded save failed; leaving on-disk row untouched"
+            );
+            GuardedSaveOutcome::IoError
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // #3077: typed status-panel ownership writes.
 //
@@ -2442,16 +2565,17 @@ pub(in crate::services::discord) enum InflightSignal {
 #[cfg(test)]
 mod stall_recovery_tests {
     use super::{
-        GuardedClearOutcome, INFLIGHT_STALENESS_THRESHOLD_SECS, InflightRestartMode,
-        InflightTurnIdentity, InflightTurnState, RelayOwnerKind, StatusPanelBindGuard,
-        StatusPanelBindOutcome, StatusPanelClearGuard, bind_status_panel_in_root,
-        clear_inflight_state_if_matches_identity_after_delivery_in_root,
+        GuardedClearOutcome, GuardedSaveOutcome, INFLIGHT_STALENESS_THRESHOLD_SECS,
+        InflightRestartMode, InflightTurnIdentity, InflightTurnState, RelayOwnerKind,
+        StatusPanelBindGuard, StatusPanelBindOutcome, StatusPanelClearGuard,
+        bind_status_panel_in_root, clear_inflight_state_if_matches_identity_after_delivery_in_root,
         clear_inflight_state_if_matches_identity_in_root, clear_inflight_state_if_matches_in_root,
         clear_inflight_state_if_matches_tmux_response_in_root,
         clear_status_panel_if_current_in_root, inflight_state_allows_idle_tmux_repair_state,
         inflight_state_is_stale, inflight_state_path, load_inflight_states_from_root,
         lock_inflight_state_path, normalize_response_sent_offset,
-        refresh_inflight_last_offset_if_matches_identity_in_root, save_inflight_state_in_root,
+        refresh_inflight_last_offset_if_matches_identity_in_root,
+        save_inflight_state_if_matches_identity_in_root, save_inflight_state_in_root,
         validate_inflight_state_for_save,
     };
     use crate::services::agent_protocol::RuntimeHandoffKind;
@@ -3835,6 +3959,172 @@ mod stall_recovery_tests {
         let outcome =
             clear_inflight_state_if_matches_in_root(temp.path(), &ProviderKind::Claude, 42, 999);
         assert_eq!(outcome, GuardedClearOutcome::Missing);
+    }
+
+    // ---------------------------------------------------------------------
+    // #3041 P1-2 (codex P1-2 R3): identity-guarded epilogue re-save. On a
+    // delivery-lease `Skip` the watcher (holder) owns the inflight lifecycle
+    // and clears the row on its OWN success. The bridge's epilogue must NOT
+    // resurrect a holder-cleared row; it must refresh a still-present matching
+    // row so retry survives when the holder FAILED.
+    // ---------------------------------------------------------------------
+
+    /// Skip → holder SUCCEEDED and cleared inflight (no row on disk). The bridge
+    /// epilogue's identity-guarded save must NOT resurrect it (`Missing`) — no
+    /// stale leak.
+    #[test]
+    fn skip_save_does_not_resurrect_holder_cleared_inflight() {
+        let temp = TempDir::new().unwrap();
+        // The holder already removed the row on its success path → nothing on disk.
+        let state = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 777);
+        let expected = InflightTurnIdentity::from_state(&state);
+
+        let outcome = save_inflight_state_if_matches_identity_in_root(
+            temp.path(),
+            &state,
+            &expected,
+            state.turn_start_offset,
+        );
+
+        assert_eq!(
+            outcome,
+            GuardedSaveOutcome::Missing,
+            "holder-cleared inflight must NOT be resurrected by the bridge skip epilogue"
+        );
+        assert!(
+            load_inflight_states_from_root(temp.path(), &ProviderKind::Claude).is_empty(),
+            "no row may be recreated for an already-delivered turn"
+        );
+    }
+
+    /// Skip → holder FAILED (NotDelivered) and did NOT clear; the turn-start row
+    /// is still on disk with matching identity. The bridge epilogue's
+    /// identity-guarded save refreshes it (`Saved`) so retry can re-deliver —
+    /// no black-hole.
+    #[test]
+    fn skip_save_preserves_inflight_when_holder_did_not_clear() {
+        let temp = TempDir::new().unwrap();
+        let mut state = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 777);
+        save_inflight_state_in_root(temp.path(), &state).unwrap();
+
+        // The bridge accumulated more of the answer during the turn; it preserves
+        // this updated copy for retry. Identity (user_msg_id/started_at/tmux) is
+        // unchanged, so the guarded save must land.
+        state.full_response = "partially delivered answer, retry me".to_string();
+        let expected = InflightTurnIdentity::from_state(&state);
+
+        let outcome = save_inflight_state_if_matches_identity_in_root(
+            temp.path(),
+            &state,
+            &expected,
+            state.turn_start_offset,
+        );
+
+        assert_eq!(
+            outcome,
+            GuardedSaveOutcome::Saved,
+            "a still-present matching row must be refreshed so retry survives a holder failure"
+        );
+        let rows = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].full_response,
+            "partially delivered answer, retry me"
+        );
+    }
+
+    /// Skip → a NEWER turn (different `user_msg_id`) already wrote its inflight
+    /// before the preserving bridge's epilogue ran. The guarded save must NOT
+    /// clobber the fresh turn (`IdentityMismatch`).
+    #[test]
+    fn skip_save_does_not_clobber_newer_turn() {
+        let temp = TempDir::new().unwrap();
+        // Newer turn currently owns the row on disk. (NB: the guard-test helper's
+        // 3rd arg feeds `current_msg_id`; set the real `user_msg_id` explicitly so
+        // the two turns differ on the identity field the guard actually checks.)
+        let mut newer = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 0);
+        newer.user_msg_id = 999;
+        save_inflight_state_in_root(temp.path(), &newer).unwrap();
+
+        // The preserving bridge is still holding the PREVIOUS turn (user_msg_id
+        // 777). Its identity no longer matches the on-disk newer turn.
+        let mut preserved = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 0);
+        preserved.user_msg_id = 777;
+        let expected = InflightTurnIdentity::from_state(&preserved);
+
+        let outcome = save_inflight_state_if_matches_identity_in_root(
+            temp.path(),
+            &preserved,
+            &expected,
+            preserved.turn_start_offset,
+        );
+
+        assert_eq!(
+            outcome,
+            GuardedSaveOutcome::IdentityMismatch,
+            "a preserved older turn must NOT overwrite a newer turn's inflight"
+        );
+        let rows = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].user_msg_id, 999,
+            "the newer turn's inflight must remain intact"
+        );
+    }
+
+    /// Skip → the on-disk row's `turn_start_offset` no longer matches (a newer
+    /// turn reusing the same `user_msg_id`/session at a different offset). The
+    /// guarded save must refuse (`IdentityMismatch`).
+    #[test]
+    fn skip_save_checks_turn_start_offset() {
+        let temp = TempDir::new().unwrap();
+        let mut on_disk = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 777);
+        on_disk.turn_start_offset = Some(500);
+        save_inflight_state_in_root(temp.path(), &on_disk).unwrap();
+
+        // Same identity (user_msg_id/started_at/tmux) as on_disk so ONLY the
+        // turn_start_offset differs — isolating the offset guard.
+        let mut preserved = on_disk.clone();
+        preserved.turn_start_offset = Some(0);
+        let expected = InflightTurnIdentity::from_state(&preserved);
+
+        // The preserving bridge expects offset 0 but disk shows 500.
+        let outcome = save_inflight_state_if_matches_identity_in_root(
+            temp.path(),
+            &preserved,
+            &expected,
+            Some(0),
+        );
+
+        assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+    }
+
+    /// Skip → the on-disk row became a planned-restart marker. The guarded save
+    /// must not clobber it (`IdentityMismatch`); restart recovery owns it.
+    #[test]
+    fn skip_save_does_not_clobber_planned_restart_marker() {
+        let temp = TempDir::new().unwrap();
+        let mut marker = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 777);
+        marker.set_restart_mode(InflightRestartMode::DrainRestart);
+        save_inflight_state_in_root(temp.path(), &marker).unwrap();
+
+        let preserved = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 777);
+        let expected = InflightTurnIdentity::from_state(&preserved);
+
+        let outcome = save_inflight_state_if_matches_identity_in_root(
+            temp.path(),
+            &preserved,
+            &expected,
+            preserved.turn_start_offset,
+        );
+
+        assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+        let rows = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0].restart_mode.is_some(),
+            "the planned-restart marker must be preserved for recovery"
+        );
     }
 
     #[cfg(unix)]

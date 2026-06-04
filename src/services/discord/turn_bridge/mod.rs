@@ -1411,8 +1411,8 @@ use stale_resume::{
 };
 use terminal_delivery::{
     BridgeDeliveryLease, BridgeLeaseAcquire, bridge_epilogue_clears_inflight,
-    bridge_epilogue_marks_watcher_delivered, send_ordered_long_terminal_response,
-    should_complete_work_dispatch_after_terminal_delivery,
+    bridge_epilogue_marks_watcher_delivered, bridge_epilogue_skip_save_is_identity_guarded,
+    send_ordered_long_terminal_response, should_complete_work_dispatch_after_terminal_delivery,
     should_fail_dispatch_after_terminal_delivery, silent_turn_skip_marks_committed,
     terminal_delivery_should_send_new_chunks, tui_quiescence_timeout_requires_inflight_retry,
     turn_bridge_replace_outcome_committed,
@@ -7208,6 +7208,25 @@ pub(super) fn spawn_turn_bridge(
             has_pending_after_voice
         };
         let mut preserve_inflight_for_cleanup_retry = false;
+        // #3041 P1-2 (codex P1-2 R3): set ONLY on a delivery-lease `Skip`, where
+        // the live HOLDER (the watcher) — a different actor sharing the same
+        // per-channel `DeliveryLeaseCell` — owns this turn's delivery AND its
+        // inflight lifecycle (the watcher CLEARS inflight on its own success).
+        // Distinct from the bridge-owned `preserve_inflight_for_cleanup_retry`
+        // sites (EditFailed, PG-cancel-fail, replace-not-committed, send/enqueue
+        // failure, TUI quiescence timeout) where the BRIDGE still owns the row
+        // and its epilogue `save_inflight_state` is load-bearing. On a Skip the
+        // bridge must NOT blindly rewrite inflight: the holder may have already
+        // cleared it on success, and a blind re-save would resurrect a STALE
+        // inflight row for an already-delivered turn (recovery sees it as
+        // delivered and returns without clearing → permanent stale leak). The
+        // epilogue's save is therefore made IDENTITY-GUARDED on a Skip
+        // (`save_inflight_state_if_matches_identity`): it only rewrites if the
+        // on-disk row STILL matches this turn's identity, so a watcher-clear
+        // (file gone) or a newer turn (identity mismatch) no-ops instead of
+        // resurrecting. When the holder FAILS (does not clear), the row is still
+        // present + matching, so the bridge refreshes it and retry survives.
+        let mut bridge_skip_holder_owns_inflight = false;
         let mut terminal_delivery_committed = false;
         let mut terminal_body_visible = false;
         let mut status_panel_terminal_committed = false;
@@ -7453,6 +7472,10 @@ pub(super) fn spawn_turn_bridge(
                 // the existing ACK-poll / next-pass machinery re-delivers the
                 // still-retry-able turn instead of black-holing it.
                 preserve_inflight_for_cleanup_retry = true;
+                // codex P1-2 R3: the watcher (holder) owns the inflight lifecycle
+                // on a Skip — make the epilogue save identity-guarded so it never
+                // resurrects a row the holder already cleared on success.
+                bridge_skip_holder_owns_inflight = true;
             } else {
                 let stop_lease = match stop_lease_acquire {
                     BridgeLeaseAcquire::Held(lease) => Some(lease),
@@ -7543,6 +7566,8 @@ pub(super) fn spawn_turn_bridge(
                 // holder owns delivery; the bridge must not clear inflight or mark
                 // the watcher delivered. See the cancel/stop skip arm above.
                 preserve_inflight_for_cleanup_retry = true;
+                // codex P1-2 R3: holder owns the inflight lifecycle on a Skip.
+                bridge_skip_holder_owns_inflight = true;
             } else {
                 let plt_lease = match plt_lease_acquire {
                     BridgeLeaseAcquire::Held(lease) => Some(lease),
@@ -7987,6 +8012,9 @@ pub(super) fn spawn_turn_bridge(
                         // and the holder's eventual NotDelivered/Unknown stays
                         // re-deliverable.
                         preserve_inflight_for_cleanup_retry = true;
+                        // codex P1-2 R3: holder owns the inflight lifecycle on a
+                        // Skip — identity-guard the epilogue save (no resurrect).
+                        bridge_skip_holder_owns_inflight = true;
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::warn!(
                             channel = channel_id.get(),
@@ -8062,6 +8090,9 @@ pub(super) fn spawn_turn_bridge(
                             // clear inflight or mark the watcher delivered. See the
                             // cancel/stop skip arm.
                             preserve_inflight_for_cleanup_retry = true;
+                            // codex P1-2 R3: holder owns the inflight lifecycle on
+                            // a Skip — identity-guard the epilogue save.
+                            bridge_skip_holder_owns_inflight = true;
                         } else {
                             let lease = match lease_acquire {
                                 BridgeLeaseAcquire::Held(lease) => Some(lease),
@@ -8152,6 +8183,9 @@ pub(super) fn spawn_turn_bridge(
                             // clear inflight or mark the watcher delivered. See the
                             // cancel/stop skip arm.
                             preserve_inflight_for_cleanup_retry = true;
+                            // codex P1-2 R3: holder owns the inflight lifecycle on
+                            // a Skip — identity-guard the epilogue save.
+                            bridge_skip_holder_owns_inflight = true;
                         } else {
                             // `Held(lease)` → commit via the lease; `NoRange` →
                             // deliver without a lease (no offset to advance).
@@ -9132,7 +9166,49 @@ pub(super) fn spawn_turn_bridge(
             let _ = save_inflight_state(&inflight_state);
             inflight_guard.provider.take();
         } else if preserve_inflight_for_cleanup_retry || bridge_output_owner.is_some() {
-            let _ = save_inflight_state(&inflight_state);
+            // #3041 P1-2 (codex P1-2 R3): on a delivery-lease `Skip` the live
+            // HOLDER (the watcher) owns this turn's inflight lifecycle and CLEARS
+            // the row on its own success. A blind `save_inflight_state` here would
+            // RACE the holder's clear: if the clear wins first and our save runs
+            // second, we resurrect a STALE inflight row for an already-delivered
+            // turn (recovery then sees it delivered and returns WITHOUT clearing
+            // → permanent stale leak). So on the skip-holder path we use an
+            // IDENTITY-GUARDED save that only rewrites when the on-disk row STILL
+            // matches this turn — a holder-cleared row (Missing) or a newer turn
+            // (IdentityMismatch) no-ops. When the holder FAILED (did not clear),
+            // the row is still present + matching, so the refresh lands and retry
+            // survives. Every other preserve site (bridge-owned cleanup retry) and
+            // the delegated-owner path keep the blind save: there is no competing
+            // holder, so the bridge's save is authoritative.
+            let identity_guarded_skip_save =
+                bridge_epilogue_skip_save_is_identity_guarded(bridge_skip_holder_owns_inflight);
+            if identity_guarded_skip_save {
+                let expected_identity =
+                    crate::services::discord::inflight::InflightTurnIdentity::from_state(
+                        &inflight_state,
+                    );
+                let guarded_outcome =
+                    crate::services::discord::inflight::save_inflight_state_if_matches_identity(
+                        &inflight_state,
+                        &expected_identity,
+                        inflight_state.turn_start_offset,
+                    );
+                crate::services::observability::emit_inflight_lifecycle_event(
+                    provider.as_str(),
+                    channel_id.get(),
+                    dispatch_id.as_deref(),
+                    adk_session_key.as_deref(),
+                    Some(turn_id.as_str()),
+                    "skip_identity_guarded_save",
+                    serde_json::json!({
+                        "guarded_save_outcome": format!("{guarded_outcome:?}"),
+                        "user_msg_id": inflight_state.user_msg_id,
+                        "turn_start_offset": inflight_state.turn_start_offset,
+                    }),
+                );
+            } else {
+                let _ = save_inflight_state(&inflight_state);
+            }
             inflight_guard.provider.take();
             if let Some(owner) = bridge_output_owner {
                 let lifecycle_event = match owner {

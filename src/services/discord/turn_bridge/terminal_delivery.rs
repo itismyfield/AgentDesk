@@ -341,6 +341,30 @@ pub(super) fn bridge_epilogue_clears_inflight(
     !cancelled_with_restart_mode && !preserve_inflight_for_cleanup_retry && !bridge_output_delegated
 }
 
+/// #3041 P1-2 (codex P1-2 R3): the cleanup-epilogue save-mode seam. On a
+/// delivery-lease `Skip` the live HOLDER (the watcher) — a different actor
+/// sharing the same per-channel `DeliveryLeaseCell` — owns this turn's delivery
+/// AND its inflight lifecycle (the holder CLEARS inflight on its own success).
+/// If the bridge's epilogue blindly re-`save_inflight_state`s after the holder
+/// cleared the row, it resurrects a STALE inflight for an already-delivered turn
+/// (recovery sees it delivered → returns WITHOUT clearing → permanent leak).
+///
+/// This predicate gates the epilogue's `~9168` preserve-save: when the preserve
+/// is due to a Skip (`bridge_skip_holder_owns_inflight`), the save MUST be
+/// identity-guarded (`save_inflight_state_if_matches_identity`) so a
+/// holder-cleared / newer-turn row no-ops instead of resurrecting. Every other
+/// preserve site (bridge-owned cleanup retry: EditFailed, PG-cancel-fail,
+/// replace-not-committed, send/enqueue failure, TUI quiescence timeout) and the
+/// delegated-owner path have NO competing holder, so the blind save stays
+/// authoritative (this returns `false` → blind save). Pure so the
+/// "a Skip never resurrects a holder-cleared inflight" contract is unit-testable
+/// without driving the whole turn loop.
+pub(super) fn bridge_epilogue_skip_save_is_identity_guarded(
+    bridge_skip_holder_owns_inflight: bool,
+) -> bool {
+    bridge_skip_holder_owns_inflight
+}
+
 /// `~8422`: the bridge signs the watcher off as already-delivered ONLY when not
 /// preserving for retry and not delegating relay to the watcher. A preserved turn
 /// must NOT mark the watcher delivered.
@@ -482,8 +506,8 @@ impl Drop for BridgeDeliveryLease {
 mod tests {
     use super::{
         bridge_epilogue_clears_inflight, bridge_epilogue_marks_watcher_delivered,
-        replace_outcome_commits_terminal_delivery, send_ordered_long_terminal_chunks,
-        should_complete_work_dispatch_after_terminal_delivery,
+        bridge_epilogue_skip_save_is_identity_guarded, replace_outcome_commits_terminal_delivery,
+        send_ordered_long_terminal_chunks, should_complete_work_dispatch_after_terminal_delivery,
         should_fail_dispatch_after_terminal_delivery, terminal_delivery_should_send_new_chunks,
         tui_quiescence_timeout_requires_inflight_retry,
     };
@@ -720,6 +744,27 @@ mod tests {
         assert!(
             !bridge_epilogue_marks_watcher_delivered(true, false),
             "a preserved (skipped) turn must NOT mark the watcher delivered"
+        );
+    }
+
+    // #3041 P1-2 (codex P1-2 R3): the epilogue preserve-save MUST be
+    // identity-guarded ONLY on a Skip (the holder owns the inflight lifecycle and
+    // may have cleared the row on success). Bridge-owned preserve sites and the
+    // delegated-owner path keep the blind save (no competing holder).
+    #[test]
+    fn bridge_skip_save_is_identity_guarded_only_when_holder_owns_inflight() {
+        // Skip → holder (watcher) owns inflight → the save MUST be identity-guarded
+        // so a holder-cleared row is never resurrected.
+        assert!(
+            bridge_epilogue_skip_save_is_identity_guarded(true),
+            "on a Skip the holder owns the inflight lifecycle; the epilogue save must be identity-guarded so it never resurrects a holder-cleared row"
+        );
+        // Bridge-owned preserve (EditFailed / PG-cancel-fail / send-fail / TUI
+        // timeout) or delegated-owner → no competing holder → the blind save stays
+        // authoritative.
+        assert!(
+            !bridge_epilogue_skip_save_is_identity_guarded(false),
+            "bridge-owned preserve and delegated paths have no competing holder; the blind epilogue save stays authoritative"
         );
     }
 
