@@ -267,6 +267,13 @@
     split before adding non-bugfix behavior).
   - `src/services/discord/turn_bridge/completion_guard.rs` (1849 lines).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (1242 lines).
+  - `src/services/discord/turn_bridge/terminal_delivery.rs` (1341 prod lines;
+    registered giant-file (#3036) — bugfix only outside an extraction plan.
+    Crossed 1000 prod LoC with #3041 P1-2: the `BridgeDeliveryLease`
+    acquire/commit_and_advance/heartbeat helper that routes the bridge's terminal
+    delivery through the shared delivery-lease, the watcher-owner-channel
+    resolution, and the skip-epilogue/identity-guarded-save decision seams. Split
+    the lease wiring vs the delivery helpers before adding behavior).
   - `src/services/discord/turn_finalizer.rs` (1011 prod lines; single-authority
     turn-finalize state machine — ledger/actor-loop/reconciler. Crossed the
     giant-file threshold when #3041 P1-0 added the dormant `DeliveryLeaseCell`

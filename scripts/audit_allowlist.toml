@@ -70,7 +70,8 @@ direct_discord_sends = [
   # notice for turns with no anchored Discord message. Consistent with the bridge's
   # existing pre-migration direct sends; retire with the #1436 outbound v3 extraction.
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:d77122f8dd3466ba",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:37e09c3e1136f9b1"
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:37e09c3e1136f9b1",
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:96efc64ae5a0f315"
 ]
 
 # Manual JSON row mapping: legacy mapping callsites pending typed migration.
