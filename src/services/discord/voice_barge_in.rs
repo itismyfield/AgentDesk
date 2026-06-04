@@ -1224,6 +1224,56 @@ impl VoiceIdSequences {
     }
 }
 
+/// Cohesive sub-concern of [`VoiceBargeInRuntime`]: the streaming-STT per-user
+/// session bookkeeping (#3038 god-object split, streaming-STT slice).
+///
+/// Bundles the two `DashMap`s that were previously sibling fields on
+/// `VoiceBargeInRuntime`, both keyed by the same `StreamingSttKey`
+/// (channel/user pair):
+/// - `sessions` holds the in-flight `SttSessionHandle` for each speaker, and
+/// - `feed_tasks` holds the per-key bucket of spawned PCM-feed `JoinHandle`s.
+///
+/// The accessors below are intentionally thin: `sessions()` / `feed_tasks()`
+/// hand back `&DashMap<...>` so the existing entry / get / remove call sites
+/// keep their exact `DashMap` semantics — including entry guards held across
+/// `await` during session finalization — and `clear()` wipes both maps in the
+/// same order as the original inline `streaming_stt_sessions.clear();
+/// streaming_stt_feed_tasks.clear();` pair. No locking, ordering, or
+/// side-effect sequencing changes relative to the pre-extraction layout.
+struct StreamingSttSessions {
+    sessions: dashmap::DashMap<StreamingSttKey, SttSessionHandle>,
+    feed_tasks: dashmap::DashMap<StreamingSttKey, Arc<StdMutex<Vec<tokio::task::JoinHandle<()>>>>>,
+}
+
+impl StreamingSttSessions {
+    fn new() -> Self {
+        Self {
+            sessions: dashmap::DashMap::new(),
+            feed_tasks: dashmap::DashMap::new(),
+        }
+    }
+
+    /// Per-speaker streaming session handles, keyed by channel/user pair.
+    fn sessions(&self) -> &dashmap::DashMap<StreamingSttKey, SttSessionHandle> {
+        &self.sessions
+    }
+
+    /// Per-speaker buckets of spawned PCM-feed tasks, keyed by channel/user pair.
+    fn feed_tasks(
+        &self,
+    ) -> &dashmap::DashMap<StreamingSttKey, Arc<StdMutex<Vec<tokio::task::JoinHandle<()>>>>> {
+        &self.feed_tasks
+    }
+
+    /// Drop every session and feed-task bucket. Sessions are cleared before
+    /// feed tasks, matching the original inline ordering in
+    /// `set_runtime_language`.
+    fn clear(&self) {
+        self.sessions.clear();
+        self.feed_tasks.clear();
+    }
+}
+
 /// Cohesive sub-concern of [`VoiceBargeInRuntime`]: the F6 (#2046) `Config`
 /// snapshot hot-cache (#3038 god-object split, config-cache slice).
 ///
@@ -1290,9 +1340,10 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     spoken_result_language: RwLock<String>,
     verbose_progress: AtomicBool,
     stt: RwLock<Option<VoiceSttRuntime>>,
-    streaming_stt_sessions: dashmap::DashMap<StreamingSttKey, SttSessionHandle>,
-    streaming_stt_feed_tasks:
-        dashmap::DashMap<StreamingSttKey, Arc<StdMutex<Vec<tokio::task::JoinHandle<()>>>>>,
+    // #3038: streaming-STT 세션/피드 태스크 DashMap 쌍을 sub-struct 로 격리.
+    // 동일한 StreamingSttKey 로 묶이며 entry/get/remove 의미와 clear 순서를
+    // 그대로 보존한다.
+    streaming_stt: StreamingSttSessions,
     tts: RwLock<Option<TtsRuntime>>,
     progress_tx: broadcast::Sender<VoiceProgressEvent>,
     monitors: dashmap::DashMap<u64, Arc<std::sync::Mutex<LiveBargeInMonitor>>>,
@@ -1351,8 +1402,7 @@ impl VoiceBargeInRuntime {
             spoken_result_language: RwLock::new(config.stt.language.clone()),
             verbose_progress: AtomicBool::new(config.verbose_progress),
             stt: RwLock::new(stt),
-            streaming_stt_sessions: dashmap::DashMap::new(),
-            streaming_stt_feed_tasks: dashmap::DashMap::new(),
+            streaming_stt: StreamingSttSessions::new(),
             tts: RwLock::new(tts),
             progress_tx,
             monitors: dashmap::DashMap::new(),
@@ -1383,8 +1433,7 @@ impl VoiceBargeInRuntime {
             spoken_result_language: RwLock::new(DEFAULT_STT_LANGUAGE.to_string()),
             verbose_progress: AtomicBool::new(false),
             stt: RwLock::new(None),
-            streaming_stt_sessions: dashmap::DashMap::new(),
-            streaming_stt_feed_tasks: dashmap::DashMap::new(),
+            streaming_stt: StreamingSttSessions::new(),
             tts: RwLock::new(None),
             progress_tx,
             monitors: dashmap::DashMap::new(),
@@ -1727,8 +1776,7 @@ impl VoiceBargeInRuntime {
         };
         *self.spoken_result_language.write().await = language;
         if self.enabled {
-            self.streaming_stt_sessions.clear();
-            self.streaming_stt_feed_tasks.clear();
+            self.streaming_stt.clear();
             *self.stt.write().await = Some(VoiceSttRuntime::from_voice_config(&config));
         }
     }
@@ -2406,7 +2454,8 @@ impl VoiceBargeInRuntime {
             user_id,
         };
         let task_bucket = self
-            .streaming_stt_feed_tasks
+            .streaming_stt
+            .feed_tasks()
             .entry(key)
             .or_insert_with(|| Arc::new(StdMutex::new(Vec::new())))
             .clone();
@@ -2439,7 +2488,7 @@ impl VoiceBargeInRuntime {
             channel_id: channel_id.get(),
             user_id,
         };
-        let session = match self.streaming_stt_sessions.get(&key) {
+        let session = match self.streaming_stt.sessions().get(&key) {
             Some(entry) => entry.value().clone(),
             None => {
                 let language = self.spoken_result_language().await;
@@ -2455,7 +2504,7 @@ impl VoiceBargeInRuntime {
                         return;
                     }
                 };
-                match self.streaming_stt_sessions.entry(key) {
+                match self.streaming_stt.sessions().entry(key) {
                     dashmap::mapref::entry::Entry::Occupied(entry) => {
                         let existing = entry.get().clone();
                         if let Err(error) = stt.finalize(new_session).await {
@@ -2509,7 +2558,7 @@ impl VoiceBargeInRuntime {
     }
 
     async fn drain_streaming_stt_feed_tasks(&self, key: StreamingSttKey) {
-        let Some((_, task_bucket)) = self.streaming_stt_feed_tasks.remove(&key) else {
+        let Some((_, task_bucket)) = self.streaming_stt.feed_tasks().remove(&key) else {
             return;
         };
         let tasks = match task_bucket.lock() {
@@ -4410,7 +4459,7 @@ impl VoiceBargeInRuntime {
                     user_id: utterance.user_id,
                 };
                 self.drain_streaming_stt_feed_tasks(key).await;
-                if let Some((_, session)) = self.streaming_stt_sessions.remove(&key) {
+                if let Some((_, session)) = self.streaming_stt.sessions().remove(&key) {
                     match stt.finalize(session).await {
                         Ok(transcript) if !transcript.text.trim().is_empty() => {
                             let stt_latency_ms =
