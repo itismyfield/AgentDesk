@@ -5230,6 +5230,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         fresh_idle_user_msg_id,
                         finish_mailbox_on_completion,
                         owed,
+                        // #3016 option A: this fresh-idle arm is already gated by
+                        // the outer `if should_finish_mailbox` (= flag-driven), so
+                        // it keeps the legacy flag semantics — `normal_completion`
+                        // stays `false` here. (No new assistant text was committed
+                        // in this pass, so it is not the canonical-completion
+                        // point that the decoupling targets.)
+                        false,
                         true,
                         "watcher fresh ready-for-input idle with queued backlog",
                     )
@@ -7886,6 +7893,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 restored_user_msg_id,
                 finish_mailbox_on_completion,
                 owed,
+                // #3016 option A: terminal output was committed above
+                // (`terminal_output_committed && !lifecycle_stage_paused`), the
+                // canonical *normal completion* point. Finalize unconditionally —
+                // independent of `owed` / `finish_mailbox_on_completion` — so the
+                // normal live bridge→watcher delegation turn no longer depends on
+                // the legacy `mailbox_finalize_owed` flag. The finalizer is
+                // idempotent (bridge winner → AlreadyFinalized here), so this
+                // cannot over-finalize.
+                true,
                 dispatch_ok,
                 "restored watcher completed with queued backlog",
             )
@@ -8884,9 +8900,10 @@ mod tests {
             &provider,
             channel_id,
             state.user_msg_id,
-            true,
-            false,
-            false,
+            true,  // finish_mailbox_on_completion (restore semantics)
+            false, // delegated_finalize_owed
+            false, // normal_completion (#3016: this path is flag-gated, not the decoupled normal-completion arm)
+            false, // kickoff_queue
             "terminal_delivery_timeout_cleanup_test",
         )
         .await;
@@ -8903,6 +8920,104 @@ mod tests {
             .into_intervention()
             .map(|(intervention, _)| intervention.text);
         assert_eq!(next.as_deref(), Some("queued follow-up"));
+    }
+
+    // #3016 option A (watcher normal-completion finalize decouple).
+    //
+    // Proves the decoupling directly: a *normal completion* drives the
+    // single-authority finalizer even when BOTH legacy flags are false —
+    // `finish_mailbox_on_completion = false` (fresh live watcher, see
+    // tmux.rs:`tmux_output_watcher` default) AND `delegated_finalize_owed =
+    // false` (`mailbox_finalize_owed` never set / already revoked). This is the
+    // exact gate that `mailbox_finalize_owed` USED to be the sole driver of on
+    // the normal live bridge→watcher delegation turn; after this change the
+    // finalize fires from the confirmed-completion signal instead, so the flag
+    // is now redundant for this path (flag_now_redundant). The finalizer's
+    // idempotence (proven by the #3140 matrix) keeps this from over-finalizing
+    // when the bridge already finalized first.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn normal_completion_finalizes_with_both_legacy_flags_false() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(987_3016);
+
+        // Seed a live active mailbox turn (cancel token registered) so we can
+        // observe the finalize releasing it.
+        assert!(
+            mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                std::sync::Arc::new(CancelToken::new()),
+                UserId::new(42),
+                MessageId::new(3001),
+            )
+            .await
+        );
+
+        // Pre-condition: the legacy debt flag is NOT set for this channel's
+        // watcher. (No `mailbox_finalize_owed.store(true)` anywhere.) Combined
+        // with `finish_mailbox_on_completion = false` below, BOTH legacy gates
+        // are off — the only thing that can drive the finalize is the new
+        // `normal_completion` signal.
+        if let Some(watcher) = shared.tmux_watchers.get(&channel_id) {
+            assert!(
+                !watcher
+                    .mailbox_finalize_owed
+                    .load(std::sync::atomic::Ordering::Acquire),
+                "precondition: mailbox_finalize_owed must be false for the decouple proof"
+            );
+        }
+
+        crate::services::discord::inflight::clear_inflight_state(&provider, channel_id.get());
+        super::finish_restored_watcher_active_turn(
+            &shared,
+            &provider,
+            channel_id,
+            3001,  // real user_msg_id (exact ledger match)
+            false, // finish_mailbox_on_completion — fresh live watcher
+            false, // delegated_finalize_owed — flag never set
+            true,  // normal_completion — confirmed terminal-output-committed point
+            false, // kickoff_queue
+            "normal_completion_decouple_test",
+        )
+        .await;
+
+        // The finalize fired purely on `normal_completion`: the active mailbox
+        // turn's cancel token is released even though both legacy flags were
+        // false. Under the OLD flag-only gate this call would have early-returned
+        // and left the token in place.
+        let snapshot = mailbox_snapshot(&shared, channel_id).await;
+        assert!(
+            snapshot.cancel_token.is_none(),
+            "normal completion must finalize and release the mailbox token even with both legacy flags false"
+        );
+
+        // Idempotent: a second normal-completion submit for the same turn is a
+        // no-op (AlreadyFinalized) — no over-finalize, no underflow.
+        super::finish_restored_watcher_active_turn(
+            &shared,
+            &provider,
+            channel_id,
+            3001,
+            false,
+            false,
+            true,
+            false,
+            "normal_completion_decouple_test_double",
+        )
+        .await;
+        let snapshot_after = mailbox_snapshot(&shared, channel_id).await;
+        assert!(
+            snapshot_after.cancel_token.is_none(),
+            "second normal-completion submit stays a no-op (idempotent finalizer)"
+        );
     }
 
     #[test]
