@@ -1833,4 +1833,576 @@ mod tests {
         );
         }).await;
     }
+
+    // ----------------------------------------------------------------------
+    // #3016 step 1 — (actor × terminal-path) exactly-once finalize matrix.
+    //
+    // The tests below fill the cells the suite above left uncovered so phase 5
+    // (legacy `mailbox_finalize_owed` flag removal) lands behind a complete
+    // exactly-once guard. Each asserts the three per-cell invariants:
+    //   (1) late/double terminal is `AlreadyFinalized` (no double finalize),
+    //   (2) `global_active` never underflows,
+    //   (3) the mailbox cancel token is released exactly once (no under- or
+    //       over-finalize).
+    // These SPECIFY current production behaviour (tests only; no prod change).
+    // ----------------------------------------------------------------------
+
+    /// Seed a live active mailbox turn so `mailbox_finish_turn` returns
+    /// `removed_token = Some` and assert helpers can verify the release.
+    /// Returns the token so the caller can check its `cancelled` flag.
+    async fn seed_active_turn(
+        shared: &Arc<SharedData>,
+        ch: ChannelId,
+        user_msg_id: u64,
+    ) -> Arc<CancelToken> {
+        use serenity::model::id::{MessageId, UserId};
+        let token = Arc::new(CancelToken::new());
+        shared
+            .mailbox(ch)
+            .restore_active_turn(token.clone(), UserId::new(7), MessageId::new(user_msg_id))
+            .await;
+        token
+    }
+
+    /// RelayMiss × bridge: a relay-miss terminal on a registered turn finalizes
+    /// exactly once, releases the active token, decrements the counter once, and
+    /// a late RelayMiss loses the gate. Covers the RelayMiss observability path
+    /// (F) of `do_finalize`.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn relay_miss_bridge_finalizes_exactly_once() {
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            let ch = ChannelId::new(2001);
+            let tid = 8001u64;
+            shared.global_active.store(1, Ordering::Relaxed);
+            let token = seed_active_turn(&shared, ch, tid).await;
+            let fin = TurnFinalizer::spawn();
+            let k = TurnKey::new(ch, tid, 0);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+
+            let first = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::RelayMiss,
+                    FinalizeContext::bridge(),
+                    shared.clone(),
+                )
+                .await;
+            match first {
+                FinalizeOutcome::Finalized { removed_token, .. } => {
+                    assert!(
+                        removed_token.is_some(),
+                        "relay-miss finalize must release the active turn's token"
+                    );
+                }
+                other => panic!(
+                    "relay-miss must finalize, got {:?}",
+                    std::mem::discriminant(&other)
+                ),
+            }
+            assert!(
+                token.cancelled.load(std::sync::atomic::Ordering::Relaxed),
+                "the released token must be marked cancelled"
+            );
+            assert_eq!(
+                shared.global_active.load(Ordering::Relaxed),
+                0,
+                "counter decremented exactly once"
+            );
+
+            let late = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::RelayMiss,
+                    FinalizeContext::bridge(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(
+                matches!(late, FinalizeOutcome::AlreadyFinalized),
+                "late relay-miss must lose the exactly-once gate"
+            );
+            assert_eq!(
+                shared.global_active.load(Ordering::Relaxed),
+                0,
+                "no underflow on the late relay-miss"
+            );
+        })
+        .await;
+    }
+
+    /// RelayMiss × watcher then late Complete: the watcher-path relay-miss
+    /// finalizes once; a later Complete (different actor) sees `AlreadyFinalized`
+    /// and the counter never underflows.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn relay_miss_watcher_then_late_complete_already_finalized() {
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            let ch = ChannelId::new(2002);
+            let tid = 8002u64;
+            shared.global_active.store(1, Ordering::Relaxed);
+            let _token = seed_active_turn(&shared, ch, tid).await;
+            let fin = TurnFinalizer::spawn();
+            let k = TurnKey::new(ch, tid, 0);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+
+            let first = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::RelayMiss,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(matches!(first, FinalizeOutcome::Finalized { .. }));
+
+            let late = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::bridge(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(matches!(late, FinalizeOutcome::AlreadyFinalized));
+            assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+        })
+        .await;
+    }
+
+    /// RelayMiss × orphan (id-0, no active mailbox turn): the channel-scoped
+    /// finish returns `removed_token = None`, so the counter is left untouched
+    /// (already 0) and never underflows even on a double submission.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn relay_miss_orphan_no_active_turn_no_underflow() {
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            shared.global_active.store(0, Ordering::Relaxed);
+            let fin = TurnFinalizer::spawn();
+            let k = TurnKey::new(ChannelId::new(2003), 0, 0);
+
+            let first = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::RelayMiss,
+                    FinalizeContext::bridge(),
+                    shared.clone(),
+                )
+                .await;
+            match first {
+                FinalizeOutcome::Finalized { removed_token, .. } => {
+                    assert!(
+                        removed_token.is_none(),
+                        "orphan relay-miss with no active turn removes no token"
+                    );
+                }
+                other => panic!(
+                    "orphan relay-miss still finalizes (idempotent no-op), got {:?}",
+                    std::mem::discriminant(&other)
+                ),
+            }
+            // Double submit on the same id-0 orphan — still no underflow.
+            let _ = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::RelayMiss,
+                    FinalizeContext::bridge(),
+                    shared.clone(),
+                )
+                .await;
+            assert_eq!(
+                shared.global_active.load(Ordering::Relaxed),
+                0,
+                "orphan relay-miss must never underflow the counter"
+            );
+        })
+        .await;
+    }
+
+    /// Cancel × watcher: a watcher-path cancel finalizes once, releases the
+    /// active token (sets `cancelled`) WITHOUT marking completion-cleanup (the
+    /// watcher context passes `allow_completion_cleanup = false` and cancel is
+    /// gated out anyway), decrements the counter once, and a late Complete loses.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn cancel_watcher_finalizes_and_releases_token() {
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            let ch = ChannelId::new(2004);
+            let tid = 8004u64;
+            shared.global_active.store(1, Ordering::Relaxed);
+            let token = seed_active_turn(&shared, ch, tid).await;
+            let fin = TurnFinalizer::spawn();
+            let k = TurnKey::new(ch, tid, 0);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+
+            let cancelled = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Cancel,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            match cancelled {
+                FinalizeOutcome::Finalized { removed_token, .. } => {
+                    assert!(
+                        removed_token.is_some(),
+                        "watcher cancel must release the active token"
+                    );
+                }
+                other => panic!(
+                    "watcher cancel must finalize, got {:?}",
+                    std::mem::discriminant(&other)
+                ),
+            }
+            assert!(
+                token.cancelled.load(std::sync::atomic::Ordering::Relaxed),
+                "cancel must set the token's cancelled flag"
+            );
+            assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+
+            let late = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::bridge(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(matches!(late, FinalizeOutcome::AlreadyFinalized));
+            assert_eq!(
+                shared.global_active.load(Ordering::Relaxed),
+                0,
+                "no underflow after the late complete on a cancelled turn"
+            );
+        })
+        .await;
+    }
+
+    /// Cancel × gate_backstop: a cancel finalized through the reconciler's
+    /// backstop context (`clear_inflight = true`, `kickoff_queue = true`)
+    /// finalizes once, releases the token, decrements the counter once, and a
+    /// late Cancel loses the gate without underflow. Covers the gate_backstop
+    /// actor against the Cancel event.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn cancel_gate_backstop_finalizes_exactly_once() {
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            let ch = ChannelId::new(2005);
+            let tid = 8005u64;
+            shared.global_active.store(1, Ordering::Relaxed);
+            let token = seed_active_turn(&shared, ch, tid).await;
+            let fin = TurnFinalizer::spawn();
+            let k = TurnKey::new(ch, tid, 0);
+
+            let first = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Cancel,
+                    FinalizeContext::gate_backstop(),
+                    shared.clone(),
+                )
+                .await;
+            match first {
+                FinalizeOutcome::Finalized { removed_token, .. } => {
+                    assert!(
+                        removed_token.is_some(),
+                        "gate_backstop cancel must release the active token"
+                    );
+                }
+                other => panic!(
+                    "gate_backstop cancel must finalize, got {:?}",
+                    std::mem::discriminant(&other)
+                ),
+            }
+            assert!(token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+            assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+
+            let late = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Cancel,
+                    FinalizeContext::gate_backstop(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(matches!(late, FinalizeOutcome::AlreadyFinalized));
+            assert_eq!(
+                shared.global_active.load(Ordering::Relaxed),
+                0,
+                "no underflow on the late cancel"
+            );
+        })
+        .await;
+    }
+
+    /// GateTimeout{None} × watcher: `pane_quiescent == None` is NOT the
+    /// `Some(false)` deferral trigger, so it finalizes IMMEDIATELY (like
+    /// `Some(true)`) even with a live relay owner. Releases the token once and a
+    /// late Complete loses.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn gate_timeout_pane_quiescent_none_watcher_finalizes_now() {
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            let ch = ChannelId::new(2006);
+            let tid = 8006u64;
+            shared.global_active.store(1, Ordering::Relaxed);
+            let token = seed_active_turn(&shared, ch, tid).await;
+            let fin = TurnFinalizer::spawn();
+            let k = TurnKey::new(ch, tid, 0);
+            // Register with a live owner so we PROVE None does not defer the way
+            // Some(false) would with an owner present.
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+
+            let outcome = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::GateTimeout {
+                        pane_quiescent: None,
+                    },
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            match outcome {
+                FinalizeOutcome::Finalized { removed_token, .. } => {
+                    assert!(
+                        removed_token.is_some(),
+                        "GateTimeout{{None}} must finalize now and release the token"
+                    );
+                }
+                other => panic!(
+                    "GateTimeout{{None}} must finalize immediately (not Deferred), got {:?}",
+                    std::mem::discriminant(&other)
+                ),
+            }
+            assert!(token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+            assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+
+            let late = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(matches!(late, FinalizeOutcome::AlreadyFinalized));
+            assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+        })
+        .await;
+    }
+
+    /// GateTimeout{None} × bridge: same immediate-finalize semantics through the
+    /// bridge context (no deferral), exactly once.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn gate_timeout_pane_quiescent_none_bridge_finalizes_now() {
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            let ch = ChannelId::new(2007);
+            let tid = 8007u64;
+            shared.global_active.store(1, Ordering::Relaxed);
+            let _token = seed_active_turn(&shared, ch, tid).await;
+            let fin = TurnFinalizer::spawn();
+            let k = TurnKey::new(ch, tid, 0);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+
+            let outcome = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::GateTimeout {
+                        pane_quiescent: None,
+                    },
+                    FinalizeContext::bridge(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(
+                matches!(outcome, FinalizeOutcome::Finalized { .. }),
+                "GateTimeout{{None}} via bridge must finalize immediately"
+            );
+            assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+        })
+        .await;
+    }
+
+    /// Genuine orphan recovery (id-0, NO registered ledger entry) with a live
+    /// active mailbox turn: with no `Finalized` entry and no live ledger entry
+    /// for the channel, the channel-only resolver collapses onto the literal
+    /// id-0 key, the entry is created on-demand and finalizes, and the unguarded
+    /// channel-scoped finish releases the active turn's token exactly once. A
+    /// second submit is `AlreadyFinalized` and the counter never underflows.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn orphan_id0_recovery_finalizes_and_releases_token() {
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            let ch = ChannelId::new(2008);
+            let tid = 8008u64;
+            shared.global_active.store(1, Ordering::Relaxed);
+            let token = seed_active_turn(&shared, ch, tid).await;
+            let fin = TurnFinalizer::spawn();
+            // NO register_start — pure orphan/recovery path keyed only by channel.
+            let k = TurnKey::new(ch, 0, 0);
+
+            let first = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            match first {
+                FinalizeOutcome::Finalized { removed_token, .. } => {
+                    assert!(
+                        removed_token.is_some(),
+                        "genuine orphan finalize must release the active turn's token via the \
+                         unguarded channel-scoped finish"
+                    );
+                }
+                other => panic!(
+                    "genuine orphan terminal must finalize, got {:?}",
+                    std::mem::discriminant(&other)
+                ),
+            }
+            assert!(token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+            assert!(
+                !shared.mailbox(ch).has_active_turn().await,
+                "the orphan finalize must clear the active turn"
+            );
+            assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+
+            // A second id-0 terminal now finds the Finalized entry → no-op.
+            let second = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(matches!(second, FinalizeOutcome::AlreadyFinalized));
+            assert_eq!(
+                shared.global_active.load(Ordering::Relaxed),
+                0,
+                "no underflow on the second orphan terminal"
+            );
+        })
+        .await;
+    }
+
+    /// Watcher→bridge handoff double-terminal: the watcher submits Complete
+    /// (finalizing the turn) and the bridge then submits its own Complete for the
+    /// SAME turn (the post-handoff straggler). Exactly one Finalized, the loser
+    /// is AlreadyFinalized, the token releases once, and the counter decrements
+    /// exactly once. This is the sequential handoff complement to the concurrent
+    /// `bridge_watcher_race_finalizes_exactly_once`.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn watcher_then_bridge_handoff_double_terminal_exactly_once() {
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            let ch = ChannelId::new(2009);
+            let tid = 8009u64;
+            shared.global_active.store(1, Ordering::Relaxed);
+            let token = seed_active_turn(&shared, ch, tid).await;
+            let fin = TurnFinalizer::spawn();
+            let k = TurnKey::new(ch, tid, 0);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+
+            let watcher = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            let bridge = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::bridge(),
+                    shared.clone(),
+                )
+                .await;
+
+            assert!(
+                matches!(watcher, FinalizeOutcome::Finalized { .. }),
+                "the first (watcher) submission performs the finalize"
+            );
+            assert!(
+                matches!(bridge, FinalizeOutcome::AlreadyFinalized),
+                "the post-handoff bridge straggler loses the gate"
+            );
+            assert!(token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+            assert_eq!(
+                shared.global_active.load(Ordering::Relaxed),
+                0,
+                "the counter decremented exactly once across the handoff"
+            );
+        })
+        .await;
+    }
+
+    /// Cancel × Cancel double terminal: two cancels for the same turn (e.g. a
+    /// reaction and a `/!stop` racing) finalize exactly once and never underflow
+    /// the counter. The second cancel is `AlreadyFinalized`.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn double_cancel_finalizes_exactly_once_no_underflow() {
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            let ch = ChannelId::new(2010);
+            let tid = 8010u64;
+            shared.global_active.store(1, Ordering::Relaxed);
+            let _token = seed_active_turn(&shared, ch, tid).await;
+            let fin = TurnFinalizer::spawn();
+            let k = TurnKey::new(ch, tid, 0);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+
+            let first = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Cancel,
+                    FinalizeContext::bridge(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(matches!(first, FinalizeOutcome::Finalized { .. }));
+
+            let second = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Cancel,
+                    FinalizeContext::bridge(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(matches!(second, FinalizeOutcome::AlreadyFinalized));
+            assert_eq!(
+                shared.global_active.load(Ordering::Relaxed),
+                0,
+                "double cancel must decrement exactly once, never underflow"
+            );
+        })
+        .await;
+    }
 }
