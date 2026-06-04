@@ -1015,12 +1015,14 @@ async fn do_finalize(
 
 // #3041 §2-§3 — delivery-lease handlers: thin wrappers over the
 // `DeliveryLeaseCell` state machine (mod.rs), run in the actor task. P1-1 wires
-// the WATCHER terminal path (commit/release go through the actor via the public
-// `commit_delivery`/`release_delivery` methods; acquire is the cell fast-path).
-// The acquire/release handler wrappers and the `AcquireDelivery` message remain
-// available for the sink/bridge wiring (P1-2..) but the watcher acquires the
-// cell directly (B4 fast-path), so `handle_acquire_delivery` is currently only
-// reached via the (still-routed) `AcquireDelivery` actor arm and tests.
+// the WATCHER terminal path, but after the R2 revert the watcher acquires,
+// commits, and releases the cell INLINE (synchronously) on its own task — it
+// does NOT route through these actor handlers. The `AcquireDelivery` /
+// `CommitDelivery` / `ReleaseDelivery` messages and their `handle_*` wrappers
+// are DORMANT here: retained (and unit-tested) for the sink/bridge wiring
+// (P1-2..), but the live watcher path no longer uses them. `commit_delivery` /
+// `release_delivery` (the public actor methods below) and these handlers are
+// reached only by tests today.
 
 /// CAS-acquire for `(key, [start,end))` on behalf of `holder`. #3041. Still
 /// dormant in the non-test build: the watcher acquires the cell directly

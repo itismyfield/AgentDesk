@@ -2001,6 +2001,51 @@ impl DeliveryLeaseCell {
         true
     }
 
+    /// #3041 P1-1 (§3, codex R2 Issue-1): HEARTBEAT renew. While the holder's
+    /// terminal send future is in flight, the holder periodically calls this to
+    /// extend the lease deadline so the (deliberately SHORT) deadline is a
+    /// HOLDER-LIVENESS signal, not a hard cap on delivery duration. If the cell
+    /// is `Leased` by EXACTLY `(holder, turn)` (matched on holder + the turn's
+    /// `exact_key()`), its `deadline_ms` is overwritten with `new_deadline_ms`
+    /// and `true` is returned. ANY other state — a different holder, a stale
+    /// older turn, a `Committed`/`Unleased` cell, or a cell already reclaimed and
+    /// reacquired by someone else — is a no-op returning `false`. The range is
+    /// intentionally NOT matched: a renew only ever needs to prove "this exact
+    /// holder for this exact turn is still alive", and the live holder's range is
+    /// fixed for the lifetime of the lease anyway.
+    ///
+    /// Race-safety (why renew can never extend SOMEONE ELSE's lease): the match
+    /// requires the recorded `holder` AND `turn` to equal the caller's, both
+    /// taken UNDER the same payload mutex as every other mutation. If the cell
+    /// was reclaimed (→ `Unleased`) and reacquired by a replacement, the holder
+    /// or turn will differ and the renew no-ops. A late heartbeat tick that
+    /// fires after the holder already committed sees `Committed` (not `Leased`)
+    /// and no-ops. The ONLY successful renew extends the caller's OWN live lease.
+    pub(in crate::services::discord) fn renew(
+        &self,
+        holder: LeaseHolder,
+        turn: turn_finalizer::TurnKey,
+        new_deadline_ms: u64,
+    ) -> bool {
+        let mut guard = self
+            .payload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let LeaseState::Leased {
+            holder: cur_holder,
+            turn: cur_turn,
+            deadline_ms,
+            ..
+        } = &mut *guard
+        {
+            if *cur_holder == holder && cur_turn.exact_key() == turn.exact_key() {
+                *deadline_ms = new_deadline_ms;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Deadline reclaim: if the lease is `Leased` and `now_ms >= deadline_ms`,
     /// force it back to `Unleased` regardless of holder (the holder is presumed
     /// dead/stuck). Returns `true` if a reclaim occurred. A `Committed` lease is

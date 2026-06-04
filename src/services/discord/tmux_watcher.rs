@@ -13,19 +13,102 @@ fn next_watcher_instance_id() -> u64 {
     WATCHER_INSTANCE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// #3041 P1-1 (B3): delivery-lease acquire deadline for the watcher terminal
-/// send. The realistic worst case is NOT a single POST: a long terminal
-/// response is split into multiple Discord messages, each separated by the
-/// long-message inter-chunk pacing wait (`formatting.rs` 500ms), and may be
-/// preceded by a session-bound relay ACK wait (`tmux_watcher.rs` 10s). A very
-/// long answer can be ~20+ chunks; 20 × 500ms = 10s of pacing alone, plus the
-/// 10s ACK wait, plus HTTP/rate-limit slack. We pick 90s — comfortably above a
-/// worst-case multi-chunk rate-limited send — so a live holder is never
-/// reclaimed mid-send, while still bounding a genuinely-dead holder so the
-/// reconciler's `reclaim_if_expired` frees the cell for a legitimate successor.
-/// This is the lease DEADLINE, independent of the finalizer's `GATE_BACKSTOP`
-/// (8s, a different concern: visible-completion gating, not delivery duration).
-const WATCHER_DELIVERY_LEASE_DEADLINE_MS: u64 = 90_000;
+/// #3041 P1-1 (B3, codex R2 Issue-1): delivery-lease acquire deadline for the
+/// watcher terminal send. The deadline is a HOLDER-LIVENESS signal, NOT a hard
+/// cap on delivery duration — while the send future is in flight the watcher
+/// keeps the lease alive with a background HEARTBEAT that `renew()`s the
+/// deadline every `WATCHER_DELIVERY_LEASE_HEARTBEAT_MS` (see below). Because a
+/// LIVE holder always re-extends within one interval, a long multi-chunk send
+/// (which can exceed any FIXED deadline — an unbounded response splits into
+/// 2000-char chunks paced ~500ms apart plus a 1s rate limiter, so 60+ chunks
+/// can run past 90s) is NEVER reclaimed mid-flight. Conversely, a genuinely
+/// DEAD holder (its watcher task/process gone) stops renewing, so the lease
+/// expires and a replacement reclaims it within ~one deadline.
+///
+/// INVARIANT — deadline must be a small multiple of the heartbeat: large enough
+/// that a live holder never expires between two renews (covers a missed/late
+/// tick under scheduler pressure), small enough that a dead holder is reclaimed
+/// PROMPTLY. We pick 3× the heartbeat (15s = 3 × 5s): one tick can be skipped
+/// entirely and the lease still survives to the next, while dead-holder
+/// recovery is ~15s instead of the old fixed 90s. This is the lease DEADLINE,
+/// independent of the finalizer's `GATE_BACKSTOP` (8s, a different concern:
+/// visible-completion gating, not delivery duration).
+const WATCHER_DELIVERY_LEASE_DEADLINE_MS: u64 = 15_000;
+
+/// #3041 P1-1 (§3, codex R2 Issue-1): how often the in-flight watcher send
+/// renews its delivery lease. Must be strictly less than (and a small fraction
+/// of) `WATCHER_DELIVERY_LEASE_DEADLINE_MS` so a live holder always re-extends
+/// before expiry even if one tick is delayed (the deadline is 3× this).
+const WATCHER_DELIVERY_LEASE_HEARTBEAT_MS: u64 = 5_000;
+
+/// #3041 P1-1 (§3, codex R2 Issue-1): RAII handle for the in-flight
+/// delivery-lease heartbeat task. The watcher spawns the heartbeat right after a
+/// successful `try_acquire` and `stop()`s it BEFORE the inline commit (and the
+/// `Drop` impl aborts it on any early return / panic), so the renew loop can
+/// NEVER outlive the send and race the commit. While the watcher task lives the
+/// heartbeat keeps the lease alive (`renew`); if the watcher TASK dies the
+/// spawned heartbeat is dropped/aborted with it → the lease stops being renewed
+/// → it expires → a replacement reclaims it. A heartbeat tick can only ever
+/// `renew` THIS holder's OWN still-`Leased` lease (matched on holder+turn), so a
+/// last tick that races `stop()`+commit merely extends our own deadline, which
+/// the immediately-following commit then flips to `Committed` — harmless.
+struct DeliveryLeaseHeartbeat {
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl DeliveryLeaseHeartbeat {
+    /// Spawn a background task that renews `(holder, turn)`'s lease on `cell`
+    /// every `WATCHER_DELIVERY_LEASE_HEARTBEAT_MS`, each time pushing the
+    /// deadline to `lease_now_ms() + WATCHER_DELIVERY_LEASE_DEADLINE_MS`. The
+    /// first tick fires AFTER one interval (the acquire already set a fresh
+    /// deadline). The loop exits on its own as soon as a `renew` returns false
+    /// (the lease is no longer ours — committed, released, or reclaimed), so it
+    /// self-terminates even before an explicit `stop()`.
+    fn spawn(
+        cell: std::sync::Arc<crate::services::discord::DeliveryLeaseCell>,
+        holder: crate::services::discord::LeaseHolder,
+        turn: crate::services::discord::turn_finalizer::TurnKey,
+    ) -> Self {
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(
+                WATCHER_DELIVERY_LEASE_HEARTBEAT_MS,
+            ));
+            // Skip the immediate tick `interval` emits at t=0; the acquire just
+            // set a fresh deadline, so the first renew is one interval later.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let renewed = cell.renew(
+                    holder,
+                    turn,
+                    crate::services::discord::lease_now_ms()
+                        .saturating_add(WATCHER_DELIVERY_LEASE_DEADLINE_MS),
+                );
+                if !renewed {
+                    // Lease is no longer ours (committed/released/reclaimed):
+                    // nothing left to keep alive.
+                    break;
+                }
+            }
+        });
+        Self { handle }
+    }
+
+    /// Stop the heartbeat. Idempotent. Called BEFORE the inline commit so the
+    /// renew loop is guaranteed not to race the commit.
+    fn stop(self) {
+        self.handle.abort();
+    }
+}
+
+impl Drop for DeliveryLeaseHeartbeat {
+    fn drop(&mut self) {
+        // Safety net: if the send path returns early / panics before an explicit
+        // `stop()`, aborting on drop guarantees the heartbeat cannot outlive the
+        // owning watcher frame.
+        self.handle.abort();
+    }
+}
 
 /// #2441 (H1) — race a fixed sleep against a `notify`-backed wake-up
 /// from `JsonlWatcher`. Returns as soon as EITHER the sleep elapses or
@@ -7157,8 +7240,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 // (black-hole). `reclaim_if_expired` only frees a `Leased` lease
                 // whose `deadline_ms` has elapsed against the SAME process-monotonic
                 // `lease_now_ms()` clock the acquire deadline is computed against,
-                // so a LIVE holder mid-send (deadline 90s out) is NOT reclaimed and
-                // this watcher still correctly B2-skips it (single-holder, §5.2).
+                // so a LIVE holder mid-send (whose deadline is continuously pushed
+                // forward by the heartbeat below) is NOT reclaimed and this watcher
+                // still correctly B2-skips it (single-holder, §5.2).
                 // This makes the acquire the PRIMARY black-hole guarantee — bounded
                 // to the lease deadline, with NO dependency on the finalizer actor
                 // having `SharedData` cached. The reconcile-tick reclaim stays as a
@@ -7190,6 +7274,38 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let watcher_lease_b2_skip = watcher_will_direct_send
             && watcher_lease_end > watcher_lease_start
             && !watcher_lease_acquired;
+
+        // #3041 P1-1 (codex R2 Issue-2, BLOCKER B5 — DEFERRED, NOT a regression):
+        // the lease range is the FULL `[data_start_offset, consumed_end)`. If THIS
+        // holder dies AFTER posting chunk 1 but BEFORE its commit, a replacement
+        // reclaims the EXPIRED lease (after the deadline) and re-sends the WHOLE
+        // range → a partial DUPLICATE of the already-posted chunks. Exact-once on
+        // a partial multi-chunk crash needs per-message-id partial-commit state,
+        // which the #3041 design EXPLICITLY defers to BLOCKER B5 (a later phase) —
+        // it is intentionally NOT built here. This is NOT a P1-1 regression: the
+        // heartbeat (just below) guarantees a LIVE holder is NEVER reclaimed
+        // mid-send, so this duplicate can only happen on a GENUINE crash mid-send
+        // — which is EXACTLY the pre-P1-1 behavior (pre-P1-1 had no lease, so a
+        // replacement watcher re-sent the full range on crash too). P1-1 only ADDS
+        // a bounded delay (≤ the lease deadline) before the replacement re-delivers.
+        //
+        // #3041 P1-1 (§3, codex R2 Issue-1): keep the lease alive WHILE the send
+        // future is in flight. The deadline is short (15s) for fast dead-holder
+        // recovery; a long legitimate send (60+ rate-limited chunks can exceed any
+        // FIXED deadline) is covered because this background heartbeat `renew()`s
+        // the lease every 5s. The heartbeat is `stop()`ped BEFORE the inline commit
+        // (and aborts on drop), so it can never race the commit. Spawned ONLY when
+        // we actually acquired (the send arm runs); on the B2-skip / no-send arms
+        // there is no lease of ours to renew.
+        let watcher_lease_heartbeat = if watcher_lease_acquired {
+            Some(DeliveryLeaseHeartbeat::spawn(
+                watcher_lease_cell.clone(),
+                watcher_lease_holder,
+                watcher_lease_turn,
+            ))
+        } else {
+            None
+        };
 
         let relay_ok = if session_bound_relay_owns_terminal_delivery {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -8059,6 +8175,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // `confirmed_end` on the retry, falsely claiming there's nothing
         // new to relay.
         let terminal_committed_offset = runtime_binding_candidate_offset.unwrap_or(current_offset);
+        // #3041 P1-1 (§3, codex R2 Issue-1): the send future has completed (success
+        // or failure) by here. STOP the heartbeat BEFORE the inline commit so the
+        // renew loop is guaranteed not to race the `commit`/`release` below. Even a
+        // tick that already fired between the send completing and this `stop()` can
+        // only `renew` our OWN still-`Leased` lease (a no-op extension), which the
+        // commit immediately flips to `Committed`. After `stop()` no further renews
+        // can occur. On the non-acquired arms `watcher_lease_heartbeat` is `None`,
+        // so this is a no-op there.
+        if let Some(hb) = watcher_lease_heartbeat {
+            hb.stop();
+        }
         if watcher_lease_acquired {
             // #3041 P1-1 (§5.2): the watcher-direct terminal delivery was leased
             // above. Commit the 3-way outcome and, on `Delivered`, advance the
@@ -8125,8 +8252,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
             // Release so the cell returns to Unleased for the next turn. Inline
             // (same-holder) compare-and-release. Idempotent: a release that loses
-            // the identity match (e.g. the lease was reclaimed mid-send because
-            // the 90s deadline elapsed) is a harmless no-op.
+            // the identity match (e.g. the lease was reclaimed because the holder
+            // died and stopped heartbeating, so the short deadline elapsed) is a
+            // harmless no-op.
             let _ = watcher_lease_cell.release(
                 watcher_lease_holder,
                 watcher_lease_turn,
@@ -10655,5 +10783,190 @@ TUI-E2E-marker ssh-direct
         assert_eq!(format!("{}{}", first.text, second.text), payload);
         assert!(!first.text.contains('\u{FFFD}'));
         assert!(!second.text.contains('\u{FFFD}'));
+    }
+
+    /// #3041 P1-1 (§3, codex R2 Issue-1): heartbeat-renew lifecycle for the
+    /// in-flight watcher delivery lease. These tests use the GATED Tokio clock
+    /// (`start_paused`) to drive the heartbeat's `tokio::time::interval` WITHOUT
+    /// real sleeps; `lease_now_ms()` is a separate real monotonic clock, so we
+    /// assert reclaim behaviour with EXPLICIT `now_ms` arguments anchored to the
+    /// observed `lease_now_ms()` baseline.
+    mod delivery_lease_heartbeat {
+        use super::super::{
+            DeliveryLeaseHeartbeat, WATCHER_DELIVERY_LEASE_DEADLINE_MS,
+            WATCHER_DELIVERY_LEASE_HEARTBEAT_MS,
+        };
+        use crate::services::discord::turn_finalizer::TurnKey;
+        use crate::services::discord::{
+            DeliveryLeaseCell, LeaseHolder, LeaseOutcome, LeaseSnapshot, lease_now_ms,
+        };
+        use serenity::model::id::ChannelId;
+        use std::sync::Arc;
+
+        fn watcher(id: u64) -> LeaseHolder {
+            LeaseHolder::Watcher { instance_id: id }
+        }
+
+        fn deadline_of(cell: &DeliveryLeaseCell) -> Option<u64> {
+            match cell.read() {
+                LeaseSnapshot::Leased { deadline_ms, .. } => Some(deadline_ms),
+                _ => None,
+            }
+        }
+
+        /// (a) A send that runs LONGER than the (short) deadline, but with the
+        /// heartbeat renewing every interval, is NEVER reclaimed mid-send: the
+        /// ORIGINAL holder's commit SUCCEEDS and advances the offset exactly once.
+        /// We acquire with a deliberately SHORT deadline (would expire almost
+        /// immediately), then let the heartbeat push it far forward, and confirm a
+        /// reclaim attempt well past the original deadline is a no-op.
+        #[tokio::test(flavor = "current_thread", start_paused = true)]
+        async fn long_send_heartbeat_renew_prevents_midsend_reclaim() {
+            let ch = ChannelId::new(7101);
+            let cell = Arc::new(DeliveryLeaseCell::new(ch));
+            let turn = TurnKey::new(ch, 11, 0);
+            let h = watcher(1);
+
+            // Acquire with a TINY deadline relative to lease_now_ms(): without a
+            // heartbeat it would be reclaimable almost immediately.
+            let acquire_now = lease_now_ms();
+            let short_deadline = acquire_now.saturating_add(100);
+            assert!(cell.try_acquire(turn, h, 0, 64, short_deadline));
+            assert_eq!(deadline_of(&cell), Some(short_deadline));
+
+            // Start the heartbeat (owned by this "watcher" frame).
+            let hb = DeliveryLeaseHeartbeat::spawn(cell.clone(), h, turn);
+
+            // Drive the gated clock across SEVERAL heartbeat intervals — i.e. a
+            // long multi-chunk send. Each crossed interval fires one renew.
+            for _ in 0..6 {
+                tokio::time::advance(std::time::Duration::from_millis(
+                    WATCHER_DELIVERY_LEASE_HEARTBEAT_MS,
+                ))
+                .await;
+                tokio::task::yield_now().await;
+            }
+
+            // The heartbeat has pushed the deadline far beyond the original short
+            // one: it is now lease_now_ms()+DEADLINE_MS (a much larger value).
+            let renewed_deadline = deadline_of(&cell).expect("still Leased mid-send");
+            assert!(
+                renewed_deadline > short_deadline,
+                "heartbeat must have renewed the deadline forward (was {short_deadline}, now {renewed_deadline})"
+            );
+
+            // A reclaim attempt at a time PAST the ORIGINAL short deadline (but
+            // before the renewed one) is a no-op — the live holder is protected.
+            assert!(
+                !cell.reclaim_if_expired(short_deadline.saturating_add(1)),
+                "a renewed (live) lease must NOT be reclaimed past its original deadline"
+            );
+
+            // Stop the heartbeat (as the watcher does before committing), then the
+            // ORIGINAL holder commits successfully and advances exactly once.
+            hb.stop();
+            tokio::task::yield_now().await;
+            assert!(
+                cell.commit(h, turn, 0, 64, LeaseOutcome::Delivered),
+                "the original holder's own commit must succeed (lease never lost)"
+            );
+            match cell.read() {
+                LeaseSnapshot::Committed { outcome, end, .. } => {
+                    assert_eq!(outcome, LeaseOutcome::Delivered);
+                    assert_eq!(end, 64);
+                }
+                other => panic!("expected Committed, got {other:?}"),
+            }
+        }
+
+        /// (b) A holder that "dies" (its heartbeat is dropped/stopped and never
+        /// renews) lets the SHORT deadline elapse, so a replacement reclaims and
+        /// acquires. We simulate death by dropping the heartbeat handle BEFORE the
+        /// renew interval fires, then asserting a reclaim past the (un-renewed)
+        /// deadline succeeds and a replacement acquires.
+        #[tokio::test(flavor = "current_thread", start_paused = true)]
+        async fn dead_holder_no_renew_is_reclaimed_after_short_deadline() {
+            let ch = ChannelId::new(7102);
+            let cell = Arc::new(DeliveryLeaseCell::new(ch));
+            let turn = TurnKey::new(ch, 22, 0);
+            let dead = watcher(1);
+
+            let acquire_now = lease_now_ms();
+            let deadline = acquire_now.saturating_add(WATCHER_DELIVERY_LEASE_DEADLINE_MS);
+            assert!(cell.try_acquire(turn, dead, 0, 40, deadline));
+
+            // The holder "dies": its heartbeat is dropped immediately (Drop aborts
+            // it) WITHOUT ever renewing.
+            let hb = DeliveryLeaseHeartbeat::spawn(cell.clone(), dead, turn);
+            drop(hb);
+            tokio::task::yield_now().await;
+
+            // Before the deadline: NOT reclaimable (single-holder still honored).
+            assert!(!cell.reclaim_if_expired(deadline.saturating_sub(1)));
+            // Past the (un-renewed, short) deadline: a replacement reclaims it.
+            assert!(
+                cell.reclaim_if_expired(deadline),
+                "a dead holder that stopped heartbeating is reclaimed after the short deadline"
+            );
+            // And a replacement (new instance, new turn) can acquire the freed cell.
+            let replacement = watcher(2);
+            let turn_b = TurnKey::new(ch, 33, 0);
+            assert!(
+                cell.try_acquire(
+                    turn_b,
+                    replacement,
+                    40,
+                    72,
+                    deadline.saturating_add(WATCHER_DELIVERY_LEASE_DEADLINE_MS),
+                ),
+                "a reclaimed cell is acquirable by the replacement (no black-hole)"
+            );
+        }
+
+        /// (c) `renew` by a NON-holder, or for the WRONG turn, is a no-op (false)
+        /// and does NOT touch the live holder's deadline — the heartbeat of one
+        /// holder can never extend (or steal) another's lease.
+        #[tokio::test(flavor = "current_thread", start_paused = true)]
+        async fn renew_by_non_holder_or_wrong_turn_is_noop() {
+            let ch = ChannelId::new(7103);
+            let cell = DeliveryLeaseCell::new(ch);
+            let turn = TurnKey::new(ch, 44, 0);
+            let holder = watcher(1);
+
+            let now = lease_now_ms();
+            let deadline = now.saturating_add(1_000);
+            assert!(cell.try_acquire(turn, holder, 0, 16, deadline));
+
+            // Wrong holder, correct turn → no-op.
+            assert!(
+                !cell.renew(watcher(2), turn, now.saturating_add(99_999)),
+                "a different holder cannot renew the lease"
+            );
+            // Correct holder, wrong (stale) turn → no-op.
+            let wrong_turn = TurnKey::new(ch, 45, 0);
+            assert!(
+                !cell.renew(holder, wrong_turn, now.saturating_add(99_999)),
+                "a stale/wrong turn cannot renew the lease"
+            );
+            // The deadline is UNCHANGED by the rejected renews.
+            assert_eq!(
+                deadline_of(&cell),
+                Some(deadline),
+                "rejected renews must not mutate the deadline"
+            );
+
+            // The TRUE holder/turn CAN renew → deadline extends.
+            let extended = now.saturating_add(WATCHER_DELIVERY_LEASE_DEADLINE_MS);
+            assert!(cell.renew(holder, turn, extended));
+            assert_eq!(deadline_of(&cell), Some(extended));
+
+            // After commit (Committed, not Leased) even the true holder's renew
+            // no-ops — a late heartbeat tick after commit cannot disturb the cell.
+            assert!(cell.commit(holder, turn, 0, 16, LeaseOutcome::Delivered));
+            assert!(
+                !cell.renew(holder, turn, extended.saturating_add(1)),
+                "a renew on a Committed lease (a late tick after commit) is a no-op"
+            );
+        }
     }
 }

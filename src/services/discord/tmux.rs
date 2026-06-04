@@ -1339,13 +1339,16 @@ fn ensure_monitor_auto_turn_inflight(
 /// Monotonic-CAS advance of the channel's `confirmed_end_offset` watermark to
 /// `committed_end_offset`, pairing the pre-CAS `.generation` mtime on a real
 /// advance and recording the `tmux_confirmed_end_monotonic` invariant. #3041
-/// P1-1 makes this `pub(in crate::services::discord)` so the `TurnFinalizer`
-/// actor's `CommitDelivery` handler can drive the SAME advance on a `Delivered`
-/// commit — the lease commit, not the watcher's inline call, is now the single
-/// thing that advances the watermark for the watcher terminal path (§5.2). The
-/// monotonic CAS keeps the advance idempotent: a second `Delivered` commit of
-/// an already-confirmed range observes `cur >= committed_end_offset` and does
-/// not move (and does not refresh the mtime), so no double-advance.
+/// P1-1 makes this `pub(in crate::services::discord)`. The watcher commits its
+/// delivery lease and then calls this to advance the watermark INLINE
+/// (synchronously) on a `Delivered` outcome — the lease commit + this inline
+/// advance are the single thing that advances the watermark for the watcher
+/// terminal path (§5.2). (The `TurnFinalizer` actor's `CommitDelivery`/
+/// `ReleaseDelivery` handlers are DORMANT — retained for a later phase, NOT the
+/// live watcher path after the R2 revert.) The monotonic CAS keeps the advance
+/// idempotent: a second `Delivered` commit of an already-confirmed range
+/// observes `cur >= committed_end_offset` and does not move (and does not
+/// refresh the mtime), so no double-advance.
 pub(in crate::services::discord) fn advance_watcher_confirmed_end(
     shared: &SharedData,
     provider: &ProviderKind,
