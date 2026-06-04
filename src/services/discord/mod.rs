@@ -1598,16 +1598,25 @@ pub(super) struct TmuxRelayCoord {
     /// written once per spawn and never touched by the live wrapper, so its
     /// mtime survives jsonl rotation but flips on a fresh spawn.
     pub(super) confirmed_end_generation_mtime_ns: Arc<std::sync::atomic::AtomicI64>,
+    /// #3041 P1-1: the LIVE per-channel delivery lease. Added ALONGSIDE
+    /// `relay_slot` (which is NOT removed yet — its guard migration is a later
+    /// step). The watcher acquires this before delivering the terminal response
+    /// and commits it after; the commit is what advances `confirmed_end_offset`
+    /// (replacing the watcher's inline advance). Shared via `Arc` across all
+    /// watcher instances for the channel so a replacement watcher observes a
+    /// live holder's lease and skips the duplicate send (the §5.2 B2 invariant).
+    pub(in crate::services::discord) delivery_lease: Arc<DeliveryLeaseCell>,
 }
 
 impl TmuxRelayCoord {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(channel_id: ChannelId) -> Self {
         Self {
             relay_slot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             confirmed_end_offset: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_relay_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             reconnect_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             confirmed_end_generation_mtime_ns: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            delivery_lease: Arc::new(DeliveryLeaseCell::new(channel_id)),
         }
     }
 }
@@ -1708,6 +1717,22 @@ enum LeaseState {
         end: u64,
         outcome: LeaseOutcome,
     },
+}
+
+/// #3041 P1-1: process-monotonic millisecond clock for delivery-lease
+/// deadlines. The acquire deadline and the reconciler's `reclaim_if_expired`
+/// MUST read the SAME clock; a wall clock would jump on NTP steps and could
+/// reclaim a live holder or strand a dead one. Anchored to a process-start
+/// `Instant` so it is purely monotonic (never goes backwards). NOTE: this is a
+/// real wall-monotonic clock, not the Tokio test clock; gated-clock tests drive
+/// `reclaim_if_expired` with explicit `now_ms` arguments rather than this fn.
+pub(in crate::services::discord) fn lease_now_ms() -> u64 {
+    use std::sync::OnceLock;
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
 }
 
 /// Internal CAS gate tag for the [`DeliveryLeaseCell`]. The CAS that flips
@@ -2355,8 +2380,40 @@ impl SharedData {
     pub(super) fn tmux_relay_coord(&self, channel_id: ChannelId) -> Arc<TmuxRelayCoord> {
         self.tmux_relay_coords
             .entry(channel_id)
-            .or_insert_with(|| Arc::new(TmuxRelayCoord::new()))
+            .or_insert_with(|| Arc::new(TmuxRelayCoord::new(channel_id)))
             .clone()
+    }
+
+    /// #3041 P1-1: the LIVE per-channel delivery-lease cell, created on first
+    /// access alongside the relay coord. The watcher acquires/commits through
+    /// this to make terminal delivery + offset advance a single-holder unit
+    /// (§5.2). The returned `Arc` is shared across all watcher instances for the
+    /// channel so a replacement watcher sees the live holder and skips the
+    /// duplicate send (B2).
+    pub(in crate::services::discord) fn delivery_lease(
+        &self,
+        channel_id: ChannelId,
+    ) -> Arc<DeliveryLeaseCell> {
+        self.tmux_relay_coord(channel_id).delivery_lease.clone()
+    }
+
+    /// #3041 P1-1 (B3): reclaim any delivery lease whose acquire deadline has
+    /// elapsed, force-returning a dead holder's cell to `Unleased` so a later
+    /// legitimate acquire can win. Identity-agnostic (deadline-only) by design —
+    /// a `Committed` lease is never reclaimed here (it awaits an explicit holder
+    /// release). Driven from the finalizer's reconcile tick. Returns the number
+    /// of cells reclaimed (for observability/tests).
+    pub(in crate::services::discord) fn reclaim_expired_delivery_leases(
+        &self,
+        now_ms: u64,
+    ) -> usize {
+        let mut reclaimed = 0usize;
+        for coord in self.tmux_relay_coords.iter() {
+            if coord.value().delivery_lease.reclaim_if_expired(now_ms) {
+                reclaimed += 1;
+            }
+        }
+        reclaimed
     }
 
     /// #3017 single output-offset authority for the relay-dedup paths — a

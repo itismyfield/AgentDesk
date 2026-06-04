@@ -375,7 +375,11 @@ enum FinalizeMsg {
         shared: Arc<SharedData>,
         ack: oneshot::Sender<FinalizeOutcome>,
     },
-    /// #3041 §2-§3 P1-0 (DORMANT): CAS-acquire `(key, [start,end))` for `holder`.
+    /// #3041 §2-§3 (DORMANT until P1-2..): CAS-acquire `(key, [start,end))` for
+    /// `holder` via the actor. The watcher acquires the cell directly (B4
+    /// fast-path), so this variant has no sender yet — it is reserved for the
+    /// sink/bridge wiring.
+    #[allow(dead_code)] // #3041: no sender until sink/bridge wiring (P1-2..).
     AcquireDelivery {
         key: TurnKey,
         lease: Arc<DeliveryLeaseCell>,
@@ -385,7 +389,14 @@ enum FinalizeMsg {
         deadline_ms: u64,
         ack: oneshot::Sender<bool>,
     },
-    /// #3041 §2-§3 P1-0 (DORMANT): three-way commit; full-identity mismatch = no-op.
+    /// #3041 P1-1: three-way commit; full-identity mismatch = no-op. On a
+    /// `Delivered` commit the handler also advances the channel's
+    /// `confirmed_end_offset` watermark to `end` (§5.2 atomicity) via the SAME
+    /// monotonic CAS the watcher's inline advance used, so commit-advances-offset
+    /// and the lease transition are one serialized unit on the finalize owner.
+    /// `provider`/`tmux_session_name`/`shared` are carried so the handler can call
+    /// `advance_watcher_confirmed_end` (the `.generation`-mtime bookkeeping needs
+    /// the session name). They are `None`/unused for non-watcher holders.
     CommitDelivery {
         key: TurnKey,
         lease: Arc<DeliveryLeaseCell>,
@@ -393,6 +404,9 @@ enum FinalizeMsg {
         start: u64,
         end: u64,
         outcome: LeaseOutcome,
+        provider: ProviderKind,
+        tmux_session_name: String,
+        shared: Arc<SharedData>,
         ack: oneshot::Sender<bool>,
     },
     /// #3041 §2-§3 P1-0 (DORMANT): compare-and-release; full-identity match only.
@@ -480,6 +494,77 @@ impl TurnFinalizer {
             return FinalizeOutcome::AlreadyFinalized;
         }
         rx.await.unwrap_or(FinalizeOutcome::AlreadyFinalized)
+    }
+
+    /// #3041 P1-1: route a three-way `CommitDelivery` through the actor so the
+    /// lease transition AND the `Delivered`-commit offset advance run as one
+    /// serialized unit on the finalize owner (B4: commit/release/reclaim are
+    /// actor transitions; only acquire/read are atomic fast-paths on the cell).
+    /// Returns whether the lease actually committed (identity matched a live
+    /// `Leased` lease). If the actor task is gone (teardown) returns `false`.
+    pub(in crate::services::discord) async fn commit_delivery(
+        &self,
+        key: TurnKey,
+        lease: Arc<DeliveryLeaseCell>,
+        holder: LeaseHolder,
+        start: u64,
+        end: u64,
+        outcome: LeaseOutcome,
+        provider: ProviderKind,
+        tmux_session_name: String,
+        shared: Arc<SharedData>,
+    ) -> bool {
+        let (ack, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(FinalizeMsg::CommitDelivery {
+                key,
+                lease,
+                holder,
+                start,
+                end,
+                outcome,
+                provider,
+                tmux_session_name,
+                shared,
+                ack,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
+    /// #3041 P1-1: route a compare-and-`ReleaseDelivery` through the actor (B4:
+    /// release is an actor transition). Returns the standard
+    /// `Committed`/`Leased` → `Unleased` result; identity mismatch is a no-op
+    /// `false`. The watcher releases its lease after committing so the cell is
+    /// free for the next turn. If the actor task is gone returns `false`.
+    pub(in crate::services::discord) async fn release_delivery(
+        &self,
+        key: TurnKey,
+        lease: Arc<DeliveryLeaseCell>,
+        holder: LeaseHolder,
+        start: u64,
+        end: u64,
+    ) -> bool {
+        let (ack, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(FinalizeMsg::ReleaseDelivery {
+                key,
+                lease,
+                holder,
+                start,
+                end,
+                ack,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
     }
 }
 
@@ -573,10 +658,22 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         start,
                         end,
                         outcome,
+                        provider,
+                        tmux_session_name,
+                        shared,
                         ack,
                     } => {
-                        let committed =
-                            handle_commit_delivery(&lease, key, holder, start, end, outcome);
+                        let committed = handle_commit_delivery(
+                            &lease,
+                            key,
+                            holder,
+                            start,
+                            end,
+                            outcome,
+                            &provider,
+                            &tmux_session_name,
+                            &shared,
+                        );
                         let _ = ack.send(committed);
                     }
                     FinalizeMsg::ReleaseDelivery {
@@ -897,11 +994,19 @@ async fn do_finalize(
     }
 }
 
-// #3041 §2-§3 P1-0 — Dormant delivery-lease handlers: thin wrappers over the
-// `DeliveryLeaseCell` state machine (mod.rs), run in the actor task. No senders yet.
+// #3041 §2-§3 — delivery-lease handlers: thin wrappers over the
+// `DeliveryLeaseCell` state machine (mod.rs), run in the actor task. P1-1 wires
+// the WATCHER terminal path (commit/release go through the actor via the public
+// `commit_delivery`/`release_delivery` methods; acquire is the cell fast-path).
+// The acquire/release handler wrappers and the `AcquireDelivery` message remain
+// available for the sink/bridge wiring (P1-2..) but the watcher acquires the
+// cell directly (B4 fast-path), so `handle_acquire_delivery` is currently only
+// reached via the (still-routed) `AcquireDelivery` actor arm and tests.
 
-/// CAS-acquire for `(key, [start,end))` on behalf of `holder`. #3041 P1-0.
-#[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
+/// CAS-acquire for `(key, [start,end))` on behalf of `holder`. #3041. Still
+/// dormant in the non-test build: the watcher acquires the cell directly
+/// (B4 fast-path) and no other holder routes `AcquireDelivery` yet (P1-2..).
+#[allow(dead_code)] // #3041: AcquireDelivery actor arm dormant until sink/bridge wiring.
 fn handle_acquire_delivery(
     lease: &DeliveryLeaseCell,
     key: TurnKey,
@@ -913,8 +1018,16 @@ fn handle_acquire_delivery(
     lease.try_acquire(key, holder, start, end, deadline_ms)
 }
 
-/// Three-way commit; full `(holder, key, [start,end))` mismatch = no-op. #3041.
-#[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
+/// Three-way commit; full `(holder, key, [start,end))` mismatch = no-op. #3041
+/// P1-1: on a successful `Delivered` commit, advance the channel's
+/// `confirmed_end_offset` watermark to `end` (§5.2). The advance is gated on the
+/// `lease.commit` having actually committed (identity matched AND state was
+/// `Leased`), so a stale/duplicate commit that the lease rejects does NOT touch
+/// the offset. The advance itself reuses `advance_watcher_confirmed_end`'s
+/// monotonic CAS, so even if the lease somehow let a same-range commit through
+/// twice the watermark only ever moves forward — no double-advance
+/// (`tmux_confirmed_end_monotonic` holds). `NotDelivered`/`Unknown` never
+/// advance: an ambiguous terminal must not claim bytes as delivered.
 fn handle_commit_delivery(
     lease: &DeliveryLeaseCell,
     key: TurnKey,
@@ -922,8 +1035,22 @@ fn handle_commit_delivery(
     start: u64,
     end: u64,
     outcome: LeaseOutcome,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    shared: &SharedData,
 ) -> bool {
-    lease.commit(holder, key, start, end, outcome)
+    let committed = lease.commit(holder, key, start, end, outcome);
+    if committed && outcome == LeaseOutcome::Delivered {
+        super::tmux::advance_watcher_confirmed_end(
+            shared,
+            provider,
+            key.channel_id,
+            tmux_session_name,
+            end,
+            "src/services/discord/turn_finalizer.rs:commit_delivery_advance",
+        );
+    }
+    committed
 }
 
 /// Compare-and-release; full `(holder, key, [start,end))` match only. #3041.
@@ -945,6 +1072,15 @@ fn handle_release_delivery(
 /// bounded.
 async fn reconcile(ledger: &mut HashMap<LedgerKey, LedgerEntry>, shared: &Arc<SharedData>) {
     let now = Instant::now();
+
+    // #3041 P1-1 (B3): reclaim any delivery lease whose acquire deadline has
+    // elapsed (a dead/stuck holder), so a legitimate successor can acquire. This
+    // runs on the reconcile tick (1s) and is identity-agnostic; a `Committed`
+    // lease is never reclaimed (it awaits an explicit holder release). Uses the
+    // process-monotonic `lease_now_ms()` clock — the SAME clock the watcher's
+    // acquire deadline is computed against — so a live holder mid-send (deadline
+    // 90s out) is never reclaimed.
+    let _ = shared.reclaim_expired_delivery_leases(super::lease_now_ms());
 
     // Collect deadline-elapsed gate-timeout entries to finalize. We must not
     // hold a `&mut` borrow across the `do_finalize` await, so snapshot first.
@@ -2757,6 +2893,274 @@ mod tests {
     }
 
     // =======================================================================
+    // #3041 P1-1 — LIVE watcher-terminal-delivery lease wiring tests.
+    //
+    // These exercise the wiring P1-1 added: the lease COMMIT advancing
+    // `confirmed_end_offset` through the actor, B2 single-holder contention,
+    // commit idempotency on the monotonic-CAS offset, and deadline reclaim of a
+    // dead holder. They run on a gated clock (`current_thread`/`start_paused`)
+    // and through the public `commit_delivery`/`release_delivery` actor methods
+    // — the same path the watcher uses — mirroring the 26-test finalizer matrix
+    // style.
+    // =======================================================================
+    mod delivery_lease_p1_1 {
+        use super::super::{LeaseHolder, LeaseOutcome, TurnFinalizer, TurnKey};
+        // `make_shared_data_for_tests_with_storage` lives in the discord module
+        // (mod.rs), three module hops up from here (p1_1 → tests → turn_finalizer
+        // → discord). `with_isolated_runtime_root` is in the parent `tests` mod.
+        use super::super::super::make_shared_data_for_tests_with_storage;
+        use super::with_isolated_runtime_root;
+        use crate::services::discord::DeliveryLeaseCell;
+        use crate::services::provider::ProviderKind;
+        use serenity::model::id::ChannelId;
+        use std::sync::Arc;
+
+        fn watcher(id: u64) -> LeaseHolder {
+            LeaseHolder::Watcher { instance_id: id }
+        }
+
+        /// Watcher/Delivered: a freshly-acquired lease committed `Delivered`
+        /// advances `confirmed_end_offset` to the leased `end` EXACTLY ONCE, and
+        /// no duplicate occurs.
+        #[tokio::test(flavor = "current_thread", start_paused = true)]
+        async fn watcher_delivered_advances_offset_once() {
+            with_isolated_runtime_root(|| async move {
+                let shared = make_shared_data_for_tests_with_storage(None, None);
+                let fin = TurnFinalizer::spawn();
+                let ch = ChannelId::new(7001);
+                let lease = shared.delivery_lease(ch);
+                let turn = TurnKey::new(ch, 11, 0);
+                let h = watcher(1);
+
+                // Acquire on the cell (the watcher fast-path), then commit through
+                // the actor (the path the watcher uses).
+                assert!(lease.try_acquire(turn, h, 0, 64, 1_000));
+                let committed = fin
+                    .commit_delivery(
+                        turn,
+                        lease.clone(),
+                        h,
+                        0,
+                        64,
+                        LeaseOutcome::Delivered,
+                        ProviderKind::Claude,
+                        "p1-1-delivered-session".to_string(),
+                        shared.clone(),
+                    )
+                    .await;
+                assert!(committed, "fresh lease must commit");
+                assert_eq!(
+                    shared.committed_relay_offset(ch),
+                    64,
+                    "Delivered commit advances confirmed_end_offset to the leased end"
+                );
+            })
+            .await;
+        }
+
+        /// Watcher acquire-contention (B2): two watcher instances race to acquire
+        /// the SAME turn/range on one channel; exactly one acquires (and would
+        /// send), the other is rejected and must skip its duplicate send.
+        #[tokio::test(flavor = "current_thread", start_paused = true)]
+        async fn watcher_acquire_contention_admits_one_holder() {
+            with_isolated_runtime_root(|| async move {
+                let shared = make_shared_data_for_tests_with_storage(None, None);
+                let ch = ChannelId::new(7002);
+                let lease = shared.delivery_lease(ch);
+                let turn = TurnKey::new(ch, 22, 0);
+
+                let w1 = watcher(1);
+                let w2 = watcher(2);
+                // First watcher acquires for [0,32).
+                assert!(lease.try_acquire(turn, w1, 0, 32, 5_000));
+                // Replacement watcher's acquire for the SAME turn/range loses
+                // while w1 still holds it (B2: it must NOT re-acquire+re-emit).
+                assert!(
+                    !lease.try_acquire(turn, w2, 0, 32, 5_000),
+                    "B2: a second watcher cannot acquire the live lease"
+                );
+                // No offset advanced yet (nothing committed).
+                assert_eq!(shared.committed_relay_offset(ch), 0);
+            })
+            .await;
+        }
+
+        /// Watcher/Unknown: a commit with `Unknown` outcome (ambiguous terminal —
+        /// e.g. lifecycle-paused TUI gate) does NOT advance the offset.
+        #[tokio::test(flavor = "current_thread", start_paused = true)]
+        async fn watcher_unknown_commit_does_not_advance_offset() {
+            with_isolated_runtime_root(|| async move {
+                let shared = make_shared_data_for_tests_with_storage(None, None);
+                let fin = TurnFinalizer::spawn();
+                let ch = ChannelId::new(7003);
+                let lease = shared.delivery_lease(ch);
+                let turn = TurnKey::new(ch, 33, 0);
+                let h = watcher(1);
+
+                assert!(lease.try_acquire(turn, h, 0, 48, 1_000));
+                let committed = fin
+                    .commit_delivery(
+                        turn,
+                        lease.clone(),
+                        h,
+                        0,
+                        48,
+                        LeaseOutcome::Unknown,
+                        ProviderKind::Claude,
+                        "p1-1-unknown-session".to_string(),
+                        shared.clone(),
+                    )
+                    .await;
+                assert!(committed, "Unknown still commits the lease state");
+                assert_eq!(
+                    shared.committed_relay_offset(ch),
+                    0,
+                    "Unknown outcome must NOT advance the confirmed offset"
+                );
+            })
+            .await;
+        }
+
+        /// Watcher/Delivered then a SECOND commit of the same range is idempotent
+        /// on the offset (monotonic CAS): the second commit is a lease no-op (the
+        /// cell is Committed, not Leased) and the offset does not double-advance.
+        #[tokio::test(flavor = "current_thread", start_paused = true)]
+        async fn watcher_second_commit_is_idempotent_on_offset() {
+            with_isolated_runtime_root(|| async move {
+                let shared = make_shared_data_for_tests_with_storage(None, None);
+                let fin = TurnFinalizer::spawn();
+                let ch = ChannelId::new(7004);
+                let lease = shared.delivery_lease(ch);
+                let turn = TurnKey::new(ch, 44, 0);
+                let h = watcher(1);
+
+                assert!(lease.try_acquire(turn, h, 0, 80, 1_000));
+                assert!(
+                    fin.commit_delivery(
+                        turn,
+                        lease.clone(),
+                        h,
+                        0,
+                        80,
+                        LeaseOutcome::Delivered,
+                        ProviderKind::Claude,
+                        "p1-1-idem-session".to_string(),
+                        shared.clone(),
+                    )
+                    .await
+                );
+                assert_eq!(shared.committed_relay_offset(ch), 80);
+
+                // A second commit of the same range: the lease is now Committed,
+                // so `commit` is a no-op (returns false) and the handler does NOT
+                // advance. Even if it did, the monotonic CAS would refuse to move
+                // the watermark backward or re-advance it.
+                let second = fin
+                    .commit_delivery(
+                        turn,
+                        lease.clone(),
+                        h,
+                        0,
+                        80,
+                        LeaseOutcome::Delivered,
+                        ProviderKind::Claude,
+                        "p1-1-idem-session".to_string(),
+                        shared.clone(),
+                    )
+                    .await;
+                assert!(!second, "second commit on a Committed lease is a no-op");
+                assert_eq!(
+                    shared.committed_relay_offset(ch),
+                    80,
+                    "offset must not double-advance on a repeated commit"
+                );
+            })
+            .await;
+        }
+
+        /// Deadline reclaim of a dead holder: a leased-but-never-committed cell
+        /// past its deadline is reclaimed by `reclaim_expired_delivery_leases`,
+        /// returns to Unleased, and a later legitimate acquire succeeds.
+        #[tokio::test(flavor = "current_thread", start_paused = true)]
+        async fn deadline_reclaim_frees_cell_for_later_acquire() {
+            with_isolated_runtime_root(|| async move {
+                let shared = make_shared_data_for_tests_with_storage(None, None);
+                let ch = ChannelId::new(7005);
+                let lease = shared.delivery_lease(ch);
+                let turn_a = TurnKey::new(ch, 55, 0);
+                let dead = watcher(1);
+
+                // A holder acquires with deadline 100ms (monotonic units) but never
+                // commits/releases (dead).
+                assert!(lease.try_acquire(turn_a, dead, 0, 16, 100));
+                // Before the deadline, the sweep is a no-op and the cell stays held.
+                assert_eq!(shared.reclaim_expired_delivery_leases(50), 0);
+                assert!(!lease.try_acquire(turn_a, watcher(2), 0, 16, 100));
+                // Past the deadline, the sweep reclaims exactly this cell.
+                assert_eq!(shared.reclaim_expired_delivery_leases(100), 1);
+                // A later legitimate acquire (new instance, new turn) succeeds.
+                let turn_b = TurnKey::new(ch, 66, 0);
+                assert!(
+                    lease.try_acquire(turn_b, watcher(3), 16, 32, 1_000),
+                    "a reclaimed cell is acquirable again"
+                );
+            })
+            .await;
+        }
+
+        /// Release after commit returns the cell to Unleased so the NEXT turn can
+        /// acquire — the lifecycle the watcher drives (acquire→commit→release).
+        #[tokio::test(flavor = "current_thread", start_paused = true)]
+        async fn release_after_commit_frees_cell_for_next_turn() {
+            with_isolated_runtime_root(|| async move {
+                let shared = make_shared_data_for_tests_with_storage(None, None);
+                let fin = TurnFinalizer::spawn();
+                let ch = ChannelId::new(7006);
+                let lease = shared.delivery_lease(ch);
+                let turn1 = TurnKey::new(ch, 77, 0);
+                let h = watcher(1);
+
+                assert!(lease.try_acquire(turn1, h, 0, 24, 1_000));
+                assert!(
+                    fin.commit_delivery(
+                        turn1,
+                        lease.clone(),
+                        h,
+                        0,
+                        24,
+                        LeaseOutcome::Delivered,
+                        ProviderKind::Claude,
+                        "p1-1-release-session".to_string(),
+                        shared.clone(),
+                    )
+                    .await
+                );
+                assert!(
+                    fin.release_delivery(turn1, lease.clone(), h, 0, 24).await,
+                    "the holder releases its committed lease"
+                );
+                // Next turn (different range) can now acquire the freed cell.
+                let turn2 = TurnKey::new(ch, 88, 0);
+                assert!(
+                    lease.try_acquire(turn2, watcher(2), 24, 48, 1_000),
+                    "released cell is free for the next turn"
+                );
+            })
+            .await;
+        }
+
+        fn _assert_send<T: Send>(_: &T) {}
+
+        /// The shared lease cell is `Send + Sync` (it is shared across watcher
+        /// instances via `Arc` and passed into the actor task).
+        #[test]
+        fn lease_cell_is_send_sync() {
+            let c: Arc<DeliveryLeaseCell> = Arc::new(DeliveryLeaseCell::new(ChannelId::new(9)));
+            _assert_send(&c);
+        }
+    }
+
+    // =======================================================================
     // #3041 §2-§3 §6 P1-0 — Dormant `DeliveryLeaseCell` state-machine tests.
     //
     // The cell is wired into no call path yet (P1-1..), but its transitions
@@ -3098,13 +3502,20 @@ mod tests {
                 6,
                 1_000
             ));
+            // #3041 P1-1: the commit handler now takes provider/session/shared so
+            // a `Delivered` commit can advance the channel watermark. Supply a
+            // throwaway `SharedData`; the advance targets the cell's channel (42).
+            let shared = super::super::super::make_shared_data_for_tests_with_storage(None, None);
             assert!(handle_commit_delivery(
                 &c,
                 turn(),
                 h,
                 0,
                 6,
-                LeaseOutcome::Delivered
+                LeaseOutcome::Delivered,
+                &crate::services::provider::ProviderKind::Claude,
+                "dormant-handler-test-session",
+                &shared,
             ));
             assert!(!handle_release_delivery(
                 &c,

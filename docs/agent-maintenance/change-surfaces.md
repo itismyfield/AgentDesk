@@ -116,13 +116,17 @@
   - `src/services/discord/watchers/lifecycle.rs` (2301 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior).
-  - `src/services/discord/tmux.rs` (2228 lines after #2558 dead-code sweep;
+  - `src/services/discord/tmux.rs` (2238 lines after #2558 dead-code sweep;
     failover guard; #3087 `session_panel_instance_key`/`write_spawn_nonce`
     re-exports; #3107 `RestoredWatcherTurn.injected_prompt_message_id`;
     #3016 option A `normal_completion` finalize-decouple param;
     #3017 monitor-auto-turn finalizer routing + ledger-generation +
-    relay-watermark reset re-exports; still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (7805 lines after #2558
+    relay-watermark reset re-exports; +10 from #3041 P1-1 making
+    `advance_watcher_confirmed_end` `pub(in crate::services::discord)` +
+    doc-comment so the finalizer actor's `CommitDelivery` handler drives the
+    SAME monotonic-CAS offset advance on a `Delivered` lease commit;
+    still giant-file territory).
+  - `src/services/discord/tmux_watcher.rs` (7981 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -148,6 +152,13 @@
     + generation-aware watermark resets, suppresses a wake/idle terminal already
     committed by another relay actor) and the monitor-auto-turn synthetic-id /
     ledger-generation threading through `finish_monitor_auto_turn_if_claimed`;
+    +176 from #3041 P1-1 wiring the WATCHER terminal delivery through the live
+    `DeliveryLeaseCell`: a per-spawn `instance_id`, the B3 acquire-deadline
+    constant + rationale, the pre-send `try_acquire` on the turn-pinned identity,
+    the B2 single-holder skip arm (a replacement watcher must not re-emit a held
+    range), and replacing the inline `advance_watcher_confirmed_end` for the
+    watcher terminal path with the actor `commit_delivery`(advances offset on
+    `Delivered`)+`release_delivery` lifecycle;
     split loop helpers further before adding behavior).
   - `src/services/discord/tui_prompt_relay.rs` (3849 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only

@@ -1,6 +1,32 @@
 use super::*;
 use crate::services::discord::InflightTurnState;
 
+/// #3041 P1-1: process-global monotonic counter that mints a unique
+/// `instance_id` for each watcher spawn. It distinguishes an outgoing watcher
+/// from its replacement across a reattach so the delivery-lease holder
+/// (`LeaseHolder::Watcher { instance_id }`) of a still-running send cannot be
+/// confused with — or released/committed by — a successor watcher that picks
+/// up the same channel/session (the §5.2 B2 single-holder invariant).
+static WATCHER_INSTANCE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_watcher_instance_id() -> u64 {
+    WATCHER_INSTANCE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// #3041 P1-1 (B3): delivery-lease acquire deadline for the watcher terminal
+/// send. The realistic worst case is NOT a single POST: a long terminal
+/// response is split into multiple Discord messages, each separated by the
+/// long-message inter-chunk pacing wait (`formatting.rs` 500ms), and may be
+/// preceded by a session-bound relay ACK wait (`tmux_watcher.rs` 10s). A very
+/// long answer can be ~20+ chunks; 20 × 500ms = 10s of pacing alone, plus the
+/// 10s ACK wait, plus HTTP/rate-limit slack. We pick 90s — comfortably above a
+/// worst-case multi-chunk rate-limited send — so a live holder is never
+/// reclaimed mid-send, while still bounding a genuinely-dead holder so the
+/// reconciler's `reclaim_if_expired` frees the cell for a legitimate successor.
+/// This is the lease DEADLINE, independent of the finalizer's `GATE_BACKSTOP`
+/// (8s, a different concern: visible-completion gating, not delivery duration).
+const WATCHER_DELIVERY_LEASE_DEADLINE_MS: u64 = 90_000;
+
 /// #2441 (H1) — race a fixed sleep against a `notify`-backed wake-up
 /// from `JsonlWatcher`. Returns as soon as EITHER the sleep elapses or
 /// the watcher fires its `Notify`. This is the primitive used to replace
@@ -3412,6 +3438,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     tracing::info!(
         "  [{ts}] 👁 tmux watcher started for #{tmux_session_name} at offset {initial_offset}"
     );
+
+    // #3041 P1-1: this watcher instance's delivery-lease holder id. Minted once
+    // per spawn so a replacement watcher cannot release/commit (or be mistaken
+    // for) this instance's lease across a reattach (§5.2 B2).
+    let watcher_instance_id = next_watcher_instance_id();
 
     // E5 (#2412): cache the supervisor-owned StreamRelay producer for this
     // tmux session, if the supervisor is running and has matched the
@@ -7075,6 +7106,73 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let mut tui_direct_anchor_terminal_body_visible = false;
         let mut tui_direct_anchor_or_lease_present_for_lifecycle =
             prompt_anchor_present_before_relay || external_input_lease_before_relay;
+
+        // #3041 P1-1: acquire the delivery lease BEFORE the watcher direct-sends
+        // its terminal response. The lease identity is the turn-pinned id (NOT a
+        // stale late re-read — `pinned_finalize_user_msg_id` mirrors the same
+        // id-pinning #3141 established) and the byte range this delivery covers,
+        // `[data_start_offset, terminal_event_consumed_offset(..))` — the SAME
+        // consumed end the commit/offset-advance uses, so acquire and commit
+        // carry one identity. We only acquire on the watcher-direct path: the
+        // session-bound delegation path is the sink's lease (P1-2) and the
+        // suppression/no-response arms deliver nothing.
+        //
+        // B2 (single-holder, §5.2): if a DIFFERENT watcher instance already
+        // holds this cell (Leased, not yet committed/released/reclaimed) for the
+        // same channel, `try_acquire` returns false and this watcher MUST NOT
+        // direct-send (see the dedicated skip arm below). The acquire is the
+        // atomic fast-path on the cell (B4); commit/release route through the
+        // finalizer actor.
+        let watcher_lease_turn = crate::services::discord::turn_finalizer::TurnKey::new(
+            channel_id,
+            pinned_finalize_user_msg_id(
+                inflight_before_relay.as_ref(),
+                &tmux_session_name,
+                current_offset,
+            ),
+            shared.current_generation,
+        );
+        let watcher_lease_holder = crate::services::discord::LeaseHolder::Watcher {
+            instance_id: watcher_instance_id,
+        };
+        let watcher_lease_start = data_start_offset;
+        let watcher_lease_end = terminal_event_consumed_offset(current_offset, &all_data);
+        let watcher_lease_cell = shared.delivery_lease(channel_id);
+        // Only the watcher-direct fallback path actually direct-sends; acquire
+        // exactly when that path will run with a real body so the lease identity
+        // matches the bytes we are about to deliver. A zero/inverted range never
+        // delivers, so do not lease it.
+        let watcher_will_direct_send =
+            watcher_direct_fallback_after_session_bound_ack && has_direct_terminal_response;
+        let watcher_lease_acquired =
+            if watcher_will_direct_send && watcher_lease_end > watcher_lease_start {
+                watcher_lease_cell.try_acquire(
+                    watcher_lease_turn,
+                    watcher_lease_holder,
+                    watcher_lease_start,
+                    watcher_lease_end,
+                    crate::services::discord::lease_now_ms()
+                        .saturating_add(WATCHER_DELIVERY_LEASE_DEADLINE_MS),
+                )
+            } else {
+                false
+            };
+        // B2 skip flag: the watcher intended to direct-send but a different
+        // holder owns the lease for this range. Used to route to the skip arm
+        // (no duplicate send) instead of the send arm. NOTE (P1-3 residual): the
+        // 10s ACK-timeout blind re-send is intentionally NOT removed here. If the
+        // SAME watcher that holds the lease hits its ACK timeout it would
+        // re-enter this block in a LATER iteration; because the prior iteration
+        // committed-and-released the lease (Committed→Unleased), a same-holder
+        // re-send re-acquires and re-commits the SAME range — but the commit's
+        // offset advance is a monotonic CAS, so it CANNOT double-advance
+        // `confirmed_end_offset`. P1-3 replaces the blind re-send with
+        // committed-offset reconciliation; until then this residual same-holder
+        // re-send window is bounded and offset-idempotent.
+        let watcher_lease_b2_skip = watcher_will_direct_send
+            && watcher_lease_end > watcher_lease_start
+            && !watcher_lease_acquired;
+
         let relay_ok = if session_bound_relay_owns_terminal_delivery {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -7110,6 +7208,26 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
             clear_provider_overload_retry_state(channel_id);
             true
+        } else if watcher_lease_b2_skip {
+            // #3041 P1-1 B2 (single-holder, §5.2): a DIFFERENT watcher instance
+            // already holds the delivery lease for this exact channel/turn/range
+            // (it is mid-send or its lease has not yet been committed/released/
+            // reclaimed). A replacement watcher MUST NOT re-acquire and re-emit
+            // the same range — that is precisely the duplicate-send vector the
+            // lease closes. Skip the direct send; `terminal_output_committed`
+            // stays false so no offset advance / lifecycle side-effects run for
+            // this suppressed re-emit. The live holder will commit-advance the
+            // offset itself.
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                provider = %watcher_provider.as_str(),
+                channel = channel_id.get(),
+                tmux_session = %tmux_session_name,
+                data_start_offset = watcher_lease_start,
+                lease_end = watcher_lease_end,
+                "  [{ts}] 👁 #3041 B2: delivery lease held by another holder — skipped duplicate terminal send for {tmux_session_name} (range {watcher_lease_start}..{watcher_lease_end})"
+            );
+            false
         } else if watcher_direct_fallback_after_session_bound_ack {
             let formatted = if shared.status_panel_v2_enabled {
                 crate::services::discord::formatting::format_for_discord_with_status_panel(
@@ -7486,6 +7604,25 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 clear_provider_overload_retry_state(channel_id);
             }
             if retry_terminal_delivery_from_offset {
+                // #3041 P1-1: this is a SAME-holder abandon-without-commit — the
+                // partial send failed and we are about to reset the offset and
+                // retry the SAME range on the next loop iteration. If we left the
+                // lease `Leased`, the retry's `try_acquire` would lose to our own
+                // held lease and the B2 skip arm would suppress the legitimate
+                // retry until the 90s deadline reclaim. Abandon-release the lease
+                // here (Leased→Unleased) so the retry can re-acquire. This is the
+                // sole abandon point that must not commit; it is released on the
+                // cell directly (a same-holder abandon, not a commit/release race
+                // that needs actor serialization). Identity-matched no-op if the
+                // lease was never acquired on this path.
+                if watcher_lease_acquired {
+                    watcher_lease_cell.release(
+                        watcher_lease_holder,
+                        watcher_lease_turn,
+                        watcher_lease_start,
+                        watcher_lease_end,
+                    );
+                }
                 current_offset = turn_data_start_offset;
                 all_data.clear();
                 all_data_start_offset = current_offset;
@@ -7904,7 +8041,65 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // `confirmed_end` on the retry, falsely claiming there's nothing
         // new to relay.
         let terminal_committed_offset = runtime_binding_candidate_offset.unwrap_or(current_offset);
-        if terminal_output_committed && !lifecycle_stage_paused {
+        if watcher_lease_acquired {
+            // #3041 P1-1 (§5.2): the watcher-direct terminal delivery was leased
+            // above. The lease COMMIT — not an inline advance — is now the single
+            // thing that advances `confirmed_end_offset` for this path. Commit the
+            // 3-way outcome through the finalizer actor (B4): `Delivered` on a
+            // confirmed send (advances the watermark to the leased `end`),
+            // `NotDelivered` on a clean send failure, `Unknown` when the TUI
+            // quiescence gate left us lifecycle-paused (ambiguous — the visible
+            // completion is deferred to the backstop, so we must NOT claim these
+            // bytes delivered). The commit handler advances the watermark ONLY on
+            // `Delivered`, mirroring the old inline `!lifecycle_stage_paused` gate
+            // exactly. Then release the lease so the cell is free for the next
+            // turn. The leased `end` equals `terminal_committed_offset` on the
+            // committed path, so the offset reaches the same value the inline call
+            // used.
+            let commit_outcome = if lifecycle_stage_paused {
+                crate::services::discord::LeaseOutcome::Unknown
+            } else if relay_ok {
+                crate::services::discord::LeaseOutcome::Delivered
+            } else {
+                crate::services::discord::LeaseOutcome::NotDelivered
+            };
+            let committed = shared
+                .turn_finalizer
+                .commit_delivery(
+                    watcher_lease_turn,
+                    watcher_lease_cell.clone(),
+                    watcher_lease_holder,
+                    watcher_lease_start,
+                    watcher_lease_end,
+                    commit_outcome,
+                    watcher_provider.clone(),
+                    tmux_session_name.clone(),
+                    shared.clone(),
+                )
+                .await;
+            debug_assert!(
+                committed,
+                "watcher must be able to commit its own freshly-acquired lease"
+            );
+            // Release so the cell returns to Unleased for the next turn. Routed
+            // through the actor (B4). Idempotent: a release that loses the
+            // identity match (e.g. the lease was reclaimed mid-send because the
+            // 90s deadline elapsed) is a harmless no-op.
+            let _ = shared
+                .turn_finalizer
+                .release_delivery(
+                    watcher_lease_turn,
+                    watcher_lease_cell.clone(),
+                    watcher_lease_holder,
+                    watcher_lease_start,
+                    watcher_lease_end,
+                )
+                .await;
+        } else if terminal_output_committed && !lifecycle_stage_paused {
+            // Non-watcher-direct committed paths (relay-suppressed task
+            // notifications, empty-turn cleanup, session-bound delegation that
+            // still consumed the range) keep the inline monotonic-CAS advance —
+            // they are NOT the watcher terminal-delivery path the lease governs.
             advance_watcher_confirmed_end(
                 &shared,
                 &watcher_provider,
