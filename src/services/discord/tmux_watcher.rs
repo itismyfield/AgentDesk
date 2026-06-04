@@ -1028,6 +1028,58 @@ fn pinned_finalize_user_msg_id(
         .unwrap_or(0)
 }
 
+/// #3016 (codex R3): the watcher's `terminal_output_committed &&
+/// !lifecycle_stage_paused` block runs MORE destructive side-effects than the
+/// finalize on a LATE re-read `inflight_state` (loaded AFTER the relay, NOT
+/// turn-pinned): the `⏳ → ✅` reaction + `session_transcript` + `turn_analytics`
+/// write (targets the late read's `user_msg_id`) and `clear_inflight_state`
+/// (deletes the on-disk inflight). In the R2/R3 aliasing scenario a FOLLOW-UP
+/// turn on the SAME tmux session has `turn_start_offset >= current_offset` (it
+/// begins AFTER the output range this completion covers), so the watcher-yield
+/// guard (tmux.rs:2110-2111: yields only when
+/// `data_start_offset <= turn_start_offset && turn_start_offset < current_offset`)
+/// does NOT yield and the watcher processes this OLD range — yet the late
+/// `inflight_state` (and possibly the pre-relay snapshot) already holds the
+/// NEWER turn's id. Running those side-effects would ✅ the newer (still-running)
+/// turn's message, write its transcript/analytics prematurely, and delete its
+/// inflight — wrong-turn lifecycle corruption.
+///
+/// This pure gate returns TRUE iff EITHER snapshot is a real NEWER turn on the
+/// SAME session that this committed range does not belong to: for that snapshot
+/// `user_msg_id != 0` AND trimmed session match AND effective start
+/// `turn_start_offset.unwrap_or(last_offset) >= current_offset`. This is the
+/// EXACT complement of `pinned_finalize_user_msg_id`'s `< current_offset` range
+/// test (and mirrors the same offset/fallback semantics as the yield guard), so
+/// the two decisions cannot disagree: when the finalize helper returns 0 because
+/// the snapshot is a newer turn, this gate returns TRUE and the call site skips
+/// the reaction/transcript/analytics/clear too.
+///
+/// Narrow by construction: for a normal completion where the inflight is THIS
+/// turn or an OLDER turn (`turn_start_offset < current_offset`), or there is no
+/// inflight, or it is `rebind_origin`/`user_msg_id == 0`, this returns FALSE and
+/// all existing behavior is preserved.
+fn committed_completion_is_stale_for_newer_turn(
+    inflight_before_relay: Option<&crate::services::discord::inflight::InflightTurnState>,
+    inflight_state: Option<&crate::services::discord::inflight::InflightTurnState>,
+    tmux_session_name: &str,
+    current_offset: u64,
+) -> bool {
+    let snapshot_is_newer_turn =
+        |snapshot: Option<&crate::services::discord::inflight::InflightTurnState>| {
+            snapshot.is_some_and(|state| {
+                state.user_msg_id != 0
+                    && state.tmux_session_name.as_deref().map(str::trim)
+                        == Some(tmux_session_name.trim())
+                    // Complement of `pinned_finalize_user_msg_id`'s
+                    // `< current_offset`: a newer turn starts AT/AFTER this
+                    // committed range. Same `turn_start_offset.unwrap_or(last_offset)`
+                    // fallback as the finalize helper and the yield guard.
+                    && state.turn_start_offset.unwrap_or(state.last_offset) >= current_offset
+            })
+        };
+    snapshot_is_newer_turn(inflight_before_relay) || snapshot_is_newer_turn(inflight_state)
+}
+
 fn refresh_watcher_turn_identity(
     current: &mut Option<crate::services::discord::inflight::InflightTurnIdentity>,
     provider: &ProviderKind,
@@ -1178,6 +1230,100 @@ mod pane_dead_identity_tests {
             pinned_finalize_user_msg_id(None, "AgentDesk-codex-adk-cdx", 50),
             0
         );
+    }
+
+    // #3016 codex R3 (wrong-turn lifecycle corruption). The SAME committed block
+    // that finalizes also runs `⏳ → ✅` + transcript/analytics + clear on the
+    // LATE-read inflight. `committed_completion_is_stale_for_newer_turn` is the
+    // exact complement of `pinned_finalize_user_msg_id`'s `< current_offset`
+    // range test: it returns TRUE iff EITHER snapshot is a real NEWER turn on the
+    // SAME session that began AT/AFTER this range (so those side-effects must be
+    // skipped). Mirrors the yield guard's offset/fallback semantics.
+    #[test]
+    fn committed_completion_stale_for_newer_turn_matrix() {
+        let session = "AgentDesk-codex-adk-cdx";
+        // (a) newer turn after range (start 50 >= current 50, same session,
+        // id != 0) → true. Here it sits in inflight_state (late read).
+        let newer = state_with_offsets(800, session, Some(50), 50);
+        assert!(committed_completion_is_stale_for_newer_turn(
+            None,
+            Some(&newer),
+            session,
+            50
+        ));
+        // strictly-after (start 60 > 50) → true.
+        let later = state_with_offsets(801, session, Some(60), 60);
+        assert!(committed_completion_is_stale_for_newer_turn(
+            None,
+            Some(&later),
+            session,
+            50
+        ));
+
+        // (b) current/older turn (start 10 < current 50) → false (normal path).
+        let in_range = state_with_offsets(700, session, Some(10), 10);
+        assert!(!committed_completion_is_stale_for_newer_turn(
+            Some(&in_range),
+            Some(&in_range),
+            session,
+            50
+        ));
+
+        // (c) wrong session, even though it is a newer turn → false.
+        let other_session = state_with_offsets(900, "AgentDesk-codex-adk-cdx-fresh", Some(50), 50);
+        assert!(!committed_completion_is_stale_for_newer_turn(
+            None,
+            Some(&other_session),
+            session,
+            50
+        ));
+
+        // (d) id == 0 (anchorless / rebind-style) newer turn → false.
+        let anchorless = state_with_offsets(0, session, Some(50), 50);
+        assert!(!committed_completion_is_stale_for_newer_turn(
+            None,
+            Some(&anchorless),
+            session,
+            50
+        ));
+
+        // (e) None / None → false (no inflight at all).
+        assert!(!committed_completion_is_stale_for_newer_turn(
+            None, None, session, 50
+        ));
+
+        // (f) only inflight_before_relay is newer (inflight_state older) → true.
+        assert!(committed_completion_is_stale_for_newer_turn(
+            Some(&newer),
+            Some(&in_range),
+            session,
+            50
+        ));
+        // …and vice-versa: only inflight_state is newer → true.
+        assert!(committed_completion_is_stale_for_newer_turn(
+            Some(&in_range),
+            Some(&newer),
+            session,
+            50
+        ));
+
+        // Fallback parity with the guard: no turn_start_offset → use last_offset.
+        // last_offset 50 >= current 50 → newer → true.
+        let no_start_after = state_with_offsets(802, session, None, 50);
+        assert!(committed_completion_is_stale_for_newer_turn(
+            None,
+            Some(&no_start_after),
+            session,
+            50
+        ));
+        // last_offset 10 < current 50 → not newer → false.
+        let no_start_before = state_with_offsets(803, session, None, 10);
+        assert!(!committed_completion_is_stale_for_newer_turn(
+            None,
+            Some(&no_start_before),
+            session,
+            50
+        ));
     }
 
     #[test]
@@ -7682,6 +7828,27 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             );
         }
 
+        // #3016 (codex R3): the late `inflight_state` re-read above (and the
+        // pre-relay snapshot) can already hold a NEWER follow-up turn's id in the
+        // R2/R3 offset-aliasing scenario — a follow-up on the SAME tmux session
+        // whose `turn_start_offset >= current_offset` (it begins AFTER this
+        // committed output range) does NOT make the watcher-yield guard yield, so
+        // the watcher still processes this OLD range while inflight on disk
+        // belongs to the newer turn. The finalize below is already safe (it uses
+        // `pinned_finalize_user_msg_id`, which returns 0 for such a newer turn —
+        // the EXACT complement of this gate's offset test), but the SAME block
+        // also runs the `⏳ → ✅` reaction + transcript + analytics write and
+        // `clear_inflight_state` on that late read. Compute the stale-range gate
+        // ONCE here and skip those wrong-turn side-effects (see the two call sites
+        // below). For every normal completion (inflight is THIS or an OLDER turn,
+        // absent, or rebind_origin/`user_msg_id == 0`) this is FALSE → no-op.
+        let completion_is_stale_for_newer_turn = committed_completion_is_stale_for_newer_turn(
+            inflight_before_relay.as_ref(),
+            inflight_state.as_ref(),
+            &tmux_session_name,
+            current_offset,
+        );
+
         if crate::services::discord::tui_prompt_relay::should_complete_tui_direct_anchor_lifecycle(
             terminal_output_committed,
             tui_direct_anchor_terminal_body_visible,
@@ -7755,8 +7922,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // analytics/turn-id key, and `MessageId::new(0)` would panic. The
         // recovered response was already delivered via the notify-bot outbox
         // enqueue above, so skipping the reaction/analytics step is safe.
+        //
+        // #3016 (codex R3): also skip when `completion_is_stale_for_newer_turn` —
+        // the late `inflight_state` belongs to a NEWER follow-up turn that began
+        // AFTER this committed range. Marking it `✅` and writing its transcript /
+        // analytics here would lie about a still-running turn's completion. The
+        // finalize below independently refuses this turn (its
+        // `pinned_finalize_user_msg_id` returns 0 via the complementary offset
+        // test), so this gate keeps the reaction/transcript/analytics consistent
+        // with that decision. No-op for every normal completion.
         if terminal_output_committed
             && !lifecycle_stage_paused
+            && !completion_is_stale_for_newer_turn
             && let Some(state) = inflight_state
                 .as_ref()
                 .filter(|s| !s.rebind_origin && s.user_msg_id != 0)
@@ -7986,33 +8163,45 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             //     that survives into the next turn will not accidentally clear
             //     that turn's freshly registered cancel_token.
             let owed = mailbox_finalize_owed.swap(false, std::sync::atomic::Ordering::AcqRel);
-            crate::services::discord::inflight::clear_inflight_state(
-                &provider_kind,
-                channel_id.get(),
-            );
-            let watcher_turn_id = inflight_state
-                .as_ref()
-                .filter(|s| s.user_msg_id != 0)
-                .map(|s| format!("discord:{}:{}", s.channel_id, s.user_msg_id));
-            let watcher_session_key_owned =
-                inflight_state.as_ref().and_then(|s| s.session_key.clone());
-            let watcher_dispatch_id_owned = resolved_did
-                .clone()
-                .or_else(|| inflight_state.as_ref().and_then(|s| s.dispatch_id.clone()));
-            crate::services::observability::emit_inflight_lifecycle_event(
-                provider_kind.as_str(),
-                channel_id.get(),
-                watcher_dispatch_id_owned.as_deref(),
-                watcher_session_key_owned.as_deref(),
-                watcher_turn_id.as_deref(),
-                "cleared_by_watcher",
-                serde_json::json!({
-                    "owed_finalize": owed,
-                    "dispatch_ok": dispatch_ok,
-                    "has_assistant_response": has_assistant_response,
-                    "full_response_len": full_response.len(),
-                }),
-            );
+            // #3016 (codex R3): do NOT delete the on-disk inflight when it
+            // belongs to a NEWER follow-up turn (same session, started AT/AFTER
+            // this committed range). The same offset decision that makes
+            // `pinned_finalize_user_msg_id` return 0 just below gates the clear
+            // here, so this stale-range pass cannot wipe the newer turn's
+            // inflight out from under it. Only the on-disk file is gated; the
+            // in-memory `inflight_state` used afterward (finalize id source,
+            // dispatch resolution, history push) is unaffected. The
+            // `cleared_by_watcher` observability event only fires when the clear
+            // actually ran (preserve existing semantics).
+            if !completion_is_stale_for_newer_turn {
+                crate::services::discord::inflight::clear_inflight_state(
+                    &provider_kind,
+                    channel_id.get(),
+                );
+                let watcher_turn_id = inflight_state
+                    .as_ref()
+                    .filter(|s| s.user_msg_id != 0)
+                    .map(|s| format!("discord:{}:{}", s.channel_id, s.user_msg_id));
+                let watcher_session_key_owned =
+                    inflight_state.as_ref().and_then(|s| s.session_key.clone());
+                let watcher_dispatch_id_owned = resolved_did
+                    .clone()
+                    .or_else(|| inflight_state.as_ref().and_then(|s| s.dispatch_id.clone()));
+                crate::services::observability::emit_inflight_lifecycle_event(
+                    provider_kind.as_str(),
+                    channel_id.get(),
+                    watcher_dispatch_id_owned.as_deref(),
+                    watcher_session_key_owned.as_deref(),
+                    watcher_turn_id.as_deref(),
+                    "cleared_by_watcher",
+                    serde_json::json!({
+                        "owed_finalize": owed,
+                        "dispatch_ok": dispatch_ok,
+                        "has_assistant_response": has_assistant_response,
+                        "full_response_len": full_response.len(),
+                    }),
+                );
+            }
             // codex P2 (#1670): cleanup (mailbox_finish_turn + cancel_token
             // release) MUST run on every relay-completed terminal even when
             // `dispatch_ok = false`, otherwise organic turns leak forever.
@@ -8050,6 +8239,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // `current_offset` here is the end of the range this completion covers
             // (same value passed to `commit_watcher_direct_terminal_session_idle`
             // just below).
+            //
+            // R3 cross-ref: this SAME offset decision now also gates the
+            // `⏳ → ✅` reaction + transcript + analytics block and the
+            // `clear_inflight_state` above, via
+            // `completion_is_stale_for_newer_turn`
+            // (`committed_completion_is_stale_for_newer_turn` is the exact
+            // complement of this helper's `< current_offset` range test). So the
+            // newer-turn case yields 0 here AND skips those destructive
+            // side-effects — the two stay consistent by construction.
             let restored_user_msg_id = pinned_finalize_user_msg_id(
                 inflight_before_relay.as_ref(),
                 &tmux_session_name,
