@@ -21,15 +21,18 @@
 //!     moment the user sends the next message in that channel.
 //!   - The next 5-min cycle deletes the previous card before posting fresh.
 //!
-//! Reverse race (codex, documented as acceptable — no CAS/tombstone): a
+//! Reverse race (codex R2 P2 — now closed by capture-at-claim + CAS): a
 //! delayed clear spawned by an *old* turn could, in principle, land after a
-//! later legitimately-posted card and delete it. The post-side active-turn
-//! recheck (step 5) closes the harmful direction (stale `idle` card over a
-//! live turn). The reverse is low-harm: a genuinely-idle channel transiently
-//! loses its recap card until the next 5-min cycle re-posts it. We
-//! deliberately do NOT add a CAS/tombstone for this; the cheap freshness
-//! win is the post-side recheck, and over-engineering the clear side is not
-//! justified by the transient, self-healing symptom.
+//! later legitimately-posted card. This is NOT self-healing: the policy posts
+//! at most once per idle period (`idle_recap_posted_at < last_heartbeat`), so
+//! a card lost to a stale clear stays gone until new activity re-arms the
+//! session. The post-side active-turn recheck (step 5) closes the harmful
+//! direction (stale `idle` card over a live turn). The reverse is closed by
+//! the claim path capturing the recap card id that exists when the turn is
+//! claimed and clearing ONLY that captured id — `delete_previous_card` probes
+//! the captured message and `clear_recap_pointer` is a compare-and-clear, so a
+//! delayed clear cannot delete or unlink a NEWER card (see
+//! `idle_recap::spawn_clear_captured_idle_recap_for_channel`).
 
 use axum::{
     Json,
@@ -173,10 +176,19 @@ async fn run_idle_recap_post_job(
     // `📦 … idle` card OVER the live turn (and persist its pointer),
     // re-opening the exact bug #3146 closes. The idle-cycle stamp at the top
     // of the route already deduped this cycle, so skipping is safe (we do NOT
-    // post-then-delete; we just don't post). Genuinely-idle channels have no
-    // (non-stale) inflight, so they still post the recap as before.
+    // post-then-delete; we just don't post).
+    //
+    // codex R2 P1: the recheck consults the MAILBOX active-turn FIRST (the
+    // authoritative signal `mailbox_try_start_turn` sets at the very start of
+    // the claim), ORed with the inflight sidecar for defense-in-depth. The
+    // claim path makes the mailbox turn active BEFORE it writes the inflight
+    // sidecar, so reading only the sidecar left a lag window in which this
+    // recheck saw "idle" and could post a stale card over a now-active turn.
+    // Reading the mailbox closes that window. Genuinely-idle channels have no
+    // active mailbox turn and no (non-stale) inflight, so they still post the
+    // recap as before.
     let active_turn = match ProviderKind::from_str(&snapshot.provider) {
-        Some(provider) => idle_recap::channel_has_active_turn(&provider, channel_id),
+        Some(provider) => idle_recap::channel_has_active_turn(&provider, channel_id).await,
         None => false,
     };
     if !idle_recap::should_post_recap(active_turn) {

@@ -948,13 +948,23 @@ async fn claim_tui_direct_synthetic_turn(
     // Discord-intake path does (`intake_gate` → `spawn_clear_idle_recap_for_channel`).
     // Without this, a turn that starts from the tmux TUI (user-typed OR the
     // autonomous self-drive loop) never goes through Discord intake, so the
-    // recap card kept showing `idle N분` over a live turn. Keyed purely on
-    // `channel_id`, so it cannot race the intake clear into clearing a
-    // still-idle channel's card.
+    // recap card kept showing `idle N분` over a live turn.
+    //
+    // codex R2 P2: capture the recap card id THAT EXISTS NOW (the turn just
+    // became active) and clear ONLY that captured id (compare-and-clear on the
+    // pointer). The idle-recap policy posts at most once per idle period, so a
+    // delayed clear that deleted a LATER legitimately-posted card would lose it
+    // for the rest of the idle period (NOT self-healing). Binding the clear to
+    // the captured id makes a delayed clear a no-op against any newer card.
     if let Some(pool) = shared.pg_pool.as_ref().cloned()
         && let Some(http) = shared.serenity_http_or_token_fallback()
     {
-        super::idle_recap::spawn_clear_idle_recap_for_channel(http, pool, channel_id.get());
+        super::idle_recap::spawn_clear_captured_idle_recap_for_channel(
+            http,
+            pool,
+            channel_id.get(),
+        )
+        .await;
     }
 
     if let Some(existing) = super::inflight::load_inflight_state(provider, channel_id.get())
