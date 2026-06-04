@@ -1412,8 +1412,9 @@ use stale_resume::{
 use terminal_delivery::{
     BridgeDeliveryLease, BridgeLeaseAcquire, send_ordered_long_terminal_response,
     should_complete_work_dispatch_after_terminal_delivery,
-    should_fail_dispatch_after_terminal_delivery, terminal_delivery_should_send_new_chunks,
-    tui_quiescence_timeout_requires_inflight_retry, turn_bridge_replace_outcome_committed,
+    should_fail_dispatch_after_terminal_delivery, silent_turn_skip_marks_committed,
+    terminal_delivery_should_send_new_chunks, tui_quiescence_timeout_requires_inflight_retry,
+    turn_bridge_replace_outcome_committed,
 };
 use tmux_runtime::is_dcserver_restart_command;
 use turn_analytics::{
@@ -7269,11 +7270,21 @@ pub(super) fn spawn_turn_bridge(
             // shared delivery lease BEFORE delivering the `[Stopped]` terminal
             // body. A B2 Skip means the watcher (or another bridge path) owns the
             // live lease for this turn/range → do NOT deliver+advance.
+            //
+            // #3041 P1-2 (codex P1-a): lease on the SAME channel's cell the WATCHER
+            // uses — `watcher_owner_channel_id`. A reused watcher can own a channel
+            // DIFFERENT from this bridge's `channel_id`; the watcher leases (and
+            // advances `confirmed_end_offset`) on ITS owner channel, and the bridge
+            // already advances on `watcher_owner_channel_id` (see
+            // `commit_and_advance`). Keying the cell + the `TurnKey` channel on
+            // `watcher_owner_channel_id` makes the bridge and watcher resolve to the
+            // SAME cell for the same actual turn so their acquires CONTEND
+            // (single-holder B2) instead of both delivering = duplicate.
             let stop_lease_acquire = BridgeDeliveryLease::acquire(
                 shared_owned.as_ref(),
-                channel_id,
+                watcher_owner_channel_id,
                 super::turn_finalizer::TurnKey::new(
-                    channel_id,
+                    watcher_owner_channel_id,
                     inflight_state.user_msg_id,
                     shared_owned.current_generation,
                 ),
@@ -7309,9 +7320,13 @@ pub(super) fn spawn_turn_bridge(
                 if replace_committed {
                     status_panel_terminal_committed = true;
                 }
-                // B6: advance ONLY via the lease commit (Delivered on a committed
-                // replace, NotDelivered otherwise). NoRange → preserve the direct
-                // advance for parity (no offset to advance for a zero/None range).
+                // B6: the ONLY confirmed_end advance on the bridge path is via a
+                // successful lease commit. `Held` → commit (Delivered advances,
+                // NotDelivered does not). `NoRange` (`end <= start` or None/0) has
+                // NO new bytes to commit, so there is nothing to advance — do NOT
+                // call `advance_tmux_relay_confirmed_end` outside a lease (codex
+                // P1-b: a degenerate equal-nonzero range like start==end==64 must
+                // not advance the offset outside a lease commit).
                 if let Some(lease) = stop_lease {
                     let outcome = if replace_committed {
                         crate::services::discord::LeaseOutcome::Delivered
@@ -7323,13 +7338,6 @@ pub(super) fn spawn_turn_bridge(
                         watcher_owner_channel_id,
                         inflight_state.tmux_session_name.as_deref(),
                         outcome,
-                    );
-                } else if replace_committed {
-                    advance_tmux_relay_confirmed_end(
-                        shared_owned.as_ref(),
-                        watcher_owner_channel_id,
-                        tmux_last_offset,
-                        inflight_state.tmux_session_name.as_deref(),
                     );
                 }
                 if !replace_committed {
@@ -7355,12 +7363,14 @@ pub(super) fn spawn_turn_bridge(
             );
             // #3041 P1-2 (site 2 — prompt-too-long terminal replace): same lease
             // routing as site 1. Acquire before the replace; B2-skip if another
-            // holder owns the live lease.
+            // holder owns the live lease. (codex P1-a) lease on
+            // `watcher_owner_channel_id` so the bridge and the (possibly reused)
+            // watcher share the SAME cell + TurnKey channel.
             let plt_lease_acquire = BridgeDeliveryLease::acquire(
                 shared_owned.as_ref(),
-                channel_id,
+                watcher_owner_channel_id,
                 super::turn_finalizer::TurnKey::new(
-                    channel_id,
+                    watcher_owner_channel_id,
                     inflight_state.user_msg_id,
                     shared_owned.current_generation,
                 ),
@@ -7396,6 +7406,8 @@ pub(super) fn spawn_turn_bridge(
                 if replace_committed {
                     status_panel_terminal_committed = true;
                 }
+                // B6 (codex P1-b): advance ONLY via a successful lease commit.
+                // NoRange has no new bytes → no advance outside the lease.
                 if let Some(lease) = plt_lease {
                     let outcome = if replace_committed {
                         crate::services::discord::LeaseOutcome::Delivered
@@ -7407,13 +7419,6 @@ pub(super) fn spawn_turn_bridge(
                         watcher_owner_channel_id,
                         inflight_state.tmux_session_name.as_deref(),
                         outcome,
-                    );
-                } else if replace_committed {
-                    advance_tmux_relay_confirmed_end(
-                        shared_owned.as_ref(),
-                        watcher_owner_channel_id,
-                        tmux_last_offset,
-                        inflight_state.tmux_session_name.as_deref(),
                     );
                 }
                 if !replace_committed {
@@ -7763,7 +7768,6 @@ pub(super) fn spawn_turn_bridge(
                     channel_id,
                     delivery_response.len()
                 );
-                terminal_delivery_committed = true;
                 terminal_body_visible = true;
                 // #3041 P1-2 (site 3 — silent_turn suppression): no Discord post
                 // happens, but the offset STILL advances so the suppressed range is
@@ -7775,17 +7779,34 @@ pub(super) fn spawn_turn_bridge(
                 // heartbeat is a formality (spawned then immediately stopped at
                 // commit). Outcome=Delivered because the offset DOES advance (the
                 // range is accounted for), exactly mirroring the pre-P1-2 advance.
+                //
+                // (codex P1-a) lease on `watcher_owner_channel_id` (same cell +
+                // TurnKey channel as the watcher).
+                //
+                // (codex P1-c) `terminal_delivery_committed` is set ONLY when THIS
+                // actor actually resolves the range — `Held`→commit (we own it) or
+                // `NoRange` (no bytes to deliver, suppression is the resolution). On
+                // `Skip` the live holder (the watcher) owns delivery; the bridge must
+                // be a NO-OP on completion side-effects: do NOT mark committed, do
+                // NOT advance, do NOT clear inflight as delivered — leave the turn
+                // retry-able so if the holder ultimately commits NotDelivered/Unknown
+                // the existing retry machinery (ACK-poll / next pass) re-attempts.
                 let lease_acquire = BridgeDeliveryLease::acquire(
                     shared_owned.as_ref(),
-                    channel_id,
+                    watcher_owner_channel_id,
                     super::turn_finalizer::TurnKey::new(
-                        channel_id,
+                        watcher_owner_channel_id,
                         inflight_state.user_msg_id,
                         shared_owned.current_generation,
                     ),
                     inflight_state.turn_start_offset.unwrap_or(0),
                     tmux_last_offset,
                 );
+                // (codex P1-c) one source of truth for "does this acquire outcome
+                // mark the silent turn committed": Skip → false (holder owns it,
+                // stay retry-able), Held/NoRange → true.
+                terminal_delivery_committed =
+                    silent_turn_skip_marks_committed(&lease_acquire);
                 match lease_acquire {
                     BridgeLeaseAcquire::Held(lease) => {
                         lease.commit_and_advance(
@@ -7796,22 +7817,20 @@ pub(super) fn spawn_turn_bridge(
                         );
                     }
                     BridgeLeaseAcquire::Skip => {
+                        // B2-skip: the watcher holds the live lease and owns this
+                        // range's delivery. Do NOT mark committed / advance / clear
+                        // inflight — leave the turn retry-able (codex P1-c).
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::warn!(
                             channel = channel_id.get(),
-                            "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge silent_turn skipped offset advance (channel {})",
+                            "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge silent_turn skipped offset advance, left turn retry-able (channel {})",
                             channel_id
                         );
                     }
                     BridgeLeaseAcquire::NoRange => {
-                        // No offset to advance (zero/None range): the direct call is
-                        // a no-op, preserved for parity. B6 not violated (no advance).
-                        advance_tmux_relay_confirmed_end(
-                            shared_owned.as_ref(),
-                            watcher_owner_channel_id,
-                            tmux_last_offset,
-                            inflight_state.tmux_session_name.as_deref(),
-                        );
+                        // No offset to advance (zero/inverted range): nothing to
+                        // deliver, the suppression itself resolves the (empty) range.
+                        // B6 holds (no advance).
                     }
                 }
             } else if delivery_response.trim().is_empty() {
@@ -7850,12 +7869,14 @@ pub(super) fn spawn_turn_bridge(
                         // `send_long_message_with_rollback` with per-chunk pacing),
                         // so the lease's HEARTBEAT (spawned in `acquire`) is what
                         // keeps it alive mid-send. Acquire BEFORE the send; B2-skip
-                        // if another holder owns the live lease.
+                        // if another holder owns the live lease. (codex P1-a) lease
+                        // on `watcher_owner_channel_id` (shared cell + TurnKey
+                        // channel with the watcher).
                         let lease_acquire = BridgeDeliveryLease::acquire(
                             shared_owned.as_ref(),
-                            channel_id,
+                            watcher_owner_channel_id,
                             super::turn_finalizer::TurnKey::new(
-                                channel_id,
+                                watcher_owner_channel_id,
                                 inflight_state.user_msg_id,
                                 shared_owned.current_generation,
                             ),
@@ -7893,23 +7914,15 @@ pub(super) fn spawn_turn_bridge(
                                     terminal_body_visible = true;
                                     response_sent_offset = full_response.len();
                                     inflight_state.response_sent_offset = response_sent_offset;
-                                    // B6: advance ONLY via the lease commit
-                                    // (Delivered). NoRange → preserve the direct
-                                    // advance for parity (no offset to advance for a
-                                    // zero/None range).
+                                    // B6 (codex P1-b): advance ONLY via a successful
+                                    // lease commit (Delivered). `NoRange` has no new
+                                    // bytes to commit → no advance outside the lease.
                                     if let Some(lease) = lease {
                                         lease.commit_and_advance(
                                             shared_owned.as_ref(),
                                             watcher_owner_channel_id,
                                             inflight_state.tmux_session_name.as_deref(),
                                             crate::services::discord::LeaseOutcome::Delivered,
-                                        );
-                                    } else {
-                                        advance_tmux_relay_confirmed_end(
-                                            shared_owned.as_ref(),
-                                            watcher_owner_channel_id,
-                                            tmux_last_offset,
-                                            inflight_state.tmux_session_name.as_deref(),
                                         );
                                     }
                                 }
@@ -7942,11 +7955,13 @@ pub(super) fn spawn_turn_bridge(
                         // the watcher and the bridge serialize on this channel. On
                         // a B2 Skip the watcher (or another bridge path) owns the
                         // live lease for this range/turn → do NOT deliver+advance.
+                        // (codex P1-a) lease on `watcher_owner_channel_id` (shared
+                        // cell + TurnKey channel with the watcher).
                         let lease_acquire = BridgeDeliveryLease::acquire(
                             shared_owned.as_ref(),
-                            channel_id,
+                            watcher_owner_channel_id,
                             super::turn_finalizer::TurnKey::new(
-                                channel_id,
+                                watcher_owner_channel_id,
                                 inflight_state.user_msg_id,
                                 shared_owned.current_generation,
                             ),
@@ -8018,18 +8033,12 @@ pub(super) fn spawn_turn_bridge(
                                     replace_committed
                                 } else {
                                     // NoRange (zero/inverted range or no tmux session):
-                                    // there is no offset to advance, so delivering
-                                    // without a lease cannot violate B6. Preserve the
-                                    // pre-P1-2 advance call for parity — it is a no-op
-                                    // for a zero/None range.
-                                    if replace_committed {
-                                        advance_tmux_relay_confirmed_end(
-                                            shared_owned.as_ref(),
-                                            watcher_owner_channel_id,
-                                            tmux_last_offset,
-                                            inflight_state.tmux_session_name.as_deref(),
-                                        );
-                                    }
+                                    // there are NO new bytes to commit, so there is
+                                    // nothing to advance. Deliver without a lease and
+                                    // WITHOUT advancing `confirmed_end_offset` (codex
+                                    // P1-b: no advance outside a lease commit). The
+                                    // message still reaches Discord; only the offset
+                                    // advance is gated to a real range.
                                     replace_committed
                                 };
                                 if outcome {

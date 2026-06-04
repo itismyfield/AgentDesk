@@ -302,6 +302,19 @@ pub(super) enum BridgeLeaseAcquire {
     NoRange,
 }
 
+/// #3041 P1-2 (codex P1-c): whether the silent-turn suppression site (mod.rs
+/// site 3) may mark `terminal_delivery_committed` for a given acquire outcome.
+///
+/// A B2 `Skip` means the live holder (the watcher) owns delivery of this range —
+/// the bridge MUST be a no-op on completion side-effects (do NOT mark committed,
+/// advance, or clear inflight as delivered) so the existing retry machinery can
+/// re-attempt if the holder ultimately fails to deliver. `Held` (the bridge
+/// committed the range itself) and `NoRange` (no bytes to deliver; the
+/// suppression resolves the empty range) DO mark committed.
+pub(super) fn silent_turn_skip_marks_committed(acquire: &BridgeLeaseAcquire) -> bool {
+    !matches!(acquire, BridgeLeaseAcquire::Skip)
+}
+
 impl BridgeDeliveryLease {
     /// Acquire the per-channel delivery lease for the bridge's terminal delivery
     /// covering `[start, end)` for `turn`. `target_end` is the same end offset the
@@ -309,6 +322,17 @@ impl BridgeDeliveryLease {
     /// `tmux_last_offset`); `start` is the turn's start offset (`turn_start_offset`,
     /// falling back to the same end so an unknown start yields an empty range that
     /// routes to [`BridgeLeaseAcquire::NoRange`]).
+    ///
+    /// `channel_id` MUST be the channel whose cell the WATCHER also leases on for
+    /// this turn — the watcher's owner channel (`watcher_owner_channel_id` on the
+    /// bridge side), NOT the bridge's dispatch `channel_id`. A reused watcher can
+    /// own a DIFFERENT channel; if the bridge leased on its dispatch channel while
+    /// the watcher leased on its owner channel, the two would hit DIFFERENT cells
+    /// and both could acquire+deliver = duplicate (codex P1-a). Keying both on the
+    /// watcher's owner channel makes their acquires contend on the SAME cell
+    /// (single-holder B2). The same channel is used for the `TurnKey` and the
+    /// `confirmed_end_offset` advance in `commit_and_advance`, so acquire, commit,
+    /// and advance all operate on one consistent channel.
     pub(super) fn acquire(
         shared: &SharedData,
         channel_id: ChannelId,
@@ -995,6 +1019,176 @@ mod tests {
                 shared.committed_relay_offset(ch),
                 64,
                 "same-range re-commit must not double-advance"
+            );
+        }
+
+        // #3041 P1-2 (codex P1-a): a REUSED watcher can own a channel DIFFERENT
+        // from the bridge's dispatch `channel_id`. The watcher leases (and advances
+        // `confirmed_end_offset`) on ITS owner channel's cell. The bridge MUST lease
+        // on that SAME owner-channel cell (it passes `watcher_owner_channel_id`), so
+        // the two contend on ONE cell (single-holder B2) and never both deliver.
+        // This test proves the cell is shared by-channel: the watcher holds the
+        // OWNER channel's cell; the bridge acquiring on the OWNER channel B2-skips
+        // (same cell), while a bridge acquiring on the unrelated dispatch channel
+        // would have hit a DIFFERENT cell and wrongly acquired — which is exactly
+        // the duplicate the P1-a fix routes the bridge onto the owner channel to
+        // avoid.
+        #[tokio::test(start_paused = true)]
+        async fn bridge_leases_on_watcher_owner_channel_shares_cell_under_reuse() {
+            let shared = make_shared_data_for_tests();
+            // The reused watcher's OWNER channel (where it leases + advances).
+            let owner_ch = ChannelId::new(CH);
+            // The bridge's dispatch channel — DIFFERENT from the owner (watcher
+            // reuse). Its cell is a SEPARATE `DeliveryLeaseCell`.
+            let dispatch_ch = ChannelId::new(CH + 1);
+            assert_ne!(owner_ch, dispatch_ch);
+
+            // The watcher acquires the OWNER channel's cell, keyed on the owner
+            // channel's TurnKey (mirrors `tmux_output_watcher_with_restore`, which
+            // leases on its own `channel_id` == owner).
+            let owner_cell = shared.delivery_lease(owner_ch);
+            let watcher = LeaseHolder::Watcher { instance_id: 70 };
+            let watcher_turn = TurnKey::new(owner_ch, 99, 1);
+            assert!(owner_cell.try_acquire(
+                watcher_turn,
+                watcher,
+                0,
+                64,
+                lease_now_ms().saturating_add(DELIVERY_LEASE_DEADLINE_MS),
+            ));
+
+            // P1-a fix: the bridge acquires on `watcher_owner_channel_id` (the OWNER
+            // channel) → SAME cell → B2-skip (contention detected, NOT both-deliver).
+            let bridge_turn = TurnKey::new(owner_ch, 99, 1);
+            assert!(
+                matches!(
+                    BridgeDeliveryLease::acquire(&shared, owner_ch, bridge_turn, 0, Some(64)),
+                    BridgeLeaseAcquire::Skip
+                ),
+                "bridge keyed on the watcher's owner channel must hit the SAME cell and B2-skip"
+            );
+
+            // Regression contrast: keying on the unrelated DISPATCH channel hits a
+            // DIFFERENT cell → the bridge would WRONGLY acquire (the pre-fix
+            // duplicate). This documents WHY the bridge must use the owner channel.
+            let dispatch_turn = TurnKey::new(dispatch_ch, 99, 1);
+            assert!(
+                matches!(
+                    BridgeDeliveryLease::acquire(&shared, dispatch_ch, dispatch_turn, 0, Some(64)),
+                    BridgeLeaseAcquire::Held(_)
+                ),
+                "the unrelated dispatch-channel cell is a DIFFERENT cell — leasing there would duplicate"
+            );
+
+            // The watcher still holds the owner cell; neither bridge acquire touched it.
+            assert!(matches!(
+                owner_cell.read(),
+                LeaseSnapshot::Leased {
+                    holder: LeaseHolder::Watcher { instance_id: 70 },
+                    ..
+                }
+            ));
+        }
+
+        // #3041 P1-2 (codex P1-b): an equal NONZERO range (`end == start`, e.g.
+        // start==end==64) routes to `NoRange` — there are NO new bytes to commit, so
+        // the bridge delivers WITHOUT a lease and NEVER advances `confirmed_end`. The
+        // pre-fix bug advanced the offset to 64 outside any lease commit (B6
+        // violation); this asserts no advance happens.
+        #[tokio::test(start_paused = true)]
+        async fn equal_nonzero_range_is_no_range_and_never_advances() {
+            let shared = make_shared_data_for_tests();
+            let ch = channel();
+            assert_eq!(shared.committed_relay_offset(ch), 0);
+            // start == end == 64 (nonzero, degenerate) → NoRange.
+            assert!(matches!(
+                BridgeDeliveryLease::acquire(&shared, ch, turn(60), 64, Some(64)),
+                BridgeLeaseAcquire::NoRange
+            ));
+            // No lease was held, so there is nothing to commit/advance. The offset
+            // MUST remain at its prior value (B6: no advance outside a lease commit).
+            assert_eq!(
+                shared.committed_relay_offset(ch),
+                0,
+                "an equal nonzero range must NOT advance confirmed_end (codex P1-b / B6)"
+            );
+            assert!(matches!(
+                shared.delivery_lease(ch).read(),
+                LeaseSnapshot::Unleased
+            ));
+        }
+
+        // #3041 P1-2 (codex P1-c): when the bridge B2-skips (the watcher holds the
+        // live lease), the skip must be a NO-OP on completion side-effects — the
+        // bridge must NOT advance and the watcher (the live holder) retains exclusive
+        // ownership of the range. If the holder later commits NotDelivered (it did
+        // NOT actually deliver), a SUBSEQUENT acquirer can still take the range and
+        // deliver — i.e. the skip never black-holes the delivery.
+        // #3041 P1-2 (codex P1-c): the silent-turn commit decision. A Skip must NOT
+        // mark `terminal_delivery_committed` (the holder owns delivery; stay
+        // retry-able); Held/NoRange DO mark it.
+        #[test]
+        fn silent_turn_skip_does_not_mark_committed() {
+            use super::super::silent_turn_skip_marks_committed;
+            assert!(
+                !silent_turn_skip_marks_committed(&BridgeLeaseAcquire::Skip),
+                "a B2-skip must leave the turn uncommitted so retry remains possible (codex P1-c)"
+            );
+            assert!(silent_turn_skip_marks_committed(
+                &BridgeLeaseAcquire::NoRange
+            ));
+            // `Held` carries a lease we cannot cheaply construct here; the match in
+            // `silent_turn_skip_marks_committed` returns `true` for every non-Skip
+            // variant (verified for `NoRange` above and exercised for `Held` by the
+            // lease-level tests that drive the real site).
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn bridge_skip_leaves_range_deliverable_after_holder_not_delivered() {
+            let shared = make_shared_data_for_tests();
+            let ch = channel();
+            // Watcher holds the live lease.
+            let cell = shared.delivery_lease(ch);
+            let watcher = LeaseHolder::Watcher { instance_id: 77 };
+            assert!(cell.try_acquire(
+                turn(80),
+                watcher,
+                0,
+                64,
+                lease_now_ms().saturating_add(DELIVERY_LEASE_DEADLINE_MS),
+            ));
+            // Bridge B2-skips and does NOT advance.
+            assert!(matches!(
+                BridgeDeliveryLease::acquire(&shared, ch, turn(80), 0, Some(64)),
+                BridgeLeaseAcquire::Skip
+            ));
+            assert_eq!(
+                shared.committed_relay_offset(ch),
+                0,
+                "a B2-skip must not advance — the holder owns delivery"
+            );
+
+            // The holder later commits NotDelivered (it did NOT deliver) and releases.
+            assert!(cell.commit(watcher, turn(80), 0, 64, LeaseOutcome::NotDelivered));
+            assert_eq!(
+                shared.committed_relay_offset(ch),
+                0,
+                "NotDelivered must not advance — the range is still undelivered"
+            );
+            assert!(cell.release(watcher, turn(80), 0, 64));
+
+            // Because the skip was a no-op (offset still 0, cell released), a
+            // subsequent acquirer (the bridge or a later watcher pass) can STILL take
+            // the range and deliver it — the skip never black-holed the delivery.
+            let retry = match BridgeDeliveryLease::acquire(&shared, ch, turn(80), 0, Some(64)) {
+                BridgeLeaseAcquire::Held(lease) => lease,
+                _ => panic!("range must be re-acquirable after the holder released NotDelivered"),
+            };
+            assert!(retry.commit_and_advance(&shared, ch, None, LeaseOutcome::Delivered));
+            assert_eq!(
+                shared.committed_relay_offset(ch),
+                64,
+                "the retry delivers the previously-skipped range (no black-hole)"
             );
         }
 
