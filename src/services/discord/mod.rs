@@ -1681,18 +1681,24 @@ pub(in crate::services::discord) enum LeaseOutcome {
 enum LeaseState {
     /// No holder; the lease is available to acquire.
     Unleased,
-    /// Held by `holder` until `deadline` (monotonic ms since process start);
-    /// covers the half-open byte range `[start, end)`.
+    /// Held by `holder` for turn identity `turn` until `deadline` (monotonic ms
+    /// since process start); covers the half-open byte range `[start, end)`.
+    /// The lease key is the FULL `(channel_id, turn, [start,end))` identity
+    /// (#3041 §2): `commit`/`release`/`reclaim` verify it so a stale commit or
+    /// release from an OLDER turn cannot act on a reacquired NEWER lease.
     Leased {
         holder: LeaseHolder,
+        turn: turn_finalizer::TurnKey,
         deadline_ms: u64,
         start: u64,
         end: u64,
     },
-    /// Committed with a three-way outcome; awaits a `release` to return to
-    /// `Unleased`.
+    /// Committed with a three-way outcome; carries the same `(holder, turn,
+    /// range)` identity forward so a stale release is rejected. Awaits a
+    /// `release` to return to `Unleased`.
     Committed {
         holder: LeaseHolder,
+        turn: turn_finalizer::TurnKey,
         start: u64,
         end: u64,
         outcome: LeaseOutcome,
@@ -1737,12 +1743,14 @@ pub(in crate::services::discord) enum LeaseSnapshot {
     Unleased,
     Leased {
         holder: LeaseHolder,
+        turn: turn_finalizer::TurnKey,
         deadline_ms: u64,
         start: u64,
         end: u64,
     },
     Committed {
         holder: LeaseHolder,
+        turn: turn_finalizer::TurnKey,
         start: u64,
         end: u64,
         outcome: LeaseOutcome,
@@ -1767,67 +1775,78 @@ impl DeliveryLeaseCell {
         self.channel_id
     }
 
-    /// Lock-free read of the current lease state. Loads the tag with `Acquire`
-    /// so the matching payload (published under the holder's mutex `Release`)
-    /// is visible. Falls back to a cheap mutex read only to materialize the
-    /// rich payload for a non-`Unleased` tag.
+    /// Read the current lease state. Always materialized UNDER the payload
+    /// mutex so the snapshot can never disagree with a concurrently-acquiring
+    /// writer (#3041 codex): because `try_acquire`/`commit`/`release`/`reclaim`
+    /// flip `state_tag` AND write `payload` while holding the SAME mutex, any
+    /// observer that takes the lock sees a tag/payload pair that are mutually
+    /// coherent. The lock-free `state_tag` remains the single-winner CAS gate
+    /// for acquire; it is NOT used as a lock-free read fast-path here because
+    /// that reintroduced the publish/observe window the codex review flagged.
     pub(in crate::services::discord) fn read(&self) -> LeaseSnapshot {
-        use std::sync::atomic::Ordering;
-        match self.state_tag.load(Ordering::Acquire) {
-            TAG_UNLEASED => LeaseSnapshot::Unleased,
-            _ => {
-                let guard = self
-                    .payload
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                match &*guard {
-                    LeaseState::Unleased => LeaseSnapshot::Unleased,
-                    LeaseState::Leased {
-                        holder,
-                        deadline_ms,
-                        start,
-                        end,
-                    } => LeaseSnapshot::Leased {
-                        holder: *holder,
-                        deadline_ms: *deadline_ms,
-                        start: *start,
-                        end: *end,
-                    },
-                    LeaseState::Committed {
-                        holder,
-                        start,
-                        end,
-                        outcome,
-                    } => LeaseSnapshot::Committed {
-                        holder: *holder,
-                        start: *start,
-                        end: *end,
-                        outcome: *outcome,
-                    },
-                }
-            }
+        let guard = self
+            .payload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*guard {
+            LeaseState::Unleased => LeaseSnapshot::Unleased,
+            LeaseState::Leased {
+                holder,
+                turn,
+                deadline_ms,
+                start,
+                end,
+            } => LeaseSnapshot::Leased {
+                holder: *holder,
+                turn: *turn,
+                deadline_ms: *deadline_ms,
+                start: *start,
+                end: *end,
+            },
+            LeaseState::Committed {
+                holder,
+                turn,
+                start,
+                end,
+                outcome,
+            } => LeaseSnapshot::Committed {
+                holder: *holder,
+                turn: *turn,
+                start: *start,
+                end: *end,
+                outcome: *outcome,
+            },
         }
     }
 
-    /// CAS-acquire the lease for `(turn, holder, [start,end))` until
-    /// `deadline_ms`. Single-winner: the `UNLEASED → LEASED` compare-exchange
-    /// admits exactly one acquirer; every concurrent loser observes a
-    /// non-`UNLEASED` tag and returns `false` without mutating the payload.
+    /// CAS-acquire the lease for the full `(channel, turn, [start,end))`
+    /// identity (#3041 §2) on behalf of `holder` until `deadline_ms`. Records
+    /// `turn` so a later `commit`/`release` carrying a STALE older turn key is
+    /// rejected (the §2 hazard: a reclaim+reacquire reuses the same holder kind,
+    /// so holder alone is insufficient).
     ///
-    /// The `_turn` identity (`TurnKey`) is carried for the wired phases
-    /// (P1-1..) where a stale-turn acquire is rejected; in P1-0 it is recorded
-    /// only via the returned lease (the cell is single-turn-at-a-time).
+    /// Ordering invariant (codex coherence fix): the tag CAS and the payload
+    /// write happen UNDER the SAME mutex, and `read()` also locks, so a tag and
+    /// its payload are never observed out of step. The CAS keeps single-winner
+    /// semantics — exactly one acquirer flips `UNLEASED → LEASED`; every
+    /// concurrent loser (already holding the lock by then) sees a non-`UNLEASED`
+    /// tag under the lock and returns `false` without mutating the payload.
     pub(in crate::services::discord) fn try_acquire(
         &self,
-        _turn: turn_finalizer::TurnKey,
+        turn: turn_finalizer::TurnKey,
         holder: LeaseHolder,
         start: u64,
         end: u64,
         deadline_ms: u64,
     ) -> bool {
         use std::sync::atomic::Ordering;
-        // Single-winner gate: only the actor that flips UNLEASED→LEASED may
-        // publish the payload. Losers see TAG_LEASED/TAG_COMMITTED and bail.
+        let mut guard = self
+            .payload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Single-winner gate, taken while holding the payload lock so the tag
+        // flip and the payload write publish together. Concurrent acquirers
+        // serialize on the mutex; whoever runs second sees a non-`UNLEASED` tag.
         if self
             .state_tag
             .compare_exchange(
@@ -1840,12 +1859,9 @@ impl DeliveryLeaseCell {
         {
             return false;
         }
-        let mut guard = self
-            .payload
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *guard = LeaseState::Leased {
             holder,
+            turn,
             deadline_ms,
             start,
             end,
@@ -1853,14 +1869,20 @@ impl DeliveryLeaseCell {
         true
     }
 
-    /// Commit the lease three-way (#3041 §3). Only the current `holder` may
-    /// commit; a holder mismatch (or a non-`Leased` state) is a no-op that
-    /// returns `false`. On success the tag advances `LEASED → COMMITTED` and
-    /// the outcome is recorded. `Unknown` records but — per design — the caller
-    /// MUST NOT advance the confirmed offset for it.
+    /// Commit the lease three-way (#3041 §3). Verifies the FULL `(holder, turn,
+    /// [start,end))` identity against the currently-`Leased` lease (#3041 §2):
+    /// any mismatch — wrong holder, a STALE older `turn`, or a different range
+    /// — or a non-`Leased` state is a no-op that returns `false`. This closes
+    /// the §2 hazard where a stale commit from an older turn could act on a
+    /// reacquired same-channel/same-holder-kind lease. On success the tag
+    /// advances `LEASED → COMMITTED` (under the lock) and the outcome is
+    /// recorded. `Unknown` records but the caller MUST NOT advance the offset.
     pub(in crate::services::discord) fn commit(
         &self,
         holder: LeaseHolder,
+        turn: turn_finalizer::TurnKey,
+        start: u64,
+        end: u64,
         outcome: LeaseOutcome,
     ) -> bool {
         use std::sync::atomic::Ordering;
@@ -1870,14 +1892,19 @@ impl DeliveryLeaseCell {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match &*guard {
             LeaseState::Leased {
-                holder: cur,
-                start,
-                end,
+                holder: cur_holder,
+                turn: cur_turn,
+                start: cur_start,
+                end: cur_end,
                 ..
-            } if *cur == holder => {
-                let (start, end) = (*start, *end);
+            } if *cur_holder == holder
+                && cur_turn.exact_key() == turn.exact_key()
+                && *cur_start == start
+                && *cur_end == end =>
+            {
                 *guard = LeaseState::Committed {
                     holder,
+                    turn,
                     start,
                     end,
                     outcome,
@@ -1885,25 +1912,39 @@ impl DeliveryLeaseCell {
                 self.state_tag.store(TAG_COMMITTED, Ordering::Release);
                 true
             }
-            // Holder mismatch or not in Leased: no-op.
+            // Identity mismatch (holder / stale turn / range) or not Leased.
             _ => false,
         }
     }
 
-    /// Compare-and-release: return the cell to `Unleased` ONLY if `holder`
-    /// matches the recorded holder (#3041 §3). A holder mismatch is a no-op
-    /// returning `false`, so a stale actor can never release a live lease. A
-    /// release is valid from either `Leased` (abandoned without commit) or
-    /// `Committed` (the normal post-commit release).
-    pub(in crate::services::discord) fn release(&self, holder: LeaseHolder) -> bool {
+    /// Compare-and-release: return the cell to `Unleased` ONLY if BOTH `holder`
+    /// AND `turn` match the recorded identity (#3041 §2-§3). Verifying the turn
+    /// (not just the holder) is what closes the §2 hazard: a stale release from
+    /// an OLDER turn — even one whose holder kind matches a reacquired lease —
+    /// is a no-op returning `false`, so it can never release the live newer
+    /// lease. A release is valid from either `Leased` (abandoned without commit)
+    /// or `Committed` (the normal post-commit release).
+    pub(in crate::services::discord) fn release(
+        &self,
+        holder: LeaseHolder,
+        turn: turn_finalizer::TurnKey,
+    ) -> bool {
         use std::sync::atomic::Ordering;
         let mut guard = self
             .payload
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let matches = match &*guard {
-            LeaseState::Leased { holder: cur, .. } => *cur == holder,
-            LeaseState::Committed { holder: cur, .. } => *cur == holder,
+            LeaseState::Leased {
+                holder: cur,
+                turn: cur_turn,
+                ..
+            }
+            | LeaseState::Committed {
+                holder: cur,
+                turn: cur_turn,
+                ..
+            } => *cur == holder && cur_turn.exact_key() == turn.exact_key(),
             LeaseState::Unleased => false,
         };
         if !matches {

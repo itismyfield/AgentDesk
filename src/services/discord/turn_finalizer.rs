@@ -379,10 +379,8 @@ enum FinalizeMsg {
         shared: Arc<SharedData>,
         ack: oneshot::Sender<FinalizeOutcome>,
     },
-    /// #3041 §2-§3 P1-0 (DORMANT): CAS-acquire the channel's delivery lease for
-    /// `key` over byte range `[start, end)` on behalf of `holder`. Nothing
-    /// sends this yet — the bridge/watcher/sink acquire paths are wired in
-    /// P1-1... The `ack` reports whether this caller won the single-winner CAS.
+    /// #3041 §2-§3 P1-0 (DORMANT): CAS-acquire the lease for `(key, [start,end))`
+    /// on behalf of `holder`; `ack` reports the single-winner result. Wired P1-1.
     AcquireDelivery {
         key: TurnKey,
         lease: Arc<DeliveryLeaseCell>,
@@ -392,18 +390,21 @@ enum FinalizeMsg {
         deadline_ms: u64,
         ack: oneshot::Sender<bool>,
     },
-    /// #3041 §3 P1-0 (DORMANT): three-way commit of a held lease. Only the
-    /// recorded `holder` may commit; `Unknown` records but must not advance the
-    /// confirmed offset. Wired in P1-1...
+    /// #3041 §2-§3 P1-0 (DORMANT): three-way commit; verifies the full `(holder,
+    /// key, [start,end))` identity so a stale older-turn commit is a no-op.
     CommitDelivery {
+        key: TurnKey,
         lease: Arc<DeliveryLeaseCell>,
         holder: LeaseHolder,
+        start: u64,
+        end: u64,
         outcome: LeaseOutcome,
         ack: oneshot::Sender<bool>,
     },
-    /// #3041 §3 P1-0 (DORMANT): compare-and-release. A holder mismatch is a
-    /// no-op (stale actor cannot release a live lease). Wired in P1-1...
+    /// #3041 §2-§3 P1-0 (DORMANT): compare-and-release; a holder OR stale-turn
+    /// mismatch is a no-op.
     ReleaseDelivery {
+        key: TurnKey,
         lease: Arc<DeliveryLeaseCell>,
         holder: LeaseHolder,
         ack: oneshot::Sender<bool>,
@@ -548,11 +549,10 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                                 .await;
                         let _ = ack.send(outcome);
                     }
-                    // #3041 §2-§3 P1-0 (DORMANT). Coherent but UNREACHABLE today
-                    // — nothing sends Acquire/Commit/ReleaseDelivery yet (wired
-                    // in P1-1..). Routing them through the actor serializes the
-                    // lease transitions on the same owner that arbitrates
-                    // finalize, the property P1-1.. relies on.
+                    // #3041 §2-§3 P1-0 (DORMANT, UNREACHABLE today). Routing
+                    // these through the actor serializes lease transitions on
+                    // the same owner that arbitrates finalize (P1-1.. relies on
+                    // this). Nothing sends them yet.
                     FinalizeMsg::AcquireDelivery {
                         key,
                         lease,
@@ -573,20 +573,25 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         let _ = ack.send(won);
                     }
                     FinalizeMsg::CommitDelivery {
+                        key,
                         lease,
                         holder,
+                        start,
+                        end,
                         outcome,
                         ack,
                     } => {
-                        let committed = handle_commit_delivery(&lease, holder, outcome);
+                        let committed =
+                            handle_commit_delivery(&lease, key, holder, start, end, outcome);
                         let _ = ack.send(committed);
                     }
                     FinalizeMsg::ReleaseDelivery {
+                        key,
                         lease,
                         holder,
                         ack,
                     } => {
-                        let released = handle_release_delivery(&lease, holder);
+                        let released = handle_release_delivery(&lease, key, holder);
                         let _ = ack.send(released);
                     }
                 }
@@ -902,12 +907,8 @@ async fn do_finalize(
 // finalize. NOTHING sends the messages that reach them yet (wired in P1-1..);
 // the unit tests at the bottom of this file prove the logic correct now.
 
-/// CAS-acquire on behalf of `holder` over `[start, end)` until `deadline_ms`.
-/// Returns whether this caller won the single-winner CAS. The `key` (`TurnKey`)
-/// is the lease's turn identity, carried for the wired phases where a stale-turn
-/// acquire is rejected.
-///
-/// #3041 P1-0: dormant, wired in P1-1...
+/// CAS-acquire for `(key, [start,end))` on behalf of `holder` until
+/// `deadline_ms`; returns the single-winner result. #3041 P1-0: dormant.
 #[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
 fn handle_acquire_delivery(
     lease: &DeliveryLeaseCell,
@@ -920,26 +921,25 @@ fn handle_acquire_delivery(
     lease.try_acquire(key, holder, start, end, deadline_ms)
 }
 
-/// Three-way commit of a held lease. Holder mismatch / non-`Leased` is a no-op
-/// returning `false`. `Unknown` is recorded but must not advance the offset.
-///
-/// #3041 P1-0: dormant, wired in P1-1...
+/// Three-way commit; verifies the full `(holder, key, [start,end))` identity
+/// so a mismatch (wrong holder, stale turn, or range) is a no-op. #3041 P1-0.
 #[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
 fn handle_commit_delivery(
     lease: &DeliveryLeaseCell,
+    key: TurnKey,
     holder: LeaseHolder,
+    start: u64,
+    end: u64,
     outcome: LeaseOutcome,
 ) -> bool {
-    lease.commit(holder, outcome)
+    lease.commit(holder, key, start, end, outcome)
 }
 
-/// Compare-and-release: returns the lease to `Unleased` only if `holder`
-/// matches. A holder mismatch is a no-op returning `false`.
-///
-/// #3041 P1-0: dormant, wired in P1-1...
+/// Compare-and-release: succeeds only if BOTH `holder` and `key` (turn) match;
+/// a holder OR stale-turn mismatch is a no-op. #3041 P1-0: dormant.
 #[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
-fn handle_release_delivery(lease: &DeliveryLeaseCell, holder: LeaseHolder) -> bool {
-    lease.release(holder)
+fn handle_release_delivery(lease: &DeliveryLeaseCell, key: TurnKey, holder: LeaseHolder) -> bool {
+    lease.release(holder, key)
 }
 
 /// The one reconciler. Finalizes deadline-armed gate-timeouts whose backstop
@@ -2802,11 +2802,13 @@ mod tests {
             match c.read() {
                 LeaseSnapshot::Leased {
                     holder,
+                    turn,
                     deadline_ms,
                     start,
                     end,
                 } => {
                     assert_eq!(holder, h);
+                    assert_eq!(turn.exact_key(), self::turn().exact_key());
                     assert_eq!(deadline_ms, 1_000);
                     assert_eq!((start, end), (10, 20));
                 }
@@ -2868,13 +2870,17 @@ mod tests {
                 let c = cell();
                 let h = LeaseHolder::Sink;
                 assert!(c.try_acquire(turn(), h, 3, 9, 1_000));
-                assert!(c.commit(h, outcome), "holder may commit {outcome:?}");
+                assert!(
+                    c.commit(h, turn(), 3, 9, outcome),
+                    "holder may commit {outcome:?}"
+                );
                 match c.read() {
                     LeaseSnapshot::Committed {
                         holder,
                         start,
                         end,
                         outcome: got,
+                        ..
                     } => {
                         assert_eq!(holder, h);
                         assert_eq!((start, end), (3, 9));
@@ -2892,14 +2898,14 @@ mod tests {
             let other = LeaseHolder::Watcher { instance_id: 2 };
             assert!(c.try_acquire(turn(), owner, 0, 4, 1_000));
             // Holder mismatch: commit refused, state stays Leased.
-            assert!(!c.commit(other, LeaseOutcome::Delivered));
+            assert!(!c.commit(other, turn(), 0, 4, LeaseOutcome::Delivered));
             assert!(matches!(c.read(), LeaseSnapshot::Leased { .. }));
         }
 
         #[test]
         fn commit_on_unleased_is_noop() {
             let c = cell();
-            assert!(!c.commit(LeaseHolder::Bridge, LeaseOutcome::Delivered));
+            assert!(!c.commit(LeaseHolder::Bridge, turn(), 0, 1, LeaseOutcome::Delivered));
             assert!(matches!(c.read(), LeaseSnapshot::Unleased));
         }
 
@@ -2910,10 +2916,10 @@ mod tests {
             let stale = LeaseHolder::Watcher { instance_id: 99 };
             assert!(c.try_acquire(turn(), owner, 0, 8, 1_000));
             // A stale actor cannot release the live lease.
-            assert!(!c.release(stale));
+            assert!(!c.release(stale, turn()));
             assert!(matches!(c.read(), LeaseSnapshot::Leased { .. }));
             // The true holder releases successfully → back to Unleased.
-            assert!(c.release(owner));
+            assert!(c.release(owner, turn()));
             assert!(matches!(c.read(), LeaseSnapshot::Unleased));
         }
 
@@ -2922,12 +2928,103 @@ mod tests {
             let c = cell();
             let h = LeaseHolder::Sink;
             assert!(c.try_acquire(turn(), h, 0, 2, 1_000));
-            assert!(c.commit(h, LeaseOutcome::Delivered));
+            assert!(c.commit(h, turn(), 0, 2, LeaseOutcome::Delivered));
             // Release is valid from Committed for the recorded holder.
-            assert!(c.release(h));
+            assert!(c.release(h, turn()));
             assert!(matches!(c.read(), LeaseSnapshot::Unleased));
             // Idempotent: a second release on the now-Unleased cell is a no-op.
-            assert!(!c.release(h));
+            assert!(!c.release(h, turn()));
+        }
+
+        #[test]
+        fn stale_turn_commit_and_release_are_noops_after_reacquire() {
+            // #3041 §2 hazard, closed: turn A is acquired then reclaimed; turn B
+            // reacquires the SAME channel with the SAME holder KIND. A stale
+            // commit OR release carrying turn A's key must be a NO-OP and must
+            // NOT touch turn B's live lease. (Holder kind alone would match —
+            // only the stored turn identity distinguishes the two.)
+            let c = cell();
+            let holder = LeaseHolder::Sink; // same holder kind across both turns
+            let turn_a = TurnKey::new(ChannelId::new(42), 100, 0);
+            let turn_b = TurnKey::new(ChannelId::new(42), 200, 0);
+
+            // Turn A acquires, then its deadline elapses and it is reclaimed.
+            assert!(c.try_acquire(turn_a, holder, 0, 5, 10));
+            assert!(c.reclaim_if_expired(10));
+            assert!(matches!(c.read(), LeaseSnapshot::Unleased));
+
+            // Turn B reacquires the freed cell (same channel, same holder kind).
+            assert!(c.try_acquire(turn_b, holder, 5, 11, 1_000));
+
+            // Stale commit from turn A: identity mismatch → no-op, B untouched.
+            assert!(!c.commit(holder, turn_a, 5, 11, LeaseOutcome::Delivered));
+            assert!(!c.commit(holder, turn_a, 0, 5, LeaseOutcome::Delivered));
+            // Stale release from turn A: identity mismatch → no-op, B untouched.
+            assert!(!c.release(holder, turn_a));
+            match c.read() {
+                LeaseSnapshot::Leased {
+                    turn, start, end, ..
+                } => {
+                    assert_eq!(turn.exact_key(), turn_b.exact_key(), "B still holds");
+                    assert_eq!((start, end), (5, 11));
+                }
+                other => panic!("turn B lease must survive stale A ops, got {other:?}"),
+            }
+
+            // Turn B's own commit/release with its real key still work.
+            assert!(c.commit(holder, turn_b, 5, 11, LeaseOutcome::Delivered));
+            assert!(!c.release(holder, turn_a)); // stale release post-commit: no-op
+            assert!(c.release(holder, turn_b));
+            assert!(matches!(c.read(), LeaseSnapshot::Unleased));
+        }
+
+        #[test]
+        fn read_observes_payload_coherent_with_tag_under_race() {
+            // #3041 codex coherence fix: a reader that observes a non-`Unleased`
+            // state must observe the MATCHING payload — never a `Leased` tag
+            // paired with an `Unleased`/empty payload. Because `try_acquire`
+            // flips the tag AND writes the payload under one mutex (and `read`
+            // also locks), this holds by construction. Hammer it: while one
+            // thread repeatedly acquires/reclaims, readers must only ever see
+            // `Unleased` or a fully-populated `Leased{turn,range}` — never a
+            // torn intermediate.
+            use std::sync::atomic::{AtomicBool, Ordering};
+            let c = Arc::new(cell());
+            let stop = Arc::new(AtomicBool::new(false));
+            let t = turn();
+
+            let writer = {
+                let c = Arc::clone(&c);
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        if c.try_acquire(t, LeaseHolder::Sink, 7, 13, 1) {
+                            // Immediately reclaim (deadline already in the past)
+                            // so the cell churns Unleased↔Leased rapidly.
+                            let _ = c.reclaim_if_expired(u64::MAX);
+                        }
+                    }
+                })
+            };
+
+            for _ in 0..200_000 {
+                match c.read() {
+                    LeaseSnapshot::Unleased => {}
+                    LeaseSnapshot::Leased {
+                        turn, start, end, ..
+                    } => {
+                        // The payload paired with the Leased state is always the
+                        // exact one the writer published — never torn/empty.
+                        assert_eq!(turn.exact_key(), t.exact_key());
+                        assert_eq!((start, end), (7, 13));
+                    }
+                    LeaseSnapshot::Committed { .. } => {
+                        panic!("writer never commits; tag/payload incoherent")
+                    }
+                }
+            }
+            stop.store(true, Ordering::Relaxed);
+            writer.join().unwrap();
         }
 
         #[test]
@@ -2950,7 +3047,7 @@ mod tests {
             let c = cell();
             let h = LeaseHolder::Bridge;
             assert!(c.try_acquire(turn(), h, 0, 3, 10));
-            assert!(c.commit(h, LeaseOutcome::Delivered));
+            assert!(c.commit(h, turn(), 0, 3, LeaseOutcome::Delivered));
             // A Committed lease awaits an explicit release; deadline reclaim is a
             // no-op even far past the (now meaningless) deadline.
             assert!(!c.reclaim_if_expired(10_000));
@@ -2973,12 +3070,20 @@ mod tests {
                 6,
                 1_000
             ));
-            assert!(handle_commit_delivery(&c, h, LeaseOutcome::Delivered));
+            assert!(handle_commit_delivery(
+                &c,
+                turn(),
+                h,
+                0,
+                6,
+                LeaseOutcome::Delivered
+            ));
             assert!(!handle_release_delivery(
                 &c,
+                turn(),
                 LeaseHolder::Watcher { instance_id: 4 }
             ));
-            assert!(handle_release_delivery(&c, h));
+            assert!(handle_release_delivery(&c, turn(), h));
             assert!(matches!(c.read(), LeaseSnapshot::Unleased));
         }
     }
