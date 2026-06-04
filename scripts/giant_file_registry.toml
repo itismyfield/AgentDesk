@@ -273,3 +273,15 @@ file = "src/services/discord/turn_finalizer.rs"
 owner = "discord-finalizer"
 deadline = "2026-08-31"
 decompose_issue = "#3016"
+
+[[entry]]
+# Crossed the 1000-prod-LoC threshold when #3146 Part 1 added the idle-recap
+# active-turn gating: the shared clear helpers (capture-at-claim + CAS), the
+# `channel_has_active_turn` mailbox/inflight probe, and the `post_recheck_action`
+# seam. The card-lifecycle helpers (compose/post/clear/CAS/probe) are cohesive
+# but sizable; decompose the recap module into compose vs lifecycle/clear
+# submodules under #3036.
+file = "src/services/discord/idle_recap.rs"
+owner = "discord-recap"
+deadline = "2026-08-31"
+decompose_issue = "#3036"
