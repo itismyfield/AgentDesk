@@ -1061,6 +1061,11 @@ fn handle_commit_delivery(
     shared: &SharedData,
 ) -> bool {
     let committed = lease.commit(holder, key, start, end, outcome);
+    // `mod tmux` (and `advance_watcher_confirmed_end`) is `#[cfg(unix)]` — the
+    // tmux relay only runs on unix. Gate the watermark advance accordingly; on
+    // non-unix this dormant handler commits the lease without an advance and
+    // consumes the otherwise-unused unix-only params.
+    #[cfg(unix)]
     if committed && outcome == LeaseOutcome::Delivered {
         super::tmux::advance_watcher_confirmed_end(
             shared,
@@ -1071,6 +1076,8 @@ fn handle_commit_delivery(
             "src/services/discord/turn_finalizer.rs:commit_delivery_advance",
         );
     }
+    #[cfg(not(unix))]
+    let _ = (shared, provider, tmux_session_name);
     committed
 }
 
@@ -3246,6 +3253,9 @@ mod tests {
         /// and asserts the offset is already advanced with NO `.await` on any
         /// actor in between — closing the #3143 duplicate window the deferred
         /// actor-commit had reopened.
+        // `advance_watcher_confirmed_end` lives in the `#[cfg(unix)] mod tmux`;
+        // this test drives it directly, so it is unix-only.
+        #[cfg(unix)]
         #[tokio::test(flavor = "current_thread", start_paused = true)]
         async fn watcher_inline_commit_advances_offset_synchronously() {
             with_isolated_runtime_root(|| async move {
