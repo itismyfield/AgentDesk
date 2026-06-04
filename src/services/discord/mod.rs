@@ -1670,10 +1670,12 @@ pub(in crate::services::discord) enum LeaseOutcome {
     Unknown,
 }
 
-/// The lease state machine value, owned behind the cell's mutex. Kept out of
-/// the lock-free fast path: the lock-free `AtomicU8` tag below decides the
-/// single CAS winner; this payload is only ever touched by that winner (or by
-/// a deadline reclaim), so it never contends on the hot read path.
+/// The lease state machine value, owned behind the cell's mutex. The `AtomicU8`
+/// tag below is the single-winner CAS gate for acquire; this payload is only
+/// ever mutated by that winner (or by a deadline reclaim), and every mutation
+/// flips the tag AND writes the payload under the SAME mutex, so the tag and
+/// payload are always observed coherently (#3041 codex). `read()` also takes
+/// the mutex — there is no lock-free read fast path.
 ///
 /// #3041 P1-0: dormant, wired in P1-1...
 #[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
@@ -1705,36 +1707,39 @@ enum LeaseState {
     },
 }
 
-/// Lock-free state tag for the [`DeliveryLeaseCell`] fast path. The CAS that
-/// flips `UNLEASED → LEASED` is the single-winner gate — exactly one acquirer
-/// wins; losers observe a non-`UNLEASED` tag and back off without touching the
-/// mutex. `read()` loads this tag with `Acquire` ordering so a reader never
-/// needs the lock.
+/// Internal CAS gate tag for the [`DeliveryLeaseCell`]. The CAS that flips
+/// `UNLEASED → LEASED` is the single-winner acquire primitive — exactly one
+/// acquirer wins; concurrent losers serialize on the payload mutex and observe
+/// a non-`UNLEASED` tag under the lock. The tag is taken/flipped under the
+/// payload mutex (never on its own); it is NOT a lock-free read fast path —
+/// `read()` always takes the mutex (#3041 R1 coherence fix).
 const TAG_UNLEASED: u8 = 0;
 const TAG_LEASED: u8 = 1;
 const TAG_COMMITTED: u8 = 2;
 
 /// One-time terminal-delivery right for a single `(channel, turn, byte_range)`
 /// (#3041 §2-§3). DORMANT in P1-0 — added alongside, NOT replacing,
-/// `TmuxRelayCoord::relay_slot`. The lock-free `state_tag` provides the
-/// single-winner CAS acquire; the `payload` mutex carries the rich lease state
-/// (holder / deadline / range / outcome) that only the CAS winner mutates.
+/// `TmuxRelayCoord::relay_slot`. The `state_tag` is the single-winner CAS
+/// acquire primitive; the `payload` mutex carries the rich lease state (holder
+/// / deadline / range / outcome). The tag flip, payload write, and `read()` all
+/// happen under the one mutex, so they are always mutually coherent.
 ///
 /// #3041 P1-0: dormant, wired in P1-1...
 #[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
 pub(in crate::services::discord) struct DeliveryLeaseCell {
     /// The channel this lease coordinates. Part of the lease identity.
     channel_id: ChannelId,
-    /// Lock-free fast-path tag (`TAG_*`). The acquire CAS on this word is the
-    /// single-winner gate; `read()` loads it without the mutex.
+    /// Internal CAS gate tag (`TAG_*`). The acquire CAS on this word is the
+    /// single-winner gate; it is flipped under the payload mutex, NOT lock-free
+    /// for readers — `read()` takes the mutex.
     state_tag: std::sync::atomic::AtomicU8,
-    /// Rich lease payload. Only mutated by the CAS winner or a deadline
-    /// reclaim, so it never contends on the read path.
+    /// Rich lease payload. Mutated by the CAS winner or a deadline reclaim, and
+    /// read by `read()` — all under this one mutex (the coherence invariant).
     payload: std::sync::Mutex<LeaseState>,
 }
 
-/// A point-in-time snapshot of a [`DeliveryLeaseCell`], returned by the
-/// lock-free `read()` so observers never block the holder.
+/// A point-in-time snapshot of a [`DeliveryLeaseCell`], returned by `read()`
+/// (which materializes it under the payload mutex).
 ///
 /// #3041 P1-0: dormant, wired in P1-1...
 #[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
@@ -1780,9 +1785,9 @@ impl DeliveryLeaseCell {
     /// writer (#3041 codex): because `try_acquire`/`commit`/`release`/`reclaim`
     /// flip `state_tag` AND write `payload` while holding the SAME mutex, any
     /// observer that takes the lock sees a tag/payload pair that are mutually
-    /// coherent. The lock-free `state_tag` remains the single-winner CAS gate
-    /// for acquire; it is NOT used as a lock-free read fast-path here because
-    /// that reintroduced the publish/observe window the codex review flagged.
+    /// coherent. `state_tag` remains the single-winner CAS gate for acquire; it
+    /// is NOT used as a lock-free read fast-path here because that reintroduced
+    /// the publish/observe window the codex review flagged.
     pub(in crate::services::discord) fn read(&self) -> LeaseSnapshot {
         let guard = self
             .payload
@@ -1917,17 +1922,21 @@ impl DeliveryLeaseCell {
         }
     }
 
-    /// Compare-and-release: return the cell to `Unleased` ONLY if BOTH `holder`
-    /// AND `turn` match the recorded identity (#3041 §2-§3). Verifying the turn
+    /// Compare-and-release: return the cell to `Unleased` ONLY if the FULL
+    /// `(holder, turn, [start,end))` identity matches the recorded lease (#3041
+    /// §2-§3) — symmetric with `commit`. Verifying the turn AND the byte range
     /// (not just the holder) is what closes the §2 hazard: a stale release from
-    /// an OLDER turn — even one whose holder kind matches a reacquired lease —
-    /// is a no-op returning `false`, so it can never release the live newer
+    /// an OLDER turn — or from the SAME turn but an OLDER byte range after a
+    /// reclaim+reacquire re-leased a different range (e.g. a continuation chunk)
+    /// — is a no-op returning `false`, so it can never release the live newer
     /// lease. A release is valid from either `Leased` (abandoned without commit)
     /// or `Committed` (the normal post-commit release).
     pub(in crate::services::discord) fn release(
         &self,
         holder: LeaseHolder,
         turn: turn_finalizer::TurnKey,
+        start: u64,
+        end: u64,
     ) -> bool {
         use std::sync::atomic::Ordering;
         let mut guard = self
@@ -1938,13 +1947,22 @@ impl DeliveryLeaseCell {
             LeaseState::Leased {
                 holder: cur,
                 turn: cur_turn,
+                start: cur_start,
+                end: cur_end,
                 ..
             }
             | LeaseState::Committed {
                 holder: cur,
                 turn: cur_turn,
+                start: cur_start,
+                end: cur_end,
                 ..
-            } => *cur == holder && cur_turn.exact_key() == turn.exact_key(),
+            } => {
+                *cur == holder
+                    && cur_turn.exact_key() == turn.exact_key()
+                    && *cur_start == start
+                    && *cur_end == end
+            }
             LeaseState::Unleased => false,
         };
         if !matches {
