@@ -315,6 +315,42 @@ pub(super) fn silent_turn_skip_marks_committed(acquire: &BridgeLeaseAcquire) -> 
     !matches!(acquire, BridgeLeaseAcquire::Skip)
 }
 
+/// #3041 P1-2 (codex P1-c): the cleanup-epilogue decision seam. On EVERY bridge
+/// skip arm (cancel/stop, prompt-too-long, silent_turn, long-send,
+/// normal-replace) the bridge sets `preserve_inflight_for_cleanup_retry = true`
+/// when the delivery-lease acquire returns [`BridgeLeaseAcquire::Skip`] — the
+/// live holder (the watcher) owns delivery of this range, so the bridge must be a
+/// TRUE no-op on completion side-effects.
+///
+/// These two pure predicates mirror the downstream epilogue gates so the
+/// "a Skip preserves retry state" contract is unit-testable without driving the
+/// whole 5000-line turn loop:
+///   * [`bridge_epilogue_clears_inflight`] — the `~9017` clear-vs-preserve fork:
+///     a preserved turn is SAVED (re-deliverable), never cleared.
+///   * [`bridge_epilogue_marks_watcher_delivered`] — the `~8422` gate that signs
+///     the watcher off as already-delivered: a preserved turn must NOT mark the
+///     watcher delivered (it never delivered the range).
+///
+/// `~9017`: the bridge clears inflight ONLY when neither preserving for retry nor
+/// delegating output to another owner. A preserved turn is saved, not cleared.
+pub(super) fn bridge_epilogue_clears_inflight(
+    preserve_inflight_for_cleanup_retry: bool,
+    bridge_output_delegated: bool,
+    cancelled_with_restart_mode: bool,
+) -> bool {
+    !cancelled_with_restart_mode && !preserve_inflight_for_cleanup_retry && !bridge_output_delegated
+}
+
+/// `~8422`: the bridge signs the watcher off as already-delivered ONLY when not
+/// preserving for retry and not delegating relay to the watcher. A preserved turn
+/// must NOT mark the watcher delivered.
+pub(super) fn bridge_epilogue_marks_watcher_delivered(
+    preserve_inflight_for_cleanup_retry: bool,
+    bridge_relay_delegated_to_watcher: bool,
+) -> bool {
+    !preserve_inflight_for_cleanup_retry && !bridge_relay_delegated_to_watcher
+}
+
 impl BridgeDeliveryLease {
     /// Acquire the per-channel delivery lease for the bridge's terminal delivery
     /// covering `[start, end)` for `turn`. `target_end` is the same end offset the
@@ -445,6 +481,7 @@ impl Drop for BridgeDeliveryLease {
 #[cfg(test)]
 mod tests {
     use super::{
+        bridge_epilogue_clears_inflight, bridge_epilogue_marks_watcher_delivered,
         replace_outcome_commits_terminal_delivery, send_ordered_long_terminal_chunks,
         should_complete_work_dispatch_after_terminal_delivery,
         should_fail_dispatch_after_terminal_delivery, terminal_delivery_should_send_new_chunks,
@@ -664,6 +701,45 @@ mod tests {
             !tui_quiescence_timeout_requires_inflight_retry(true),
             "after Discord terminal delivery commits, timeout may suppress visible completion but must not preserve stale inflight ownership"
         );
+    }
+
+    // #3041 P1-2 (codex P1-c): every bridge skip arm sets
+    // `preserve_inflight_for_cleanup_retry = true`. These predicates encode the two
+    // downstream epilogue gates the production loop now routes through; the
+    // assertions prove a Skip (preserve = true) is a TRUE no-op on completion
+    // side-effects — inflight is NOT cleared and the watcher is NOT marked
+    // delivered — so the turn stays fully retry-able if the holder later fails.
+    #[test]
+    fn bridge_skip_preserves_inflight_and_does_not_mark_watcher_delivered() {
+        // A B2 Skip sets preserve = true → the epilogue must NOT clear inflight…
+        assert!(
+            !bridge_epilogue_clears_inflight(true, false, false),
+            "a preserved (skipped) turn must NOT clear inflight — it stays retry-able"
+        );
+        // …and must NOT mark the watcher delivered (the bridge never delivered it).
+        assert!(
+            !bridge_epilogue_marks_watcher_delivered(true, false),
+            "a preserved (skipped) turn must NOT mark the watcher delivered"
+        );
+    }
+
+    #[test]
+    fn bridge_non_skip_normal_completion_clears_and_marks_delivered() {
+        // A normal committed turn (preserve = false, no delegation, not a
+        // restart-cancel) DOES clear inflight and DOES mark the watcher delivered.
+        assert!(bridge_epilogue_clears_inflight(false, false, false));
+        assert!(bridge_epilogue_marks_watcher_delivered(false, false));
+    }
+
+    #[test]
+    fn bridge_delegation_and_restart_cancel_never_clear_inflight() {
+        // Output delegated to another owner → preserve (save), never clear.
+        assert!(!bridge_epilogue_clears_inflight(false, true, false));
+        // A restart-mode cancel saves inflight on its own branch → never clear here.
+        assert!(!bridge_epilogue_clears_inflight(false, false, true));
+        // Relay delegated to the watcher → the watcher relays itself; the bridge
+        // must not also sign it off as delivered.
+        assert!(!bridge_epilogue_marks_watcher_delivered(false, true));
     }
 
     #[test]

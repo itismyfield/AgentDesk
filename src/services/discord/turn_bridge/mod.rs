@@ -1410,7 +1410,8 @@ use stale_resume::{
     stream_error_requires_terminal_session_reset,
 };
 use terminal_delivery::{
-    BridgeDeliveryLease, BridgeLeaseAcquire, send_ordered_long_terminal_response,
+    BridgeDeliveryLease, BridgeLeaseAcquire, bridge_epilogue_clears_inflight,
+    bridge_epilogue_marks_watcher_delivered, send_ordered_long_terminal_response,
     should_complete_work_dispatch_after_terminal_delivery,
     should_fail_dispatch_after_terminal_delivery, silent_turn_skip_marks_committed,
     terminal_delivery_should_send_new_chunks, tui_quiescence_timeout_requires_inflight_retry,
@@ -3102,12 +3103,127 @@ fn live_watcher_registered_for_relay(shared: &SharedData, owner_channel_id: Chan
         .is_some_and(|watcher| !watcher.cancel.load(Ordering::Relaxed))
 }
 
+/// #3041 P1-2 (codex P1-a): resolve the AUTHORITATIVE owner channel a turn's
+/// tmux session belongs to, so the bridge's availability check AND its delivery
+/// lease acquire+advance key on the SAME channel the (possibly reused) watcher
+/// leases+advances on.
+///
+/// A RECOVERED/restored bridge can reach delivery WITHOUT going through the
+/// `TmuxReady`/`RuntimeReady` claim paths (which set `watcher_owner_channel_id =
+/// claim.owner_channel_id()`). If it kept its dispatch `channel_id` (Y) while a
+/// reused watcher leases on its owner channel (X), the two would hit DIFFERENT
+/// `DeliveryLeaseCell`s and both could acquire+deliver = duplicate. Resolving
+/// the session's owner channel from the registry here closes that gap in EVERY
+/// path. When no reused watcher owns the session (`None`), the bridge owns its
+/// own channel → fall back to `dispatch_channel_id`.
+fn resolve_bridge_owner_channel(
+    tmux_watchers: &TmuxWatcherRegistry,
+    tmux_session_name: Option<&str>,
+    dispatch_channel_id: ChannelId,
+) -> ChannelId {
+    tmux_session_name
+        .and_then(|session| tmux_watchers.owner_channel_for_tmux_session(session))
+        .unwrap_or(dispatch_channel_id)
+}
+
 fn bridge_should_reclaim_relay_from_missing_watcher(
     watcher_owns_assistant_relay: bool,
     standby_relay_owns_output: bool,
     live_watcher_registered: bool,
 ) -> bool {
     watcher_owns_assistant_relay && !standby_relay_owns_output && !live_watcher_registered
+}
+
+#[cfg(test)]
+mod bridge_owner_channel_resolution_tests {
+    use super::*;
+
+    fn live_watcher_handle(tmux_session_name: &str) -> TmuxWatcherHandle {
+        TmuxWatcherHandle {
+            tmux_session_name: tmux_session_name.to_string(),
+            output_path: format!("/tmp/{tmux_session_name}.jsonl"),
+            paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            mailbox_finalize_owed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    // #3041 P1-2 (codex P1-a): a RECOVERED/restored bridge whose dispatch channel
+    // (Y) differs from a REUSED watcher's owner channel (X) for the SAME tmux
+    // session must resolve the AUTHORITATIVE owner channel to X — so its
+    // availability check and delivery-lease acquire+advance key on the SAME cell
+    // the watcher leases+advances on (single-holder B2), not the dispatch
+    // channel's separate cell (which would let both deliver = duplicate).
+    #[test]
+    fn recovered_bridge_resolves_reused_watcher_owner_channel_not_dispatch() {
+        let registry = TmuxWatcherRegistry::new();
+        let tmux = "AgentDesk-claude-adk-cc-t1500000000000000001";
+        let owner_channel_x = ChannelId::new(1_500_000_000_000_000_001);
+        let dispatch_channel_y = ChannelId::new(2_600_000_000_000_000_002);
+        assert_ne!(owner_channel_x, dispatch_channel_y);
+
+        // A live (reused) watcher owns the session under channel X.
+        registry.insert(owner_channel_x, live_watcher_handle(tmux));
+
+        // The bridge dispatches on Y but the turn's session is owned by X →
+        // resolve to X (the channel the watcher leases on), NOT Y.
+        assert_eq!(
+            resolve_bridge_owner_channel(&registry, Some(tmux), dispatch_channel_y),
+            owner_channel_x,
+            "a recovered bridge must lease on the reused watcher's owner channel, not its dispatch channel"
+        );
+
+        // The watcher's OWN lease channel is exactly its
+        // `owner_channel_for_tmux_session` result — so the two truly match.
+        assert_eq!(
+            registry.owner_channel_for_tmux_session(tmux),
+            Some(owner_channel_x),
+            "the watcher's own lease channel must equal the resolved owner channel"
+        );
+    }
+
+    // #3105 restored-owner (no live watcher handle, settings-derived owner) is
+    // still authoritative: a recovered bridge resolves to it so it cannot lease a
+    // different cell than the relay path that re-registered the owner.
+    #[test]
+    fn recovered_bridge_resolves_restored_owner_channel() {
+        let registry = TmuxWatcherRegistry::new();
+        let tmux = "AgentDesk-claude-adk-cc-t1500000000000000003";
+        let restored_owner = ChannelId::new(1_500_000_000_000_000_003);
+        let dispatch_channel_y = ChannelId::new(2_600_000_000_000_000_004);
+
+        registry.restore_owner_channel_for_tmux_session(tmux, restored_owner);
+        assert_eq!(
+            resolve_bridge_owner_channel(&registry, Some(tmux), dispatch_channel_y),
+            restored_owner,
+        );
+    }
+
+    // When NO reused watcher (and no restored owner) owns the session, the bridge
+    // owns its own channel → fall back to the dispatch channel.
+    #[test]
+    fn no_reused_watcher_falls_back_to_dispatch_channel() {
+        let registry = TmuxWatcherRegistry::new();
+        let dispatch_channel = ChannelId::new(3_700_000_000_000_000_005);
+        assert_eq!(
+            resolve_bridge_owner_channel(
+                &registry,
+                Some("AgentDesk-claude-adk-cc-t-unowned"),
+                dispatch_channel,
+            ),
+            dispatch_channel,
+            "no owner mapping → the bridge owns its own dispatch channel"
+        );
+        // No tmux session at all → also falls back to the dispatch channel.
+        assert_eq!(
+            resolve_bridge_owner_channel(&registry, None, dispatch_channel),
+            dispatch_channel,
+        );
+    }
 }
 
 fn advance_tmux_relay_confirmed_end(
@@ -4138,10 +4254,34 @@ pub(super) fn spawn_turn_bridge(
                 provider.as_str(),
             );
         }
+        // #3041 P1-2 (codex P1-a): resolve the AUTHORITATIVE owner channel for
+        // this turn's tmux session BEFORE the watcher availability check and the
+        // bridge delivery-lease acquisition. A RECOVERED/restored bridge that
+        // REUSES an existing watcher (without going through the
+        // `TmuxReady`/`RuntimeReady` claim paths, which set
+        // `watcher_owner_channel_id = claim.owner_channel_id()`) would otherwise
+        // keep `watcher_owner_channel_id == channel_id` (the bridge's dispatch
+        // channel Y) while the reused watcher leases + advances on its owner
+        // channel X — different cells, so both could acquire and deliver
+        // (duplicate). Resolving the session's owner channel here makes EVERY
+        // path (normal, claim, recovered/restored) key the availability check
+        // AND the lease acquire+advance on the SAME channel the watcher uses.
+        // When no reused watcher owns the session, this falls back to
+        // `channel_id` (the bridge owns its own channel). The claim paths below
+        // still re-assert `claim.owner_channel_id()` (which equals this resolved
+        // value for the same session) so live truth always wins.
+        let resolved_watcher_owner_channel_id = resolve_bridge_owner_channel(
+            &shared_owned.tmux_watchers,
+            bridge.inflight_state.tmux_session_name.as_deref(),
+            channel_id,
+        );
         let mut watcher_owns_assistant_relay =
             matches!(initial_relay_owner_kind, super::inflight::RelayOwnerKind::Watcher);
         let mut watcher_relay_available_for_turn = watcher_owns_assistant_relay
-            && live_watcher_registered_for_relay(shared_owned.as_ref(), channel_id);
+            && live_watcher_registered_for_relay(
+                shared_owned.as_ref(),
+                resolved_watcher_owner_channel_id,
+            );
         let mut watcher_handoff_claim_outcome = WatcherHandoffClaimOutcome::None;
         // Durable recovery must honor typed non-bridge owners too. `Unknown`
         // is treated like a live external owner so future relay variants do
@@ -4282,7 +4422,13 @@ pub(super) fn spawn_turn_bridge(
         let mut streaming_rollover_frozen_msg_ids: Vec<MessageId> = Vec::new();
         let mut terminal_full_replay_cleanup_msg_ids: Vec<MessageId> = Vec::new();
         let mut tmux_last_offset = bridge.tmux_last_offset;
-        let mut watcher_owner_channel_id = channel_id;
+        // #3041 P1-2 (codex P1-a): seed from the session's AUTHORITATIVE owner
+        // channel (resolved above) so a recovered/restored bridge reusing an
+        // existing watcher leases on the SAME cell the watcher leases+advances
+        // on — not its dispatch `channel_id`. The claim paths below still
+        // overwrite this with `claim.owner_channel_id()` (equal for the same
+        // session) when they run.
+        let mut watcher_owner_channel_id = resolved_watcher_owner_channel_id;
         let mut new_session_id = bridge.new_session_id.clone();
         let mut new_raw_provider_session_id: Option<String> = None;
         let defer_watcher_resume = bridge.defer_watcher_resume;
@@ -7298,6 +7444,15 @@ pub(super) fn spawn_turn_bridge(
                     "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate cancel/stop terminal replace (channel {})",
                     channel_id
                 );
+                // #3041 P1-2 (codex P1-c): a B2 Skip means the live lease holder
+                // (the watcher) owns delivery of this range — the bridge must be a
+                // TRUE no-op on completion side-effects. PRESERVE the inflight so
+                // the cleanup epilogue does NOT clear it (~9017) and does NOT mark
+                // `watcher.turn_delivered = true` (~8356); the bridge never
+                // delivered this range. If the holder ultimately fails to deliver,
+                // the existing ACK-poll / next-pass machinery re-delivers the
+                // still-retry-able turn instead of black-holing it.
+                preserve_inflight_for_cleanup_retry = true;
             } else {
                 let stop_lease = match stop_lease_acquire {
                     BridgeLeaseAcquire::Held(lease) => Some(lease),
@@ -7384,6 +7539,10 @@ pub(super) fn spawn_turn_bridge(
                     "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate prompt-too-long terminal replace (channel {})",
                     channel_id
                 );
+                // #3041 P1-2 (codex P1-c): preserve retry state on a B2 Skip — the
+                // holder owns delivery; the bridge must not clear inflight or mark
+                // the watcher delivered. See the cancel/stop skip arm above.
+                preserve_inflight_for_cleanup_retry = true;
             } else {
                 let plt_lease = match plt_lease_acquire {
                     BridgeLeaseAcquire::Held(lease) => Some(lease),
@@ -7819,7 +7978,15 @@ pub(super) fn spawn_turn_bridge(
                     BridgeLeaseAcquire::Skip => {
                         // B2-skip: the watcher holds the live lease and owns this
                         // range's delivery. Do NOT mark committed / advance / clear
-                        // inflight — leave the turn retry-able (codex P1-c).
+                        // inflight — leave the turn retry-able (codex P1-c). The
+                        // `terminal_delivery_committed = false` above is NOT enough
+                        // on its own: the cleanup epilogue still marks
+                        // `watcher.turn_delivered = true` (~8356) and CLEARS inflight
+                        // (~9017) unless `preserve_inflight_for_cleanup_retry` is set.
+                        // Set it so a Skip is a TRUE no-op on completion side-effects
+                        // and the holder's eventual NotDelivered/Unknown stays
+                        // re-deliverable.
+                        preserve_inflight_for_cleanup_retry = true;
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::warn!(
                             channel = channel_id.get(),
@@ -7890,6 +8057,11 @@ pub(super) fn spawn_turn_bridge(
                                 "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate long terminal send (channel {})",
                                 channel_id
                             );
+                            // #3041 P1-2 (codex P1-c): preserve retry state on a B2
+                            // Skip — the holder owns delivery; the bridge must not
+                            // clear inflight or mark the watcher delivered. See the
+                            // cancel/stop skip arm.
+                            preserve_inflight_for_cleanup_retry = true;
                         } else {
                             let lease = match lease_acquire {
                                 BridgeLeaseAcquire::Held(lease) => Some(lease),
@@ -7975,6 +8147,11 @@ pub(super) fn spawn_turn_bridge(
                                 "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate terminal replace (channel {})",
                                 channel_id
                             );
+                            // #3041 P1-2 (codex P1-c): preserve retry state on a B2
+                            // Skip — the holder owns delivery; the bridge must not
+                            // clear inflight or mark the watcher delivered. See the
+                            // cancel/stop skip arm.
+                            preserve_inflight_for_cleanup_retry = true;
                         } else {
                             // `Held(lease)` → commit via the lease; `NoRange` →
                             // deliver without a lease (no offset to advance).
@@ -8353,9 +8530,15 @@ pub(super) fn spawn_turn_bridge(
 
             // Signal the watcher that this turn's response was already delivered.
             // Prevents the watcher from relaying the same response when it resumes.
-            if !preserve_inflight_for_cleanup_retry
-                && !bridge_relay_delegated_to_watcher
-                && let Some(watcher) = shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
+            // #3041 P1-2 (codex P1-c): a B2 Skip set
+            // `preserve_inflight_for_cleanup_retry = true`, so this gate (encoded in
+            // `bridge_epilogue_marks_watcher_delivered`) does NOT mark the watcher
+            // delivered — the bridge never delivered the range; the holder owns it.
+            if bridge_epilogue_marks_watcher_delivered(
+                preserve_inflight_for_cleanup_retry,
+                bridge_relay_delegated_to_watcher,
+            ) && let Some(watcher) =
+                shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
             {
                 watcher.turn_delivered.store(true, Ordering::Release);
             }
@@ -8982,6 +9165,20 @@ pub(super) fn spawn_turn_bridge(
                 );
             }
         } else {
+            // #3041 P1-2 (codex P1-c): the clear branch is reached IFF the pure
+            // epilogue seam agrees inflight must be cleared — i.e. NOT preserving
+            // for retry (a B2 Skip sets `preserve_inflight_for_cleanup_retry`) and
+            // NOT delegating output. This keeps the production fork and the
+            // unit-tested `bridge_epilogue_clears_inflight` seam in lockstep so a
+            // Skip can never silently reach this destroy-inflight path.
+            debug_assert!(
+                bridge_epilogue_clears_inflight(
+                    preserve_inflight_for_cleanup_retry,
+                    bridge_output_owner.is_some(),
+                    cancelled && cancel_token.restart_mode().is_some(),
+                ),
+                "inflight clear must only run when neither preserving for retry nor delegating output"
+            );
             // #2838 (relay-stability P0-1): detect the missing-answer vector
             // (root causes #1b / #4). We are about to clear inflight (not
             // preserving, no delegated owner). If a non-empty full_response was
