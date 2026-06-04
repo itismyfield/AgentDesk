@@ -1943,7 +1943,7 @@ mod tests {
             let ch = ChannelId::new(2002);
             let tid = 8002u64;
             shared.global_active.store(1, Ordering::Relaxed);
-            let _token = seed_active_turn(&shared, ch, tid).await;
+            let token = seed_active_turn(&shared, ch, tid).await;
             let fin = TurnFinalizer::spawn();
             let k = TurnKey::new(ch, tid, 0);
             fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
@@ -1957,7 +1957,28 @@ mod tests {
                     shared.clone(),
                 )
                 .await;
-            assert!(matches!(first, FinalizeOutcome::Finalized { .. }));
+            match first {
+                FinalizeOutcome::Finalized { removed_token, .. } => {
+                    assert!(
+                        removed_token.is_some(),
+                        "the watcher relay-miss must release the active turn's token"
+                    );
+                }
+                other => panic!(
+                    "watcher relay-miss must finalize, got {:?}",
+                    std::mem::discriminant(&other)
+                ),
+            }
+            // Invariant (3): the released token is cancelled and the active turn
+            // is cleared off the channel.
+            assert!(
+                token.cancelled.load(std::sync::atomic::Ordering::Relaxed),
+                "the released token must be marked cancelled"
+            );
+            assert!(
+                !shared.mailbox(ch).has_active_turn().await,
+                "the relay-miss finalize must clear the active turn"
+            );
 
             let late = fin
                 .submit_terminal(
@@ -2006,8 +2027,13 @@ mod tests {
                     std::mem::discriminant(&other)
                 ),
             }
-            // Double submit on the same id-0 orphan — still no underflow.
-            let _ = fin
+            // Double submit on the same id-0 orphan. The first submit recorded a
+            // `Finalized` ledger entry, so the second MUST lose the exactly-once
+            // gate. Binding (not discarding) this outcome guards invariant (1):
+            // if id-0/no-token ever regressed to a second `Finalized` no-op the
+            // counter would still read 0 and the discarded-outcome version would
+            // pass blind — this assert catches that regression.
+            let second = fin
                 .submit_terminal(
                     k,
                     ProviderKind::Claude,
@@ -2016,6 +2042,11 @@ mod tests {
                     shared.clone(),
                 )
                 .await;
+            assert!(
+                matches!(second, FinalizeOutcome::AlreadyFinalized),
+                "the second orphan relay-miss must lose the exactly-once gate, \
+                 not re-finalize as a no-op"
+            );
             assert_eq!(
                 shared.global_active.load(Ordering::Relaxed),
                 0,
@@ -2087,13 +2118,20 @@ mod tests {
         .await;
     }
 
-    /// Cancel × gate_backstop: a cancel finalized through the reconciler's
-    /// backstop context (`clear_inflight = true`, `kickoff_queue = true`)
-    /// finalizes once, releases the token, decrements the counter once, and a
-    /// late Cancel loses the gate without underflow. Covers the gate_backstop
-    /// actor against the Cancel event.
+    /// Reconciler-backstop × deferred gate-timeout (the REAL prod backstop cell):
+    /// a `GateTimeout{Some(false)}` with a live relay owner defers (arming the
+    /// backstop deadline); once the deadline elapses the reconciler drives the
+    /// `gate_backstop()` finalize — the ONLY way `gate_backstop()` is reached in
+    /// prod (`reconcile()` always submits `GateTimeout{Some(true)}` through it).
+    /// That backstop finalize releases the seeded active turn's token exactly
+    /// once, clears the active turn, and decrements the counter once; a late
+    /// terminal then loses the gate without underflow.
+    ///
+    /// (Replaces the former `cancel_gate_backstop_finalizes_exactly_once`, which
+    /// injected `TerminalEvent::Cancel` through `gate_backstop()` — an impossible
+    /// cell that never occurs in prod and overstated matrix coverage.)
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn cancel_gate_backstop_finalizes_exactly_once() {
+    async fn reconciler_backstop_finalizes_deferred_gate_timeout_exactly_once() {
         with_isolated_runtime_root(|| async move {
             let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
             let ch = ChannelId::new(2005);
@@ -2102,45 +2140,77 @@ mod tests {
             let token = seed_active_turn(&shared, ch, tid).await;
             let fin = TurnFinalizer::spawn();
             let k = TurnKey::new(ch, tid, 0);
+            // A live relay owner is what makes `GateTimeout{Some(false)}` defer
+            // (arming the backstop) rather than finalize immediately.
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
 
-            let first = fin
+            let deferred = fin
                 .submit_terminal(
                     k,
                     ProviderKind::Claude,
-                    TerminalEvent::Cancel,
-                    FinalizeContext::gate_backstop(),
+                    TerminalEvent::GateTimeout {
+                        pane_quiescent: Some(false),
+                    },
+                    FinalizeContext::watcher(),
                     shared.clone(),
                 )
                 .await;
-            match first {
-                FinalizeOutcome::Finalized { removed_token, .. } => {
-                    assert!(
-                        removed_token.is_some(),
-                        "gate_backstop cancel must release the active token"
-                    );
-                }
-                other => panic!(
-                    "gate_backstop cancel must finalize, got {:?}",
-                    std::mem::discriminant(&other)
-                ),
-            }
-            assert!(token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
-            assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+            assert!(
+                matches!(deferred, FinalizeOutcome::Deferred),
+                "a busy-pane gate-timeout with a live owner must defer to the backstop"
+            );
+            // The token is still live while the entry is only deferred.
+            assert!(
+                !token.cancelled.load(std::sync::atomic::Ordering::Relaxed),
+                "the deferred turn's token must not be released before the backstop fires"
+            );
+            assert!(
+                shared.mailbox(ch).has_active_turn().await,
+                "the active turn must persist while the gate-timeout is only deferred"
+            );
 
+            // Sleep past GATE_BACKSTOP. Under `start_paused` the runtime
+            // auto-advances the clock once tasks idle on timers, letting the
+            // actor's reconcile interval fire and drive the `gate_backstop()`
+            // finalize. A couple extra intervals guarantees the pass ran.
+            tokio::time::sleep(GATE_BACKSTOP + RECONCILE_INTERVAL * 3).await;
+            tokio::task::yield_now().await;
+
+            // The reconciler-backstop finalize released the seeded active turn's
+            // token exactly once.
+            assert!(
+                token.cancelled.load(std::sync::atomic::Ordering::Relaxed),
+                "the reconciler backstop must release (cancel) the active turn's token"
+            );
+            assert!(
+                !shared.mailbox(ch).has_active_turn().await,
+                "the reconciler backstop must clear the active turn"
+            );
+            assert_eq!(
+                shared.global_active.load(Ordering::Relaxed),
+                0,
+                "the reconciler backstop decrements the counter exactly once"
+            );
+
+            // A late terminal now sees Finalized → AlreadyFinalized, proving the
+            // backstop finalized the deferred entry and the gate holds.
             let late = fin
                 .submit_terminal(
                     k,
                     ProviderKind::Claude,
-                    TerminalEvent::Cancel,
-                    FinalizeContext::gate_backstop(),
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
                     shared.clone(),
                 )
                 .await;
-            assert!(matches!(late, FinalizeOutcome::AlreadyFinalized));
+            assert!(
+                matches!(late, FinalizeOutcome::AlreadyFinalized),
+                "a late terminal after the backstop must lose the exactly-once gate"
+            );
             assert_eq!(
                 shared.global_active.load(Ordering::Relaxed),
                 0,
-                "no underflow on the late cancel"
+                "no underflow on the late terminal after the backstop finalize"
             );
         })
         .await;
@@ -2214,7 +2284,7 @@ mod tests {
             let ch = ChannelId::new(2007);
             let tid = 8007u64;
             shared.global_active.store(1, Ordering::Relaxed);
-            let _token = seed_active_turn(&shared, ch, tid).await;
+            let token = seed_active_turn(&shared, ch, tid).await;
             let fin = TurnFinalizer::spawn();
             let k = TurnKey::new(ch, tid, 0);
             fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
@@ -2230,11 +2300,51 @@ mod tests {
                     shared.clone(),
                 )
                 .await;
+            match outcome {
+                FinalizeOutcome::Finalized { removed_token, .. } => {
+                    assert!(
+                        removed_token.is_some(),
+                        "GateTimeout{{None}} via bridge must finalize now and release the token"
+                    );
+                }
+                other => panic!(
+                    "GateTimeout{{None}} via bridge must finalize immediately (not Deferred), \
+                     got {:?}",
+                    std::mem::discriminant(&other)
+                ),
+            }
+            // Invariant (3): the released token is cancelled and the active turn
+            // is cleared off the channel.
             assert!(
-                matches!(outcome, FinalizeOutcome::Finalized { .. }),
-                "GateTimeout{{None}} via bridge must finalize immediately"
+                token.cancelled.load(std::sync::atomic::Ordering::Relaxed),
+                "GateTimeout{{None}} via bridge must mark the released token cancelled"
+            );
+            assert!(
+                !shared.mailbox(ch).has_active_turn().await,
+                "GateTimeout{{None}} via bridge must clear the active turn"
             );
             assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+
+            // Late probe: a follow-up terminal on the now-finalized turn must
+            // lose the exactly-once gate without underflowing the counter.
+            let late = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::bridge(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(
+                matches!(late, FinalizeOutcome::AlreadyFinalized),
+                "a late terminal after GateTimeout{{None}} must be AlreadyFinalized"
+            );
+            assert_eq!(
+                shared.global_active.load(Ordering::Relaxed),
+                0,
+                "no underflow on the late terminal after GateTimeout{{None}}"
+            );
         })
         .await;
     }
@@ -2371,7 +2481,7 @@ mod tests {
             let ch = ChannelId::new(2010);
             let tid = 8010u64;
             shared.global_active.store(1, Ordering::Relaxed);
-            let _token = seed_active_turn(&shared, ch, tid).await;
+            let token = seed_active_turn(&shared, ch, tid).await;
             let fin = TurnFinalizer::spawn();
             let k = TurnKey::new(ch, tid, 0);
             fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
@@ -2385,7 +2495,28 @@ mod tests {
                     shared.clone(),
                 )
                 .await;
-            assert!(matches!(first, FinalizeOutcome::Finalized { .. }));
+            match first {
+                FinalizeOutcome::Finalized { removed_token, .. } => {
+                    assert!(
+                        removed_token.is_some(),
+                        "the first cancel must release the active turn's token"
+                    );
+                }
+                other => panic!(
+                    "the first cancel must finalize, got {:?}",
+                    std::mem::discriminant(&other)
+                ),
+            }
+            // Invariant (3): cancel sets the token's cancelled flag and clears
+            // the active turn off the channel.
+            assert!(
+                token.cancelled.load(std::sync::atomic::Ordering::Relaxed),
+                "cancel must set the released token's cancelled flag"
+            );
+            assert!(
+                !shared.mailbox(ch).has_active_turn().await,
+                "the first cancel must clear the active turn"
+            );
 
             let second = fin
                 .submit_terminal(
