@@ -1326,6 +1326,42 @@ mod pane_dead_identity_tests {
         ));
     }
 
+    /// #3016 (codex B1): the call-site guard proof. In the stale-newer-turn
+    /// scenario the watcher MUST skip `finish_restored_watcher_active_turn`
+    /// because `pinned_finalize_user_msg_id` would return 0 and an id-0
+    /// `Complete` would collapse onto the newer live turn (see
+    /// `turn_finalizer::tests::stale_completion_skips_finalize_no_id0_collapse`).
+    /// This asserts the two predicates the call site relies on line up:
+    ///   1. `committed_completion_is_stale_for_newer_turn` is TRUE (→ guard skips
+    ///      the finalize), AND
+    ///   2. `pinned_finalize_user_msg_id` is 0 for the SAME snapshot (→ the id
+    ///      that WOULD have been submitted is the unsafe channel-collapse id),
+    /// so "stale" ⇔ "id 0" ⇔ "skip" by construction.
+    #[test]
+    fn stale_completion_skips_finalize_no_id0_collapse() {
+        let session = "AgentDesk-codex-adk-cdx";
+        // A NEWER same-session turn (id 999) that started AT/AFTER this range
+        // (turn_start_offset 50 >= current_offset 50). This is the late-read
+        // inflight a follow-up turn rewrote onto disk before this stale pass.
+        let newer = state_with_offsets(999, session, Some(50), 50);
+
+        // (1) Guard predicate: stale → the call site skips the finalize entirely.
+        assert!(
+            committed_completion_is_stale_for_newer_turn(Some(&newer), Some(&newer), session, 50),
+            "newer same-session turn at/after the range must be classified stale so the \
+             call site skips finish_restored_watcher_active_turn"
+        );
+
+        // (2) The id that WOULD have been submitted is 0 — the unsafe
+        // channel-collapse id proven hazardous in the turn_finalizer test.
+        assert_eq!(
+            pinned_finalize_user_msg_id(Some(&newer), session, 50),
+            0,
+            "stale newer turn pins to 0 — submitting Complete with this id would \
+             collapse onto the newer live ledger entry (wrong-turn finalize)"
+        );
+    }
+
     #[test]
     fn watcher_creates_status_panel_for_external_input_when_v2_on_and_panel_absent() {
         // #3003: pure TUI-direct (ExternalInput) turn with v2 enabled and no panel
@@ -8253,26 +8289,67 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &tmux_session_name,
                 current_offset,
             );
-            let watcher_drove_finalize = finish_restored_watcher_active_turn(
-                &shared,
-                &provider_kind,
-                channel_id,
-                restored_user_msg_id,
-                finish_mailbox_on_completion,
-                owed,
-                // #3016 option A: terminal output was committed above
-                // (`terminal_output_committed && !lifecycle_stage_paused`), the
-                // canonical *normal completion* point. Finalize unconditionally —
-                // independent of `owed` / `finish_mailbox_on_completion` — so the
-                // normal live bridge→watcher delegation turn no longer depends on
-                // the legacy `mailbox_finalize_owed` flag. The finalizer is
-                // idempotent (bridge winner → AlreadyFinalized here), so this
-                // cannot over-finalize.
-                true,
-                dispatch_ok,
-                "restored watcher completed with queued backlog",
-            )
-            .await;
+            // #3016 (codex B1): SKIP the normal-completion finalize ENTIRELY in the
+            // stale-newer-turn case — do NOT call it with `restored_user_msg_id == 0`.
+            // Why a 0-id submit here is unsafe, not a harmless no-op: with
+            // `normal_completion = true` this site finalizes UNCONDITIONALLY, and in
+            // the stale case `pinned_finalize_user_msg_id` returns 0. A 0-id
+            // `TurnKey` reaches `resolve_channel_only`
+            // (turn_finalizer.rs:161-181), which — when NO terminal(finalized)
+            // ledger entry exists for this channel/generation — collapses onto the
+            // SINGLE live non-finalized entry. In the stale scenario the OLD turn
+            // whose trailing output this is was already completed/finalized via its
+            // own path earlier (that is precisely WHAT makes a NEWER same-session
+            // turn already live), so its ledger entry may have been finalized/GC'd
+            // and the only live entry is the NEWER still-running turn. Submitting
+            // Complete with id 0 would then collapse onto and finalize that newer
+            // live turn — a wrong-turn finalize that releases its cancel_token /
+            // ledger entry mid-flight. The correct action is to finalize NOTHING
+            // here: the newer live turn owns its own normal-completion finalize when
+            // ITS terminal output is committed in a later watcher-loop iteration.
+            //
+            // `completion_is_stale_for_newer_turn` is the exact complement of the
+            // `< current_offset` range test inside `pinned_finalize_user_msg_id`, so
+            // "id == 0 here" and "skip the finalize" are the same predicate by
+            // construction (see the R3 cross-ref comment above).
+            //
+            // Skip-path bookkeeping: the watcher did NOT drive the finalize, so
+            // `watcher_drove_finalize = false`. The `owed = mailbox_finalize_owed
+            // .swap(false, AcqRel)` at L~8165 already ran UNCONDITIONALLY (pre-
+            // existing option-A ordering), so this skip does not change the atomic's
+            // lifecycle — and dropping the LOCAL `owed` here drops no legitimate
+            // work: with option A's decoupling the newer live turn no longer depends
+            // on the `owed` flag to finalize (it finalizes via its own
+            // `normal_completion = true` path with its real id). `delegated_finalize_owed
+            // = owed` below still feeds `watcher_handled_mailbox_finish` so queue-
+            // kickoff suppression / terminal-stop accounting keep the legacy flag
+            // intent intact on the skip path.
+            let watcher_drove_finalize = if !completion_is_stale_for_newer_turn {
+                finish_restored_watcher_active_turn(
+                    &shared,
+                    &provider_kind,
+                    channel_id,
+                    restored_user_msg_id,
+                    finish_mailbox_on_completion,
+                    owed,
+                    // #3016 option A: terminal output was committed above
+                    // (`terminal_output_committed && !lifecycle_stage_paused`), the
+                    // canonical *normal completion* point. Finalize unconditionally —
+                    // independent of `owed` / `finish_mailbox_on_completion` — so the
+                    // normal live bridge→watcher delegation turn no longer depends on
+                    // the legacy `mailbox_finalize_owed` flag. The finalizer is
+                    // idempotent (bridge winner → AlreadyFinalized here), so this
+                    // cannot over-finalize.
+                    true,
+                    dispatch_ok,
+                    "restored watcher completed with queued backlog",
+                )
+                .await
+            } else {
+                // Stale-newer-turn: finalize skipped (see above). The watcher did
+                // not drive any finalize on this pass.
+                false
+            };
             if !watcher_direct_terminal_idle_committed {
                 watcher_direct_terminal_idle_committed =
                     commit_watcher_direct_terminal_session_idle(

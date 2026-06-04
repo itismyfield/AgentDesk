@@ -2536,4 +2536,75 @@ mod tests {
         })
         .await;
     }
+
+    /// #3016 (codex B1): documents WHY an id-0 watcher finalize is UNSAFE in the
+    /// stale-newer-turn case — and therefore why the call site
+    /// (`tmux_watcher.rs`) must SKIP `finish_restored_watcher_active_turn`
+    /// entirely rather than submit `Complete` with `user_msg_id == 0`.
+    ///
+    /// Scenario reproduced at the resolver level: the channel ledger has NO
+    /// terminal(`Finalized`) entry and a SINGLE live (non-finalized) NEWER turn.
+    /// A 0-id `TurnKey` (what `pinned_finalize_user_msg_id` returns for a stale
+    /// completion) collapses onto that single live entry. If the watcher
+    /// submitted `Complete` against this resolved key, the finalizer would
+    /// finalize the NEWER still-running turn and release its cancel_token /
+    /// ledger entry — a wrong-turn finalize. The guard in the watcher is to not
+    /// finalize at all when `completion_is_stale_for_newer_turn`; this test
+    /// pins the resolver behavior the guard exists to avoid.
+    #[test]
+    fn stale_completion_skips_finalize_no_id0_collapse() {
+        let ch = ChannelId::new(4242);
+        let generation = 0u64;
+        // The single LIVE (non-finalized) entry belongs to the NEWER turn
+        // (user_msg_id 999). No terminal/finalized entry exists for the channel.
+        let newer_live = LedgerKey {
+            channel_id: ch,
+            generation,
+            user_msg_id: 999,
+        };
+        let candidates = [(&newer_live, /* is_terminal */ false)];
+
+        // A 0-id key (stale watcher completion id) collapses onto the newer
+        // live entry — proving an id-0 `Complete` here WOULD finalize the wrong
+        // (newer, still-running) turn. This is exactly why the call site skips.
+        let zero_key = TurnKey::new(ch, 0, generation);
+        let resolved = resolve_channel_only(zero_key, candidates.iter().copied());
+        assert_eq!(
+            resolved, newer_live,
+            "id-0 collapse onto the single live newer entry is the wrong-turn \
+             finalize hazard the watcher skip closes (codex B1)"
+        );
+
+        // Sanity complement: the same resolver routes a REAL id to its own exact
+        // key, never collapsing — so the hazard is unique to the id-0 path the
+        // stale-skip guard removes.
+        let real_key = TurnKey::new(ch, 777, generation);
+        let resolved_real = resolve_channel_only(real_key, candidates.iter().copied());
+        assert_eq!(
+            resolved_real,
+            real_key.exact_key(),
+            "a real user_msg_id never collapses onto a different live entry"
+        );
+
+        // And the finalized-guard branch: once a terminal entry exists for the
+        // channel/generation, even a 0-id key refuses to collapse (routes to the
+        // literal orphan key) — the cross-turn safety net. Included so the test
+        // documents the full id-0 resolution matrix the guard reasons about.
+        let finalized_old = LedgerKey {
+            channel_id: ch,
+            generation,
+            user_msg_id: 100,
+        };
+        let guarded = [
+            (&finalized_old, /* is_terminal */ true),
+            (&newer_live, /* is_terminal */ false),
+        ];
+        let resolved_guarded = resolve_channel_only(zero_key, guarded.iter().copied());
+        assert_eq!(
+            resolved_guarded,
+            zero_key.exact_key(),
+            "with a terminal entry present, id-0 routes to the orphan no-op key, \
+             not the newer live entry"
+        );
+    }
 }

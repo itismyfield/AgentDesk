@@ -121,7 +121,7 @@
     re-exports; #3107 `RestoredWatcherTurn.injected_prompt_message_id`;
     #3016 option A `normal_completion` finalize-decouple param;
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (7621 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (7662 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
