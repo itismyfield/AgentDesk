@@ -138,6 +138,11 @@
     the bind did not record it, instead of leaking a duplicate);
     +50 from #3104 terminal/idle reconciliation pass that strips a lingering
     `계속 처리 중` streaming footer off the committed-but-unrelayed placeholder;
+    +46 from #3016 option A codex R2 `pinned_finalize_user_msg_id` pure helper
+    that binds the watcher normal-completion finalize id to the OUTPUT RANGE
+    (`turn_start_offset.unwrap_or(last_offset) < current_offset`, mirroring the
+    yield guard at `tmux.rs:2110-2111`) so a follow-up turn started after this
+    range is not released by stale output;
     split loop helpers further before adding behavior).
   - `src/services/discord/tui_prompt_relay.rs` (3849 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only

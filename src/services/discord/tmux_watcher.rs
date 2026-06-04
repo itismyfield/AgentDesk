@@ -983,6 +983,51 @@ fn matching_watcher_turn_identity(
         .map(crate::services::discord::inflight::InflightTurnIdentity::from_state)
 }
 
+/// #3016 (codex R2): pick the `user_msg_id` handed to the normal-completion
+/// finalize, gated on the OUTPUT-RANGE relationship so we only ever finalize
+/// the turn whose output THIS completion actually is.
+///
+/// Offset-aliasing hazard: the watcher loop is not turn-scoped, and the
+/// watcher-yield guard `watcher_should_yield_to_inflight_state`
+/// (tmux.rs ~2083-2112) lets the watcher PROCEED on this old range in the
+/// `RelayOwnerKind::None` arm whenever it does NOT satisfy
+/// `data_start_offset <= turn_start_offset && turn_start_offset < current_offset`
+/// (tmux.rs:2110-2111). One such non-yield case is a FOLLOW-UP turn started on
+/// the SAME tmux session whose `turn_start_offset >= current_offset` — i.e. it
+/// begins AFTER the range this completion covers. In that case
+/// `inflight_before_relay` already holds the NEWER turn's `user_msg_id`; handing
+/// that id to the finalizer would `mailbox_finish_turn_if_matches` and release
+/// the WRONG (newer, still-running) turn.
+///
+/// Binding rule (mirrors the guard's exact offset semantics so the two cannot
+/// disagree): only return the pinned id when the pinned inflight turn has
+/// actually produced output by this completion point — its effective start
+/// offset `turn_start_offset.unwrap_or(last_offset)` is `< current_offset`. A
+/// newer turn (start offset `>= current_offset`) does NOT satisfy this → return
+/// `0` (no exact ledger match; the finalizer refuses to release a mismatched
+/// live turn). The session-match + `user_msg_id != 0` checks are kept too.
+///
+/// Note: `InflightTurnIdentity` (inflight.rs:665) does NOT carry
+/// `turn_start_offset`, so this reads it from the `InflightTurnState` directly.
+fn pinned_finalize_user_msg_id(
+    inflight_before_relay: Option<&crate::services::discord::inflight::InflightTurnState>,
+    tmux_session_name: &str,
+    current_offset: u64,
+) -> u64 {
+    inflight_before_relay
+        .filter(|state| {
+            state.user_msg_id != 0
+                && state.tmux_session_name.as_deref().map(str::trim)
+                    == Some(tmux_session_name.trim())
+                // Mirror the guard at tmux.rs:2110-2111: effective turn start =
+                // `turn_start_offset.unwrap_or(last_offset)`. Only this turn's
+                // output reaches `current_offset` when its start precedes it.
+                && state.turn_start_offset.unwrap_or(state.last_offset) < current_offset
+        })
+        .map(|state| state.user_msg_id)
+        .unwrap_or(0)
+}
+
 fn refresh_watcher_turn_identity(
     current: &mut Option<crate::services::discord::inflight::InflightTurnIdentity>,
     provider: &ProviderKind,
@@ -1038,6 +1083,101 @@ mod pane_dead_identity_tests {
         identity = matching_watcher_turn_identity(Some(&second), "AgentDesk-codex-adk-cdx");
 
         assert!(identity.is_none());
+    }
+
+    // #3016 codex R2 (offset-aliasing id-selection). Exercises the SELECTION
+    // path the call site uses (`pinned_finalize_user_msg_id`) — which the
+    // direct-helper `stale_normal_completion_does_not_release_newer_active_turn`
+    // test does NOT cover. The hazard: a follow-up turn on the SAME session whose
+    // `turn_start_offset >= current_offset` (it begins AFTER the range this
+    // completion covers) sits in `inflight_before_relay`; passing its id to the
+    // finalizer would release the WRONG (newer, still-running) turn. The
+    // selection must return 0 in that case, mirroring the watcher-yield guard at
+    // tmux.rs:2110-2111.
+    fn state_with_offsets(
+        user_msg_id: u64,
+        tmux_session_name: &str,
+        turn_start_offset: Option<u64>,
+        last_offset: u64,
+    ) -> InflightTurnState {
+        let mut state = state_for_turn(user_msg_id, tmux_session_name);
+        state.last_offset = last_offset;
+        state.turn_start_offset = turn_start_offset;
+        state
+    }
+
+    #[test]
+    fn pinned_finalize_id_matching_turn_in_range_returns_its_id() {
+        // (a) The pinned turn's output reaches current_offset
+        // (turn_start_offset 10 < current_offset 50) → return its id.
+        let state = state_with_offsets(700, "AgentDesk-codex-adk-cdx", Some(10), 10);
+        assert_eq!(
+            pinned_finalize_user_msg_id(Some(&state), "AgentDesk-codex-adk-cdx", 50),
+            700
+        );
+    }
+
+    #[test]
+    fn pinned_finalize_id_newer_followup_turn_after_range_returns_zero() {
+        // (b) Follow-up turn started AFTER this range
+        // (turn_start_offset 50 >= current_offset 50) → 0, NOT the newer id.
+        let newer = state_with_offsets(800, "AgentDesk-codex-adk-cdx", Some(50), 50);
+        assert_eq!(
+            pinned_finalize_user_msg_id(Some(&newer), "AgentDesk-codex-adk-cdx", 50),
+            0
+        );
+        // Also strictly-after (start 60 > 50) → 0.
+        let later = state_with_offsets(801, "AgentDesk-codex-adk-cdx", Some(60), 60);
+        assert_eq!(
+            pinned_finalize_user_msg_id(Some(&later), "AgentDesk-codex-adk-cdx", 50),
+            0
+        );
+    }
+
+    #[test]
+    fn pinned_finalize_id_falls_back_to_last_offset_like_the_guard() {
+        // Mirror the guard's `turn_start_offset.unwrap_or(last_offset)`: with no
+        // turn_start_offset, last_offset 50 >= current_offset 50 → 0.
+        let no_start = state_with_offsets(802, "AgentDesk-codex-adk-cdx", None, 50);
+        assert_eq!(
+            pinned_finalize_user_msg_id(Some(&no_start), "AgentDesk-codex-adk-cdx", 50),
+            0
+        );
+        // last_offset 10 < 50 → return id.
+        let in_range = state_with_offsets(803, "AgentDesk-codex-adk-cdx", None, 10);
+        assert_eq!(
+            pinned_finalize_user_msg_id(Some(&in_range), "AgentDesk-codex-adk-cdx", 50),
+            803
+        );
+    }
+
+    #[test]
+    fn pinned_finalize_id_wrong_session_returns_zero() {
+        // (c) Different tmux session → 0 even though it is in range.
+        let other = state_with_offsets(900, "AgentDesk-codex-adk-cdx-fresh", Some(10), 10);
+        assert_eq!(
+            pinned_finalize_user_msg_id(Some(&other), "AgentDesk-codex-adk-cdx", 50),
+            0
+        );
+    }
+
+    #[test]
+    fn pinned_finalize_id_zero_user_msg_id_returns_zero() {
+        // (d) Anchorless turn (user_msg_id == 0) → 0.
+        let anchorless = state_with_offsets(0, "AgentDesk-codex-adk-cdx", Some(10), 10);
+        assert_eq!(
+            pinned_finalize_user_msg_id(Some(&anchorless), "AgentDesk-codex-adk-cdx", 50),
+            0
+        );
+    }
+
+    #[test]
+    fn pinned_finalize_id_none_returns_zero() {
+        // (e) No pre-relay snapshot → 0.
+        assert_eq!(
+            pinned_finalize_user_msg_id(None, "AgentDesk-codex-adk-cdx", 50),
+            0
+        );
     }
 
     #[test]
@@ -7882,33 +8022,39 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // entry. The redundant `should_kickoff_queue` block further
             // below is also `dispatch_ok`-gated and remains as a fallback
             // for paths where the helper short-circuited.
-            // #3016 (codex R1): derive the finalize id from the TURN-PINNED
-            // snapshot, never from the late `inflight_state` re-read above. That
-            // late read reloads the on-disk inflight AFTER the relay/emit; the
-            // watcher loop is not turn-scoped (see the L~7327 warning), so a
-            // follow-up turn may have already rewritten inflight on disk by then —
-            // its `user_msg_id` would belong to a NEWER turn. Under the old
-            // flag-gated path this finalize fired narrowly; with `normal_completion
-            // = true` it fires UNCONDITIONALLY, so a stale-id match here could
-            // `finish_turn_if_matches` and release the WRONG (follow-up) turn.
+            // #3016 (codex R1+R2): derive the finalize id from the TURN-PINNED
+            // pre-relay snapshot, never from the late `inflight_state` re-read
+            // above. That late read reloads the on-disk inflight AFTER the
+            // relay/emit; the watcher loop is not turn-scoped (see the L~7327
+            // warning), so a follow-up turn may have already rewritten inflight on
+            // disk by then — its `user_msg_id` would belong to a NEWER turn. Under
+            // the old flag-gated path this finalize fired narrowly; with
+            // `normal_completion = true` it fires UNCONDITIONALLY, so a stale-id
+            // match here could `finish_turn_if_matches` and release the WRONG
+            // (follow-up) turn.
             //
-            // `inflight_identity_before_relay` is the pre-relay snapshot
-            // (`inflight_before_relay`, loaded L~6163) already filtered to this
-            // watcher's `tmux_session_name` by `matching_watcher_turn_identity`.
-            // Re-assert the session match defensively; if the pinned identity is
-            // missing OR not for this session, pass 0 (`user_msg_id == 0` = no
-            // exact ledger match — the finalizer refuses to release a mismatched
-            // live turn, see turn_finalizer L~526) instead of a possibly-stale
-            // follow-up id.
-            let restored_user_msg_id = inflight_identity_before_relay
-                .as_ref()
-                .filter(|identity| {
-                    identity.user_msg_id != 0
-                        && identity.tmux_session_name.as_deref().map(str::trim)
-                            == Some(tmux_session_name.trim())
-                })
-                .map(|identity| identity.user_msg_id)
-                .unwrap_or(0);
+            // R2 (offset-aliasing): even the pre-relay snapshot
+            // `inflight_before_relay` (loaded L~6163) is NOT inherently pinned to
+            // the OUTPUT RANGE being completed. The watcher-yield guard
+            // `watcher_should_yield_to_inflight_state` (tmux.rs:2110-2111) lets the
+            // watcher PROCEED on this old range when a FOLLOW-UP turn on the SAME
+            // session has `turn_start_offset >= current_offset` (it starts AFTER
+            // this range). In that case the snapshot holds the newer turn's id, and
+            // a session-only filter would still pass it. `pinned_finalize_user_msg_id`
+            // gates on the range relationship — effective start
+            // `turn_start_offset.unwrap_or(last_offset) < current_offset` — exactly
+            // mirroring the guard, so a newer turn yields 0 (no exact ledger match;
+            // turn_finalizer L~526 refuses to release a mismatched live turn). It
+            // keeps the session-match + `user_msg_id != 0` checks too.
+            //
+            // `current_offset` here is the end of the range this completion covers
+            // (same value passed to `commit_watcher_direct_terminal_session_idle`
+            // just below).
+            let restored_user_msg_id = pinned_finalize_user_msg_id(
+                inflight_before_relay.as_ref(),
+                &tmux_session_name,
+                current_offset,
+            );
             let watcher_drove_finalize = finish_restored_watcher_active_turn(
                 &shared,
                 &provider_kind,
