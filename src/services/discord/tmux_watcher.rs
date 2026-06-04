@@ -1,6 +1,115 @@
 use super::*;
 use crate::services::discord::InflightTurnState;
 
+/// #3041 P1-1: process-global monotonic counter that mints a unique
+/// `instance_id` for each watcher spawn. It distinguishes an outgoing watcher
+/// from its replacement across a reattach so the delivery-lease holder
+/// (`LeaseHolder::Watcher { instance_id }`) of a still-running send cannot be
+/// confused with — or released/committed by — a successor watcher that picks
+/// up the same channel/session (the §5.2 B2 single-holder invariant).
+static WATCHER_INSTANCE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_watcher_instance_id() -> u64 {
+    WATCHER_INSTANCE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// #3041 P1-1 (B3, codex R2 Issue-1): delivery-lease acquire deadline for the
+/// watcher terminal send. The deadline is a HOLDER-LIVENESS signal, NOT a hard
+/// cap on delivery duration — while the send future is in flight the watcher
+/// keeps the lease alive with a background HEARTBEAT that `renew()`s the
+/// deadline every `WATCHER_DELIVERY_LEASE_HEARTBEAT_MS` (see below). Because a
+/// LIVE holder always re-extends within one interval, a long multi-chunk send
+/// (which can exceed any FIXED deadline — an unbounded response splits into
+/// 2000-char chunks paced ~500ms apart plus a 1s rate limiter, so 60+ chunks
+/// can run past 90s) is NEVER reclaimed mid-flight. Conversely, a genuinely
+/// DEAD holder (its watcher task/process gone) stops renewing, so the lease
+/// expires and a replacement reclaims it within ~one deadline.
+///
+/// INVARIANT — deadline must be a small multiple of the heartbeat: large enough
+/// that a live holder never expires between two renews (covers a missed/late
+/// tick under scheduler pressure), small enough that a dead holder is reclaimed
+/// PROMPTLY. We pick 3× the heartbeat (15s = 3 × 5s): one tick can be skipped
+/// entirely and the lease still survives to the next, while dead-holder
+/// recovery is ~15s instead of the old fixed 90s. This is the lease DEADLINE,
+/// independent of the finalizer's `GATE_BACKSTOP` (8s, a different concern:
+/// visible-completion gating, not delivery duration).
+const WATCHER_DELIVERY_LEASE_DEADLINE_MS: u64 = 15_000;
+
+/// #3041 P1-1 (§3, codex R2 Issue-1): how often the in-flight watcher send
+/// renews its delivery lease. Must be strictly less than (and a small fraction
+/// of) `WATCHER_DELIVERY_LEASE_DEADLINE_MS` so a live holder always re-extends
+/// before expiry even if one tick is delayed (the deadline is 3× this).
+const WATCHER_DELIVERY_LEASE_HEARTBEAT_MS: u64 = 5_000;
+
+/// #3041 P1-1 (§3, codex R2 Issue-1): RAII handle for the in-flight
+/// delivery-lease heartbeat task. The watcher spawns the heartbeat right after a
+/// successful `try_acquire` and `stop()`s it BEFORE the inline commit (and the
+/// `Drop` impl aborts it on any early return / panic), so the renew loop can
+/// NEVER outlive the send and race the commit. While the watcher task lives the
+/// heartbeat keeps the lease alive (`renew`); if the watcher TASK dies the
+/// spawned heartbeat is dropped/aborted with it → the lease stops being renewed
+/// → it expires → a replacement reclaims it. A heartbeat tick can only ever
+/// `renew` THIS holder's OWN still-`Leased` lease (matched on holder+turn), so a
+/// last tick that races `stop()`+commit merely extends our own deadline, which
+/// the immediately-following commit then flips to `Committed` — harmless.
+struct DeliveryLeaseHeartbeat {
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl DeliveryLeaseHeartbeat {
+    /// Spawn a background task that renews `(holder, turn)`'s lease on `cell`
+    /// every `WATCHER_DELIVERY_LEASE_HEARTBEAT_MS`, each time pushing the
+    /// deadline to `lease_now_ms() + WATCHER_DELIVERY_LEASE_DEADLINE_MS`. The
+    /// first tick fires AFTER one interval (the acquire already set a fresh
+    /// deadline). The loop exits on its own as soon as a `renew` returns false
+    /// (the lease is no longer ours — committed, released, or reclaimed), so it
+    /// self-terminates even before an explicit `stop()`.
+    fn spawn(
+        cell: std::sync::Arc<crate::services::discord::DeliveryLeaseCell>,
+        holder: crate::services::discord::LeaseHolder,
+        turn: crate::services::discord::turn_finalizer::TurnKey,
+    ) -> Self {
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(
+                WATCHER_DELIVERY_LEASE_HEARTBEAT_MS,
+            ));
+            // Skip the immediate tick `interval` emits at t=0; the acquire just
+            // set a fresh deadline, so the first renew is one interval later.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let renewed = cell.renew(
+                    holder,
+                    turn,
+                    crate::services::discord::lease_now_ms()
+                        .saturating_add(WATCHER_DELIVERY_LEASE_DEADLINE_MS),
+                );
+                if !renewed {
+                    // Lease is no longer ours (committed/released/reclaimed):
+                    // nothing left to keep alive.
+                    break;
+                }
+            }
+        });
+        Self { handle }
+    }
+
+    /// Stop the heartbeat. Idempotent. Called BEFORE the inline commit so the
+    /// renew loop is guaranteed not to race the commit.
+    fn stop(self) {
+        self.handle.abort();
+    }
+}
+
+impl Drop for DeliveryLeaseHeartbeat {
+    fn drop(&mut self) {
+        // Safety net: if the send path returns early / panics before an explicit
+        // `stop()`, aborting on drop guarantees the heartbeat cannot outlive the
+        // owning watcher frame.
+        self.handle.abort();
+    }
+}
+
 /// #2441 (H1) — race a fixed sleep against a `notify`-backed wake-up
 /// from `JsonlWatcher`. Returns as soon as EITHER the sleep elapses or
 /// the watcher fires its `Notify`. This is the primitive used to replace
@@ -3412,6 +3521,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     tracing::info!(
         "  [{ts}] 👁 tmux watcher started for #{tmux_session_name} at offset {initial_offset}"
     );
+
+    // #3041 P1-1: this watcher instance's delivery-lease holder id. Minted once
+    // per spawn so a replacement watcher cannot release/commit (or be mistaken
+    // for) this instance's lease across a reattach (§5.2 B2).
+    let watcher_instance_id = next_watcher_instance_id();
 
     // E5 (#2412): cache the supervisor-owned StreamRelay producer for this
     // tmux session, if the supervisor is running and has matched the
@@ -7075,6 +7189,126 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let mut tui_direct_anchor_terminal_body_visible = false;
         let mut tui_direct_anchor_or_lease_present_for_lifecycle =
             prompt_anchor_present_before_relay || external_input_lease_before_relay;
+
+        // #3041 P1-1: acquire the delivery lease BEFORE the watcher direct-sends
+        // its terminal response. The lease identity is the turn-pinned id (NOT a
+        // stale late re-read — `pinned_finalize_user_msg_id` mirrors the same
+        // id-pinning #3141 established) and the byte range this delivery covers,
+        // `[data_start_offset, terminal_event_consumed_offset(..))` — the SAME
+        // consumed end the commit/offset-advance uses, so acquire and commit
+        // carry one identity. We only acquire on the watcher-direct path: the
+        // session-bound delegation path is the sink's lease (P1-2) and the
+        // suppression/no-response arms deliver nothing.
+        //
+        // B2 (single-holder, §5.2): if a DIFFERENT watcher instance already
+        // holds this cell (Leased, not yet committed/released/reclaimed) for the
+        // same channel, `try_acquire` returns false and this watcher MUST NOT
+        // direct-send (see the dedicated skip arm below). The acquire is the
+        // atomic fast-path on the cell (B4); commit/advance/release happen
+        // INLINE in the watcher (synchronously, to preserve the pre-P1-1 prompt
+        // confirmed_end advance and avoid an actor-deferral duplicate window).
+        // The actor CommitDelivery/ReleaseDelivery messages remain dormant.
+        let watcher_lease_turn = crate::services::discord::turn_finalizer::TurnKey::new(
+            channel_id,
+            pinned_finalize_user_msg_id(
+                inflight_before_relay.as_ref(),
+                &tmux_session_name,
+                current_offset,
+            ),
+            shared.current_generation,
+        );
+        let watcher_lease_holder = crate::services::discord::LeaseHolder::Watcher {
+            instance_id: watcher_instance_id,
+        };
+        let watcher_lease_start = data_start_offset;
+        let watcher_lease_end = terminal_event_consumed_offset(current_offset, &all_data);
+        let watcher_lease_cell = shared.delivery_lease(channel_id);
+        // Only the watcher-direct fallback path actually direct-sends; acquire
+        // exactly when that path will run with a real body so the lease identity
+        // matches the bytes we are about to deliver. A zero/inverted range never
+        // delivers, so do not lease it.
+        let watcher_will_direct_send =
+            watcher_direct_fallback_after_session_bound_ack && has_direct_terminal_response;
+        let watcher_lease_acquired =
+            if watcher_will_direct_send && watcher_lease_end > watcher_lease_start {
+                // #3041 P1-1 (B3, Issue 1): SELF-HEALING acquire. Before trying to
+                // acquire, reclaim the current lease IFF it is EXPIRED — a dead
+                // holder that `try_acquire`d but died before commit/release (e.g.
+                // on a cold/no-terminal path where the finalizer actor never
+                // cached `SharedData`, so the reconcile-tick reclaim would never
+                // run). Without this, a replacement watcher's `try_acquire` would
+                // lose to the dead holder's stuck `Leased` lease forever and take
+                // the B2 skip arm permanently → the range is never delivered
+                // (black-hole). `reclaim_if_expired` only frees a `Leased` lease
+                // whose `deadline_ms` has elapsed against the SAME process-monotonic
+                // `lease_now_ms()` clock the acquire deadline is computed against,
+                // so a LIVE holder mid-send (whose deadline is continuously pushed
+                // forward by the heartbeat below) is NOT reclaimed and this watcher
+                // still correctly B2-skips it (single-holder, §5.2).
+                // This makes the acquire the PRIMARY black-hole guarantee — bounded
+                // to the lease deadline, with NO dependency on the finalizer actor
+                // having `SharedData` cached. The reconcile-tick reclaim stays as a
+                // secondary net (harmless if redundant).
+                watcher_lease_cell.reclaim_if_expired(crate::services::discord::lease_now_ms());
+                watcher_lease_cell.try_acquire(
+                    watcher_lease_turn,
+                    watcher_lease_holder,
+                    watcher_lease_start,
+                    watcher_lease_end,
+                    crate::services::discord::lease_now_ms()
+                        .saturating_add(WATCHER_DELIVERY_LEASE_DEADLINE_MS),
+                )
+            } else {
+                false
+            };
+        // B2 skip flag: the watcher intended to direct-send but a different
+        // holder owns the lease for this range. Used to route to the skip arm
+        // (no duplicate send) instead of the send arm. NOTE (P1-3 residual): the
+        // 10s ACK-timeout blind re-send is intentionally NOT removed here. If the
+        // SAME watcher that holds the lease hits its ACK timeout it would
+        // re-enter this block in a LATER iteration; because the prior iteration
+        // committed-and-released the lease (Committed→Unleased), a same-holder
+        // re-send re-acquires and re-commits the SAME range — but the commit's
+        // offset advance is a monotonic CAS, so it CANNOT double-advance
+        // `confirmed_end_offset`. P1-3 replaces the blind re-send with
+        // committed-offset reconciliation; until then this residual same-holder
+        // re-send window is bounded and offset-idempotent.
+        let watcher_lease_b2_skip = watcher_will_direct_send
+            && watcher_lease_end > watcher_lease_start
+            && !watcher_lease_acquired;
+
+        // #3041 P1-1 (codex R2 Issue-2, BLOCKER B5 — DEFERRED, NOT a regression):
+        // the lease range is the FULL `[data_start_offset, consumed_end)`. If THIS
+        // holder dies AFTER posting chunk 1 but BEFORE its commit, a replacement
+        // reclaims the EXPIRED lease (after the deadline) and re-sends the WHOLE
+        // range → a partial DUPLICATE of the already-posted chunks. Exact-once on
+        // a partial multi-chunk crash needs per-message-id partial-commit state,
+        // which the #3041 design EXPLICITLY defers to BLOCKER B5 (a later phase) —
+        // it is intentionally NOT built here. This is NOT a P1-1 regression: the
+        // heartbeat (just below) guarantees a LIVE holder is NEVER reclaimed
+        // mid-send, so this duplicate can only happen on a GENUINE crash mid-send
+        // — which is EXACTLY the pre-P1-1 behavior (pre-P1-1 had no lease, so a
+        // replacement watcher re-sent the full range on crash too). P1-1 only ADDS
+        // a bounded delay (≤ the lease deadline) before the replacement re-delivers.
+        //
+        // #3041 P1-1 (§3, codex R2 Issue-1): keep the lease alive WHILE the send
+        // future is in flight. The deadline is short (15s) for fast dead-holder
+        // recovery; a long legitimate send (60+ rate-limited chunks can exceed any
+        // FIXED deadline) is covered because this background heartbeat `renew()`s
+        // the lease every 5s. The heartbeat is `stop()`ped BEFORE the inline commit
+        // (and aborts on drop), so it can never race the commit. Spawned ONLY when
+        // we actually acquired (the send arm runs); on the B2-skip / no-send arms
+        // there is no lease of ours to renew.
+        let watcher_lease_heartbeat = if watcher_lease_acquired {
+            Some(DeliveryLeaseHeartbeat::spawn(
+                watcher_lease_cell.clone(),
+                watcher_lease_holder,
+                watcher_lease_turn,
+            ))
+        } else {
+            None
+        };
+
         let relay_ok = if session_bound_relay_owns_terminal_delivery {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -7110,6 +7344,26 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
             clear_provider_overload_retry_state(channel_id);
             true
+        } else if watcher_lease_b2_skip {
+            // #3041 P1-1 B2 (single-holder, §5.2): a DIFFERENT watcher instance
+            // already holds the delivery lease for this exact channel/turn/range
+            // (it is mid-send or its lease has not yet been committed/released/
+            // reclaimed). A replacement watcher MUST NOT re-acquire and re-emit
+            // the same range — that is precisely the duplicate-send vector the
+            // lease closes. Skip the direct send; `terminal_output_committed`
+            // stays false so no offset advance / lifecycle side-effects run for
+            // this suppressed re-emit. The live holder will commit-advance the
+            // offset itself.
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                provider = %watcher_provider.as_str(),
+                channel = channel_id.get(),
+                tmux_session = %tmux_session_name,
+                data_start_offset = watcher_lease_start,
+                lease_end = watcher_lease_end,
+                "  [{ts}] 👁 #3041 B2: delivery lease held by another holder — skipped duplicate terminal send for {tmux_session_name} (range {watcher_lease_start}..{watcher_lease_end})"
+            );
+            false
         } else if watcher_direct_fallback_after_session_bound_ack {
             let formatted = if shared.status_panel_v2_enabled {
                 crate::services::discord::formatting::format_for_discord_with_status_panel(
@@ -7486,6 +7740,25 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 clear_provider_overload_retry_state(channel_id);
             }
             if retry_terminal_delivery_from_offset {
+                // #3041 P1-1: this is a SAME-holder abandon-without-commit — the
+                // partial send failed and we are about to reset the offset and
+                // retry the SAME range on the next loop iteration. If we left the
+                // lease `Leased`, the retry's `try_acquire` would lose to our own
+                // held lease and the B2 skip arm would suppress the legitimate
+                // retry until the lease-deadline reclaim. Abandon-release the lease
+                // here (Leased→Unleased) so the retry can re-acquire. This is the
+                // sole abandon point that must not commit; it is released on the
+                // cell directly (a same-holder abandon, not a commit/release race
+                // that needs actor serialization). Identity-matched no-op if the
+                // lease was never acquired on this path.
+                if watcher_lease_acquired {
+                    watcher_lease_cell.release(
+                        watcher_lease_holder,
+                        watcher_lease_turn,
+                        watcher_lease_start,
+                        watcher_lease_end,
+                    );
+                }
                 current_offset = turn_data_start_offset;
                 all_data.clear();
                 all_data_start_offset = current_offset;
@@ -7904,7 +8177,97 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // `confirmed_end` on the retry, falsely claiming there's nothing
         // new to relay.
         let terminal_committed_offset = runtime_binding_candidate_offset.unwrap_or(current_offset);
-        if terminal_output_committed && !lifecycle_stage_paused {
+        // #3041 P1-1 (§3, codex R2 Issue-1): the send future has completed (success
+        // or failure) by here. STOP the heartbeat BEFORE the inline commit so the
+        // renew loop is guaranteed not to race the `commit`/`release` below. Even a
+        // tick that already fired between the send completing and this `stop()` can
+        // only `renew` our OWN still-`Leased` lease (a no-op extension), which the
+        // commit immediately flips to `Committed`. After `stop()` no further renews
+        // can occur. On the non-acquired arms `watcher_lease_heartbeat` is `None`,
+        // so this is a no-op there.
+        if let Some(hb) = watcher_lease_heartbeat {
+            hb.stop();
+        }
+        if watcher_lease_acquired {
+            // #3041 P1-1 (§5.2): the watcher-direct terminal delivery was leased
+            // above. Commit the 3-way outcome and, on `Delivered`, advance the
+            // `confirmed_end_offset` watermark — both INLINE (synchronously),
+            // exactly at the pre-P1-1 call site/timing.
+            //
+            // WHY INLINE (and NOT the awaited `CommitDelivery`/`ReleaseDelivery`
+            // actor round-trip a prior P1-1 iteration used): the actor-commit
+            // DEFERRED the offset advance behind the finalize owner's mailbox.
+            // A `CommitDelivery` can queue behind an awaited `Terminal` handler,
+            // so `confirmed_end_offset` stays OLD for the duration of that await.
+            // Meanwhile `session_relay_sink` dedups purely on
+            // `shared.committed_relay_offset(channel)` (no lease consult until
+            // P1-2), so during the deferral window it can re-relay the SAME range
+            // → duplicate. That reopened the #3143 read-only offset-authority
+            // duplicate window the pre-P1-1 inline advance had closed. Committing
+            // the cell and advancing the watermark inline restores the prompt
+            // advance so #3143's `committed_relay_offset` consult sees it
+            // immediately — closing the window. The cell's `commit` is itself an
+            // atomic CAS on the payload mutex, so §5.2's "offset advances IFF the
+            // Delivered commit succeeds" still holds atomically without the actor.
+            // The ledger-coupling of the commit (§5.3) is a deferred later step;
+            // nothing here requires the actor to serialize commit against
+            // `Terminal` today (the advance is a standalone monotonic CAS).
+            //
+            // 3-way outcome: `Delivered` on a confirmed send (advances the
+            // watermark to the leased `end`), `NotDelivered` on a clean send
+            // failure, `Unknown` when the TUI quiescence gate left us
+            // lifecycle-paused (ambiguous — visible completion deferred to the
+            // backstop, so we must NOT claim these bytes delivered). We advance
+            // ONLY on `Delivered`, mirroring the old inline `!lifecycle_stage_paused`
+            // gate exactly. The leased `end` equals `terminal_committed_offset` on
+            // the committed path, so the offset reaches the same value the inline
+            // call used. Then release the lease (inline, same-holder) so the cell
+            // is free for the next turn.
+            let commit_outcome = if lifecycle_stage_paused {
+                crate::services::discord::LeaseOutcome::Unknown
+            } else if relay_ok {
+                crate::services::discord::LeaseOutcome::Delivered
+            } else {
+                crate::services::discord::LeaseOutcome::NotDelivered
+            };
+            let committed = watcher_lease_cell.commit(
+                watcher_lease_holder,
+                watcher_lease_turn,
+                watcher_lease_start,
+                watcher_lease_end,
+                commit_outcome,
+            );
+            debug_assert!(
+                committed,
+                "watcher must be able to commit its own freshly-acquired lease"
+            );
+            if committed && commit_outcome == crate::services::discord::LeaseOutcome::Delivered {
+                // INLINE advance — exactly the pre-P1-1 call site/timing.
+                advance_watcher_confirmed_end(
+                    &shared,
+                    &watcher_provider,
+                    channel_id,
+                    &tmux_session_name,
+                    watcher_lease_end,
+                    "src/services/discord/tmux_watcher.rs:watcher_lease_commit_advance",
+                );
+            }
+            // Release so the cell returns to Unleased for the next turn. Inline
+            // (same-holder) compare-and-release. Idempotent: a release that loses
+            // the identity match (e.g. the lease was reclaimed because the holder
+            // died and stopped heartbeating, so the short deadline elapsed) is a
+            // harmless no-op.
+            let _ = watcher_lease_cell.release(
+                watcher_lease_holder,
+                watcher_lease_turn,
+                watcher_lease_start,
+                watcher_lease_end,
+            );
+        } else if terminal_output_committed && !lifecycle_stage_paused {
+            // Non-watcher-direct committed paths (relay-suppressed task
+            // notifications, empty-turn cleanup, session-bound delegation that
+            // still consumed the range) keep the inline monotonic-CAS advance —
+            // they are NOT the watcher terminal-delivery path the lease governs.
             advance_watcher_confirmed_end(
                 &shared,
                 &watcher_provider,
@@ -10422,5 +10785,190 @@ TUI-E2E-marker ssh-direct
         assert_eq!(format!("{}{}", first.text, second.text), payload);
         assert!(!first.text.contains('\u{FFFD}'));
         assert!(!second.text.contains('\u{FFFD}'));
+    }
+
+    /// #3041 P1-1 (§3, codex R2 Issue-1): heartbeat-renew lifecycle for the
+    /// in-flight watcher delivery lease. These tests use the GATED Tokio clock
+    /// (`start_paused`) to drive the heartbeat's `tokio::time::interval` WITHOUT
+    /// real sleeps; `lease_now_ms()` is a separate real monotonic clock, so we
+    /// assert reclaim behaviour with EXPLICIT `now_ms` arguments anchored to the
+    /// observed `lease_now_ms()` baseline.
+    mod delivery_lease_heartbeat {
+        use super::super::{
+            DeliveryLeaseHeartbeat, WATCHER_DELIVERY_LEASE_DEADLINE_MS,
+            WATCHER_DELIVERY_LEASE_HEARTBEAT_MS,
+        };
+        use crate::services::discord::turn_finalizer::TurnKey;
+        use crate::services::discord::{
+            DeliveryLeaseCell, LeaseHolder, LeaseOutcome, LeaseSnapshot, lease_now_ms,
+        };
+        use serenity::model::id::ChannelId;
+        use std::sync::Arc;
+
+        fn watcher(id: u64) -> LeaseHolder {
+            LeaseHolder::Watcher { instance_id: id }
+        }
+
+        fn deadline_of(cell: &DeliveryLeaseCell) -> Option<u64> {
+            match cell.read() {
+                LeaseSnapshot::Leased { deadline_ms, .. } => Some(deadline_ms),
+                _ => None,
+            }
+        }
+
+        /// (a) A send that runs LONGER than the (short) deadline, but with the
+        /// heartbeat renewing every interval, is NEVER reclaimed mid-send: the
+        /// ORIGINAL holder's commit SUCCEEDS and advances the offset exactly once.
+        /// We acquire with a deliberately SHORT deadline (would expire almost
+        /// immediately), then let the heartbeat push it far forward, and confirm a
+        /// reclaim attempt well past the original deadline is a no-op.
+        #[tokio::test(flavor = "current_thread", start_paused = true)]
+        async fn long_send_heartbeat_renew_prevents_midsend_reclaim() {
+            let ch = ChannelId::new(7101);
+            let cell = Arc::new(DeliveryLeaseCell::new(ch));
+            let turn = TurnKey::new(ch, 11, 0);
+            let h = watcher(1);
+
+            // Acquire with a TINY deadline relative to lease_now_ms(): without a
+            // heartbeat it would be reclaimable almost immediately.
+            let acquire_now = lease_now_ms();
+            let short_deadline = acquire_now.saturating_add(100);
+            assert!(cell.try_acquire(turn, h, 0, 64, short_deadline));
+            assert_eq!(deadline_of(&cell), Some(short_deadline));
+
+            // Start the heartbeat (owned by this "watcher" frame).
+            let hb = DeliveryLeaseHeartbeat::spawn(cell.clone(), h, turn);
+
+            // Drive the gated clock across SEVERAL heartbeat intervals — i.e. a
+            // long multi-chunk send. Each crossed interval fires one renew.
+            for _ in 0..6 {
+                tokio::time::advance(std::time::Duration::from_millis(
+                    WATCHER_DELIVERY_LEASE_HEARTBEAT_MS,
+                ))
+                .await;
+                tokio::task::yield_now().await;
+            }
+
+            // The heartbeat has pushed the deadline far beyond the original short
+            // one: it is now lease_now_ms()+DEADLINE_MS (a much larger value).
+            let renewed_deadline = deadline_of(&cell).expect("still Leased mid-send");
+            assert!(
+                renewed_deadline > short_deadline,
+                "heartbeat must have renewed the deadline forward (was {short_deadline}, now {renewed_deadline})"
+            );
+
+            // A reclaim attempt at a time PAST the ORIGINAL short deadline (but
+            // before the renewed one) is a no-op — the live holder is protected.
+            assert!(
+                !cell.reclaim_if_expired(short_deadline.saturating_add(1)),
+                "a renewed (live) lease must NOT be reclaimed past its original deadline"
+            );
+
+            // Stop the heartbeat (as the watcher does before committing), then the
+            // ORIGINAL holder commits successfully and advances exactly once.
+            hb.stop();
+            tokio::task::yield_now().await;
+            assert!(
+                cell.commit(h, turn, 0, 64, LeaseOutcome::Delivered),
+                "the original holder's own commit must succeed (lease never lost)"
+            );
+            match cell.read() {
+                LeaseSnapshot::Committed { outcome, end, .. } => {
+                    assert_eq!(outcome, LeaseOutcome::Delivered);
+                    assert_eq!(end, 64);
+                }
+                other => panic!("expected Committed, got {other:?}"),
+            }
+        }
+
+        /// (b) A holder that "dies" (its heartbeat is dropped/stopped and never
+        /// renews) lets the SHORT deadline elapse, so a replacement reclaims and
+        /// acquires. We simulate death by dropping the heartbeat handle BEFORE the
+        /// renew interval fires, then asserting a reclaim past the (un-renewed)
+        /// deadline succeeds and a replacement acquires.
+        #[tokio::test(flavor = "current_thread", start_paused = true)]
+        async fn dead_holder_no_renew_is_reclaimed_after_short_deadline() {
+            let ch = ChannelId::new(7102);
+            let cell = Arc::new(DeliveryLeaseCell::new(ch));
+            let turn = TurnKey::new(ch, 22, 0);
+            let dead = watcher(1);
+
+            let acquire_now = lease_now_ms();
+            let deadline = acquire_now.saturating_add(WATCHER_DELIVERY_LEASE_DEADLINE_MS);
+            assert!(cell.try_acquire(turn, dead, 0, 40, deadline));
+
+            // The holder "dies": its heartbeat is dropped immediately (Drop aborts
+            // it) WITHOUT ever renewing.
+            let hb = DeliveryLeaseHeartbeat::spawn(cell.clone(), dead, turn);
+            drop(hb);
+            tokio::task::yield_now().await;
+
+            // Before the deadline: NOT reclaimable (single-holder still honored).
+            assert!(!cell.reclaim_if_expired(deadline.saturating_sub(1)));
+            // Past the (un-renewed, short) deadline: a replacement reclaims it.
+            assert!(
+                cell.reclaim_if_expired(deadline),
+                "a dead holder that stopped heartbeating is reclaimed after the short deadline"
+            );
+            // And a replacement (new instance, new turn) can acquire the freed cell.
+            let replacement = watcher(2);
+            let turn_b = TurnKey::new(ch, 33, 0);
+            assert!(
+                cell.try_acquire(
+                    turn_b,
+                    replacement,
+                    40,
+                    72,
+                    deadline.saturating_add(WATCHER_DELIVERY_LEASE_DEADLINE_MS),
+                ),
+                "a reclaimed cell is acquirable by the replacement (no black-hole)"
+            );
+        }
+
+        /// (c) `renew` by a NON-holder, or for the WRONG turn, is a no-op (false)
+        /// and does NOT touch the live holder's deadline — the heartbeat of one
+        /// holder can never extend (or steal) another's lease.
+        #[tokio::test(flavor = "current_thread", start_paused = true)]
+        async fn renew_by_non_holder_or_wrong_turn_is_noop() {
+            let ch = ChannelId::new(7103);
+            let cell = DeliveryLeaseCell::new(ch);
+            let turn = TurnKey::new(ch, 44, 0);
+            let holder = watcher(1);
+
+            let now = lease_now_ms();
+            let deadline = now.saturating_add(1_000);
+            assert!(cell.try_acquire(turn, holder, 0, 16, deadline));
+
+            // Wrong holder, correct turn → no-op.
+            assert!(
+                !cell.renew(watcher(2), turn, now.saturating_add(99_999)),
+                "a different holder cannot renew the lease"
+            );
+            // Correct holder, wrong (stale) turn → no-op.
+            let wrong_turn = TurnKey::new(ch, 45, 0);
+            assert!(
+                !cell.renew(holder, wrong_turn, now.saturating_add(99_999)),
+                "a stale/wrong turn cannot renew the lease"
+            );
+            // The deadline is UNCHANGED by the rejected renews.
+            assert_eq!(
+                deadline_of(&cell),
+                Some(deadline),
+                "rejected renews must not mutate the deadline"
+            );
+
+            // The TRUE holder/turn CAN renew → deadline extends.
+            let extended = now.saturating_add(WATCHER_DELIVERY_LEASE_DEADLINE_MS);
+            assert!(cell.renew(holder, turn, extended));
+            assert_eq!(deadline_of(&cell), Some(extended));
+
+            // After commit (Committed, not Leased) even the true holder's renew
+            // no-ops — a late heartbeat tick after commit cannot disturb the cell.
+            assert!(cell.commit(holder, turn, 0, 16, LeaseOutcome::Delivered));
+            assert!(
+                !cell.renew(holder, turn, extended.saturating_add(1)),
+                "a renew on a Committed lease (a late tick after commit) is a no-op"
+            );
+        }
     }
 }

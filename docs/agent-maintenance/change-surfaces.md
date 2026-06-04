@@ -116,13 +116,19 @@
   - `src/services/discord/watchers/lifecycle.rs` (2301 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior).
-  - `src/services/discord/tmux.rs` (2228 lines after #2558 dead-code sweep;
+  - `src/services/discord/tmux.rs` (2241 lines after #2558 dead-code sweep;
     failover guard; #3087 `session_panel_instance_key`/`write_spawn_nonce`
     re-exports; #3107 `RestoredWatcherTurn.injected_prompt_message_id`;
     #3016 option A `normal_completion` finalize-decouple param;
     #3017 monitor-auto-turn finalizer routing + ledger-generation +
-    relay-watermark reset re-exports; still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (7805 lines after #2558
+    relay-watermark reset re-exports; +10 from #3041 P1-1 making
+    `advance_watcher_confirmed_end` `pub(in crate::services::discord)` +
+    doc-comment — the watcher commits the delivery lease and advances this
+    monotonic-CAS offset INLINE (synchronously) on a `Delivered` outcome; the
+    finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
+    (retained for a later phase, not the live watcher path after the R2 revert);
+    still giant-file territory).
+  - `src/services/discord/tmux_watcher.rs` (8168 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -148,6 +154,18 @@
     + generation-aware watermark resets, suppresses a wake/idle terminal already
     committed by another relay actor) and the monitor-auto-turn synthetic-id /
     ledger-generation threading through `finish_monitor_auto_turn_if_claimed`;
+    +185 from #3041 P1-1 wiring the WATCHER terminal delivery through the live
+    `DeliveryLeaseCell`: a per-spawn `instance_id`, the B3 acquire-deadline
+    constant + rationale, the pre-send `try_acquire` on the turn-pinned identity,
+    the B2 single-holder skip arm (a replacement watcher must not re-emit a held
+    range), and committing the lease + advancing `advance_watcher_confirmed_end`
+    for the watcher terminal path INLINE (synchronously; the actor
+    `commit_delivery`/`release_delivery` round-trip was reverted in R2 — those
+    actor handlers are DORMANT, retained for a later phase); plus the R2 Issue-1
+    heartbeat: a `DeliveryLeaseHeartbeat` background task `renew()`s the lease
+    every 5s while the send future is in flight (deadline cut to 15s for fast
+    dead-holder recovery), stopped before the inline commit so a long multi-chunk
+    send is never reclaimed mid-flight;
     split loop helpers further before adding behavior).
   - `src/services/discord/tui_prompt_relay.rs` (3849 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
