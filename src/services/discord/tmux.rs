@@ -2264,7 +2264,7 @@ async fn finish_restored_watcher_active_turn(
     normal_completion: bool,
     kickoff_queue: bool,
     stop_source: &'static str,
-) {
+) -> bool {
     // Either flag implies the watcher must clear the channel mailbox now:
     //   * `finish_mailbox_on_completion` → inflight-restore semantics (a
     //     restored/recovered watcher inherits its turn from the bridge, so
@@ -2290,8 +2290,16 @@ async fn finish_restored_watcher_active_turn(
     // delegated-debt paths, but they are no longer the only way the watcher's
     // normal-completion finalize fires — that's the decoupling. (The finalizer's
     // idempotence guarantees no double finalize when the bridge already won.)
+    //
+    // #3016 (codex R1): the return value reports whether this helper actually
+    // DROVE the finalize (i.e. did NOT early-return). The caller folds it into
+    // `watcher_handled_mailbox_finish` so the post-finalize lifecycle (queue
+    // kickoff suppression + terminal-stop-candidate path) reflects the real
+    // finalize, not just the legacy flag intent — otherwise the newly decoupled
+    // `normal_completion`-only finalize would leave that signal false and
+    // double-schedule kickoff / skip terminal-stop handling.
     if !normal_completion && !finish_mailbox_on_completion && !delegated_finalize_owed {
-        return;
+        return false;
     }
 
     if delegated_finalize_owed {
@@ -2357,6 +2365,8 @@ async fn finish_restored_watcher_active_turn(
             stop_source,
         );
     }
+    // Drove the finalize (reached here past the early-return gate).
+    true
 }
 
 /// Background watcher that continuously tails a tmux output file.

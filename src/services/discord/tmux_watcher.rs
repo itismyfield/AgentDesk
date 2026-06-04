@@ -7882,11 +7882,34 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // entry. The redundant `should_kickoff_queue` block further
             // below is also `dispatch_ok`-gated and remains as a fallback
             // for paths where the helper short-circuited.
-            // #3016: the in-memory `inflight_state` (loaded at L~5860) still
-            // holds the real id even though the on-disk file was cleared above,
-            // so pass it for an exact ledger match.
-            let restored_user_msg_id = inflight_state.as_ref().map(|s| s.user_msg_id).unwrap_or(0);
-            finish_restored_watcher_active_turn(
+            // #3016 (codex R1): derive the finalize id from the TURN-PINNED
+            // snapshot, never from the late `inflight_state` re-read above. That
+            // late read reloads the on-disk inflight AFTER the relay/emit; the
+            // watcher loop is not turn-scoped (see the L~7327 warning), so a
+            // follow-up turn may have already rewritten inflight on disk by then —
+            // its `user_msg_id` would belong to a NEWER turn. Under the old
+            // flag-gated path this finalize fired narrowly; with `normal_completion
+            // = true` it fires UNCONDITIONALLY, so a stale-id match here could
+            // `finish_turn_if_matches` and release the WRONG (follow-up) turn.
+            //
+            // `inflight_identity_before_relay` is the pre-relay snapshot
+            // (`inflight_before_relay`, loaded L~6163) already filtered to this
+            // watcher's `tmux_session_name` by `matching_watcher_turn_identity`.
+            // Re-assert the session match defensively; if the pinned identity is
+            // missing OR not for this session, pass 0 (`user_msg_id == 0` = no
+            // exact ledger match — the finalizer refuses to release a mismatched
+            // live turn, see turn_finalizer L~526) instead of a possibly-stale
+            // follow-up id.
+            let restored_user_msg_id = inflight_identity_before_relay
+                .as_ref()
+                .filter(|identity| {
+                    identity.user_msg_id != 0
+                        && identity.tmux_session_name.as_deref().map(str::trim)
+                            == Some(tmux_session_name.trim())
+                })
+                .map(|identity| identity.user_msg_id)
+                .unwrap_or(0);
+            let watcher_drove_finalize = finish_restored_watcher_active_turn(
                 &shared,
                 &provider_kind,
                 channel_id,
@@ -7922,8 +7945,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             let delegated_finalize_owed = owed;
             let mailbox = shared.mailbox(channel_id);
             let has_active_turn = mailbox.has_active_turn().await;
+            // #3016 (codex R1): couple the post-finalize lifecycle to the ACTUAL
+            // finalize, not just the legacy flag intent. `watcher_drove_finalize`
+            // is true whenever the helper ran the finalizer (here always, via
+            // `normal_completion = true`) — so queue-kickoff suppression and the
+            // terminal-stop-candidate path below correctly account for the newly
+            // decoupled normal-completion finalize even when both legacy flags are
+            // false. (Folding the flags in too keeps behavior identical on the
+            // flag-driven paths.)
             let watcher_handled_mailbox_finish =
-                finish_mailbox_on_completion || delegated_finalize_owed;
+                watcher_drove_finalize || finish_mailbox_on_completion || delegated_finalize_owed;
             let should_kickoff_queue = if watcher_handled_mailbox_finish
                 || monitor_auto_turn_finished
                 || has_active_turn
@@ -8922,6 +8953,31 @@ mod tests {
         assert_eq!(next.as_deref(), Some("queued follow-up"));
     }
 
+    // #3016 test helper: a real, non-stale watcher handle so the
+    // `mailbox_finalize_owed` precondition is NON-vacuous and the helper's
+    // `swap(false)` revoke path actually has a slot to act on. Mirrors the
+    // `live_watcher_handle` builder in mod.rs's registry tests.
+    fn test_watcher_handle(
+        tmux_session_name: &str,
+        mailbox_finalize_owed: bool,
+    ) -> crate::services::discord::TmuxWatcherHandle {
+        crate::services::discord::TmuxWatcherHandle {
+            tmux_session_name: tmux_session_name.to_string(),
+            output_path: format!("/tmp/{tmux_session_name}.jsonl"),
+            paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            resume_offset: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pause_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_delivered: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_heartbeat_ts_ms: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(
+                crate::services::discord::tmux_watcher_now_ms(),
+            )),
+            mailbox_finalize_owed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                mailbox_finalize_owed,
+            )),
+        }
+    }
+
     // #3016 option A (watcher normal-completion finalize decouple).
     //
     // Proves the decoupling directly: a *normal completion* drives the
@@ -8935,6 +8991,11 @@ mod tests {
     // is now redundant for this path (flag_now_redundant). The finalizer's
     // idempotence (proven by the #3140 matrix) keeps this from over-finalizing
     // when the bridge already finalized first.
+    //
+    // codex R1 hardening: registers a REAL watcher handle (so the
+    // `mailbox_finalize_owed` precondition is non-vacuous and the helper's
+    // `swap(false)` revoke path is exercised), asserts the finalize drove via
+    // the return value, and keeps the idempotence assertion.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn normal_completion_finalizes_with_both_legacy_flags_false() {
@@ -8947,6 +9008,14 @@ mod tests {
         let shared = crate::services::discord::make_shared_data_for_tests();
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(987_3016);
+        let tmux_session_name = "AgentDesk-claude-adk-cc-9873016";
+
+        // Register a REAL watcher handle. The `mailbox_finalize_owed` flag is
+        // false here, so the precondition below is observed on an ACTUAL slot
+        // (not the vacuous "no handle exists" case the original test had).
+        shared
+            .tmux_watchers
+            .insert(channel_id, test_watcher_handle(tmux_session_name, false));
 
         // Seed a live active mailbox turn (cancel token registered) so we can
         // observe the finalize releasing it.
@@ -8961,22 +9030,25 @@ mod tests {
             .await
         );
 
-        // Pre-condition: the legacy debt flag is NOT set for this channel's
-        // watcher. (No `mailbox_finalize_owed.store(true)` anywhere.) Combined
-        // with `finish_mailbox_on_completion = false` below, BOTH legacy gates
-        // are off — the only thing that can drive the finalize is the new
+        // Pre-condition (NON-vacuous: real handle present): the legacy debt flag
+        // is NOT set for this channel's watcher. Combined with
+        // `finish_mailbox_on_completion = false` below, BOTH legacy gates are
+        // off — the only thing that can drive the finalize is the new
         // `normal_completion` signal.
-        if let Some(watcher) = shared.tmux_watchers.get(&channel_id) {
-            assert!(
-                !watcher
-                    .mailbox_finalize_owed
-                    .load(std::sync::atomic::Ordering::Acquire),
-                "precondition: mailbox_finalize_owed must be false for the decouple proof"
-            );
-        }
+        let watcher = shared
+            .tmux_watchers
+            .get(&channel_id)
+            .expect("real watcher handle must be registered for a non-vacuous precondition");
+        assert!(
+            !watcher
+                .mailbox_finalize_owed
+                .load(std::sync::atomic::Ordering::Acquire),
+            "precondition: mailbox_finalize_owed must be false for the decouple proof"
+        );
+        drop(watcher);
 
         crate::services::discord::inflight::clear_inflight_state(&provider, channel_id.get());
-        super::finish_restored_watcher_active_turn(
+        let drove = super::finish_restored_watcher_active_turn(
             &shared,
             &provider,
             channel_id,
@@ -8988,6 +9060,10 @@ mod tests {
             "normal_completion_decouple_test",
         )
         .await;
+        assert!(
+            drove,
+            "normal_completion must drive the finalize (helper must not early-return)"
+        );
 
         // The finalize fired purely on `normal_completion`: the active mailbox
         // turn's cancel token is released even though both legacy flags were
@@ -9017,6 +9093,148 @@ mod tests {
         assert!(
             snapshot_after.cancel_token.is_none(),
             "second normal-completion submit stays a no-op (idempotent finalizer)"
+        );
+    }
+
+    // #3016 codex R1 (wrong-turn finalize guard). Companion to the decouple
+    // test above. Exercises the SAFETY PROPERTY the Issue-1 call-site fix
+    // depends on: once `normal_completion = true` finalizes UNCONDITIONALLY,
+    // the id handed to the finalizer must name the SAME turn the watcher just
+    // completed — otherwise a stale/follow-up id would `finish_turn_if_matches`
+    // and release the WRONG (newer) live turn.
+    //
+    // Scenario: turn A (id 3001) is finalized correctly; then a NEWER turn B
+    // (id 4002) becomes the live active turn; a stale normal-completion submit
+    // that mistakenly carries turn A's id (3001) must NOT release turn B. The
+    // call site avoids this by deriving the id from the turn-PINNED pre-relay
+    // snapshot (falling back to 0), but the finalizer's exact-id match is the
+    // backstop this asserts.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn stale_normal_completion_does_not_release_newer_active_turn() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(987_3017);
+        let tmux_session_name = "AgentDesk-claude-adk-cc-9873017";
+
+        // Real watcher handle with the legacy debt flag PRE-SET so we can also
+        // assert the helper's `swap(false)` revoke path runs on the matching
+        // (correct-turn) finalize.
+        shared
+            .tmux_watchers
+            .insert(channel_id, test_watcher_handle(tmux_session_name, true));
+
+        // Turn A is the live active turn (id 3001).
+        assert!(
+            mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                std::sync::Arc::new(CancelToken::new()),
+                UserId::new(42),
+                MessageId::new(3001),
+            )
+            .await
+        );
+
+        crate::services::discord::inflight::clear_inflight_state(&provider, channel_id.get());
+        // Finalize turn A with its OWN id — releases turn A and revokes the
+        // legacy flag.
+        let drove_a = super::finish_restored_watcher_active_turn(
+            &shared,
+            &provider,
+            channel_id,
+            3001,
+            false,
+            true, // delegated_finalize_owed (real flag-driven correct-turn finalize)
+            true,
+            false,
+            "stale_guard_turn_a",
+        )
+        .await;
+        assert!(drove_a, "correct-turn finalize must drive");
+        assert!(
+            mailbox_snapshot(&shared, channel_id)
+                .await
+                .cancel_token
+                .is_none(),
+            "turn A must be released by its matching finalize"
+        );
+        // The matching finalize consumed the debt: legacy flag revoked.
+        let watcher = shared
+            .tmux_watchers
+            .get(&channel_id)
+            .expect("handle present");
+        assert!(
+            !watcher
+                .mailbox_finalize_owed
+                .load(std::sync::atomic::Ordering::Acquire),
+            "matching finalize must revoke mailbox_finalize_owed (swap(false) path)"
+        );
+        drop(watcher);
+
+        // A NEWER turn B (id 4002) becomes the live active turn.
+        let token_b = std::sync::Arc::new(CancelToken::new());
+        assert!(
+            mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                token_b.clone(),
+                UserId::new(42),
+                MessageId::new(4002),
+            )
+            .await
+        );
+
+        // A STALE normal-completion submit mistakenly carrying turn A's id
+        // (3001) must NOT release turn B (4002). It drove the finalizer (past
+        // the gate) but the exact-id match misses, so turn B stays live.
+        let drove_stale = super::finish_restored_watcher_active_turn(
+            &shared,
+            &provider,
+            channel_id,
+            3001, // STALE id (turn A), while turn B (4002) is live
+            false,
+            false,
+            true, // normal_completion fires unconditionally
+            false,
+            "stale_guard_stale_id",
+        )
+        .await;
+        assert!(
+            drove_stale,
+            "the stale submit still passes the gate (normal_completion = true)"
+        );
+        let snapshot_b = mailbox_snapshot(&shared, channel_id).await;
+        assert!(
+            snapshot_b.cancel_token.is_some(),
+            "a stale id MUST NOT release the newer active turn B (wrong-turn guard)"
+        );
+
+        // Sanity: turn B finalizes correctly when handed its OWN id.
+        super::finish_restored_watcher_active_turn(
+            &shared,
+            &provider,
+            channel_id,
+            4002,
+            false,
+            false,
+            true,
+            false,
+            "stale_guard_turn_b",
+        )
+        .await;
+        assert!(
+            mailbox_snapshot(&shared, channel_id)
+                .await
+                .cancel_token
+                .is_none(),
+            "turn B is released by its matching finalize"
         );
     }
 
