@@ -1224,6 +1224,59 @@ impl VoiceIdSequences {
     }
 }
 
+/// Cohesive sub-concern of [`VoiceBargeInRuntime`]: the F6 (#2046) `Config`
+/// snapshot hot-cache (#3038 god-object split, config-cache slice).
+///
+/// Wraps the single `Mutex<Option<(Instant, Arc<Config>)>>` slot that used to
+/// live directly on `VoiceBargeInRuntime`. The accessors below preserve the
+/// original lock discipline and TTL fallback exactly:
+/// - `lookup_within_ttl` returns the cached `Arc<Config>` only while the entry
+///   is younger than `VOICE_CONFIG_CACHE_TTL`, silently treating a poisoned /
+///   contended lock as a miss (`Ok` guard required, never blocking-on-panic),
+/// - `store` overwrites the slot with a freshly stamped entry, also ignoring a
+///   failed lock,
+/// - the spawn_blocking reload itself stays on the runtime so the async control
+///   flow and side-effect ordering are byte-for-byte unchanged.
+struct ConfigSnapshotCache {
+    slot: std::sync::Mutex<Option<(Instant, Arc<crate::config::Config>)>>,
+}
+
+impl ConfigSnapshotCache {
+    fn new() -> Self {
+        Self {
+            slot: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Return the cached snapshot iff it is still within the TTL window as of
+    /// `now`. A poisoned or contended lock is treated as a cache miss, matching
+    /// the original `if let Ok(guard) = ... .lock()` fallback.
+    fn lookup_within_ttl(&self, now: Instant) -> Option<Arc<crate::config::Config>> {
+        if let Ok(guard) = self.slot.lock()
+            && let Some((loaded_at, cached)) = guard.as_ref()
+            && now.duration_since(*loaded_at) < VOICE_CONFIG_CACHE_TTL
+        {
+            return Some(cached.clone());
+        }
+        None
+    }
+
+    /// Stamp and store a freshly loaded snapshot. A failed lock is ignored,
+    /// matching the original `if let Ok(mut guard) = ... .lock()` write.
+    fn store(&self, loaded_at: Instant, config: Arc<crate::config::Config>) {
+        if let Ok(mut guard) = self.slot.lock() {
+            *guard = Some((loaded_at, config));
+        }
+    }
+
+    /// Test-only seed of the cache slot (mirrors the previous direct
+    /// `*runtime.config_cache.lock().unwrap() = Some(...)` writes).
+    #[cfg(test)]
+    fn seed(&self, loaded_at: Instant, config: Arc<crate::config::Config>) {
+        *self.slot.lock().unwrap() = Some((loaded_at, config));
+    }
+}
+
 pub(in crate::services::discord) struct VoiceBargeInRuntime {
     enabled: bool,
     barge_in_enabled: bool,
@@ -1253,8 +1306,9 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     // Ordering 을 그대로 보존한다.
     id_sequences: VoiceIdSequences,
     // F6 (#2046): `resolve_voice_turn_target` 가 매 utterance 마다 YAML 을
-    // 재파싱하지 않도록 한 `Config` snapshot 핫캐시.
-    config_cache: std::sync::Mutex<Option<(Instant, Arc<crate::config::Config>)>>,
+    // 재파싱하지 않도록 한 `Config` snapshot 핫캐시. #3038: TTL/lock 규율을
+    // ConfigSnapshotCache 로 격리해 폴백 동작을 보존.
+    config_cache: ConfigSnapshotCache,
     // F12 (#2046): voice alias collision 경고를 1회만 노출. utterance 마다 같은
     // collision 으로 warn 이 쏟아져 운영 로그가 묻히는 것을 막는다.
     alias_collision_signature: std::sync::Mutex<Option<String>>,
@@ -1308,7 +1362,7 @@ impl VoiceBargeInRuntime {
             active_voice_routes: dashmap::DashMap::new(),
             deferred_buffers: dashmap::DashMap::new(),
             id_sequences: VoiceIdSequences::new(),
-            config_cache: std::sync::Mutex::new(None),
+            config_cache: ConfigSnapshotCache::new(),
             alias_collision_signature: std::sync::Mutex::new(None),
             inflight_foreground_cancels: dashmap::DashMap::new(),
             #[cfg(test)]
@@ -1340,7 +1394,7 @@ impl VoiceBargeInRuntime {
             active_voice_routes: dashmap::DashMap::new(),
             deferred_buffers: dashmap::DashMap::new(),
             id_sequences: VoiceIdSequences::new(),
-            config_cache: std::sync::Mutex::new(None),
+            config_cache: ConfigSnapshotCache::new(),
             alias_collision_signature: std::sync::Mutex::new(None),
             inflight_foreground_cancels: dashmap::DashMap::new(),
             #[cfg(test)]
@@ -3445,19 +3499,14 @@ impl VoiceBargeInRuntime {
     /// 5초 TTL 로 묶어 부하를 줄이고 async executor 블록도 회피한다.
     async fn cached_config(&self) -> Arc<crate::config::Config> {
         let now = Instant::now();
-        if let Ok(guard) = self.config_cache.lock()
-            && let Some((loaded_at, cached)) = guard.as_ref()
-            && now.duration_since(*loaded_at) < VOICE_CONFIG_CACHE_TTL
-        {
-            return cached.clone();
+        if let Some(cached) = self.config_cache.lookup_within_ttl(now) {
+            return cached;
         }
         let fresh = tokio::task::spawn_blocking(crate::config::load_graceful)
             .await
             .unwrap_or_else(|_| crate::config::Config::default());
         let arc = Arc::new(fresh);
-        if let Ok(mut guard) = self.config_cache.lock() {
-            *guard = Some((Instant::now(), arc.clone()));
-        }
+        self.config_cache.store(Instant::now(), arc.clone());
         arc
     }
 
@@ -5975,7 +6024,7 @@ mod tests {
         let runtime = enabled_runtime();
         let mut config = crate::config::Config::default();
         config.agents = vec![test_agent("codex")];
-        *runtime.config_cache.lock().unwrap() = Some((Instant::now(), Arc::new(config)));
+        runtime.config_cache.seed(Instant::now(), Arc::new(config));
 
         assert_eq!(
             runtime
@@ -6000,7 +6049,7 @@ mod tests {
         agent_b.id = "agent-b".to_string();
         agent_b.voice.channel_id = Some("400".to_string());
         config.agents = vec![agent_a, agent_b];
-        *runtime.config_cache.lock().unwrap() = Some((Instant::now(), Arc::new(config)));
+        runtime.config_cache.seed(Instant::now(), Arc::new(config));
 
         assert_eq!(
             runtime
@@ -6025,7 +6074,7 @@ mod tests {
         agent_b.id = "agent-b".to_string();
         agent_b.voice.channel_id = Some("400".to_string());
         config.agents = vec![agent_a, agent_b];
-        *runtime.config_cache.lock().unwrap() = Some((Instant::now(), Arc::new(config)));
+        runtime.config_cache.seed(Instant::now(), Arc::new(config));
 
         assert_eq!(
             runtime
@@ -6054,7 +6103,7 @@ mod tests {
         agent_b.id = "agent-b".to_string();
         agent_b.voice.channel_id = Some("400".to_string());
         config.agents = vec![agent_a, agent_b];
-        *runtime.config_cache.lock().unwrap() = Some((Instant::now(), Arc::new(config)));
+        runtime.config_cache.seed(Instant::now(), Arc::new(config));
 
         assert_eq!(
             runtime
