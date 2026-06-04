@@ -1999,12 +1999,25 @@ pub(in crate::services::discord) async fn handle_event(
             // trigger-capable announce/allowed-bot messages used by
             // `send-to-agent`; clearing only human messages left stale
             // `📦 idle` cards under valid bot-origin E2E turns.
+            //
+            // codex R3 P2: use the SAME capture-at-claim + compare-and-clear
+            // variant the TUI claim path uses (`tui_prompt_relay` →
+            // `spawn_clear_captured_idle_recap_for_channel`). The non-captured
+            // `spawn_clear_idle_recap_for_channel` ran its
+            // `lookup_active_recap_for_channel` INSIDE the detached task, so a
+            // delayed clear could look up + delete a NEWER card posted by a
+            // later idle period (NOT self-healing — the policy posts at most
+            // once per idle period). Capturing the pointer synchronously here,
+            // at intake time, and clearing ONLY that captured id makes a
+            // delayed clear a no-op against any newer card. The http + pool +
+            // channel_id needed for the synchronous lookup are all in scope.
             if let Some(pool) = data.shared.pg_pool.as_ref().cloned() {
-                crate::services::discord::idle_recap::spawn_clear_idle_recap_for_channel(
+                crate::services::discord::idle_recap::spawn_clear_captured_idle_recap_for_channel(
                     ctx.http.clone(),
                     pool,
                     channel_id.get(),
-                );
+                )
+                .await;
             }
 
             // #189: Generic DM reply tracking — consume pending entry if present.

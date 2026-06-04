@@ -928,36 +928,16 @@ async fn clear_idle_recap_for_channel_with<Lookup, LookupFut, Delete, DeleteFut,
     }
 }
 
-/// Clear the active idle-recap card for a Discord channel using the real
-/// Postgres pool + Discord http. Shared by the Discord-intake path and the
-/// TUI-driven turn path so neither has to re-implement the
-/// lookup → delete → clear-pointer sequence (#3146).
-pub(in crate::services::discord) async fn clear_idle_recap_for_channel(
-    http: &serenity::Http,
-    pool: &PgPool,
-    channel_id: u64,
-) {
-    clear_idle_recap_for_channel_with(
-        channel_id,
-        |chan| lookup_active_recap_for_channel(pool, chan),
-        |chan, msg| delete_previous_card(http, chan, msg),
-        |session_key, msg| async move { clear_recap_pointer(pool, &session_key, msg).await },
-    )
-    .await;
-}
-
-/// Spawn a detached task that clears the active idle-recap card for a channel.
-/// Used wherever a turn becomes active and the caller must not block on the
-/// best-effort Discord delete / pointer clear (#3146).
-pub(in crate::services::discord) fn spawn_clear_idle_recap_for_channel(
-    http: std::sync::Arc<serenity::Http>,
-    pool: PgPool,
-    channel_id: u64,
-) {
-    tokio::spawn(async move {
-        clear_idle_recap_for_channel(&http, &pool, channel_id).await;
-    });
-}
+// codex R3 P2: the non-captured `clear_idle_recap_for_channel` /
+// `spawn_clear_idle_recap_for_channel` wrappers were removed. Both the
+// Discord-intake path and the TUI claim path now capture the recap pointer
+// SYNCHRONOUSLY at claim time and clear ONLY that captured id via
+// `spawn_clear_captured_idle_recap_for_channel` — see its doc-comment. The
+// non-captured variant ran `lookup_active_recap_for_channel` inside the
+// detached task, so a delayed clear could delete a NEWER card from a later
+// idle period (NOT self-healing). The generic
+// `clear_idle_recap_for_channel_with` seam below is retained only because the
+// unit tests exercise its lookup → delete → clear-pointer decision logic.
 
 /// Clear ONLY the specific recap card identified by `(session_key, channel_id,
 /// message_id)` — never whatever card happens to be current at clear time.
@@ -1120,6 +1100,35 @@ fn inflight_has_active_turn(provider: &ProviderKind, channel_id: u64) -> bool {
 /// the top of the route already deduped this cycle, so skipping is safe.
 pub(crate) fn should_post_recap(active_turn: bool) -> bool {
     !active_turn
+}
+
+/// #3146 Part 1 (codex R3 P1 — check-then-post TOCTOU): what the post job does
+/// with a card it ALREADY posted, given the active-turn state re-checked AFTER
+/// the Discord POST returned (and before persisting the pointer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PostRecheckAction {
+    /// Channel is still idle — persist the just-posted card's pointer.
+    Persist,
+    /// A turn raced into the (check → post) window — UNDO the post: delete the
+    /// just-posted card and do NOT persist its pointer. The capture-at-claim
+    /// clear of that racing turn grabbed the OLD pointer, so it cannot remove
+    /// THIS card; persisting would leave a stale `📦 … idle` card over the live
+    /// turn. The idle-cycle stamp already deduped this cycle, so not persisting
+    /// is safe.
+    DeleteAndSkipPersist,
+}
+
+/// Pure decision seam for the post-recheck. The post job calls this with the
+/// active-turn state observed AFTER `post_recap_card` returns; the residual
+/// window (a turn starting in the few-ms between the POST returning and this
+/// recheck) is inherent and is documented at the call site in
+/// `server::routes::idle_recap::run_idle_recap_post_job`.
+pub(crate) fn post_recheck_action(active_turn_after_post: bool) -> PostRecheckAction {
+    if should_post_recap(active_turn_after_post) {
+        PostRecheckAction::Persist
+    } else {
+        PostRecheckAction::DeleteAndSkipPersist
+    }
 }
 
 #[cfg(test)]
@@ -1285,6 +1294,60 @@ mod tests {
 
         assert_eq!(deleted.borrow().as_slice(), &[(777, 4242)]);
         assert_eq!(*cleared_count.borrow(), 1);
+    }
+
+    /// codex R3 P2: the Discord-INTAKE clear now uses the SAME capture-at-claim
+    /// variant (`spawn_clear_captured_idle_recap_for_channel`) the TUI claim
+    /// path uses, instead of the old non-captured `spawn_clear_idle_recap_for_
+    /// channel` that looked up the pointer INSIDE the detached task. Capturing
+    /// the id at intake time and clearing ONLY that captured id means a delayed
+    /// intake-clear is a no-op against a NEWER card from a later idle period:
+    /// both the delete probe and the pointer CAS are keyed on the captured id,
+    /// so when the pointer has advanced the CAS reports 0 rows affected
+    /// (`Ok(false)`) and the newer card survives. Mirrors the TUI capture test
+    /// for the intake call site (both now route through the same seam).
+    #[tokio::test]
+    async fn intake_capture_clear_targets_captured_id_and_cas_is_noop_when_pointer_advanced() {
+        let deleted: Rc<RefCell<Vec<(u64, u64)>>> = Rc::new(RefCell::new(Vec::new()));
+        let cleared: Rc<RefCell<Vec<(String, u64)>>> = Rc::new(RefCell::new(Vec::new()));
+        let deleted_for_closure = deleted.clone();
+        let cleared_for_closure = cleared.clone();
+
+        // Captured at intake time: the OLD card (id 4242). A NEWER card (id
+        // 9999) was posted by a later idle period, so the live pointer is 9999.
+        let intake_captured_msg = 4242u64;
+        clear_specific_idle_recap_card_with(
+            "discord:claude:intake-sess".to_string(),
+            555,
+            intake_captured_msg,
+            move |chan, msg| {
+                let deleted = deleted_for_closure.clone();
+                async move {
+                    deleted.borrow_mut().push((chan, msg));
+                }
+            },
+            move |session_key, msg| {
+                let cleared = cleared_for_closure.clone();
+                async move {
+                    cleared.borrow_mut().push((session_key, msg));
+                    // CAS no-op: the pointer advanced to 9999 (a later idle
+                    // period's card), so the captured-id UPDATE affects 0 rows.
+                    Ok(false)
+                }
+            },
+        )
+        .await;
+
+        // Both the delete probe and the CAS used the id captured AT INTAKE
+        // (4242), never the newer 9999 — the later card is left intact.
+        assert_eq!(deleted.borrow().as_slice(), &[(555, intake_captured_msg)]);
+        assert_eq!(
+            cleared.borrow().as_slice(),
+            &[(
+                "discord:claude:intake-sess".to_string(),
+                intake_captured_msg
+            )]
+        );
     }
 
     fn snapshot_with_sessions(
@@ -1542,6 +1605,96 @@ mod tests {
         // A turn became active during compose → skip (do NOT post a stale
         // `📦 … idle` card over the live turn).
         assert!(!should_post_recap(true));
+    }
+
+    // ---------------------------------------------------------------
+    // #3146 Part 1 (codex R3 P1 — check-then-post TOCTOU): after the POST
+    // returns, re-check active-turn. If a turn raced into the (check → post)
+    // window, UNDO the post (delete the just-posted card, do NOT persist).
+    // ---------------------------------------------------------------
+
+    /// Pure recheck decision: idle-after-post → persist; active-after-post →
+    /// delete the just-posted card and skip persist.
+    #[test]
+    fn post_recheck_action_persists_when_idle_deletes_when_turn_raced_in() {
+        assert_eq!(
+            post_recheck_action(false),
+            PostRecheckAction::Persist,
+            "still idle after POST → persist the card pointer"
+        );
+        assert_eq!(
+            post_recheck_action(true),
+            PostRecheckAction::DeleteAndSkipPersist,
+            "a turn raced the check→post window → delete the just-posted card, skip persist"
+        );
+    }
+
+    /// End-to-end of the post-job's commit branch using the SAME seam the route
+    /// uses: simulate "idle at pre-check, ACTIVE at post-recheck". The recheck
+    /// must DELETE the just-posted card and NOT persist its pointer. Mirrors the
+    /// route's `run_idle_recap_post_job` post-recheck without a live Postgres or
+    /// Discord http.
+    #[tokio::test]
+    async fn post_recheck_deletes_just_posted_card_and_does_not_persist_when_turn_raced_in() {
+        let deleted: Rc<RefCell<Vec<(u64, u64)>>> = Rc::new(RefCell::new(Vec::new()));
+        let persisted: Rc<RefCell<Vec<(u64, u64)>>> = Rc::new(RefCell::new(Vec::new()));
+
+        // Pre-post check saw idle (so we posted); the POST returned this id.
+        let posted_message_id = 5151u64;
+        let channel_id = 777u64;
+        // ... but a TUI claim raced in during (check → post): active now.
+        let active_turn_after_post = true;
+
+        match post_recheck_action(active_turn_after_post) {
+            PostRecheckAction::DeleteAndSkipPersist => {
+                deleted.borrow_mut().push((channel_id, posted_message_id));
+                // NOTE: no persist call in this branch.
+            }
+            PostRecheckAction::Persist => {
+                persisted.borrow_mut().push((channel_id, posted_message_id));
+            }
+        }
+
+        assert_eq!(
+            deleted.borrow().as_slice(),
+            &[(channel_id, posted_message_id)],
+            "the just-posted card must be deleted"
+        );
+        assert!(
+            persisted.borrow().is_empty(),
+            "the pointer must NOT be persisted when a turn raced the check→post window"
+        );
+    }
+
+    /// Positive control: still idle at the post-recheck → persist the pointer,
+    /// delete nothing. This is the normal, common-case path.
+    #[tokio::test]
+    async fn post_recheck_persists_when_still_idle() {
+        let deleted: Rc<RefCell<Vec<(u64, u64)>>> = Rc::new(RefCell::new(Vec::new()));
+        let persisted: Rc<RefCell<Vec<(u64, u64)>>> = Rc::new(RefCell::new(Vec::new()));
+
+        let posted_message_id = 6262u64;
+        let channel_id = 888u64;
+        let active_turn_after_post = false;
+
+        match post_recheck_action(active_turn_after_post) {
+            PostRecheckAction::DeleteAndSkipPersist => {
+                deleted.borrow_mut().push((channel_id, posted_message_id));
+            }
+            PostRecheckAction::Persist => {
+                persisted.borrow_mut().push((channel_id, posted_message_id));
+            }
+        }
+
+        assert!(
+            deleted.borrow().is_empty(),
+            "nothing deleted when still idle"
+        );
+        assert_eq!(
+            persisted.borrow().as_slice(),
+            &[(channel_id, posted_message_id)],
+            "the pointer is persisted when the channel is still idle at the recheck"
+        );
     }
 
     /// Process-wide mutex: `inflight_has_active_turn` resolves the inflight
