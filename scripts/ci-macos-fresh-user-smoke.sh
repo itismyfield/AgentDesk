@@ -11,7 +11,14 @@ cd "$repo_root"
 
 python3 -m unittest tests.test_install_bootstrap_portable
 
-runner_temp="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+# The sandbox root is written into a generated config that is then checked for
+# private-home markers (e.g. /Users/<operator>). A self-hosted runner's
+# RUNNER_TEMP lives under the operator's home
+# (e.g. /Users/itismyfield/actions-runner/_work/_temp), so deriving the sandbox
+# from it would false-trip that portability check. Prefer the macOS system temp
+# ($TMPDIR → /var/folders/...), which is outside any user home, and only fall
+# back to RUNNER_TEMP/tmp.
+runner_temp="${TMPDIR:-${RUNNER_TEMP:-/tmp}}"
 smoke_base="$(mktemp -d "$runner_temp/agentdesk-fresh-user.XXXXXX")"
 smoke_base="$(cd "$smoke_base" && pwd -P)"
 trap 'rm -rf "$smoke_base"' EXIT
