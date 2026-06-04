@@ -238,6 +238,13 @@
     split before adding non-bugfix behavior).
   - `src/services/discord/turn_bridge/completion_guard.rs` (1849 lines).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (1242 lines).
+  - `src/services/discord/turn_finalizer.rs` (1011 prod lines; single-authority
+    turn-finalize state machine — ledger/actor-loop/reconciler. Crossed the
+    giant-file threshold when #3041 P1-0 added the dormant `DeliveryLeaseCell`
+    finalizer messages/handlers on top of #3143's `FinalizeContext::monitor()` +
+    monitor turn-key/ledger-generation logic; tracked decompose target — see
+    `giant-file-registry.md` (owner `discord-finalizer`, deadline 2026-08-31,
+    issue #3016). Bugfix only outside a finalizer-decomposition plan).
   - `src/services/discord/formatting.rs` (2802 lines; +46 from #3082
     answer-flush-barrier guards (+11 around the plain multi-chunk send loops;
     +24 from the #3082 codex follow-up that also guards the edit/replace path
