@@ -1395,43 +1395,6 @@ pub(crate) const STALL_WATCHDOG_INITIAL_DELAY_SECS: u64 = 90;
 pub(crate) const STALL_WATCHDOG_THRESHOLD_SECS: u64 =
     2 * discord::inflight::INFLIGHT_STALENESS_THRESHOLD_SECS;
 
-/// #3126: snapshot the in-memory provider session selector (`session_id`) for
-/// `channel_id` before the 1446 force-clean tears the channel down. Returns
-/// `None` when there is no session row or no selector to preserve, in which
-/// case the matching `restore_resume_selector_snapshot` is a no-op.
-async fn preserve_resume_selector_snapshot(
-    shared: &Arc<SharedData>,
-    channel_id: ChannelId,
-) -> Option<String> {
-    let data = shared.core.lock().await;
-    data.sessions
-        .get(&channel_id)
-        .and_then(|session| session.session_id.clone())
-}
-
-/// #3126: re-assert a selector captured by `preserve_resume_selector_snapshot`
-/// after the 1446 force-clean. The force-clean tears down the tmux pane but
-/// must not invalidate the provider conversation selector; restoring it here
-/// keeps `claude --resume` viable for the user's next message. Only writes when
-/// a selector was captured AND the current row lacks one (so a legitimate
-/// concurrent clear/intake that already established a *different* session is
-/// never clobbered).
-async fn restore_resume_selector_snapshot(
-    shared: &Arc<SharedData>,
-    channel_id: ChannelId,
-    preserved: Option<String>,
-) {
-    let Some(selector) = preserved else {
-        return;
-    };
-    let mut data = shared.core.lock().await;
-    if let Some(session) = data.sessions.get_mut(&channel_id)
-        && session.session_id.is_none()
-    {
-        session.restore_provider_session(Some(selector));
-    }
-}
-
 /// Run a single stall-watchdog pass against one provider+SharedData.
 ///
 /// Iterates every attached watcher (via `tmux_watchers.iter()`), pulls the
@@ -1707,18 +1670,6 @@ pub(crate) async fn run_stall_watchdog_pass(
             discord::inflight::load_inflight_state(provider, channel_id.get())
                 .filter(|state| state.user_msg_id != 0)
                 .map(|state| state.user_msg_id);
-        // #3126 resume-selector preservation (1446 path ONLY): the force-clean
-        // below tears down the tmux session (`CleanupSession`) so any genuinely
-        // hung provider process is killed. But the *provider session selector*
-        // (the durable `claude_session_id` / in-memory `session_id` used by
-        // `claude --resume`) identifies the conversation, not the dead pane —
-        // it must survive so the user's next message resumes the same session
-        // instead of starting fresh. Snapshot it here and re-assert it after
-        // the mailbox/orphan finalize so this watchdog never invalidates a
-        // resumable selector. This is scoped to `1446_stall_watchdog`; /clear
-        // and genuine stale-resume invalidation paths are unaffected.
-        let preserved_resume_selector =
-            preserve_resume_selector_snapshot(&shared, channel_id).await;
         discord::inflight::delete_inflight_state_file(provider, channel_id.get());
         let cleared = discord::mailbox_clear_channel(&shared, provider, channel_id).await;
         discord::stall_recovery::finalize_orphaned_clear(
@@ -1727,7 +1678,6 @@ pub(crate) async fn run_stall_watchdog_pass(
             cleared.removed_token,
             "1446_stall_watchdog",
         );
-        restore_resume_selector_snapshot(&shared, channel_id, preserved_resume_selector).await;
         shared
             .dispatch_thread_parents
             .retain(|_, thread_id| *thread_id != channel_id);

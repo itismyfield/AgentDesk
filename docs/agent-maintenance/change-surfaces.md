@@ -206,10 +206,9 @@
   - `src/services/discord/health.rs` (2354 lines after #1879 snapshot/mailbox
     extraction; +3 from #3082 answer-flush-barrier field in the test SharedData
     constructor).
-  - `src/services/discord/health/recovery.rs` (2488 lines; health recovery
-    extraction surface, split further before adding non-bugfix behavior; +71
-    from #3126 stall-watchdog completed-idle false-positive guard + 1446
-    resume-selector preservation helpers/tests).
+  - `src/services/discord/health/recovery.rs` (2438 lines; health recovery
+    extraction surface, split further before adding non-bugfix behavior; +70
+    from #3126 stall-watchdog completed-idle false-positive guard tests).
   - `src/services/discord/router/message_handler/intake_turn.rs` (3620 lines;
     Discord message intake turn orchestration split from the router message
     handler; bugfix only outside a further extraction plan; +9 from #3082
