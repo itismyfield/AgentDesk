@@ -191,7 +191,11 @@ jobs:
           if command -v sccache >/dev/null 2>&1; then
             sccache_dir="${SCCACHE_DIR:-$HOME/.cache/sccache}"
             {
-              echo "SCCACHE_GHA_ENABLED="
+              # Disable the GHA-backed cache and use the local SCCACHE_DIR.
+              # sccache rejects an empty value, so this must be an explicit
+              # `false` (not ``) — otherwise rustc-as-wrapper aborts with
+              # "SCCACHE_GHA_ENABLED must be 'true'/'false'/...".
+              echo "SCCACHE_GHA_ENABLED=false"
               echo "RUSTC_WRAPPER=$(command -v sccache)"
               echo "SCCACHE_DIR=${sccache_dir}"
               echo "SCCACHE_CACHE_SIZE=${SCCACHE_CACHE_SIZE:-20G}"
@@ -200,7 +204,7 @@ jobs:
           else
             echo "::warning::sccache not found on self-hosted macOS runner; continuing without rustc wrapper."
             {
-              echo "SCCACHE_GHA_ENABLED="
+              echo "SCCACHE_GHA_ENABLED=false"
               echo "RUSTC_WRAPPER="
             } >> "$GITHUB_ENV"
           fi
