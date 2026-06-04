@@ -968,6 +968,43 @@ pub(crate) fn tmux_session_name_from_key(session_key: &str) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
+/// #3146 Part 1 (codex clear/post race): does this channel currently have an
+/// ACTIVE turn? Probed right before the recap post job commits a card.
+///
+/// Signal: a present, NON-stale inflight state for `(provider, channel_id)`.
+/// This is the exact marker the TUI claim path writes — `claim_tui_direct_
+/// synthetic_turn` calls `save_inflight_state` the moment a TUI-driven turn
+/// becomes active, keyed purely on `(provider, channel_id)` — so it is the
+/// same "a turn is in progress" signal the THREAD-GUARD / stall-watchdog
+/// (`INFLIGHT_STALENESS_THRESHOLD_SECS`) and the claim path itself treat as
+/// authoritative. Staleness is applied so a leftover inflight from a long-
+/// crashed dispatch never produces a false skip on a genuinely idle channel.
+///
+/// Cross-platform note: this reads the on-disk inflight sidecar (no tmux),
+/// so it compiles and behaves identically on Windows. No `#[cfg(unix)]`
+/// symbol is referenced.
+pub(crate) fn channel_has_active_turn(provider: &ProviderKind, channel_id: u64) -> bool {
+    let Some(state) = super::inflight::load_inflight_state(provider, channel_id) else {
+        return false;
+    };
+    let now_unix = Utc::now().timestamp();
+    !super::inflight::inflight_state_is_stale(
+        &state,
+        now_unix,
+        super::inflight::INFLIGHT_STALENESS_THRESHOLD_SECS,
+    )
+}
+
+/// #3146 Part 1 (codex clear/post race): pure decision seam for the recap
+/// post job. We post the fresh recap card ONLY when the channel is still
+/// idle. If a turn became active during the (multi-second) tmux-capture +
+/// Haiku-summary compose window, posting would slap a stale `📦 … idle` card
+/// over a live turn — exactly the bug #3146 closes. The idle-cycle stamp at
+/// the top of the route already deduped this cycle, so skipping is safe.
+pub(crate) fn should_post_recap(active_turn: bool) -> bool {
+    !active_turn
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1286,5 +1323,142 @@ mod tests {
     fn extract_transcript_tail_text_returns_none_when_file_missing() {
         let path = std::path::Path::new("/nonexistent-idle-recap-transcript.jsonl");
         assert_eq!(extract_transcript_tail_text(path), None);
+    }
+
+    // ---------------------------------------------------------------
+    // #3146 Part 1 (codex clear/post race): the post job must SKIP when a
+    // turn became active during compose, and still POST when idle.
+    // ---------------------------------------------------------------
+
+    /// Pure decision seam: post iff NOT active. The detached post job in
+    /// `server::routes::idle_recap::run_idle_recap_post_job` gates its
+    /// delete + post + persist sequence on `should_post_recap(active_turn)`.
+    #[test]
+    fn should_post_recap_skips_when_turn_active_posts_when_idle() {
+        // Idle channel → still post the recap (normal case, no false skip).
+        assert!(should_post_recap(false));
+        // A turn became active during compose → skip (do NOT post a stale
+        // `📦 … idle` card over the live turn).
+        assert!(!should_post_recap(true));
+    }
+
+    /// Process-wide mutex: `channel_has_active_turn` resolves the inflight
+    /// root from the PROCESS-WIDE `AGENTDESK_ROOT_DIR`, so the env-mutating
+    /// tests must not race the rest of the suite.
+    fn active_turn_env_test_mutex() -> &'static std::sync::Mutex<()> {
+        static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        M.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    struct RootEnvGuard(Option<std::ffi::OsString>);
+    impl Drop for RootEnvGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
+    fn make_inflight(channel_id: u64) -> super::super::inflight::InflightTurnState {
+        super::super::inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            channel_id,
+            Some("adk-cdx".to_string()),
+            7,
+            channel_id + 1,
+            channel_id + 1001,
+            "hello".to_string(),
+            None,
+            Some(format!("AgentDesk-codex-adk-cdx-{channel_id}")),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        )
+    }
+
+    /// A fresh, non-stale inflight for `(provider, channel_id)` — exactly the
+    /// marker the TUI claim path writes when a turn becomes active — is read
+    /// as an ACTIVE turn, so the post job will skip.
+    #[test]
+    fn channel_has_active_turn_true_for_fresh_inflight() {
+        let _guard = active_turn_env_test_mutex()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let temp = tempfile::TempDir::new().unwrap();
+        let _env = RootEnvGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        let channel_id = 8_146_001;
+        super::super::inflight::save_inflight_state(&make_inflight(channel_id)).expect("save");
+
+        assert!(channel_has_active_turn(&ProviderKind::Codex, channel_id));
+        // And the gate skips the post.
+        assert!(!should_post_recap(channel_has_active_turn(
+            &ProviderKind::Codex,
+            channel_id
+        )));
+    }
+
+    /// A genuinely idle channel (no inflight on disk) is NOT active — the
+    /// post job must still post the recap. This is the no-false-skip guard.
+    #[test]
+    fn channel_has_active_turn_false_when_no_inflight() {
+        let _guard = active_turn_env_test_mutex()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let temp = tempfile::TempDir::new().unwrap();
+        let _env = RootEnvGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        let channel_id = 8_146_002;
+        assert!(!channel_has_active_turn(&ProviderKind::Codex, channel_id));
+        // Idle → still post.
+        assert!(should_post_recap(channel_has_active_turn(
+            &ProviderKind::Codex,
+            channel_id
+        )));
+    }
+
+    /// A stale leftover inflight (its `updated_at` aged past the THREAD-GUARD
+    /// staleness threshold) must NOT be treated as an active turn — otherwise
+    /// a crashed dispatch would permanently suppress the recap on an idle
+    /// channel (a false skip). This mirrors how THREAD-GUARD / the stall-
+    /// watchdog treat such rows.
+    #[test]
+    fn channel_has_active_turn_false_for_stale_inflight() {
+        let _guard = active_turn_env_test_mutex()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let temp = tempfile::TempDir::new().unwrap();
+        let _env = RootEnvGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        let channel_id = 8_146_003;
+        // `save_inflight_state` always re-stamps `updated_at = now`, so to
+        // simulate an aged row we save normally and then rewrite the
+        // persisted `updated_at` on disk to a stale value.
+        super::super::inflight::save_inflight_state(&make_inflight(channel_id)).expect("save");
+        let state_path = temp
+            .path()
+            .join("runtime")
+            .join("discord_inflight")
+            .join(ProviderKind::Codex.as_str())
+            .join(format!("{channel_id}.json"));
+        // The on-disk `updated_at` uses the same LOCAL-time `%Y-%m-%d
+        // %H:%M:%S` form as `now_string()`; the staleness parser only
+        // understands that form, so we must match it (an RFC3339 string would
+        // be unparseable → treated as NOT stale).
+        let stale_local = chrono::Local::now()
+            - chrono::Duration::seconds(
+                super::super::inflight::INFLIGHT_STALENESS_THRESHOLD_SECS as i64 + 60,
+            );
+        let stale_str = stale_local.format("%Y-%m-%d %H:%M:%S").to_string();
+        let mut json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+        json["updated_at"] = serde_json::Value::String(stale_str);
+        std::fs::write(&state_path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+        assert!(!channel_has_active_turn(&ProviderKind::Codex, channel_id));
     }
 }

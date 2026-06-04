@@ -11,13 +11,25 @@
 //!   3. Capture the last ~100 lines of the tmux scrollback (best effort).
 //!   4. Ask Claude Haiku for a 1-2 sentence Korean summary (best effort,
 //!      20 s timeout; fall back to a header-only card if it fails).
-//!   5. Delete the previous recap card for this channel (best effort), post
-//!      the new one via the notify bot, and persist its message id.
+//!   5. Re-check whether a turn became active during the (slow) compose
+//!      window (#3146 Part 1, codex clear/post race); if so, SKIP posting.
+//!   6. Otherwise delete the previous recap card for this channel (best
+//!      effort), post the new one via the notify bot, and persist its id.
 //!
 //! Lifecycle hooks live in two places:
 //!   - `router::message_handler::clear_idle_recap_for_channel` — fires the
 //!     moment the user sends the next message in that channel.
 //!   - The next 5-min cycle deletes the previous card before posting fresh.
+//!
+//! Reverse race (codex, documented as acceptable — no CAS/tombstone): a
+//! delayed clear spawned by an *old* turn could, in principle, land after a
+//! later legitimately-posted card and delete it. The post-side active-turn
+//! recheck (step 5) closes the harmful direction (stale `idle` card over a
+//! live turn). The reverse is low-harm: a genuinely-idle channel transiently
+//! loses its recap card until the next 5-min cycle re-posts it. We
+//! deliberately do NOT add a CAS/tombstone for this; the cheap freshness
+//! win is the post-side recheck, and over-engineering the clear side is not
+//! justified by the transient, self-healing symptom.
 
 use axum::{
     Json,
@@ -32,6 +44,7 @@ use std::sync::Arc;
 use super::AppState;
 use crate::services::discord::idle_recap;
 use crate::services::discord::idle_recap::RecapSnapshot;
+use crate::services::provider::ProviderKind;
 
 /// POST /api/sessions/{session_key}/idle-recap
 pub async fn post_idle_recap(
@@ -150,6 +163,30 @@ async fn run_idle_recap_post_job(
         None => None,
     };
     let content = idle_recap::compose_recap_text(&snapshot, summary.as_deref());
+
+    // #3146 Part 1 (codex clear/post race): the scrollback + Haiku compose
+    // above can take seconds. During that window a TUI-driven turn may have
+    // become active and the claim path (`claim_tui_direct_synthetic_turn`)
+    // may have already cleared the previous recap card. Re-check turn
+    // activity RIGHT before we commit, and skip posting+persisting entirely
+    // if a turn is now in progress — otherwise we would post a FRESH stale
+    // `📦 … idle` card OVER the live turn (and persist its pointer),
+    // re-opening the exact bug #3146 closes. The idle-cycle stamp at the top
+    // of the route already deduped this cycle, so skipping is safe (we do NOT
+    // post-then-delete; we just don't post). Genuinely-idle channels have no
+    // (non-stale) inflight, so they still post the recap as before.
+    let active_turn = match ProviderKind::from_str(&snapshot.provider) {
+        Some(provider) => idle_recap::channel_has_active_turn(&provider, channel_id),
+        None => false,
+    };
+    if !idle_recap::should_post_recap(active_turn) {
+        tracing::info!(
+            session_key = %session_key,
+            channel_id = channel_id,
+            "idle_recap post skipped: turn became active during recap compose"
+        );
+        return Ok(());
+    }
 
     if let (Some(prev_msg), Some(prev_chan)) =
         (snapshot.previous_message_id, snapshot.previous_channel_id)
