@@ -48,6 +48,9 @@ use crate::services::discord::inflight::RelayOwnerKind;
 use crate::services::provider::{CancelToken, ProviderKind};
 
 use super::SharedData;
+// #3041 P1-0: dormant lease types used by the AcquireDelivery/CommitDelivery/
+// ReleaseDelivery messages below. Wired in P1-1.. — see mod.rs §2-§3 block.
+use super::{DeliveryLeaseCell, LeaseHolder, LeaseOutcome};
 
 /// How often the reconciler `Tick` fires to re-check deadline-armed
 /// gate-timeout entries and garbage-collect the ledger.
@@ -292,6 +295,23 @@ impl FinalizeContext {
             kickoff_queue: true,
         }
     }
+
+    /// #3041 §3 P1-0 (DORMANT): the context a lease-release-driven finalize will
+    /// use once the watcher terminal is migrated onto the delivery lease
+    /// (P1-1..). It currently mirrors `watcher()` exactly — the watcher path is
+    /// the first to adopt the lease — so adding it changes NO existing behaviour
+    /// (no live caller constructs it). It is a separate constructor (not a reuse
+    /// of `watcher()`) so the wired phases can tune the lease-release knobs
+    /// independently without disturbing the legacy watcher semantics.
+    #[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
+    pub(in crate::services::discord) fn delivery_lease() -> Self {
+        Self {
+            clear_inflight: false,
+            allow_completion_cleanup: false,
+            drain_voice: false,
+            kickoff_queue: false,
+        }
+    }
 }
 
 /// Outcome of a terminal submission. The submitter uses this to decide whether
@@ -358,6 +378,35 @@ enum FinalizeMsg {
         ctx: FinalizeContext,
         shared: Arc<SharedData>,
         ack: oneshot::Sender<FinalizeOutcome>,
+    },
+    /// #3041 §2-§3 P1-0 (DORMANT): CAS-acquire the channel's delivery lease for
+    /// `key` over byte range `[start, end)` on behalf of `holder`. Nothing
+    /// sends this yet — the bridge/watcher/sink acquire paths are wired in
+    /// P1-1... The `ack` reports whether this caller won the single-winner CAS.
+    AcquireDelivery {
+        key: TurnKey,
+        lease: Arc<DeliveryLeaseCell>,
+        holder: LeaseHolder,
+        start: u64,
+        end: u64,
+        deadline_ms: u64,
+        ack: oneshot::Sender<bool>,
+    },
+    /// #3041 §3 P1-0 (DORMANT): three-way commit of a held lease. Only the
+    /// recorded `holder` may commit; `Unknown` records but must not advance the
+    /// confirmed offset. Wired in P1-1...
+    CommitDelivery {
+        lease: Arc<DeliveryLeaseCell>,
+        holder: LeaseHolder,
+        outcome: LeaseOutcome,
+        ack: oneshot::Sender<bool>,
+    },
+    /// #3041 §3 P1-0 (DORMANT): compare-and-release. A holder mismatch is a
+    /// no-op (stale actor cannot release a live lease). Wired in P1-1...
+    ReleaseDelivery {
+        lease: Arc<DeliveryLeaseCell>,
+        holder: LeaseHolder,
+        ack: oneshot::Sender<bool>,
     },
 }
 
@@ -498,6 +547,47 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                             handle_terminal(&mut ledger, key, provider, event, ctx, &shared)
                                 .await;
                         let _ = ack.send(outcome);
+                    }
+                    // #3041 §2-§3 P1-0 (DORMANT). Coherent but UNREACHABLE today
+                    // — nothing sends Acquire/Commit/ReleaseDelivery yet (wired
+                    // in P1-1..). Routing them through the actor serializes the
+                    // lease transitions on the same owner that arbitrates
+                    // finalize, the property P1-1.. relies on.
+                    FinalizeMsg::AcquireDelivery {
+                        key,
+                        lease,
+                        holder,
+                        start,
+                        end,
+                        deadline_ms,
+                        ack,
+                    } => {
+                        let won = handle_acquire_delivery(
+                            &lease,
+                            key,
+                            holder,
+                            start,
+                            end,
+                            deadline_ms,
+                        );
+                        let _ = ack.send(won);
+                    }
+                    FinalizeMsg::CommitDelivery {
+                        lease,
+                        holder,
+                        outcome,
+                        ack,
+                    } => {
+                        let committed = handle_commit_delivery(&lease, holder, outcome);
+                        let _ = ack.send(committed);
+                    }
+                    FinalizeMsg::ReleaseDelivery {
+                        lease,
+                        holder,
+                        ack,
+                    } => {
+                        let released = handle_release_delivery(&lease, holder);
+                        let _ = ack.send(released);
                     }
                 }
             }
@@ -804,6 +894,52 @@ async fn do_finalize(
         has_pending: has_pending_after_voice,
         mailbox_online: finish.mailbox_online,
     }
+}
+
+// #3041 §2-§3 P1-0 — Dormant delivery-lease handlers. Thin, coherent wrappers
+// over the `DeliveryLeaseCell` state machine (mod.rs), run inside the actor
+// task so lease transitions serialize on the same owner that arbitrates
+// finalize. NOTHING sends the messages that reach them yet (wired in P1-1..);
+// the unit tests at the bottom of this file prove the logic correct now.
+
+/// CAS-acquire on behalf of `holder` over `[start, end)` until `deadline_ms`.
+/// Returns whether this caller won the single-winner CAS. The `key` (`TurnKey`)
+/// is the lease's turn identity, carried for the wired phases where a stale-turn
+/// acquire is rejected.
+///
+/// #3041 P1-0: dormant, wired in P1-1...
+#[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
+fn handle_acquire_delivery(
+    lease: &DeliveryLeaseCell,
+    key: TurnKey,
+    holder: LeaseHolder,
+    start: u64,
+    end: u64,
+    deadline_ms: u64,
+) -> bool {
+    lease.try_acquire(key, holder, start, end, deadline_ms)
+}
+
+/// Three-way commit of a held lease. Holder mismatch / non-`Leased` is a no-op
+/// returning `false`. `Unknown` is recorded but must not advance the offset.
+///
+/// #3041 P1-0: dormant, wired in P1-1...
+#[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
+fn handle_commit_delivery(
+    lease: &DeliveryLeaseCell,
+    holder: LeaseHolder,
+    outcome: LeaseOutcome,
+) -> bool {
+    lease.commit(holder, outcome)
+}
+
+/// Compare-and-release: returns the lease to `Unleased` only if `holder`
+/// matches. A holder mismatch is a no-op returning `false`.
+///
+/// #3041 P1-0: dormant, wired in P1-1...
+#[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
+fn handle_release_delivery(lease: &DeliveryLeaseCell, holder: LeaseHolder) -> bool {
+    lease.release(holder)
 }
 
 /// The one reconciler. Finalizes deadline-armed gate-timeouts whose backstop
@@ -2622,5 +2758,228 @@ mod tests {
             "with a terminal entry present, id-0 routes to the orphan no-op key, \
              not the newer live entry"
         );
+    }
+
+    // =======================================================================
+    // #3041 §2-§3 §6 P1-0 — Dormant `DeliveryLeaseCell` state-machine tests.
+    //
+    // The cell is wired into no call path yet (P1-1..), but its transitions
+    // are proven correct now: single-winner CAS acquire, three-way commit,
+    // compare-and-release no-op on holder mismatch, and deadline reclaim. The
+    // tests drive the cell directly (and through the dormant handler wrappers)
+    // because that is the logic later phases depend on.
+    // =======================================================================
+    mod delivery_lease {
+        use super::super::{
+            TurnKey, handle_acquire_delivery, handle_commit_delivery, handle_release_delivery,
+        };
+        use crate::services::discord::{
+            DeliveryLeaseCell, LeaseHolder, LeaseOutcome, LeaseSnapshot,
+        };
+        use serenity::model::id::ChannelId;
+        use std::sync::Arc;
+
+        fn cell() -> DeliveryLeaseCell {
+            DeliveryLeaseCell::new(ChannelId::new(42))
+        }
+
+        fn turn() -> TurnKey {
+            TurnKey::new(ChannelId::new(42), 7, 0)
+        }
+
+        #[test]
+        fn fresh_cell_is_unleased() {
+            let c = cell();
+            assert!(matches!(c.read(), LeaseSnapshot::Unleased));
+            assert_eq!(c.channel_id(), ChannelId::new(42));
+        }
+
+        #[test]
+        fn acquire_records_holder_range_and_deadline() {
+            let c = cell();
+            let h = LeaseHolder::Watcher { instance_id: 1 };
+            assert!(c.try_acquire(turn(), h, 10, 20, 1_000));
+            match c.read() {
+                LeaseSnapshot::Leased {
+                    holder,
+                    deadline_ms,
+                    start,
+                    end,
+                } => {
+                    assert_eq!(holder, h);
+                    assert_eq!(deadline_ms, 1_000);
+                    assert_eq!((start, end), (10, 20));
+                }
+                other => panic!("expected Leased, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn acquire_cas_admits_a_single_winner() {
+            // Two distinct holders race to acquire the SAME fresh cell; exactly
+            // one wins the CAS and the loser is rejected without mutating state.
+            let c = cell();
+            let w1 = LeaseHolder::Watcher { instance_id: 1 };
+            let w2 = LeaseHolder::Watcher { instance_id: 2 };
+            assert!(c.try_acquire(turn(), w1, 0, 5, 1_000));
+            // Second acquire on an already-Leased cell loses.
+            assert!(!c.try_acquire(turn(), w2, 0, 5, 1_000));
+            // The winner's payload is intact (loser did not overwrite it).
+            match c.read() {
+                LeaseSnapshot::Leased { holder, .. } => assert_eq!(holder, w1),
+                other => panic!("expected Leased held by winner, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn concurrent_acquire_has_exactly_one_winner() {
+            // Stronger single-winner proof: spawn N threads contending on one
+            // shared cell; exactly one try_acquire returns true.
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            let c = Arc::new(cell());
+            let wins = Arc::new(AtomicUsize::new(0));
+            let barrier = Arc::new(std::sync::Barrier::new(16));
+            let mut handles = Vec::new();
+            for i in 0..16u64 {
+                let c = Arc::clone(&c);
+                let wins = Arc::clone(&wins);
+                let barrier = Arc::clone(&barrier);
+                handles.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    if c.try_acquire(turn(), LeaseHolder::Watcher { instance_id: i }, 0, 1, 9_999) {
+                        wins.fetch_add(1, Ordering::Relaxed);
+                    }
+                }));
+            }
+            for h in handles {
+                h.join().unwrap();
+            }
+            assert_eq!(wins.load(Ordering::Relaxed), 1, "CAS must admit one winner");
+            assert!(matches!(c.read(), LeaseSnapshot::Leased { .. }));
+        }
+
+        #[test]
+        fn commit_three_way_delivered_not_delivered_unknown() {
+            for outcome in [
+                LeaseOutcome::Delivered,
+                LeaseOutcome::NotDelivered,
+                LeaseOutcome::Unknown,
+            ] {
+                let c = cell();
+                let h = LeaseHolder::Sink;
+                assert!(c.try_acquire(turn(), h, 3, 9, 1_000));
+                assert!(c.commit(h, outcome), "holder may commit {outcome:?}");
+                match c.read() {
+                    LeaseSnapshot::Committed {
+                        holder,
+                        start,
+                        end,
+                        outcome: got,
+                    } => {
+                        assert_eq!(holder, h);
+                        assert_eq!((start, end), (3, 9));
+                        assert_eq!(got, outcome);
+                    }
+                    other => panic!("expected Committed({outcome:?}), got {other:?}"),
+                }
+            }
+        }
+
+        #[test]
+        fn commit_by_non_holder_is_noop() {
+            let c = cell();
+            let owner = LeaseHolder::Watcher { instance_id: 1 };
+            let other = LeaseHolder::Watcher { instance_id: 2 };
+            assert!(c.try_acquire(turn(), owner, 0, 4, 1_000));
+            // Holder mismatch: commit refused, state stays Leased.
+            assert!(!c.commit(other, LeaseOutcome::Delivered));
+            assert!(matches!(c.read(), LeaseSnapshot::Leased { .. }));
+        }
+
+        #[test]
+        fn commit_on_unleased_is_noop() {
+            let c = cell();
+            assert!(!c.commit(LeaseHolder::Bridge, LeaseOutcome::Delivered));
+            assert!(matches!(c.read(), LeaseSnapshot::Unleased));
+        }
+
+        #[test]
+        fn release_compare_and_release_noop_on_holder_mismatch() {
+            let c = cell();
+            let owner = LeaseHolder::Bridge;
+            let stale = LeaseHolder::Watcher { instance_id: 99 };
+            assert!(c.try_acquire(turn(), owner, 0, 8, 1_000));
+            // A stale actor cannot release the live lease.
+            assert!(!c.release(stale));
+            assert!(matches!(c.read(), LeaseSnapshot::Leased { .. }));
+            // The true holder releases successfully → back to Unleased.
+            assert!(c.release(owner));
+            assert!(matches!(c.read(), LeaseSnapshot::Unleased));
+        }
+
+        #[test]
+        fn release_after_commit_returns_to_unleased() {
+            let c = cell();
+            let h = LeaseHolder::Sink;
+            assert!(c.try_acquire(turn(), h, 0, 2, 1_000));
+            assert!(c.commit(h, LeaseOutcome::Delivered));
+            // Release is valid from Committed for the recorded holder.
+            assert!(c.release(h));
+            assert!(matches!(c.read(), LeaseSnapshot::Unleased));
+            // Idempotent: a second release on the now-Unleased cell is a no-op.
+            assert!(!c.release(h));
+        }
+
+        #[test]
+        fn deadline_reclaim_forces_unleased_when_expired() {
+            let c = cell();
+            let h = LeaseHolder::Watcher { instance_id: 1 };
+            assert!(c.try_acquire(turn(), h, 0, 3, 100));
+            // Not yet expired: no reclaim.
+            assert!(!c.reclaim_if_expired(50));
+            assert!(matches!(c.read(), LeaseSnapshot::Leased { .. }));
+            // At/after the deadline: reclaimed regardless of holder identity.
+            assert!(c.reclaim_if_expired(100));
+            assert!(matches!(c.read(), LeaseSnapshot::Unleased));
+            // After a reclaim a fresh acquire can win again.
+            assert!(c.try_acquire(turn(), h, 0, 3, 200));
+        }
+
+        #[test]
+        fn deadline_reclaim_never_touches_committed() {
+            let c = cell();
+            let h = LeaseHolder::Bridge;
+            assert!(c.try_acquire(turn(), h, 0, 3, 10));
+            assert!(c.commit(h, LeaseOutcome::Delivered));
+            // A Committed lease awaits an explicit release; deadline reclaim is a
+            // no-op even far past the (now meaningless) deadline.
+            assert!(!c.reclaim_if_expired(10_000));
+            assert!(matches!(c.read(), LeaseSnapshot::Committed { .. }));
+        }
+
+        #[test]
+        fn dormant_handlers_drive_the_same_transitions() {
+            // The actor-task handler wrappers must produce identical results to
+            // the direct cell methods (they are wired in P1-1.. and exercised
+            // through these wrappers).
+            let c = cell();
+            let h = LeaseHolder::Watcher { instance_id: 3 };
+            assert!(handle_acquire_delivery(&c, turn(), h, 0, 6, 1_000));
+            assert!(!handle_acquire_delivery(
+                &c,
+                turn(),
+                LeaseHolder::Sink,
+                0,
+                6,
+                1_000
+            ));
+            assert!(handle_commit_delivery(&c, h, LeaseOutcome::Delivered));
+            assert!(!handle_release_delivery(
+                &c,
+                LeaseHolder::Watcher { instance_id: 4 }
+            ));
+            assert!(handle_release_delivery(&c, h));
+            assert!(matches!(c.read(), LeaseSnapshot::Unleased));
+        }
     }
 }
