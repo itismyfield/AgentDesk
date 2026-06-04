@@ -1887,6 +1887,56 @@ fn watcher_should_direct_send_after_session_bound_ack(
     should_direct_send && !matches!(ack_outcome, SessionBoundRelayAckOutcome::Delivered)
 }
 
+/// #3041 P1-3 (Part b, §3.2): the watcher's terminal re-send DECISION after a
+/// non-`Delivered` session-bound ACK, reconciled against the offset authority
+/// (`committed_relay_offset`) instead of BLINDLY re-sending. This is the
+/// watcher-terminal counterpart of the idle relay's `idle_relay_range_action`
+/// (skip / suffix / full), extended to the terminal re-send path so the 10s
+/// blind re-send (the `relay_terminal_ack_timeout` duplicate vector) is removed.
+///
+/// Because Part (a) makes a confirmed sink delivery ADVANCE the authority to the
+/// watcher's own consumed-terminal `end`, this reconciliation is exact:
+///   * `committed >= end`           → the range was already delivered (by the
+///                                     sink, ACK merely lagged) → SKIP (no dup).
+///   * `start < committed < end`    → the prefix `[start, committed)` was
+///                                     delivered → send ONLY the uncommitted
+///                                     suffix (no black-hole, reduced dup).
+///   * `committed <= start`         → nothing delivered → send the FULL range.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum WatcherTerminalResendAction {
+    /// `committed >= end`: the whole range is already delivered. Do NOT re-send.
+    SkipAlreadyCommitted,
+    /// `start < committed < end`: send only the uncommitted suffix
+    /// `[committed, end)`; the prefix was already delivered.
+    SendSuffix,
+    /// `committed <= start`: nothing covered — send the full range.
+    SendFull,
+}
+
+/// Reconcile a watcher terminal re-send against the committed offset authority.
+/// Only ever consulted when the watcher WOULD have re-sent (a non-`Delivered`
+/// ACK and a real body); the caller still applies the existing `relay_owner`
+/// suppression. A zero/inverted range (`end <= start`) yields `SendFull` so the
+/// existing zero-range guards (which never lease/advance) stay in control — the
+/// reconciliation never manufactures a skip for a range it cannot reason about.
+fn watcher_terminal_resend_action(
+    committed: u64,
+    start: u64,
+    end: u64,
+) -> WatcherTerminalResendAction {
+    if end <= start {
+        // Degenerate range: defer to the existing no-range handling downstream.
+        return WatcherTerminalResendAction::SendFull;
+    }
+    if committed >= end {
+        WatcherTerminalResendAction::SkipAlreadyCommitted
+    } else if committed > start {
+        WatcherTerminalResendAction::SendSuffix
+    } else {
+        WatcherTerminalResendAction::SendFull
+    }
+}
+
 fn watcher_terminal_response_for_direct_send<'a>(
     full_response: &'a str,
     response_sent_offset: usize,
@@ -3063,6 +3113,74 @@ mod matched_session_jsonl_gate_tests {
             SessionBoundRelayAckOutcome::Delivered,
             true
         ));
+    }
+
+    // #3041 P1-3 (Part b, §3.2): the watcher's terminal re-send reconciliation
+    // against the committed offset authority — REPLACING the blind re-send. These
+    // assert the exact 3-way skip/suffix/full decision so the failure-mode-① skip
+    // (no duplicate) and the black-hole guard (suffix/full still sent) are pinned.
+    #[test]
+    fn watcher_terminal_resend_skips_when_range_already_committed() {
+        // failure-mode-①: the sink delivered `[0, 100)` (Part a advanced the
+        // authority to 100) but the terminal-commit ACK lagged the 10s wait →
+        // committed >= end → SKIP. No duplicate.
+        assert_eq!(
+            watcher_terminal_resend_action(100, 0, 100),
+            WatcherTerminalResendAction::SkipAlreadyCommitted,
+            "committed == end must skip the re-send (no duplicate)"
+        );
+        assert_eq!(
+            watcher_terminal_resend_action(150, 0, 100),
+            WatcherTerminalResendAction::SkipAlreadyCommitted,
+            "committed past end must skip the re-send (no duplicate)"
+        );
+    }
+
+    #[test]
+    fn watcher_terminal_resend_sends_suffix_on_partial_overlap() {
+        // The sink delivered the prefix `[0, 60)`; the file grew to 100 before the
+        // watcher reconciled → send ONLY the uncommitted suffix `[60, 100)`.
+        // No black-hole (the suffix IS sent), reduced duplicate.
+        assert_eq!(
+            watcher_terminal_resend_action(60, 0, 100),
+            WatcherTerminalResendAction::SendSuffix
+        );
+        // Boundary: committed just past start is still a partial overlap.
+        assert_eq!(
+            watcher_terminal_resend_action(1, 0, 100),
+            WatcherTerminalResendAction::SendSuffix
+        );
+    }
+
+    #[test]
+    fn watcher_terminal_resend_sends_full_when_nothing_committed() {
+        // BLACK-HOLE GUARD: the sink did NOT deliver (committed < end, and
+        // committed <= start) → the FULL range must still be sent. Removing the
+        // blind re-send must NEVER drop an undelivered range.
+        assert_eq!(
+            watcher_terminal_resend_action(0, 0, 100),
+            WatcherTerminalResendAction::SendFull,
+            "committed == start (nothing delivered) must send the full range"
+        );
+        assert_eq!(
+            watcher_terminal_resend_action(40, 50, 100),
+            WatcherTerminalResendAction::SendFull,
+            "committed below start must send the full range (no black-hole)"
+        );
+    }
+
+    #[test]
+    fn watcher_terminal_resend_degenerate_range_defers_to_full() {
+        // A zero/inverted range manufactures NO skip — it defers to the existing
+        // downstream zero-range guards (which never lease/advance).
+        assert_eq!(
+            watcher_terminal_resend_action(100, 100, 100),
+            WatcherTerminalResendAction::SendFull
+        );
+        assert_eq!(
+            watcher_terminal_resend_action(0, 100, 50),
+            WatcherTerminalResendAction::SendFull
+        );
     }
 
     #[test]
@@ -7042,14 +7160,91 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 crate::services::discord::inflight::RelayOwnerKind::None
             )
         });
-        let watcher_direct_fallback_after_session_bound_ack =
-            watcher_should_direct_send_after_session_bound_ack(
-                relay_decision.should_direct_send,
+        let watcher_direct_fallback_intended = watcher_should_direct_send_after_session_bound_ack(
+            relay_decision.should_direct_send,
+            session_bound_ack_outcome,
+            relay_owner_present,
+        );
+        // #3041 P1-3 (Part b, §3.2): REPLACE the blind re-send. When the watcher
+        // would re-send its terminal body after a non-`Delivered` session-bound
+        // ACK (the `relay_terminal_ack_timeout` duplicate vector), reconcile
+        // against the offset authority FIRST. The range is the SAME consumed
+        // terminal range the lease/advance use:
+        // `[data_start_offset, terminal_event_consumed_offset(current_offset, all_data))`.
+        // Part (a) makes a confirmed sink delivery advance `committed_relay_offset`
+        // to the watcher's own `end`, so this consult is exact:
+        //   * committed >= end → SKIP (the sink delivered; ACK merely lagged) → no
+        //     duplicate (failure-mode-①);
+        //   * start < committed < end → send only the uncommitted suffix → no
+        //     black-hole, reduced duplicate;
+        //   * committed <= end (nothing committed) → re-send (no black-hole).
+        // Reconcile ONLY on the session-bound re-send path (an attempted delegation
+        // whose ACK was not `Delivered`); the plain watcher-direct path (no
+        // delegation) keeps its existing behaviour untouched.
+        let watcher_resend_range_start = data_start_offset;
+        let watcher_resend_range_end = terminal_event_consumed_offset(current_offset, &all_data);
+        let watcher_resend_committed = shared.committed_relay_offset(channel_id);
+        let watcher_resend_reconciled = session_bound_terminal_delivery_attempted
+            && watcher_direct_fallback_intended
+            && !matches!(
                 session_bound_ack_outcome,
-                relay_owner_present,
+                SessionBoundRelayAckOutcome::Delivered
             );
+        let watcher_resend_action = if watcher_resend_reconciled {
+            // Self-heal a stale-high authority left by a respawned/truncated
+            // wrapper BEFORE consulting it, exactly as the no-inflight gate and the
+            // idle relay do — so a fresh range is never wrongly skipped (codex P2).
+            reset_relay_watermark_on_generation_change(
+                &shared,
+                channel_id,
+                &tmux_session_name,
+                "watcher_terminal_resend_reconcile",
+            );
+            let committed = shared.committed_relay_offset(channel_id);
+            Some(watcher_terminal_resend_action(
+                committed,
+                watcher_resend_range_start,
+                watcher_resend_range_end,
+            ))
+        } else {
+            None
+        };
+        if matches!(
+            watcher_resend_action,
+            Some(WatcherTerminalResendAction::SkipAlreadyCommitted)
+        ) {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                provider = watcher_provider.as_str(),
+                channel = channel_id.get(),
+                tmux_session = %tmux_session_name,
+                start = watcher_resend_range_start,
+                end = watcher_resend_range_end,
+                committed = watcher_resend_committed,
+                ?session_bound_ack_outcome,
+                "  [{ts}] 👁 #3041 P1-3 §3.2: skipped watcher terminal re-send — range already committed by the sink (offset authority); no duplicate"
+            );
+        }
+        // The watcher actually direct-sends only when the reconciliation did NOT
+        // skip the range. `SkipAlreadyCommitted` suppresses the re-send (no dup);
+        // `SendSuffix`/`SendFull`/the non-reconciled path proceed to send.
+        let watcher_direct_fallback_after_session_bound_ack = watcher_direct_fallback_intended
+            && !matches!(
+                watcher_resend_action,
+                Some(WatcherTerminalResendAction::SkipAlreadyCommitted)
+            );
+        // §3.2 suffix trim: on a PARTIAL overlap the prefix was already delivered,
+        // so do NOT re-send the full body — fall back to the streamed-suffix body
+        // (`response_sent_offset`), which excludes the already-delivered prefix
+        // (no black-hole: the uncommitted suffix is still sent). On `SendFull` /
+        // the non-reconciled path keep the existing full-body fallback semantics.
+        let watcher_resend_force_suffix = matches!(
+            watcher_resend_action,
+            Some(WatcherTerminalResendAction::SendSuffix)
+        );
         let session_bound_fallback_uses_full_body = session_bound_terminal_delivery_attempted
-            && watcher_direct_fallback_after_session_bound_ack;
+            && watcher_direct_fallback_after_session_bound_ack
+            && !watcher_resend_force_suffix;
         let direct_terminal_response = watcher_terminal_response_for_direct_send(
             &full_response,
             response_sent_offset,
@@ -7272,9 +7467,46 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         inflight.last_watcher_relayed_offset = Some(turn_data_start_offset);
                         inflight.last_watcher_relayed_generation_mtime_ns =
                             last_observed_generation_mtime_ns;
+                        // #3041 P1-3 (Part a, B1): persist the watcher's
+                        // AUTHORITATIVE consumed terminal END for the range it is
+                        // delegating to the sink — exactly the value the watcher
+                        // advances `confirmed_end_offset` to on its OWN terminal
+                        // delivery (`watcher_lease_end ==
+                        // terminal_event_consumed_offset(current_offset, all_data)`).
+                        // The sink reads this (identity-gated) to advance the offset
+                        // authority on a confirmed delivery, so reconciliation (Part
+                        // b) sees the delegated range as delivered even if the
+                        // terminal-commit ACK lags. Only record a real (non-empty)
+                        // range; a zero/inverted range never advances.
+                        if watcher_lease_end > watcher_lease_start {
+                            inflight.session_bound_delegated_terminal_end = Some(watcher_lease_end);
+                        }
                         let _ = crate::services::discord::inflight::save_inflight_state(&inflight);
                     }
                 }
+            }
+            clear_provider_overload_retry_state(channel_id);
+            true
+        } else if matches!(
+            watcher_resend_action,
+            Some(WatcherTerminalResendAction::SkipAlreadyCommitted)
+        ) {
+            // #3041 P1-3 (Part b, §3.2): the offset authority already covers this
+            // terminal range (`committed >= end`) — the session-bound sink already
+            // delivered it (the terminal-commit ACK merely lagged the 10s wait, and
+            // Part (a) advanced the authority on the sink's confirmed POST). This is
+            // the failure-mode-① case: re-sending would DUPLICATE. Treat it as a
+            // completed delegated delivery (mirror the delegation-success arm): the
+            // sink owns the placeholder/body, so do NOT delete the placeholder and
+            // do NOT re-send. `relay_ok = true` so the turn's lifecycle finalizes
+            // (completion observed, inflight cleared) exactly as a delivered turn —
+            // the response IS on the channel, just posted by the sink. The offset is
+            // already at `end`, so the inline advance below is an idempotent no-op.
+            if has_current_response {
+                tui_direct_anchor_terminal_body_visible = true;
+                last_relayed_offset = Some(turn_data_start_offset);
+                last_observed_generation_mtime_ns =
+                    Some(read_generation_file_mtime_ns(&tmux_session_name));
             }
             clear_provider_overload_retry_state(channel_id);
             true

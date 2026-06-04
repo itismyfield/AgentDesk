@@ -270,6 +270,51 @@ impl SessionBoundDiscordRelaySink {
         }
     }
 
+    /// #3041 P1-3 (Part a, BLOCKER B1 — the "commit fence"): on a CONFIRMED
+    /// terminal Discord delivery, advance the offset authority
+    /// (`confirmed_end_offset`) to the watcher's AUTHORITATIVE consumed-terminal
+    /// END for the delegated turn (`session_bound_delegated_terminal_end`,
+    /// persisted by the watcher when it delegated this terminal — see
+    /// `tmux_watcher.rs` delegation block). This couples the POST success to the
+    /// offset advance in the SAME path so the watcher's §3.2 reconciliation
+    /// (Part b) sees `committed >= end` and SKIPS its blind re-send (no duplicate)
+    /// even when the terminal-commit ACK lagged the 10s wait.
+    ///
+    /// DIRECT ADVANCE, not a Sink lease commit: the sink runs UNDER the watcher's
+    /// delegation and is NOT a per-channel `DeliveryLeaseCell` holder (the
+    /// delegation path does not acquire the cell, so there is no lease for the
+    /// sink to commit). The watcher is the byte-range AUTHORITY; the sink advances
+    /// to the watcher's OWN end via `advance_watcher_confirmed_end`'s monotonic CAS
+    /// so it can never regress, double-advance, or overshoot.
+    ///
+    /// NO-BLACK-HOLE: the sink NEVER reads a fresh JSONL EOF (which could include
+    /// later-appended undelivered bytes, codex r4 P1). `delegated_end` is the
+    /// watcher's persisted consumed-terminal end for THIS delivered turn (read off
+    /// the inflight loaded at the START of `deliver_response`, i.e. the turn being
+    /// delivered — NOT a re-load that could pick up a LATER turn's larger end and
+    /// overshoot). When the watcher did not delegate (no field / zero) the sink
+    /// does not advance (the watcher's own delivery path advances instead).
+    fn advance_offset_for_confirmed_delegated_terminal(
+        &self,
+        shared: &super::SharedData,
+        provider: &ProviderKind,
+        channel_id: u64,
+        session_name: &str,
+        delegated_end: Option<u64>,
+    ) {
+        let Some(end) = delegated_end.filter(|end| *end > 0) else {
+            return;
+        };
+        super::tmux::advance_watcher_confirmed_end(
+            shared,
+            provider,
+            ChannelId::new(channel_id),
+            session_name,
+            end,
+            "src/services/discord/session_relay_sink.rs:sink_confirmed_terminal_advance",
+        );
+    }
+
     async fn deliver_response(
         &self,
         delivery: SessionRelayDelivery,
@@ -277,6 +322,14 @@ impl SessionBoundDiscordRelaySink {
         let channel_id = delivery.channel_id;
         let provider = delivery.provider;
         let inflight = super::inflight::load_inflight_state(&provider, channel_id);
+        // #3041 P1-3 (Part a, B1): the watcher's authoritative consumed-terminal
+        // END for the turn it delegated to this sink, captured from the inflight
+        // loaded for THIS delivery (the turn being delivered) so a confirmed POST
+        // can advance the offset authority to it without re-reading a later turn's
+        // larger end (which would overshoot — black-hole).
+        let delegated_terminal_end = inflight
+            .as_ref()
+            .and_then(|state| state.session_bound_delegated_terminal_end);
         let trace = session_relay_trace_context(
             &provider,
             channel_id,
@@ -395,6 +448,15 @@ impl SessionBoundDiscordRelaySink {
                     &delivery.session_name,
                     channel_id,
                 );
+                // #3041 P1-3 (Part a, B1): couple the confirmed POST to the offset
+                // advance in the SAME path.
+                self.advance_offset_for_confirmed_delegated_terminal(
+                    &shared,
+                    &provider,
+                    channel_id,
+                    &delivery.session_name,
+                    delegated_terminal_end,
+                );
                 return Ok(SessionRelayDeliveryOutcome::Committed);
             }
             match formatting::replace_long_message_raw_with_outcome(
@@ -440,6 +502,14 @@ impl SessionBoundDiscordRelaySink {
                         &delivery.session_name,
                         channel_id,
                     );
+                    // #3041 P1-3 (Part a, B1): commit fence.
+                    self.advance_offset_for_confirmed_delegated_terminal(
+                        &shared,
+                        &provider,
+                        channel_id,
+                        &delivery.session_name,
+                        delegated_terminal_end,
+                    );
                     Ok(SessionRelayDeliveryOutcome::Committed)
                 }
                 Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error }) => {
@@ -483,6 +553,15 @@ impl SessionBoundDiscordRelaySink {
                         provider.as_str(),
                         &delivery.session_name,
                         channel_id,
+                    );
+                    // #3041 P1-3 (Part a, B1): commit fence — the fallback POST
+                    // delivered the response, so advance the authority too.
+                    self.advance_offset_for_confirmed_delegated_terminal(
+                        &shared,
+                        &provider,
+                        channel_id,
+                        &delivery.session_name,
+                        delegated_terminal_end,
                     );
                     Ok(SessionRelayDeliveryOutcome::Committed)
                 }
@@ -544,6 +623,14 @@ impl SessionBoundDiscordRelaySink {
                 true,
                 Some("new message"),
             );
+            // #3041 P1-3 (Part a, B1): commit fence.
+            self.advance_offset_for_confirmed_delegated_terminal(
+                &shared,
+                &provider,
+                channel_id,
+                &delivery.session_name,
+                delegated_terminal_end,
+            );
             Ok(SessionRelayDeliveryOutcome::Committed)
         }
     }
@@ -566,40 +653,25 @@ impl RelaySink for SessionBoundDiscordRelaySink {
             match self.deliver_response(delivery).await {
                 Ok(SessionRelayDeliveryOutcome::Committed) => {
                     terminal_committed = true;
-                    // #3017: the sink deliberately does NOT advance the
-                    // committed relay offset here. The only byte offset
-                    // available at this point is the JSONL EOF, which can
-                    // include bytes appended AFTER this frame was read but
-                    // before the async Discord delivery committed — committing
-                    // that later EOF would mark undelivered appended output as
-                    // already relayed and DROP it (codex r4 P1). The
-                    // `StreamFrame` contract does not carry the exact delivered
-                    // byte-range end, and threading one through the cluster
-                    // stream-relay producer/parser is out of this subset's
-                    // scope. The tmux watcher remains the SOLE committer of the
-                    // authority (`advance_watcher_confirmed_end`, which has the
-                    // exact relayed offset); the idle relay only CONSULTS it.
-                    // This keeps the dedup data-loss-free: the residual
-                    // idle-wins-the-race window is bounded by the idle relay's
-                    // 10s recent-inflight grace (the watcher relays + commits
-                    // within ~250ms), and when no watcher is relaying there is
-                    // no second actor to duplicate against. (See FINAL OUTPUT
-                    // note for the #3017 follow-up to carry the range end.)
+                    // #3041 P1-3 (Part a, BLOCKER B1 CLOSED): the offset advance
+                    // for a confirmed terminal delivery now happens INLINE inside
+                    // `deliver_response` (the commit fence:
+                    // `advance_offset_for_confirmed_delegated_terminal`), coupled
+                    // to the POST success in the SAME path. It advances
+                    // `confirmed_end_offset` to the WATCHER's authoritative
+                    // consumed-terminal end (`session_bound_delegated_terminal_end`,
+                    // persisted on the inflight by the watcher when it delegated
+                    // this terminal), NOT a fresh JSONL EOF — so it can never
+                    // overshoot into later-appended undelivered bytes (the codex
+                    // r4 P1 black-hole) and is a monotonic, idempotent CAS.
                     //
-                    // EXACT-ONCE GAP (deferred to #3041, NOT a regression):
-                    // because this terminal Discord delivery does NOT advance the
-                    // authority, the "sink wins first" case is not yet exact-once.
-                    // If this sink posts BEFORE the watcher commits, the authority
-                    // (`confirmed_end_offset`) stays stale, so the watcher's later
-                    // no-inflight dedup gate cannot suppress its own delivery →
-                    // a residual duplicate window (the 10s grace reduces but does
-                    // not eliminate it). Closing this requires the sink's delivery
-                    // to advance the authority atomically with the exact relayed
-                    // range end — that is the #3041 delivery-lease (commit-with-
-                    // offset) work, deliberately out of scope here to avoid the
-                    // codex r4 P1 black-hole of committing a too-late EOF. Phase4's
-                    // read-only consult is a strict improvement over no consult;
-                    // it does not by itself achieve full exact-once for this window.
+                    // This closes the prior EXACT-ONCE GAP: if the sink posts
+                    // BEFORE the watcher's terminal-commit ACK lands (or that ACK
+                    // lags the watcher's 10s wait), the authority is now ADVANCED
+                    // by the sink, so the watcher's §3.2 reconciliation (P1-3 Part
+                    // b) sees `committed >= end` and SKIPS its re-send (no
+                    // duplicate). When the watcher did NOT delegate (no field), the
+                    // watcher's OWN delivery path advances the authority instead.
                     self.finish_terminal_candidate(&session_name);
                 }
                 Ok(SessionRelayDeliveryOutcome::Skipped) => {
@@ -1795,6 +1867,94 @@ mod tests {
             .expect("frame without terminal delivery should be accepted");
 
         assert_eq!(outcome, RelaySinkOutcome::FrameAccepted);
+    }
+
+    // #3041 P1-3 (Part a, BLOCKER B1): when the sink CONFIRMS a terminal delivery,
+    // it advances `committed_relay_offset` to the watcher's authoritative
+    // consumed-terminal END (persisted on the inflight as
+    // `session_bound_delegated_terminal_end`). This is the B1 "commit fence": the
+    // POST success and the offset advance are coupled, so the watcher's §3.2
+    // reconciliation (Part b) sees the delegated range as delivered even if the
+    // terminal-commit ACK lags.
+    #[tokio::test]
+    async fn sink_confirmed_delivery_advances_committed_offset_to_delegated_end() {
+        let shared = super::super::make_shared_data_for_tests();
+        let channel = ChannelId::new(8_041);
+        let sink = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
+
+        // Before any delivery the authority is at 0.
+        assert_eq!(shared.committed_relay_offset(channel), 0);
+
+        // A confirmed sink delivery for the watcher-delegated range `[0, 256)`:
+        // the watcher persisted end=256, so the sink advances the authority to it.
+        sink.advance_offset_for_confirmed_delegated_terminal(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            "AgentDesk-claude-8041",
+            Some(256),
+        );
+        assert_eq!(
+            shared.committed_relay_offset(channel),
+            256,
+            "a confirmed sink delivery must advance committed_relay_offset to the delegated end (B1 close)"
+        );
+
+        // Idempotent / no double-advance: re-confirming the SAME range is a
+        // monotonic-CAS no-op (cannot regress or double-advance).
+        sink.advance_offset_for_confirmed_delegated_terminal(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            "AgentDesk-claude-8041",
+            Some(256),
+        );
+        assert_eq!(shared.committed_relay_offset(channel), 256);
+
+        // When the watcher did NOT delegate a range (None / zero end), the sink
+        // does NOT advance — the watcher's own delivery path owns the advance.
+        sink.advance_offset_for_confirmed_delegated_terminal(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            "AgentDesk-claude-8041",
+            None,
+        );
+        sink.advance_offset_for_confirmed_delegated_terminal(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            "AgentDesk-claude-8041",
+            Some(0),
+        );
+        assert_eq!(
+            shared.committed_relay_offset(channel),
+            256,
+            "no delegated range (None/0) must not advance the authority"
+        );
+
+        // Monotonic guard: a later confirmed delivery at a LARGER end advances; a
+        // stale smaller end never regresses the authority.
+        sink.advance_offset_for_confirmed_delegated_terminal(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            "AgentDesk-claude-8041",
+            Some(128),
+        );
+        assert_eq!(
+            shared.committed_relay_offset(channel),
+            256,
+            "a smaller (stale) end must not regress the authority"
+        );
+        sink.advance_offset_for_confirmed_delegated_terminal(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            "AgentDesk-claude-8041",
+            Some(512),
+        );
+        assert_eq!(shared.committed_relay_offset(channel), 512);
     }
 
     #[test]

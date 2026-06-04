@@ -198,6 +198,26 @@ pub(super) struct InflightTurnState {
     /// (#1270). `None` for offsets persisted before this field existed.
     #[serde(default)]
     pub last_watcher_relayed_generation_mtime_ns: Option<i64>,
+    /// #3041 P1-3 (Part a, BLOCKER B1): the watcher's AUTHORITATIVE consumed
+    /// terminal-output END offset for the turn it DELEGATED to the session-bound
+    /// StreamRelay sink. Set by the watcher at the moment it delegates
+    /// (`session_bound_relay_owns_terminal_delivery`) to exactly the value the
+    /// watcher would have advanced `confirmed_end_offset` to had it delivered the
+    /// terminal itself (`terminal_event_consumed_offset(current_offset,
+    /// all_data)` == the watcher's lease `end`). The sink CANNOT derive this from
+    /// its opaque `StreamFrame` (payload + sequence only, NO JSONL byte offset),
+    /// and the only file offset it can read (the JSONL EOF) overshoots the
+    /// consumed-terminal end and would BLACK-HOLE undelivered later-appended bytes
+    /// (codex r4 P1). So the watcher — the byte-range AUTHORITY — persists its
+    /// exact consumed end here; on a CONFIRMED terminal Discord delivery the sink
+    /// advances `confirmed_end_offset` to THIS value (identity-gated, monotonic
+    /// CAS). This closes B1's "commit fence": a sink POST success now advances the
+    /// authority in the same path, so the watcher's §3.2 reconciliation (Part b)
+    /// sees `committed >= end` and SKIPS its blind re-send (no duplicate) even when
+    /// the terminal-commit ACK lagged the 10s wait. `None` until the watcher
+    /// delegates a terminal turn (and for legacy rows that pre-date this field).
+    #[serde(default)]
+    pub session_bound_delegated_terminal_end: Option<u64>,
     /// Lifecycle-aware restart/handoff mode for recovery semantics.
     #[serde(default)]
     pub restart_mode: Option<InflightRestartMode>,
@@ -582,6 +602,7 @@ impl InflightTurnState {
             dispatch_id: None,
             last_watcher_relayed_offset: None,
             last_watcher_relayed_generation_mtime_ns: None,
+            session_bound_delegated_terminal_end: None,
             restart_mode: None,
             restart_generation: None,
             rebind_origin: false,

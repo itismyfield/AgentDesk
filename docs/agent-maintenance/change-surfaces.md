@@ -128,7 +128,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (8102 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (8266 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -166,6 +166,15 @@
     every 5s while the send future is in flight (deadline cut to 15s for fast
     dead-holder recovery), stopped before the inline commit so a long multi-chunk
     send is never reclaimed mid-flight;
+    +164 from #3041 P1-3 Part b: REPLACING the 10s blind terminal re-send with the
+    §3.2 committed-offset reconciliation — `watcher_terminal_resend_action`
+    (skip-already-committed / send-suffix / send-full against
+    `committed_relay_offset`), a dedicated `SkipAlreadyCommitted` relay arm that
+    treats an already-committed range as a completed delegated delivery (no
+    duplicate, no placeholder double-handling), the watcher persisting its
+    authoritative consumed-terminal end (`session_bound_delegated_terminal_end`)
+    when it delegates so the sink can advance the offset (Part a, B1 close), and the
+    suffix-trim wiring; the ACK polling itself is preserved;
     split loop helpers further before adding behavior).
   - `src/services/discord/tui_prompt_relay.rs` (3874 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
