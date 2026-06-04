@@ -7204,8 +7204,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // holds this cell (Leased, not yet committed/released/reclaimed) for the
         // same channel, `try_acquire` returns false and this watcher MUST NOT
         // direct-send (see the dedicated skip arm below). The acquire is the
-        // atomic fast-path on the cell (B4); commit/release route through the
-        // finalizer actor.
+        // atomic fast-path on the cell (B4); commit/advance/release happen
+        // INLINE in the watcher (synchronously, to preserve the pre-P1-1 prompt
+        // confirmed_end advance and avoid an actor-deferral duplicate window).
+        // The actor CommitDelivery/ReleaseDelivery messages remain dormant.
         let watcher_lease_turn = crate::services::discord::turn_finalizer::TurnKey::new(
             channel_id,
             pinned_finalize_user_msg_id(
@@ -7743,7 +7745,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 // retry the SAME range on the next loop iteration. If we left the
                 // lease `Leased`, the retry's `try_acquire` would lose to our own
                 // held lease and the B2 skip arm would suppress the legitimate
-                // retry until the 90s deadline reclaim. Abandon-release the lease
+                // retry until the lease-deadline reclaim. Abandon-release the lease
                 // here (Leased→Unleased) so the retry can re-acquire. This is the
                 // sole abandon point that must not commit; it is released on the
                 // cell directly (a same-holder abandon, not a commit/release race

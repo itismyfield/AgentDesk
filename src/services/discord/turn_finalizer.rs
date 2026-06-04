@@ -1099,8 +1099,9 @@ async fn reconcile(ledger: &mut HashMap<LedgerKey, LedgerEntry>, shared: &Arc<Sh
     // runs on the reconcile tick (1s) and is identity-agnostic; a `Committed`
     // lease is never reclaimed (it awaits an explicit holder release). Uses the
     // process-monotonic `lease_now_ms()` clock — the SAME clock the watcher's
-    // acquire deadline is computed against — so a live holder mid-send (deadline
-    // 90s out) is never reclaimed.
+    // acquire deadline is computed against — so a live holder mid-send (whose
+    // ~15s deadline is kept ahead by the watcher's heartbeat-renew) is never
+    // reclaimed.
     let _ = shared.reclaim_expired_delivery_leases(super::lease_now_ms());
 
     // Collect deadline-elapsed gate-timeout entries to finalize. We must not

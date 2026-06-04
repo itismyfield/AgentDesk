@@ -1622,17 +1622,16 @@ impl TmuxRelayCoord {
 }
 
 // ===========================================================================
-// #3041 §2-§3 P1-0 — Delivery-lease scaffolding (DORMANT).
+// #3041 §2-§3 — Delivery-lease `DeliveryLeaseCell` state machine.
 //
-// This block introduces the `DeliveryLeaseCell` type and its state machine.
-// It is intentionally INERT in P1-0: NOTHING in any existing call path
-// constructs, reads, or mutates a cell yet. The `relay_slot` field above is
-// the current single-winner coordination primitive and is LEFT UNTOUCHED here
-// — its migration onto the lease lands in P1-1. Everything below is a pure
-// addition that later phases (P1-1..P1-5) wire in. Because it is dormant it
-// is necessarily dead code today; that is acknowledged via the targeted
-// `#[allow(dead_code)]` attributes, each tagged with this issue/phase so the
-// follow-up wiring can remove them.
+// As of P1-1 the WATCHER terminal-delivery path wires this LIVE: the watcher
+// acquires the cell before sending, heartbeat-renews it during the send, and
+// commits+advances+releases INLINE. The `relay_slot` field above is LEFT
+// UNTOUCHED for now (its guard migration is a later step). The SINK/BRIDGE
+// committers (P1-2) and the 3-way ACK reconciliation (P1-3) are not wired yet,
+// so the actor `CommitDelivery`/`ReleaseDelivery` messages and some helpers
+// remain dormant — those still carry targeted `#[allow(dead_code)]` attributes
+// tagged with this issue/phase, to be wired/removed by the follow-up phases.
 //
 // Design (faithful to #3041 §2-§3):
 //   lease = (channel_id, turn_identity: TurnKey, byte_range [start,end))
