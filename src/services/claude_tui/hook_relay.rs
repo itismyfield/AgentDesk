@@ -225,7 +225,10 @@ fn memento_feedback_instruction(search_event_id: Option<String>) -> String {
         "Action required: you just received a memento search result. Before your next memento \
 recall/context/search call, submit one `mcp__memento__tool_feedback` call for THIS result with \
 {target}, `relevant` = whether any returned fragment was on-topic, and `sufficient` = whether the \
-results were enough to proceed. This is a single quick call — do it now, then continue."
+results were enough to proceed. If `mcp__memento__tool_feedback` is not in your active tools \
+(memento tools are deferred), first load it with ToolSearch query \
+`select:mcp__memento__tool_feedback`, then make the call. This is a single quick step — do it now, \
+then continue."
     )
 }
 
@@ -501,6 +504,8 @@ mod tests {
         assert_eq!(value["hookSpecificOutput"]["hookEventName"], "PostToolUse");
         assert!(ctx.contains("search_event_id=22752"));
         assert!(ctx.contains("mcp__memento__tool_feedback"));
+        // Deferred-tool friction hint: tell the model how to load the tool.
+        assert!(ctx.contains("select:mcp__memento__tool_feedback"));
         assert_eq!(value["suppressOutput"], true);
     }
 
