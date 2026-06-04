@@ -389,14 +389,21 @@ enum FinalizeMsg {
         deadline_ms: u64,
         ack: oneshot::Sender<bool>,
     },
-    /// #3041 P1-1: three-way commit; full-identity mismatch = no-op. On a
-    /// `Delivered` commit the handler also advances the channel's
-    /// `confirmed_end_offset` watermark to `end` (§5.2 atomicity) via the SAME
-    /// monotonic CAS the watcher's inline advance used, so commit-advances-offset
-    /// and the lease transition are one serialized unit on the finalize owner.
+    /// #3041 three-way commit; full-identity mismatch = no-op. On a `Delivered`
+    /// commit the handler also advances the channel's `confirmed_end_offset`
+    /// watermark to `end` (§5.2 atomicity) via the SAME monotonic CAS the
+    /// watcher's inline advance uses, so commit-advances-offset and the lease
+    /// transition are one serialized unit on the finalize owner.
     /// `provider`/`tmux_session_name`/`shared` are carried so the handler can call
     /// `advance_watcher_confirmed_end` (the `.generation`-mtime bookkeeping needs
-    /// the session name). They are `None`/unused for non-watcher holders.
+    /// the session name).
+    ///
+    /// DORMANT (reverted in P1-1): the watcher now commits + advances the offset
+    /// INLINE (see tmux_watcher.rs `watcher_lease_commit_advance`), NOT via this
+    /// awaited actor round-trip — the actor-commit deferral reopened the #3143
+    /// duplicate window. Kept defined (no production sender) for the later phase
+    /// that re-couples the commit to the ledger (§5.3).
+    #[allow(dead_code)] // #3041: wired in a later phase (ledger-coupled commit, §5.3).
     CommitDelivery {
         key: TurnKey,
         lease: Arc<DeliveryLeaseCell>,
@@ -409,7 +416,10 @@ enum FinalizeMsg {
         shared: Arc<SharedData>,
         ack: oneshot::Sender<bool>,
     },
-    /// #3041 §2-§3 P1-0 (DORMANT): compare-and-release; full-identity match only.
+    /// #3041 compare-and-release; full-identity match only. DORMANT (reverted in
+    /// P1-1): the watcher releases its lease INLINE after the inline commit, NOT
+    /// via this awaited actor round-trip. Kept defined for a later phase.
+    #[allow(dead_code)] // #3041: wired in a later phase (alongside CommitDelivery).
     ReleaseDelivery {
         key: TurnKey,
         lease: Arc<DeliveryLeaseCell>,
@@ -496,12 +506,18 @@ impl TurnFinalizer {
         rx.await.unwrap_or(FinalizeOutcome::AlreadyFinalized)
     }
 
-    /// #3041 P1-1: route a three-way `CommitDelivery` through the actor so the
-    /// lease transition AND the `Delivered`-commit offset advance run as one
-    /// serialized unit on the finalize owner (B4: commit/release/reclaim are
-    /// actor transitions; only acquire/read are atomic fast-paths on the cell).
-    /// Returns whether the lease actually committed (identity matched a live
-    /// `Leased` lease). If the actor task is gone (teardown) returns `false`.
+    /// #3041: route a three-way `CommitDelivery` through the actor so the lease
+    /// transition AND the `Delivered`-commit offset advance run as one serialized
+    /// unit on the finalize owner. Returns whether the lease actually committed
+    /// (identity matched a live `Leased` lease). If the actor task is gone
+    /// (teardown) returns `false`.
+    ///
+    /// DORMANT (reverted in P1-1): the watcher commits + advances INLINE (see
+    /// tmux_watcher.rs) to keep the pre-P1-1 prompt advance — awaiting this
+    /// behind the actor's `Terminal` mailbox reopened the #3143 duplicate window.
+    /// Retained (exercised only by the lease unit tests) for a later
+    /// ledger-coupled-commit phase (§5.3).
+    #[allow(dead_code)] // #3041: wired in a later phase (ledger-coupled commit, §5.3).
     pub(in crate::services::discord) async fn commit_delivery(
         &self,
         key: TurnKey,
@@ -536,11 +552,14 @@ impl TurnFinalizer {
         rx.await.unwrap_or(false)
     }
 
-    /// #3041 P1-1: route a compare-and-`ReleaseDelivery` through the actor (B4:
-    /// release is an actor transition). Returns the standard
-    /// `Committed`/`Leased` → `Unleased` result; identity mismatch is a no-op
-    /// `false`. The watcher releases its lease after committing so the cell is
-    /// free for the next turn. If the actor task is gone returns `false`.
+    /// #3041: route a compare-and-`ReleaseDelivery` through the actor. Returns
+    /// the standard `Committed`/`Leased` → `Unleased` result; identity mismatch
+    /// is a no-op `false`. If the actor task is gone returns `false`.
+    ///
+    /// DORMANT (reverted in P1-1): the watcher releases INLINE after its inline
+    /// commit. Retained (exercised only by the lease unit tests) for a later
+    /// phase.
+    #[allow(dead_code)] // #3041: wired in a later phase (alongside commit_delivery).
     pub(in crate::services::discord) async fn release_delivery(
         &self,
         key: TurnKey,
@@ -2895,13 +2914,18 @@ mod tests {
     // =======================================================================
     // #3041 P1-1 — LIVE watcher-terminal-delivery lease wiring tests.
     //
-    // These exercise the wiring P1-1 added: the lease COMMIT advancing
-    // `confirmed_end_offset` through the actor, B2 single-holder contention,
-    // commit idempotency on the monotonic-CAS offset, and deadline reclaim of a
-    // dead holder. They run on a gated clock (`current_thread`/`start_paused`)
-    // and through the public `commit_delivery`/`release_delivery` actor methods
-    // — the same path the watcher uses — mirroring the 26-test finalizer matrix
-    // style.
+    // NOTE on the commit path: the watcher commits + advances the offset INLINE
+    // (see `watcher_inline_*` tests below + tmux_watcher.rs) — the awaited
+    // `CommitDelivery`/`ReleaseDelivery` actor round-trip was reverted to dormant
+    // because the actor-commit deferral reopened the #3143 duplicate window. The
+    // tests immediately below still drive the RETAINED-for-a-later-phase actor
+    // `commit_delivery`/`release_delivery` methods to keep that machinery proven
+    // correct (lease COMMIT advances `confirmed_end_offset`, B2 single-holder
+    // contention, commit idempotency on the monotonic CAS, deadline reclaim,
+    // release). The `watcher_inline_*` tests assert the NEW production inline
+    // path (synchronous commit+advance, acquire-time self-reclaim). All run on a
+    // gated clock (`current_thread`/`start_paused`), mirroring the 26-test
+    // finalizer matrix style.
     // =======================================================================
     mod delivery_lease_p1_1 {
         use super::super::{LeaseHolder, LeaseOutcome, TurnFinalizer, TurnKey};
@@ -3144,6 +3168,124 @@ mod tests {
                 assert!(
                     lease.try_acquire(turn2, watcher(2), 24, 48, 1_000),
                     "released cell is free for the next turn"
+                );
+            })
+            .await;
+        }
+
+        /// Issue 1 (HIGH) — acquire-time SELF-RECLAIM of a dead holder, the REAL
+        /// black-hole path: a holder `try_acquire`s and then "dies" (never
+        /// commits/releases) on a cold path where NO finalizer `Terminal` message
+        /// ever cached `SharedData`. Without acquire-time self-reclaim a
+        /// replacement watcher would B2-skip the stuck `Leased` lease forever
+        /// (permanent black-hole). This asserts the REAL fix: a replacement
+        /// reclaims the EXPIRED lease at acquire time and SUCCEEDS — WITHOUT any
+        /// finalizer actor, `SharedData`, or reconcile tick involved. It also
+        /// asserts a NON-expired live lease still B2-skips (single-holder, §5.2).
+        #[tokio::test(flavor = "current_thread", start_paused = true)]
+        async fn watcher_inline_acquire_reclaims_dead_holder_without_terminal() {
+            with_isolated_runtime_root(|| async move {
+                let shared = make_shared_data_for_tests_with_storage(None, None);
+                let ch = ChannelId::new(7007);
+                let lease = shared.delivery_lease(ch);
+                let dead_turn = TurnKey::new(ch, 101, 0);
+                let dead = watcher(1);
+
+                // Dead holder acquires with deadline 100 (monotonic units) and
+                // then dies — never commits, never releases. No `SharedData` was
+                // ever cached in any finalizer (we never spawn/route a Terminal).
+                assert!(lease.try_acquire(dead_turn, dead, 0, 40, 100));
+
+                // BEFORE the deadline: a NON-expired live lease still B2-skips —
+                // the replacement's acquire-time reclaim is a no-op and the
+                // acquire loses (single-holder invariant intact, no duplicate).
+                let live = watcher(2);
+                assert!(
+                    !lease.reclaim_if_expired(50),
+                    "a non-expired lease must NOT be reclaimed (would reintroduce duplicates)"
+                );
+                assert!(
+                    !lease.try_acquire(dead_turn, live, 0, 40, 100),
+                    "B2: a replacement cannot acquire while the holder's lease is live (non-expired)"
+                );
+
+                // AFTER the deadline: the replacement's acquire-time
+                // `reclaim_if_expired` frees the dead holder's EXPIRED lease, then
+                // its `try_acquire` SUCCEEDS — the range is delivered, NOT
+                // black-holed. This is the exact in-watcher self-heal sequence
+                // (reclaim_if_expired immediately before try_acquire), with NO
+                // finalizer/SharedData/reconcile dependency.
+                let replacement = watcher(3);
+                let now_after_deadline = 150_u64;
+                let reclaimed = lease.reclaim_if_expired(now_after_deadline);
+                assert!(
+                    reclaimed,
+                    "acquire-time reclaim must free the dead holder's EXPIRED lease"
+                );
+                assert!(
+                    lease.try_acquire(
+                        dead_turn,
+                        replacement,
+                        0,
+                        40,
+                        now_after_deadline.saturating_add(1_000),
+                    ),
+                    "the replacement acquires the reclaimed cell and delivers (no black-hole)"
+                );
+            })
+            .await;
+        }
+
+        /// Issue 2 (HIGH) — the inline commit advances `confirmed_end_offset`
+        /// SYNCHRONOUSLY by the time control returns to the caller (no
+        /// actor-deferral window). This replicates the EXACT in-watcher inline
+        /// sequence (`cell.commit(Delivered)` then `advance_watcher_confirmed_end`)
+        /// and asserts the offset is already advanced with NO `.await` on any
+        /// actor in between — closing the #3143 duplicate window the deferred
+        /// actor-commit had reopened.
+        #[tokio::test(flavor = "current_thread", start_paused = true)]
+        async fn watcher_inline_commit_advances_offset_synchronously() {
+            with_isolated_runtime_root(|| async move {
+                let shared = make_shared_data_for_tests_with_storage(None, None);
+                let ch = ChannelId::new(7008);
+                let lease = shared.delivery_lease(ch);
+                let turn = TurnKey::new(ch, 202, 0);
+                let h = watcher(1);
+
+                assert!(lease.try_acquire(turn, h, 0, 96, 1_000));
+                assert_eq!(
+                    shared.committed_relay_offset(ch),
+                    0,
+                    "no advance before commit"
+                );
+
+                // The INLINE production sequence: synchronous cell commit, then
+                // (on Delivered) the synchronous offset advance — NO actor await.
+                let committed = lease.commit(h, turn, 0, 96, LeaseOutcome::Delivered);
+                assert!(committed, "fresh lease commits");
+                super::super::super::tmux::advance_watcher_confirmed_end(
+                    &shared,
+                    &ProviderKind::Claude,
+                    ch,
+                    "p1-1-inline-session",
+                    96,
+                    "test:watcher_inline_commit_advances_offset_synchronously",
+                );
+
+                // By the time control returns here — with no actor round-trip in
+                // between — the offset is ALREADY advanced. There is no window in
+                // which `committed_relay_offset` still reads the old value.
+                assert_eq!(
+                    shared.committed_relay_offset(ch),
+                    96,
+                    "inline commit+advance moves confirmed_end_offset synchronously \
+                     (no actor-deferral duplicate window)"
+                );
+
+                // Inline same-holder release returns the cell to Unleased.
+                assert!(
+                    lease.release(h, turn, 0, 96),
+                    "inline release frees the committed cell for the next turn"
                 );
             })
             .await;

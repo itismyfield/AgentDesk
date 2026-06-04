@@ -7146,6 +7146,24 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             watcher_direct_fallback_after_session_bound_ack && has_direct_terminal_response;
         let watcher_lease_acquired =
             if watcher_will_direct_send && watcher_lease_end > watcher_lease_start {
+                // #3041 P1-1 (B3, Issue 1): SELF-HEALING acquire. Before trying to
+                // acquire, reclaim the current lease IFF it is EXPIRED — a dead
+                // holder that `try_acquire`d but died before commit/release (e.g.
+                // on a cold/no-terminal path where the finalizer actor never
+                // cached `SharedData`, so the reconcile-tick reclaim would never
+                // run). Without this, a replacement watcher's `try_acquire` would
+                // lose to the dead holder's stuck `Leased` lease forever and take
+                // the B2 skip arm permanently → the range is never delivered
+                // (black-hole). `reclaim_if_expired` only frees a `Leased` lease
+                // whose `deadline_ms` has elapsed against the SAME process-monotonic
+                // `lease_now_ms()` clock the acquire deadline is computed against,
+                // so a LIVE holder mid-send (deadline 90s out) is NOT reclaimed and
+                // this watcher still correctly B2-skips it (single-holder, §5.2).
+                // This makes the acquire the PRIMARY black-hole guarantee — bounded
+                // to the lease deadline, with NO dependency on the finalizer actor
+                // having `SharedData` cached. The reconcile-tick reclaim stays as a
+                // secondary net (harmless if redundant).
+                watcher_lease_cell.reclaim_if_expired(crate::services::discord::lease_now_ms());
                 watcher_lease_cell.try_acquire(
                     watcher_lease_turn,
                     watcher_lease_holder,
@@ -8043,19 +8061,39 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let terminal_committed_offset = runtime_binding_candidate_offset.unwrap_or(current_offset);
         if watcher_lease_acquired {
             // #3041 P1-1 (§5.2): the watcher-direct terminal delivery was leased
-            // above. The lease COMMIT — not an inline advance — is now the single
-            // thing that advances `confirmed_end_offset` for this path. Commit the
-            // 3-way outcome through the finalizer actor (B4): `Delivered` on a
-            // confirmed send (advances the watermark to the leased `end`),
-            // `NotDelivered` on a clean send failure, `Unknown` when the TUI
-            // quiescence gate left us lifecycle-paused (ambiguous — the visible
-            // completion is deferred to the backstop, so we must NOT claim these
-            // bytes delivered). The commit handler advances the watermark ONLY on
-            // `Delivered`, mirroring the old inline `!lifecycle_stage_paused` gate
-            // exactly. Then release the lease so the cell is free for the next
-            // turn. The leased `end` equals `terminal_committed_offset` on the
-            // committed path, so the offset reaches the same value the inline call
-            // used.
+            // above. Commit the 3-way outcome and, on `Delivered`, advance the
+            // `confirmed_end_offset` watermark — both INLINE (synchronously),
+            // exactly at the pre-P1-1 call site/timing.
+            //
+            // WHY INLINE (and NOT the awaited `CommitDelivery`/`ReleaseDelivery`
+            // actor round-trip a prior P1-1 iteration used): the actor-commit
+            // DEFERRED the offset advance behind the finalize owner's mailbox.
+            // A `CommitDelivery` can queue behind an awaited `Terminal` handler,
+            // so `confirmed_end_offset` stays OLD for the duration of that await.
+            // Meanwhile `session_relay_sink` dedups purely on
+            // `shared.committed_relay_offset(channel)` (no lease consult until
+            // P1-2), so during the deferral window it can re-relay the SAME range
+            // → duplicate. That reopened the #3143 read-only offset-authority
+            // duplicate window the pre-P1-1 inline advance had closed. Committing
+            // the cell and advancing the watermark inline restores the prompt
+            // advance so #3143's `committed_relay_offset` consult sees it
+            // immediately — closing the window. The cell's `commit` is itself an
+            // atomic CAS on the payload mutex, so §5.2's "offset advances IFF the
+            // Delivered commit succeeds" still holds atomically without the actor.
+            // The ledger-coupling of the commit (§5.3) is a deferred later step;
+            // nothing here requires the actor to serialize commit against
+            // `Terminal` today (the advance is a standalone monotonic CAS).
+            //
+            // 3-way outcome: `Delivered` on a confirmed send (advances the
+            // watermark to the leased `end`), `NotDelivered` on a clean send
+            // failure, `Unknown` when the TUI quiescence gate left us
+            // lifecycle-paused (ambiguous — visible completion deferred to the
+            // backstop, so we must NOT claim these bytes delivered). We advance
+            // ONLY on `Delivered`, mirroring the old inline `!lifecycle_stage_paused`
+            // gate exactly. The leased `end` equals `terminal_committed_offset` on
+            // the committed path, so the offset reaches the same value the inline
+            // call used. Then release the lease (inline, same-holder) so the cell
+            // is free for the next turn.
             let commit_outcome = if lifecycle_stage_paused {
                 crate::services::discord::LeaseOutcome::Unknown
             } else if relay_ok {
@@ -8063,38 +8101,38 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             } else {
                 crate::services::discord::LeaseOutcome::NotDelivered
             };
-            let committed = shared
-                .turn_finalizer
-                .commit_delivery(
-                    watcher_lease_turn,
-                    watcher_lease_cell.clone(),
-                    watcher_lease_holder,
-                    watcher_lease_start,
-                    watcher_lease_end,
-                    commit_outcome,
-                    watcher_provider.clone(),
-                    tmux_session_name.clone(),
-                    shared.clone(),
-                )
-                .await;
+            let committed = watcher_lease_cell.commit(
+                watcher_lease_holder,
+                watcher_lease_turn,
+                watcher_lease_start,
+                watcher_lease_end,
+                commit_outcome,
+            );
             debug_assert!(
                 committed,
                 "watcher must be able to commit its own freshly-acquired lease"
             );
-            // Release so the cell returns to Unleased for the next turn. Routed
-            // through the actor (B4). Idempotent: a release that loses the
-            // identity match (e.g. the lease was reclaimed mid-send because the
-            // 90s deadline elapsed) is a harmless no-op.
-            let _ = shared
-                .turn_finalizer
-                .release_delivery(
-                    watcher_lease_turn,
-                    watcher_lease_cell.clone(),
-                    watcher_lease_holder,
-                    watcher_lease_start,
+            if committed && commit_outcome == crate::services::discord::LeaseOutcome::Delivered {
+                // INLINE advance — exactly the pre-P1-1 call site/timing.
+                advance_watcher_confirmed_end(
+                    &shared,
+                    &watcher_provider,
+                    channel_id,
+                    &tmux_session_name,
                     watcher_lease_end,
-                )
-                .await;
+                    "src/services/discord/tmux_watcher.rs:watcher_lease_commit_advance",
+                );
+            }
+            // Release so the cell returns to Unleased for the next turn. Inline
+            // (same-holder) compare-and-release. Idempotent: a release that loses
+            // the identity match (e.g. the lease was reclaimed mid-send because
+            // the 90s deadline elapsed) is a harmless no-op.
+            let _ = watcher_lease_cell.release(
+                watcher_lease_holder,
+                watcher_lease_turn,
+                watcher_lease_start,
+                watcher_lease_end,
+            );
         } else if terminal_output_committed && !lifecycle_stage_paused {
             // Non-watcher-direct committed paths (relay-suppressed task
             // notifications, empty-turn cleanup, session-bound delegation that
