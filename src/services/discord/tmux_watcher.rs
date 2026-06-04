@@ -17,98 +17,32 @@ fn next_watcher_instance_id() -> u64 {
 /// watcher terminal send. The deadline is a HOLDER-LIVENESS signal, NOT a hard
 /// cap on delivery duration — while the send future is in flight the watcher
 /// keeps the lease alive with a background HEARTBEAT that `renew()`s the
-/// deadline every `WATCHER_DELIVERY_LEASE_HEARTBEAT_MS` (see below). Because a
-/// LIVE holder always re-extends within one interval, a long multi-chunk send
-/// (which can exceed any FIXED deadline — an unbounded response splits into
-/// 2000-char chunks paced ~500ms apart plus a 1s rate limiter, so 60+ chunks
-/// can run past 90s) is NEVER reclaimed mid-flight. Conversely, a genuinely
-/// DEAD holder (its watcher task/process gone) stops renewing, so the lease
-/// expires and a replacement reclaims it within ~one deadline.
+/// deadline every heartbeat interval. Because a LIVE holder always re-extends
+/// within one interval, a long multi-chunk send (which can exceed any FIXED
+/// deadline — an unbounded response splits into 2000-char chunks paced ~500ms
+/// apart plus a 1s rate limiter, so 60+ chunks can run past 90s) is NEVER
+/// reclaimed mid-flight. Conversely, a genuinely DEAD holder (its watcher
+/// task/process gone) stops renewing, so the lease expires and a replacement
+/// reclaims it within ~one deadline.
 ///
-/// INVARIANT — deadline must be a small multiple of the heartbeat: large enough
-/// that a live holder never expires between two renews (covers a missed/late
-/// tick under scheduler pressure), small enough that a dead holder is reclaimed
-/// PROMPTLY. We pick 3× the heartbeat (15s = 3 × 5s): one tick can be skipped
-/// entirely and the lease still survives to the next, while dead-holder
-/// recovery is ~15s instead of the old fixed 90s. This is the lease DEADLINE,
-/// independent of the finalizer's `GATE_BACKSTOP` (8s, a different concern:
-/// visible-completion gating, not delivery duration).
-const WATCHER_DELIVERY_LEASE_DEADLINE_MS: u64 = 15_000;
+/// #3041 P1-2: this is now an ALIAS for the shared
+/// [`crate::services::discord::DELIVERY_LEASE_DEADLINE_MS`] so the watcher and
+/// the bridge use the SAME deadline against the SAME per-channel cell. Kept as a
+/// named alias to minimize churn at the watcher call/test sites.
+const WATCHER_DELIVERY_LEASE_DEADLINE_MS: u64 =
+    crate::services::discord::DELIVERY_LEASE_DEADLINE_MS;
 
 /// #3041 P1-1 (§3, codex R2 Issue-1): how often the in-flight watcher send
-/// renews its delivery lease. Must be strictly less than (and a small fraction
-/// of) `WATCHER_DELIVERY_LEASE_DEADLINE_MS` so a live holder always re-extends
-/// before expiry even if one tick is delayed (the deadline is 3× this).
-const WATCHER_DELIVERY_LEASE_HEARTBEAT_MS: u64 = 5_000;
+/// renews its delivery lease. Alias for the shared
+/// [`crate::services::discord::DELIVERY_LEASE_HEARTBEAT_MS`] (P1-2).
+const WATCHER_DELIVERY_LEASE_HEARTBEAT_MS: u64 =
+    crate::services::discord::DELIVERY_LEASE_HEARTBEAT_MS;
 
-/// #3041 P1-1 (§3, codex R2 Issue-1): RAII handle for the in-flight
-/// delivery-lease heartbeat task. The watcher spawns the heartbeat right after a
-/// successful `try_acquire` and `stop()`s it BEFORE the inline commit (and the
-/// `Drop` impl aborts it on any early return / panic), so the renew loop can
-/// NEVER outlive the send and race the commit. While the watcher task lives the
-/// heartbeat keeps the lease alive (`renew`); if the watcher TASK dies the
-/// spawned heartbeat is dropped/aborted with it → the lease stops being renewed
-/// → it expires → a replacement reclaims it. A heartbeat tick can only ever
-/// `renew` THIS holder's OWN still-`Leased` lease (matched on holder+turn), so a
-/// last tick that races `stop()`+commit merely extends our own deadline, which
-/// the immediately-following commit then flips to `Committed` — harmless.
-struct DeliveryLeaseHeartbeat {
-    handle: tokio::task::JoinHandle<()>,
-}
-
-impl DeliveryLeaseHeartbeat {
-    /// Spawn a background task that renews `(holder, turn)`'s lease on `cell`
-    /// every `WATCHER_DELIVERY_LEASE_HEARTBEAT_MS`, each time pushing the
-    /// deadline to `lease_now_ms() + WATCHER_DELIVERY_LEASE_DEADLINE_MS`. The
-    /// first tick fires AFTER one interval (the acquire already set a fresh
-    /// deadline). The loop exits on its own as soon as a `renew` returns false
-    /// (the lease is no longer ours — committed, released, or reclaimed), so it
-    /// self-terminates even before an explicit `stop()`.
-    fn spawn(
-        cell: std::sync::Arc<crate::services::discord::DeliveryLeaseCell>,
-        holder: crate::services::discord::LeaseHolder,
-        turn: crate::services::discord::turn_finalizer::TurnKey,
-    ) -> Self {
-        let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(
-                WATCHER_DELIVERY_LEASE_HEARTBEAT_MS,
-            ));
-            // Skip the immediate tick `interval` emits at t=0; the acquire just
-            // set a fresh deadline, so the first renew is one interval later.
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                let renewed = cell.renew(
-                    holder,
-                    turn,
-                    crate::services::discord::lease_now_ms()
-                        .saturating_add(WATCHER_DELIVERY_LEASE_DEADLINE_MS),
-                );
-                if !renewed {
-                    // Lease is no longer ours (committed/released/reclaimed):
-                    // nothing left to keep alive.
-                    break;
-                }
-            }
-        });
-        Self { handle }
-    }
-
-    /// Stop the heartbeat. Idempotent. Called BEFORE the inline commit so the
-    /// renew loop is guaranteed not to race the commit.
-    fn stop(self) {
-        self.handle.abort();
-    }
-}
-
-impl Drop for DeliveryLeaseHeartbeat {
-    fn drop(&mut self) {
-        // Safety net: if the send path returns early / panics before an explicit
-        // `stop()`, aborting on drop guarantees the heartbeat cannot outlive the
-        // owning watcher frame.
-        self.handle.abort();
-    }
-}
+/// #3041 P1-2: the heartbeat RAII handle now lives in the shared `discord` module
+/// (`super::DeliveryLeaseHeartbeat`) so the watcher and the bridge reuse one
+/// implementation. Re-exported here under the watcher-local name to keep the
+/// existing watcher call sites and tests unchanged.
+use crate::services::discord::DeliveryLeaseHeartbeat;
 
 /// #2441 (H1) — race a fixed sleep against a `notify`-backed wake-up
 /// from `JsonlWatcher`. Returns as soon as EITHER the sleep elapses or

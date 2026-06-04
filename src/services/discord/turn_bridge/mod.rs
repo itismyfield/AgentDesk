@@ -1410,7 +1410,8 @@ use stale_resume::{
     stream_error_requires_terminal_session_reset,
 };
 use terminal_delivery::{
-    send_ordered_long_terminal_response, should_complete_work_dispatch_after_terminal_delivery,
+    BridgeDeliveryLease, BridgeLeaseAcquire, send_ordered_long_terminal_response,
+    should_complete_work_dispatch_after_terminal_delivery,
     should_fail_dispatch_after_terminal_delivery, terminal_delivery_should_send_new_chunks,
     tui_quiescence_timeout_requires_inflight_retry, turn_bridge_replace_outcome_committed,
 };
@@ -7264,30 +7265,76 @@ pub(super) fn spawn_turn_bridge(
                 format!("{}\n\n[Stopped]", formatted)
             };
 
-            let replace_committed = turn_bridge_replace_outcome_committed(
+            // #3041 P1-2 (site 1 — cancel/stop terminal replace): acquire the
+            // shared delivery lease BEFORE delivering the `[Stopped]` terminal
+            // body. A B2 Skip means the watcher (or another bridge path) owns the
+            // live lease for this turn/range → do NOT deliver+advance.
+            let stop_lease_acquire = BridgeDeliveryLease::acquire(
                 shared_owned.as_ref(),
-                &provider,
                 channel_id,
-                current_msg_id,
-                inflight_state.tmux_session_name.as_deref(),
-                gateway
-                    .replace_message_with_outcome(channel_id, current_msg_id, &terminal_response)
-                    .await,
-                dispatch_id.as_deref(),
-                adk_session_key.as_deref(),
-                Some(turn_id.as_str()),
-                "turn_bridge_cancelled_terminal_replace",
+                super::turn_finalizer::TurnKey::new(
+                    channel_id,
+                    inflight_state.user_msg_id,
+                    shared_owned.current_generation,
+                ),
+                inflight_state.turn_start_offset.unwrap_or(0),
+                tmux_last_offset,
             );
-            if replace_committed {
-                status_panel_terminal_committed = true;
-                advance_tmux_relay_confirmed_end(
-                    shared_owned.as_ref(),
-                    watcher_owner_channel_id,
-                    tmux_last_offset,
-                    inflight_state.tmux_session_name.as_deref(),
+            if matches!(stop_lease_acquire, BridgeLeaseAcquire::Skip) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    channel = channel_id.get(),
+                    "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate cancel/stop terminal replace (channel {})",
+                    channel_id
                 );
             } else {
-                preserve_inflight_for_cleanup_retry = true;
+                let stop_lease = match stop_lease_acquire {
+                    BridgeLeaseAcquire::Held(lease) => Some(lease),
+                    _ => None,
+                };
+                let replace_committed = turn_bridge_replace_outcome_committed(
+                    shared_owned.as_ref(),
+                    &provider,
+                    channel_id,
+                    current_msg_id,
+                    inflight_state.tmux_session_name.as_deref(),
+                    gateway
+                        .replace_message_with_outcome(channel_id, current_msg_id, &terminal_response)
+                        .await,
+                    dispatch_id.as_deref(),
+                    adk_session_key.as_deref(),
+                    Some(turn_id.as_str()),
+                    "turn_bridge_cancelled_terminal_replace",
+                );
+                if replace_committed {
+                    status_panel_terminal_committed = true;
+                }
+                // B6: advance ONLY via the lease commit (Delivered on a committed
+                // replace, NotDelivered otherwise). NoRange → preserve the direct
+                // advance for parity (no offset to advance for a zero/None range).
+                if let Some(lease) = stop_lease {
+                    let outcome = if replace_committed {
+                        crate::services::discord::LeaseOutcome::Delivered
+                    } else {
+                        crate::services::discord::LeaseOutcome::NotDelivered
+                    };
+                    lease.commit_and_advance(
+                        shared_owned.as_ref(),
+                        watcher_owner_channel_id,
+                        inflight_state.tmux_session_name.as_deref(),
+                        outcome,
+                    );
+                } else if replace_committed {
+                    advance_tmux_relay_confirmed_end(
+                        shared_owned.as_ref(),
+                        watcher_owner_channel_id,
+                        tmux_last_offset,
+                        inflight_state.tmux_session_name.as_deref(),
+                    );
+                }
+                if !replace_committed {
+                    preserve_inflight_for_cleanup_retry = true;
+                }
             }
 
             if preserved_restart_mode.is_none()
@@ -7306,30 +7353,72 @@ pub(super) fn spawn_turn_bridge(
                  컨텍스트를 줄이려면 `/compact` 또는 `/clear`를 사용해 주세요.",
                 mention
             );
-            let replace_committed = turn_bridge_replace_outcome_committed(
+            // #3041 P1-2 (site 2 — prompt-too-long terminal replace): same lease
+            // routing as site 1. Acquire before the replace; B2-skip if another
+            // holder owns the live lease.
+            let plt_lease_acquire = BridgeDeliveryLease::acquire(
                 shared_owned.as_ref(),
-                &provider,
                 channel_id,
-                current_msg_id,
-                inflight_state.tmux_session_name.as_deref(),
-                gateway
-                    .replace_message_with_outcome(channel_id, current_msg_id, &full_response)
-                    .await,
-                dispatch_id.as_deref(),
-                adk_session_key.as_deref(),
-                Some(turn_id.as_str()),
-                "turn_bridge_prompt_too_long_replace",
+                super::turn_finalizer::TurnKey::new(
+                    channel_id,
+                    inflight_state.user_msg_id,
+                    shared_owned.current_generation,
+                ),
+                inflight_state.turn_start_offset.unwrap_or(0),
+                tmux_last_offset,
             );
-            if replace_committed {
-                status_panel_terminal_committed = true;
-                advance_tmux_relay_confirmed_end(
-                    shared_owned.as_ref(),
-                    watcher_owner_channel_id,
-                    tmux_last_offset,
-                    inflight_state.tmux_session_name.as_deref(),
+            if matches!(plt_lease_acquire, BridgeLeaseAcquire::Skip) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    channel = channel_id.get(),
+                    "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate prompt-too-long terminal replace (channel {})",
+                    channel_id
                 );
             } else {
-                preserve_inflight_for_cleanup_retry = true;
+                let plt_lease = match plt_lease_acquire {
+                    BridgeLeaseAcquire::Held(lease) => Some(lease),
+                    _ => None,
+                };
+                let replace_committed = turn_bridge_replace_outcome_committed(
+                    shared_owned.as_ref(),
+                    &provider,
+                    channel_id,
+                    current_msg_id,
+                    inflight_state.tmux_session_name.as_deref(),
+                    gateway
+                        .replace_message_with_outcome(channel_id, current_msg_id, &full_response)
+                        .await,
+                    dispatch_id.as_deref(),
+                    adk_session_key.as_deref(),
+                    Some(turn_id.as_str()),
+                    "turn_bridge_prompt_too_long_replace",
+                );
+                if replace_committed {
+                    status_panel_terminal_committed = true;
+                }
+                if let Some(lease) = plt_lease {
+                    let outcome = if replace_committed {
+                        crate::services::discord::LeaseOutcome::Delivered
+                    } else {
+                        crate::services::discord::LeaseOutcome::NotDelivered
+                    };
+                    lease.commit_and_advance(
+                        shared_owned.as_ref(),
+                        watcher_owner_channel_id,
+                        inflight_state.tmux_session_name.as_deref(),
+                        outcome,
+                    );
+                } else if replace_committed {
+                    advance_tmux_relay_confirmed_end(
+                        shared_owned.as_ref(),
+                        watcher_owner_channel_id,
+                        tmux_last_offset,
+                        inflight_state.tmux_session_name.as_deref(),
+                    );
+                }
+                if !replace_committed {
+                    preserve_inflight_for_cleanup_retry = true;
+                }
             }
 
             if let Some(user_msg_id) = user_msg_id {
@@ -7676,12 +7765,55 @@ pub(super) fn spawn_turn_bridge(
                 );
                 terminal_delivery_committed = true;
                 terminal_body_visible = true;
-                advance_tmux_relay_confirmed_end(
+                // #3041 P1-2 (site 3 — silent_turn suppression): no Discord post
+                // happens, but the offset STILL advances so the suppressed range is
+                // marked consumed (not re-delivered by recovery). Per B6 the advance
+                // must flow through a lease commit, so we acquire→commit(Delivered)
+                // →release here: the bridge OWNS and resolves this range. If the
+                // watcher already holds the live lease for this turn/range we B2-skip
+                // (the watcher will advance it). The "send" is instantaneous, so the
+                // heartbeat is a formality (spawned then immediately stopped at
+                // commit). Outcome=Delivered because the offset DOES advance (the
+                // range is accounted for), exactly mirroring the pre-P1-2 advance.
+                let lease_acquire = BridgeDeliveryLease::acquire(
                     shared_owned.as_ref(),
-                    watcher_owner_channel_id,
+                    channel_id,
+                    super::turn_finalizer::TurnKey::new(
+                        channel_id,
+                        inflight_state.user_msg_id,
+                        shared_owned.current_generation,
+                    ),
+                    inflight_state.turn_start_offset.unwrap_or(0),
                     tmux_last_offset,
-                    inflight_state.tmux_session_name.as_deref(),
                 );
+                match lease_acquire {
+                    BridgeLeaseAcquire::Held(lease) => {
+                        lease.commit_and_advance(
+                            shared_owned.as_ref(),
+                            watcher_owner_channel_id,
+                            inflight_state.tmux_session_name.as_deref(),
+                            crate::services::discord::LeaseOutcome::Delivered,
+                        );
+                    }
+                    BridgeLeaseAcquire::Skip => {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::warn!(
+                            channel = channel_id.get(),
+                            "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge silent_turn skipped offset advance (channel {})",
+                            channel_id
+                        );
+                    }
+                    BridgeLeaseAcquire::NoRange => {
+                        // No offset to advance (zero/None range): the direct call is
+                        // a no-op, preserved for parity. B6 not violated (no advance).
+                        advance_tmux_relay_confirmed_end(
+                            shared_owned.as_ref(),
+                            watcher_owner_channel_id,
+                            tmux_last_offset,
+                            inflight_state.tmux_session_name.as_deref(),
+                        );
+                    }
+                }
             } else if delivery_response.trim().is_empty() {
                 if gateway
                     .edit_message(
@@ -7712,91 +7844,208 @@ pub(super) fn spawn_turn_bridge(
                         can_chain_locally,
                         &delivery_response,
                     ) {
-                        match send_ordered_long_terminal_response(
+                        // #3041 P1-2 (site 4 — long chunked terminal delivery):
+                        // this is the one bridge delivery that can run PAST the
+                        // 15s lease deadline (a multi-chunk
+                        // `send_long_message_with_rollback` with per-chunk pacing),
+                        // so the lease's HEARTBEAT (spawned in `acquire`) is what
+                        // keeps it alive mid-send. Acquire BEFORE the send; B2-skip
+                        // if another holder owns the live lease.
+                        let lease_acquire = BridgeDeliveryLease::acquire(
                             shared_owned.as_ref(),
-                            gateway.as_ref(),
-                            &provider,
                             channel_id,
-                            current_msg_id,
-                            inflight_state.tmux_session_name.as_deref(),
-                            &delivery_response,
-                            dispatch_id.as_deref(),
-                            adk_session_key.as_deref(),
-                            Some(turn_id.as_str()),
-                        )
-                        .await
-                        {
-                            Ok(_) => {
-                                terminal_delivery_committed = true;
-                                terminal_body_visible = true;
-                                response_sent_offset = full_response.len();
-                                inflight_state.response_sent_offset = response_sent_offset;
-                                advance_tmux_relay_confirmed_end(
-                                    shared_owned.as_ref(),
-                                    watcher_owner_channel_id,
-                                    tmux_last_offset,
-                                    inflight_state.tmux_session_name.as_deref(),
-                                );
-                            }
-                            Err(error) => {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                tracing::warn!(
-                                    "  [{ts}] ⚠ terminal long response send failed for channel {}: {} — preserving inflight for retry",
-                                    channel_id,
-                                    error
-                                );
-                                preserve_inflight_for_cleanup_retry = true;
+                            super::turn_finalizer::TurnKey::new(
+                                channel_id,
+                                inflight_state.user_msg_id,
+                                shared_owned.current_generation,
+                            ),
+                            inflight_state.turn_start_offset.unwrap_or(0),
+                            tmux_last_offset,
+                        );
+                        if matches!(lease_acquire, BridgeLeaseAcquire::Skip) {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::warn!(
+                                channel = channel_id.get(),
+                                "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate long terminal send (channel {})",
+                                channel_id
+                            );
+                        } else {
+                            let lease = match lease_acquire {
+                                BridgeLeaseAcquire::Held(lease) => Some(lease),
+                                _ => None,
+                            };
+                            match send_ordered_long_terminal_response(
+                                shared_owned.as_ref(),
+                                gateway.as_ref(),
+                                &provider,
+                                channel_id,
+                                current_msg_id,
+                                inflight_state.tmux_session_name.as_deref(),
+                                &delivery_response,
+                                dispatch_id.as_deref(),
+                                adk_session_key.as_deref(),
+                                Some(turn_id.as_str()),
+                            )
+                            .await
+                            {
+                                Ok(_) => {
+                                    terminal_delivery_committed = true;
+                                    terminal_body_visible = true;
+                                    response_sent_offset = full_response.len();
+                                    inflight_state.response_sent_offset = response_sent_offset;
+                                    // B6: advance ONLY via the lease commit
+                                    // (Delivered). NoRange → preserve the direct
+                                    // advance for parity (no offset to advance for a
+                                    // zero/None range).
+                                    if let Some(lease) = lease {
+                                        lease.commit_and_advance(
+                                            shared_owned.as_ref(),
+                                            watcher_owner_channel_id,
+                                            inflight_state.tmux_session_name.as_deref(),
+                                            crate::services::discord::LeaseOutcome::Delivered,
+                                        );
+                                    } else {
+                                        advance_tmux_relay_confirmed_end(
+                                            shared_owned.as_ref(),
+                                            watcher_owner_channel_id,
+                                            tmux_last_offset,
+                                            inflight_state.tmux_session_name.as_deref(),
+                                        );
+                                    }
+                                }
+                                Err(error) => {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    tracing::warn!(
+                                        "  [{ts}] ⚠ terminal long response send failed for channel {}: {} — preserving inflight for retry",
+                                        channel_id,
+                                        error
+                                    );
+                                    // Send failed: NotDelivered → no advance. The
+                                    // lease's `commit_and_advance` records the
+                                    // outcome and releases so the next turn / the
+                                    // watcher can proceed.
+                                    if let Some(lease) = lease {
+                                        lease.commit_and_advance(
+                                            shared_owned.as_ref(),
+                                            watcher_owner_channel_id,
+                                            inflight_state.tmux_session_name.as_deref(),
+                                            crate::services::discord::LeaseOutcome::NotDelivered,
+                                        );
+                                    }
+                                    preserve_inflight_for_cleanup_retry = true;
+                                }
                             }
                         }
                     } else {
-                        let replace_outcome = gateway
-                            .replace_message_with_outcome(
-                                channel_id,
-                                current_msg_id,
-                                &delivery_response,
-                            )
-                            .await;
-                        // #2860: the answer reached the channel if the placeholder was
-                        // edited OR a fallback message was posted. A fallback posts the
-                        // full delivery_response as a fresh message and reports the
-                        // placeholder edit as non-committed; record it as delivered
-                        // (advance the offset) so this turn does not later present as a
-                        // never-delivered completed-stale leak and get re-delivered by
-                        // the stall-watchdog recovery.
-                        let fallback_delivered = matches!(
-                            &replace_outcome,
-                            Ok(super::formatting::ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. })
-                        );
-                        let replace_committed = turn_bridge_replace_outcome_committed(
+                        // #3041 P1-2 (site 5 — normal bridge terminal replace):
+                        // acquire the shared delivery lease BEFORE delivering so
+                        // the watcher and the bridge serialize on this channel. On
+                        // a B2 Skip the watcher (or another bridge path) owns the
+                        // live lease for this range/turn → do NOT deliver+advance.
+                        let lease_acquire = BridgeDeliveryLease::acquire(
                             shared_owned.as_ref(),
-                            &provider,
                             channel_id,
-                            current_msg_id,
-                            inflight_state.tmux_session_name.as_deref(),
-                            replace_outcome,
-                            dispatch_id.as_deref(),
-                            adk_session_key.as_deref(),
-                            Some(turn_id.as_str()),
-                            "turn_bridge_terminal_replace",
+                            super::turn_finalizer::TurnKey::new(
+                                channel_id,
+                                inflight_state.user_msg_id,
+                                shared_owned.current_generation,
+                            ),
+                            inflight_state.turn_start_offset.unwrap_or(0),
+                            tmux_last_offset,
                         );
-                        if replace_committed {
-                            advance_tmux_relay_confirmed_end(
-                                shared_owned.as_ref(),
-                                watcher_owner_channel_id,
-                                tmux_last_offset,
-                                inflight_state.tmux_session_name.as_deref(),
+                        if matches!(lease_acquire, BridgeLeaseAcquire::Skip) {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::warn!(
+                                channel = channel_id.get(),
+                                "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate terminal replace (channel {})",
+                                channel_id
                             );
-                            terminal_delivery_committed = true;
-                            terminal_body_visible = true;
                         } else {
-                            preserve_inflight_for_cleanup_retry = true;
-                            if fallback_delivered {
-                                // Mark the whole response delivered: the fallback
-                                // message carried it. The preserved-inflight save on
-                                // the `preserve_inflight_for_cleanup_retry` path below
-                                // persists this advanced offset, so the turn never
-                                // re-presents as a never-delivered leak for recovery.
-                                inflight_state.response_sent_offset = full_response.len();
+                            // `Held(lease)` → commit via the lease; `NoRange` →
+                            // deliver without a lease (no offset to advance).
+                            let lease = match lease_acquire {
+                                BridgeLeaseAcquire::Held(lease) => Some(lease),
+                                _ => None,
+                            };
+                            {
+                                let replace_outcome = gateway
+                                    .replace_message_with_outcome(
+                                        channel_id,
+                                        current_msg_id,
+                                        &delivery_response,
+                                    )
+                                    .await;
+                                // #2860: the answer reached the channel if the placeholder was
+                                // edited OR a fallback message was posted. A fallback posts the
+                                // full delivery_response as a fresh message and reports the
+                                // placeholder edit as non-committed; record it as delivered
+                                // (advance the offset) so this turn does not later present as a
+                                // never-delivered completed-stale leak and get re-delivered by
+                                // the stall-watchdog recovery.
+                                let fallback_delivered = matches!(
+                                    &replace_outcome,
+                                    Ok(super::formatting::ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. })
+                                );
+                                let replace_committed = turn_bridge_replace_outcome_committed(
+                                    shared_owned.as_ref(),
+                                    &provider,
+                                    channel_id,
+                                    current_msg_id,
+                                    inflight_state.tmux_session_name.as_deref(),
+                                    replace_outcome,
+                                    dispatch_id.as_deref(),
+                                    adk_session_key.as_deref(),
+                                    Some(turn_id.as_str()),
+                                    "turn_bridge_terminal_replace",
+                                );
+                                // #3041 P1-2 / B6: the confirmed_end advance now flows
+                                // ONLY through the lease commit. `Delivered` on a
+                                // committed replace (advances), `NotDelivered` on a
+                                // non-committed one (no advance) — mirroring the
+                                // pre-P1-2 `if replace_committed { advance }` gate.
+                                let outcome = if let Some(lease) = lease {
+                                    let outcome = if replace_committed {
+                                        crate::services::discord::LeaseOutcome::Delivered
+                                    } else {
+                                        crate::services::discord::LeaseOutcome::NotDelivered
+                                    };
+                                    lease.commit_and_advance(
+                                        shared_owned.as_ref(),
+                                        watcher_owner_channel_id,
+                                        inflight_state.tmux_session_name.as_deref(),
+                                        outcome,
+                                    );
+                                    replace_committed
+                                } else {
+                                    // NoRange (zero/inverted range or no tmux session):
+                                    // there is no offset to advance, so delivering
+                                    // without a lease cannot violate B6. Preserve the
+                                    // pre-P1-2 advance call for parity — it is a no-op
+                                    // for a zero/None range.
+                                    if replace_committed {
+                                        advance_tmux_relay_confirmed_end(
+                                            shared_owned.as_ref(),
+                                            watcher_owner_channel_id,
+                                            tmux_last_offset,
+                                            inflight_state.tmux_session_name.as_deref(),
+                                        );
+                                    }
+                                    replace_committed
+                                };
+                                if outcome {
+                                    terminal_delivery_committed = true;
+                                    terminal_body_visible = true;
+                                } else {
+                                    preserve_inflight_for_cleanup_retry = true;
+                                    if fallback_delivered {
+                                        // Mark the whole response delivered: the fallback
+                                        // message carried it. The preserved-inflight save on
+                                        // the `preserve_inflight_for_cleanup_retry` path below
+                                        // persists this advanced offset, so the turn never
+                                        // re-presents as a never-delivered leak for recovery.
+                                        inflight_state.response_sent_offset = full_response.len();
+                                    }
+                                }
                             }
                         }
                     }

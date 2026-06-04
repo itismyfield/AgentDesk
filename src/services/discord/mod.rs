@@ -2065,6 +2065,97 @@ impl DeliveryLeaseCell {
         false
     }
 }
+
+/// #3041 P1-1/P1-2: delivery-lease acquire deadline shared by BOTH the watcher
+/// and the bridge terminal-delivery paths. The deadline is a HOLDER-LIVENESS
+/// signal, NOT a hard cap on delivery duration — while a send future is in
+/// flight the holder keeps the lease alive with a background HEARTBEAT that
+/// `renew()`s the deadline every [`DELIVERY_LEASE_HEARTBEAT_MS`]. Because a LIVE
+/// holder always re-extends within one interval, a long multi-chunk send (which
+/// can exceed any FIXED deadline) is NEVER reclaimed mid-flight; a genuinely
+/// DEAD holder stops renewing, so the lease expires and a replacement reclaims
+/// it within ~one deadline. Picked as 3× the heartbeat (15s = 3 × 5s): one tick
+/// can be skipped entirely and the lease still survives to the next, while
+/// dead-holder recovery is ~15s. P1-2 reuses this so the WATCHER and the BRIDGE
+/// share one deadline against the one per-channel cell — whoever holds it blocks
+/// the other's acquire (cross-actor duplicate prevention).
+pub(in crate::services::discord) const DELIVERY_LEASE_DEADLINE_MS: u64 = 15_000;
+
+/// #3041 P1-1/P1-2: how often an in-flight holder renews its delivery lease.
+/// Must be strictly less than (and a small fraction of)
+/// [`DELIVERY_LEASE_DEADLINE_MS`] so a live holder always re-extends before
+/// expiry even if one tick is delayed (the deadline is 3× this).
+pub(in crate::services::discord) const DELIVERY_LEASE_HEARTBEAT_MS: u64 = 5_000;
+
+/// #3041 P1-1 (§3, codex R2 Issue-1) / P1-2: RAII handle for the in-flight
+/// delivery-lease heartbeat task, shared by the watcher and the bridge. The
+/// holder spawns the heartbeat right after a successful `try_acquire` and
+/// `stop()`s it BEFORE the inline commit (and the `Drop` impl aborts it on any
+/// early return / panic), so the renew loop can NEVER outlive the send and race
+/// the commit. While the holder task lives the heartbeat keeps the lease alive
+/// (`renew`); if the holder TASK dies the spawned heartbeat is dropped/aborted
+/// with it → the lease stops being renewed → it expires → a replacement reclaims
+/// it. A heartbeat tick can only ever `renew` THIS holder's OWN still-`Leased`
+/// lease (matched on holder+turn), so a last tick that races `stop()`+commit
+/// merely extends our own deadline, which the immediately-following commit then
+/// flips to `Committed` — harmless.
+pub(in crate::services::discord) struct DeliveryLeaseHeartbeat {
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl DeliveryLeaseHeartbeat {
+    /// Spawn a background task that renews `(holder, turn)`'s lease on `cell`
+    /// every [`DELIVERY_LEASE_HEARTBEAT_MS`], each time pushing the deadline to
+    /// `lease_now_ms() + DELIVERY_LEASE_DEADLINE_MS`. The first tick fires AFTER
+    /// one interval (the acquire already set a fresh deadline). The loop exits on
+    /// its own as soon as a `renew` returns false (the lease is no longer ours —
+    /// committed, released, or reclaimed), so it self-terminates even before an
+    /// explicit `stop()`.
+    pub(in crate::services::discord) fn spawn(
+        cell: std::sync::Arc<DeliveryLeaseCell>,
+        holder: LeaseHolder,
+        turn: turn_finalizer::TurnKey,
+    ) -> Self {
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(
+                DELIVERY_LEASE_HEARTBEAT_MS,
+            ));
+            // Skip the immediate tick `interval` emits at t=0; the acquire just
+            // set a fresh deadline, so the first renew is one interval later.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let renewed = cell.renew(
+                    holder,
+                    turn,
+                    lease_now_ms().saturating_add(DELIVERY_LEASE_DEADLINE_MS),
+                );
+                if !renewed {
+                    // Lease is no longer ours (committed/released/reclaimed):
+                    // nothing left to keep alive.
+                    break;
+                }
+            }
+        });
+        Self { handle }
+    }
+
+    /// Stop the heartbeat. Idempotent. Called BEFORE the inline commit so the
+    /// renew loop is guaranteed not to race the commit.
+    pub(in crate::services::discord) fn stop(self) {
+        self.handle.abort();
+    }
+}
+
+impl Drop for DeliveryLeaseHeartbeat {
+    fn drop(&mut self) {
+        // Safety net: if the send path returns early / panics before an explicit
+        // `stop()`, aborting on drop guarantees the heartbeat cannot outlive the
+        // owning holder frame.
+        self.handle.abort();
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ModelPickerPendingState {
     pub(super) owner_user_id: UserId,
