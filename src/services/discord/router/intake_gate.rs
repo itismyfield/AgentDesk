@@ -1567,36 +1567,6 @@ pub(super) fn is_model_picker_component_custom_id(
     super::super::commands::parse_model_picker_custom_id(custom_id, fallback_channel_id).is_some()
 }
 
-fn spawn_clear_idle_recap_for_channel(
-    http: std::sync::Arc<serenity::Http>,
-    pool: sqlx::PgPool,
-    channel_id: u64,
-) {
-    tokio::spawn(async move {
-        match crate::services::discord::idle_recap::lookup_active_recap_for_channel(
-            &pool, channel_id,
-        )
-        .await
-        {
-            Ok(Some((session_key, chan, msg))) => {
-                crate::services::discord::idle_recap::delete_previous_card(&http, chan, msg).await;
-                let _ = crate::services::discord::idle_recap::clear_recap_pointer(
-                    &pool,
-                    &session_key,
-                    msg,
-                )
-                .await;
-            }
-            Ok(None) => {}
-            Err(e) => tracing::warn!(
-                error = %e,
-                channel_id = channel_id,
-                "idle_recap clear lookup failed"
-            ),
-        }
-    });
-}
-
 pub(in crate::services::discord) async fn handle_event(
     ctx: &serenity::Context,
     event: &serenity::FullEvent,
@@ -2030,7 +2000,11 @@ pub(in crate::services::discord) async fn handle_event(
             // `send-to-agent`; clearing only human messages left stale
             // `📦 idle` cards under valid bot-origin E2E turns.
             if let Some(pool) = data.shared.pg_pool.as_ref().cloned() {
-                spawn_clear_idle_recap_for_channel(ctx.http.clone(), pool, channel_id.get());
+                crate::services::discord::idle_recap::spawn_clear_idle_recap_for_channel(
+                    ctx.http.clone(),
+                    pool,
+                    channel_id.get(),
+                );
             }
 
             // #189: Generic DM reply tracking — consume pending entry if present.

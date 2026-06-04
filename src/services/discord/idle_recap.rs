@@ -889,6 +889,76 @@ pub(crate) async fn lookup_active_recap_for_channel(
     Ok(row.map(|(k, c, m)| (k, c as u64, m as u64)))
 }
 
+/// Core clear sequence for an idle-recap card bound to a Discord channel,
+/// generic over the lookup / delete / clear-pointer operations so the
+/// decision logic is unit-testable without a live Postgres or Discord http.
+///
+/// Invariant (#3146): while an active turn exists for a channel — regardless
+/// of origin (Discord-intake OR a TUI-driven turn detected by the watcher) —
+/// the `📦 … idle N분` recap card must not remain shown. Both call sites feed
+/// the same `(channel_id)` key into this helper, so a turn that starts via the
+/// TUI clears the card exactly the way a Discord-origin turn already does.
+///
+/// When the lookup returns `None` (no recap card recorded for the channel)
+/// this is a no-op: a still-idle channel keeps its card.
+async fn clear_idle_recap_for_channel_with<Lookup, LookupFut, Delete, DeleteFut, Clear, ClearFut>(
+    channel_id: u64,
+    lookup: Lookup,
+    delete: Delete,
+    clear: Clear,
+) where
+    Lookup: FnOnce(u64) -> LookupFut,
+    LookupFut: std::future::Future<Output = Result<Option<(String, u64, u64)>, sqlx::Error>>,
+    Delete: FnOnce(u64, u64) -> DeleteFut,
+    DeleteFut: std::future::Future<Output = ()>,
+    Clear: FnOnce(String, u64) -> ClearFut,
+    ClearFut: std::future::Future<Output = Result<bool, sqlx::Error>>,
+{
+    match lookup(channel_id).await {
+        Ok(Some((session_key, chan, msg))) => {
+            delete(chan, msg).await;
+            let _ = clear(session_key, msg).await;
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!(
+            error = %e,
+            channel_id = channel_id,
+            "idle_recap clear lookup failed"
+        ),
+    }
+}
+
+/// Clear the active idle-recap card for a Discord channel using the real
+/// Postgres pool + Discord http. Shared by the Discord-intake path and the
+/// TUI-driven turn path so neither has to re-implement the
+/// lookup → delete → clear-pointer sequence (#3146).
+pub(in crate::services::discord) async fn clear_idle_recap_for_channel(
+    http: &serenity::Http,
+    pool: &PgPool,
+    channel_id: u64,
+) {
+    clear_idle_recap_for_channel_with(
+        channel_id,
+        |chan| lookup_active_recap_for_channel(pool, chan),
+        |chan, msg| delete_previous_card(http, chan, msg),
+        |session_key, msg| async move { clear_recap_pointer(pool, &session_key, msg).await },
+    )
+    .await;
+}
+
+/// Spawn a detached task that clears the active idle-recap card for a channel.
+/// Used wherever a turn becomes active and the caller must not block on the
+/// best-effort Discord delete / pointer clear (#3146).
+pub(in crate::services::discord) fn spawn_clear_idle_recap_for_channel(
+    http: std::sync::Arc<serenity::Http>,
+    pool: PgPool,
+    channel_id: u64,
+) {
+    tokio::spawn(async move {
+        clear_idle_recap_for_channel(&http, &pool, channel_id).await;
+    });
+}
+
 /// Extract `tmux_session_name` from a session_key — the part after the last
 /// `:`. Mirrors `parseSessionTmuxName` from `policies/lib/timeouts-helpers.js`.
 pub(crate) fn tmux_session_name_from_key(session_key: &str) -> Option<&str> {
@@ -901,6 +971,82 @@ pub(crate) fn tmux_session_name_from_key(session_key: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// #3146 Part 1: when a turn becomes active for a channel that has a
+    /// recorded idle-recap card, the clear sequence must delete the card AND
+    /// clear the recap pointer. This exercises the SAME core helper both the
+    /// Discord-intake and the TUI-driven turn call sites use, so a TUI-origin
+    /// active turn clears the card exactly the way a Discord-origin turn does.
+    #[tokio::test]
+    async fn clear_idle_recap_for_channel_deletes_card_and_clears_pointer() {
+        let deleted: Rc<RefCell<Vec<(u64, u64)>>> = Rc::new(RefCell::new(Vec::new()));
+        let cleared: Rc<RefCell<Vec<(String, u64)>>> = Rc::new(RefCell::new(Vec::new()));
+        let deleted_for_closure = deleted.clone();
+        let cleared_for_closure = cleared.clone();
+
+        clear_idle_recap_for_channel_with(
+            777,
+            |channel_id| async move {
+                assert_eq!(channel_id, 777);
+                Ok(Some(("discord:codex:tui-sess".to_string(), 777, 4242)))
+            },
+            move |chan, msg| {
+                let deleted = deleted_for_closure.clone();
+                async move {
+                    deleted.borrow_mut().push((chan, msg));
+                }
+            },
+            move |session_key, msg| {
+                let cleared = cleared_for_closure.clone();
+                async move {
+                    cleared.borrow_mut().push((session_key, msg));
+                    Ok(true)
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(deleted.borrow().as_slice(), &[(777, 4242)]);
+        assert_eq!(
+            cleared.borrow().as_slice(),
+            &[("discord:codex:tui-sess".to_string(), 4242)]
+        );
+    }
+
+    /// A still-idle channel (no recap pointer recorded) must NOT have anything
+    /// deleted or cleared — the clear is a no-op so a legitimately idle card
+    /// survives.
+    #[tokio::test]
+    async fn clear_idle_recap_for_channel_noop_when_no_card_recorded() {
+        let deleted = Rc::new(RefCell::new(0u32));
+        let cleared = Rc::new(RefCell::new(0u32));
+        let deleted_for_closure = deleted.clone();
+        let cleared_for_closure = cleared.clone();
+
+        clear_idle_recap_for_channel_with(
+            123,
+            |_channel_id| async move { Ok(None) },
+            move |_chan, _msg| {
+                let deleted = deleted_for_closure.clone();
+                async move {
+                    *deleted.borrow_mut() += 1;
+                }
+            },
+            move |_session_key, _msg| {
+                let cleared = cleared_for_closure.clone();
+                async move {
+                    *cleared.borrow_mut() += 1;
+                    Ok(true)
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(*deleted.borrow(), 0);
+        assert_eq!(*cleared.borrow(), 0);
+    }
 
     fn snapshot_with_sessions(
         claude_session_id: Option<&str>,

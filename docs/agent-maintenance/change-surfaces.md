@@ -167,7 +167,7 @@
     dead-holder recovery), stopped before the inline commit so a long multi-chunk
     send is never reclaimed mid-flight;
     split loop helpers further before adding behavior).
-  - `src/services/discord/tui_prompt_relay.rs` (3849 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (3864 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3082 queued-only answer-flush gate
     (`is_queued_notice = false` for the TUI idle-response placeholder); +139
@@ -214,7 +214,11 @@
     recorded real id) so a transient Discord post failure no longer leaves a
     stuck `Pending` slot suppressing that task-id for up to 1h; the next
     same-task notification reserves fresh and reposts (plus failed-post-reposts /
-    preserve-recorded-id / missing-id regression tests).
+    preserve-recorded-id / missing-id regression tests); +15 from #3146 Part 1:
+    `claim_tui_direct_synthetic_turn` now clears the stale `📦 … idle N분`
+    idle-recap card once a TUI-driven turn is owned for the channel, reusing the
+    shared `idle_recap::spawn_clear_idle_recap_for_channel` helper (keyed on
+    `channel_id`, mirrors the Discord-intake clear).
   - `src/services/codex_tmux_wrapper.rs` (1222 lines; Codex tmux wrapper JSON
     event parser and relay bridge for native Codex session events — bugfix only
     outside an extraction plan).
