@@ -586,7 +586,14 @@ impl SessionBoundDiscordRelaySink {
                     false,
                     Some("bridge-owned or mismatched inflight"),
                 );
-                return Ok(SessionRelayDeliveryOutcome::Skipped);
+                // #3041 P1-5: the SOLE sink-local decline. The route decision
+                // declined deterministically (a foreign-owner lease block, or
+                // `route_or_skip` Err = bridge-owned / mismatched inflight). This is
+                // `NotDelivered`, NOT `Unknown`: the sink KNOWS it did not post. The
+                // watcher routes `NotDelivered` through committed-offset
+                // reconciliation (§3.2): if no owner committed, SendFull recovers the
+                // turn — never a blind skip.
+                return Ok(SessionRelayDeliveryOutcome::NotDelivered);
             }
         };
         // #3041 P1-4 (§4-④): arm the RAII release-on-all-paths guard the moment
@@ -689,7 +696,7 @@ impl SessionBoundDiscordRelaySink {
                     &delivery.session_name,
                     &delivery,
                 );
-                return Ok(SessionRelayDeliveryOutcome::Committed);
+                return Ok(SessionRelayDeliveryOutcome::Delivered);
             }
             match formatting::replace_long_message_raw_with_outcome(
                 &http,
@@ -739,7 +746,7 @@ impl SessionBoundDiscordRelaySink {
                         &delivery.session_name,
                         &delivery,
                     );
-                    Ok(SessionRelayDeliveryOutcome::Committed)
+                    Ok(SessionRelayDeliveryOutcome::Delivered)
                 }
                 Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error }) => {
                     // #2757: do not delete msg_id here. The 3e158e588 path
@@ -789,7 +796,7 @@ impl SessionBoundDiscordRelaySink {
                         &delivery.session_name,
                         &delivery,
                     );
-                    Ok(SessionRelayDeliveryOutcome::Committed)
+                    Ok(SessionRelayDeliveryOutcome::Delivered)
                 }
                 Ok(ReplaceLongMessageOutcome::PartialContinuationFailure { error, .. }) => {
                     Err(RelaySinkError::Transient(error.to_string()))
@@ -854,15 +861,23 @@ impl SessionBoundDiscordRelaySink {
                 &delivery.session_name,
                 &delivery,
             );
-            Ok(SessionRelayDeliveryOutcome::Committed)
+            Ok(SessionRelayDeliveryOutcome::Delivered)
         }
     }
 }
 
+/// #3041 P1-5: the SINK-LOCAL terminal outcome stays deliberately 2-way. The
+/// session-bound sink always KNOWS its result: a confirmed POST/edit → `Delivered`;
+/// a deterministic route-decision decline (foreign-owner lease block, or
+/// bridge-owned / mismatched inflight) → `NotDelivered`; a transport/format failure
+/// → `Err`. There is NO sink-local `Unknown` (the cross-actor `Unknown` arises in
+/// the relay ring + watcher, not here). `NotDelivered` (the former `Skipped`) is
+/// mapped to `RelaySinkOutcome::TerminalNotDelivered`, which the watcher routes
+/// through committed-offset reconciliation (§3.2) — never a blind skip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionRelayDeliveryOutcome {
-    Committed,
-    Skipped,
+    Delivered,
+    NotDelivered,
 }
 
 #[async_trait]
@@ -870,8 +885,8 @@ impl RelaySink for SessionBoundDiscordRelaySink {
     async fn deliver(&self, frame: &StreamFrame) -> Result<RelaySinkOutcome, RelaySinkError> {
         // #3041 P1-3 R5 (codex P1-3 — REVERT R4 fence-gating of the terminal
         // outcome): a RESULT-bearing delivery reports its terminal outcome
-        // (Committed / Skipped) REGARDLESS of whether THIS frame carries a commit
-        // fence (`terminal_consumed_end`). R4 gated the outcome on the fence, which
+        // (Delivered / NotDelivered) REGARDLESS of whether THIS frame carries a
+        // commit fence (`terminal_consumed_end`). R4 gated the outcome on the fence, which
         // BROKE the legitimate no-inflight session-bound terminal delivery: that
         // delivery legitimately has NO fence but IS a real terminal whose ACK must
         // resolve — under R4 it reported only `FrameAccepted`, so the watcher timed
@@ -889,13 +904,13 @@ impl RelaySink for SessionBoundDiscordRelaySink {
         // ACK marker" (driven by a result-bearing delivery) and "offset advance"
         // (driven by the fence) are now decoupled.
         let deliveries = self.ingest_frame(frame);
-        let mut terminal_committed = false;
-        let mut terminal_skipped = false;
+        let mut terminal_delivered = false;
+        let mut terminal_not_delivered = false;
         for delivery in deliveries {
             let session_name = delivery.session_name.clone();
             match self.deliver_response(delivery).await {
-                Ok(SessionRelayDeliveryOutcome::Committed) => {
-                    terminal_committed = true;
+                Ok(SessionRelayDeliveryOutcome::Delivered) => {
+                    terminal_delivered = true;
                     // #3041 P1-3 (Part a, BLOCKER B1 CLOSED — FRAME-CARRIED): the
                     // offset advance for a confirmed terminal delivery happens INLINE
                     // inside `deliver_response` (the commit fence:
@@ -920,8 +935,8 @@ impl RelaySink for SessionBoundDiscordRelaySink {
                     // watcher's OWN delivery path advances the authority instead.
                     self.finish_terminal_candidate(&session_name);
                 }
-                Ok(SessionRelayDeliveryOutcome::Skipped) => {
-                    terminal_skipped = true;
+                Ok(SessionRelayDeliveryOutcome::NotDelivered) => {
+                    terminal_not_delivered = true;
                     self.finish_terminal_candidate(&session_name);
                 }
                 Err(error) => {
@@ -936,10 +951,15 @@ impl RelaySink for SessionBoundDiscordRelaySink {
         // ITS OWN terminal frame's ACK on its exact sequence, so a co-chunked tail
         // at a different sequence can never satisfy another turn's terminal-ACK.
         // A frame that produced no result-bearing delivery reports `FrameAccepted`.
-        if terminal_committed {
-            Ok(RelaySinkOutcome::TerminalCommitted)
-        } else if terminal_skipped {
-            Ok(RelaySinkOutcome::TerminalSkipped)
+        // #3041 P1-5: the sink emits NO `TerminalUnknown` — it always KNOWS its
+        // own result (confirmed POST → Delivered; deterministic decline →
+        // NotDelivered; failure → the `Err` returned above). `Unknown` is the
+        // cross-actor state (relay ring + watcher), surfaced when the terminal
+        // resolution cannot be confirmed there.
+        if terminal_delivered {
+            Ok(RelaySinkOutcome::TerminalDelivered)
+        } else if terminal_not_delivered {
+            Ok(RelaySinkOutcome::TerminalNotDelivered)
         } else {
             Ok(RelaySinkOutcome::FrameAccepted)
         }
@@ -1962,8 +1982,16 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // #3041 P1-5: a route-layer `Skipped` decision (the route enum legitimately
+    // keeps "Skipped" — a bridge-owned / mismatched inflight has no place to
+    // route) is the SOLE producer of the sink-local `NotDelivered` outcome
+    // (`deliver_response` returns `SessionRelayDeliveryOutcome::NotDelivered` at
+    // the route-decline arm), which `deliver` surfaces as
+    // `RelaySinkOutcome::TerminalNotDelivered`. The watcher then routes
+    // `NotDelivered` through committed-offset reconciliation (§3.2) — never a
+    // blind skip. This pins the route-`Skipped` → `NotDelivered` mapping origin.
     #[test]
-    fn terminal_delivery_route_skip_maps_to_terminal_skipped_outcome() {
+    fn terminal_delivery_route_skip_maps_to_not_delivered_outcome() {
         let tmux = "AgentDesk-claude-relay-test";
         let bridge_owned = inflight_for(tmux, RelayOwnerKind::None, false);
         assert_eq!(
@@ -1973,7 +2001,10 @@ mod tests {
                 &ProviderKind::Claude,
                 42,
             ),
-            SessionBoundTerminalDeliveryRouteDecision::Skipped
+            SessionBoundTerminalDeliveryRouteDecision::Skipped,
+            "a bridge-owned / mismatched inflight declines → route-layer Skipped, \
+             which deliver_response maps to the sink-local NotDelivered outcome \
+             (surfaced as RelaySinkOutcome::TerminalNotDelivered)"
         );
     }
 

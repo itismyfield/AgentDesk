@@ -2061,14 +2061,52 @@ fn forward_chunk_to_supervisor_relay_inner(
     }
 }
 
+/// #3041 P1-5: the watcher's view of the session-bound terminal ACK. The
+/// non-failure arms fold 1:1 onto the cross-actor 3-way `DeliveryOutcome`:
+///   * `Delivered`      ← ring `DeliveryOutcome::Delivered`
+///   * `NotDelivered`   ← ring `DeliveryOutcome::NotDelivered` (the former
+///                        `TerminalSkipped`; a deterministic sink decline)
+///   * the failure/unconfirmed arms (`Unknown`-class) — `RingUnknown` (the ring
+///     recorded an explicit `Unknown`: sink POSTed without confirming),
+///     `Dropped`, `SinkError`, `TimedOut`, `MissingTarget` — ALL collapse to
+///     `DeliveryOutcome::Unknown` for the resend DECISION (see
+///     [`session_bound_ack_delivery_outcome`]). They stay DISTINCT variants here
+///     so the flight-recorder / metrics keep their exact provenance.
+///
+/// §3.2 SAFETY INVARIANT: BOTH `NotDelivered` AND every `Unknown`-class arm route
+/// through `watcher_terminal_resend_action` (committed-offset reconciliation).
+/// There is NO blind skip for `NotDelivered` and NO blind 10s re-send for any
+/// `Unknown`-class arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionBoundRelayAckOutcome {
     Delivered,
-    TerminalSkipped,
+    NotDelivered,
+    RingUnknown,
     Dropped,
     SinkError,
     TimedOut,
     MissingTarget,
+}
+
+/// #3041 P1-5: collapse the watcher ACK onto the canonical cross-actor 3-way
+/// `DeliveryOutcome` for the resend DECISION. `Delivered` → delivered (no resend);
+/// `NotDelivered` → not-delivered (reconcile); every failure/unconfirmed arm →
+/// `Unknown` (reconcile). The §3.2 reconciliation treats `NotDelivered` and
+/// `Unknown` IDENTICALLY (both consult the committed offset → SendFull-or-Skip),
+/// so this fold is what guarantees neither gets a blind fast-path.
+fn session_bound_ack_delivery_outcome(
+    ack_outcome: SessionBoundRelayAckOutcome,
+) -> crate::services::cluster::stream_relay::DeliveryOutcome {
+    use crate::services::cluster::stream_relay::DeliveryOutcome;
+    match ack_outcome {
+        SessionBoundRelayAckOutcome::Delivered => DeliveryOutcome::Delivered,
+        SessionBoundRelayAckOutcome::NotDelivered => DeliveryOutcome::NotDelivered,
+        SessionBoundRelayAckOutcome::RingUnknown
+        | SessionBoundRelayAckOutcome::Dropped
+        | SessionBoundRelayAckOutcome::SinkError
+        | SessionBoundRelayAckOutcome::TimedOut
+        | SessionBoundRelayAckOutcome::MissingTarget => DeliveryOutcome::Unknown,
+    }
 }
 
 fn sequence_reached(latest: Option<u64>, target: u64) -> bool {
@@ -2078,7 +2116,7 @@ fn sequence_reached(latest: Option<u64>, target: u64) -> bool {
 fn session_bound_relay_ack_snapshot_outcome(
     target: Option<&SessionBoundRelayAckTarget>,
 ) -> Option<SessionBoundRelayAckOutcome> {
-    use crate::services::cluster::stream_relay::TerminalOutcome;
+    use crate::services::cluster::stream_relay::DeliveryOutcome;
     let target = target?;
     // #3041 P1-3 R5 (per-sequence terminal-ACK correlation): resolve the terminal
     // ACK on THIS watcher's OWN terminal frame (`target.sequence`) EXACT outcome,
@@ -2094,11 +2132,21 @@ fn session_bound_relay_ack_snapshot_outcome(
         .metrics
         .terminal_outcome_for_sequence(target.sequence)
     {
-        Some(TerminalOutcome::Committed) => {
+        Some(DeliveryOutcome::Delivered) => {
             return Some(SessionBoundRelayAckOutcome::Delivered);
         }
-        Some(TerminalOutcome::Skipped) => {
-            return Some(SessionBoundRelayAckOutcome::TerminalSkipped);
+        Some(DeliveryOutcome::NotDelivered) => {
+            return Some(SessionBoundRelayAckOutcome::NotDelivered);
+        }
+        // #3041 P1-5: an explicit ring `Unknown` (sink POSTed but could not confirm
+        // the commit) RESOLVES the per-sequence ACK immediately to a `RingUnknown`
+        // — the watcher reconciles against the committed offset NOW instead of
+        // waiting out the 10s ACK timeout. `RingUnknown` folds to
+        // `DeliveryOutcome::Unknown`, which §3.2 treats exactly like `NotDelivered`
+        // (committed-offset SendFull-or-Skip), so this is a faster path to the SAME
+        // safe reconciliation — never a blind re-send.
+        Some(DeliveryOutcome::Unknown) => {
+            return Some(SessionBoundRelayAckOutcome::RingUnknown);
         }
         None => {}
     }
@@ -2128,6 +2176,7 @@ fn watcher_should_direct_send_after_session_bound_ack(
     ack_outcome: SessionBoundRelayAckOutcome,
     relay_owner_present: bool,
 ) -> bool {
+    use crate::services::cluster::stream_relay::DeliveryOutcome;
     // #3042 (relay-stability P1, immediate mitigation): after a restart the
     // channel can run with `relay_owner_kind=none` + `inflight_present=false`
     // (restore_inflight failed to rebind ownership), so the session-bound
@@ -2142,7 +2191,18 @@ fn watcher_should_direct_send_after_session_bound_ack(
     if !relay_owner_present && matches!(ack_outcome, SessionBoundRelayAckOutcome::TimedOut) {
         return false;
     }
-    should_direct_send && !matches!(ack_outcome, SessionBoundRelayAckOutcome::Delivered)
+    // #3041 P1-5: decide on the cross-actor 3-way `DeliveryOutcome` instead of the
+    // implicit `ack_outcome != Delivered` bit. `Delivered` → no watcher re-send.
+    // `NotDelivered` AND `Unknown` (every failure/unconfirmed arm) BOTH intend a
+    // re-send here — but that intent is only the PRECONDITION GATE; the actual send
+    // is masked downstream by `watcher_terminal_resend_action` (committed-offset
+    // reconciliation), so neither gets a blind skip (NotDelivered) nor a blind
+    // re-send (Unknown). §3.2 SAFETY INVARIANT.
+    should_direct_send
+        && !matches!(
+            session_bound_ack_delivery_outcome(ack_outcome),
+            DeliveryOutcome::Delivered
+        )
 }
 
 /// #3041 P1-3 (Part b, §3.2): the watcher's terminal re-send DECISION after a
@@ -3298,7 +3358,7 @@ mod matched_session_jsonl_gate_tests {
         skipped_metrics.record_terminal_skipped_sequence_for_test(11);
         assert_eq!(
             session_bound_relay_ack_snapshot_outcome(Some(&skipped_target)),
-            Some(SessionBoundRelayAckOutcome::TerminalSkipped)
+            Some(SessionBoundRelayAckOutcome::NotDelivered)
         );
 
         let delivered_metrics =
@@ -3336,8 +3396,8 @@ mod matched_session_jsonl_gate_tests {
     }
 
     // #3041 P1-3 R5 (per-sequence terminal-ACK correlation): turn A (seq N) was
-    // SKIPPED, turn B's tail (seq N+1) COMMITTED in the same chunk. A's ACK must
-    // resolve on A's OWN sequence → TerminalSkipped (so the watcher reconciles /
+    // NOT delivered, turn B's tail (seq N+1) delivered in the same chunk. A's ACK
+    // must resolve on A's OWN sequence → NotDelivered (so the watcher reconciles /
     // SendFull → A delivered, no black-hole), NOT Delivered from B bumping the
     // committed high-water-mark to N+1. B's ACK at its own sequence → Delivered.
     #[test]
@@ -3355,8 +3415,8 @@ mod matched_session_jsonl_gate_tests {
         };
         assert_eq!(
             session_bound_relay_ack_snapshot_outcome(Some(&a_target)),
-            Some(SessionBoundRelayAckOutcome::TerminalSkipped),
-            "A's ACK reads A's own seq-5 outcome (Skipped), not B's committed HWM"
+            Some(SessionBoundRelayAckOutcome::NotDelivered),
+            "A's ACK reads A's own seq-5 outcome (NotDelivered), not B's delivered HWM"
         );
 
         let b_target = SessionBoundRelayAckTarget {
@@ -3699,7 +3759,7 @@ mod matched_session_jsonl_gate_tests {
         ));
         assert!(watcher_should_direct_send_after_session_bound_ack(
             true,
-            SessionBoundRelayAckOutcome::TerminalSkipped,
+            SessionBoundRelayAckOutcome::NotDelivered,
             true
         ));
         assert!(watcher_should_direct_send_after_session_bound_ack(
@@ -3749,7 +3809,7 @@ mod matched_session_jsonl_gate_tests {
         ));
         assert!(watcher_should_direct_send_after_session_bound_ack(
             true,
-            SessionBoundRelayAckOutcome::TerminalSkipped,
+            SessionBoundRelayAckOutcome::NotDelivered,
             false
         ));
         // Ownerless TimedOut with should_direct_send=false is also suppressed.
@@ -3769,7 +3829,7 @@ mod matched_session_jsonl_gate_tests {
         ));
         assert!(watcher_should_direct_send_after_session_bound_ack(
             true,
-            SessionBoundRelayAckOutcome::TerminalSkipped,
+            SessionBoundRelayAckOutcome::NotDelivered,
             true
         ));
         assert!(watcher_should_direct_send_after_session_bound_ack(
@@ -3844,6 +3904,85 @@ mod matched_session_jsonl_gate_tests {
             watcher_terminal_resend_action(40, 50, 100),
             WatcherTerminalResendAction::SendFull,
             "committed below start must send the full range (no black-hole)"
+        );
+    }
+
+    // #3041 P1-5 (§3.2 SAFETY INVARIANT): a cross-actor `Unknown` outcome (the
+    // ring recorded `Unknown` / the ACK timed out / target was missing / dropped /
+    // sink-errored) MUST route through committed-offset reconciliation, NOT a blind
+    // 10s re-send. So `Unknown` with `committed >= end` → SkipAlreadyCommitted (a
+    // foreign owner already committed the range; re-sending would duplicate), and
+    // `Unknown` with `committed < end` → SendFull (the range is uncovered; no
+    // black-hole). The decision is driven SOLELY by the committed offset — it
+    // consults the authority, never blind-sends on the Unknown signal alone.
+    #[test]
+    fn unknown_outcome_triggers_committed_offset_reconciliation_not_blind_resend() {
+        use crate::services::cluster::stream_relay::DeliveryOutcome;
+        // The fold: every failure/unconfirmed ACK arm collapses to `Unknown`.
+        for ack in [
+            SessionBoundRelayAckOutcome::RingUnknown,
+            SessionBoundRelayAckOutcome::Dropped,
+            SessionBoundRelayAckOutcome::SinkError,
+            SessionBoundRelayAckOutcome::TimedOut,
+            SessionBoundRelayAckOutcome::MissingTarget,
+        ] {
+            assert_eq!(
+                session_bound_ack_delivery_outcome(ack),
+                DeliveryOutcome::Unknown,
+                "every failure/unconfirmed ACK arm folds to the cross-actor Unknown"
+            );
+        }
+
+        // §3.2: an Unknown outcome reconciles against the committed offset. The
+        // SAME `watcher_terminal_resend_action` gate that NotDelivered uses — no
+        // separate blind-resend path exists for Unknown.
+        let start = 100u64;
+        let end = 356u64;
+        // committed >= end: a foreign owner already committed the range → SKIP, NOT
+        // a blind re-send (which would duplicate).
+        assert_eq!(
+            watcher_terminal_resend_action(end, start, end),
+            WatcherTerminalResendAction::SkipAlreadyCommitted,
+            "Unknown + committed>=end must consult the offset and SKIP (no blind 10s re-send / no duplicate)"
+        );
+        // committed < end: the range is genuinely uncovered → SendFull (no
+        // black-hole). The decision came from the offset, not the Unknown signal.
+        assert_eq!(
+            watcher_terminal_resend_action(start, start, end),
+            WatcherTerminalResendAction::SendFull,
+            "Unknown + committed<end must SendFull via the offset authority (no black-hole)"
+        );
+    }
+
+    // #3041 P1-5 (§3.2 SAFETY INVARIANT): a `NotDelivered` outcome (the former
+    // `Ok(Skipped)`, redefined this phase) must ALSO route through committed-offset
+    // reconciliation — there is NO blind-skip fast-path for NotDelivered. When a
+    // FOREIGN owner already committed the range (`committed >= end`), the watcher
+    // must SKIP its re-send (no duplicate), exactly like a delivered turn — proving
+    // NotDelivered consults the offset rather than blindly skipping or blindly
+    // re-sending.
+    #[test]
+    fn not_delivered_outcome_keeps_no_resend_when_foreign_owner_committed() {
+        use crate::services::cluster::stream_relay::DeliveryOutcome;
+        assert_eq!(
+            session_bound_ack_delivery_outcome(SessionBoundRelayAckOutcome::NotDelivered),
+            DeliveryOutcome::NotDelivered,
+            "NotDelivered folds to the cross-actor NotDelivered (not Unknown, not Delivered)"
+        );
+        let start = 100u64;
+        let end = 356u64;
+        // A foreign owner committed the full range out from under this watcher.
+        assert_eq!(
+            watcher_terminal_resend_action(end, start, end),
+            WatcherTerminalResendAction::SkipAlreadyCommitted,
+            "NotDelivered + committed>=end (foreign owner committed) must SKIP (no duplicate, no blind-skip-without-checking)"
+        );
+        // But when NOTHING committed it still SendFulls — NotDelivered is never a
+        // silent drop (no black-hole).
+        assert_eq!(
+            watcher_terminal_resend_action(start, start, end),
+            WatcherTerminalResendAction::SendFull,
+            "NotDelivered + committed<end must SendFull (no black-hole; not a blind skip)"
         );
     }
 

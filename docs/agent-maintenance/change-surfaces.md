@@ -128,7 +128,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (8766 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (8826 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -228,7 +228,23 @@
     (`external_input_relay_lease(...)` under a SINGLE STATE lock) and derives BOTH
     the presence bool and the generation from that one atomic read, closing the
     present/generation TOCTOU where two separate accessor calls re-locked STATE and
-    a concurrently-started turn could slip a newer same-key lease into the gap).
+    a concurrently-started turn could slip a newer same-key lease into the gap);
+    +60 from #3041 P1-5 (FINAL phase): unify the terminal delivery outcome into the
+    cross-actor 3-way `DeliveryOutcome { Delivered, NotDelivered, Unknown }`. The
+    watcher's `SessionBoundRelayAckOutcome::TerminalSkipped` is renamed `NotDelivered`
+    (folds ring `DeliveryOutcome::NotDelivered`), a new `RingUnknown` arm folds the
+    explicit ring `Unknown`, and the failure/unconfirmed arms
+    (`RingUnknown`/`Dropped`/`SinkError`/`TimedOut`/`MissingTarget`) collapse to
+    `DeliveryOutcome::Unknown` via the new pure `session_bound_ack_delivery_outcome`
+    fold. `watcher_should_direct_send_after_session_bound_ack` now decides on that
+    3-way (`!= Delivered`) instead of the implicit `ack_outcome != Delivered` bit.
+    §3.2 SAFETY INVARIANT: BOTH `NotDelivered` AND every `Unknown`-class arm still
+    flow through `watcher_terminal_resend_action` (committed-offset reconciliation:
+    `committed >= end` → SkipAlreadyCommitted, else SendFull) — NO blind-skip for
+    NotDelivered, NO blind 10s re-send for Unknown; the should-direct-send bool stays
+    the precondition gate, the send paths stay masked by `!SkipAlreadyCommitted`. New
+    tests `unknown_outcome_triggers_committed_offset_reconciliation_not_blind_resend`
+    and `not_delivered_outcome_keeps_no_resend_when_foreign_owner_committed`).
   - `src/services/discord/tui_prompt_relay.rs` (3982 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +12 from #3041 P1-4 codex: the lease record
