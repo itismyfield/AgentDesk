@@ -1898,18 +1898,33 @@ fn watcher_should_direct_send_after_session_bound_ack(
 /// watcher's own consumed-terminal `end`, this reconciliation is exact:
 ///   * `committed >= end`           → the range was already delivered (by the
 ///                                     sink, ACK merely lagged) → SKIP (no dup).
-///   * `start < committed < end`    → the prefix `[start, committed)` was
-///                                     delivered → send ONLY the uncommitted
-///                                     suffix (no black-hole, reduced dup).
-///   * `committed <= start`         → nothing delivered → send the FULL range.
+///   * `committed < end`            → the range is NOT (fully) delivered → re-send
+///                                     the FULL response (no black-hole).
+///
+/// codex BLOCKER 2 (no SendSuffix for the watcher path): a partial-overlap
+/// `start < committed < end` case would in principle let us send only the
+/// uncommitted suffix — BUT the watcher delivers RESPONSE TEXT sliced by
+/// `response_sent_offset` (a streaming/render offset), which is a DIFFERENT
+/// coordinate system from the JSONL byte `committed`/`start`/`end`. There is no
+/// correct way to map `[committed, end)` JSONL bytes onto a `response_sent_offset`
+/// suffix, so a "SendSuffix" here would post an incoherent / mis-offset slice (or
+/// nothing while committed<end → black-hole). Crucially, the sink-delegated
+/// terminal delivery is ALL-OR-NOTHING: the sink advances `confirmed_end_offset`
+/// to the FULL `end` ONLY after one confirmed `replace_message_with_outcome`
+/// (`advance_offset_for_confirmed_delegated_terminal`, sink ~453/506), so for this
+/// path `committed` is either `>= end` (delivered → Skip) or `<= start` (not
+/// delivered → Full) — the partial-overlap middle case effectively does not occur.
+/// Therefore SendFull on `committed < end` is SAFE: no black-hole (the missing
+/// content is always re-delivered), and no incoherent mid-response tail. The
+/// idle-relay path still does a real JSONL `[committed,end)` re-read for its
+/// suffix; only the watcher response-text path is restricted to Skip/Full.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum WatcherTerminalResendAction {
     /// `committed >= end`: the whole range is already delivered. Do NOT re-send.
     SkipAlreadyCommitted,
-    /// `start < committed < end`: send only the uncommitted suffix
-    /// `[committed, end)`; the prefix was already delivered.
-    SendSuffix,
-    /// `committed <= start`: nothing covered — send the full range.
+    /// `committed < end`: the range is not (fully) covered — re-send the full
+    /// response. See the type doc for why no partial-suffix variant exists for
+    /// the watcher response-text path (coordinate mismatch + all-or-nothing sink).
     SendFull,
 }
 
@@ -1930,9 +1945,10 @@ fn watcher_terminal_resend_action(
     }
     if committed >= end {
         WatcherTerminalResendAction::SkipAlreadyCommitted
-    } else if committed > start {
-        WatcherTerminalResendAction::SendSuffix
     } else {
+        // committed < end (incl. the partial `start < committed < end` case which
+        // the all-or-nothing sink delegation does not actually produce): re-send
+        // the FULL response. No black-hole; no mis-offset suffix (codex BLOCKER 2).
         WatcherTerminalResendAction::SendFull
     }
 }
@@ -2036,6 +2052,30 @@ async fn wait_for_session_bound_relay_delivery_ack(
 
 fn terminal_event_consumed_offset(current_offset: u64, unprocessed_tail: &str) -> u64 {
     current_offset.saturating_sub(unprocessed_tail.len() as u64)
+}
+
+/// #3041 P1-3 (Part a, B1 — codex real-close): the watcher's AUTHORITATIVE
+/// consumed-terminal END to persist into inflight BEFORE the sink loads it in
+/// `deliver_response`, or `None` when this turn must NOT record a delegated end.
+///
+/// Pure decision so the BEFORE-the-ACK-wait ordering and the gating are unit
+/// testable without driving the whole watcher loop. Returns the end to persist
+/// only when (1) the turn has visible response output the watcher would delegate
+/// (`has_current_response`), (2) the session-bound sink is eligible to own the
+/// terminal delivery for this inflight (`sink_can_own`), and (3) the consumed
+/// range is real (`end > start`). A zero/inverted range or a bridge-owned /
+/// mismatched inflight yields `None` so no spurious end is recorded.
+fn watcher_delegated_terminal_end_for_persist(
+    has_current_response: bool,
+    sink_can_own: bool,
+    turn_data_start_offset: u64,
+    delegated_consumed_end: u64,
+) -> Option<u64> {
+    if has_current_response && sink_can_own && delegated_consumed_end > turn_data_start_offset {
+        Some(delegated_consumed_end)
+    } else {
+        None
+    }
 }
 
 /// Resolve the provider session selector to durably persist at turn end.
@@ -3117,8 +3157,11 @@ mod matched_session_jsonl_gate_tests {
 
     // #3041 P1-3 (Part b, §3.2): the watcher's terminal re-send reconciliation
     // against the committed offset authority — REPLACING the blind re-send. These
-    // assert the exact 3-way skip/suffix/full decision so the failure-mode-① skip
-    // (no duplicate) and the black-hole guard (suffix/full still sent) are pinned.
+    // assert the exact 2-way skip/full decision so the failure-mode-① skip (no
+    // duplicate) and the black-hole guard (full still sent on committed<end) are
+    // pinned. codex BLOCKER 2: there is no SendSuffix for the watcher response-text
+    // path (coordinate mismatch + all-or-nothing sink) — `committed < end` always
+    // re-sends the FULL response (no black-hole, no mis-offset slice).
     #[test]
     fn watcher_terminal_resend_skips_when_range_already_committed() {
         // failure-mode-①: the sink delivered `[0, 100)` (Part a advanced the
@@ -3137,18 +3180,24 @@ mod matched_session_jsonl_gate_tests {
     }
 
     #[test]
-    fn watcher_terminal_resend_sends_suffix_on_partial_overlap() {
-        // The sink delivered the prefix `[0, 60)`; the file grew to 100 before the
-        // watcher reconciled → send ONLY the uncommitted suffix `[60, 100)`.
-        // No black-hole (the suffix IS sent), reduced duplicate.
+    fn watcher_terminal_resend_partial_overlap_sends_full_not_suffix() {
+        // codex BLOCKER 2: a partial overlap `start < committed < end` would in
+        // principle allow a suffix-only re-send, but the watcher delivers RESPONSE
+        // TEXT sliced by `response_sent_offset` (a render offset), NOT JSONL bytes
+        // — so it cannot coherently map `[committed, end)`. The all-or-nothing sink
+        // never actually produces this case (it advances to the FULL end on a
+        // single confirmed post, or not at all). Decision: SendFull on committed<end
+        // — no black-hole (missing content always re-delivered), no mis-offset send.
         assert_eq!(
             watcher_terminal_resend_action(60, 0, 100),
-            WatcherTerminalResendAction::SendSuffix
+            WatcherTerminalResendAction::SendFull,
+            "partial overlap must SendFull (no mis-offset suffix; no black-hole)"
         );
-        // Boundary: committed just past start is still a partial overlap.
+        // Boundary: committed just past start is still committed<end → SendFull.
         assert_eq!(
             watcher_terminal_resend_action(1, 0, 100),
-            WatcherTerminalResendAction::SendSuffix
+            WatcherTerminalResendAction::SendFull,
+            "committed just past start must SendFull (committed<end → re-send)"
         );
     }
 
@@ -3166,6 +3215,113 @@ mod matched_session_jsonl_gate_tests {
             watcher_terminal_resend_action(40, 50, 100),
             WatcherTerminalResendAction::SendFull,
             "committed below start must send the full range (no black-hole)"
+        );
+    }
+
+    // #3041 P1-3 codex BLOCKER 2: the sink-delegated terminal delivery is
+    // ALL-OR-NOTHING — the sink advances `confirmed_end_offset` to the FULL `end`
+    // on ONE confirmed post, or not at all. So for the sink-delegated path the
+    // reconciliation only ever sees committed == end (delivered → Skip) or
+    // committed == start (not delivered → Full); it NEVER sees a partial
+    // `start < committed < end`. This pins that no SendSuffix is reachable on the
+    // delegated path, and that committed<end ALWAYS re-sends the full body (no
+    // black-hole). The watcher response-text path never derives a suffix from the
+    // unrelated `response_sent_offset`.
+    #[test]
+    fn sink_delegated_path_is_all_or_nothing_skip_or_full_never_suffix() {
+        let start = 100u64;
+        let end = 356u64; // full consumed-terminal end after an all-or-nothing post
+
+        // Delivered: the sink committed the FULL range → committed == end → Skip.
+        assert_eq!(
+            watcher_terminal_resend_action(end, start, end),
+            WatcherTerminalResendAction::SkipAlreadyCommitted,
+            "all-or-nothing delivered → committed==end → Skip (no duplicate, failure-mode-①)"
+        );
+
+        // Not delivered: the sink did NOT post → committed stays at the prior
+        // turn's end (<= start) → committed < end → SendFull (no black-hole).
+        assert_eq!(
+            watcher_terminal_resend_action(start, start, end),
+            WatcherTerminalResendAction::SendFull,
+            "all-or-nothing not-delivered → committed<=start → SendFull (no black-hole)"
+        );
+
+        // No reachable input on the delegated path yields SendSuffix — the variant
+        // does not exist. Even an (unreachable) partial value re-sends FULL, not a
+        // mis-offset suffix.
+        for committed in [start + 1, (start + end) / 2, end - 1] {
+            assert_eq!(
+                watcher_terminal_resend_action(committed, start, end),
+                WatcherTerminalResendAction::SendFull,
+                "committed<end must SendFull (no suffix, no mis-offset slice, no black-hole)"
+            );
+        }
+    }
+
+    // BLOCKER 2 payload guard: `watcher_terminal_response_for_direct_send` must
+    // deliver the FULL response (not the `full_response[response_sent_offset..]`
+    // streaming-offset slice) whenever the reconciled re-send is taken, so the
+    // body is coherent and never a mid-response tail driven by an unrelated offset.
+    #[test]
+    fn watcher_resend_delivers_full_response_not_render_offset_slice() {
+        let full_response = "ANSWER-PREFIX|ANSWER-SUFFIX";
+        // A non-zero render offset that has NOTHING to do with JSONL bytes — the
+        // exact mismatch BLOCKER 2 flagged. The old SendSuffix path would have
+        // returned an incoherent slice from here.
+        let response_sent_offset = "ANSWER-PREFIX|".len();
+
+        // SendFull path (session_bound_fallback_uses_full_body = true): the full,
+        // coherent response is delivered — never the render-offset slice.
+        assert_eq!(
+            watcher_terminal_response_for_direct_send(full_response, response_sent_offset, true),
+            full_response,
+            "reconciled re-send must deliver the FULL response (no mis-offset slice)"
+        );
+        // And it is NOT the render-offset suffix that the removed SendSuffix path
+        // would have sent.
+        assert_ne!(
+            watcher_terminal_response_for_direct_send(full_response, response_sent_offset, true),
+            &full_response[response_sent_offset..],
+            "must NOT send the unrelated full_response[response_sent_offset..] slice"
+        );
+    }
+
+    // #3041 P1-3 (Part a, B1 — codex real-close): the watcher's decision to persist
+    // the delegated consumed-terminal END (BEFORE the ACK wait / sink load) is
+    // gated exactly so a bridge-owned / mismatched / no-response / zero-range turn
+    // never records a spurious end, while a real delegated turn always does.
+    #[test]
+    fn watcher_persists_delegated_end_only_for_a_real_delegated_range() {
+        // Real delegated turn: response present, sink eligible, end > start.
+        assert_eq!(
+            watcher_delegated_terminal_end_for_persist(true, true, 0, 256),
+            Some(256),
+            "a real delegated turn must record its consumed-terminal end"
+        );
+        // No visible response → nothing to delegate → no end.
+        assert_eq!(
+            watcher_delegated_terminal_end_for_persist(false, true, 0, 256),
+            None,
+            "no-response turn must not record a delegated end"
+        );
+        // Sink not eligible (bridge-owned / mismatched inflight) → no end.
+        assert_eq!(
+            watcher_delegated_terminal_end_for_persist(true, false, 0, 256),
+            None,
+            "sink-ineligible turn must not record a delegated end"
+        );
+        // Zero range (end == start) → no end (never advances/overshoots).
+        assert_eq!(
+            watcher_delegated_terminal_end_for_persist(true, true, 256, 256),
+            None,
+            "zero range must not record a delegated end"
+        );
+        // Inverted range (end < start) → no end.
+        assert_eq!(
+            watcher_delegated_terminal_end_for_persist(true, true, 300, 256),
+            None,
+            "inverted range must not record a delegated end"
         );
     }
 
@@ -6729,6 +6885,53 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let current_response = full_response.get(response_sent_offset..).unwrap_or("");
         let has_current_response = !current_response.trim().is_empty();
 
+        // #3041 P1-3 (Part a, B1 — REAL close, codex): persist the watcher's
+        // AUTHORITATIVE consumed-terminal END for the range it is delegating to
+        // the session-bound sink BEFORE the sink can load inflight in
+        // `deliver_response`. The terminal frame has already been forwarded to the
+        // sink's MPSC during line collection, but the sink only runs
+        // `deliver_response` (and loads inflight) when it is scheduled to drain
+        // that frame — which is during/after the 10s ACK wait below. Writing the
+        // end HERE (synchronously, before that wait) means the sink reads a
+        // non-None end for THIS delivery and advances `confirmed_end_offset` on its
+        // confirmed POST. Reconciliation (Part b) then sees committed>=end → Skip,
+        // closing the ACK-lag duplicate vector. The OLD write at the
+        // post-ACK delegation arm was too late: it ran only AFTER the ACK already
+        // observed `Delivered`, i.e. after the sink had already loaded `None`.
+        //
+        // Identity-guarded: only writes when the on-disk row is still THIS turn
+        // (no newer turn / restart marker has taken the row), so it can never
+        // clobber a follow-up turn's state. Gated on the same terminal-delivery
+        // eligibility the sink uses + a real (non-empty) consumed range, so a
+        // bridge-owned / mismatched / zero-range turn never records a spurious end.
+        {
+            let sink_can_own =
+                crate::services::discord::session_relay_sink::session_bound_discord_relay_can_own_terminal_delivery(
+                    inflight_before_relay.as_ref(),
+                    &tmux_session_name,
+                );
+            let delegated_end_to_persist = watcher_delegated_terminal_end_for_persist(
+                has_current_response,
+                sink_can_own,
+                turn_data_start_offset,
+                terminal_event_consumed_offset(current_offset, &all_data),
+            );
+            if let Some(delegated_consumed_end) = delegated_end_to_persist
+                && let (Some(mut inflight), Some(identity)) = (
+                    inflight_before_relay.clone(),
+                    inflight_identity_before_relay.clone(),
+                )
+            {
+                let expected_turn_start_offset = inflight.turn_start_offset;
+                inflight.session_bound_delegated_terminal_end = Some(delegated_consumed_end);
+                let _ = crate::services::discord::inflight::save_inflight_state_if_matches_identity(
+                    &inflight,
+                    &identity,
+                    expected_turn_start_offset,
+                );
+            }
+        }
+
         let recent_stop_for_output =
             recent_turn_stop_for_watcher_range(channel_id, &tmux_session_name, data_start_offset);
         let inflight_missing_before_relay = inflight_before_relay.is_none();
@@ -7175,9 +7378,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // to the watcher's own `end`, so this consult is exact:
         //   * committed >= end → SKIP (the sink delivered; ACK merely lagged) → no
         //     duplicate (failure-mode-①);
-        //   * start < committed < end → send only the uncommitted suffix → no
-        //     black-hole, reduced duplicate;
-        //   * committed <= end (nothing committed) → re-send (no black-hole).
+        //   * committed < end → re-send the FULL response (no black-hole). codex
+        //     BLOCKER 2: NO partial-suffix send for the watcher response-text path
+        //     (its `response_sent_offset` render coordinate cannot be derived from
+        //     the JSONL `committed` byte offset), and the sink delegation is
+        //     all-or-nothing so `committed` is never strictly between start and end.
         // Reconcile ONLY on the session-bound re-send path (an attempted delegation
         // whose ACK was not `Delivered`); the plain watcher-direct path (no
         // delegation) keeps its existing behaviour untouched.
@@ -7227,24 +7432,22 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         }
         // The watcher actually direct-sends only when the reconciliation did NOT
         // skip the range. `SkipAlreadyCommitted` suppresses the re-send (no dup);
-        // `SendSuffix`/`SendFull`/the non-reconciled path proceed to send.
+        // `SendFull`/the non-reconciled path proceed to send.
         let watcher_direct_fallback_after_session_bound_ack = watcher_direct_fallback_intended
             && !matches!(
                 watcher_resend_action,
                 Some(WatcherTerminalResendAction::SkipAlreadyCommitted)
             );
-        // §3.2 suffix trim: on a PARTIAL overlap the prefix was already delivered,
-        // so do NOT re-send the full body — fall back to the streamed-suffix body
-        // (`response_sent_offset`), which excludes the already-delivered prefix
-        // (no black-hole: the uncommitted suffix is still sent). On `SendFull` /
-        // the non-reconciled path keep the existing full-body fallback semantics.
-        let watcher_resend_force_suffix = matches!(
-            watcher_resend_action,
-            Some(WatcherTerminalResendAction::SendSuffix)
-        );
+        // codex BLOCKER 2: on a non-skip reconciled re-send the action is always
+        // `SendFull` (the watcher response-text coordinate cannot be derived from
+        // the JSONL `committed` offset, and the sink delegation is all-or-nothing,
+        // so no partial-suffix variant exists). The full body is re-sent: no
+        // black-hole when committed<end, and never a mis-offset
+        // `full_response[response_sent_offset..]` slice driven by an unrelated
+        // streaming offset. The non-reconciled path keeps the existing full-body
+        // fallback semantics.
         let session_bound_fallback_uses_full_body = session_bound_terminal_delivery_attempted
-            && watcher_direct_fallback_after_session_bound_ack
-            && !watcher_resend_force_suffix;
+            && watcher_direct_fallback_after_session_bound_ack;
         let direct_terminal_response = watcher_terminal_response_for_direct_send(
             &full_response,
             response_sent_offset,
@@ -7467,17 +7670,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         inflight.last_watcher_relayed_offset = Some(turn_data_start_offset);
                         inflight.last_watcher_relayed_generation_mtime_ns =
                             last_observed_generation_mtime_ns;
-                        // #3041 P1-3 (Part a, B1): persist the watcher's
-                        // AUTHORITATIVE consumed terminal END for the range it is
-                        // delegating to the sink — exactly the value the watcher
-                        // advances `confirmed_end_offset` to on its OWN terminal
-                        // delivery (`watcher_lease_end ==
-                        // terminal_event_consumed_offset(current_offset, all_data)`).
-                        // The sink reads this (identity-gated) to advance the offset
-                        // authority on a confirmed delivery, so reconciliation (Part
-                        // b) sees the delegated range as delivered even if the
-                        // terminal-commit ACK lags. Only record a real (non-empty)
-                        // range; a zero/inverted range never advances.
+                        // #3041 P1-3 (Part a, B1): the AUTHORITATIVE consumed
+                        // terminal END (`session_bound_delegated_terminal_end ==
+                        // watcher_lease_end == terminal_event_consumed_offset(..)`)
+                        // is now persisted EARLIER, at the top of the terminal-relay
+                        // block BEFORE the 10s ACK wait, so the sink reads a non-None
+                        // end for THIS delivery (the codex B1 fix). Writing it here
+                        // (post-ACK) was too late — the sink had already loaded
+                        // inflight during the wait. We keep the idempotent re-write
+                        // below as a belt-and-suspenders refresh so the value is
+                        // never lost if the early write was raced by a row rewrite,
+                        // but the load-bearing write is the early one.
                         if watcher_lease_end > watcher_lease_start {
                             inflight.session_bound_delegated_terminal_end = Some(watcher_lease_end);
                         }

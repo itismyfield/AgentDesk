@@ -3415,6 +3415,88 @@ mod stall_recovery_tests {
         assert!(load_inflight_states_from_root(temp.path(), &ProviderKind::Claude).is_empty());
     }
 
+    /// #3041 P1-3 (Part a, B1 — codex real-close): the watcher persists its
+    /// AUTHORITATIVE consumed-terminal END into inflight via the identity-guarded
+    /// save the watcher uses BEFORE the ACK wait. A subsequent load — exactly what
+    /// the session-bound sink's `deliver_response` does — must read a NON-None end
+    /// for THIS delivery (the ACK-lag path), so the sink can advance
+    /// `confirmed_end_offset` on its confirmed POST. The OLD code wrote this only
+    /// AFTER the ACK observed `Delivered`, i.e. AFTER the sink had already loaded
+    /// `None` → the duplicate vector stayed open. This pins the corrected ordering:
+    /// persist-before-load yields a readable end.
+    #[test]
+    fn delegated_terminal_end_is_persisted_before_sink_load_via_guarded_save() {
+        let temp = TempDir::new().unwrap();
+        let mut state = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
+        state.turn_start_offset = Some(0);
+        // The sink has NOT yet loaded — the field starts None.
+        assert_eq!(state.session_bound_delegated_terminal_end, None);
+        save_inflight_state_in_root(temp.path(), &state).unwrap();
+
+        // Watcher's early persist (mirrors the terminal-relay block): identity-
+        // guarded save of the consumed-terminal end BEFORE the ACK wait.
+        let identity = InflightTurnIdentity::from_state(&state);
+        let mut to_persist = state.clone();
+        let delegated_end = 256u64;
+        to_persist.session_bound_delegated_terminal_end = Some(delegated_end);
+        let outcome = save_inflight_state_if_matches_identity_in_root(
+            temp.path(),
+            &to_persist,
+            &identity,
+            state.turn_start_offset,
+        );
+        assert_eq!(outcome, GuardedSaveOutcome::Saved);
+
+        // The sink's `deliver_response` load now reads a NON-None end for THIS
+        // delivery — the ACK-lag duplicate vector is closed.
+        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].session_bound_delegated_terminal_end,
+            Some(delegated_end),
+            "sink must read the delegated end persisted BEFORE its load (B1 ordering)"
+        );
+    }
+
+    /// #3041 P1-3 (Part a, B1): the identity guard must NOT let the delegated-end
+    /// persist clobber a NEWER turn that has taken over the inflight row (e.g. a
+    /// fast follow-up turn on the same channel between the watcher's compute and
+    /// its write). A mismatched identity yields `IdentityMismatch` and the newer
+    /// turn's row is preserved — no cross-turn end leakage / overshoot.
+    #[test]
+    fn delegated_terminal_end_persist_is_identity_guarded_against_newer_turn() {
+        let temp = TempDir::new().unwrap();
+        // The original turn the watcher was delegating (user_msg_id = 100).
+        let mut original = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
+        original.user_msg_id = 100;
+        let original_identity = InflightTurnIdentity::from_state(&original);
+
+        // A NEWER turn (distinct user_msg_id) now owns the row on disk.
+        let mut newer = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 200);
+        newer.user_msg_id = 200;
+        save_inflight_state_in_root(temp.path(), &newer).unwrap();
+
+        // Watcher tries to persist the OLD turn's delegated end under the OLD
+        // identity → must be rejected, leaving the newer turn intact.
+        let mut stale_persist = original.clone();
+        stale_persist.session_bound_delegated_terminal_end = Some(256);
+        let outcome = save_inflight_state_if_matches_identity_in_root(
+            temp.path(),
+            &stale_persist,
+            &original_identity,
+            original.turn_start_offset,
+        );
+        assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+
+        let rows = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].user_msg_id, 200, "newer turn must be preserved");
+        assert_eq!(
+            rows[0].session_bound_delegated_terminal_end, None,
+            "the newer turn must NOT inherit the old turn's delegated end"
+        );
+    }
+
     /// #2427 Pitfall #1 — stale TurnCompleted carrying the previous
     /// turn's `user_msg_id` must NOT delete the next turn's inflight.
     #[test]
