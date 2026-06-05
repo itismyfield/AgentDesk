@@ -142,6 +142,7 @@ mod tests {
             terminal_consumed_end: None,
             turn_user_msg_id: 0,
             turn_started_at: String::new(),
+            turn_start_offset: None,
         };
         sink.deliver(&frame).await.expect("infallible");
         sink.deliver(&frame).await.expect("infallible");

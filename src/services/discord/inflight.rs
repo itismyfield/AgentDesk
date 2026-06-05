@@ -666,6 +666,12 @@ pub(in crate::services::discord) struct InflightTurnIdentity {
     pub user_msg_id: u64,
     pub started_at: String,
     pub tmux_session_name: Option<String>,
+    /// #3041 P1-3 (codex P1-3 issue 2): the turn's `turn_start_offset` — the JSONL
+    /// byte offset at which this turn began. Used to disambiguate two consecutive
+    /// `user_msg_id == 0` TUI-direct turns whose `started_at` collides because
+    /// `now_string` only has 1-second resolution. Monotonic per turn, so it makes
+    /// the frame-carried turn identity unique even within a single second.
+    pub turn_start_offset: Option<u64>,
 }
 
 impl InflightTurnIdentity {
@@ -674,6 +680,7 @@ impl InflightTurnIdentity {
             user_msg_id: state.user_msg_id,
             started_at: state.started_at.clone(),
             tmux_session_name: state.tmux_session_name.clone(),
+            turn_start_offset: state.turn_start_offset,
         }
     }
 

@@ -286,8 +286,10 @@ impl SessionBoundDiscordRelaySink {
     /// channel's CURRENT inflight identity. If a newer/different turn has taken the
     /// channel (or no inflight remains), a stale terminal frame for the prior turn
     /// must NOT advance the authority — that would wrongly skip the new turn's
-    /// reconciliation. `inflight` is the inflight loaded for THIS delivery in
-    /// `deliver_response` (loaded once, reused — no second racy re-load).
+    /// reconciliation. `inflight` is supplied by the caller; the production path
+    /// (`advance_after_confirmed_post`) re-loads it FRESH after the Discord POST
+    /// returns (codex P1-3 issue 3), so the gate compares against the CURRENT
+    /// channel state rather than a snapshot taken before the slow async POST.
     ///
     /// DIRECT ADVANCE, not a Sink lease commit: the sink runs UNDER the watcher's
     /// delegation and is NOT a per-channel `DeliveryLeaseCell` holder. The producer
@@ -300,6 +302,37 @@ impl SessionBoundDiscordRelaySink {
     /// the producer's exact consumed-terminal end for THIS delivered turn. When the
     /// producer did not delegate a terminal end on this frame (None / zero) the
     /// sink does not advance (the watcher's own delivery path advances instead).
+    /// #3041 P1-3 (codex P1-3 issue 3 — stale-snapshot close): re-check the
+    /// identity gate against a FRESHLY-RELOADED inflight AFTER the confirmed
+    /// Discord POST/edit returned, then advance. `deliver_response` loads the
+    /// inflight ONCE before the slow async POST; if the turn is cleared or replaced
+    /// DURING that POST, that pre-POST snapshot still authorizes the advance → a
+    /// wrong-turn advance. Re-loading here (immediately before the advance, after
+    /// the await) means the gate sees the CURRENT channel state: if a newer turn
+    /// took the channel (or inflight was cleared) during the POST, the gate blocks.
+    ///
+    /// This is the ONLY advance path `deliver_response` uses; the pure
+    /// `advance_offset_for_confirmed_delegated_terminal` it delegates to keeps its
+    /// explicit-inflight signature so the gate logic stays unit-testable.
+    fn advance_after_confirmed_post(
+        &self,
+        shared: &super::SharedData,
+        provider: &ProviderKind,
+        channel_id: u64,
+        session_name: &str,
+        delivery: &SessionRelayDelivery,
+    ) {
+        let fresh_inflight = super::inflight::load_inflight_state(provider, channel_id);
+        self.advance_offset_for_confirmed_delegated_terminal(
+            shared,
+            provider,
+            channel_id,
+            session_name,
+            delivery,
+            fresh_inflight.as_ref(),
+        );
+    }
+
     fn advance_offset_for_confirmed_delegated_terminal(
         &self,
         shared: &super::SharedData,
@@ -325,8 +358,17 @@ impl SessionBoundDiscordRelaySink {
             );
             return;
         };
+        // #3041 P1-3 (codex P1-3 issue 2): `turn_start_offset` is part of the gate
+        // so two consecutive `user_msg_id == 0` turns started in the SAME second
+        // (identical `started_at`) cannot collide. The frame carries the pinned
+        // turn's `turn_start_offset`; it must match the channel's current inflight.
+        // When the frame carries no offset (legacy / non-fence) we fall back to the
+        // `(user_msg_id, started_at)` pair so old producers still gate correctly.
         let identity_matches = inflight.user_msg_id == delivery.frame_turn_user_msg_id
-            && inflight.started_at == delivery.frame_turn_started_at;
+            && inflight.started_at == delivery.frame_turn_started_at
+            && delivery
+                .frame_turn_start_offset
+                .is_none_or(|frame_offset| inflight.turn_start_offset == Some(frame_offset));
         if !identity_matches {
             tracing::debug!(
                 provider = provider.as_str(),
@@ -334,6 +376,8 @@ impl SessionBoundDiscordRelaySink {
                 tmux_session = %session_name,
                 frame_user_msg_id = delivery.frame_turn_user_msg_id,
                 inflight_user_msg_id = inflight.user_msg_id,
+                frame_turn_start_offset = delivery.frame_turn_start_offset,
+                inflight_turn_start_offset = inflight.turn_start_offset,
                 "session-bound sink: terminal frame identity != current inflight; identity gate blocks advance (delayed/wrong-turn frame)"
             );
             return;
@@ -358,8 +402,11 @@ impl SessionBoundDiscordRelaySink {
         // #3041 P1-3 (Part a, B1 — frame-carried): the producer's authoritative
         // consumed-terminal END now rides on the RESULT-bearing frame
         // (`delivery.terminal_consumed_end`), NOT read back from the inflight FILE
-        // (the racy old Part (a) is removed). The `inflight` loaded here is reused
-        // for the IDENTITY GATE in `advance_offset_for_confirmed_delegated_terminal`.
+        // (the racy old Part (a) is removed). The `inflight` loaded here is used
+        // ONLY for the route decision + trace context BELOW. The IDENTITY GATE's
+        // advance does NOT reuse this pre-POST snapshot — `advance_after_confirmed_post`
+        // re-loads a FRESH inflight AFTER the await (codex P1-3 issue 3), so a turn
+        // cleared/replaced during the slow POST cannot authorize a wrong-turn advance.
         let trace = session_relay_trace_context(
             &provider,
             channel_id,
@@ -479,14 +526,15 @@ impl SessionBoundDiscordRelaySink {
                     channel_id,
                 );
                 // #3041 P1-3 (Part a, B1): couple the confirmed POST to the offset
-                // advance in the SAME path.
-                self.advance_offset_for_confirmed_delegated_terminal(
+                // advance in the SAME path. (codex P1-3 issue 3) Re-check the
+                // identity gate against a freshly-reloaded inflight AFTER the POST,
+                // so a turn cleared/replaced during the slow POST blocks the advance.
+                self.advance_after_confirmed_post(
                     &shared,
                     &provider,
                     channel_id,
                     &delivery.session_name,
                     &delivery,
-                    inflight.as_ref(),
                 );
                 return Ok(SessionRelayDeliveryOutcome::Committed);
             }
@@ -533,14 +581,14 @@ impl SessionBoundDiscordRelaySink {
                         &delivery.session_name,
                         channel_id,
                     );
-                    // #3041 P1-3 (Part a, B1): commit fence.
-                    self.advance_offset_for_confirmed_delegated_terminal(
+                    // #3041 P1-3 (Part a, B1): commit fence. (codex P1-3 issue 3)
+                    // Post-POST fresh-inflight re-check before advancing.
+                    self.advance_after_confirmed_post(
                         &shared,
                         &provider,
                         channel_id,
                         &delivery.session_name,
                         &delivery,
-                        inflight.as_ref(),
                     );
                     Ok(SessionRelayDeliveryOutcome::Committed)
                 }
@@ -587,14 +635,14 @@ impl SessionBoundDiscordRelaySink {
                         channel_id,
                     );
                     // #3041 P1-3 (Part a, B1): commit fence — the fallback POST
-                    // delivered the response, so advance the authority too.
-                    self.advance_offset_for_confirmed_delegated_terminal(
+                    // delivered the response, so advance the authority too. (codex
+                    // P1-3 issue 3) Post-POST fresh-inflight re-check before advance.
+                    self.advance_after_confirmed_post(
                         &shared,
                         &provider,
                         channel_id,
                         &delivery.session_name,
                         &delivery,
-                        inflight.as_ref(),
                     );
                     Ok(SessionRelayDeliveryOutcome::Committed)
                 }
@@ -656,14 +704,14 @@ impl SessionBoundDiscordRelaySink {
                 true,
                 Some("new message"),
             );
-            // #3041 P1-3 (Part a, B1): commit fence.
-            self.advance_offset_for_confirmed_delegated_terminal(
+            // #3041 P1-3 (Part a, B1): commit fence. (codex P1-3 issue 3) Post-POST
+            // fresh-inflight re-check before advancing the authority.
+            self.advance_after_confirmed_post(
                 &shared,
                 &provider,
                 channel_id,
                 &delivery.session_name,
                 &delivery,
-                inflight.as_ref(),
             );
             Ok(SessionRelayDeliveryOutcome::Committed)
         }
@@ -1236,6 +1284,7 @@ impl SessionRelayParser {
                     terminal_consumed_end: frame.terminal_consumed_end,
                     frame_turn_user_msg_id: frame.turn_user_msg_id,
                     frame_turn_started_at: frame.turn_started_at.clone(),
+                    frame_turn_start_offset: frame.turn_start_offset,
                 });
                 break;
             } else {
@@ -1277,6 +1326,13 @@ struct SessionRelayDelivery {
     /// current inflight before advancing — a delayed/wrong-turn frame is ignored.
     frame_turn_user_msg_id: u64,
     frame_turn_started_at: String,
+    /// #3041 P1-3 (codex P1-3 issue 2): the pinned turn's `turn_start_offset`,
+    /// part of the IDENTITY GATE. `now_string` has 1-second resolution, so two
+    /// back-to-back `user_msg_id == 0` turns started in the same second share an
+    /// identical `(0, started_at)` — without this a delayed OLD terminal frame
+    /// would pass the gate for the NEW turn. `turn_start_offset` is monotonic per
+    /// turn, so it makes the identity unique. `None` on legacy/non-fence frames.
+    frame_turn_start_offset: Option<u64>,
 }
 
 fn ssh_direct_prompt_anchor_for_response(
@@ -1356,6 +1412,7 @@ mod tests {
             terminal_consumed_end: None,
             turn_user_msg_id: 0,
             turn_started_at: String::new(),
+            turn_start_offset: None,
         }
     }
 
@@ -1367,6 +1424,27 @@ mod tests {
         turn_user_msg_id: u64,
         turn_started_at: &str,
     ) -> StreamFrame {
+        terminal_frame_offset(
+            binding,
+            payload,
+            sequence,
+            consumed_end,
+            turn_user_msg_id,
+            turn_started_at,
+            Some(0),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn terminal_frame_offset(
+        binding: &MatchedChannel,
+        payload: &str,
+        sequence: u64,
+        consumed_end: u64,
+        turn_user_msg_id: u64,
+        turn_started_at: &str,
+        turn_start_offset: Option<u64>,
+    ) -> StreamFrame {
         StreamFrame {
             session_name: binding.expected_session_name.clone(),
             binding: binding.clone(),
@@ -1375,6 +1453,7 @@ mod tests {
             terminal_consumed_end: Some(consumed_end),
             turn_user_msg_id,
             turn_started_at: turn_started_at.to_string(),
+            turn_start_offset,
         }
     }
 
@@ -1954,6 +2033,22 @@ mod tests {
         turn_user_msg_id: u64,
         turn_started_at: &str,
     ) -> SessionRelayDelivery {
+        delivery_with_fence_offset(
+            session_name,
+            consumed_end,
+            turn_user_msg_id,
+            turn_started_at,
+            None,
+        )
+    }
+
+    fn delivery_with_fence_offset(
+        session_name: &str,
+        consumed_end: Option<u64>,
+        turn_user_msg_id: u64,
+        turn_started_at: &str,
+        turn_start_offset: Option<u64>,
+    ) -> SessionRelayDelivery {
         SessionRelayDelivery {
             provider: ProviderKind::Claude,
             channel_id: 8_041,
@@ -1963,6 +2058,7 @@ mod tests {
             terminal_consumed_end: consumed_end,
             frame_turn_user_msg_id: turn_user_msg_id,
             frame_turn_started_at: turn_started_at.to_string(),
+            frame_turn_start_offset: turn_start_offset,
         }
     }
 
@@ -1971,6 +2067,16 @@ mod tests {
         session_name: &str,
         user_msg_id: u64,
         started_at: &str,
+    ) -> super::super::inflight::InflightTurnState {
+        inflight_with_identity_offset(channel_id, session_name, user_msg_id, started_at, None)
+    }
+
+    fn inflight_with_identity_offset(
+        channel_id: u64,
+        session_name: &str,
+        user_msg_id: u64,
+        started_at: &str,
+        turn_start_offset: Option<u64>,
     ) -> super::super::inflight::InflightTurnState {
         let mut state = super::super::inflight::InflightTurnState::new(
             ProviderKind::Claude,
@@ -1987,6 +2093,7 @@ mod tests {
             0,
         );
         state.started_at = started_at.to_string();
+        state.turn_start_offset = turn_start_offset;
         state
     }
 
@@ -2171,6 +2278,166 @@ mod tests {
         );
     }
 
+    // #3041 P1-3 (codex P1-3 issue 2 — same-second identity collision close): two
+    // consecutive TUI-direct turns with `user_msg_id == 0` started in the SAME
+    // `now_string` second share an identical `(0, started_at)` pair. WITHOUT the
+    // `turn_start_offset` discriminator a delayed OLD terminal frame would pass the
+    // NEW turn's identity gate and wrongly advance. The gate now also compares
+    // `turn_start_offset` (monotonic per turn), so the old frame is blocked.
+    #[tokio::test]
+    async fn sink_identity_gate_blocks_same_second_turn_by_turn_start_offset() {
+        let shared = super::super::make_shared_data_for_tests();
+        let channel = ChannelId::new(8_041);
+        let session = "AgentDesk-claude-8041";
+        let sink = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
+
+        // Both turns: user_msg_id == 0 AND the SAME started_at (same second). They
+        // differ ONLY by turn_start_offset (the JSONL byte offset they began at).
+        let same_second = "2026-06-04T00:00:00Z";
+        // The NEW turn now owns the channel (turn_start_offset = 4096).
+        let new_inflight =
+            inflight_with_identity_offset(channel.get(), session, 0, same_second, Some(4096));
+        // A delayed OLD terminal frame from the PRIOR turn (turn_start_offset = 0)
+        // arrives — its (user_msg_id, started_at) pair matches, but its offset does
+        // not. Pre-fix this would have advanced the NEW turn's authority.
+        let stale_same_second_frame =
+            delivery_with_fence_offset(session, Some(256), 0, same_second, Some(0));
+
+        sink.advance_offset_for_confirmed_delegated_terminal(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            session,
+            &stale_same_second_frame,
+            Some(&new_inflight),
+        );
+        assert_eq!(
+            shared.committed_relay_offset(channel),
+            0,
+            "an old same-second frame (matching user_msg_id+started_at but different turn_start_offset) must NOT advance the new turn"
+        );
+
+        // The NEW turn's OWN terminal frame (matching turn_start_offset) DOES
+        // advance, proving the offset gate is discriminating, not blocking all.
+        let new_turn_frame =
+            delivery_with_fence_offset(session, Some(512), 0, same_second, Some(4096));
+        sink.advance_offset_for_confirmed_delegated_terminal(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            session,
+            &new_turn_frame,
+            Some(&new_inflight),
+        );
+        assert_eq!(
+            shared.committed_relay_offset(channel),
+            512,
+            "the matching-offset frame for the current turn DOES advance the authority"
+        );
+    }
+
+    // #3041 P1-3 (codex P1-3 issue 3 — stale-snapshot close): the production
+    // advance path re-loads the inflight FRESH after the confirmed POST. If the
+    // turn was cleared/replaced DURING the slow POST, the post-POST re-check sees
+    // the CURRENT (replaced/cleared) inflight and blocks the wrong-turn advance —
+    // even though a snapshot taken before the POST would have matched.
+    #[test]
+    fn sink_post_post_recheck_blocks_advance_when_inflight_replaced_during_post() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        struct EnvReset(Option<std::ffi::OsString>);
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+                }
+            }
+        }
+        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::TempDir::new().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        let shared = super::super::make_shared_data_for_tests();
+        let channel = ChannelId::new(8_041);
+        let session = "AgentDesk-claude-8041";
+        let sink = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
+
+        // The frame was delegated for the ORIGINAL turn (turn_start_offset=0). A
+        // pre-POST snapshot would carry this identity and authorize the advance.
+        let delivery =
+            delivery_with_fence_offset(session, Some(256), 0, "2026-06-04T00:00:00Z", Some(0));
+
+        // DURING the (simulated) slow POST a NEW turn took the channel: same
+        // user_msg_id==0 and same second, but a later turn_start_offset. We persist
+        // THAT as the on-disk inflight so the fresh post-POST reload reads it.
+        let replaced = inflight_with_identity_offset(
+            channel.get(),
+            session,
+            0,
+            "2026-06-04T00:00:00Z",
+            Some(4096),
+        );
+        super::super::inflight::save_inflight_state(&replaced).expect("persist replaced inflight");
+
+        // Post-POST advance: re-loads inflight from disk (the REPLACED turn) → the
+        // identity gate (turn_start_offset 0 != 4096) blocks the advance.
+        sink.advance_after_confirmed_post(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            session,
+            &delivery,
+        );
+        assert_eq!(
+            shared.committed_relay_offset(channel),
+            0,
+            "a turn replaced DURING the POST must block the advance (post-POST fresh re-check)"
+        );
+
+        // Control: if the original turn STILL owns the channel at post-POST time,
+        // the fresh reload matches and the advance proceeds.
+        let still_original = inflight_with_identity_offset(
+            channel.get(),
+            session,
+            0,
+            "2026-06-04T00:00:00Z",
+            Some(0),
+        );
+        super::super::inflight::save_inflight_state(&still_original).expect("persist original");
+        sink.advance_after_confirmed_post(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            session,
+            &delivery,
+        );
+        assert_eq!(
+            shared.committed_relay_offset(channel),
+            256,
+            "when the original turn still owns the channel at post-POST time, the advance proceeds"
+        );
+
+        // Cleared inflight (stop/cancel during POST) → no advance either.
+        super::super::make_shared_data_for_tests();
+        super::super::inflight::clear_inflight_state(&ProviderKind::Claude, channel.get());
+        let advanced_delivery =
+            delivery_with_fence_offset(session, Some(512), 0, "2026-06-04T00:00:00Z", Some(0));
+        sink.advance_after_confirmed_post(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            session,
+            &advanced_delivery,
+        );
+        assert_eq!(
+            shared.committed_relay_offset(channel),
+            256,
+            "a cleared inflight at post-POST time must block the advance (identity gate, no inflight)"
+        );
+    }
+
     // #3041 P1-3 (Part a, B1): the RESULT-bearing terminal frame's commit fence
     // (consumed_end + identity) is copied onto the emitted `SessionRelayDelivery`,
     // so `deliver_response` advances the authority from frame data — not an inflight
@@ -2205,6 +2472,85 @@ mod tests {
         );
         assert_eq!(deliveries[0].frame_turn_user_msg_id, 77);
         assert_eq!(deliveries[0].frame_turn_started_at, "2026-06-04T00:00:00Z");
+        // #3041 P1-3 (codex P1-3 issue 2): the delivery also carries the frame's
+        // pinned turn_start_offset for the sink's identity gate.
+        assert_eq!(deliveries[0].frame_turn_start_offset, Some(0));
+    }
+
+    // #3041 P1-3 (codex P1-3 issue 1 — multi-turn-chunk close): after the watcher
+    // SPLITS a `result(A) + bytes(B)` physical chunk, the sink's parser receives
+    // turn A's bytes on a TERMINAL frame (A's fence) and turn B's bytes on a
+    // SEPARATE frame. A commits to A's end with A's identity; B is NOT black-holed —
+    // it is mirrored and, when it completes, commits to B's end with B's identity.
+    // Pre-fix, B's bytes rode A's terminal frame and a follow-up empty chunk emitted
+    // no frame for B (black-hole) and could reuse A's ACK (mis-commit).
+    #[test]
+    fn split_multi_turn_chunk_commits_each_turn_with_its_own_fence() {
+        let binding = matched("8051");
+        let mut parser = SessionRelayParser::default();
+
+        // The watcher split produced: terminal frame = turn A (result + A's fence),
+        // then a separate non-terminal frame = turn B's leading bytes.
+        let turn_a_result = "{\"type\":\"result\",\"result\":\"answer A\"}\n";
+        let turn_a_deliveries = parser.ingest_frame(&terminal_frame_offset(
+            &binding,
+            turn_a_result,
+            1,
+            /*consumed_end=*/ 100,
+            /*user_msg_id=*/ 0,
+            "2026-06-04T00:00:00Z",
+            /*turn_start_offset=*/ Some(0),
+        ));
+        // Turn A commits to A's end (100) with A's identity (offset 0).
+        assert_eq!(turn_a_deliveries.len(), 1, "turn A must produce a delivery");
+        assert_eq!(turn_a_deliveries[0].response_text, "answer A");
+        assert_eq!(turn_a_deliveries[0].terminal_consumed_end, Some(100));
+        assert_eq!(turn_a_deliveries[0].frame_turn_start_offset, Some(0));
+
+        // The sink resets the parser after each terminal delivery (via
+        // `finish_terminal_candidate`); model that so turn B starts a fresh turn.
+        parser.reset_turn();
+
+        // Turn B's leading bytes arrive on their OWN (non-terminal) frame — the
+        // split-out tail. The parser accumulates them (B not yet complete → no
+        // delivery), proving B is MIRRORED rather than black-holed.
+        let turn_b_assistant = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"answer B\"}]}}\n";
+        assert!(
+            parser
+                .ingest_frame(&frame(&binding, turn_b_assistant, 2))
+                .is_empty(),
+            "turn B's split-out bytes must accumulate (mirrored), not vanish"
+        );
+
+        // When turn B completes on a later pass, it gets its OWN terminal frame +
+        // fence: B commits to B's end (250) with B's identity (offset 100) — NOT
+        // turn A's. No shared-ACK reuse, no mis-commit.
+        let turn_b_result = "{\"type\":\"result\",\"result\":\"answer B\"}\n";
+        let turn_b_deliveries = parser.ingest_frame(&terminal_frame_offset(
+            &binding,
+            turn_b_result,
+            3,
+            /*consumed_end=*/ 250,
+            /*user_msg_id=*/ 0,
+            "2026-06-04T00:00:01Z",
+            /*turn_start_offset=*/ Some(100),
+        ));
+        assert_eq!(
+            turn_b_deliveries.len(),
+            1,
+            "turn B must commit (not black-holed)"
+        );
+        assert_eq!(turn_b_deliveries[0].response_text, "answer B");
+        assert_eq!(
+            turn_b_deliveries[0].terminal_consumed_end,
+            Some(250),
+            "turn B commits to B's end, not A's"
+        );
+        assert_eq!(
+            turn_b_deliveries[0].frame_turn_start_offset,
+            Some(100),
+            "turn B commits with B's own identity (turn_start_offset), not A's"
+        );
     }
 
     #[test]

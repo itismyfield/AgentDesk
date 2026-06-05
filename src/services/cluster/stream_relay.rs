@@ -103,6 +103,16 @@ pub struct StreamFrame {
     /// (external-input turns share `user_msg_id == 0`, so `started_at`
     /// distinguishes consecutive TUI-direct turns). Empty on non-terminal frames.
     pub turn_started_at: String,
+    /// #3041 P1-3 (codex P1-3 issue 2 — identity collision close): the pinned
+    /// inflight's `turn_start_offset` (the JSONL byte offset at which THIS turn
+    /// began). `now_string` has 1-second resolution, so two back-to-back
+    /// TUI-direct turns with `user_msg_id == 0` started in the SAME second share
+    /// an identical `(0, started_at)` pair — a delayed OLD terminal frame would
+    /// then pass the sink's identity gate for the NEW turn and wrongly advance.
+    /// `turn_start_offset` is monotonic per turn (the next turn always begins at a
+    /// strictly larger byte offset), so adding it to the IDENTITY GATE makes the
+    /// frame identity UNIQUE per turn. `None` on non-terminal frames.
+    pub turn_start_offset: Option<u64>,
 }
 
 /// Per-session counters. Exposed via the supervisor for diagnostics.
@@ -496,6 +506,10 @@ pub struct TerminalCommitFence {
     pub consumed_end: u64,
     pub turn_user_msg_id: u64,
     pub turn_started_at: String,
+    /// #3041 P1-3 (codex P1-3 issue 2): the turn's `turn_start_offset` — added to
+    /// the sink's identity gate so two consecutive `user_msg_id == 0` turns started
+    /// in the same `now_string` second (identical `started_at`) cannot collide.
+    pub turn_start_offset: Option<u64>,
 }
 
 fn try_send_frame_inner(
@@ -511,14 +525,16 @@ fn try_send_frame_inner(
         return RelaySendOutcome::closed();
     }
     let seq = sequence.fetch_add(1, Ordering::AcqRel);
-    let (terminal_consumed_end, turn_user_msg_id, turn_started_at) = match terminal {
-        Some(fence) => (
-            Some(fence.consumed_end),
-            fence.turn_user_msg_id,
-            fence.turn_started_at,
-        ),
-        None => (None, 0, String::new()),
-    };
+    let (terminal_consumed_end, turn_user_msg_id, turn_started_at, turn_start_offset) =
+        match terminal {
+            Some(fence) => (
+                Some(fence.consumed_end),
+                fence.turn_user_msg_id,
+                fence.turn_started_at,
+                fence.turn_start_offset,
+            ),
+            None => (None, 0, String::new(), None),
+        };
     let frame = StreamFrame {
         session_name: matched.expected_session_name.clone(),
         binding: matched.clone(),
@@ -527,6 +543,7 @@ fn try_send_frame_inner(
         terminal_consumed_end,
         turn_user_msg_id,
         turn_started_at,
+        turn_start_offset,
     };
     metrics.frames_received.fetch_add(1, Ordering::AcqRel);
     match queue.push_drop_oldest(frame) {
@@ -946,6 +963,7 @@ mod tests {
                 consumed_end: 512,
                 turn_user_msg_id: 77,
                 turn_started_at: "2026-06-04T00:00:00Z".to_string(),
+                turn_start_offset: Some(64),
             },
         );
         assert!(outcome.is_alive());
@@ -959,12 +977,14 @@ mod tests {
         assert_eq!(delivered[0].terminal_consumed_end, None);
         assert_eq!(delivered[0].turn_user_msg_id, 0);
         assert_eq!(delivered[0].turn_started_at, "");
+        assert_eq!(delivered[0].turn_start_offset, None);
 
         // Terminal frame carries the consumed_end + pinned identity.
         assert_eq!(delivered[1].payload, "result-bearing");
         assert_eq!(delivered[1].terminal_consumed_end, Some(512));
         assert_eq!(delivered[1].turn_user_msg_id, 77);
         assert_eq!(delivered[1].turn_started_at, "2026-06-04T00:00:00Z");
+        assert_eq!(delivered[1].turn_start_offset, Some(64));
 
         handle.shutdown().await;
     }

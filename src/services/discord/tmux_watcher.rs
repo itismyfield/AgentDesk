@@ -1825,6 +1825,91 @@ fn forward_terminal_chunk_to_supervisor_relay(
     )
 }
 
+/// #3041 P1-3 (codex P1-3 issue 1): forward a RESULT-bearing physical chunk that
+/// may ALSO contain a trailing LATER-turn tail. `leftover_len` is the post-parse
+/// `all_data.len()` — the bytes `process_watcher_lines` did NOT consume (the next
+/// turn's bytes). We split `decoded` at that boundary and:
+///   1. forward the just-completed turn's bytes (`terminal_part`) on a TERMINAL
+///      frame carrying THIS turn's commit fence, and
+///   2. forward the trailing later-turn bytes (`tail_part`) on a SEPARATE
+///      NON-terminal frame so they are still mirrored into the sink's parser and
+///      the later turn is never black-holed (it gets its own fence when it
+///      completes on a later pass).
+///
+/// The returned ACK target is the TERMINAL frame's (so the watcher's terminal-ACK
+/// wait correlates to THIS turn's delivery, not the trailing fragment). `mirrored`
+/// is the AND of both forwards. When there is no trailing tail this is exactly the
+/// single terminal forward.
+fn forward_terminal_chunk_with_trailing_to_supervisor_relay(
+    tmux_session_name: &str,
+    decoded: &str,
+    leftover_len: usize,
+    registry: &std::sync::Arc<
+        crate::services::cluster::relay_producer_registry::RelayProducerRegistry,
+    >,
+    cached_producer: &mut Option<crate::services::cluster::stream_relay::RelayProducer>,
+    terminal: crate::services::cluster::stream_relay::TerminalCommitFence,
+) -> SupervisorRelayForward {
+    let (terminal_part, tail_part) =
+        split_decoded_chunk_at_terminal_boundary(decoded, leftover_len);
+    let terminal_forward = forward_terminal_chunk_to_supervisor_relay(
+        tmux_session_name,
+        terminal_part,
+        registry,
+        cached_producer,
+        terminal,
+    );
+    if tail_part.is_empty() {
+        return terminal_forward;
+    }
+    // Forward the later-turn tail as its OWN non-terminal frame (no fence). This
+    // keeps it in the sink's parser stream so the later turn is mirrored; its
+    // terminal fence rides a future result-bearing chunk. We keep the TERMINAL
+    // frame's ack_target (the watcher waits on THIS turn's delivery) and AND the
+    // tail's mirror flag so a failed tail forward still surfaces "not fully
+    // mirrored".
+    let tail_forward =
+        forward_chunk_to_supervisor_relay(tmux_session_name, tail_part, registry, cached_producer);
+    SupervisorRelayForward {
+        mirrored: terminal_forward.mirrored && tail_forward.mirrored,
+        ack_target: terminal_forward.ack_target,
+    }
+}
+
+/// #3041 P1-3 (codex P1-3 issue 1 — multi-turn-chunk black-hole close): split the
+/// freshly-decoded physical chunk at the consumed-terminal boundary so a TERMINAL
+/// frame carries ONLY the just-completed turn's bytes, and the trailing bytes of a
+/// LATER turn ride a SEPARATE (non-terminal) frame.
+///
+/// A single physical read can contain turn A's `result` PLUS turn B's first bytes.
+/// `process_watcher_lines` stops at A's `result` and leaves B's bytes in the
+/// outer-scope `all_data` (the `leftover_len` after the parse). If we forwarded the
+/// WHOLE chunk on A's terminal frame, B's bytes would be consumed by the sink's
+/// parser as part of A's frame; on the NEXT loop pass `decoded.text` can be empty,
+/// so `forward_chunk_to_supervisor_relay_inner` emits NO frame for B → B is never
+/// delivered (black-hole), and the now-stale ACK for A can be reused for B
+/// (mis-commit). Splitting here forwards A's bytes terminal (with A's fence) and
+/// B's trailing bytes as their own non-terminal frame, so B is still mirrored and
+/// — when B completes — gets its OWN terminal frame + fence on a later pass.
+///
+/// The trailing `min(decoded.len(), leftover_len)` bytes of `decoded` are the part
+/// that survived the parse as leftover (B's bytes); the rest is A's terminal
+/// payload. `leftover_len` is the post-parse `all_data.len()` (bytes the parser did
+/// NOT consume). The split index is clamped to a UTF-8 char boundary (defensive —
+/// the leftover always begins on a JSONL `\n` line boundary in practice).
+fn split_decoded_chunk_at_terminal_boundary(decoded: &str, leftover_len: usize) -> (&str, &str) {
+    let trailing = leftover_len.min(decoded.len());
+    let mut split = decoded.len() - trailing;
+    while split < decoded.len() && !decoded.is_char_boundary(split) {
+        // A multibyte scalar straddles the nominal split: keep it whole on the
+        // terminal side rather than panic-slicing mid-scalar. The leftover begins
+        // one boundary later; the sink reorders nothing within a single line, so a
+        // whole extra line on the terminal side is harmless and never drops bytes.
+        split += 1;
+    }
+    decoded.split_at(split)
+}
+
 fn forward_chunk_to_supervisor_relay_inner(
     tmux_session_name: &str,
     chunk: &str,
@@ -1964,6 +2049,18 @@ fn watcher_should_direct_send_after_session_bound_ack(
 /// content is always re-delivered), and no incoherent mid-response tail. The
 /// idle-relay path still does a real JSONL `[committed,end)` re-read for its
 /// suffix; only the watcher response-text path is restricted to Skip/Full.
+///
+/// #3041 P1-3 (codex P1-3 issue 4 — DEFERRED, no regression, tracked by #3151):
+/// the watcher's 10s terminal-commit ACK wait can elapse while the sink's Discord
+/// POST is still IN FLIGHT (not failed). In that window `committed < end` (the sink
+/// has not advanced the authority yet because its POST has not returned), so this
+/// reconciliation chooses `SendFull` and the watcher re-sends — producing a
+/// duplicate when the in-flight sink POST later succeeds. This is NOT a regression:
+/// the pre-P1-3 path ALSO blind-re-sent on the 10s timeout, and `SendFull` IS the
+/// retry, so there is no black-hole (the content is always delivered). Fully closing
+/// the slow-sink-in-flight duplicate needs an in-flight/reclaimable sink-delivery
+/// marker (the sink signals "delivering this range" so the watcher waits/skips
+/// instead of re-sending) — OUT OF SCOPE for P1-3, tracked by #3151.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum WatcherTerminalResendAction {
     /// `committed >= end`: the whole range is already delivered. Do NOT re-send.
@@ -1971,6 +2068,13 @@ enum WatcherTerminalResendAction {
     /// `committed < end`: the range is not (fully) covered — re-send the full
     /// response. See the type doc for why no partial-suffix variant exists for
     /// the watcher response-text path (coordinate mismatch + all-or-nothing sink).
+    ///
+    /// #3041 P1-3 (codex P1-3 issue 4 — DEFERRED, #3151): this arm also fires when
+    /// the sink's POST is still IN FLIGHT at the 10s ACK timeout (committed has not
+    /// advanced yet) → a duplicate once that POST succeeds. No regression (the
+    /// pre-P1-3 path re-sent on timeout too) and no black-hole (SendFull is the
+    /// retry). The remaining slow-sink-in-flight duplicate is closed by the future
+    /// in-flight sink-delivery marker tracked in #3151.
     SendFull,
 }
 
@@ -2149,6 +2253,10 @@ fn watcher_terminal_commit_fence(
             consumed_end,
             turn_user_msg_id: identity.user_msg_id,
             turn_started_at: identity.started_at.clone(),
+            // #3041 P1-3 (codex P1-3 issue 2): carry the pinned turn's
+            // `turn_start_offset` so the sink's identity gate can disambiguate two
+            // consecutive `user_msg_id == 0` turns started in the same second.
+            turn_start_offset: identity.turn_start_offset,
         },
     )
 }
@@ -3376,6 +3484,7 @@ mod matched_session_jsonl_gate_tests {
             user_msg_id: 0,
             started_at: "2026-06-04T00:00:00Z".to_string(),
             tmux_session_name: Some(session.to_string()),
+            turn_start_offset: Some(64),
         };
         // Real terminal chunk: found_result, end > start, identity for this session.
         let fence = watcher_terminal_commit_fence(true, 0, 256, Some(&identity), session)
@@ -3383,6 +3492,9 @@ mod matched_session_jsonl_gate_tests {
         assert_eq!(fence.consumed_end, 256);
         assert_eq!(fence.turn_user_msg_id, 0);
         assert_eq!(fence.turn_started_at, "2026-06-04T00:00:00Z");
+        // #3041 P1-3 (codex P1-3 issue 2): the fence carries the pinned
+        // turn_start_offset so the sink can disambiguate same-second turns.
+        assert_eq!(fence.turn_start_offset, Some(64));
         // Not the result chunk → no fence.
         assert!(watcher_terminal_commit_fence(false, 0, 256, Some(&identity), session).is_none());
         // Zero range (end == start) → no fence.
@@ -3396,10 +3508,47 @@ mod matched_session_jsonl_gate_tests {
             user_msg_id: 0,
             started_at: "2026-06-04T00:00:00Z".to_string(),
             tmux_session_name: Some("AgentDesk-claude-99".to_string()),
+            turn_start_offset: Some(64),
         };
         assert!(
             watcher_terminal_commit_fence(true, 0, 256, Some(&other_identity), session).is_none()
         );
+    }
+
+    // #3041 P1-3 (codex P1-3 issue 1): a single physical chunk can carry turn A's
+    // result PLUS turn B's first bytes. The split must put A's bytes on the terminal
+    // side and B's leftover on the trailing side so B is forwarded (not black-holed).
+    #[test]
+    fn split_decoded_chunk_isolates_terminal_turn_from_trailing_tail() {
+        let turn_a = "{\"type\":\"result\",\"result\":\"A done\"}\n";
+        let turn_b = "{\"type\":\"assistant\",\"message\":{\"content\":[]}}\n";
+        let combined = format!("{turn_a}{turn_b}");
+        // After the parse, `all_data` holds turn B's bytes → leftover_len = turn_b.len().
+        let (terminal_part, tail_part) =
+            split_decoded_chunk_at_terminal_boundary(&combined, turn_b.len());
+        assert_eq!(terminal_part, turn_a, "terminal frame carries ONLY turn A");
+        assert_eq!(tail_part, turn_b, "turn B's bytes ride a separate frame");
+
+        // No leftover (single complete turn) → whole chunk is terminal, no tail.
+        let (only_terminal, no_tail) = split_decoded_chunk_at_terminal_boundary(turn_a, 0);
+        assert_eq!(only_terminal, turn_a);
+        assert!(no_tail.is_empty());
+
+        // Leftover >= chunk (turn A's result was entirely in a prior leftover): the
+        // whole decoded chunk is the trailing tail; terminal side is empty (the
+        // empty terminal frame is then a no-op, the tail is still forwarded).
+        let (empty_terminal, all_tail) =
+            split_decoded_chunk_at_terminal_boundary(turn_b, turn_b.len() + 10);
+        assert!(empty_terminal.is_empty());
+        assert_eq!(all_tail, turn_b);
+
+        // UTF-8 boundary safety: a split that would fall mid-scalar is nudged to the
+        // next char boundary (keeps the scalar whole on the terminal side).
+        let multibyte = "ok한"; // '한' is 3 bytes
+        // leftover_len = 1 would nominally split inside '한'; the helper keeps it whole.
+        let (head, tail) = split_decoded_chunk_at_terminal_boundary(multibyte, 1);
+        assert!(multibyte.is_char_boundary(head.len()));
+        assert_eq!(format!("{head}{tail}"), multibyte, "no bytes dropped");
     }
 
     #[test]
@@ -4601,9 +4750,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &tmux_session_name,
         );
         let data_mirrored_to_session_relay = match initial_terminal_fence {
-            Some(fence) => forward_terminal_chunk_to_supervisor_relay(
+            // #3041 P1-3 (codex P1-3 issue 1): a single physical chunk may carry
+            // turn A's result PLUS turn B's first bytes. `all_data` after the parse
+            // holds turn B's leftover; split the decoded chunk at that boundary so
+            // the TERMINAL frame carries only turn A's bytes and turn B's tail rides
+            // a separate non-terminal frame (no black-hole, no shared-ACK reuse).
+            Some(fence) => forward_terminal_chunk_with_trailing_to_supervisor_relay(
                 &tmux_session_name,
                 &decoded_data.text,
+                all_data.len(),
                 &producer_registry,
                 &mut cached_relay_producer,
                 fence,
@@ -4841,13 +4996,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             &tmux_session_name,
                         );
                         let chunk_forwarded_to_session_relay = match streaming_terminal_fence {
-                            Some(fence) => forward_terminal_chunk_to_supervisor_relay(
-                                &tmux_session_name,
-                                &decoded_chunk.text,
-                                &producer_registry,
-                                &mut cached_relay_producer,
-                                fence,
-                            ),
+                            // #3041 P1-3 (codex P1-3 issue 1): split a result+next-turn
+                            // physical chunk at the leftover boundary so turn A's
+                            // terminal frame carries only A's bytes and turn B's tail
+                            // rides a separate non-terminal frame (no black-hole).
+                            Some(fence) => {
+                                forward_terminal_chunk_with_trailing_to_supervisor_relay(
+                                    &tmux_session_name,
+                                    &decoded_chunk.text,
+                                    all_data.len(),
+                                    &producer_registry,
+                                    &mut cached_relay_producer,
+                                    fence,
+                                )
+                            }
                             None => forward_chunk_to_supervisor_relay(
                                 &tmux_session_name,
                                 &decoded_chunk.text,

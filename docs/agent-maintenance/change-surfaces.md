@@ -128,7 +128,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (8428 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (8549 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -180,6 +180,12 @@
     data), the sink advances `confirmed_end_offset` identity-gated on its CONFIRMED
     POST (`advance_offset_for_confirmed_delegated_terminal`), and the RACY
     inflight-persist Part a (`session_bound_delegated_terminal_end`) is REMOVED;
+    +21 from #3041 P1-3 codex review (PR #3150) fixes: issue-1 multi-turn-chunk
+    split (`split_decoded_chunk_at_terminal_boundary` +
+    `forward_terminal_chunk_with_trailing_to_supervisor_relay` — the TERMINAL frame
+    carries ONLY the just-completed turn's bytes, a trailing later-turn tail rides a
+    separate non-terminal frame so it is never black-holed), and the
+    `WatcherTerminalResendAction::SendFull` slow-sink-in-flight deferral doc (#3151);
     split loop helpers further before adding behavior).
   - `src/services/discord/tui_prompt_relay.rs` (3874 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
