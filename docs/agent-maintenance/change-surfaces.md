@@ -369,10 +369,10 @@
     routing the recovery terminal through the single-authority finalizer
     (`submit_terminal` + `FinalizeContext::monitor`) instead of inline
     `mailbox_finish_turn`).
-  - `src/services/discord/health.rs` (2354 lines after #1879 snapshot/mailbox
+  - `src/services/discord/health.rs` (2369 lines after #1879 snapshot/mailbox
     extraction; +3 from #3082 answer-flush-barrier field in the test SharedData
     constructor).
-  - `src/services/discord/health/recovery.rs` (2438 lines; health recovery
+  - `src/services/discord/health/recovery.rs` (2567 lines; health recovery
     extraction surface, split further before adding non-bugfix behavior; +70
     from #3126 stall-watchdog completed-idle false-positive guard tests).
   - `src/services/discord/router/message_handler/intake_turn.rs` (3620 lines;
@@ -415,7 +415,7 @@
     `finalize_stale_streaming_footer` / `text_ends_with_streaming_footer` shared
     terminal-idle reconciliation helpers + their unit tests).
   - `src/services/discord/prompt_builder/` (directory, refactored).
-  - `src/services/discord/runtime_bootstrap.rs` (2762 lines after #2558
+  - `src/services/discord/runtime_bootstrap.rs` (2800 lines after #2558
     thread-session GC loopback shim cleanup; +3 from #3082 answer-flush-barrier
     field in the SharedData constructor; +1 from #3037 cluster backflow path
     rewrite wrapping a longer `services::cluster::node_registry::*` call; +3 from

@@ -1181,131 +1181,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 let shared_for_tmux = shared_for_migrate.clone();
 
                 // Background: poll for deferred restart marker when idle
-                let shared_for_deferred = shared_for_tmux.clone();
-                let provider_for_deferred = provider_for_setup.clone();
-                tokio::spawn(async move {
-                    loop {
-                        tokio::time::sleep(DEFERRED_RESTART_POLL_INTERVAL).await;
-                        // Quick-exit restart (#2713): dcserver no longer waits
-                        // for all active turns to drain. The marker is a deploy
-                        // request to persist cheap local state and exit; managed
-                        // TUI/tmux sessions survive and the next process
-                        // rehydrates transcript tailing from runtime state.
-                        if let Some(root) = crate::agentdesk_runtime_root() {
-                            let marker = root.join("restart_pending");
-                            if marker.exists() {
-                                shared_for_deferred
-                                    .restart_pending
-                                    .store(true, Ordering::SeqCst);
-                                shared_for_deferred
-                                    .shutting_down
-                                    .store(true, Ordering::SeqCst);
-                                if shared_for_deferred
-                                    .shutdown_counted
-                                    .compare_exchange(
-                                        false,
-                                        true,
-                                        Ordering::AcqRel,
-                                        Ordering::Relaxed,
-                                    )
-                                    .is_err()
-                                {
-                                    continue;
-                                }
-                                let drain = mailbox_restart_drain_all(
-                                    &shared_for_deferred,
-                                    &provider_for_deferred,
-                                )
-                                .await;
-                                let queue_count = drain.queued_count;
-                                if !drain.persistence_errors.is_empty() {
-                                    tracing::error!(
-                                        failures = drain.persistence_errors.len(),
-                                        "restart_pending quick exit continuing after pending-queue persistence failure(s)"
-                                    );
-                                }
-                                let ids: std::collections::HashMap<u64, u64> = shared_for_deferred
-                                    .last_message_ids
-                                    .iter()
-                                    .map(|entry| (entry.key().get(), *entry.value()))
-                                    .collect();
-                                if !ids.is_empty() {
-                                    runtime_store::save_all_last_message_ids(
-                                        provider_for_deferred.as_str(),
-                                        &ids,
-                                    );
-                                }
-                                // Quick-exit must preserve inflight state with
-                                // bumped mtime + DrainRestart marker. Without
-                                // this, repeated quick-exits (e.g. destructive
-                                // E2E scenarios that restart release multiple
-                                // times) leave file mtime frozen at first save,
-                                // and stale-removal trips after 1800s even
-                                // while the tmux pane is still alive. Mirrors
-                                // the graceful-shutdown preserve block below.
-                                let inflight_states_qe =
-                                    inflight::load_inflight_states(&provider_for_deferred);
-                                if !inflight_states_qe.is_empty() {
-                                    let ts2 = chrono::Local::now().format("%H:%M:%S");
-                                    tracing::info!(
-                                        "  [{ts2}] 👁 preserving {} inflight turn(s) for restart recovery",
-                                        inflight_states_qe.len()
-                                    );
-                                    let marked_qe = inflight::mark_all_inflight_states_restart_mode(
-                                        &provider_for_deferred,
-                                        crate::services::discord::InflightRestartMode::DrainRestart,
-                                    );
-                                    tracing::info!(
-                                        "  [{ts2}] 🔖 marked {marked_qe} inflight turn(s) as drain_restart"
-                                    );
-                                }
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                tracing::info!(
-                                    "  [{ts}] 🔄 restart_pending detected — quick exit after persisting {queue_count} queued item(s)"
-                                );
-                                if shared_for_deferred
-                                        .shutdown_remaining
-                                        .fetch_sub(1, Ordering::AcqRel)
-                                        == 1
-                                {
-                                    let _ = std::fs::remove_file(&marker);
-                                    std::process::exit(0);
-                                }
-                            }
-                        }
-                        // Use process-global counters so we wait for ALL providers
-                        let g_active = shared_for_deferred.global_active.load(Ordering::Relaxed);
-                        let g_finalizing = shared_for_deferred
-                            .global_finalizing
-                            .load(Ordering::Relaxed);
-                        if g_active == 0
-                            && g_finalizing == 0
-                            && shared_for_deferred.restart_pending.load(Ordering::Relaxed)
-                        {
-                            let drain = mailbox_restart_drain_all(
-                                &shared_for_deferred,
-                                &provider_for_deferred,
-                            )
-                            .await;
-                            let queue_count = drain.queued_count;
-                            if !drain.persistence_errors.is_empty() {
-                                tracing::error!(
-                                    failures = drain.persistence_errors.len(),
-                                    "deferred restart observed pending-queue persistence failure(s)"
-                                );
-                            }
-                            if queue_count > 0 {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                tracing::info!(
-                                    "  [{ts}] 📋 DRAIN: mailbox persisted {queue_count} pending queue item(s) before deferred restart"
-                                );
-                            }
-                            check_deferred_restart(&shared_for_deferred);
-                            // This provider has saved and decremented — stop polling
-                            return;
-                        }
-                    }
-                });
+                run_bot_spawn_deferred_restart_poller(&shared_for_tmux, &provider_for_setup);
 
                 // (Phase 5.1 of intake-node-routing — issue #2007: the
                 // intake_worker poll loop is now spawned in `run_bot()`
@@ -1315,50 +1191,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
                 // Background: hot-reload skills on file changes (30s polling)
                 // Scans home-level AND all active project-level skill directories.
-                let shared_for_skills = shared_for_tmux.clone();
-                let provider_for_skills = provider_for_setup.clone();
-                tokio::spawn(async move {
-                    let mut last_fingerprint: (usize, u64) = (0, 0); // (file_count, max_mtime_epoch)
-                    loop {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-                        // Collect unique project paths from active sessions
-                        let project_paths: Vec<String> = {
-                            let data = shared_for_skills.core.lock().await;
-                            let mut paths: Vec<String> = data
-                                .sessions
-                                .values()
-                                .filter_map(|s| s.current_path.clone())
-                                .collect();
-                            paths.sort();
-                            paths.dedup();
-                            paths
-                        };
-                        let fp =
-                            skill_dir_fingerprint_with_projects(&provider_for_skills, &project_paths);
-                        if fp != last_fingerprint && last_fingerprint != (0, 0) {
-                            // Merge home + all project skills (scan_skills deduplicates by name)
-                            let mut merged = scan_skills(&provider_for_skills, None);
-                            let mut seen: std::collections::HashSet<String> =
-                                merged.iter().map(|(n, _)| n.clone()).collect();
-                            for path in &project_paths {
-                                for skill in scan_skills(&provider_for_skills, Some(path)) {
-                                    if seen.insert(skill.0.clone()) {
-                                        merged.push(skill);
-                                    }
-                                }
-                            }
-                            merged.sort_by(|a, b| a.0.cmp(&b.0));
-                            let count = merged.len();
-                            *shared_for_skills.skills_cache.write().await = merged;
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::info!(
-                                "  [{ts}] 🔄 Skills hot-reloaded: {count} skill(s) ({} files, mtime Δ)",
-                                fp.0
-                            );
-                        }
-                        last_fingerprint = fp;
-                    }
-                });
+                run_bot_spawn_skills_hot_reload(&shared_for_tmux, &provider_for_setup);
 
                 // #799: MCP credential watcher (Claude only).
                 // Watches ~/.claude/.credentials.json and ~/.claude/mcp.json and posts
@@ -1387,382 +1220,19 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 // Recovery skips channels that have a pending restart report,
                 // so the report must still be on disk when recovery runs.
                 // After recovery completes, the flush loop starts and delivers/clears reports.
-                let http_for_tmux = ctx.http.clone();
-                let shared_for_tmux2 = shared_for_tmux.clone();
-                let http_for_restart_reports = ctx.http.clone();
-                let ctx_for_kickoff = ctx.clone();
-                let token_for_kickoff = token_owned.clone();
-                let shared_for_restart_reports = shared_for_tmux.clone();
-                let provider_for_restore = provider_for_setup.clone();
-                let startup_reconcile_remaining_for_restore =
-                    startup_reconcile_remaining.clone();
-                let startup_doctor_started_for_restore = startup_doctor_started.clone();
-                let health_registry_for_startup_doctor = health_registry_for_setup.clone();
-                tokio::spawn(async move {
-                    let is_utility_bot = {
-                        let s = shared_for_tmux2.settings.read().await;
-                        s.agent.is_some()
-                    };
-                    if is_utility_bot {
-                        mark_reconcile_complete(&shared_for_tmux2);
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!("  [{ts}] ✓ Utility bot reconcile — skipped recovery");
-                    } else {
-                        // #429: Recover restart-gap messages first so new user input gets queued
-                        // within seconds of bot ready instead of waiting behind slower
-                        // Discord API-heavy inflight/thread-map recovery passes.
-                        catch_up_missed_messages(
-                            &http_for_tmux,
-                            &shared_for_tmux2,
-                            &provider_for_restore,
-                        )
-                        .await;
-
-                        gc_stale_fixed_working_sessions(&shared_for_tmux2).await;
-
-                        // Restore pending intervention queues saved during previous SIGTERM
-                        // before inflight turn recovery. Drain-mode queue snapshots are the
-                        // source of truth for restart-gap user input; if inflight recovery
-                        // recreates an active turn first, the active message id can make a
-                        // persisted queue item look "already known" and incorrectly drop it.
-                        let (restored_queues, restored_overrides) =
-                            load_pending_queues(&provider_for_restore, &shared_for_tmux2.token_hash);
-                        let allowed_bot_ids_for_restore: Vec<u64> = {
-                            let settings = shared_for_tmux2.settings.read().await;
-                            settings.allowed_bot_ids.clone()
-                        };
-                        let announce_bot_id_for_restore =
-                            super::resolve_announce_bot_user_id(&shared_for_tmux2).await;
-                        // P1-1: Restore dispatch_role_overrides from queue snapshots
-                        for (thread_channel_id, alt_channel_id) in &restored_overrides {
-                            if !matches!(
-                                resolve_runtime_channel_binding_status(
-                                    &http_for_tmux,
-                                    *thread_channel_id,
-                                )
-                                .await,
-                                RuntimeChannelBindingStatus::Owned
-                            ) {
-                                continue;
-                            }
-                            shared_for_tmux2
-                                .dispatch_role_overrides
-                                .insert(*thread_channel_id, *alt_channel_id);
-                        }
-                        if !restored_overrides.is_empty() {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::info!(
-                                "  [{ts}] 📋 FLUSH: restored {} dispatch_role_override(s) from queue snapshots",
-                                restored_overrides.len()
-                            );
-                        }
-                        if !restored_queues.is_empty() {
-                            let mut added = 0usize;
-                            let mut skipped_unowned = 0usize;
-                            let mut skipped_sender = 0usize;
-                            let mut skipped_duplicate = 0usize;
-                            for (channel_id, items) in restored_queues {
-                                if !matches!(
-                                    resolve_runtime_channel_binding_status(&http_for_tmux, channel_id)
-                                        .await,
-                                    RuntimeChannelBindingStatus::Owned
-                                ) {
-                                    skipped_unowned += items.len();
-                                    continue;
-                                }
-                                let snapshot = mailbox_snapshot(&shared_for_tmux2, channel_id).await;
-                                let mut existing_ids = queued_message_ids(&snapshot);
-                                let mut queue = snapshot.intervention_queue;
-                                for item in items {
-                                    if !super::is_allowed_turn_sender(
-                                        &allowed_bot_ids_for_restore,
-                                        announce_bot_id_for_restore,
-                                        item.author_id.get(),
-                                        item.author_is_bot,
-                                        &item.text,
-                                    ) {
-                                        skipped_sender += 1;
-                                        continue;
-                                    }
-                                    if enqueue_restored_intervention(
-                                        &mut existing_ids,
-                                        &mut queue,
-                                        item,
-                                    ) {
-                                        added += 1;
-                                    } else {
-                                        skipped_duplicate += 1;
-                                    }
-                                }
-                                mailbox_replace_queue(
-                                    &shared_for_tmux2,
-                                    &provider_for_restore,
-                                    channel_id,
-                                    queue,
-                                )
-                                .await;
-                            }
-                            let skipped = skipped_unowned + skipped_sender + skipped_duplicate;
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::info!(
-                                "  [{ts}] 📋 FLUSH: restored {added} pending queue item(s) from disk (skipped {skipped}: unowned={skipped_unowned}, sender={skipped_sender}, duplicate={skipped_duplicate})"
-                            );
-                        }
-
-                        // codex review round-3 P2 (#1332): restore the
-                        // `queued_placeholders` mapping from disk BEFORE
-                        // `kickoff_idle_queues` so the restored mailbox queue
-                        // entries pick up the existing `📬 메시지 대기 중`
-                        // Discord cards instead of stranding them and posting
-                        // duplicate placeholders. Must run AFTER the mailbox
-                        // queue is restored (above) and BEFORE
-                        // `kickoff_idle_queues` / `restore_inflight_turns` so
-                        // the live-queue filter (round-6 P2) can reject any
-                        // mapping whose source message id is no longer in any
-                        // currently-queued intervention.
-                        // codex review round-7 P2 (#1332): collect stale
-                        // `📬` card tuples during the filter pass and call
-                        // `delete_message` on each AFTER `kickoff_idle_queues`
-                        // returns. Inline deletion before kickoff would
-                        // gate startup intake on per-card HTTP latency
-                        // (and surface 404s for cards posted by an old
-                        // bot identity). Best-effort, post-kickoff is
-                        // strictly safer.
-                        let mut stale_cards_to_delete: Vec<(
-                            ChannelId,
-                            MessageId,
-                            MessageId,
-                        )> = Vec::new();
-                        let restored_queued_placeholders =
-                            super::queued_placeholders_store::load_queued_placeholders(
-                                &provider_for_restore,
-                                &shared_for_tmux2.token_hash,
-                            );
-                        if !restored_queued_placeholders.is_empty() {
-                            // codex review round-6 P2 (#1332): when startup
-                            // skips/supersedes a restored or catch-up queue
-                            // item before this point (channel no longer
-                            // owned, sender no longer allowed, duplicate or
-                            // cap pruning, …), its persisted queued-
-                            // placeholder mapping has no live queue entry to
-                            // attach to. Inserting it unconditionally would
-                            // strand the `📬` card + sidecar row forever:
-                            // no future dispatch or queue-exit event would
-                            // reference that user message id. Filter the
-                            // loaded mappings against the live mailbox queue
-                            // and DELETE the on-disk + in-memory state for
-                            // every mapping whose user message id is no
-                            // longer queued.
-                            let live_queue_ids = collect_live_queue_message_ids(
-                                &shared_for_tmux2,
-                            )
-                            .await;
-                            let filter_outcome = filter_restored_queued_placeholders(
-                                restored_queued_placeholders,
-                                &live_queue_ids,
-                            );
-                            for (key, placeholder_msg_id) in &filter_outcome.live {
-                                shared_for_tmux2
-                                    .queued_placeholders
-                                    .insert(*key, *placeholder_msg_id);
-                            }
-                            // Re-snapshot every channel that had at least
-                            // one stale mapping pruned so the on-disk file
-                            // matches the filtered in-memory state. Empty
-                            // channels are removed via the snapshot helper
-                            // (the `entries.is_empty()` branch deletes the
-                            // file). Without this rewrite, the next restart
-                            // would re-load the same stale mapping and the
-                            // leak would compound across restarts.
-                            for channel_id in &filter_outcome.channels_with_stale {
-                                super::queued_placeholders_store::persist_channel_from_map(
-                                    &shared_for_tmux2.queued_placeholders,
-                                    &shared_for_tmux2.provider,
-                                    &shared_for_tmux2.token_hash,
-                                    *channel_id,
-                                );
-                            }
-                            let live_count = filter_outcome.live.len();
-                            let stale_count = filter_outcome.stale_count;
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            if stale_count > 0 {
-                                tracing::warn!(
-                                    "  [{ts}] 📋 FLUSH: restored {live_count} queued-placeholder mapping(s) from disk; pruned {stale_count} stale mapping(s) with no live queue entry"
-                                );
-                            } else {
-                                tracing::info!(
-                                    "  [{ts}] 📋 FLUSH: restored {live_count} queued-placeholder mapping(s) from disk"
-                                );
-                            }
-                            // codex review round-7 P2 (#1332): capture
-                            // the visible-card tuples so the post-kickoff
-                            // cleanup loop can dismiss them via Discord's
-                            // delete_message API. Without this, the
-                            // round-6 disk-rewrite leaves the cards
-                            // stranded on the channel.
-                            stale_cards_to_delete = filter_outcome.stale_cards;
-                        }
-
-                        // #2437 (#2427 C wire) boot-time generation
-                        // invalidate. Remove non-planned-restart inflight
-                        // rows whose `restart_generation` does not match
-                        // the current generation so recovery does not
-                        // revive a row whose tmux session no longer
-                        // exists. Must run BEFORE `restore_inflight_turns`
-                        // — otherwise recovery would attempt to revive
-                        // ghost rows and the placeholder sweeper would
-                        // eventually have to time-guess them at 1800s.
-                        // Planned-restart / hot-swap rows survive (their
-                        // generation gate in `stale_removal_reason`
-                        // already handles them with longer retention).
-                        let invalidated = super::inflight::invalidate_stale_generation(
-                            &provider_for_restore,
-                            shared_for_tmux2.current_generation,
-                        );
-                        if invalidated > 0 {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::info!(
-                                "  [{ts}] 🧹 inflight: invalidated {} stale-generation row(s) for {} (current generation {}) — #2437",
-                                invalidated,
-                                provider_for_restore.as_str(),
-                                shared_for_tmux2.current_generation,
-                            );
-                        }
-
-                        restore_inflight_turns(
-                            &http_for_tmux,
-                            &shared_for_tmux2,
-                            &provider_for_restore,
-                        )
-                        .await;
-
-                        // P1-2: Warn about legacy queue files that cannot be restored
-                        warn_legacy_pending_queue_files(&provider_for_restore);
-
-                        // #226: Collect channels that recovery already handled (spawned + ended watchers).
-                        // restore_tmux_watchers must skip these to prevent duplicate watcher creation.
-                        // The issue: recovery watcher starts → session ends quickly → watcher removes
-                        // itself from DashMap → restore_tmux_watchers sees empty slot → creates second watcher.
-                        #[cfg(unix)]
-                        {
-                            // Mark all channels that recovery touched as "recently handled"
-                            // by inserting a recovery_handled marker in kv_meta.
-                            // restore_tmux_watchers checks this and skips those channels.
-                            let recovery_channels: Vec<u64> = shared_for_tmux2
-                                .recovering_channels
-                                .iter()
-                                .map(|entry| entry.key().get())
-                                .collect();
-                            super::tmux::store_recovery_handled_channels(
-                                &shared_for_tmux2,
-                                &recovery_channels,
-                            )
-                            .await;
-
-                            restore_tmux_watchers(&http_for_tmux, &shared_for_tmux2).await;
-                            cleanup_orphan_tmux_sessions(&shared_for_tmux2).await;
-
-                            // Clean up recovery markers
-                            super::tmux::clear_recovery_handled_channels(&shared_for_tmux2).await;
-                        }
-
-                        // Remove retired durable handoffs so stale legacy JSON cannot
-                        // influence startup.
-                        purge_legacy_durable_handoffs();
-
-                        // #164: Re-deliver orphan pending dispatches from before restart
-                        recover_orphan_pending_dispatches(&shared_for_restart_reports).await;
-
-                        // Kick off turns for channels that have queued messages but no
-                        // active turn. Without this, restored pending queues and handoff
-                        // injections sit idle until the next user message arrives.
-                        kickoff_idle_queues(
-                            &ctx_for_kickoff,
-                            &shared_for_restart_reports,
-                            &token_for_kickoff,
-                            &provider_for_restore,
-                        )
-                        .await;
-
-                        // codex review round-7 P2 (#1332): now that the
-                        // gateway has had a chance to settle and live
-                        // queues have been kicked off, best-effort
-                        // delete any `📬 메시지 대기 중` Discord cards
-                        // whose mapping the round-6 filter pruned.
-                        // Without this loop the cards stay forever (the
-                        // owning mapping was just removed, so no future
-                        // dispatch / queue-exit event can reach them).
-                        delete_stale_queued_placeholder_cards(
-                            &http_for_tmux,
-                            &stale_cards_to_delete,
-                        )
-                        .await;
-
-                        // #122: Reconcile phase complete — open intake
-                        mark_reconcile_complete(&shared_for_restart_reports);
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!("  [{ts}] ✓ Reconcile complete — intake open");
-                    } // end of !is_utility_bot recovery block
-
-                    // Kick off again to drain messages queued during reconcile window
-                    kickoff_idle_queues(
-                        &ctx_for_kickoff,
-                        &shared_for_restart_reports,
-                        &token_for_kickoff,
-                        &provider_for_restore,
-                    )
-                    .await;
-
-                    // Thread-map validation is best-effort hygiene and can spend
-                    // multiple REST round-trips on startup. Do not block intake
-                    // reopening or queued-turn kickoff on it.
-                    if shared_for_tmux2.pg_pool.is_some()
-                        && STARTUP_THREAD_MAP_VALIDATION_STARTED
-                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                            .is_ok()
-                    {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!("  [{ts}] 🧹 THREAD-MAP: continuing validation in background");
-                        spawn_startup_thread_map_validation(
-                            shared_for_tmux2.pg_pool.clone(),
-                            token_for_kickoff.clone(),
-                        );
-                    }
-
-                    run_startup_diagnostic_after_reconcile_barrier(
-                        startup_reconcile_remaining_for_restore,
-                        startup_doctor_started_for_restore,
-                        health_registry_for_startup_doctor,
-                        api_port,
-                    )
-                    .await;
-
-                    // NOW flush restart reports (recovery is done, safe to delete them)
-                    flush_restart_reports(
-                        &http_for_restart_reports,
-                        &shared_for_restart_reports,
-                        &provider_for_restore,
-                    )
-                    .await;
-                    // Continue flushing in a loop for any reports created later
-                    loop {
-                        tokio::time::sleep(RESTART_REPORT_FLUSH_INTERVAL).await;
-                        flush_restart_reports(
-                            &http_for_restart_reports,
-                            &shared_for_restart_reports,
-                            &provider_for_restore,
-                        )
-                        .await;
-                    }
-                });
+                run_bot_spawn_recovery_and_flush_restart_reports(
+                    ctx,
+                    &shared_for_tmux,
+                    &token_owned,
+                    &provider_for_setup,
+                    &startup_reconcile_remaining,
+                    &startup_doctor_started,
+                    &health_registry_for_setup,
+                    api_port,
+                );
 
                 // Background: periodic cleanup for stale Discord upload files
-                tokio::spawn(async move {
-                    loop {
-                        tokio::time::sleep(UPLOAD_CLEANUP_INTERVAL).await;
-                        cleanup_old_uploads(UPLOAD_MAX_AGE);
-                    }
-                });
+                run_bot_spawn_upload_cleanup();
 
                 // #1115 placeholder stall sweeper: safety net for placeholders
                 // whose owning turn task is stuck or dead. Edits Discord
@@ -1827,53 +1297,16 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 // Normal idle/disconnected thread rows expire after 1 hour,
                 // but rows still carrying an active_dispatch_id stay until the
                 // 3-hour safety TTL so warm-resume sessions keep DB ownership.
-                {
-                    let shared_for_session_gc = shared_clone.clone();
-                    tokio::spawn(async move {
-                        // Run every 10 minutes, initial delay 2 minutes
-                        tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
-                        loop {
-                            gc_stale_fixed_working_sessions(&shared_for_session_gc).await;
-                            gc_stale_thread_sessions(&shared_for_session_gc).await;
-                            tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
-                        }
-                    });
-                }
+                run_bot_spawn_stale_session_gc(&shared_clone);
 
-                if voice_config_for_setup.enabled
-                    && !voice_config_for_setup
-                        .auto_join_channel_ids_with_lobby()
-                        .is_empty()
-                {
-                    let ctx_for_voice = ctx.clone();
-                    let receiver_for_voice = voice_receiver_for_setup.clone();
-                    let config_for_voice = voice_config_for_setup.clone();
-                    let barge_in_for_voice = shared_clone.voice_barge_in.clone();
-                    let pairings_for_voice = shared_clone.voice_pairings.clone();
-                    let provider_for_voice = provider_for_setup.clone();
-                    let agent_for_voice = {
-                        let settings = shared_clone.settings.read().await;
-                        settings.agent.clone()
-                    };
-                    // #2054 v7: agent voice binding은 channel_id → provider+agent
-                    // 매핑을 build 해서 같은 provider의 다른 에이전트 봇까지
-                    // 같은 voice 채널에 진입하는 중복 STT/TTS를 차단한다.
-                    let cfg = crate::config::load_graceful();
-                    let channel_provider_map = voice_auto_join_provider_map(&cfg);
-                    tokio::spawn(async move {
-                        commands::auto_join_voice_channels(
-                            ctx_for_voice,
-                            receiver_for_voice,
-                            config_for_voice,
-                            barge_in_for_voice,
-                            pairings_for_voice,
-                            provider_for_voice,
-                            agent_for_voice,
-                            channel_provider_map,
-                        )
-                        .await;
-                    });
-                }
+                run_bot_spawn_voice_auto_join(
+                    ctx,
+                    &voice_config_for_setup,
+                    &voice_receiver_for_setup,
+                    &shared_clone,
+                    &provider_for_setup,
+                )
+                .await;
 
                 Ok(Data {
                     shared: shared_clone,
@@ -1919,6 +1352,611 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         api_port,
     )
     .await;
+}
+
+/// Background: poll for the deferred restart marker when idle (leader-only).
+/// Behavior-preserving extraction of the inline spawn from run_bot's setup
+/// callback. Both clones are used only inside the spawn; the JoinHandle is
+/// discarded exactly as the inline code did.
+fn run_bot_spawn_deferred_restart_poller(
+    shared_for_tmux: &Arc<SharedData>,
+    provider_for_setup: &ProviderKind,
+) {
+    let shared_for_deferred = shared_for_tmux.clone();
+    let provider_for_deferred = provider_for_setup.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(DEFERRED_RESTART_POLL_INTERVAL).await;
+            // Quick-exit restart (#2713): dcserver no longer waits
+            // for all active turns to drain. The marker is a deploy
+            // request to persist cheap local state and exit; managed
+            // TUI/tmux sessions survive and the next process
+            // rehydrates transcript tailing from runtime state.
+            if let Some(root) = crate::agentdesk_runtime_root() {
+                let marker = root.join("restart_pending");
+                if marker.exists() {
+                    shared_for_deferred
+                        .restart_pending
+                        .store(true, Ordering::SeqCst);
+                    shared_for_deferred
+                        .shutting_down
+                        .store(true, Ordering::SeqCst);
+                    if shared_for_deferred
+                        .shutdown_counted
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    let drain =
+                        mailbox_restart_drain_all(&shared_for_deferred, &provider_for_deferred)
+                            .await;
+                    let queue_count = drain.queued_count;
+                    if !drain.persistence_errors.is_empty() {
+                        tracing::error!(
+                            failures = drain.persistence_errors.len(),
+                            "restart_pending quick exit continuing after pending-queue persistence failure(s)"
+                        );
+                    }
+                    let ids: std::collections::HashMap<u64, u64> = shared_for_deferred
+                        .last_message_ids
+                        .iter()
+                        .map(|entry| (entry.key().get(), *entry.value()))
+                        .collect();
+                    if !ids.is_empty() {
+                        runtime_store::save_all_last_message_ids(
+                            provider_for_deferred.as_str(),
+                            &ids,
+                        );
+                    }
+                    // Quick-exit must preserve inflight state with
+                    // bumped mtime + DrainRestart marker. Without
+                    // this, repeated quick-exits (e.g. destructive
+                    // E2E scenarios that restart release multiple
+                    // times) leave file mtime frozen at first save,
+                    // and stale-removal trips after 1800s even
+                    // while the tmux pane is still alive. Mirrors
+                    // the graceful-shutdown preserve block below.
+                    let inflight_states_qe = inflight::load_inflight_states(&provider_for_deferred);
+                    if !inflight_states_qe.is_empty() {
+                        let ts2 = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts2}] 👁 preserving {} inflight turn(s) for restart recovery",
+                            inflight_states_qe.len()
+                        );
+                        let marked_qe = inflight::mark_all_inflight_states_restart_mode(
+                            &provider_for_deferred,
+                            crate::services::discord::InflightRestartMode::DrainRestart,
+                        );
+                        tracing::info!(
+                            "  [{ts2}] 🔖 marked {marked_qe} inflight turn(s) as drain_restart"
+                        );
+                    }
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] 🔄 restart_pending detected — quick exit after persisting {queue_count} queued item(s)"
+                    );
+                    if shared_for_deferred
+                        .shutdown_remaining
+                        .fetch_sub(1, Ordering::AcqRel)
+                        == 1
+                    {
+                        let _ = std::fs::remove_file(&marker);
+                        std::process::exit(0);
+                    }
+                }
+            }
+            // Use process-global counters so we wait for ALL providers
+            let g_active = shared_for_deferred.global_active.load(Ordering::Relaxed);
+            let g_finalizing = shared_for_deferred
+                .global_finalizing
+                .load(Ordering::Relaxed);
+            if g_active == 0
+                && g_finalizing == 0
+                && shared_for_deferred.restart_pending.load(Ordering::Relaxed)
+            {
+                let drain =
+                    mailbox_restart_drain_all(&shared_for_deferred, &provider_for_deferred).await;
+                let queue_count = drain.queued_count;
+                if !drain.persistence_errors.is_empty() {
+                    tracing::error!(
+                        failures = drain.persistence_errors.len(),
+                        "deferred restart observed pending-queue persistence failure(s)"
+                    );
+                }
+                if queue_count > 0 {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] 📋 DRAIN: mailbox persisted {queue_count} pending queue item(s) before deferred restart"
+                    );
+                }
+                check_deferred_restart(&shared_for_deferred);
+                // This provider has saved and decremented — stop polling
+                return;
+            }
+        }
+    });
+}
+
+/// Background: hot-reload skills on file changes (30s polling). Scans
+/// home-level AND all active project-level skill directories. Behavior-
+/// preserving extraction; JoinHandle discarded as inline.
+fn run_bot_spawn_skills_hot_reload(
+    shared_for_tmux: &Arc<SharedData>,
+    provider_for_setup: &ProviderKind,
+) {
+    let shared_for_skills = shared_for_tmux.clone();
+    let provider_for_skills = provider_for_setup.clone();
+    tokio::spawn(async move {
+        let mut last_fingerprint: (usize, u64) = (0, 0); // (file_count, max_mtime_epoch)
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+            // Collect unique project paths from active sessions
+            let project_paths: Vec<String> = {
+                let data = shared_for_skills.core.lock().await;
+                let mut paths: Vec<String> = data
+                    .sessions
+                    .values()
+                    .filter_map(|s| s.current_path.clone())
+                    .collect();
+                paths.sort();
+                paths.dedup();
+                paths
+            };
+            let fp = skill_dir_fingerprint_with_projects(&provider_for_skills, &project_paths);
+            if fp != last_fingerprint && last_fingerprint != (0, 0) {
+                // Merge home + all project skills (scan_skills deduplicates by name)
+                let mut merged = scan_skills(&provider_for_skills, None);
+                let mut seen: std::collections::HashSet<String> =
+                    merged.iter().map(|(n, _)| n.clone()).collect();
+                for path in &project_paths {
+                    for skill in scan_skills(&provider_for_skills, Some(path)) {
+                        if seen.insert(skill.0.clone()) {
+                            merged.push(skill);
+                        }
+                    }
+                }
+                merged.sort_by(|a, b| a.0.cmp(&b.0));
+                let count = merged.len();
+                *shared_for_skills.skills_cache.write().await = merged;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 🔄 Skills hot-reloaded: {count} skill(s) ({} files, mtime Δ)",
+                    fp.0
+                );
+            }
+            last_fingerprint = fp;
+        }
+    });
+}
+
+/// Restore inflight turns FIRST, then flush restart reports (leader-only).
+/// Recovery skips channels that have a pending restart report, so the report
+/// must still be on disk when recovery runs. After recovery completes, the
+/// flush loop starts and delivers/clears reports. Behavior-preserving
+/// extraction; JoinHandle discarded as inline. `api_port` is captured by the
+/// spawn (used by run_startup_diagnostic_after_reconcile_barrier).
+fn run_bot_spawn_recovery_and_flush_restart_reports(
+    ctx: &serenity::Context,
+    shared_for_tmux: &Arc<SharedData>,
+    token_owned: &str,
+    provider_for_setup: &ProviderKind,
+    startup_reconcile_remaining: &Arc<std::sync::atomic::AtomicUsize>,
+    startup_doctor_started: &Arc<std::sync::atomic::AtomicBool>,
+    health_registry_for_setup: &Arc<health::HealthRegistry>,
+    api_port: u16,
+) {
+    let http_for_tmux = ctx.http.clone();
+    let shared_for_tmux2 = shared_for_tmux.clone();
+    let http_for_restart_reports = ctx.http.clone();
+    let ctx_for_kickoff = ctx.clone();
+    let token_for_kickoff = token_owned.to_string();
+    let shared_for_restart_reports = shared_for_tmux.clone();
+    let provider_for_restore = provider_for_setup.clone();
+    let startup_reconcile_remaining_for_restore = startup_reconcile_remaining.clone();
+    let startup_doctor_started_for_restore = startup_doctor_started.clone();
+    let health_registry_for_startup_doctor = health_registry_for_setup.clone();
+    tokio::spawn(async move {
+        let is_utility_bot = {
+            let s = shared_for_tmux2.settings.read().await;
+            s.agent.is_some()
+        };
+        if is_utility_bot {
+            mark_reconcile_complete(&shared_for_tmux2);
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!("  [{ts}] ✓ Utility bot reconcile — skipped recovery");
+        } else {
+            // #429: Recover restart-gap messages first so new user input gets queued
+            // within seconds of bot ready instead of waiting behind slower
+            // Discord API-heavy inflight/thread-map recovery passes.
+            catch_up_missed_messages(&http_for_tmux, &shared_for_tmux2, &provider_for_restore)
+                .await;
+
+            gc_stale_fixed_working_sessions(&shared_for_tmux2).await;
+
+            // Restore pending intervention queues saved during previous SIGTERM
+            // before inflight turn recovery. Drain-mode queue snapshots are the
+            // source of truth for restart-gap user input; if inflight recovery
+            // recreates an active turn first, the active message id can make a
+            // persisted queue item look "already known" and incorrectly drop it.
+            let (restored_queues, restored_overrides) =
+                load_pending_queues(&provider_for_restore, &shared_for_tmux2.token_hash);
+            let allowed_bot_ids_for_restore: Vec<u64> = {
+                let settings = shared_for_tmux2.settings.read().await;
+                settings.allowed_bot_ids.clone()
+            };
+            let announce_bot_id_for_restore =
+                super::resolve_announce_bot_user_id(&shared_for_tmux2).await;
+            // P1-1: Restore dispatch_role_overrides from queue snapshots
+            for (thread_channel_id, alt_channel_id) in &restored_overrides {
+                if !matches!(
+                    resolve_runtime_channel_binding_status(&http_for_tmux, *thread_channel_id)
+                        .await,
+                    RuntimeChannelBindingStatus::Owned
+                ) {
+                    continue;
+                }
+                shared_for_tmux2
+                    .dispatch_role_overrides
+                    .insert(*thread_channel_id, *alt_channel_id);
+            }
+            if !restored_overrides.is_empty() {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 📋 FLUSH: restored {} dispatch_role_override(s) from queue snapshots",
+                    restored_overrides.len()
+                );
+            }
+            if !restored_queues.is_empty() {
+                let mut added = 0usize;
+                let mut skipped_unowned = 0usize;
+                let mut skipped_sender = 0usize;
+                let mut skipped_duplicate = 0usize;
+                for (channel_id, items) in restored_queues {
+                    if !matches!(
+                        resolve_runtime_channel_binding_status(&http_for_tmux, channel_id).await,
+                        RuntimeChannelBindingStatus::Owned
+                    ) {
+                        skipped_unowned += items.len();
+                        continue;
+                    }
+                    let snapshot = mailbox_snapshot(&shared_for_tmux2, channel_id).await;
+                    let mut existing_ids = queued_message_ids(&snapshot);
+                    let mut queue = snapshot.intervention_queue;
+                    for item in items {
+                        if !super::is_allowed_turn_sender(
+                            &allowed_bot_ids_for_restore,
+                            announce_bot_id_for_restore,
+                            item.author_id.get(),
+                            item.author_is_bot,
+                            &item.text,
+                        ) {
+                            skipped_sender += 1;
+                            continue;
+                        }
+                        if enqueue_restored_intervention(&mut existing_ids, &mut queue, item) {
+                            added += 1;
+                        } else {
+                            skipped_duplicate += 1;
+                        }
+                    }
+                    mailbox_replace_queue(
+                        &shared_for_tmux2,
+                        &provider_for_restore,
+                        channel_id,
+                        queue,
+                    )
+                    .await;
+                }
+                let skipped = skipped_unowned + skipped_sender + skipped_duplicate;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 📋 FLUSH: restored {added} pending queue item(s) from disk (skipped {skipped}: unowned={skipped_unowned}, sender={skipped_sender}, duplicate={skipped_duplicate})"
+                );
+            }
+
+            // codex review round-3 P2 (#1332): restore the
+            // `queued_placeholders` mapping from disk BEFORE
+            // `kickoff_idle_queues` so the restored mailbox queue
+            // entries pick up the existing `📬 메시지 대기 중`
+            // Discord cards instead of stranding them and posting
+            // duplicate placeholders. Must run AFTER the mailbox
+            // queue is restored (above) and BEFORE
+            // `kickoff_idle_queues` / `restore_inflight_turns` so
+            // the live-queue filter (round-6 P2) can reject any
+            // mapping whose source message id is no longer in any
+            // currently-queued intervention.
+            // codex review round-7 P2 (#1332): collect stale
+            // `📬` card tuples during the filter pass and call
+            // `delete_message` on each AFTER `kickoff_idle_queues`
+            // returns. Inline deletion before kickoff would
+            // gate startup intake on per-card HTTP latency
+            // (and surface 404s for cards posted by an old
+            // bot identity). Best-effort, post-kickoff is
+            // strictly safer.
+            let mut stale_cards_to_delete: Vec<(ChannelId, MessageId, MessageId)> = Vec::new();
+            let restored_queued_placeholders =
+                super::queued_placeholders_store::load_queued_placeholders(
+                    &provider_for_restore,
+                    &shared_for_tmux2.token_hash,
+                );
+            if !restored_queued_placeholders.is_empty() {
+                // codex review round-6 P2 (#1332): when startup
+                // skips/supersedes a restored or catch-up queue
+                // item before this point (channel no longer
+                // owned, sender no longer allowed, duplicate or
+                // cap pruning, …), its persisted queued-
+                // placeholder mapping has no live queue entry to
+                // attach to. Inserting it unconditionally would
+                // strand the `📬` card + sidecar row forever:
+                // no future dispatch or queue-exit event would
+                // reference that user message id. Filter the
+                // loaded mappings against the live mailbox queue
+                // and DELETE the on-disk + in-memory state for
+                // every mapping whose user message id is no
+                // longer queued.
+                let live_queue_ids = collect_live_queue_message_ids(&shared_for_tmux2).await;
+                let filter_outcome = filter_restored_queued_placeholders(
+                    restored_queued_placeholders,
+                    &live_queue_ids,
+                );
+                for (key, placeholder_msg_id) in &filter_outcome.live {
+                    shared_for_tmux2
+                        .queued_placeholders
+                        .insert(*key, *placeholder_msg_id);
+                }
+                // Re-snapshot every channel that had at least
+                // one stale mapping pruned so the on-disk file
+                // matches the filtered in-memory state. Empty
+                // channels are removed via the snapshot helper
+                // (the `entries.is_empty()` branch deletes the
+                // file). Without this rewrite, the next restart
+                // would re-load the same stale mapping and the
+                // leak would compound across restarts.
+                for channel_id in &filter_outcome.channels_with_stale {
+                    super::queued_placeholders_store::persist_channel_from_map(
+                        &shared_for_tmux2.queued_placeholders,
+                        &shared_for_tmux2.provider,
+                        &shared_for_tmux2.token_hash,
+                        *channel_id,
+                    );
+                }
+                let live_count = filter_outcome.live.len();
+                let stale_count = filter_outcome.stale_count;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                if stale_count > 0 {
+                    tracing::warn!(
+                        "  [{ts}] 📋 FLUSH: restored {live_count} queued-placeholder mapping(s) from disk; pruned {stale_count} stale mapping(s) with no live queue entry"
+                    );
+                } else {
+                    tracing::info!(
+                        "  [{ts}] 📋 FLUSH: restored {live_count} queued-placeholder mapping(s) from disk"
+                    );
+                }
+                // codex review round-7 P2 (#1332): capture
+                // the visible-card tuples so the post-kickoff
+                // cleanup loop can dismiss them via Discord's
+                // delete_message API. Without this, the
+                // round-6 disk-rewrite leaves the cards
+                // stranded on the channel.
+                stale_cards_to_delete = filter_outcome.stale_cards;
+            }
+
+            // #2437 (#2427 C wire) boot-time generation
+            // invalidate. Remove non-planned-restart inflight
+            // rows whose `restart_generation` does not match
+            // the current generation so recovery does not
+            // revive a row whose tmux session no longer
+            // exists. Must run BEFORE `restore_inflight_turns`
+            // — otherwise recovery would attempt to revive
+            // ghost rows and the placeholder sweeper would
+            // eventually have to time-guess them at 1800s.
+            // Planned-restart / hot-swap rows survive (their
+            // generation gate in `stale_removal_reason`
+            // already handles them with longer retention).
+            let invalidated = super::inflight::invalidate_stale_generation(
+                &provider_for_restore,
+                shared_for_tmux2.current_generation,
+            );
+            if invalidated > 0 {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 🧹 inflight: invalidated {} stale-generation row(s) for {} (current generation {}) — #2437",
+                    invalidated,
+                    provider_for_restore.as_str(),
+                    shared_for_tmux2.current_generation,
+                );
+            }
+
+            restore_inflight_turns(&http_for_tmux, &shared_for_tmux2, &provider_for_restore).await;
+
+            // P1-2: Warn about legacy queue files that cannot be restored
+            warn_legacy_pending_queue_files(&provider_for_restore);
+
+            // #226: Collect channels that recovery already handled (spawned + ended watchers).
+            // restore_tmux_watchers must skip these to prevent duplicate watcher creation.
+            // The issue: recovery watcher starts → session ends quickly → watcher removes
+            // itself from DashMap → restore_tmux_watchers sees empty slot → creates second watcher.
+            #[cfg(unix)]
+            {
+                // Mark all channels that recovery touched as "recently handled"
+                // by inserting a recovery_handled marker in kv_meta.
+                // restore_tmux_watchers checks this and skips those channels.
+                let recovery_channels: Vec<u64> = shared_for_tmux2
+                    .recovering_channels
+                    .iter()
+                    .map(|entry| entry.key().get())
+                    .collect();
+                super::tmux::store_recovery_handled_channels(&shared_for_tmux2, &recovery_channels)
+                    .await;
+
+                restore_tmux_watchers(&http_for_tmux, &shared_for_tmux2).await;
+                cleanup_orphan_tmux_sessions(&shared_for_tmux2).await;
+
+                // Clean up recovery markers
+                super::tmux::clear_recovery_handled_channels(&shared_for_tmux2).await;
+            }
+
+            // Remove retired durable handoffs so stale legacy JSON cannot
+            // influence startup.
+            purge_legacy_durable_handoffs();
+
+            // #164: Re-deliver orphan pending dispatches from before restart
+            recover_orphan_pending_dispatches(&shared_for_restart_reports).await;
+
+            // Kick off turns for channels that have queued messages but no
+            // active turn. Without this, restored pending queues and handoff
+            // injections sit idle until the next user message arrives.
+            kickoff_idle_queues(
+                &ctx_for_kickoff,
+                &shared_for_restart_reports,
+                &token_for_kickoff,
+                &provider_for_restore,
+            )
+            .await;
+
+            // codex review round-7 P2 (#1332): now that the
+            // gateway has had a chance to settle and live
+            // queues have been kicked off, best-effort
+            // delete any `📬 메시지 대기 중` Discord cards
+            // whose mapping the round-6 filter pruned.
+            // Without this loop the cards stay forever (the
+            // owning mapping was just removed, so no future
+            // dispatch / queue-exit event can reach them).
+            delete_stale_queued_placeholder_cards(&http_for_tmux, &stale_cards_to_delete).await;
+
+            // #122: Reconcile phase complete — open intake
+            mark_reconcile_complete(&shared_for_restart_reports);
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!("  [{ts}] ✓ Reconcile complete — intake open");
+        } // end of !is_utility_bot recovery block
+
+        // Kick off again to drain messages queued during reconcile window
+        kickoff_idle_queues(
+            &ctx_for_kickoff,
+            &shared_for_restart_reports,
+            &token_for_kickoff,
+            &provider_for_restore,
+        )
+        .await;
+
+        // Thread-map validation is best-effort hygiene and can spend
+        // multiple REST round-trips on startup. Do not block intake
+        // reopening or queued-turn kickoff on it.
+        if shared_for_tmux2.pg_pool.is_some()
+            && STARTUP_THREAD_MAP_VALIDATION_STARTED
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!("  [{ts}] 🧹 THREAD-MAP: continuing validation in background");
+            spawn_startup_thread_map_validation(
+                shared_for_tmux2.pg_pool.clone(),
+                token_for_kickoff.clone(),
+            );
+        }
+
+        run_startup_diagnostic_after_reconcile_barrier(
+            startup_reconcile_remaining_for_restore,
+            startup_doctor_started_for_restore,
+            health_registry_for_startup_doctor,
+            api_port,
+        )
+        .await;
+
+        // NOW flush restart reports (recovery is done, safe to delete them)
+        flush_restart_reports(
+            &http_for_restart_reports,
+            &shared_for_restart_reports,
+            &provider_for_restore,
+        )
+        .await;
+        // Continue flushing in a loop for any reports created later
+        loop {
+            tokio::time::sleep(RESTART_REPORT_FLUSH_INTERVAL).await;
+            flush_restart_reports(
+                &http_for_restart_reports,
+                &shared_for_restart_reports,
+                &provider_for_restore,
+            )
+            .await;
+        }
+    });
+}
+
+/// Background: periodic cleanup for stale Discord upload files. No captures;
+/// behavior-preserving extraction.
+fn run_bot_spawn_upload_cleanup() {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(UPLOAD_CLEANUP_INTERVAL).await;
+            cleanup_old_uploads(UPLOAD_MAX_AGE);
+        }
+    });
+}
+
+/// Background: periodic GC for stale thread sessions in DB. Normal
+/// idle/disconnected thread rows expire after 1 hour, but rows still carrying
+/// an active_dispatch_id stay until the 3-hour safety TTL so warm-resume
+/// sessions keep DB ownership. Behavior-preserving extraction.
+fn run_bot_spawn_stale_session_gc(shared_clone: &Arc<SharedData>) {
+    let shared_for_session_gc = shared_clone.clone();
+    tokio::spawn(async move {
+        // Run every 10 minutes, initial delay 2 minutes
+        tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
+        loop {
+            gc_stale_fixed_working_sessions(&shared_for_session_gc).await;
+            gc_stale_thread_sessions(&shared_for_session_gc).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
+        }
+    });
+}
+
+/// Auto-join configured voice channels (leader-only). The enable/non-empty
+/// guard lives inside so the call site is unconditional. Async because it
+/// reads `shared_clone.settings` before spawning. Behavior-preserving
+/// extraction; the await point matches the inline block exactly.
+async fn run_bot_spawn_voice_auto_join(
+    ctx: &serenity::Context,
+    voice_config_for_setup: &crate::voice::VoiceConfig,
+    voice_receiver_for_setup: &crate::voice::VoiceReceiver,
+    shared_clone: &Arc<SharedData>,
+    provider_for_setup: &ProviderKind,
+) {
+    if voice_config_for_setup.enabled
+        && !voice_config_for_setup
+            .auto_join_channel_ids_with_lobby()
+            .is_empty()
+    {
+        let ctx_for_voice = ctx.clone();
+        let receiver_for_voice = voice_receiver_for_setup.clone();
+        let config_for_voice = voice_config_for_setup.clone();
+        let barge_in_for_voice = shared_clone.voice_barge_in.clone();
+        let pairings_for_voice = shared_clone.voice_pairings.clone();
+        let provider_for_voice = provider_for_setup.clone();
+        let agent_for_voice = {
+            let settings = shared_clone.settings.read().await;
+            settings.agent.clone()
+        };
+        // #2054 v7: agent voice binding은 channel_id → provider+agent
+        // 매핑을 build 해서 같은 provider의 다른 에이전트 봇까지
+        // 같은 voice 채널에 진입하는 중복 STT/TTS를 차단한다.
+        let cfg = crate::config::load_graceful();
+        let channel_provider_map = voice_auto_join_provider_map(&cfg);
+        tokio::spawn(async move {
+            commands::auto_join_voice_channels(
+                ctx_for_voice,
+                receiver_for_voice,
+                config_for_voice,
+                barge_in_for_voice,
+                pairings_for_voice,
+                provider_for_voice,
+                agent_for_voice,
+                channel_provider_map,
+            )
+            .await;
+        });
+    }
 }
 
 // ── run_bot startup-phase helpers (decomposition of the run_bot

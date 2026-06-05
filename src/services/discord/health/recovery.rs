@@ -2569,13 +2569,12 @@ async fn maybe_recover_completed_stale_leak(
 mod stall_watchdog_pure_tests {
     use super::{
         LeakRecoveryLedgerIdentity, STALL_WATCHDOG_THRESHOLD_SECS,
-        force_clean_should_preserve_resume_selector,
-        inflight_completed_stale_leak_detected, leak_recovery_chunk_fingerprints,
-        leak_recovery_clear_chunk_ledger, leak_recovery_confirmed_chunk_count,
-        leak_recovery_confirmed_prefix_from_ledger, leak_recovery_record_confirmed_chunk,
-        leak_recovery_unrelayed_range, preserve_cancel_should_skip_provider_interrupt_for_idle_tui,
-        render_leak_recovery_delivery, stale_idle_foreground_queue_detected,
-        stall_watchdog_should_force_clean,
+        force_clean_should_preserve_resume_selector, inflight_completed_stale_leak_detected,
+        leak_recovery_chunk_fingerprints, leak_recovery_clear_chunk_ledger,
+        leak_recovery_confirmed_chunk_count, leak_recovery_confirmed_prefix_from_ledger,
+        leak_recovery_record_confirmed_chunk, leak_recovery_unrelayed_range,
+        preserve_cancel_should_skip_provider_interrupt_for_idle_tui, render_leak_recovery_delivery,
+        stale_idle_foreground_queue_detected, stall_watchdog_should_force_clean,
         stall_watchdog_should_force_clean_orphan_explicit_background_work,
     };
     use crate::services::discord::relay_health::{RelayActiveTurn, RelayStallState};

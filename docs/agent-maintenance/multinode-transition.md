@@ -379,3 +379,13 @@
   in-memory gate guarding queued-card ordering) — it owns no leader-only side
   effect, no durable queue, and no PG lease, so it introduces no new multinode
   ownership/singleton/lease assumption.
+- #3038 (`run_bot` god-function decomposition): `runtime_bootstrap.rs` changed
+  by a **pure, behavior-preserving extraction** of `run_bot`'s inline
+  leader-only background-spawn block into six `run_bot_spawn_*` free helpers
+  (deferred_restart_poller, skills_hot_reload, recovery_and_flush_restart_reports,
+  upload_cleanup, stale_session_gc, voice_auto_join). The leader/standby gating,
+  the gateway-lease acquisition order, every `tokio::spawn` point, and all
+  captured clones are **unchanged** — each helper recreates the same named clones
+  internally and is invoked at the identical position in `run_bot`. No new
+  multinode ownership, singleton, or lease assumption is introduced; the
+  leader-only vs worker-local classification of every spawned task is preserved.
