@@ -128,7 +128,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (8826 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (8844 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -244,7 +244,25 @@
     NotDelivered, NO blind 10s re-send for Unknown; the should-direct-send bool stays
     the precondition gate, the send paths stay masked by `!SkipAlreadyCommitted`. New
     tests `unknown_outcome_triggers_committed_offset_reconciliation_not_blind_resend`
-    and `not_delivered_outcome_keeps_no_resend_when_foreign_owner_committed`).
+    and `not_delivered_outcome_keeps_no_resend_when_foreign_owner_committed`);
+    +18 from #3041 P1-5 (codex P1 follow-up) routing the ownerless `TimedOut`
+    through §3.2: the pre-existing #3042 band-aid (`if !relay_owner_present &&
+    TimedOut { return false }` early-return in
+    `watcher_should_direct_send_after_session_bound_ack`) blanket-suppressed an
+    ownerless TimedOut BEFORE it could reach `watcher_terminal_resend_action`
+    (committed-offset reconciliation) — neither reconciling nor resending → a
+    potential black-hole when committed < end. P1-3 Part (a)
+    (`advance_offset_for_confirmed_delegated_terminal`) made the committed offset
+    authoritative on a CONFIRMED post (the same fence that arms the ACK target →
+    TimedOut), so the band-aid is obsolete: the early-return is removed and an
+    ownerless TimedOut now flows through the SAME §3.2 path as every other
+    non-Delivered outcome (committed >= end → SkipAlreadyCommitted → the #3042 3×
+    duplicate is prevented PRINCIPALLY; committed < end → SendFull → black-hole
+    closed). The §3.2 universality invariant now covers EVERY non-Delivered arm with
+    no exception. New/updated tests `ownerless_timed_out_intends_resend_via_gate`
+    (renamed from `ownerless_timeout_suppresses_watcher_direct_fallback`),
+    `ownerless_timed_out_reconciles_skip_when_committed_reaches_end` (#3042
+    regression guard), `ownerless_timed_out_reconciles_full_when_not_committed`.
   - `src/services/discord/tui_prompt_relay.rs` (3982 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +12 from #3041 P1-4 codex: the lease record

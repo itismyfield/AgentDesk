@@ -2177,20 +2177,38 @@ fn watcher_should_direct_send_after_session_bound_ack(
     relay_owner_present: bool,
 ) -> bool {
     use crate::services::cluster::stream_relay::DeliveryOutcome;
-    // #3042 (relay-stability P1, immediate mitigation): after a restart the
-    // channel can run with `relay_owner_kind=none` + `inflight_present=false`
-    // (restore_inflight failed to rebind ownership), so the session-bound
-    // StreamRelay terminal-commit ACK never lands and the 10s wait reports
-    // `TimedOut` on every poll. In that ownerless state a `TimedOut` is NOT a
-    // reliable "not delivered" signal — the StreamRelay sink may have posted
-    // and merely failed to advance the committed-sequence metric — so blindly
-    // re-sending the same byte-range once per ACK-timeout poll produces the
-    // observed 3× duplicate. Suppress the watcher-direct fallback for an
-    // ownerless `TimedOut`. Owned outcomes and non-timeout outcomes keep the
-    // existing fallback behaviour.
-    if !relay_owner_present && matches!(ack_outcome, SessionBoundRelayAckOutcome::TimedOut) {
-        return false;
-    }
+    // #3042 (relay-stability P1, OBSOLETE band-aid — removed by #3041 P1-5):
+    // #3042 added an early `return false` here for an ownerless (`relay_owner_kind=none`
+    // / `inflight_present=false`, the post-restart restore_inflight gap) `TimedOut`,
+    // blanket-suppressing the watcher-direct fallback. Its rationale: in that gap the
+    // StreamRelay sink "may have posted and merely failed to ADVANCE the committed-
+    // sequence metric", so a blind re-send produced the observed 3× duplicate.
+    //
+    // That rationale no longer holds. #3041 P1-3 Part (a)
+    // (`advance_offset_for_confirmed_delegated_terminal`, session_relay_sink.rs ~459)
+    // now COUPLES a CONFIRMED sink terminal POST to advancing the offset authority
+    // (`confirmed_end_offset`) to the producer's fenced `end`. A `TimedOut` (NOT
+    // `MissingTarget`) is ONLY produced when a FENCED terminal frame was forwarded
+    // (tmux_watcher.rs ~2038/2053) — and that SAME fence is what the sink advances on,
+    // so the committed offset now DOES reflect a confirmed post even in the ownerless
+    // state (the authority is a plain owner-independent atomic; it is always readable).
+    //
+    // Therefore the blanket suppression is obsolete and HARMFUL: it returned `false`
+    // BEFORE the outcome could reach the §3.2 committed-offset reconciliation
+    // (`watcher_terminal_resend_action`), so an ownerless `TimedOut` whose bytes were
+    // NOT actually delivered (committed < end) neither reconciled nor resent — a
+    // potential black-hole. Routing it through §3.2 instead (drop the early return):
+    //   * committed >= end → `SkipAlreadyCommitted` → NO resend → the #3042 3×
+    //     duplicate is prevented PRINCIPALLY (not by blanket suppression);
+    //   * committed < end → `SendFull` → the bytes were genuinely undelivered →
+    //     recover → the black-hole the band-aid left is closed.
+    // This completes the P1-5 §3.2 invariant: EVERY non-`Delivered` outcome
+    // (NotDelivered, RingUnknown, MissingTarget, Dropped, SinkError, and now ownerless
+    // `TimedOut`) routes through committed-offset reconciliation — none blind-skips,
+    // none blind-resends. (`relay_owner_present` is retained in the signature for the
+    // flight-recorder/telemetry call site even though the gate no longer branches on
+    // it.)
+    let _ = relay_owner_present;
     // #3041 P1-5: decide on the cross-actor 3-way `DeliveryOutcome` instead of the
     // implicit `ack_outcome != Delivered` bit. `Delivered` → no watcher re-send.
     // `NotDelivered` AND `Unknown` (every failure/unconfirmed arm) BOTH intend a
@@ -3772,6 +3790,17 @@ mod matched_session_jsonl_gate_tests {
             SessionBoundRelayAckOutcome::Delivered,
             true
         ));
+        // #3041 P1-5: an ownerless `TimedOut` now ALSO returns true (intends a
+        // re-send) — the gate is the precondition only; the §3.2 committed-offset
+        // reconciliation at the call site decides Skip vs Full. (Previously #3042
+        // blanket-suppressed this to false.)
+        assert!(watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::TimedOut,
+            false
+        ));
+        // should_direct_send=false still gates the precondition off regardless of
+        // owner presence.
         assert!(!watcher_should_direct_send_after_session_bound_ack(
             false,
             SessionBoundRelayAckOutcome::TimedOut,
@@ -3779,29 +3808,35 @@ mod matched_session_jsonl_gate_tests {
         ));
     }
 
-    /// #3042: after a restart `restore_inflight` can leave the channel with
+    /// #3041 P1-5 (was `ownerless_timeout_suppresses_watcher_direct_fallback`,
+    /// #3042): after a restart `restore_inflight` can leave the channel with
     /// `relay_owner_kind=none`/`inflight_present=false`, so the session-bound
     /// terminal-commit ACK never lands and every 10s poll reports `TimedOut`.
-    /// In that ownerless state a `TimedOut` is not a reliable not-delivered
-    /// signal, so the watcher-direct blind re-send must be suppressed (the
-    /// observed 3× duplicate). Owner-absent + non-timeout outcomes still fall
-    /// back so genuine sink failures/skips are not silently dropped.
+    /// #3042 blanket-suppressed the gate to `false` there to avoid a 3× duplicate;
+    /// #3041 P1-5 REMOVES that band-aid because P1-3 Part (a) made the committed
+    /// offset authoritative on a confirmed post. The gate now returns `true` (intends
+    /// a re-send) for an ownerless `TimedOut` — JUST the precondition — and the §3.2
+    /// committed-offset reconciliation (`watcher_terminal_resend_action`) decides
+    /// Skip-vs-Full downstream. The actual no-duplicate / no-black-hole guarantees
+    /// are asserted by `ownerless_timed_out_reconciles_*` below.
     #[test]
-    fn ownerless_timeout_suppresses_watcher_direct_fallback() {
+    fn ownerless_timed_out_intends_resend_via_gate() {
         // The exact incident shape: should_direct_send=true, TimedOut, no owner.
-        assert!(!watcher_should_direct_send_after_session_bound_ack(
+        // Now PASSES the gate (was suppressed to false by #3042); §3.2 then
+        // reconciles (see `ownerless_timed_out_reconciles_*`).
+        assert!(watcher_should_direct_send_after_session_bound_ack(
             true,
             SessionBoundRelayAckOutcome::TimedOut,
             false
         ));
-        // Owner present with the same TimedOut keeps the fallback (regression
-        // guard so the suppression is owner-scoped, not a blanket TimedOut mute).
+        // Owner present with the same TimedOut also intends the fallback —
+        // universality: the gate no longer branches on owner presence.
         assert!(watcher_should_direct_send_after_session_bound_ack(
             true,
             SessionBoundRelayAckOutcome::TimedOut,
             true
         ));
-        // Ownerless but a non-timeout (definitive) outcome still falls back.
+        // Ownerless but a non-timeout (definitive) outcome still intends the fallback.
         assert!(watcher_should_direct_send_after_session_bound_ack(
             true,
             SessionBoundRelayAckOutcome::SinkError,
@@ -3812,12 +3847,67 @@ mod matched_session_jsonl_gate_tests {
             SessionBoundRelayAckOutcome::NotDelivered,
             false
         ));
-        // Ownerless TimedOut with should_direct_send=false is also suppressed.
+        // should_direct_send=false still gates the precondition off.
         assert!(!watcher_should_direct_send_after_session_bound_ack(
             false,
             SessionBoundRelayAckOutcome::TimedOut,
             false
         ));
+    }
+
+    /// #3041 P1-5 / #3042 REGRESSION GUARD: an ownerless (`relay_owner_present=false`)
+    /// `TimedOut` whose range is ALREADY committed at/past `end` (the sink posted and
+    /// P1-3 advanced `confirmed_end_offset`) reconciles to `SkipAlreadyCommitted` —
+    /// NO re-send. This is the principled replacement for #3042's blanket suppression:
+    /// the observed 3× duplicate is still prevented, but now via the committed-offset
+    /// authority rather than a blind owner-scoped mute (so a genuine non-delivery is
+    /// no longer black-holed — see `ownerless_timed_out_reconciles_full_when_not_committed`).
+    #[test]
+    fn ownerless_timed_out_reconciles_skip_when_committed_reaches_end() {
+        // Ownerless TimedOut now passes the precondition gate (no longer suppressed).
+        assert!(watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::TimedOut,
+            false
+        ));
+        // The §3.2 reconciliation against the offset authority: committed has reached
+        // (or passed) the consumed-terminal `end` → the sink delivered, ACK merely
+        // lagged → SKIP. No duplicate (the #3042 3× incident cannot recur).
+        let (start, end) = (1_000u64, 1_500u64);
+        assert_eq!(
+            watcher_terminal_resend_action(end, start, end),
+            WatcherTerminalResendAction::SkipAlreadyCommitted,
+        );
+        assert_eq!(
+            watcher_terminal_resend_action(end + 256, start, end),
+            WatcherTerminalResendAction::SkipAlreadyCommitted,
+        );
+    }
+
+    /// #3041 P1-5 (black-hole closed): an ownerless `TimedOut` whose range is NOT
+    /// committed (committed < end → the sink did NOT confirm a post) reconciles to
+    /// `SendFull` — the bytes are recovered. Under the old #3042 blanket suppression
+    /// this outcome neither reconciled nor resent: a potential black-hole.
+    #[test]
+    fn ownerless_timed_out_reconciles_full_when_not_committed() {
+        // Same ownerless TimedOut precondition.
+        assert!(watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::TimedOut,
+            false
+        ));
+        // committed < end → genuinely undelivered → re-send the FULL response.
+        let (start, end) = (1_000u64, 1_500u64);
+        assert_eq!(
+            watcher_terminal_resend_action(start, start, end),
+            WatcherTerminalResendAction::SendFull,
+        );
+        // committed at/below start (the all-or-nothing sink delegation's not-delivered
+        // shape) also re-sends.
+        assert_eq!(
+            watcher_terminal_resend_action(0, start, end),
+            WatcherTerminalResendAction::SendFull,
+        );
     }
 
     #[test]
