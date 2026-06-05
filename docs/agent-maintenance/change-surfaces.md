@@ -128,7 +128,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (8680 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (8739 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -203,6 +203,19 @@
     pass sees a different pinned turn identity → ack reset to `None` → B reconciles
     against `committed_relay_offset` (None → MissingTarget → §3.2 SendFull/Skip),
     NEVER black-holed even when A reported Delivered;
+    +59 from R7 (PR #3150) codex P1-3 R7: TURN-BOUNDARY ack reset at the split.
+    R6's `carry_session_bound_ack_for_turn` STILL black-holes a later turn when
+    `turn_identity_for_panel` is NOT refreshed (B's inflight not yet established when
+    B's leftover bytes are processed → the pinned offset is STILL A's → the carry
+    helper KEEPS A's ack). `SupervisorRelayForward` now carries a `trailing_turn_follows`
+    signal set by `forward_terminal_chunk_with_trailing_to_supervisor_relay` whenever it
+    splits a result-bearing chunk with a non-empty trailing tail (a later turn follows).
+    A pass-scoped `split_trailing_turn_follows` latch ORs that over both forward sites;
+    AFTER this turn waits on (consumes) its own terminal ACK — right after the relay
+    flight-recorder log — the watcher resets `all_data_session_bound_relay_ack` to `None`.
+    So a later turn ALWAYS starts with no inherited ack → MissingTarget → §3.2 reconcile
+    (SendFull/Skip) → never black-holed, independent of whether the pinned identity
+    refreshed. A's own delivery still resolves on A's ack (the reset is post-wait);
     split loop helpers further before adding behavior).
   - `src/services/discord/tui_prompt_relay.rs` (3874 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only

@@ -1690,6 +1690,18 @@ struct SessionBoundRelayAckTarget {
 struct SupervisorRelayForward {
     mirrored: bool,
     ack_target: Option<SessionBoundRelayAckTarget>,
+    /// #3041 P1-3 (codex P1-3 R7): TRUE when this forward SPLIT a result-bearing
+    /// physical chunk and a NON-EMPTY trailing tail (a LATER turn's bytes) followed
+    /// the just-completed turn's terminal frame. This is the turn-boundary signal:
+    /// after the just-completed turn (A) consumes its own terminal ACK, the watcher
+    /// must RESET the stored ack to `None` so the trailing turn (B) — which is
+    /// processed from the leftover buffer on a later pass, possibly while
+    /// `turn_identity_for_panel` is STILL pinned to A's offset — can NEVER inherit
+    /// A's finished ACK. With no inherited ack B reads `MissingTarget` → §3.2
+    /// reconciliation (committed-offset SendFull-or-Skip) → B is never black-holed.
+    /// Only the SPLIT terminal forward sets this; every other forward leaves it
+    /// `false` (no boundary crossed).
+    trailing_turn_follows: bool,
 }
 
 impl SupervisorRelayForward {
@@ -1697,6 +1709,7 @@ impl SupervisorRelayForward {
         Self {
             mirrored: true,
             ack_target: None,
+            trailing_turn_follows: false,
         }
     }
 
@@ -1704,6 +1717,7 @@ impl SupervisorRelayForward {
         Self {
             mirrored: false,
             ack_target: None,
+            trailing_turn_follows: false,
         }
     }
 }
@@ -1949,6 +1963,13 @@ fn forward_terminal_chunk_with_trailing_to_supervisor_relay(
     SupervisorRelayForward {
         mirrored: terminal_forward.mirrored && tail_forward.mirrored,
         ack_target: terminal_forward.ack_target,
+        // #3041 P1-3 (codex P1-3 R7): a NON-EMPTY trailing tail means a LATER turn's
+        // bytes followed THIS turn's terminal frame inside ONE physical chunk — a
+        // turn-boundary signal. The watcher resets the stored ack AFTER this turn
+        // consumes its own terminal ACK, so the trailing turn never inherits this
+        // finished turn's ACK (R7 black-hole close), regardless of whether
+        // `turn_identity_for_panel` has refreshed to the trailing turn yet.
+        trailing_turn_follows: true,
     }
 }
 
@@ -2034,6 +2055,9 @@ fn forward_chunk_to_supervisor_relay_inner(
             sequence,
             turn_start_offset: ack_turn_start_offset,
         }),
+        // A single forward of one frame never crosses a turn boundary; only the
+        // split helper sets this when it forwards a separate trailing tail.
+        trailing_turn_follows: false,
     }
 }
 
@@ -3385,6 +3409,152 @@ mod matched_session_jsonl_gate_tests {
             same_turn.map(|ack| ack.sequence),
             Some(5),
             "an ack set earlier in THIS turn survives a later non-terminal pass"
+        );
+    }
+
+    // #3041 P1-3 (codex P1-3 R7): the forward of a result-bearing physical chunk that
+    // ALSO carries a trailing later-turn tail MUST surface the turn-boundary signal
+    // (`trailing_turn_follows = true`) while still keeping the TERMINAL frame's ack as
+    // the wait target. A single-turn forward (no tail) must NOT raise the signal. This
+    // is the primitive the watcher latches to reset the stored ack at the boundary.
+    #[tokio::test]
+    async fn split_terminal_forward_signals_trailing_turn_and_keeps_terminal_ack() {
+        use crate::services::cluster::session_matcher::MatchedChannel;
+        use crate::services::cluster::session_matcher::expected_rollout_path_for;
+        use crate::services::cluster::stream_relay::{
+            DiscardSink, RelaySink, TerminalCommitFence, spawn_stream_relay,
+        };
+        use crate::services::provider::ProviderKind;
+
+        let session = ProviderKind::Claude.build_tmux_session_name("c-r7-split");
+        let matched = MatchedChannel {
+            channel_id: "c-r7-split".to_string(),
+            agent_id: "a-r7-split".to_string(),
+            provider: ProviderKind::Claude,
+            expected_session_name: session.clone(),
+            expected_rollout_path: expected_rollout_path_for(&session),
+        };
+        let registry = std::sync::Arc::new(
+            crate::services::cluster::relay_producer_registry::RelayProducerRegistry::new(),
+        );
+        let sink: std::sync::Arc<dyn RelaySink> = std::sync::Arc::new(DiscardSink);
+        let handle = spawn_stream_relay(matched.clone(), sink);
+        registry.register(session.clone(), handle.producer());
+        let mut cached = None;
+
+        // Turn A's result + turn B's first bytes in ONE physical chunk. After the
+        // parse, `all_data` holds turn B's bytes → leftover_len = turn_b.len().
+        let turn_a = "{\"type\":\"result\",\"result\":\"A done\"}\n";
+        let turn_b = "{\"type\":\"assistant\",\"message\":{\"content\":[]}}\n";
+        let combined = format!("{turn_a}{turn_b}");
+        let fence = TerminalCommitFence {
+            consumed_end: 240,
+            turn_user_msg_id: 0,
+            turn_started_at: "12:00:00".to_string(),
+            // A's pinned identity — the SAME offset the watcher carry helper keys on.
+            turn_start_offset: Some(100),
+        };
+        let split_forward = forward_terminal_chunk_with_trailing_to_supervisor_relay(
+            &session,
+            &combined,
+            turn_b.len(),
+            &registry,
+            &mut cached,
+            fence.clone(),
+        );
+        assert!(
+            split_forward.trailing_turn_follows,
+            "a result+next-turn split must signal that a later turn follows (R7 \
+             turn-boundary)"
+        );
+        assert!(
+            split_forward.ack_target.is_some(),
+            "the split still waits on the TERMINAL frame's ack (turn A's delivery)"
+        );
+        assert_eq!(
+            split_forward
+                .ack_target
+                .as_ref()
+                .and_then(|ack| ack.turn_start_offset),
+            Some(100),
+            "the kept ack is bound to turn A's pinned offset"
+        );
+
+        // A single complete turn (no trailing tail) must NOT raise the signal.
+        let single_forward = forward_terminal_chunk_with_trailing_to_supervisor_relay(
+            &session,
+            turn_a,
+            0,
+            &registry,
+            &mut cached,
+            fence,
+        );
+        assert!(
+            !single_forward.trailing_turn_follows,
+            "a single-turn terminal forward never crosses a turn boundary"
+        );
+        registry.deregister(&session);
+        let _ = handle;
+    }
+
+    // #3041 P1-3 (codex P1-3 R7): END-TO-END boundary semantics. The R6 carry helper
+    // ALONE still black-holes turn B when `turn_identity_for_panel` is STILL pinned to
+    // A's offset on B's pass (B's inflight not yet established): the carry KEEPS A's
+    // ack, and A's `Delivered` falsely satisfies B's ACK. R7 closes this by RESETTING
+    // the stored ack to `None` at A's split boundary AFTER A consumes its own ack —
+    // independent of whether the pinned identity refreshed. This test models that exact
+    // sequence: A's split signals the boundary → reset → B (even with A's stale pinned
+    // offset) starts with NO inherited ack → MissingTarget → §3.2 reconcile → B NOT
+    // black-holed even though A reported Delivered and B's tail was skipped/dropped.
+    #[test]
+    fn split_boundary_reset_prevents_later_turn_inheriting_finished_turn_ack() {
+        let metrics =
+            std::sync::Arc::new(crate::services::cluster::stream_relay::RelayMetrics::default());
+        // A's terminal frame ack (seq 5), pinned to A's turn_start_offset = 100.
+        let a_ack = SessionBoundRelayAckTarget {
+            metrics: metrics.clone(),
+            sequence: 5,
+            turn_start_offset: Some(100),
+        };
+
+        // A's pass forwards the split (result(A) + tail(B)) → the carry helper adopts
+        // A's fresh terminal ack (A's own delivery resolves correctly on A's ack).
+        let mut stored = carry_session_bound_ack_for_turn(None, Some(a_ack.clone()), Some(100));
+        assert_eq!(
+            stored.as_ref().map(|ack| ack.sequence),
+            Some(5),
+            "A's own delivery still uses A's ack (no spurious reset mid-A)"
+        );
+
+        // The split signalled a trailing turn. AFTER A's terminal block consumes A's
+        // ack, the watcher resets the stored ack at the boundary (the R7 fix).
+        let split_trailing_turn_follows = true;
+        if split_trailing_turn_follows {
+            stored = None;
+        }
+
+        // B's pass: `turn_identity_for_panel` is STILL pinned to A's offset (100) —
+        // the exact R7 condition the R6 carry helper could NOT fix. B's deferred
+        // forward produced NO fresh ack (B's tail was already mirrored, or skipped /
+        // dropped on the failure path). WITHOUT the reset, the carry helper would KEEP
+        // A's seq-5 ack here (same pinned offset) → black-hole. WITH the reset, the
+        // stored ack is already `None`, so B reconciles.
+        let carried_for_b = carry_session_bound_ack_for_turn(stored, None, Some(100));
+        assert!(
+            carried_for_b.is_none(),
+            "after A's split boundary reset, turn B NEVER inherits A's finished ack — \
+             even with `turn_identity_for_panel` STILL pinned to A's offset → B reads \
+             MissingTarget → §3.2 reconcile (SendFull/Skip) → B not black-holed"
+        );
+
+        // Contrast: WITHOUT the boundary reset (pre-R7), the very same B pass with A's
+        // stale pinned offset would KEEP A's ack — the regression R7 fixes.
+        let without_reset = carry_session_bound_ack_for_turn(Some(a_ack.clone()), None, Some(100));
+        assert_eq!(
+            without_reset.map(|ack| ack.sequence),
+            Some(5),
+            "documents the R7 regression the boundary reset closes: the carry helper \
+             alone keeps A's ack when the pinned offset is still A's"
         );
     }
 
@@ -4899,6 +5069,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         }
         all_data.push_str(&decoded_data.text);
         let turn_data_start_offset = all_data_start_offset;
+        // #3041 P1-3 (codex P1-3 R7): pass-scoped turn-boundary latch. Set TRUE when
+        // ANY forward on THIS watcher pass SPLIT a result-bearing chunk with a
+        // non-empty trailing tail (a LATER turn's bytes). After this turn consumes
+        // its own terminal ACK below, the stored ack is reset to `None` so the
+        // trailing turn — processed from the leftover buffer on a LATER pass, where
+        // `turn_identity_for_panel` may STILL be pinned to THIS turn's offset — can
+        // NEVER inherit this finished turn's ACK (→ MissingTarget → §3.2 reconcile,
+        // no black-hole). The reset happens AFTER the terminal ACK wait, so this
+        // turn's OWN ack resolution is untouched.
+        let mut split_trailing_turn_follows = false;
         let mut state = StreamLineState::new();
         let restored_turn_seed = restored_turn.take();
         let discard_restored_seed = should_discard_restored_seed_for_idle_direct_prompt(
@@ -5077,6 +5257,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 .as_ref()
                 .and_then(|identity| identity.turn_start_offset),
         );
+        // #3041 P1-3 (codex P1-3 R7): latch the turn-boundary signal. If this initial
+        // forward split a result+next-turn chunk, a later turn follows; reset the ack
+        // after THIS turn's terminal ACK wait so the later turn never inherits it.
+        split_trailing_turn_follows |= data_mirrored_to_session_relay.trailing_turn_follows;
         if initial_buffer_was_empty {
             all_data_fully_mirrored_to_session_relay = data_mirrored_to_session_relay.mirrored;
         } else {
@@ -5333,6 +5517,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 .as_ref()
                                 .and_then(|identity| identity.turn_start_offset),
                         );
+                        // #3041 P1-3 (codex P1-3 R7): latch the turn-boundary signal
+                        // for the streaming-chunk forward too (a result+next-turn
+                        // chunk can arrive mid-stream).
+                        split_trailing_turn_follows |=
+                            chunk_forwarded_to_session_relay.trailing_turn_follows;
                         let chunk_mirrored_to_session_relay =
                             chunk_forwarded_to_session_relay.mirrored;
                         session_bound_relay_turn_fully_mirrored &= chunk_mirrored_to_session_relay;
@@ -8078,6 +8267,22 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             frame_ack_outcome = ?session_bound_ack_outcome,
             "relay flight recorder"
         );
+        // #3041 P1-3 (codex P1-3 R7): turn-boundary ACK reset. THIS turn's terminal
+        // ACK has now been waited on (`session_bound_ack_outcome` is captured) and
+        // logged. If a forward on this pass SPLIT a result-bearing chunk with a
+        // trailing tail, a LATER turn (B) follows in the leftover buffer. B is
+        // processed on a SUBSEQUENT pass — possibly while `turn_identity_for_panel`
+        // is STILL pinned to THIS turn's offset (B's inflight not yet established),
+        // which would make `carry_session_bound_ack_for_turn` KEEP this turn's stale
+        // ack and let this turn's `Delivered` falsely satisfy B's ACK → B
+        // black-holed. RESET the stored ack to `None` HERE, AFTER this turn consumed
+        // it, so B starts with NO inherited ack → MissingTarget → §3.2 reconcile
+        // (committed-offset SendFull-or-Skip) → B is never black-holed (worst case a
+        // duplicate, the #3151-deferred edge). This is the primary R7 guarantee and
+        // is independent of whether the pinned identity refreshes.
+        if split_trailing_turn_follows {
+            all_data_session_bound_relay_ack = None;
+        }
         let mut watcher_direct_terminal_idle_committed = false;
         let mut tui_direct_anchor_terminal_body_visible = false;
         let mut tui_direct_anchor_or_lease_present_for_lifecycle =
