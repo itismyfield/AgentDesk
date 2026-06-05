@@ -2281,6 +2281,69 @@ enum WatcherTerminalResendAction {
     /// retry). The remaining slow-sink-in-flight duplicate is closed by the future
     /// in-flight sink-delivery marker tracked in #3151.
     SendFull,
+    /// #3151: a sink POST is genuinely IN FLIGHT for this range (the per-channel
+    /// `DeliveryLeaseCell` is `Leased{Sink, fresh}`). The watcher must NOT re-send
+    /// this pass — neither SendFull nor a Skip-log — and let its NEXT terminal pass
+    /// re-evaluate. This is a BOUNDED wait: each pass re-reads the cell, and within
+    /// at most one `DELIVERY_LEASE_DEADLINE_MS` the sink either commits+releases
+    /// (→ committed >= end → Skip) or dies (→ deadline lapses → reclaim + SendFull).
+    /// No busy-loop is introduced — it rides the existing watcher iteration cadence.
+    WaitInFlight,
+}
+
+/// #3151: gate the watcher terminal re-send on the in-flight sink-delivery marker
+/// BEFORE deferring to [`watcher_terminal_resend_action`]. The marker is a
+/// `Leased{Sink, ..}` state on the per-channel `DeliveryLeaseCell`; this reads a
+/// coherent `snapshot` (materialized under the cell's payload mutex) and decides:
+///
+/// - `Leased{Sink}` AND `now_ms < deadline_ms` → [`WatcherTerminalResendAction::WaitInFlight`]
+///   (a sink POST is genuinely in flight — do not re-send this pass).
+/// - `Leased{Sink}` AND `now_ms >= deadline_ms` → RECLAIM (the caller force-clears
+///   the dead sink's marker via `reclaim_if_expired`) then fall through to
+///   `watcher_terminal_resend_action` → `SendFull` (committed < end). No black-hole.
+/// - `Committed{Sink}` (sink committed Delivered, not yet released) → Skip (belt-and-
+///   suspenders; `committed >= end` already yields Skip below).
+/// - ANY non-Sink holder / `Unleased` / committed-covered → behave EXACTLY as today:
+///   defer to `watcher_terminal_resend_action`. The gate ONLY interposes for a
+///   Sink-held lease, so the watcher-direct B2 path is untouched.
+///
+/// Returns `(action, reclaim_expired_sink)`. When `reclaim_expired_sink` is true
+/// the caller MUST call `reclaim_if_expired(now_ms)` on the cell before sending
+/// (the side effect is kept out of this pure decision fn so it stays unit-testable).
+fn watcher_terminal_resend_action_gated(
+    snapshot: &crate::services::discord::LeaseSnapshot,
+    committed: u64,
+    start: u64,
+    end: u64,
+    now_ms: u64,
+) -> (WatcherTerminalResendAction, bool) {
+    use crate::services::discord::{LeaseHolder, LeaseSnapshot};
+    match snapshot {
+        LeaseSnapshot::Leased {
+            holder: LeaseHolder::Sink,
+            deadline_ms,
+            ..
+        } => {
+            if now_ms < *deadline_ms {
+                // Live, in-flight sink POST — wait this pass (bounded by deadline).
+                (WatcherTerminalResendAction::WaitInFlight, false)
+            } else {
+                // Dead/stalled sink — reclaim its marker and re-send (no black-hole).
+                (watcher_terminal_resend_action(committed, start, end), true)
+            }
+        }
+        LeaseSnapshot::Committed {
+            holder: LeaseHolder::Sink,
+            ..
+        } => {
+            // The sink committed Delivered but hasn't released yet; the range is
+            // delivered. Skip (belt-and-suspenders; committed>=end also yields Skip).
+            (WatcherTerminalResendAction::SkipAlreadyCommitted, false)
+        }
+        // Unleased, or held/committed by a non-Sink holder (Watcher/Bridge): the
+        // #3151 marker does not apply — behave exactly as the pre-#3151 path.
+        _ => (watcher_terminal_resend_action(committed, start, end), false),
+    }
 }
 
 /// Reconcile a watcher terminal re-send against the committed offset authority.
@@ -8400,14 +8463,57 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 "watcher_terminal_resend_reconcile",
             );
             let committed = shared.committed_relay_offset(channel_id);
-            Some(watcher_terminal_resend_action(
+            // #3151: gate the re-send on the in-flight sink-delivery marker BEFORE
+            // the committed-offset reconciliation. The marker is a `Leased{Sink}`
+            // state on the SAME per-channel `DeliveryLeaseCell` the watcher's own
+            // direct-send path acquires (B2). Read a coherent snapshot, then:
+            //   * Leased{Sink, fresh}  → WaitInFlight: a sink POST is in flight; do
+            //     NOT re-send this pass (the slow-sink-in-flight duplicate #3151).
+            //   * Leased{Sink, expired} → reclaim the dead sink's marker, then
+            //     SendFull (committed<end) — the no-black-hole arm.
+            //   * Committed{Sink} / committed>=end → Skip (range delivered).
+            //   * Unleased / non-Sink holder → unchanged (defer to the existing
+            //     committed-offset reconciliation).
+            let gate_cell = shared.delivery_lease(channel_id);
+            let snapshot = gate_cell.read();
+            let now_ms = crate::services::discord::lease_now_ms();
+            let (action, reclaim_expired_sink) = watcher_terminal_resend_action_gated(
+                &snapshot,
                 committed,
                 watcher_resend_range_start,
                 watcher_resend_range_end,
-            ))
+                now_ms,
+            );
+            if reclaim_expired_sink {
+                // Force the dead sink's marker Unleased so the watcher-direct path
+                // below can re-acquire and SendFull (no black-hole). Deadline-only /
+                // identity-agnostic — a LIVE sink (fresh deadline) is never reached.
+                gate_cell.reclaim_if_expired(now_ms);
+            }
+            Some(action)
         } else {
             None
         };
+        // #3151: WaitInFlight suppresses BOTH the re-send and the skip-log this
+        // pass — the watcher's NEXT terminal pass re-evaluates (bounded by the
+        // sink's lease deadline). It must NOT be treated as "send" by the fallback.
+        let watcher_resend_wait_in_flight = matches!(
+            watcher_resend_action,
+            Some(WatcherTerminalResendAction::WaitInFlight)
+        );
+        if watcher_resend_wait_in_flight {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                provider = watcher_provider.as_str(),
+                channel = channel_id.get(),
+                tmux_session = %tmux_session_name,
+                start = watcher_resend_range_start,
+                end = watcher_resend_range_end,
+                committed = watcher_resend_committed,
+                ?session_bound_ack_outcome,
+                "  [{ts}] 👁 #3151: deferred watcher terminal re-send — sink POST in flight (Leased{{Sink}}, fresh); will re-evaluate next pass (no duplicate)"
+            );
+        }
         if matches!(
             watcher_resend_action,
             Some(WatcherTerminalResendAction::SkipAlreadyCommitted)
@@ -8425,12 +8531,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             );
         }
         // The watcher actually direct-sends only when the reconciliation did NOT
-        // skip the range. `SkipAlreadyCommitted` suppresses the re-send (no dup);
-        // `SendFull`/the non-reconciled path proceed to send.
+        // skip the range AND is not WAITING on an in-flight sink POST.
+        // `SkipAlreadyCommitted` suppresses the re-send (no dup); `WaitInFlight`
+        // (#3151) suppresses it this pass (re-evaluated next pass); `SendFull`/the
+        // non-reconciled path proceed to send.
         let watcher_direct_fallback_after_session_bound_ack = watcher_direct_fallback_intended
             && !matches!(
                 watcher_resend_action,
-                Some(WatcherTerminalResendAction::SkipAlreadyCommitted)
+                Some(
+                    WatcherTerminalResendAction::SkipAlreadyCommitted
+                        | WatcherTerminalResendAction::WaitInFlight
+                )
             );
         // codex BLOCKER 2: on a non-skip reconciled re-send the action is always
         // `SendFull` (the watcher response-text coordinate cannot be derived from
@@ -8714,6 +8825,22 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
             clear_provider_overload_retry_state(channel_id);
             true
+        } else if matches!(
+            watcher_resend_action,
+            Some(WatcherTerminalResendAction::WaitInFlight)
+        ) {
+            // #3151: a sink POST is genuinely IN FLIGHT for this range
+            // (`Leased{Sink, fresh}` on the per-channel delivery lease). Do NOT
+            // re-send and do NOT finalize this pass — and crucially do NOT delete
+            // the placeholder (the sink is about to edit/post into it). Return
+            // `false` so `terminal_output_committed` stays false: the turn is left
+            // OPEN and the watcher re-enters this terminal block on its NEXT pass.
+            // The wait is BOUNDED by the sink's lease deadline — within one
+            // `DELIVERY_LEASE_DEADLINE_MS` the sink either commits+releases
+            // (→ committed>=end → SkipAlreadyCommitted next pass) or dies (→ the
+            // deadline lapses → the gate reclaims + SendFull next pass). This is the
+            // sole arm that closes the slow-sink-in-flight duplicate (#3151).
+            false
         } else if watcher_lease_b2_skip {
             // #3041 P1-1 B2 (single-holder, §5.2): a DIFFERENT watcher instance
             // already holds the delivery lease for this exact channel/turn/range
@@ -12351,6 +12478,239 @@ TUI-E2E-marker ssh-direct
                 !cell.renew(holder, turn, extended.saturating_add(1)),
                 "a renew on a Committed lease (a late tick after commit) is a no-op"
             );
+        }
+    }
+
+    /// #3151: the deterministic decision seam for the in-flight sink-delivery
+    /// marker gate (`watcher_terminal_resend_action_gated`). Table-drives the gate
+    /// over every lease-snapshot variant and asserts the reclaim side-effect flag.
+    /// The decision fn is PURE (no cell mutation) so the side effect is testable in
+    /// isolation; the integration tests below exercise the actual `reclaim_if_expired`.
+    mod inflight_sink_marker_gate {
+        use super::super::{
+            WatcherTerminalResendAction, watcher_terminal_resend_action,
+            watcher_terminal_resend_action_gated,
+        };
+        use crate::services::discord::turn_finalizer::TurnKey;
+        use crate::services::discord::{
+            DeliveryLeaseCell, LeaseHolder, LeaseOutcome, LeaseSnapshot, lease_now_ms,
+        };
+        use serenity::model::id::ChannelId;
+
+        const START: u64 = 100;
+        const END: u64 = 200;
+        // `committed < end` so the underlying reconciliation would choose SendFull.
+        const COMMITTED_BELOW_END: u64 = 100;
+        const NOW: u64 = 50_000;
+
+        fn turn() -> TurnKey {
+            TurnKey::new(ChannelId::new(7201), 9, 0)
+        }
+
+        /// Unleased → behaves EXACTLY as the ungated reconciliation (SendFull when
+        /// committed<end), no reclaim.
+        #[test]
+        fn unleased_defers_to_reconciliation() {
+            let (action, reclaim) = watcher_terminal_resend_action_gated(
+                &LeaseSnapshot::Unleased,
+                COMMITTED_BELOW_END,
+                START,
+                END,
+                NOW,
+            );
+            assert_eq!(action, WatcherTerminalResendAction::SendFull);
+            assert!(!reclaim);
+            // ... and committed>=end on an Unleased cell still Skips (unchanged).
+            let (skip, reclaim2) = watcher_terminal_resend_action_gated(
+                &LeaseSnapshot::Unleased,
+                END,
+                START,
+                END,
+                NOW,
+            );
+            assert_eq!(skip, WatcherTerminalResendAction::SkipAlreadyCommitted);
+            assert!(!reclaim2);
+        }
+
+        /// Leased{Sink, FRESH} (now < deadline) → WaitInFlight, no reclaim. This is
+        /// the slow-sink-in-flight case: the watcher must NOT re-send this pass.
+        #[test]
+        fn leased_sink_fresh_waits_in_flight() {
+            let snap = LeaseSnapshot::Leased {
+                holder: LeaseHolder::Sink,
+                turn: turn(),
+                deadline_ms: NOW + 5_000, // fresh: deadline strictly in the future
+                start: START,
+                end: END,
+            };
+            let (action, reclaim) =
+                watcher_terminal_resend_action_gated(&snap, COMMITTED_BELOW_END, START, END, NOW);
+            assert_eq!(action, WatcherTerminalResendAction::WaitInFlight);
+            assert!(!reclaim, "a fresh sink lease must NOT be reclaimed");
+        }
+
+        /// Leased{Sink, EXPIRED} (now >= deadline) → reclaim flag set AND SendFull
+        /// (committed<end). This is the dead-sink no-black-hole arm.
+        #[test]
+        fn leased_sink_expired_reclaims_and_sends_full() {
+            let snap = LeaseSnapshot::Leased {
+                holder: LeaseHolder::Sink,
+                turn: turn(),
+                deadline_ms: NOW, // expired: now >= deadline
+                start: START,
+                end: END,
+            };
+            let (action, reclaim) =
+                watcher_terminal_resend_action_gated(&snap, COMMITTED_BELOW_END, START, END, NOW);
+            assert_eq!(action, WatcherTerminalResendAction::SendFull);
+            assert!(
+                reclaim,
+                "an expired sink lease MUST be reclaimed (no black-hole)"
+            );
+        }
+
+        /// Committed{Sink} (sink committed Delivered, not yet released) → Skip,
+        /// no reclaim (belt-and-suspenders early Skip).
+        #[test]
+        fn committed_sink_skips() {
+            let snap = LeaseSnapshot::Committed {
+                holder: LeaseHolder::Sink,
+                turn: turn(),
+                start: START,
+                end: END,
+                outcome: LeaseOutcome::Delivered,
+            };
+            let (action, reclaim) =
+                watcher_terminal_resend_action_gated(&snap, COMMITTED_BELOW_END, START, END, NOW);
+            assert_eq!(action, WatcherTerminalResendAction::SkipAlreadyCommitted);
+            assert!(!reclaim);
+        }
+
+        /// Leased by a WATCHER (non-Sink) holder → the #3151 gate does NOT interpose;
+        /// it defers to the existing reconciliation (the B2 path is untouched).
+        #[test]
+        fn leased_by_watcher_defers_to_reconciliation() {
+            let snap = LeaseSnapshot::Leased {
+                holder: LeaseHolder::Watcher { instance_id: 1 },
+                turn: turn(),
+                deadline_ms: NOW + 5_000,
+                start: START,
+                end: END,
+            };
+            // committed<end → SendFull (NOT WaitInFlight: only a Sink lease waits).
+            let (action, reclaim) =
+                watcher_terminal_resend_action_gated(&snap, COMMITTED_BELOW_END, START, END, NOW);
+            assert_eq!(action, WatcherTerminalResendAction::SendFull);
+            assert!(!reclaim);
+            // committed>=end on a watcher-held lease still Skips.
+            let (skip, _) = watcher_terminal_resend_action_gated(&snap, END, START, END, NOW);
+            assert_eq!(skip, WatcherTerminalResendAction::SkipAlreadyCommitted);
+        }
+
+        /// committed>=end with a Bridge holder → Skip (the range is delivered),
+        /// matching the ungated path.
+        #[test]
+        fn committed_covered_skips_for_non_sink() {
+            let snap = LeaseSnapshot::Leased {
+                holder: LeaseHolder::Bridge,
+                turn: turn(),
+                deadline_ms: NOW + 1,
+                start: START,
+                end: END,
+            };
+            let (action, _) = watcher_terminal_resend_action_gated(&snap, END, START, END, NOW);
+            assert_eq!(action, WatcherTerminalResendAction::SkipAlreadyCommitted);
+            // Sanity: the gated decision equals the ungated reconciliation here.
+            assert_eq!(action, watcher_terminal_resend_action(END, START, END));
+        }
+
+        /// (b) Integration: a DEAD/STALE sink marker on a real cell is reclaimed by
+        /// the gate's `reclaim_if_expired` side effect, then the watcher re-acquires
+        /// and SendFulls — NO black-hole. Drives the actual cell, not just the flag.
+        #[test]
+        fn dead_sink_marker_reclaimed_then_resent_no_blackhole() {
+            let ch = ChannelId::new(7202);
+            let cell = DeliveryLeaseCell::new(ch);
+            let sink_turn = TurnKey::new(ch, 9, 0);
+            let now = lease_now_ms();
+            let deadline = now.saturating_add(10);
+            // Sink set the marker then "died" (no heartbeat renews it).
+            assert!(cell.try_acquire(sink_turn, LeaseHolder::Sink, START, END, deadline));
+
+            // The gate, observed at a time PAST the deadline, decides reclaim+SendFull.
+            let past = deadline.saturating_add(1);
+            let snap = cell.read();
+            let (action, reclaim) =
+                watcher_terminal_resend_action_gated(&snap, COMMITTED_BELOW_END, START, END, past);
+            assert_eq!(action, WatcherTerminalResendAction::SendFull);
+            assert!(reclaim);
+
+            // The caller performs the reclaim → the dead marker clears → a
+            // replacement watcher re-acquires and re-delivers (no black-hole).
+            assert!(cell.reclaim_if_expired(past));
+            assert!(matches!(cell.read(), LeaseSnapshot::Unleased));
+            let watcher_turn = TurnKey::new(ch, 9, 0);
+            assert!(
+                cell.try_acquire(
+                    watcher_turn,
+                    LeaseHolder::Watcher { instance_id: 1 },
+                    START,
+                    END,
+                    past.saturating_add(10_000),
+                ),
+                "the reclaimed cell is re-acquirable by the watcher (no black-hole)"
+            );
+        }
+
+        /// (c) reclaim-races-with-late-sink-success cannot corrupt the lease: after a
+        /// dead sink's marker is reclaimed and the watcher re-acquires, the zombie
+        /// sink's late `commit`/`release` (full-identity-gated) NO-OP against the
+        /// watcher's lease — no wrong-holder advance, no stolen release.
+        #[test]
+        fn reclaim_then_late_sink_commit_cannot_corrupt_lease() {
+            let ch = ChannelId::new(7203);
+            let cell = DeliveryLeaseCell::new(ch);
+            let sink_turn = TurnKey::new(ch, 9, 0);
+            let now = lease_now_ms();
+            let deadline = now.saturating_add(10);
+            assert!(cell.try_acquire(sink_turn, LeaseHolder::Sink, START, END, deadline));
+
+            // Watcher reclaims the expired sink marker and re-acquires the SAME range.
+            let past = deadline.saturating_add(1);
+            assert!(cell.reclaim_if_expired(past));
+            let watcher_holder = LeaseHolder::Watcher { instance_id: 1 };
+            assert!(cell.try_acquire(
+                sink_turn,
+                watcher_holder,
+                START,
+                END,
+                past.saturating_add(10_000),
+            ));
+
+            // The zombie sink's LATE commit/release target Sink+sink_turn; the cell
+            // is now held by the Watcher → both no-op (false). No corruption.
+            assert!(
+                !cell.commit(
+                    LeaseHolder::Sink,
+                    sink_turn,
+                    START,
+                    END,
+                    LeaseOutcome::Delivered
+                ),
+                "a late sink commit must NOT act on the watcher's lease"
+            );
+            assert!(
+                !cell.release(LeaseHolder::Sink, sink_turn, START, END),
+                "a late sink release must NOT free the watcher's lease"
+            );
+            // The watcher's lease is intact and committable by its true holder.
+            assert!(cell.commit(
+                watcher_holder,
+                sink_turn,
+                START,
+                END,
+                LeaseOutcome::Delivered
+            ));
         }
     }
 }
