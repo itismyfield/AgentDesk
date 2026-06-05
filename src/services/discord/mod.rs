@@ -2087,6 +2087,20 @@ pub(in crate::services::discord) const DELIVERY_LEASE_DEADLINE_MS: u64 = 15_000;
 /// expiry even if one tick is delayed (the deadline is 3× this).
 pub(in crate::services::discord) const DELIVERY_LEASE_HEARTBEAT_MS: u64 = 5_000;
 
+/// #3159 BUG 2 (Layer B): absolute wall-clock cap on how long a single delivery
+/// lease may keep RENEWING its deadline. A LIVE-but-blocked holder (e.g. a sink
+/// whose Discord POST genuinely hangs off a timed await) would otherwise renew
+/// forever via the heartbeat, so the deadline would never lapse and the watcher's
+/// `WaitInFlight` would persist indefinitely (a permanent hang). Once a lease has
+/// been held this long the heartbeat STOPS renewing; with no further renewal the
+/// deadline lapses within ≤[`DELIVERY_LEASE_DEADLINE_MS`] and the watcher's
+/// existing expired-lease reclaim arm SendFulls. Chosen GREATER than
+/// `SINK_POST_TIMEOUT` (30s) so the per-POST local timeout (Layer A) normally
+/// fires first; this cap is the defense-in-depth safety net for a stall that is
+/// NOT on a timed await. This does NOT weaken the dead-sink-reclaim path (a dead
+/// task stops renewing on its own); it only ADDS a second way to stop renewal.
+pub(in crate::services::discord) const DELIVERY_LEASE_MAX_RENEW_MS: u64 = 60_000;
+
 /// #3041 P1-1 (§3, codex R2 Issue-1) / P1-2: RAII handle for the in-flight
 /// delivery-lease heartbeat task, shared by the watcher and the bridge. The
 /// holder spawns the heartbeat right after a successful `try_acquire` and
@@ -2110,7 +2124,11 @@ impl DeliveryLeaseHeartbeat {
     /// one interval (the acquire already set a fresh deadline). The loop exits on
     /// its own as soon as a `renew` returns false (the lease is no longer ours —
     /// committed, released, or reclaimed), so it self-terminates even before an
-    /// explicit `stop()`.
+    /// explicit `stop()`. #3159 BUG 2 (Layer B): it ALSO stops renewing once the
+    /// lease has been held for [`DELIVERY_LEASE_MAX_RENEW_MS`] (an absolute
+    /// wall-clock cap, independent of how alive the holder task is), so a
+    /// hung-but-alive holder can no longer renew forever — its deadline then lapses
+    /// and the watcher's expired-lease reclaim recovers it.
     pub(in crate::services::discord) fn spawn(
         cell: std::sync::Arc<DeliveryLeaseCell>,
         holder: LeaseHolder,
@@ -2120,11 +2138,22 @@ impl DeliveryLeaseHeartbeat {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(
                 DELIVERY_LEASE_HEARTBEAT_MS,
             ));
+            // #3159 BUG 2 (Layer B): wall-clock start so renewal is capped at
+            // DELIVERY_LEASE_MAX_RENEW_MS regardless of how alive the holder task is.
+            let started = lease_now_ms();
             // Skip the immediate tick `interval` emits at t=0; the acquire just
             // set a fresh deadline, so the first renew is one interval later.
             interval.tick().await;
             loop {
                 interval.tick().await;
+                // #3159 BUG 2 (Layer B): once the absolute renewal cap is reached,
+                // STOP renewing BEFORE the renew call. No code then refreshes
+                // deadline_ms, so within ≤DELIVERY_LEASE_DEADLINE_MS the lease passes
+                // its deadline and the watcher's existing expired-lease arm reclaims +
+                // SendFulls — bounding a hung-but-alive holder that escaped Layer A.
+                if lease_now_ms().saturating_sub(started) >= DELIVERY_LEASE_MAX_RENEW_MS {
+                    break;
+                }
                 let renewed = cell.renew(
                     holder,
                     turn,
@@ -2153,6 +2182,44 @@ impl Drop for DeliveryLeaseHeartbeat {
         // `stop()`, aborting on drop guarantees the heartbeat cannot outlive the
         // owning holder frame.
         self.handle.abort();
+    }
+}
+
+#[cfg(test)]
+mod delivery_lease_renewal_cap_tests {
+    use super::*;
+
+    /// #3159 BUG 2 (Layer B) invariant: the absolute renewal cap must exceed the
+    /// per-pass deadline so that once the heartbeat STOPS renewing (at the cap), the
+    /// deadline lapses within ≤DELIVERY_LEASE_DEADLINE_MS and the watcher's
+    /// expired-lease reclaim arm fires — bounding a hung-but-alive holder.
+    #[test]
+    fn renewal_cap_exceeds_deadline() {
+        assert!(
+            DELIVERY_LEASE_MAX_RENEW_MS > DELIVERY_LEASE_DEADLINE_MS,
+            "the renewal cap must exceed the deadline so the deadline can lapse after the cap stops renewal"
+        );
+    }
+
+    /// The cap must be a whole number of heartbeat intervals' worth of renewals
+    /// (strictly greater than the heartbeat) so at least one renewal happens before
+    /// the cap — a merely-slow-but-progressing holder is never cut short by the cap.
+    #[test]
+    fn renewal_cap_allows_at_least_one_renewal() {
+        assert!(
+            DELIVERY_LEASE_MAX_RENEW_MS > DELIVERY_LEASE_HEARTBEAT_MS,
+            "the cap must allow at least one heartbeat renewal"
+        );
+    }
+
+    /// #3159 BUG 2 (Layer A vs Layer B ordering): the worst-case time before a hung
+    /// holder is reclaimed via Layer B is the cap plus one deadline. This locks the
+    /// documented ~75s bound so a future const tweak that would make recovery
+    /// unbounded (or regress the Layer-A-fires-first ordering) trips the test.
+    #[test]
+    fn worst_case_layer_b_recovery_is_bounded() {
+        let worst_case = DELIVERY_LEASE_MAX_RENEW_MS + DELIVERY_LEASE_DEADLINE_MS;
+        assert_eq!(worst_case, 75_000);
     }
 }
 

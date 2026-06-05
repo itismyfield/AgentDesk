@@ -128,7 +128,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (9124 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (9135 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -304,6 +304,23 @@
     (incl. id==0 external/injected) NOT adopted/edited, in-range id==0
     watcher-direct STILL adopts+edits (over-suppression guard), and in-range id!=0
     unchanged.
+    +11 from #3159 (#3159 sink-marker bugfix, follow-up to #3151): the
+    `Committed{Sink}` arm of `watcher_terminal_resend_action_gated` NO LONGER
+    blind-Skips. BUG 1 (under-delivery / black-hole): the sink now commits the
+    lease as `NotDelivered` when the fresh-inflight identity gate REFUSED the
+    offset advance (the POST/advance did not happen), so the watcher must read the
+    committed offset, not the marker presence. The arm routes through
+    `watcher_terminal_resend_action(committed, start, end)`: `committed >= end` (a
+    real Delivered commit advanced the offset BEFORE committing) → SkipAlreadyCommitted
+    (unchanged no-duplicate); `committed < end` (a NotDelivered/refused commit, or
+    the Drop-release Unleased fallback) → SendFull (no black-hole). The committed
+    offset is the SOLE delivered-test. New unit tests
+    `committed_sink_delivered_covered_skips`, `committed_sink_not_delivered_sends_full`,
+    `committed_sink_below_end_sends_full_regardless_of_label` (the old
+    `committed_sink_skips` is split into these). BUG 2 (Layer A vs Layer B) lives
+    in session_relay_sink.rs (per-POST timeout) + mod.rs (renewal cap); the watcher
+    side relies on the EXISTING expired-Sink reclaim arm, now guaranteed reachable
+    because mod.rs's `DELIVERY_LEASE_MAX_RENEW_MS` cap stops perpetual renewal.
   - `src/services/discord/tui_prompt_relay.rs` (4001 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +12 from #3041 P1-4 codex: the lease record
