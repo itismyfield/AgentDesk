@@ -736,26 +736,6 @@ pub(crate) fn external_input_relay_lease_present(
     external_input_relay_lease(provider, tmux_session_name, channel_id).is_some()
 }
 
-/// Return the UNIQUE `generation` of the external-input relay lease currently
-/// stored for `(provider, tmux_session)` iff its channel scope matches
-/// `channel_id` (same channel-scope rule as [`external_input_relay_lease_present`]),
-/// else `None`.
-///
-/// Watchers/sinks that observe a lease before an awaited delivery and want to
-/// clear it afterwards MUST capture this generation at observation time and pass
-/// it to [`clear_external_input_relay_lease_if_generation_matches`], rather than
-/// using the unconditional [`clear_external_input_relay_lease`]. That guarantees
-/// a stale snapshot cannot clobber a NEWER same-key lease recorded by a
-/// concurrently-started turn while the first delivery was in flight.
-pub(crate) fn external_input_relay_lease_generation(
-    provider: &str,
-    tmux_session_name: &str,
-    channel_id: u64,
-) -> Option<u64> {
-    external_input_relay_lease(provider, tmux_session_name, channel_id)
-        .map(|lease| lease.generation)
-}
-
 pub(crate) fn clear_external_input_relay_lease(
     provider: &str,
     tmux_session_name: &str,
@@ -1895,43 +1875,11 @@ mod tests {
         assert!(external_input_relay_lease("codex", "tmux-gen", 99).is_none());
     }
 
-    #[test]
-    fn external_input_relay_lease_generation_reports_stored_generation() {
-        let _guard = TEST_LOCK.lock().unwrap();
-        reset_state();
-
-        // No lease yet → None.
-        assert_eq!(
-            external_input_relay_lease_generation("codex", "tmux-genfn", 99),
-            None,
-            "no stored lease must report None"
-        );
-
-        record_external_input_relay_lease("codex", "tmux-genfn", Some(99));
-        let stored = external_input_relay_lease("codex", "tmux-genfn", 99).expect("stored lease");
-        assert_ne!(
-            stored.generation, EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
-            "a recorded lease must carry a non-sentinel generation"
-        );
-
-        // Matching channel scope → returns the stored generation.
-        assert_eq!(
-            external_input_relay_lease_generation("codex", "tmux-genfn", 99),
-            Some(stored.generation),
-            "must report the stored lease's generation for the matching channel"
-        );
-
-        // Channel mismatch → None (same channel-scope rule as `_present`).
-        assert_eq!(
-            external_input_relay_lease_generation("codex", "tmux-genfn", 100),
-            None,
-            "a channel mismatch must report None"
-        );
-    }
-
     /// Watcher-style no-clobber: turn-1 snapshots the lease generation G1 before its
     /// awaited send; turn-2 records a NEWER same-key lease G2 during that send; turn-1
-    /// then clears BY G1 — which must NOT remove turn-2's G2 lease.
+    /// then clears BY G1 — which must NOT remove turn-2's G2 lease. The snapshot is taken
+    /// from a single `external_input_relay_lease` read (the watcher derives both the
+    /// presence bool and the generation from that one atomic read).
     #[test]
     fn watcher_snapshot_generation_clear_preserves_newer_same_key_lease() {
         let _guard = TEST_LOCK.lock().unwrap();
@@ -1939,12 +1887,14 @@ mod tests {
 
         // turn-1 records & the watcher snapshots its generation BEFORE the awaited send.
         record_external_input_relay_lease("codex", "tmux-watch", Some(7));
-        let g1 = external_input_relay_lease_generation("codex", "tmux-watch", 7)
+        let g1 = external_input_relay_lease("codex", "tmux-watch", 7)
+            .map(|lease| lease.generation)
             .expect("turn-1 generation snapshot");
 
         // turn-2 records a NEWER same-key lease while turn-1's send is in flight.
         record_external_input_relay_lease("codex", "tmux-watch", Some(7));
-        let g2 = external_input_relay_lease_generation("codex", "tmux-watch", 7)
+        let g2 = external_input_relay_lease("codex", "tmux-watch", 7)
+            .map(|lease| lease.generation)
             .expect("turn-2 generation");
         assert_ne!(
             g1, g2,
@@ -1957,7 +1907,7 @@ mod tests {
             "clear by the stale G1 snapshot must not match the current G2 lease"
         );
         assert_eq!(
-            external_input_relay_lease_generation("codex", "tmux-watch", 7),
+            external_input_relay_lease("codex", "tmux-watch", 7).map(|lease| lease.generation),
             Some(g2),
             "turn-2's lease must survive turn-1's stale-snapshot clear (no clobber)"
         );

@@ -128,7 +128,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (8763 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (8766 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -223,7 +223,12 @@
     `clear_external_input_relay_lease_if_generation_matches` instead of the
     unconditional by-key `clear_external_input_relay_lease`, closing the
     stale-snapshot clobber where a turn-2 same-key lease recorded during turn-1's
-    in-flight send was wrongly removed by turn-1's success clear).
+    in-flight send was wrongly removed by turn-1's success clear);
+    +3 from #3041 P1-4 codex R3: the snapshot now reads the lease ONCE
+    (`external_input_relay_lease(...)` under a SINGLE STATE lock) and derives BOTH
+    the presence bool and the generation from that one atomic read, closing the
+    present/generation TOCTOU where two separate accessor calls re-locked STATE and
+    a concurrently-started turn could slip a newer same-key lease into the gap).
   - `src/services/discord/tui_prompt_relay.rs` (3982 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +12 from #3041 P1-4 codex: the lease record
@@ -300,7 +305,7 @@
   - `src/services/codex_tmux_wrapper.rs` (1222 lines; Codex tmux wrapper JSON
     event parser and relay bridge for native Codex session events — bugfix only
     outside an extraction plan).
-  - `src/services/tui_prompt_dedupe.rs` (1172 lines; shared TUI prompt
+  - `src/services/tui_prompt_dedupe.rs` (1152 lines; shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
     outside an extraction plan; +88 from #3041 P1-4 codex: a per-record
     `generation: u64` nonce on `ExternalInputRelayLease` (process-global
@@ -312,11 +317,13 @@
     `reset_state_for_tests` helper; +26 from #3105 codex-P1 sub-case B
     `evict_dead_tmux_mirror` tombstone helper that drops both the runtime and
     channel mirror for a dead/orphaned session and then allows re-registration;
-    +20 from #3041 P1-4 codex follow-up: the `external_input_relay_lease_generation`
-    read-only accessor (returns the CURRENT stored lease's generation iff the channel
-    scope matches, else None) that the watcher snapshots before its awaited relay and
-    the relay early-return guard captures, so post-await clears are generation-scoped
-    no-clobber, plus its accessor + watcher-snapshot no-clobber regression tests).
+    -20 from #3041 P1-4 codex R3: REMOVED the now-unused
+    `external_input_relay_lease_generation` read-only accessor (its only caller was the
+    watcher, which now snapshots the lease ONCE via the single-lock
+    `external_input_relay_lease` and derives both presence + generation from that one
+    atomic read, closing the present/generation TOCTOU) plus its dedicated accessor unit
+    test; the watcher-snapshot no-clobber regression test is retained, rewritten to take
+    its G1/G2 snapshots from `external_input_relay_lease(...).map(|l| l.generation)`).
   - `src/services/discord/recovery_engine.rs` (4037 lines; +36 from #3099
     task-notification anchor `⏳` cleanup for `user_msg_id == 0` recovery; +4
     from the #3099 re-review pinned-injected-message-id cleanup target; +55 from

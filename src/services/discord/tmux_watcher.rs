@@ -7624,24 +7624,27 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 channel_id.get(),
             )
             .is_some();
-        let external_input_lease_before_relay =
-            crate::services::tui_prompt_dedupe::external_input_relay_lease_present(
-                watcher_provider.as_str(),
-                &tmux_session_name,
-                channel_id.get(),
-            );
-        // #3041 P1-4 codex: capture the GENERATION of the lease observed before the
-        // awaited Discord delivery (at the SAME point as the bool above — no await in
-        // between can change it relative to the bool). The post-delivery clear uses this
+        // #3041 P1-4 codex: snapshot the external-input lease ONCE under a single STATE
+        // lock and derive BOTH the presence bool and the generation from that one atomic
+        // read. Two separate accessor calls (present + generation) re-lock STATE between
+        // them, so a concurrently-started turn could record a NEWER same-key lease in the
+        // gap — leaving the bool reflecting turn-1 but the generation captured from
+        // turn-2's lease (present/generation TOCTOU). The post-delivery clear uses this
         // generation so it only removes the EXACT lease this relay consumed; a NEWER
         // same-key lease recorded by a concurrently-started turn during the slow send
         // survives (no stale-snapshot clobber).
-        let external_input_lease_generation_before_relay =
-            crate::services::tui_prompt_dedupe::external_input_relay_lease_generation(
+        let external_input_lease_before_relay_snapshot =
+            crate::services::tui_prompt_dedupe::external_input_relay_lease(
                 watcher_provider.as_str(),
                 &tmux_session_name,
                 channel_id.get(),
             );
+        let external_input_lease_before_relay =
+            external_input_lease_before_relay_snapshot.is_some();
+        let external_input_lease_generation_before_relay =
+            external_input_lease_before_relay_snapshot
+                .as_ref()
+                .map(|lease| lease.generation);
         let inflight_before_relay = crate::services::discord::inflight::load_inflight_state(
             &watcher_provider,
             channel_id.get(),
