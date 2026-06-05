@@ -1,5 +1,6 @@
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -24,6 +25,25 @@ static STATE: LazyLock<Mutex<TuiPromptDedupeState>> =
 pub(crate) static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static OBSERVED_PROMPTS: LazyLock<broadcast::Sender<ObservedTuiPrompt>> =
     LazyLock::new(|| broadcast::channel(OBSERVED_PROMPT_BUFFER).0);
+
+/// Process-global monotonic counter that stamps a UNIQUE `generation` onto every
+/// external-input relay lease at the moment it is RECORDED. Two leases that are
+/// otherwise identical by value — e.g. two newer `Unassigned` (legacy) turns for
+/// the same `(provider, tmux_session, channel)` whose `turn_id`/`session_key`/
+/// `runtime_kind` are all `None` — therefore receive DISTINCT generations and are
+/// no longer indistinguishable. A RAII guard captures the exact recorded lease
+/// (with its generation) and on Drop clears ONLY that generation, so a slow OLD
+/// delivery's guard can never clobber a NEWER identical lease. #3041 P1-4 codex.
+/// Starts at 1 so that 0 stays a reserved "not yet recorded" sentinel.
+static EXTERNAL_INPUT_RELAY_LEASE_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// `generation` sentinel for a freshly constructed lease that has NOT yet been
+/// recorded (and therefore not yet stamped with a unique generation).
+pub(crate) const EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED: u64 = 0;
+
+fn next_external_input_relay_lease_generation() -> u64 {
+    EXTERNAL_INPUT_RELAY_LEASE_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObservedTuiPrompt {
@@ -67,6 +87,16 @@ pub(crate) struct ExternalInputRelayLease {
     pub session_key: Option<String>,
     pub relay_owner: ExternalInputRelayOwner,
     pub runtime_kind: Option<RuntimeHandoffKind>,
+    /// Unique, monotonic per-record identity stamped by
+    /// [`record_external_input_turn_lease`] when this lease is inserted into the
+    /// state map. A freshly constructed (not-yet-recorded) lease carries
+    /// [`EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED`] (0); the record path
+    /// overwrites it with a fresh process-global counter value so that two leases
+    /// that are otherwise value-equal (notably two `Unassigned` leases whose
+    /// trace fields are all `None`) are still DISTINGUISHABLE. A RAII guard
+    /// captures the RECORDED lease (via the value returned from the record call)
+    /// and clears only its OWN generation, so it can never clobber a newer lease.
+    pub generation: u64,
 }
 
 impl ExternalInputRelayLease {
@@ -77,6 +107,7 @@ impl ExternalInputRelayLease {
             session_key: None,
             relay_owner: ExternalInputRelayOwner::Unassigned,
             runtime_kind: None,
+            generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         }
     }
 }
@@ -643,25 +674,37 @@ pub(crate) fn record_external_input_relay_lease(
     );
 }
 
+/// Record an external-input relay lease for `(provider, tmux_session)` and return
+/// the EXACT lease that was stored, including the unique `generation` stamped at
+/// record time. Callers that need to later release THIS lease (e.g. an RAII
+/// guard) MUST capture the returned value, not the pre-record argument: only the
+/// returned value carries the recorded generation that
+/// [`clear_external_input_relay_lease_if_matches`] /
+/// [`clear_external_input_relay_lease_if_generation_matches`] compare against, so
+/// a guard never clobbers a newer (even value-identical `Unassigned`) lease.
 pub(crate) fn record_external_input_turn_lease(
     provider: &str,
     tmux_session_name: &str,
-    lease: ExternalInputRelayLease,
-) {
+    mut lease: ExternalInputRelayLease,
+) -> ExternalInputRelayLease {
     let provider = normalize_provider(provider);
     let tmux_session_name = tmux_session_name.trim();
     if provider.is_empty() || tmux_session_name.is_empty() {
-        return;
+        return lease;
     }
+    // Stamp a UNIQUE generation at the moment of record so two otherwise
+    // value-equal leases for the same key are distinguishable by identity.
+    lease.generation = next_external_input_relay_lease_generation();
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
     state.external_input_relay_lease_by_tmux.insert(
         PromptKey::new(&provider, tmux_session_name),
         TimedValue {
-            value: lease,
+            value: lease.clone(),
             recorded_at: Instant::now(),
         },
     );
+    lease
 }
 
 pub(crate) fn external_input_relay_lease(
@@ -745,6 +788,51 @@ pub(crate) fn clear_external_input_relay_lease_if_matches(
         return false;
     }
     if &entry.value != expected {
+        return false;
+    }
+    state.external_input_relay_lease_by_tmux.remove(&key);
+    true
+}
+
+/// Compare-and-clear the external-input relay lease for `(provider, tmux_session)`
+/// by its UNIQUE `generation` (and channel scope) rather than by full value.
+///
+/// This is the no-clobber primitive for the RAII release guards: the guard
+/// captures the generation of the EXACT lease it observed/recorded and on Drop
+/// clears only that generation. Two value-identical `Unassigned` leases (all
+/// trace fields `None`) for the same key receive distinct generations at record
+/// time, so an OLD guard's Drop leaves a NEWER lease — with a different
+/// generation — untouched. A guard whose captured lease was never recorded
+/// (generation == [`EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED`]) clears
+/// nothing.
+pub(crate) fn clear_external_input_relay_lease_if_generation_matches(
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+    expected_generation: u64,
+) -> bool {
+    if expected_generation == EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED {
+        return false;
+    }
+    let provider = normalize_provider(provider);
+    let tmux_session_name = tmux_session_name.trim();
+    if provider.is_empty() || tmux_session_name.is_empty() || channel_id == 0 {
+        return false;
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    let key = PromptKey::new(&provider, tmux_session_name);
+    let Some(entry) = state.external_input_relay_lease_by_tmux.get(&key) else {
+        return false;
+    };
+    if entry
+        .value
+        .channel_id
+        .is_some_and(|leased| leased != channel_id)
+    {
+        return false;
+    }
+    if entry.value.generation != expected_generation {
         return false;
     }
     state.external_input_relay_lease_by_tmux.remove(&key);
@@ -1670,6 +1758,7 @@ mod tests {
                 session_key: Some("host:tmux-trace".to_string()),
                 relay_owner: ExternalInputRelayOwner::SessionBoundRelay,
                 runtime_kind: Some(RuntimeHandoffKind::CodexTui),
+                generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
             },
         );
 
@@ -1699,32 +1788,129 @@ mod tests {
             session_key: Some("host:tmux-trace".to_string()),
             relay_owner: ExternalInputRelayOwner::BridgeAdapter,
             runtime_kind: Some(RuntimeHandoffKind::CodexTui),
+            generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         };
         let newer = ExternalInputRelayLease {
             turn_id: Some("external:codex:42:tmux-trace:2".to_string()),
             ..original.clone()
         };
 
-        record_external_input_turn_lease("codex", "tmux-trace", original.clone());
-        record_external_input_turn_lease("codex", "tmux-trace", newer.clone());
+        // Capture the RECORDED leases (each stamped with a distinct generation) —
+        // those are the exact identities `_if_matches` compares against.
+        let recorded_original =
+            record_external_input_turn_lease("codex", "tmux-trace", original.clone());
+        let recorded_newer = record_external_input_turn_lease("codex", "tmux-trace", newer.clone());
+        assert_ne!(
+            recorded_original.generation, recorded_newer.generation,
+            "each recorded lease must get a distinct generation"
+        );
 
+        // The OLD recorded lease no longer matches the CURRENT (newer) one.
         assert!(!clear_external_input_relay_lease_if_matches(
             "codex",
             "tmux-trace",
             42,
-            &original
+            &recorded_original
         ));
         assert_eq!(
             external_input_relay_lease("codex", "tmux-trace", 42),
-            Some(newer.clone())
+            Some(recorded_newer.clone())
         );
         assert!(clear_external_input_relay_lease_if_matches(
             "codex",
             "tmux-trace",
             42,
-            &newer
+            &recorded_newer
         ));
         assert!(external_input_relay_lease("codex", "tmux-trace", 42).is_none());
+    }
+
+    #[test]
+    fn clear_external_input_relay_lease_if_generation_matches_preserves_newer_unassigned() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        // Two value-identical Unassigned leases (all trace fields None) for the same
+        // key receive DISTINCT generations.
+        record_external_input_relay_lease("codex", "tmux-gen", Some(99));
+        let first = external_input_relay_lease("codex", "tmux-gen", 99).expect("first lease");
+        record_external_input_relay_lease("codex", "tmux-gen", Some(99));
+        let second = external_input_relay_lease("codex", "tmux-gen", 99).expect("second lease");
+
+        assert_eq!(first.relay_owner, ExternalInputRelayOwner::Unassigned);
+        assert_eq!(second.relay_owner, ExternalInputRelayOwner::Unassigned);
+        assert_ne!(
+            first.generation, second.generation,
+            "two Unassigned leases for the same key must get distinct generations"
+        );
+
+        // Clearing by the OLD generation must NOT clear the newer lease.
+        assert!(!clear_external_input_relay_lease_if_generation_matches(
+            "codex",
+            "tmux-gen",
+            99,
+            first.generation
+        ));
+        assert_eq!(
+            external_input_relay_lease("codex", "tmux-gen", 99),
+            Some(second.clone()),
+            "the newer Unassigned lease must survive a clear by the old generation"
+        );
+
+        // The UNRECORDED sentinel generation clears nothing.
+        assert!(!clear_external_input_relay_lease_if_generation_matches(
+            "codex",
+            "tmux-gen",
+            99,
+            EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED
+        ));
+
+        // Clearing by the CURRENT generation clears exactly it.
+        assert!(clear_external_input_relay_lease_if_generation_matches(
+            "codex",
+            "tmux-gen",
+            99,
+            second.generation
+        ));
+        assert!(external_input_relay_lease("codex", "tmux-gen", 99).is_none());
+    }
+
+    /// Watcher-style no-clobber: turn-1 snapshots the lease generation G1 before its
+    /// awaited send; turn-2 records a NEWER same-key lease G2 during that send; turn-1
+    /// then clears BY G1 — which must NOT remove turn-2's G2 lease. The snapshot is taken
+    /// from a single `external_input_relay_lease` read (the watcher derives both the
+    /// presence bool and the generation from that one atomic read).
+    #[test]
+    fn watcher_snapshot_generation_clear_preserves_newer_same_key_lease() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        // turn-1 records & the watcher snapshots its generation BEFORE the awaited send.
+        record_external_input_relay_lease("codex", "tmux-watch", Some(7));
+        let g1 = external_input_relay_lease("codex", "tmux-watch", 7)
+            .map(|lease| lease.generation)
+            .expect("turn-1 generation snapshot");
+
+        // turn-2 records a NEWER same-key lease while turn-1's send is in flight.
+        record_external_input_relay_lease("codex", "tmux-watch", Some(7));
+        let g2 = external_input_relay_lease("codex", "tmux-watch", 7)
+            .map(|lease| lease.generation)
+            .expect("turn-2 generation");
+        assert_ne!(
+            g1, g2,
+            "the newer same-key lease must get a distinct generation"
+        );
+
+        // turn-1's post-send clear BY G1 must be a no-op (G1 != current G2).
+        assert!(
+            !clear_external_input_relay_lease_if_generation_matches("codex", "tmux-watch", 7, g1),
+            "clear by the stale G1 snapshot must not match the current G2 lease"
+        );
+        assert_eq!(
+            external_input_relay_lease("codex", "tmux-watch", 7).map(|lease| lease.generation),
+            Some(g2),
+            "turn-2's lease must survive turn-1's stale-snapshot clear (no clobber)"
+        );
     }
 
     #[test]
