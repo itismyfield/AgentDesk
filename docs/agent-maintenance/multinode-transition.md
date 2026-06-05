@@ -389,3 +389,19 @@
   internally and is invoked at the identical position in `run_bot`. No new
   multinode ownership, singleton, or lease assumption is introduced; the
   leader-only vs worker-local classification of every spawned task is preserved.
+- #3142 (committed-output turn-aliasing safety): `tmux_watcher.rs` changed by
+  adding one **pure** decision helper
+  (`committed_anchor_cleanup_is_stale_for_newer_turn`, the id==0-inclusive sibling
+  of #3141's `committed_completion_is_stale_for_newer_turn`) and gating four
+  consumers of the committed-output block (dispatch finalization, TUI history
+  push, the two anchor-cleanup branches, and the status-panel completion
+  identity) on the offset-pinned stale test so an older committed range cannot
+  act on a NEWER same-session turn's inflight identity. The gate is computed
+  purely from the **process-local** in-memory inflight snapshots
+  (`inflight_before_relay` / late-read `inflight_state`) and the per-session JSONL
+  `current_offset` already owned by THIS watcher loop — it reads no cross-node
+  state, acquires no lease, and changes no leader/standby ownership. The watcher
+  loop remains **session-owner-local** (a watcher only processes a tmux session
+  it owns); this change only narrows which in-process side-effects fire on a
+  turn boundary and introduces no new multinode ownership/singleton/lease
+  assumption.
