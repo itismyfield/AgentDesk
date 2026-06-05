@@ -61,6 +61,28 @@ use super::session_matcher::MatchedChannel;
 /// [`RelayMetrics::dropped_frames`] when full.
 pub const DEFAULT_RELAY_BUFFER: usize = 1024;
 
+/// #3041 P1-3 R5 (per-sequence terminal-ACK correlation): how many recent
+/// terminal sequences' resolved outcomes the relay retains for exact-sequence
+/// ACK lookup. The watcher waits ~10s for its terminal frame's own outcome, so
+/// only the most recent handful of terminal sequences can ever be queried; we
+/// keep a small bounded ring so a busy session cannot grow this without bound.
+/// Older entries are evicted FIFO — an evicted sequence reads back as `None`
+/// (treated by the watcher as "not yet resolved" → it keeps waiting / eventually
+/// times out → reconciles, never a false ACK).
+pub const TERMINAL_OUTCOME_RING_CAPACITY: usize = 64;
+
+/// #3041 P1-3 R5: the EXACT, per-frame terminal resolution recorded by the sink
+/// for a single terminal (result-bearing) frame's sequence. Distinct from the
+/// high-water-mark fields (`last_terminal_committed/skipped_sequence`), which a
+/// LATER, higher-sequence terminal can bump — this is keyed to ONE sequence so a
+/// watcher resolves its ACK on ITS OWN terminal frame's outcome, decoupled from
+/// any other turn sharing the same physical chunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalOutcome {
+    Committed,
+    Skipped,
+}
+
 /// An opaque stream frame emitted by a provider. Carries enough metadata for
 /// the sink to route + format without re-reading the rollout file.
 ///
@@ -129,6 +151,13 @@ pub struct RelayMetrics {
     last_terminal_skipped_sequence_plus_one: AtomicU64,
     last_dropped_sequence_plus_one: AtomicU64,
     last_sink_error_sequence_plus_one: AtomicU64,
+    /// #3041 P1-3 R5: bounded ring of recently-resolved per-sequence terminal
+    /// outcomes. ADDITIVE to the high-water-mark fields above (which other
+    /// consumers — drop/diagnostics/tests — still read). Queried by the watcher
+    /// for the EXACT `target.sequence` so B's tail committing at seq N+1 never
+    /// satisfies A's ACK at seq N. Bounded FIFO (`TERMINAL_OUTCOME_RING_CAPACITY`):
+    /// an evicted/never-recorded sequence reads back `None`.
+    terminal_outcomes: Mutex<VecDeque<(u64, TerminalOutcome)>>,
 }
 
 impl RelayMetrics {
@@ -162,6 +191,42 @@ impl RelayMetrics {
         }
     }
 
+    /// #3041 P1-3 R5: record THIS terminal frame's resolved outcome keyed by its
+    /// exact sequence, in a bounded FIFO ring. Called from `deliver_frame` for a
+    /// result-bearing terminal delivery (Committed/Skipped). Idempotent-ish: a
+    /// re-record of the same sequence overwrites the prior entry in place (a
+    /// sequence is delivered once, but this keeps the ring free of duplicates).
+    fn record_terminal_outcome(&self, sequence: u64, outcome: TerminalOutcome) {
+        let mut ring = self
+            .terminal_outcomes
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(existing) = ring.iter_mut().find(|(seq, _)| *seq == sequence) {
+            existing.1 = outcome;
+            return;
+        }
+        ring.push_back((sequence, outcome));
+        while ring.len() > TERMINAL_OUTCOME_RING_CAPACITY {
+            ring.pop_front();
+        }
+    }
+
+    /// #3041 P1-3 R5: the EXACT-sequence terminal-ACK query. Returns this
+    /// sequence's recorded outcome, or `None` if it was never terminally
+    /// resolved on this frame (non-terminal / dropped / evicted from the ring).
+    /// The watcher resolves its ACK on its OWN terminal frame's sequence via this
+    /// — NOT the `>=` high-water-mark — so a co-chunked higher-sequence terminal
+    /// can never satisfy it.
+    pub fn terminal_outcome_for_sequence(&self, sequence: u64) -> Option<TerminalOutcome> {
+        let ring = self
+            .terminal_outcomes
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        ring.iter()
+            .find(|(seq, _)| *seq == sequence)
+            .map(|(_, outcome)| *outcome)
+    }
+
     #[cfg(test)]
     pub(crate) fn record_delivered_sequence_for_test(&self, sequence: u64) {
         self.last_delivered_sequence_plus_one
@@ -172,12 +237,14 @@ impl RelayMetrics {
     pub(crate) fn record_terminal_committed_sequence_for_test(&self, sequence: u64) {
         self.last_terminal_committed_sequence_plus_one
             .fetch_max(encode_sequence_marker(sequence), Ordering::AcqRel);
+        self.record_terminal_outcome(sequence, TerminalOutcome::Committed);
     }
 
     #[cfg(test)]
     pub(crate) fn record_terminal_skipped_sequence_for_test(&self, sequence: u64) {
         self.last_terminal_skipped_sequence_plus_one
             .fetch_max(encode_sequence_marker(sequence), Ordering::AcqRel);
+        self.record_terminal_outcome(sequence, TerminalOutcome::Skipped);
     }
 
     #[cfg(test)]
@@ -807,12 +874,18 @@ async fn deliver_frame(
                 metrics
                     .last_terminal_committed_sequence_plus_one
                     .fetch_max(encode_sequence_marker(frame.sequence), Ordering::AcqRel);
+                // #3041 P1-3 R5: record THIS frame's exact-sequence outcome so the
+                // watcher resolves its ACK on its own terminal frame (decoupled
+                // from any co-chunked higher-sequence terminal).
+                metrics.record_terminal_outcome(frame.sequence, TerminalOutcome::Committed);
             }
             if outcome.terminal_skipped() {
                 metrics.terminal_skips.fetch_add(1, Ordering::AcqRel);
                 metrics
                     .last_terminal_skipped_sequence_plus_one
                     .fetch_max(encode_sequence_marker(frame.sequence), Ordering::AcqRel);
+                // #3041 P1-3 R5: per-sequence skip — see committed branch above.
+                metrics.record_terminal_outcome(frame.sequence, TerminalOutcome::Skipped);
             }
         }
         Err(error) => {
@@ -1071,7 +1144,72 @@ mod tests {
         assert_eq!(snap.last_delivered_sequence, Some(2));
         assert_eq!(snap.last_terminal_skipped_sequence, Some(1));
         assert_eq!(snap.last_terminal_committed_sequence, Some(2));
+
+        // #3041 P1-3 R5: per-sequence query resolves each frame's OWN exact
+        // outcome, independent of the high-water-mark. seq 1 was skipped, seq 2
+        // committed, seq 0 was a non-terminal accept (no terminal outcome).
+        let metrics = handle.metrics();
+        assert_eq!(
+            metrics.terminal_outcome_for_sequence(1),
+            Some(TerminalOutcome::Skipped)
+        );
+        assert_eq!(
+            metrics.terminal_outcome_for_sequence(2),
+            Some(TerminalOutcome::Committed)
+        );
+        assert_eq!(metrics.terminal_outcome_for_sequence(0), None);
+        // A sequence that was never terminally resolved reads None.
+        assert_eq!(metrics.terminal_outcome_for_sequence(99), None);
         handle.shutdown().await;
+    }
+
+    // #3041 P1-3 R5: the load-bearing invariant — outcome[N] is INDEPENDENT of
+    // outcome[N+1]. Turn A (seq N) SKIPPED + turn B (seq N+1) COMMITTED sharing a
+    // chunk: A's per-sequence query reads Skipped (NOT Delivered from the bumped
+    // high-water-mark), so the watcher reconciles A → no black-hole.
+    #[test]
+    fn per_sequence_terminal_outcome_is_independent_of_higher_sequences() {
+        let metrics = RelayMetrics::default();
+        // A at seq 10 was SKIPPED; B's tail at seq 11 COMMITTED (higher sequence).
+        metrics.record_terminal_outcome(10, TerminalOutcome::Skipped);
+        metrics.record_terminal_outcome(11, TerminalOutcome::Committed);
+        // High-water-mark for committed is now 11 (would falsely satisfy `>= 10`).
+        assert_eq!(
+            metrics.terminal_outcome_for_sequence(10),
+            Some(TerminalOutcome::Skipped),
+            "A's ACK must read A's OWN outcome (Skipped), not B's committed high-water-mark"
+        );
+        assert_eq!(
+            metrics.terminal_outcome_for_sequence(11),
+            Some(TerminalOutcome::Committed)
+        );
+    }
+
+    // #3041 P1-3 R5: the ring is bounded; an evicted sequence reads back None
+    // (treated by the watcher as "not yet resolved" → it waits / times out →
+    // reconciles, never a false ACK).
+    #[test]
+    fn terminal_outcome_ring_is_bounded_and_evicts_oldest() {
+        let metrics = RelayMetrics::default();
+        let total = TERMINAL_OUTCOME_RING_CAPACITY as u64 + 5;
+        for seq in 0..total {
+            metrics.record_terminal_outcome(seq, TerminalOutcome::Committed);
+        }
+        // The oldest 5 were evicted.
+        for seq in 0..5 {
+            assert_eq!(
+                metrics.terminal_outcome_for_sequence(seq),
+                None,
+                "evicted oldest sequence reads None"
+            );
+        }
+        // The most recent CAPACITY are retained.
+        for seq in 5..total {
+            assert_eq!(
+                metrics.terminal_outcome_for_sequence(seq),
+                Some(TerminalOutcome::Committed)
+            );
+        }
     }
 
     #[tokio::test]

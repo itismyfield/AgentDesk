@@ -733,24 +733,26 @@ enum SessionRelayDeliveryOutcome {
 #[async_trait]
 impl RelaySink for SessionBoundDiscordRelaySink {
     async fn deliver(&self, frame: &StreamFrame) -> Result<RelaySinkOutcome, RelaySinkError> {
-        // #3041 P1-3 (codex P1-3 issue 1 R4 — ACK correlation): only a FENCED
-        // (terminal) frame may report a terminal outcome to the relay metrics. A
-        // single physical chunk can carry turn A's result PLUS turn B's COMPLETE
-        // result; the split forwards A on a terminal (fenced) frame and B's tail on
-        // a SEPARATE non-terminal (fence-less) frame. The sink's parser still
-        // delivers B from that tail (so B is never black-holed), but that post is
-        // NOT a terminal commit for THIS frame — the frame carries no fence. If we
-        // bumped `last_terminal_committed_sequence` for the tail (B's higher
-        // sequence N+1), it would MASK turn A's true terminal outcome: A's
-        // terminal-ACK (target = A's seq N) would read `committed >= N` and report
-        // `Delivered` even when A's terminal frame was actually SKIPPED — the
-        // watcher would then suppress its SendFull reconciliation and BLACK-HOLE A.
-        // Gating the terminal outcome on the frame's own fence keeps A's
-        // terminal-ACK bound strictly to A's terminal frame. The deferred duplicate
-        // of B (the watcher's later SendFull re-posts B) is tracked in #3151; it is
-        // never a black-hole (B is delivered) and never a wrong-turn advance (B's
-        // tail has no fence so it cannot advance any offset).
-        let frame_is_terminal = frame.terminal_consumed_end.is_some();
+        // #3041 P1-3 R5 (codex P1-3 — REVERT R4 fence-gating of the terminal
+        // outcome): a RESULT-bearing delivery reports its terminal outcome
+        // (Committed / Skipped) REGARDLESS of whether THIS frame carries a commit
+        // fence (`terminal_consumed_end`). R4 gated the outcome on the fence, which
+        // BROKE the legitimate no-inflight session-bound terminal delivery: that
+        // delivery legitimately has NO fence but IS a real terminal whose ACK must
+        // resolve — under R4 it reported only `FrameAccepted`, so the watcher timed
+        // out, the fallback was suppressed, and the turn was BLACK-HOLED.
+        //
+        // The co-chunked-turn confusion R4 tried to prevent (turn B's fence-less
+        // tail at seq N+1 masking turn A's seq-N outcome) is now handled CORRECTLY
+        // by the per-sequence terminal-ACK (R5): the watcher resolves A's ACK on
+        // outcome[N] (A's own frame), so B's outcome[N+1] no longer touches A —
+        // reverting this gate is safe.
+        //
+        // The commit FENCE still ONLY gates the OFFSET ADVANCE: the advance happens
+        // INLINE in `deliver_response` via `advance_offset_for_confirmed_delegated_terminal`,
+        // which no-ops when `terminal_consumed_end` is None. So "terminal outcome /
+        // ACK marker" (driven by a result-bearing delivery) and "offset advance"
+        // (driven by the fence) are now decoupled.
         let deliveries = self.ingest_frame(frame);
         let mut terminal_committed = false;
         let mut terminal_skipped = false;
@@ -793,14 +795,15 @@ impl RelaySink for SessionBoundDiscordRelaySink {
                 }
             }
         }
-        // Only a FENCED frame may surface a terminal outcome (see above). A
-        // fence-less frame that posted a delivery (e.g. turn B's complete result
-        // riding turn A's trailing tail) reports `FrameAccepted`: the relay records
-        // it as DELIVERED (mirrored) but NOT terminal-committed, so it can never
-        // satisfy another turn's terminal-ACK.
-        if frame_is_terminal && terminal_committed {
+        // #3041 P1-3 R5: a result-bearing delivery surfaces its terminal outcome
+        // for THIS frame's sequence (fence-independent — see the revert note above).
+        // The relay records it keyed by this frame's sequence; the watcher resolves
+        // ITS OWN terminal frame's ACK on its exact sequence, so a co-chunked tail
+        // at a different sequence can never satisfy another turn's terminal-ACK.
+        // A frame that produced no result-bearing delivery reports `FrameAccepted`.
+        if terminal_committed {
             Ok(RelaySinkOutcome::TerminalCommitted)
-        } else if frame_is_terminal && terminal_skipped {
+        } else if terminal_skipped {
             Ok(RelaySinkOutcome::TerminalSkipped)
         } else {
             Ok(RelaySinkOutcome::FrameAccepted)
@@ -2056,17 +2059,17 @@ mod tests {
         assert_eq!(outcome, RelaySinkOutcome::FrameAccepted);
     }
 
-    // #3041 P1-3 (codex P1-3 issue 1 R4 — ACK correlation): a FENCE-LESS
-    // (non-terminal) frame that carries a COMPLETE result (e.g. turn B's result
-    // riding turn A's trailing tail) produces a delivery whose
-    // `terminal_consumed_end` is None — so the identity-gated advance can NEVER
-    // fire for it (the advance requires `Some(end > 0)`), and `deliver` reports a
-    // terminal outcome ONLY when `frame.terminal_consumed_end.is_some()`. Both
-    // guarantee B's tail post can never advance an offset nor satisfy turn A's
-    // terminal-ACK (which would otherwise black-hole A). Driving a real terminal
-    // COMMIT needs Discord HTTP, so we assert the two load-bearing invariants
-    // directly: (a) the fence-less frame is non-terminal, and (b) its delivery
-    // carries no consumed_end.
+    // #3041 P1-3 R5 (codex P1-3 — fence gates the ADVANCE, not the ACK): a
+    // FENCE-LESS frame that carries a COMPLETE result (e.g. turn B's result riding
+    // turn A's trailing tail) produces a delivery whose `terminal_consumed_end` is
+    // None — so the identity-gated OFFSET ADVANCE can NEVER fire for it (the advance
+    // requires `Some(end > 0)`). After the R4 revert, `deliver` DOES surface this
+    // frame's terminal outcome (the no-inflight terminal needs its ACK to resolve),
+    // but that outcome is recorded keyed by THIS frame's own sequence, so it can
+    // never satisfy ANOTHER turn's terminal-ACK (which queries its own sequence).
+    // Driving a real terminal COMMIT needs Discord HTTP, so we assert the
+    // load-bearing offset-advance invariant directly: a fence-less frame's delivery
+    // carries no consumed_end → it can never advance the offset authority.
     #[test]
     fn fenceless_frame_with_complete_result_carries_no_commit_fence() {
         let binding = matched("44");
@@ -2079,7 +2082,7 @@ mod tests {
         let fenceless = frame(&binding, payload, 7);
         assert!(
             fenceless.terminal_consumed_end.is_none(),
-            "precondition: this is a fence-less (non-terminal) frame — `deliver` reports FrameAccepted, never a terminal outcome"
+            "precondition: this is a fence-less frame — its result is still delivered and its ACK still resolves, but it can never ADVANCE the offset"
         );
 
         let deliveries = parser.ingest_frame(&fenceless);
@@ -2090,7 +2093,7 @@ mod tests {
         );
         assert_eq!(
             deliveries[0].terminal_consumed_end, None,
-            "a fence-less frame's delivery carries NO consumed_end → it can never advance the offset authority (no wrong-turn advance, no shared-ACK reuse)"
+            "a fence-less frame's delivery carries NO consumed_end → it can never advance the offset authority (no wrong-turn advance)"
         );
     }
 

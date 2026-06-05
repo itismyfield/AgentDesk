@@ -1986,14 +1986,34 @@ fn sequence_reached(latest: Option<u64>, target: u64) -> bool {
 fn session_bound_relay_ack_snapshot_outcome(
     target: Option<&SessionBoundRelayAckTarget>,
 ) -> Option<SessionBoundRelayAckOutcome> {
+    use crate::services::cluster::stream_relay::TerminalOutcome;
     let target = target?;
+    // #3041 P1-3 R5 (per-sequence terminal-ACK correlation): resolve the terminal
+    // ACK on THIS watcher's OWN terminal frame (`target.sequence`) EXACT outcome,
+    // NOT the `>=` high-water-mark. When two turns share a physical chunk (turn A
+    // frame seq N, turn B tail seq N+1), B committing bumps the high-water-mark to
+    // N+1; the old `committed >= N` test would then falsely report A as Delivered
+    // even when A's own terminal frame was SKIPPED — black-holing A. Keying the
+    // ACK to A's exact sequence decouples A from B: A reads outcome[N] (its own
+    // result), B reads outcome[N+1]. `None` (not yet resolved / dropped / evicted)
+    // falls through so a dropped/lagging frame keeps waiting → eventually TimedOut
+    // → the watcher reconciles against the committed offset (no false ACK).
+    match target
+        .metrics
+        .terminal_outcome_for_sequence(target.sequence)
+    {
+        Some(TerminalOutcome::Committed) => {
+            return Some(SessionBoundRelayAckOutcome::Delivered);
+        }
+        Some(TerminalOutcome::Skipped) => {
+            return Some(SessionBoundRelayAckOutcome::TerminalSkipped);
+        }
+        None => {}
+    }
+    // Sink-error / drop remain high-water-mark signals (terminal outcome was never
+    // recorded for this sequence in those paths): they are per-sequence-monotonic
+    // failure markers, not a co-chunked-turn confusion vector.
     let snapshot = target.metrics.snapshot();
-    if sequence_reached(snapshot.last_terminal_committed_sequence, target.sequence) {
-        return Some(SessionBoundRelayAckOutcome::Delivered);
-    }
-    if sequence_reached(snapshot.last_terminal_skipped_sequence, target.sequence) {
-        return Some(SessionBoundRelayAckOutcome::TerminalSkipped);
-    }
     if sequence_reached(snapshot.last_sink_error_sequence, target.sequence) {
         return Some(SessionBoundRelayAckOutcome::SinkError);
     }
@@ -3216,6 +3236,69 @@ mod matched_session_jsonl_gate_tests {
             wait_for_session_bound_relay_delivery_ack(None, std::time::Duration::from_millis(1))
                 .await,
             SessionBoundRelayAckOutcome::MissingTarget
+        );
+    }
+
+    // #3041 P1-3 R5 (per-sequence terminal-ACK correlation): turn A (seq N) was
+    // SKIPPED, turn B's tail (seq N+1) COMMITTED in the same chunk. A's ACK must
+    // resolve on A's OWN sequence → TerminalSkipped (so the watcher reconciles /
+    // SendFull → A delivered, no black-hole), NOT Delivered from B bumping the
+    // committed high-water-mark to N+1. B's ACK at its own sequence → Delivered.
+    #[test]
+    fn session_bound_relay_ack_is_per_sequence_not_high_water_mark() {
+        let metrics =
+            std::sync::Arc::new(crate::services::cluster::stream_relay::RelayMetrics::default());
+        // A at seq N=5 skipped, B at seq N+1=6 committed (higher → bumps HWM).
+        metrics.record_terminal_skipped_sequence_for_test(5);
+        metrics.record_terminal_committed_sequence_for_test(6);
+
+        let a_target = SessionBoundRelayAckTarget {
+            metrics: metrics.clone(),
+            sequence: 5,
+        };
+        assert_eq!(
+            session_bound_relay_ack_snapshot_outcome(Some(&a_target)),
+            Some(SessionBoundRelayAckOutcome::TerminalSkipped),
+            "A's ACK reads A's own seq-5 outcome (Skipped), not B's committed HWM"
+        );
+
+        let b_target = SessionBoundRelayAckTarget {
+            metrics: metrics.clone(),
+            sequence: 6,
+        };
+        assert_eq!(
+            session_bound_relay_ack_snapshot_outcome(Some(&b_target)),
+            Some(SessionBoundRelayAckOutcome::Delivered),
+            "B's ACK reads its own seq-6 committed outcome"
+        );
+    }
+
+    // #3041 P1-3 R5: a target sequence that was never terminally resolved (dropped
+    // before the sink, or evicted from the bounded ring) reads None → the snapshot
+    // outcome is None → the wait times out → the watcher reconciles (no false ACK,
+    // no black-hole).
+    #[tokio::test]
+    async fn session_bound_relay_ack_unresolved_sequence_times_out() {
+        let metrics =
+            std::sync::Arc::new(crate::services::cluster::stream_relay::RelayMetrics::default());
+        // A different sequence committed; OUR target (42) was never resolved.
+        metrics.record_terminal_committed_sequence_for_test(40);
+        let target = SessionBoundRelayAckTarget {
+            metrics: metrics.clone(),
+            sequence: 42,
+        };
+        assert_eq!(
+            session_bound_relay_ack_snapshot_outcome(Some(&target)),
+            None
+        );
+        assert_eq!(
+            wait_for_session_bound_relay_delivery_ack(
+                Some(&target),
+                std::time::Duration::from_millis(1),
+            )
+            .await,
+            SessionBoundRelayAckOutcome::TimedOut,
+            "unresolved/evicted target sequence times out → reconcile, never a false ACK"
         );
     }
 
