@@ -217,9 +217,13 @@
     (SendFull/Skip) → never black-holed, independent of whether the pinned identity
     refreshed. A's own delivery still resolves on A's ack (the reset is post-wait);
     split loop helpers further before adding behavior).
-  - `src/services/discord/tui_prompt_relay.rs` (3874 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (3886 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
-    outside an extraction plan; +4 from #3082 queued-only answer-flush gate
+    outside an extraction plan; +12 from #3041 P1-4 codex: the lease record
+    helpers now RETURN the recorded lease (with its per-record `generation`
+    nonce) and callers adopt it back so a later exact-match/by-generation clear
+    targets the precise stored identity (no clobber of a newer lease); +4 from
+    #3082 queued-only answer-flush gate
     (`is_queued_notice = false` for the TUI idle-response placeholder); +139
     from #3099/#3100 injected-prompt classifier + neutral system-continuation
     note; +140 from the #3099/#3100 codex re-review: P1 bridge-tail output
@@ -279,9 +283,15 @@
   - `src/services/codex_tmux_wrapper.rs` (1222 lines; Codex tmux wrapper JSON
     event parser and relay bridge for native Codex session events — bugfix only
     outside an extraction plan).
-  - `src/services/tui_prompt_dedupe.rs` (1064 lines; shared TUI prompt
+  - `src/services/tui_prompt_dedupe.rs` (1152 lines; shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
-    outside an extraction plan; +9 from the #3099 re-review crate-visible
+    outside an extraction plan; +88 from #3041 P1-4 codex: a per-record
+    `generation: u64` nonce on `ExternalInputRelayLease` (process-global
+    `AtomicU64`, stamped in `record_external_input_turn_lease` which now returns
+    the recorded lease) plus the `clear_external_input_relay_lease_if_generation_matches`
+    no-clobber primitive — two value-identical `Unassigned` leases for the same
+    key get DISTINCT generations so a slow old delivery's RAII guard never clears
+    a newer lease; +9 from the #3099 re-review crate-visible
     `reset_state_for_tests` helper; +26 from #3105 codex-P1 sub-case B
     `evict_dead_tmux_mirror` tombstone helper that drops both the runtime and
     channel mirror for a dead/orphaned session and then allows re-registration).

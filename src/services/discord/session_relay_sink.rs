@@ -125,7 +125,35 @@ fn session_bound_terminal_delivery_route_decision(
     provider: &ProviderKind,
     channel_id: u64,
 ) -> SessionBoundTerminalDeliveryRouteDecision {
-    if session_bound_external_lease_blocks_delivery(provider, channel_id, tmux_session_name) {
+    // #3041 P1-4 codex (TOCTOU close): read the external-input lease ONCE here and
+    // thread that exact snapshot into BOTH the block decision below AND the RAII
+    // release guard (`arm_with_observed_lease`). Re-reading the lease separately
+    // at arm time could capture a DIFFERENT lease (another thread can overwrite it
+    // between the two mutex acquisitions), so the guard might clear a lease the
+    // route never observed. The shared single read makes the guard's captured
+    // identity == what the route decision saw.
+    let observed_lease = crate::services::tui_prompt_dedupe::external_input_relay_lease(
+        provider.as_str(),
+        tmux_session_name,
+        channel_id,
+    );
+    session_bound_terminal_delivery_route_decision_with_lease(
+        inflight,
+        tmux_session_name,
+        provider,
+        channel_id,
+        observed_lease.as_ref(),
+    )
+}
+
+fn session_bound_terminal_delivery_route_decision_with_lease(
+    inflight: Option<&InflightTurnState>,
+    tmux_session_name: &str,
+    provider: &ProviderKind,
+    channel_id: u64,
+    observed_lease: Option<&crate::services::tui_prompt_dedupe::ExternalInputRelayLease>,
+) -> SessionBoundTerminalDeliveryRouteDecision {
+    if session_bound_external_lease_blocks_delivery(observed_lease) {
         return SessionBoundTerminalDeliveryRouteDecision::Skipped;
     }
     match session_bound_terminal_delivery_route_or_skip(
@@ -140,15 +168,9 @@ fn session_bound_terminal_delivery_route_decision(
 }
 
 fn session_bound_external_lease_blocks_delivery(
-    provider: &ProviderKind,
-    channel_id: u64,
-    tmux_session_name: &str,
+    observed_lease: Option<&crate::services::tui_prompt_dedupe::ExternalInputRelayLease>,
 ) -> bool {
-    let Some(lease) = crate::services::tui_prompt_dedupe::external_input_relay_lease(
-        provider.as_str(),
-        tmux_session_name,
-        channel_id,
-    ) else {
+    let Some(lease) = observed_lease else {
         return false;
     };
     // #3041 P1-4 / §4-④: the external_input lease's role is now "input dedup
@@ -179,33 +201,38 @@ fn session_bound_external_lease_blocks_delivery(
 /// `session_bound_external_lease_blocks_delivery` would then block the NEXT
 /// terminal delivery for up to ~10 minutes.
 ///
-/// NO-CLOBBER: the guard captures the EXACT lease value it observed when it
-/// armed and clears via `clear_external_input_relay_lease_if_matches`, so a
+/// NO-CLOBBER: the guard captures the UNIQUE `generation` of the EXACT lease the
+/// route decision observed (a SINGLE read threaded in via `arm_with_observed_lease`)
+/// and clears via `clear_external_input_relay_lease_if_generation_matches`, so a
 /// NEWER turn that re-took the same `(provider, tmux_session, channel)` lease
-/// during a slow delivery is left untouched — the guard only ever releases its
-/// OWN lease (mirrors `TuiDirectExternalInputLeaseGuard`).
+/// during a slow delivery is left untouched — even when the two leases are
+/// value-identical `Unassigned` markers (all trace fields `None`), their
+/// generations differ, so the guard only ever releases its OWN lease (mirrors
+/// `TuiDirectExternalInputLeaseGuard`). #3041 P1-4 codex.
 struct SessionBoundExternalInputLeaseGuard {
     provider: ProviderKind,
     tmux_session_name: String,
     channel_id: u64,
-    lease: crate::services::tui_prompt_dedupe::ExternalInputRelayLease,
+    /// `generation` of the recorded lease this guard armed with. Drop clears ONLY
+    /// this exact generation.
+    generation: u64,
 }
 
 impl SessionBoundExternalInputLeaseGuard {
-    /// Arm a guard IFF an `Unassigned`/`SessionBoundRelay`-owned input lease is
-    /// currently present for this delivery target. Foreign-owner leases are not
-    /// ours to release (a different subsystem owns them), and no-lease deliveries
-    /// have nothing to clear, so both return `None` (inert — no Drop clear).
-    fn arm_if_present(
+    /// Arm a guard IFF the lease the route decision observed (threaded in as
+    /// `observed_lease`, a SINGLE shared read) is an `Unassigned`/
+    /// `SessionBoundRelay`-owned input lease for this delivery target. Foreign-owner
+    /// leases are not ours to release (a different subsystem owns them), and
+    /// no-lease deliveries have nothing to clear, so both return `None` (inert — no
+    /// Drop clear). Capturing the generation from the SAME read the route observed
+    /// closes the TOCTOU where a re-read at arm time could see a different lease.
+    fn arm_with_observed_lease(
         provider: &ProviderKind,
         channel_id: u64,
         tmux_session_name: &str,
+        observed_lease: Option<&crate::services::tui_prompt_dedupe::ExternalInputRelayLease>,
     ) -> Option<Self> {
-        let lease = crate::services::tui_prompt_dedupe::external_input_relay_lease(
-            provider.as_str(),
-            tmux_session_name,
-            channel_id,
-        )?;
+        let lease = observed_lease?;
         if !matches!(
             lease.relay_owner,
             crate::services::tui_prompt_dedupe::ExternalInputRelayOwner::Unassigned
@@ -217,21 +244,39 @@ impl SessionBoundExternalInputLeaseGuard {
             provider: provider.clone(),
             tmux_session_name: tmux_session_name.to_string(),
             channel_id,
-            lease,
+            generation: lease.generation,
         })
+    }
+
+    /// Test-only convenience: read the current lease for this target and arm with
+    /// it (the production path threads in the route's single read instead).
+    #[cfg(test)]
+    fn arm_if_present(
+        provider: &ProviderKind,
+        channel_id: u64,
+        tmux_session_name: &str,
+    ) -> Option<Self> {
+        let observed = crate::services::tui_prompt_dedupe::external_input_relay_lease(
+            provider.as_str(),
+            tmux_session_name,
+            channel_id,
+        );
+        Self::arm_with_observed_lease(provider, channel_id, tmux_session_name, observed.as_ref())
     }
 }
 
 impl Drop for SessionBoundExternalInputLeaseGuard {
     fn drop(&mut self) {
-        // Compare-and-clear: only release the lease if it is STILL the exact one
-        // we armed with. A newer turn's lease (different turn_id/identity) that
-        // re-took this key during a slow delivery survives this drop.
-        crate::services::tui_prompt_dedupe::clear_external_input_relay_lease_if_matches(
+        // Compare-and-clear by generation: only release the lease if the CURRENT
+        // lease for this key is STILL the exact one (same generation) we armed
+        // with. A newer turn's lease that re-took this key during a slow delivery
+        // — even a value-identical `Unassigned` lease — has a DIFFERENT generation
+        // and therefore survives this drop.
+        crate::services::tui_prompt_dedupe::clear_external_input_relay_lease_if_generation_matches(
             self.provider.as_str(),
             &self.tmux_session_name,
             self.channel_id,
-            &self.lease,
+            self.generation,
         );
     }
 }
@@ -497,11 +542,22 @@ impl SessionBoundDiscordRelaySink {
             &delivery.session_name,
             inflight.as_ref(),
         );
-        let route = match session_bound_terminal_delivery_route_decision(
+        // #3041 P1-4 codex (TOCTOU close): read the external-input lease ONCE and
+        // thread the SAME snapshot into both the route/block decision and the RAII
+        // release guard, so the guard's captured generation == the lease the route
+        // observed. No `.await` runs between this read and arming the guard.
+        let observed_external_lease =
+            crate::services::tui_prompt_dedupe::external_input_relay_lease(
+                provider.as_str(),
+                &delivery.session_name,
+                channel_id,
+            );
+        let route = match session_bound_terminal_delivery_route_decision_with_lease(
             inflight.as_ref(),
             &delivery.session_name,
             &provider,
             channel_id,
+            observed_external_lease.as_ref(),
         ) {
             SessionBoundTerminalDeliveryRouteDecision::Route(route) => route,
             SessionBoundTerminalDeliveryRouteDecision::Skipped => {
@@ -540,11 +596,13 @@ impl SessionBoundDiscordRelaySink {
         // input-dedup lease. This replaces the four scattered Ok-path clears with
         // ONE release path, closing the leak that left the lease set for the full
         // 600s TTL on Err/`?`/503 and blocked the next delivery for up to ~10min.
-        let _external_input_lease_guard = SessionBoundExternalInputLeaseGuard::arm_if_present(
-            &provider,
-            channel_id,
-            &delivery.session_name,
-        );
+        let _external_input_lease_guard =
+            SessionBoundExternalInputLeaseGuard::arm_with_observed_lease(
+                &provider,
+                channel_id,
+                &delivery.session_name,
+                observed_external_lease.as_ref(),
+            );
         let shared = self
             .health_registry
             .shared_for_provider(&provider)
@@ -1814,6 +1872,8 @@ mod tests {
                 relay_owner:
                     crate::services::tui_prompt_dedupe::ExternalInputRelayOwner::SessionBoundRelay,
                 runtime_kind: Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui),
+                generation:
+                    crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
             },
         );
 
@@ -1848,8 +1908,12 @@ mod tests {
             session_key: Some("host:AgentDesk-codex-bridge-owned-direct".to_string()),
             relay_owner: crate::services::tui_prompt_dedupe::ExternalInputRelayOwner::BridgeAdapter,
             runtime_kind: Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui),
+            generation:
+                crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         };
-        crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+        // Capture the RECORDED lease (with its stamped generation) so the later
+        // `_if_matches` clear compares against the exact stored identity.
+        let recorded = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
             ProviderKind::Codex.as_str(),
             tmux,
             lease.clone(),
@@ -1864,7 +1928,7 @@ mod tests {
                 ProviderKind::Codex.as_str(),
                 tmux,
                 4243,
-                &lease,
+                &recorded,
             )
         );
         assert_eq!(
@@ -2949,6 +3013,8 @@ mod tests {
             session_key: Some(format!("host:{session}")),
             relay_owner: ExternalInputRelayOwner::SessionBoundRelay,
             runtime_kind: Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
+            generation:
+                crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         }
     }
 
@@ -3059,10 +3125,14 @@ mod tests {
 
         // DURING the slow delivery a NEWER turn (turn 2) re-takes the same key.
         let lease2 = session_bound_lease(channel_id, session, 2);
-        crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+        let recorded2 = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
             ProviderKind::Claude.as_str(),
             session,
             lease2.clone(),
+        );
+        assert_ne!(
+            guard.generation, recorded2.generation,
+            "each recorded lease must get a DISTINCT generation"
         );
 
         // The OLD guard drops (turn 1 finished/errored) — must NOT clobber turn 2.
@@ -3073,8 +3143,76 @@ mod tests {
                 session,
                 channel_id,
             ),
-            Some(lease2),
-            "a newer turn's lease must survive an old guard's drop (compare-and-clear)"
+            Some(recorded2),
+            "a newer turn's lease must survive an old guard's drop (compare-and-clear by generation)"
+        );
+    }
+
+    // #3041 P1-4 codex: NO-CLOBBER for two VALUE-IDENTICAL `Unassigned` leases.
+    // Two legacy `Unassigned` turns for the same (provider, tmux_session, channel)
+    // have `turn_id`/`session_key`/`runtime_kind` ALL `None`, so they are
+    // indistinguishable by value. The per-record `generation` makes them distinct:
+    // an OLD guard's Drop must clear ONLY its own generation and leave the newer
+    // (value-identical) lease in place. Without the generation, a slow old
+    // delivery's guard would wrongly release the newer turn's lease.
+    #[test]
+    fn lease_guard_drop_preserves_newer_unassigned_lease_by_generation() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+
+        let channel_id = 8_044_u64;
+        let session = "AgentDesk-claude-p1-4-unassigned-no-clobber";
+
+        // Turn 1: a legacy/Unassigned lease (all trace fields None) is recorded and
+        // the sink arms a guard capturing turn 1's generation.
+        crate::services::tui_prompt_dedupe::record_external_input_relay_lease(
+            ProviderKind::Claude.as_str(),
+            session,
+            Some(channel_id),
+        );
+        let guard = SessionBoundExternalInputLeaseGuard::arm_if_present(
+            &ProviderKind::Claude,
+            channel_id,
+            session,
+        )
+        .expect("guard arms for an Unassigned input-dedup lease");
+
+        // DURING the slow delivery a NEWER, VALUE-IDENTICAL Unassigned turn re-takes
+        // the same key (same provider/session/channel; all trace fields None).
+        crate::services::tui_prompt_dedupe::record_external_input_relay_lease(
+            ProviderKind::Claude.as_str(),
+            session,
+            Some(channel_id),
+        );
+        let newer = crate::services::tui_prompt_dedupe::external_input_relay_lease(
+            ProviderKind::Claude.as_str(),
+            session,
+            channel_id,
+        )
+        .expect("newer Unassigned lease present");
+        assert_eq!(
+            newer.relay_owner,
+            ExternalInputRelayOwner::Unassigned,
+            "the newer lease is the value-identical Unassigned marker"
+        );
+        assert_ne!(
+            guard.generation, newer.generation,
+            "two Unassigned leases for the same key must get DISTINCT generations"
+        );
+
+        // The OLD guard drops — by generation it does NOT match the newer lease, so
+        // the newer (value-identical) lease must SURVIVE.
+        drop(guard);
+        assert_eq!(
+            crate::services::tui_prompt_dedupe::external_input_relay_lease(
+                ProviderKind::Claude.as_str(),
+                session,
+                channel_id,
+            ),
+            Some(newer),
+            "a newer value-identical Unassigned lease must survive an old guard's drop (clear-by-generation, no clobber)"
         );
     }
 
@@ -3123,7 +3261,7 @@ mod tests {
             relay_owner: ExternalInputRelayOwner::BridgeAdapter,
             ..session_bound_lease(channel_id, session, 2)
         };
-        crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+        let recorded_foreign = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
             ProviderKind::Claude.as_str(),
             session,
             foreign.clone(),
@@ -3143,7 +3281,7 @@ mod tests {
                 session,
                 channel_id,
             ),
-            Some(foreign),
+            Some(recorded_foreign),
             "a foreign-owner lease is preserved (input-dedup / cross-subsystem routing not regressed)"
         );
     }

@@ -583,10 +583,14 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             .await;
             if claim.claimed && lease.relay_owner != claim.relay_owner {
                 lease.relay_owner = claim.relay_owner;
-                crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+                // Re-record overwrites the lease with a FRESH generation; adopt it
+                // back into `lease` so the bridge-tail guard below captures the
+                // exact stored identity (otherwise the guard would hold the stale
+                // generation and its Drop would clear nothing / the wrong lease).
+                lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
                     provider.as_str(),
                     &prompt.tmux_session_name,
-                    lease.clone(),
+                    lease,
                 );
             }
         }
@@ -672,11 +676,16 @@ fn record_observed_external_turn_lease(
         session_key,
         relay_owner,
         runtime_kind,
+        generation:
+            crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
     };
-    crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+    // Capture the RECORDED lease (with its stamped generation) so the caller's
+    // later `clear_observed_external_turn_lease_if_current` matches the exact
+    // stored identity and never clobbers a newer turn's lease.
+    let lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
         &prompt.provider,
         &prompt.tmux_session_name,
-        lease.clone(),
+        lease,
     );
     tracing::info!(
         provider = %prompt.provider,
@@ -768,13 +777,16 @@ fn record_external_turn_lease_for_output(
         )),
         relay_owner,
         runtime_kind: Some(runtime_kind),
+        generation:
+            crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
     };
+    // Return the RECORDED lease (with its stamped generation) so a later
+    // exact-match clear targets the precise stored identity.
     crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
         provider.as_str(),
         tmux_session_name,
-        lease.clone(),
-    );
-    lease
+        lease,
+    )
 }
 
 fn external_input_turn_id(
@@ -4778,19 +4790,24 @@ mod tests {
             session_key: Some("host:AgentDesk-codex-bridge-guard".to_string()),
             relay_owner: ExternalInputRelayOwner::BridgeAdapter,
             runtime_kind: Some(RuntimeHandoffKind::CodexTui),
+            generation:
+                crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         };
-        crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
-            ProviderKind::Codex.as_str(),
-            tmux,
-            original.clone(),
-        );
+        // Capture the RECORDED lease (with its stamped generation) — the guard must
+        // hold the exact stored identity to clear it on drop.
+        let recorded_original =
+            crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+                ProviderKind::Codex.as_str(),
+                tmux,
+                original.clone(),
+            );
 
         {
             let _guard = TuiDirectExternalInputLeaseGuard::new(
                 ProviderKind::Codex,
                 tmux,
                 channel_id,
-                &original,
+                &recorded_original,
             );
         }
         assert!(
@@ -4806,19 +4823,21 @@ mod tests {
             turn_id: Some("external:codex:940000000000003:bridge-guard:2".to_string()),
             ..original.clone()
         };
-        crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
-            ProviderKind::Codex.as_str(),
-            tmux,
-            original.clone(),
-        );
+        let recorded_original =
+            crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+                ProviderKind::Codex.as_str(),
+                tmux,
+                original.clone(),
+            );
+        let recorded_newer;
         {
             let _guard = TuiDirectExternalInputLeaseGuard::new(
                 ProviderKind::Codex,
                 tmux,
                 channel_id,
-                &original,
+                &recorded_original,
             );
-            crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+            recorded_newer = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
                 ProviderKind::Codex.as_str(),
                 tmux,
                 newer.clone(),
@@ -4830,14 +4849,15 @@ mod tests {
                 tmux,
                 channel_id.get(),
             ),
-            Some(newer.clone())
+            Some(recorded_newer.clone()),
+            "the old guard's drop must NOT clobber the newer lease (clear-by-identity)"
         );
         assert!(
             crate::services::tui_prompt_dedupe::clear_external_input_relay_lease_if_matches(
                 ProviderKind::Codex.as_str(),
                 tmux,
                 channel_id.get(),
-                &newer,
+                &recorded_newer,
             )
         );
     }
@@ -4856,6 +4876,8 @@ mod tests {
             session_key: Some("host:AgentDesk-claude-bridge-dedup-skip".to_string()),
             relay_owner: ExternalInputRelayOwner::BridgeAdapter,
             runtime_kind: Some(RuntimeHandoffKind::ClaudeTui),
+            generation:
+                crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         };
         {
             let mut active = CLAUDE_IDLE_RESPONSE_TAILS
@@ -4864,10 +4886,10 @@ mod tests {
             active.remove(tmux);
             active.insert(tmux.to_string());
         }
-        crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+        let lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
             ProviderKind::Claude.as_str(),
             tmux,
-            lease.clone(),
+            lease,
         );
 
         let spawned = spawn_claude_idle_response_tail_once(
@@ -4928,11 +4950,13 @@ mod tests {
             session_key: Some("host:AgentDesk-claude-bridge-no-binding".to_string()),
             relay_owner: ExternalInputRelayOwner::BridgeAdapter,
             runtime_kind: Some(RuntimeHandoffKind::ClaudeTui),
+            generation:
+                crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         };
-        crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+        let lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
             ProviderKind::Claude.as_str(),
             tmux,
-            lease.clone(),
+            lease,
         );
 
         let spawned;
@@ -4997,11 +5021,13 @@ mod tests {
             // session-bound delivery if left dangling.
             relay_owner: ExternalInputRelayOwner::BridgeAdapter,
             runtime_kind: Some(RuntimeHandoffKind::ClaudeTui),
+            generation:
+                crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         };
-        crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+        let lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
             ProviderKind::Claude.as_str(),
             tmux,
-            lease.clone(),
+            lease,
         );
         // Sanity: the lease is present and would block delivery.
         assert!(
@@ -5050,28 +5076,34 @@ mod tests {
             session_key: Some("host:AgentDesk-task-card-repeat-newer".to_string()),
             relay_owner: ExternalInputRelayOwner::BridgeAdapter,
             runtime_kind: Some(RuntimeHandoffKind::ClaudeTui),
+            generation:
+                crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         };
         let newer_lease = ExternalInputRelayLease {
             turn_id: Some("external:claude:950000000000002:repeat:2".to_string()),
             ..repeat_lease.clone()
         };
-        crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+        let recorded_repeat = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
             ProviderKind::Claude.as_str(),
             tmux,
             repeat_lease.clone(),
         );
         // A newer turn overwrites the lease before the repeat's cleanup runs.
-        crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+        let recorded_newer = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
             ProviderKind::Claude.as_str(),
             tmux,
             newer_lease.clone(),
+        );
+        assert_ne!(
+            recorded_repeat.generation, recorded_newer.generation,
+            "each recorded lease must get a distinct generation",
         );
 
         // The repeat's exact-match clear is a no-op against the newer lease.
         assert!(!clear_observed_external_turn_lease_if_current(
             &prompt,
             channel_id,
-            &repeat_lease,
+            &recorded_repeat,
         ));
         assert_eq!(
             crate::services::tui_prompt_dedupe::external_input_relay_lease(
@@ -5079,7 +5111,7 @@ mod tests {
                 tmux,
                 channel_id.get(),
             ),
-            Some(newer_lease),
+            Some(recorded_newer),
             "exact-match clear must preserve a newer turn's lease",
         );
     }
@@ -5111,6 +5143,8 @@ mod tests {
             session_key: Some("token:AgentDesk-codex-owner-split".to_string()),
             relay_owner: ExternalInputRelayOwner::BridgeAdapter,
             runtime_kind: Some(RuntimeHandoffKind::CodexTui),
+            generation:
+                crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         };
         let state = build_tui_direct_bridge_inflight_state(
             ProviderKind::Codex,
@@ -5144,6 +5178,8 @@ mod tests {
             session_key: Some("token:AgentDesk-codex-owner-split".to_string()),
             relay_owner: ExternalInputRelayOwner::TmuxWatcher,
             runtime_kind: Some(RuntimeHandoffKind::CodexTui),
+            generation:
+                crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         };
         let state = build_tui_direct_synthetic_inflight_state(
             ProviderKind::Codex,
