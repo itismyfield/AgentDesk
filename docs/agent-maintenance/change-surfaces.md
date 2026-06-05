@@ -128,7 +128,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (8739 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (8763 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -216,8 +216,15 @@
     So a later turn ALWAYS starts with no inherited ack → MissingTarget → §3.2 reconcile
     (SendFull/Skip) → never black-holed, independent of whether the pinned identity
     refreshed. A's own delivery still resolves on A's ack (the reset is post-wait);
-    split loop helpers further before adding behavior).
-  - `src/services/discord/tui_prompt_relay.rs` (3886 lines; SSH-direct TUI
+    split loop helpers further before adding behavior;
+    +24 from #3041 P1-4 codex: the watcher post-delivery external-input lease clear
+    now snapshots the lease GENERATION before the awaited relay
+    (`external_input_lease_generation_before_relay`) and clears via
+    `clear_external_input_relay_lease_if_generation_matches` instead of the
+    unconditional by-key `clear_external_input_relay_lease`, closing the
+    stale-snapshot clobber where a turn-2 same-key lease recorded during turn-1's
+    in-flight send was wrongly removed by turn-1's success clear).
+  - `src/services/discord/tui_prompt_relay.rs` (3982 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +12 from #3041 P1-4 codex: the lease record
     helpers now RETURN the recorded lease (with its per-record `generation`
@@ -272,7 +279,17 @@
     `claim_tui_direct_synthetic_turn` now clears the stale `📦 … idle N분`
     idle-recap card once a TUI-driven turn is owned for the channel, reusing the
     shared `idle_recap::spawn_clear_idle_recap_for_channel` helper (keyed on
-    `channel_id`, mirrors the Discord-intake clear).
+    `channel_id`, mirrors the Discord-intake clear);
+    +96 from #3041 P1-4 codex: a `TuiDirectObservedLeaseEarlyReturnGuard` (arm right
+    after `record_observed_external_turn_lease`, disarm on the success path before
+    the bridge-tail ownership block) closes the early-return leak where a FAILURE
+    abort (health registry None, notify `resolve_bot_http` Err/503, task-card repeat,
+    anchor POST failure) left the recorded (possibly BridgeAdapter-owned) lease set
+    for the full TTL, blocking the legitimate watcher/sink delivery. The guard clears
+    BY the recorded generation (`clear_external_input_relay_lease_if_generation_matches`)
+    so a newer same-key lease recorded during the await is never clobbered; success
+    persistence is preserved by disarming before the bridge legitimately retains the
+    turn (plus failure-clear / disarm-persist / no-clobber regression tests).
   - `src/services/discord/idle_recap.rs` (1881 prod lines; idle-recap card
     compose/post/clear surface, registered giant-file (#3036) — bugfix only
     outside an extraction plan. Crossed 1000 prod LoC with #3146 Part 1: the
@@ -283,7 +300,7 @@
   - `src/services/codex_tmux_wrapper.rs` (1222 lines; Codex tmux wrapper JSON
     event parser and relay bridge for native Codex session events — bugfix only
     outside an extraction plan).
-  - `src/services/tui_prompt_dedupe.rs` (1152 lines; shared TUI prompt
+  - `src/services/tui_prompt_dedupe.rs` (1172 lines; shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
     outside an extraction plan; +88 from #3041 P1-4 codex: a per-record
     `generation: u64` nonce on `ExternalInputRelayLease` (process-global
@@ -294,7 +311,12 @@
     a newer lease; +9 from the #3099 re-review crate-visible
     `reset_state_for_tests` helper; +26 from #3105 codex-P1 sub-case B
     `evict_dead_tmux_mirror` tombstone helper that drops both the runtime and
-    channel mirror for a dead/orphaned session and then allows re-registration).
+    channel mirror for a dead/orphaned session and then allows re-registration;
+    +20 from #3041 P1-4 codex follow-up: the `external_input_relay_lease_generation`
+    read-only accessor (returns the CURRENT stored lease's generation iff the channel
+    scope matches, else None) that the watcher snapshots before its awaited relay and
+    the relay early-return guard captures, so post-await clears are generation-scoped
+    no-clobber, plus its accessor + watcher-snapshot no-clobber regression tests).
   - `src/services/discord/recovery_engine.rs` (4037 lines; +36 from #3099
     task-notification anchor `⏳` cleanup for `user_msg_id == 0` recovery; +4
     from the #3099 re-review pinned-injected-message-id cleanup target; +55 from

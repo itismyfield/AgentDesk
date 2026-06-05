@@ -7630,6 +7630,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &tmux_session_name,
                 channel_id.get(),
             );
+        // #3041 P1-4 codex: capture the GENERATION of the lease observed before the
+        // awaited Discord delivery (at the SAME point as the bool above — no await in
+        // between can change it relative to the bool). The post-delivery clear uses this
+        // generation so it only removes the EXACT lease this relay consumed; a NEWER
+        // same-key lease recorded by a concurrently-started turn during the slow send
+        // survives (no stale-snapshot clobber).
+        let external_input_lease_generation_before_relay =
+            crate::services::tui_prompt_dedupe::external_input_relay_lease_generation(
+                watcher_provider.as_str(),
+                &tmux_session_name,
+                channel_id.get(),
+            );
         let inflight_before_relay = crate::services::discord::inflight::load_inflight_state(
             &watcher_provider,
             channel_id.get(),
@@ -8795,11 +8807,23 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             if relay_ok {
                 if direct_send_delivered || !has_direct_terminal_response {
                     if direct_send_delivered {
-                        if external_input_lease_consumed_by_relay {
-                            crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
+                        // #3041 P1-4 codex: clear BY the generation snapshotted before
+                        // this awaited delivery, NOT by key. The old unconditional by-key
+                        // clear had a stale-snapshot clobber: turn-1 snapshots the lease
+                        // present, starts its send; turn-2 records a NEWER same-key lease;
+                        // turn-1's send succeeds and the by-key clear removed turn-2's
+                        // lease (re-introducing the exact no-clobber race the generation
+                        // nonce was added to kill). Generation-scoped clear only removes
+                        // the lease this relay actually consumed; sentinel/None (no lease
+                        // was present) clears nothing — guarded by the consumed gate too.
+                        if let Some(generation) = external_input_lease_generation_before_relay
+                            && external_input_lease_consumed_by_relay
+                        {
+                            crate::services::tui_prompt_dedupe::clear_external_input_relay_lease_if_generation_matches(
                                 watcher_provider.as_str(),
                                 &tmux_session_name,
                                 channel_id.get(),
+                                generation,
                             );
                         }
                         if watcher_direct_terminal_should_commit_session_idle(

@@ -109,6 +109,80 @@ impl Drop for TuiDirectExternalInputLeaseGuard {
     }
 }
 
+/// Early-return RAII guard for [`relay_observed_prompt`]: armed right after
+/// [`record_observed_external_turn_lease`] records & stores a (possibly
+/// `BridgeAdapter`-owned, hence delivery-blocking) lease, it clears that exact
+/// lease BY GENERATION on every early-return between the record and the point
+/// where the bridge legitimately takes ownership of the in-flight turn.
+///
+/// WHY clear-by-generation (not by full value): a NEWER turn may have re-taken
+/// the same `(provider, tmux_session, channel)` lease while this relay was awaiting
+/// the notify HTTP resolve / Discord POST; a by-key or by-value clear could clobber
+/// that newer lease (the exact no-clobber race the per-record generation nonce was
+/// added to kill, #3041 P1-4 codex). Clearing only the captured generation leaves a
+/// newer (even value-identical `Unassigned`) lease untouched.
+///
+/// SUCCESS-PATH PERSISTENCE: on the path where the bridge posts the card/anchor and
+/// retains the in-flight turn, the lease MUST persist so the watcher/sink does not
+/// double-deliver. The caller therefore [`disarm`](Self::disarm)s this guard right
+/// before the bridge-tail ownership block; only the genuinely-aborting early-returns
+/// (registry None, notify resolve `Err`/503, task-card repeat, anchor POST failure)
+/// leave the guard armed → its clear releases the lease so legitimate delivery can
+/// proceed.
+struct TuiDirectObservedLeaseEarlyReturnGuard {
+    provider: Option<ProviderKind>,
+    tmux_session_name: String,
+    channel_id: ChannelId,
+    /// Generation of the lease this guard armed with; Drop clears ONLY this exact
+    /// generation (sentinel `UNRECORDED` clears nothing).
+    generation: u64,
+    active: bool,
+}
+
+impl TuiDirectObservedLeaseEarlyReturnGuard {
+    /// Arm a guard capturing the generation of the just-recorded `lease`. When the
+    /// provider string is not a known [`ProviderKind`] the guard is inert (no key to
+    /// clear by) but still constructed so callers keep a uniform disarm point.
+    fn arm(
+        provider_str: &str,
+        tmux_session_name: &str,
+        channel_id: ChannelId,
+        generation: u64,
+    ) -> Self {
+        Self {
+            provider: ProviderKind::from_str(provider_str),
+            tmux_session_name: tmux_session_name.to_string(),
+            channel_id,
+            generation,
+            active: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for TuiDirectObservedLeaseEarlyReturnGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let Some(provider) = self.provider.as_ref() else {
+            return;
+        };
+        // Compare-and-clear by the captured generation: a newer same-key lease
+        // recorded during a slow notify-resolve / POST await has a DIFFERENT
+        // generation and survives this drop (no clobber).
+        crate::services::tui_prompt_dedupe::clear_external_input_relay_lease_if_generation_matches(
+            provider.as_str(),
+            &self.tmux_session_name,
+            self.channel_id.get(),
+            self.generation,
+        );
+    }
+}
+
 fn clear_external_input_bridge_lease_if_current(
     provider: &ProviderKind,
     tmux_session_name: &str,
@@ -394,6 +468,20 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         return;
     };
     let mut lease = record_observed_external_turn_lease(shared, &prompt, channel_id);
+    // #3041 P1-4 codex: arm an early-return RAII guard the instant the lease is
+    // recorded & stored. Every FAILURE early-return below (registry None, notify
+    // resolve Err/503, task-card repeat, anchor POST failure) would otherwise leave
+    // this (possibly BridgeAdapter-owned) lease set for the full TTL, blocking the
+    // legitimate watcher/sink delivery for ~10 minutes. The guard clears EXACTLY the
+    // recorded generation on drop; it is DISARMED on the success path just before the
+    // bridge-tail ownership block, so a turn the bridge legitimately owns keeps its
+    // lease (no double-delivery).
+    let mut observed_lease_early_return_guard = TuiDirectObservedLeaseEarlyReturnGuard::arm(
+        &prompt.provider,
+        &prompt.tmux_session_name,
+        channel_id,
+        lease.generation,
+    );
     let Some(registry) = shared.health_registry() else {
         tracing::warn!(
             provider = %prompt.provider,
@@ -607,6 +695,14 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             "SSH-direct TUI prompt notified; runtime relay attached synthetic ownership when possible"
         );
     }
+
+    // #3041 P1-4 codex: SUCCESS PATH reached — the card/anchor (or system-continuation
+    // note) was posted and the bridge legitimately retains the in-flight turn. DISARM
+    // the early-return guard so the lease PERSISTS for this turn (otherwise the
+    // watcher/sink would double-deliver). From here on, persistence is governed by the
+    // bridge-tail block's own `TuiDirectExternalInputLeaseGuard` (bridge-owner leases)
+    // or simply left set (Unassigned / session-bound-owned leases the sink delivers).
+    observed_lease_early_return_guard.disarm();
 
     #[cfg(unix)]
     {
@@ -5813,5 +5909,165 @@ mod tests {
         assert!(tui_idle_tail_should_commit_runtime_binding_offset(
             "", false
         ));
+    }
+
+    // #3041 P1-4 codex: the early-return guard armed right after
+    // `record_observed_external_turn_lease` must clear EXACTLY its recorded lease on
+    // drop, so a FAILURE early-return (registry None / notify resolve Err-503 /
+    // anchor POST failure) does not leave a dangling (BridgeAdapter-owned) lease
+    // blocking the legitimate watcher/sink delivery for the full TTL.
+    #[test]
+    fn observed_lease_early_return_guard_clears_recorded_lease_on_drop() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        let tmux = "AgentDesk-early-return-guard-clear";
+        let channel_id = ChannelId::new(960_000_000_000_001);
+        let lease = ExternalInputRelayLease {
+            channel_id: Some(channel_id.get()),
+            turn_id: Some("external:claude:960000000000001:early:1".to_string()),
+            session_key: Some("host:AgentDesk-early-return-guard-clear".to_string()),
+            relay_owner: ExternalInputRelayOwner::BridgeAdapter,
+            runtime_kind: Some(RuntimeHandoffKind::ClaudeTui),
+            generation:
+                crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+        };
+        let recorded = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+            ProviderKind::Claude.as_str(),
+            tmux,
+            lease,
+        );
+        assert!(
+            crate::services::tui_prompt_dedupe::external_input_relay_lease_present(
+                ProviderKind::Claude.as_str(),
+                tmux,
+                channel_id.get(),
+            ),
+            "lease must be present after record (would block delivery)"
+        );
+
+        // Simulate a failure early-return: the guard is armed and never disarmed, so
+        // dropping it (function returns) clears the recorded lease.
+        {
+            let _guard = TuiDirectObservedLeaseEarlyReturnGuard::arm(
+                ProviderKind::Claude.as_str(),
+                tmux,
+                channel_id,
+                recorded.generation,
+            );
+        }
+
+        assert!(
+            crate::services::tui_prompt_dedupe::external_input_relay_lease(
+                ProviderKind::Claude.as_str(),
+                tmux,
+                channel_id.get(),
+            )
+            .is_none(),
+            "an armed early-return guard drop must release the recorded lease so the watcher/sink can deliver"
+        );
+    }
+
+    // #3041 P1-4 codex: on the SUCCESS path the caller DISARMs the guard before the
+    // bridge-tail ownership block, so the lease PERSISTS for the in-flight turn (the
+    // watcher/sink must not double-deliver). A disarmed guard's drop is a no-op.
+    #[test]
+    fn observed_lease_early_return_guard_disarm_preserves_lease() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        let tmux = "AgentDesk-early-return-guard-disarm";
+        let channel_id = ChannelId::new(960_000_000_000_002);
+        let lease = ExternalInputRelayLease {
+            channel_id: Some(channel_id.get()),
+            turn_id: Some("external:claude:960000000000002:early:1".to_string()),
+            session_key: Some("host:AgentDesk-early-return-guard-disarm".to_string()),
+            relay_owner: ExternalInputRelayOwner::BridgeAdapter,
+            runtime_kind: Some(RuntimeHandoffKind::ClaudeTui),
+            generation:
+                crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+        };
+        let recorded = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+            ProviderKind::Claude.as_str(),
+            tmux,
+            lease,
+        );
+
+        {
+            let mut guard = TuiDirectObservedLeaseEarlyReturnGuard::arm(
+                ProviderKind::Claude.as_str(),
+                tmux,
+                channel_id,
+                recorded.generation,
+            );
+            // SUCCESS path: bridge legitimately takes ownership → disarm.
+            guard.disarm();
+        }
+
+        assert_eq!(
+            crate::services::tui_prompt_dedupe::external_input_relay_lease(
+                ProviderKind::Claude.as_str(),
+                tmux,
+                channel_id.get(),
+            ),
+            Some(recorded),
+            "a disarmed early-return guard must leave the lease intact for the in-flight turn"
+        );
+    }
+
+    // #3041 P1-4 codex: the early-return guard clears BY GENERATION, so an OLD guard
+    // armed with turn-1's generation must NOT clobber a NEWER same-key lease recorded
+    // by turn-2 while turn-1 was awaiting the notify resolve / POST.
+    #[test]
+    fn observed_lease_early_return_guard_does_not_clobber_newer_lease() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        let tmux = "AgentDesk-early-return-guard-noclobber";
+        let channel_id = ChannelId::new(960_000_000_000_003);
+        let base = ExternalInputRelayLease {
+            channel_id: Some(channel_id.get()),
+            turn_id: Some("external:claude:960000000000003:early:1".to_string()),
+            session_key: Some("host:AgentDesk-early-return-guard-noclobber".to_string()),
+            relay_owner: ExternalInputRelayOwner::BridgeAdapter,
+            runtime_kind: Some(RuntimeHandoffKind::ClaudeTui),
+            generation:
+                crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+        };
+        // turn-1 records and the relay arms a guard capturing G1.
+        let recorded_turn1 = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+            ProviderKind::Claude.as_str(),
+            tmux,
+            base.clone(),
+        );
+        let guard = TuiDirectObservedLeaseEarlyReturnGuard::arm(
+            ProviderKind::Claude.as_str(),
+            tmux,
+            channel_id,
+            recorded_turn1.generation,
+        );
+        // turn-2 records a NEWER same-key lease (G2) while turn-1 is in flight.
+        let recorded_turn2 = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+            ProviderKind::Claude.as_str(),
+            tmux,
+            ExternalInputRelayLease {
+                turn_id: Some("external:claude:960000000000003:early:2".to_string()),
+                ..base
+            },
+        );
+        assert_ne!(recorded_turn1.generation, recorded_turn2.generation);
+
+        // turn-1's guard drops (failure early-return) — by G1 it must NOT touch G2.
+        drop(guard);
+
+        assert_eq!(
+            crate::services::tui_prompt_dedupe::external_input_relay_lease(
+                ProviderKind::Claude.as_str(),
+                tmux,
+                channel_id.get(),
+            ),
+            Some(recorded_turn2),
+            "an old early-return guard (G1) must leave turn-2's newer lease (G2) intact"
+        );
     }
 }
