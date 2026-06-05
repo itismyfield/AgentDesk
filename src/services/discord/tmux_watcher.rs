@@ -2061,14 +2061,52 @@ fn forward_chunk_to_supervisor_relay_inner(
     }
 }
 
+/// #3041 P1-5: the watcher's view of the session-bound terminal ACK. The
+/// non-failure arms fold 1:1 onto the cross-actor 3-way `DeliveryOutcome`:
+///   * `Delivered`      ← ring `DeliveryOutcome::Delivered`
+///   * `NotDelivered`   ← ring `DeliveryOutcome::NotDelivered` (the former
+///                        `TerminalSkipped`; a deterministic sink decline)
+///   * the failure/unconfirmed arms (`Unknown`-class) — `RingUnknown` (the ring
+///     recorded an explicit `Unknown`: sink POSTed without confirming),
+///     `Dropped`, `SinkError`, `TimedOut`, `MissingTarget` — ALL collapse to
+///     `DeliveryOutcome::Unknown` for the resend DECISION (see
+///     [`session_bound_ack_delivery_outcome`]). They stay DISTINCT variants here
+///     so the flight-recorder / metrics keep their exact provenance.
+///
+/// §3.2 SAFETY INVARIANT: BOTH `NotDelivered` AND every `Unknown`-class arm route
+/// through `watcher_terminal_resend_action` (committed-offset reconciliation).
+/// There is NO blind skip for `NotDelivered` and NO blind 10s re-send for any
+/// `Unknown`-class arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionBoundRelayAckOutcome {
     Delivered,
-    TerminalSkipped,
+    NotDelivered,
+    RingUnknown,
     Dropped,
     SinkError,
     TimedOut,
     MissingTarget,
+}
+
+/// #3041 P1-5: collapse the watcher ACK onto the canonical cross-actor 3-way
+/// `DeliveryOutcome` for the resend DECISION. `Delivered` → delivered (no resend);
+/// `NotDelivered` → not-delivered (reconcile); every failure/unconfirmed arm →
+/// `Unknown` (reconcile). The §3.2 reconciliation treats `NotDelivered` and
+/// `Unknown` IDENTICALLY (both consult the committed offset → SendFull-or-Skip),
+/// so this fold is what guarantees neither gets a blind fast-path.
+fn session_bound_ack_delivery_outcome(
+    ack_outcome: SessionBoundRelayAckOutcome,
+) -> crate::services::cluster::stream_relay::DeliveryOutcome {
+    use crate::services::cluster::stream_relay::DeliveryOutcome;
+    match ack_outcome {
+        SessionBoundRelayAckOutcome::Delivered => DeliveryOutcome::Delivered,
+        SessionBoundRelayAckOutcome::NotDelivered => DeliveryOutcome::NotDelivered,
+        SessionBoundRelayAckOutcome::RingUnknown
+        | SessionBoundRelayAckOutcome::Dropped
+        | SessionBoundRelayAckOutcome::SinkError
+        | SessionBoundRelayAckOutcome::TimedOut
+        | SessionBoundRelayAckOutcome::MissingTarget => DeliveryOutcome::Unknown,
+    }
 }
 
 fn sequence_reached(latest: Option<u64>, target: u64) -> bool {
@@ -2078,7 +2116,7 @@ fn sequence_reached(latest: Option<u64>, target: u64) -> bool {
 fn session_bound_relay_ack_snapshot_outcome(
     target: Option<&SessionBoundRelayAckTarget>,
 ) -> Option<SessionBoundRelayAckOutcome> {
-    use crate::services::cluster::stream_relay::TerminalOutcome;
+    use crate::services::cluster::stream_relay::DeliveryOutcome;
     let target = target?;
     // #3041 P1-3 R5 (per-sequence terminal-ACK correlation): resolve the terminal
     // ACK on THIS watcher's OWN terminal frame (`target.sequence`) EXACT outcome,
@@ -2094,11 +2132,21 @@ fn session_bound_relay_ack_snapshot_outcome(
         .metrics
         .terminal_outcome_for_sequence(target.sequence)
     {
-        Some(TerminalOutcome::Committed) => {
+        Some(DeliveryOutcome::Delivered) => {
             return Some(SessionBoundRelayAckOutcome::Delivered);
         }
-        Some(TerminalOutcome::Skipped) => {
-            return Some(SessionBoundRelayAckOutcome::TerminalSkipped);
+        Some(DeliveryOutcome::NotDelivered) => {
+            return Some(SessionBoundRelayAckOutcome::NotDelivered);
+        }
+        // #3041 P1-5: an explicit ring `Unknown` (sink POSTed but could not confirm
+        // the commit) RESOLVES the per-sequence ACK immediately to a `RingUnknown`
+        // — the watcher reconciles against the committed offset NOW instead of
+        // waiting out the 10s ACK timeout. `RingUnknown` folds to
+        // `DeliveryOutcome::Unknown`, which §3.2 treats exactly like `NotDelivered`
+        // (committed-offset SendFull-or-Skip), so this is a faster path to the SAME
+        // safe reconciliation — never a blind re-send.
+        Some(DeliveryOutcome::Unknown) => {
+            return Some(SessionBoundRelayAckOutcome::RingUnknown);
         }
         None => {}
     }
@@ -2128,21 +2176,51 @@ fn watcher_should_direct_send_after_session_bound_ack(
     ack_outcome: SessionBoundRelayAckOutcome,
     relay_owner_present: bool,
 ) -> bool {
-    // #3042 (relay-stability P1, immediate mitigation): after a restart the
-    // channel can run with `relay_owner_kind=none` + `inflight_present=false`
-    // (restore_inflight failed to rebind ownership), so the session-bound
-    // StreamRelay terminal-commit ACK never lands and the 10s wait reports
-    // `TimedOut` on every poll. In that ownerless state a `TimedOut` is NOT a
-    // reliable "not delivered" signal — the StreamRelay sink may have posted
-    // and merely failed to advance the committed-sequence metric — so blindly
-    // re-sending the same byte-range once per ACK-timeout poll produces the
-    // observed 3× duplicate. Suppress the watcher-direct fallback for an
-    // ownerless `TimedOut`. Owned outcomes and non-timeout outcomes keep the
-    // existing fallback behaviour.
-    if !relay_owner_present && matches!(ack_outcome, SessionBoundRelayAckOutcome::TimedOut) {
-        return false;
-    }
-    should_direct_send && !matches!(ack_outcome, SessionBoundRelayAckOutcome::Delivered)
+    use crate::services::cluster::stream_relay::DeliveryOutcome;
+    // #3042 (relay-stability P1, OBSOLETE band-aid — removed by #3041 P1-5):
+    // #3042 added an early `return false` here for an ownerless (`relay_owner_kind=none`
+    // / `inflight_present=false`, the post-restart restore_inflight gap) `TimedOut`,
+    // blanket-suppressing the watcher-direct fallback. Its rationale: in that gap the
+    // StreamRelay sink "may have posted and merely failed to ADVANCE the committed-
+    // sequence metric", so a blind re-send produced the observed 3× duplicate.
+    //
+    // That rationale no longer holds. #3041 P1-3 Part (a)
+    // (`advance_offset_for_confirmed_delegated_terminal`, session_relay_sink.rs ~459)
+    // now COUPLES a CONFIRMED sink terminal POST to advancing the offset authority
+    // (`confirmed_end_offset`) to the producer's fenced `end`. A `TimedOut` (NOT
+    // `MissingTarget`) is ONLY produced when a FENCED terminal frame was forwarded
+    // (tmux_watcher.rs ~2038/2053) — and that SAME fence is what the sink advances on,
+    // so the committed offset now DOES reflect a confirmed post even in the ownerless
+    // state (the authority is a plain owner-independent atomic; it is always readable).
+    //
+    // Therefore the blanket suppression is obsolete and HARMFUL: it returned `false`
+    // BEFORE the outcome could reach the §3.2 committed-offset reconciliation
+    // (`watcher_terminal_resend_action`), so an ownerless `TimedOut` whose bytes were
+    // NOT actually delivered (committed < end) neither reconciled nor resent — a
+    // potential black-hole. Routing it through §3.2 instead (drop the early return):
+    //   * committed >= end → `SkipAlreadyCommitted` → NO resend → the #3042 3×
+    //     duplicate is prevented PRINCIPALLY (not by blanket suppression);
+    //   * committed < end → `SendFull` → the bytes were genuinely undelivered →
+    //     recover → the black-hole the band-aid left is closed.
+    // This completes the P1-5 §3.2 invariant: EVERY non-`Delivered` outcome
+    // (NotDelivered, RingUnknown, MissingTarget, Dropped, SinkError, and now ownerless
+    // `TimedOut`) routes through committed-offset reconciliation — none blind-skips,
+    // none blind-resends. (`relay_owner_present` is retained in the signature for the
+    // flight-recorder/telemetry call site even though the gate no longer branches on
+    // it.)
+    let _ = relay_owner_present;
+    // #3041 P1-5: decide on the cross-actor 3-way `DeliveryOutcome` instead of the
+    // implicit `ack_outcome != Delivered` bit. `Delivered` → no watcher re-send.
+    // `NotDelivered` AND `Unknown` (every failure/unconfirmed arm) BOTH intend a
+    // re-send here — but that intent is only the PRECONDITION GATE; the actual send
+    // is masked downstream by `watcher_terminal_resend_action` (committed-offset
+    // reconciliation), so neither gets a blind skip (NotDelivered) nor a blind
+    // re-send (Unknown). §3.2 SAFETY INVARIANT.
+    should_direct_send
+        && !matches!(
+            session_bound_ack_delivery_outcome(ack_outcome),
+            DeliveryOutcome::Delivered
+        )
 }
 
 /// #3041 P1-3 (Part b, §3.2): the watcher's terminal re-send DECISION after a
@@ -3298,7 +3376,7 @@ mod matched_session_jsonl_gate_tests {
         skipped_metrics.record_terminal_skipped_sequence_for_test(11);
         assert_eq!(
             session_bound_relay_ack_snapshot_outcome(Some(&skipped_target)),
-            Some(SessionBoundRelayAckOutcome::TerminalSkipped)
+            Some(SessionBoundRelayAckOutcome::NotDelivered)
         );
 
         let delivered_metrics =
@@ -3336,8 +3414,8 @@ mod matched_session_jsonl_gate_tests {
     }
 
     // #3041 P1-3 R5 (per-sequence terminal-ACK correlation): turn A (seq N) was
-    // SKIPPED, turn B's tail (seq N+1) COMMITTED in the same chunk. A's ACK must
-    // resolve on A's OWN sequence → TerminalSkipped (so the watcher reconciles /
+    // NOT delivered, turn B's tail (seq N+1) delivered in the same chunk. A's ACK
+    // must resolve on A's OWN sequence → NotDelivered (so the watcher reconciles /
     // SendFull → A delivered, no black-hole), NOT Delivered from B bumping the
     // committed high-water-mark to N+1. B's ACK at its own sequence → Delivered.
     #[test]
@@ -3355,8 +3433,8 @@ mod matched_session_jsonl_gate_tests {
         };
         assert_eq!(
             session_bound_relay_ack_snapshot_outcome(Some(&a_target)),
-            Some(SessionBoundRelayAckOutcome::TerminalSkipped),
-            "A's ACK reads A's own seq-5 outcome (Skipped), not B's committed HWM"
+            Some(SessionBoundRelayAckOutcome::NotDelivered),
+            "A's ACK reads A's own seq-5 outcome (NotDelivered), not B's delivered HWM"
         );
 
         let b_target = SessionBoundRelayAckTarget {
@@ -3699,7 +3777,7 @@ mod matched_session_jsonl_gate_tests {
         ));
         assert!(watcher_should_direct_send_after_session_bound_ack(
             true,
-            SessionBoundRelayAckOutcome::TerminalSkipped,
+            SessionBoundRelayAckOutcome::NotDelivered,
             true
         ));
         assert!(watcher_should_direct_send_after_session_bound_ack(
@@ -3712,6 +3790,17 @@ mod matched_session_jsonl_gate_tests {
             SessionBoundRelayAckOutcome::Delivered,
             true
         ));
+        // #3041 P1-5: an ownerless `TimedOut` now ALSO returns true (intends a
+        // re-send) — the gate is the precondition only; the §3.2 committed-offset
+        // reconciliation at the call site decides Skip vs Full. (Previously #3042
+        // blanket-suppressed this to false.)
+        assert!(watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::TimedOut,
+            false
+        ));
+        // should_direct_send=false still gates the precondition off regardless of
+        // owner presence.
         assert!(!watcher_should_direct_send_after_session_bound_ack(
             false,
             SessionBoundRelayAckOutcome::TimedOut,
@@ -3719,29 +3808,35 @@ mod matched_session_jsonl_gate_tests {
         ));
     }
 
-    /// #3042: after a restart `restore_inflight` can leave the channel with
+    /// #3041 P1-5 (was `ownerless_timeout_suppresses_watcher_direct_fallback`,
+    /// #3042): after a restart `restore_inflight` can leave the channel with
     /// `relay_owner_kind=none`/`inflight_present=false`, so the session-bound
     /// terminal-commit ACK never lands and every 10s poll reports `TimedOut`.
-    /// In that ownerless state a `TimedOut` is not a reliable not-delivered
-    /// signal, so the watcher-direct blind re-send must be suppressed (the
-    /// observed 3× duplicate). Owner-absent + non-timeout outcomes still fall
-    /// back so genuine sink failures/skips are not silently dropped.
+    /// #3042 blanket-suppressed the gate to `false` there to avoid a 3× duplicate;
+    /// #3041 P1-5 REMOVES that band-aid because P1-3 Part (a) made the committed
+    /// offset authoritative on a confirmed post. The gate now returns `true` (intends
+    /// a re-send) for an ownerless `TimedOut` — JUST the precondition — and the §3.2
+    /// committed-offset reconciliation (`watcher_terminal_resend_action`) decides
+    /// Skip-vs-Full downstream. The actual no-duplicate / no-black-hole guarantees
+    /// are asserted by `ownerless_timed_out_reconciles_*` below.
     #[test]
-    fn ownerless_timeout_suppresses_watcher_direct_fallback() {
+    fn ownerless_timed_out_intends_resend_via_gate() {
         // The exact incident shape: should_direct_send=true, TimedOut, no owner.
-        assert!(!watcher_should_direct_send_after_session_bound_ack(
+        // Now PASSES the gate (was suppressed to false by #3042); §3.2 then
+        // reconciles (see `ownerless_timed_out_reconciles_*`).
+        assert!(watcher_should_direct_send_after_session_bound_ack(
             true,
             SessionBoundRelayAckOutcome::TimedOut,
             false
         ));
-        // Owner present with the same TimedOut keeps the fallback (regression
-        // guard so the suppression is owner-scoped, not a blanket TimedOut mute).
+        // Owner present with the same TimedOut also intends the fallback —
+        // universality: the gate no longer branches on owner presence.
         assert!(watcher_should_direct_send_after_session_bound_ack(
             true,
             SessionBoundRelayAckOutcome::TimedOut,
             true
         ));
-        // Ownerless but a non-timeout (definitive) outcome still falls back.
+        // Ownerless but a non-timeout (definitive) outcome still intends the fallback.
         assert!(watcher_should_direct_send_after_session_bound_ack(
             true,
             SessionBoundRelayAckOutcome::SinkError,
@@ -3749,15 +3844,70 @@ mod matched_session_jsonl_gate_tests {
         ));
         assert!(watcher_should_direct_send_after_session_bound_ack(
             true,
-            SessionBoundRelayAckOutcome::TerminalSkipped,
+            SessionBoundRelayAckOutcome::NotDelivered,
             false
         ));
-        // Ownerless TimedOut with should_direct_send=false is also suppressed.
+        // should_direct_send=false still gates the precondition off.
         assert!(!watcher_should_direct_send_after_session_bound_ack(
             false,
             SessionBoundRelayAckOutcome::TimedOut,
             false
         ));
+    }
+
+    /// #3041 P1-5 / #3042 REGRESSION GUARD: an ownerless (`relay_owner_present=false`)
+    /// `TimedOut` whose range is ALREADY committed at/past `end` (the sink posted and
+    /// P1-3 advanced `confirmed_end_offset`) reconciles to `SkipAlreadyCommitted` —
+    /// NO re-send. This is the principled replacement for #3042's blanket suppression:
+    /// the observed 3× duplicate is still prevented, but now via the committed-offset
+    /// authority rather than a blind owner-scoped mute (so a genuine non-delivery is
+    /// no longer black-holed — see `ownerless_timed_out_reconciles_full_when_not_committed`).
+    #[test]
+    fn ownerless_timed_out_reconciles_skip_when_committed_reaches_end() {
+        // Ownerless TimedOut now passes the precondition gate (no longer suppressed).
+        assert!(watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::TimedOut,
+            false
+        ));
+        // The §3.2 reconciliation against the offset authority: committed has reached
+        // (or passed) the consumed-terminal `end` → the sink delivered, ACK merely
+        // lagged → SKIP. No duplicate (the #3042 3× incident cannot recur).
+        let (start, end) = (1_000u64, 1_500u64);
+        assert_eq!(
+            watcher_terminal_resend_action(end, start, end),
+            WatcherTerminalResendAction::SkipAlreadyCommitted,
+        );
+        assert_eq!(
+            watcher_terminal_resend_action(end + 256, start, end),
+            WatcherTerminalResendAction::SkipAlreadyCommitted,
+        );
+    }
+
+    /// #3041 P1-5 (black-hole closed): an ownerless `TimedOut` whose range is NOT
+    /// committed (committed < end → the sink did NOT confirm a post) reconciles to
+    /// `SendFull` — the bytes are recovered. Under the old #3042 blanket suppression
+    /// this outcome neither reconciled nor resent: a potential black-hole.
+    #[test]
+    fn ownerless_timed_out_reconciles_full_when_not_committed() {
+        // Same ownerless TimedOut precondition.
+        assert!(watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::TimedOut,
+            false
+        ));
+        // committed < end → genuinely undelivered → re-send the FULL response.
+        let (start, end) = (1_000u64, 1_500u64);
+        assert_eq!(
+            watcher_terminal_resend_action(start, start, end),
+            WatcherTerminalResendAction::SendFull,
+        );
+        // committed at/below start (the all-or-nothing sink delegation's not-delivered
+        // shape) also re-sends.
+        assert_eq!(
+            watcher_terminal_resend_action(0, start, end),
+            WatcherTerminalResendAction::SendFull,
+        );
     }
 
     #[test]
@@ -3769,7 +3919,7 @@ mod matched_session_jsonl_gate_tests {
         ));
         assert!(watcher_should_direct_send_after_session_bound_ack(
             true,
-            SessionBoundRelayAckOutcome::TerminalSkipped,
+            SessionBoundRelayAckOutcome::NotDelivered,
             true
         ));
         assert!(watcher_should_direct_send_after_session_bound_ack(
@@ -3844,6 +3994,85 @@ mod matched_session_jsonl_gate_tests {
             watcher_terminal_resend_action(40, 50, 100),
             WatcherTerminalResendAction::SendFull,
             "committed below start must send the full range (no black-hole)"
+        );
+    }
+
+    // #3041 P1-5 (§3.2 SAFETY INVARIANT): a cross-actor `Unknown` outcome (the
+    // ring recorded `Unknown` / the ACK timed out / target was missing / dropped /
+    // sink-errored) MUST route through committed-offset reconciliation, NOT a blind
+    // 10s re-send. So `Unknown` with `committed >= end` → SkipAlreadyCommitted (a
+    // foreign owner already committed the range; re-sending would duplicate), and
+    // `Unknown` with `committed < end` → SendFull (the range is uncovered; no
+    // black-hole). The decision is driven SOLELY by the committed offset — it
+    // consults the authority, never blind-sends on the Unknown signal alone.
+    #[test]
+    fn unknown_outcome_triggers_committed_offset_reconciliation_not_blind_resend() {
+        use crate::services::cluster::stream_relay::DeliveryOutcome;
+        // The fold: every failure/unconfirmed ACK arm collapses to `Unknown`.
+        for ack in [
+            SessionBoundRelayAckOutcome::RingUnknown,
+            SessionBoundRelayAckOutcome::Dropped,
+            SessionBoundRelayAckOutcome::SinkError,
+            SessionBoundRelayAckOutcome::TimedOut,
+            SessionBoundRelayAckOutcome::MissingTarget,
+        ] {
+            assert_eq!(
+                session_bound_ack_delivery_outcome(ack),
+                DeliveryOutcome::Unknown,
+                "every failure/unconfirmed ACK arm folds to the cross-actor Unknown"
+            );
+        }
+
+        // §3.2: an Unknown outcome reconciles against the committed offset. The
+        // SAME `watcher_terminal_resend_action` gate that NotDelivered uses — no
+        // separate blind-resend path exists for Unknown.
+        let start = 100u64;
+        let end = 356u64;
+        // committed >= end: a foreign owner already committed the range → SKIP, NOT
+        // a blind re-send (which would duplicate).
+        assert_eq!(
+            watcher_terminal_resend_action(end, start, end),
+            WatcherTerminalResendAction::SkipAlreadyCommitted,
+            "Unknown + committed>=end must consult the offset and SKIP (no blind 10s re-send / no duplicate)"
+        );
+        // committed < end: the range is genuinely uncovered → SendFull (no
+        // black-hole). The decision came from the offset, not the Unknown signal.
+        assert_eq!(
+            watcher_terminal_resend_action(start, start, end),
+            WatcherTerminalResendAction::SendFull,
+            "Unknown + committed<end must SendFull via the offset authority (no black-hole)"
+        );
+    }
+
+    // #3041 P1-5 (§3.2 SAFETY INVARIANT): a `NotDelivered` outcome (the former
+    // `Ok(Skipped)`, redefined this phase) must ALSO route through committed-offset
+    // reconciliation — there is NO blind-skip fast-path for NotDelivered. When a
+    // FOREIGN owner already committed the range (`committed >= end`), the watcher
+    // must SKIP its re-send (no duplicate), exactly like a delivered turn — proving
+    // NotDelivered consults the offset rather than blindly skipping or blindly
+    // re-sending.
+    #[test]
+    fn not_delivered_outcome_keeps_no_resend_when_foreign_owner_committed() {
+        use crate::services::cluster::stream_relay::DeliveryOutcome;
+        assert_eq!(
+            session_bound_ack_delivery_outcome(SessionBoundRelayAckOutcome::NotDelivered),
+            DeliveryOutcome::NotDelivered,
+            "NotDelivered folds to the cross-actor NotDelivered (not Unknown, not Delivered)"
+        );
+        let start = 100u64;
+        let end = 356u64;
+        // A foreign owner committed the full range out from under this watcher.
+        assert_eq!(
+            watcher_terminal_resend_action(end, start, end),
+            WatcherTerminalResendAction::SkipAlreadyCommitted,
+            "NotDelivered + committed>=end (foreign owner committed) must SKIP (no duplicate, no blind-skip-without-checking)"
+        );
+        // But when NOTHING committed it still SendFulls — NotDelivered is never a
+        // silent drop (no black-hole).
+        assert_eq!(
+            watcher_terminal_resend_action(start, start, end),
+            WatcherTerminalResendAction::SendFull,
+            "NotDelivered + committed<end must SendFull (no black-hole; not a blind skip)"
         );
     }
 

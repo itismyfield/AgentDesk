@@ -71,16 +71,31 @@ pub const DEFAULT_RELAY_BUFFER: usize = 1024;
 /// times out → reconciles, never a false ACK).
 pub const TERMINAL_OUTCOME_RING_CAPACITY: usize = 64;
 
-/// #3041 P1-3 R5: the EXACT, per-frame terminal resolution recorded by the sink
-/// for a single terminal (result-bearing) frame's sequence. Distinct from the
+/// #3041 P1-3 R5 / P1-5: the EXACT, per-frame terminal resolution recorded for a
+/// single terminal (result-bearing) frame's sequence. Distinct from the
 /// high-water-mark fields (`last_terminal_committed/skipped_sequence`), which a
 /// LATER, higher-sequence terminal can bump — this is keyed to ONE sequence so a
 /// watcher resolves its ACK on ITS OWN terminal frame's outcome, decoupled from
 /// any other turn sharing the same physical chunk.
+///
+/// #3041 P1-5: the CANONICAL cross-actor 3-way delivery outcome. The sink-local
+/// enum stays 2-way (the sink always KNOWS: confirmed POST → `Delivered`;
+/// deterministic decline → `NotDelivered`; failure → `Err`). `Unknown` is a
+/// CROSS-ACTOR state that arises in the relay ring + watcher when the terminal
+/// resolution cannot be confirmed (the watcher's ACK timed out / target was
+/// missing / the frame was dropped or hit a sink error, or the sink POSTed but
+/// could not confirm the commit). Both `NotDelivered` AND `Unknown` MUST flow
+/// through the watcher's committed-offset reconciliation (§3.2) — there is NO
+/// blind skip for `NotDelivered` and NO blind 10s re-send for `Unknown`.
+///
+/// A NEVER-recorded sequence reads back `None` (distinct from `Some(Unknown)`):
+/// `None` means "not yet resolved" (keep waiting), `Some(Unknown)` is an explicit
+/// "resolved but unconfirmed → reconcile NOW" signal the sink/watcher can record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TerminalOutcome {
-    Committed,
-    Skipped,
+pub enum DeliveryOutcome {
+    Delivered,
+    NotDelivered,
+    Unknown,
 }
 
 /// An opaque stream frame emitted by a provider. Carries enough metadata for
@@ -157,7 +172,7 @@ pub struct RelayMetrics {
     /// for the EXACT `target.sequence` so B's tail committing at seq N+1 never
     /// satisfies A's ACK at seq N. Bounded FIFO (`TERMINAL_OUTCOME_RING_CAPACITY`):
     /// an evicted/never-recorded sequence reads back `None`.
-    terminal_outcomes: Mutex<VecDeque<(u64, TerminalOutcome)>>,
+    terminal_outcomes: Mutex<VecDeque<(u64, DeliveryOutcome)>>,
 }
 
 impl RelayMetrics {
@@ -191,12 +206,15 @@ impl RelayMetrics {
         }
     }
 
-    /// #3041 P1-3 R5: record THIS terminal frame's resolved outcome keyed by its
-    /// exact sequence, in a bounded FIFO ring. Called from `deliver_frame` for a
-    /// result-bearing terminal delivery (Committed/Skipped). Idempotent-ish: a
-    /// re-record of the same sequence overwrites the prior entry in place (a
-    /// sequence is delivered once, but this keeps the ring free of duplicates).
-    fn record_terminal_outcome(&self, sequence: u64, outcome: TerminalOutcome) {
+    /// #3041 P1-3 R5 / P1-5: record THIS terminal frame's resolved outcome keyed
+    /// by its exact sequence, in a bounded FIFO ring. Called from `deliver_frame`
+    /// for a result-bearing terminal delivery (`Delivered`/`NotDelivered`) and may
+    /// also carry an explicit cross-actor `Unknown` (sink POSTed but could not
+    /// confirm the commit) so the watcher reconciles immediately instead of waiting
+    /// for the 10s ACK timeout. Idempotent-ish: a re-record of the same sequence
+    /// overwrites the prior entry in place (a sequence is delivered once, but this
+    /// keeps the ring free of duplicates).
+    pub(crate) fn record_terminal_outcome(&self, sequence: u64, outcome: DeliveryOutcome) {
         let mut ring = self
             .terminal_outcomes
             .lock()
@@ -217,7 +235,7 @@ impl RelayMetrics {
     /// The watcher resolves its ACK on its OWN terminal frame's sequence via this
     /// — NOT the `>=` high-water-mark — so a co-chunked higher-sequence terminal
     /// can never satisfy it.
-    pub fn terminal_outcome_for_sequence(&self, sequence: u64) -> Option<TerminalOutcome> {
+    pub fn terminal_outcome_for_sequence(&self, sequence: u64) -> Option<DeliveryOutcome> {
         let ring = self
             .terminal_outcomes
             .lock()
@@ -237,14 +255,14 @@ impl RelayMetrics {
     pub(crate) fn record_terminal_committed_sequence_for_test(&self, sequence: u64) {
         self.last_terminal_committed_sequence_plus_one
             .fetch_max(encode_sequence_marker(sequence), Ordering::AcqRel);
-        self.record_terminal_outcome(sequence, TerminalOutcome::Committed);
+        self.record_terminal_outcome(sequence, DeliveryOutcome::Delivered);
     }
 
     #[cfg(test)]
     pub(crate) fn record_terminal_skipped_sequence_for_test(&self, sequence: u64) {
         self.last_terminal_skipped_sequence_plus_one
             .fetch_max(encode_sequence_marker(sequence), Ordering::AcqRel);
-        self.record_terminal_outcome(sequence, TerminalOutcome::Skipped);
+        self.record_terminal_outcome(sequence, DeliveryOutcome::NotDelivered);
     }
 
     #[cfg(test)]
@@ -327,22 +345,37 @@ pub trait RelaySink: Send + Sync + 'static {
 /// Result of accepting a relay frame into the sink. This deliberately
 /// distinguishes "the sink accepted/parsing-counted this frame" from "a
 /// terminal Discord response was actually committed". Watchers must use only
-/// `TerminalCommitted` as delegation success; `TerminalSkipped` is an explicit
-/// direct-fallback signal, not an error and not a commit.
+/// `TerminalDelivered` as delegation success.
+///
+/// #3041 P1-5: the three terminal variants mirror the cross-actor 3-way
+/// `DeliveryOutcome`. `TerminalDelivered` (confirmed POST/edit) → the watcher
+/// treats the turn as delivered. `TerminalNotDelivered` (a deterministic
+/// route-decision decline — foreign-owner lease block, or bridge-owned /
+/// mismatched inflight) and `TerminalUnknown` (the sink POSTed but could not
+/// confirm the commit) BOTH route the watcher through committed-offset
+/// reconciliation (§3.2): NO blind skip for `NotDelivered`, NO blind re-send for
+/// `Unknown`. The session-bound sink itself emits only `Delivered`/`NotDelivered`
+/// (it always knows); `TerminalUnknown` is reserved for a future/optional sink
+/// site that POSTs-without-confirm and for cross-actor symmetry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RelaySinkOutcome {
     FrameAccepted,
-    TerminalCommitted,
-    TerminalSkipped,
+    TerminalDelivered,
+    TerminalNotDelivered,
+    TerminalUnknown,
 }
 
 impl RelaySinkOutcome {
-    pub fn terminal_committed(self) -> bool {
-        matches!(self, Self::TerminalCommitted)
+    pub fn terminal_delivered(self) -> bool {
+        matches!(self, Self::TerminalDelivered)
     }
 
-    pub fn terminal_skipped(self) -> bool {
-        matches!(self, Self::TerminalSkipped)
+    pub fn terminal_not_delivered(self) -> bool {
+        matches!(self, Self::TerminalNotDelivered)
+    }
+
+    pub fn terminal_unknown(self) -> bool {
+        matches!(self, Self::TerminalUnknown)
     }
 }
 
@@ -869,7 +902,7 @@ async fn deliver_frame(
             metrics
                 .last_delivered_sequence_plus_one
                 .fetch_max(encode_sequence_marker(frame.sequence), Ordering::AcqRel);
-            if outcome.terminal_committed() {
+            if outcome.terminal_delivered() {
                 metrics.terminal_commits.fetch_add(1, Ordering::AcqRel);
                 metrics
                     .last_terminal_committed_sequence_plus_one
@@ -877,15 +910,26 @@ async fn deliver_frame(
                 // #3041 P1-3 R5: record THIS frame's exact-sequence outcome so the
                 // watcher resolves its ACK on its own terminal frame (decoupled
                 // from any co-chunked higher-sequence terminal).
-                metrics.record_terminal_outcome(frame.sequence, TerminalOutcome::Committed);
+                metrics.record_terminal_outcome(frame.sequence, DeliveryOutcome::Delivered);
             }
-            if outcome.terminal_skipped() {
+            if outcome.terminal_not_delivered() {
                 metrics.terminal_skips.fetch_add(1, Ordering::AcqRel);
                 metrics
                     .last_terminal_skipped_sequence_plus_one
                     .fetch_max(encode_sequence_marker(frame.sequence), Ordering::AcqRel);
-                // #3041 P1-3 R5: per-sequence skip — see committed branch above.
-                metrics.record_terminal_outcome(frame.sequence, TerminalOutcome::Skipped);
+                // #3041 P1-5: a deterministic route-decision decline — recorded as
+                // `NotDelivered` so the watcher reconciles against the committed
+                // offset (§3.2 SendFull-or-Skip), never a blind skip.
+                metrics.record_terminal_outcome(frame.sequence, DeliveryOutcome::NotDelivered);
+            }
+            if outcome.terminal_unknown() {
+                // #3041 P1-5: the sink POSTed but could not confirm the commit. We
+                // do NOT bump the commit/skip high-water-marks (the outcome is, by
+                // definition, unconfirmed) but DO record the per-sequence `Unknown`
+                // so the watcher's per-sequence ACK resolves immediately to
+                // committed-offset reconciliation instead of waiting out the 10s
+                // ACK timeout. Both `NotDelivered` and `Unknown` flow through §3.2.
+                metrics.record_terminal_outcome(frame.sequence, DeliveryOutcome::Unknown);
             }
         }
         Err(error) => {
@@ -961,8 +1005,8 @@ mod tests {
         async fn deliver(&self, frame: &StreamFrame) -> Result<RelaySinkOutcome, RelaySinkError> {
             Ok(match frame.sequence {
                 0 => RelaySinkOutcome::FrameAccepted,
-                1 => RelaySinkOutcome::TerminalSkipped,
-                _ => RelaySinkOutcome::TerminalCommitted,
+                1 => RelaySinkOutcome::TerminalNotDelivered,
+                _ => RelaySinkOutcome::TerminalDelivered,
             })
         }
     }
@@ -1151,11 +1195,11 @@ mod tests {
         let metrics = handle.metrics();
         assert_eq!(
             metrics.terminal_outcome_for_sequence(1),
-            Some(TerminalOutcome::Skipped)
+            Some(DeliveryOutcome::NotDelivered)
         );
         assert_eq!(
             metrics.terminal_outcome_for_sequence(2),
-            Some(TerminalOutcome::Committed)
+            Some(DeliveryOutcome::Delivered)
         );
         assert_eq!(metrics.terminal_outcome_for_sequence(0), None);
         // A sequence that was never terminally resolved reads None.
@@ -1171,17 +1215,17 @@ mod tests {
     fn per_sequence_terminal_outcome_is_independent_of_higher_sequences() {
         let metrics = RelayMetrics::default();
         // A at seq 10 was SKIPPED; B's tail at seq 11 COMMITTED (higher sequence).
-        metrics.record_terminal_outcome(10, TerminalOutcome::Skipped);
-        metrics.record_terminal_outcome(11, TerminalOutcome::Committed);
+        metrics.record_terminal_outcome(10, DeliveryOutcome::NotDelivered);
+        metrics.record_terminal_outcome(11, DeliveryOutcome::Delivered);
         // High-water-mark for committed is now 11 (would falsely satisfy `>= 10`).
         assert_eq!(
             metrics.terminal_outcome_for_sequence(10),
-            Some(TerminalOutcome::Skipped),
-            "A's ACK must read A's OWN outcome (Skipped), not B's committed high-water-mark"
+            Some(DeliveryOutcome::NotDelivered),
+            "A's ACK must read A's OWN outcome (NotDelivered), not B's delivered high-water-mark"
         );
         assert_eq!(
             metrics.terminal_outcome_for_sequence(11),
-            Some(TerminalOutcome::Committed)
+            Some(DeliveryOutcome::Delivered)
         );
     }
 
@@ -1193,7 +1237,7 @@ mod tests {
         let metrics = RelayMetrics::default();
         let total = TERMINAL_OUTCOME_RING_CAPACITY as u64 + 5;
         for seq in 0..total {
-            metrics.record_terminal_outcome(seq, TerminalOutcome::Committed);
+            metrics.record_terminal_outcome(seq, DeliveryOutcome::Delivered);
         }
         // The oldest 5 were evicted.
         for seq in 0..5 {
@@ -1207,9 +1251,33 @@ mod tests {
         for seq in 5..total {
             assert_eq!(
                 metrics.terminal_outcome_for_sequence(seq),
-                Some(TerminalOutcome::Committed)
+                Some(DeliveryOutcome::Delivered)
             );
         }
+    }
+
+    // #3041 P1-5: the ring carries the cross-actor `Unknown` outcome and an
+    // explicit `Some(Unknown)` is DISTINCT from a never-recorded `None`. A sink
+    // that POSTed-without-confirming (or the watcher's reconcile path) records
+    // `Unknown` so the watcher reconciles immediately instead of waiting out the
+    // 10s ACK timeout — while a sequence that was never resolved still reads
+    // `None` ("keep waiting"). This pins the additive third variant.
+    #[test]
+    fn terminal_outcome_ring_carries_unknown() {
+        let metrics = RelayMetrics::default();
+        metrics.record_terminal_outcome(7, DeliveryOutcome::Unknown);
+        assert_eq!(
+            metrics.terminal_outcome_for_sequence(7),
+            Some(DeliveryOutcome::Unknown),
+            "Unknown is recorded and read back as an explicit cross-actor outcome"
+        );
+        assert_ne!(
+            metrics.terminal_outcome_for_sequence(7),
+            None,
+            "Some(Unknown) (resolved-but-unconfirmed) is DISTINCT from None (not yet resolved)"
+        );
+        // A never-recorded sequence still reads None ("keep waiting"), not Unknown.
+        assert_eq!(metrics.terminal_outcome_for_sequence(8), None);
     }
 
     #[tokio::test]
