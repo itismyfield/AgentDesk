@@ -128,7 +128,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (8971 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (9124 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -263,6 +263,47 @@
     (renamed from `ownerless_timeout_suppresses_watcher_direct_fallback`),
     `ownerless_timed_out_reconciles_skip_when_committed_reaches_end` (#3042
     regression guard), `ownerless_timed_out_reconciles_full_when_not_committed`.
+    +93 from #3142 (EPIC, follow-up to #3141): TURN-ALIASING SAFETY for the
+    remaining committed-output consumers that the #3141 finalize/clear/reaction
+    gate did not cover. A new pure sibling helper
+    `committed_anchor_cleanup_is_stale_for_newer_turn` (the id==0-INCLUSIVE variant
+    of #3141's `committed_completion_is_stale_for_newer_turn`, mirroring the same
+    `turn_start_offset.unwrap_or(last_offset) >= current_offset` yield-guard offset
+    test but requiring anchor-relevance — `user_msg_id != 0 ||
+    injected_prompt_message_id.is_some() || external_input`) gates the two
+    anchor-cleanup branches (the `should_complete_tui_direct_anchor_lifecycle`
+    first branch — also the `lifecycle_stage_paused`-with-inflight path — and the
+    `injected_prompt_message_id` task-notification branch) so an id==0
+    external-input/injected newer turn's anchor is never `✅`'d mid-flight. The
+    id!=0 `completion_is_stale_for_newer_turn` now ALSO gates dispatch finalization
+    (the `else if let Some(did) = resolved_did.as_deref().filter(|_| !stale)` arm
+    falls through to the no-finalize `else => true` so a newer dispatch is not
+    completed with the older `full_response`) and the TUI history push (the newer
+    turn's `user_text` is never cross-paired with the older response). The
+    status-panel completion identity is offset-pinned via `pinned_finalize_user_msg_id`
+    (None for a newer pre-relay snapshot) so the panel binding agrees by
+    construction with the reaction/transcript/analytics gate. Matrix tests
+    `committed_anchor_cleanup_stale_for_newer_turn_matrix` (+ per-consumer
+    `dispatch_finalization_skips_when_stale`, `history_append_skips_when_stale`,
+    `status_panel_id_none_when_pre_relay_snapshot_is_newer`,
+    `anchor_cleanup_skips_when_stale_id0`, `paused_first_branch_anchor_gate`).
+    +54 from the #3142 codex re-review (residual status-panel aliasing gap): the
+    completion IDENTITY was offset-pinned but the status-panel ADOPT site
+    (`should_adopt_inflight_terminal_message_ids` → `status_message_id`) and the
+    EDIT/finalize site (`complete_watcher_status_panel_v2` + the external-input
+    orphan-store reconciliation) still acted on a stale NEWER pre-relay snapshot,
+    so the older committed range could pull a newer turn's panel id and EDIT it.
+    Both sites now gate on
+    `!committed_anchor_cleanup_is_stale_for_newer_turn(inflight_before_relay, None,
+    session, current_offset)` (the id==0-INCLUSIVE anchor variant catches a newer
+    id==0 external-input/injected panel owner the id!=0 sibling would miss; the
+    OFFSET test — not `pinned == 0` — keeps an in-range id==0 watcher-direct turn
+    NON-suppressed). turn_bridge/mod.rs:2009 (BRIDGE path / #3016 core hotfile) is
+    explicitly OUT OF SCOPE and deferred to a follow-up. New test
+    `status_panel_adopt_and_edit_gate_is_turn_aliasing_safe` covers stale-newer
+    (incl. id==0 external/injected) NOT adopted/edited, in-range id==0
+    watcher-direct STILL adopts+edits (over-suppression guard), and in-range id!=0
+    unchanged.
   - `src/services/discord/tui_prompt_relay.rs` (3994 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +12 from #3041 P1-4 codex: the lease record
