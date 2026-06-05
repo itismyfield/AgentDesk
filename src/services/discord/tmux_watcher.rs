@@ -2793,8 +2793,11 @@ enum WatcherTerminalResendAction {
 /// - `Leased{Sink}` AND `now_ms >= deadline_ms` → RECLAIM (the caller force-clears
 ///   the dead sink's marker via `reclaim_if_expired`) then fall through to
 ///   `watcher_terminal_resend_action` → `SendFull` (committed < end). No black-hole.
-/// - `Committed{Sink}` (sink committed Delivered, not yet released) → Skip (belt-and-
-///   suspenders; `committed >= end` already yields Skip below).
+/// - `Committed{Sink}` (sink committed its terminal decision, not yet released) →
+///   route through the committed-offset reconciliation: `committed >= end` (a real
+///   Delivered commit) → Skip, `committed < end` (a NotDelivered / refused-advance
+///   commit) → SendFull (re-send; no black-hole). #3159 BUG 1: the marker is no
+///   longer blindly treated as delivered.
 /// - ANY non-Sink holder / `Unleased` / committed-covered → behave EXACTLY as today:
 ///   defer to `watcher_terminal_resend_action`. The gate ONLY interposes for a
 ///   Sink-held lease, so the watcher-direct B2 path is untouched.
@@ -2828,9 +2831,15 @@ fn watcher_terminal_resend_action_gated(
             holder: LeaseHolder::Sink,
             ..
         } => {
-            // The sink committed Delivered but hasn't released yet; the range is
-            // delivered. Skip (belt-and-suspenders; committed>=end also yields Skip).
-            (WatcherTerminalResendAction::SkipAlreadyCommitted, false)
+            // #3159 BUG 1: a Committed{Sink} marker is NO LONGER assumed delivered.
+            // Route through the committed-offset reconciliation; committed >= end
+            // (a real Delivered commit, which advanced the offset BEFORE committing)
+            // → SkipAlreadyCommitted (unchanged), committed < end (a NotDelivered /
+            // refused-advance commit) → SendFull (the range was NOT delivered, so
+            // re-send; no black-hole). This also subsumes the Drop-release fallback
+            // (Unleased + committed < end → SendFull). The committed offset is the
+            // sole delivered-test, so a genuinely-delivered range is never re-sent.
+            (watcher_terminal_resend_action(committed, start, end), false)
         }
         // Unleased, or held/committed by a non-Sink holder (Watcher/Bridge): the
         // #3151 marker does not apply — behave exactly as the pre-#3151 path.
@@ -8975,7 +8984,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &tmux_session_name,
                 "watcher_terminal_resend_reconcile",
             );
-            let committed = shared.committed_relay_offset(channel_id);
             // #3151: gate the re-send on the in-flight sink-delivery marker BEFORE
             // the committed-offset reconciliation. The marker is a `Leased{Sink}`
             // state on the SAME per-channel `DeliveryLeaseCell` the watcher's own
@@ -8984,11 +8992,22 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             //     NOT re-send this pass (the slow-sink-in-flight duplicate #3151).
             //   * Leased{Sink, expired} → reclaim the dead sink's marker, then
             //     SendFull (committed<end) — the no-black-hole arm.
-            //   * Committed{Sink} / committed>=end → Skip (range delivered).
+            //   * Committed{Sink} → reconcile vs committed offset: committed>=end →
+            //     Skip (delivered), committed<end → SendFull (#3159: a refused/
+            //     NotDelivered commit re-sends, no black-hole).
             //   * Unleased / non-Sink holder → unchanged (defer to the existing
             //     committed-offset reconciliation).
             let gate_cell = shared.delivery_lease(channel_id);
             let snapshot = gate_cell.read();
+            // #3159 BUG 1 (codex race-1): read `committed` AFTER the lease snapshot.
+            // The sink's CLEAR protocol advances `committed` FIRST, THEN commits the
+            // marker (`Committed{Sink}`). So observing `Committed{Sink}` in `snapshot`
+            // happens-after the sink's committed-offset write; reading `committed`
+            // next is therefore guaranteed to see the advanced value (committed>=end
+            // for a real Delivered commit → Skip). Reading it BEFORE the snapshot
+            // could capture a pre-advance `committed < end` paired with a now-
+            // Committed{Delivered} marker → a spurious SendFull duplicate.
+            let committed = shared.committed_relay_offset(channel_id);
             let now_ms = crate::services::discord::lease_now_ms();
             let (action, reclaim_expired_sink) = watcher_terminal_resend_action_gated(
                 &snapshot,
@@ -13166,10 +13185,55 @@ TUI-E2E-marker ssh-direct
             );
         }
 
-        /// Committed{Sink} (sink committed Delivered, not yet released) → Skip,
-        /// no reclaim (belt-and-suspenders early Skip).
+        /// #3159 BUG 1: Committed{Sink, Delivered} with committed >= end (a real
+        /// delivered commit advances the offset BEFORE committing) → Skip, no reclaim.
+        /// This is the no-duplicate invariant: a genuinely-delivered range is never
+        /// re-sent.
         #[test]
-        fn committed_sink_skips() {
+        fn committed_sink_delivered_covered_skips() {
+            let snap = LeaseSnapshot::Committed {
+                holder: LeaseHolder::Sink,
+                turn: turn(),
+                start: START,
+                end: END,
+                outcome: LeaseOutcome::Delivered,
+            };
+            // committed >= end (END): the advance ran before commit.
+            let (action, reclaim) =
+                watcher_terminal_resend_action_gated(&snap, END, START, END, NOW);
+            assert_eq!(action, WatcherTerminalResendAction::SkipAlreadyCommitted);
+            assert!(!reclaim);
+        }
+
+        /// #3159 BUG 1 (no black-hole): Committed{Sink, NotDelivered} — the identity
+        /// gate REFUSED the advance, so committed stayed < end. The gate now routes
+        /// through committed-offset reconciliation → SendFull (re-send, not Skip).
+        /// Previously this blind-Skipped → under-delivery / black-hole.
+        #[test]
+        fn committed_sink_not_delivered_sends_full() {
+            let snap = LeaseSnapshot::Committed {
+                holder: LeaseHolder::Sink,
+                turn: turn(),
+                start: START,
+                end: END,
+                outcome: LeaseOutcome::NotDelivered,
+            };
+            let (action, reclaim) =
+                watcher_terminal_resend_action_gated(&snap, COMMITTED_BELOW_END, START, END, NOW);
+            assert_eq!(
+                action,
+                WatcherTerminalResendAction::SendFull,
+                "a NotDelivered commit (committed<end) must re-send, not Skip"
+            );
+            assert!(!reclaim);
+        }
+
+        /// #3159 BUG 1 belt-and-suspenders: even a Delivered-labelled commit with
+        /// committed < end (which the fixed producer no longer emits, since Delivered
+        /// is committed only after a real advance) re-sends — the committed offset is
+        /// the SOLE delivered-test, not the outcome label. No black-hole regardless.
+        #[test]
+        fn committed_sink_below_end_sends_full_regardless_of_label() {
             let snap = LeaseSnapshot::Committed {
                 holder: LeaseHolder::Sink,
                 turn: turn(),
@@ -13179,7 +13243,7 @@ TUI-E2E-marker ssh-direct
             };
             let (action, reclaim) =
                 watcher_terminal_resend_action_gated(&snap, COMMITTED_BELOW_END, START, END, NOW);
-            assert_eq!(action, WatcherTerminalResendAction::SkipAlreadyCommitted);
+            assert_eq!(action, WatcherTerminalResendAction::SendFull);
             assert!(!reclaim);
         }
 
