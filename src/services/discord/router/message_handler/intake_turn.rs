@@ -1616,6 +1616,37 @@ pub(in crate::services::discord) async fn handle_text_message(
         return Ok(());
     }
 
+    // #3148: relocated idle-recap clear (Window 2 fix). The clear (and the
+    // per-channel turn-generation bump) used to run in `intake_gate` at
+    // message-accept time, BEFORE this mailbox claim — so it was not truly
+    // capture-at-claim and a racing recap POST could persist a fresh card the
+    // old-id-keyed clear could not remove. Run it HERE, right after the claim
+    // succeeds (`started == true`) and only when THIS message won the claim,
+    // mirroring the TUI path (`tui_prompt_relay` claim → bump → clear). A
+    // queued message that lost the claim race must NOT bump/clear — the winning
+    // turn does that. The bump runs BEFORE the clear so any idle-recap POST job
+    // whose persist CAS captured the pre-bump generation fails to persist a
+    // card over this just-claimed turn; the clear then removes any card the
+    // POST already persisted before this claim.
+    if started && let Some(pool) = shared.pg_pool.as_ref().cloned() {
+        if let Err(e) =
+            crate::services::discord::idle_recap::bump_turn_generation(&pool, channel_id.get())
+                .await
+        {
+            tracing::warn!(
+                error = %e,
+                channel_id = channel_id.get(),
+                "idle_recap: failed to bump turn generation on Discord-intake claim"
+            );
+        }
+        crate::services::discord::idle_recap::spawn_clear_captured_idle_recap_for_channel(
+            http.clone(),
+            pool,
+            channel_id.get(),
+        )
+        .await;
+    }
+
     // #1332 dispatch hand-off: if this turn was previously enqueued and is now
     // being dispatched, reuse the Queued placeholder card so the user sees a
     // single message transition `📬 → 🔄` instead of two distinct placeholders.

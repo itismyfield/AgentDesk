@@ -263,7 +263,7 @@
     (renamed from `ownerless_timeout_suppresses_watcher_direct_fallback`),
     `ownerless_timed_out_reconciles_skip_when_committed_reaches_end` (#3042
     regression guard), `ownerless_timed_out_reconciles_full_when_not_committed`.
-  - `src/services/discord/tui_prompt_relay.rs` (3982 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (3994 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +12 from #3041 P1-4 codex: the lease record
     helpers now RETURN the recorded lease (with its per-record `generation`
@@ -375,7 +375,7 @@
   - `src/services/discord/health/recovery.rs` (2567 lines; health recovery
     extraction surface, split further before adding non-bugfix behavior; +70
     from #3126 stall-watchdog completed-idle false-positive guard tests).
-  - `src/services/discord/router/message_handler/intake_turn.rs` (3620 lines;
+  - `src/services/discord/router/message_handler/intake_turn.rs` (3651 lines;
     Discord message intake turn orchestration split from the router message
     handler; bugfix only outside a further extraction plan; +9 from #3082
     queued-only answer-flush gate (`is_queued_notice` on the two

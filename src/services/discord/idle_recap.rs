@@ -86,6 +86,13 @@ pub(crate) struct RecapSnapshot {
     /// Used as the fallback source for transcript-based scrollback when no
     /// live tmux pane exists (e.g. the `claude-e` per-turn spawn runtime).
     pub(crate) cwd: Option<String>,
+    /// #3148: per-channel turn-generation counter captured at snapshot load.
+    /// The persist CAS (`persist_recap_message_id`) folds this into the UPDATE
+    /// `WHERE` so a turn claimed during the (multi-second) compose/persist
+    /// window — which bumps this counter via `bump_turn_generation` — makes the
+    /// persist a no-op (0 rows) and the just-posted card is deleted instead of
+    /// being left over the now-active turn. See migration 0070.
+    pub(crate) idle_recap_turn_generation: i64,
 }
 
 impl RecapSnapshot {
@@ -119,6 +126,7 @@ pub(crate) async fn load_recap_snapshot(
                 s.cwd,
                 s.idle_recap_message_id,
                 s.idle_recap_channel_id,
+                s.idle_recap_turn_generation,
                 a.discord_channel_id,
                 a.discord_channel_cc,
                 a.discord_channel_cdx,
@@ -179,6 +187,7 @@ struct RecapSnapshotRow {
     cwd: Option<String>,
     idle_recap_message_id: Option<i64>,
     idle_recap_channel_id: Option<i64>,
+    idle_recap_turn_generation: i64,
     discord_channel_id: Option<String>,
     discord_channel_cc: Option<String>,
     discord_channel_cdx: Option<String>,
@@ -213,6 +222,7 @@ impl RecapSnapshotRow {
             latest_turn_cache_read_tokens: self.latest_turn_cache_read_tokens,
             previous_message_id: self.idle_recap_message_id,
             previous_channel_id: self.idle_recap_channel_id,
+            idle_recap_turn_generation: self.idle_recap_turn_generation,
             discord_channel_id: self.discord_channel_id,
             discord_channel_cc: self.discord_channel_cc,
             discord_channel_cdx: self.discord_channel_cdx,
@@ -809,22 +819,72 @@ pub(crate) async fn delete_previous_card(http: &serenity::Http, channel_id: u64,
 /// Persist the freshly-posted message id (and the channel it lives in) so
 /// the next cycle can delete it and `message_handler` can clear it the
 /// moment the user sends their next turn.
+///
+/// #3148 (compare-and-swap on the turn generation): the persist is conditional
+/// on `idle_recap_turn_generation` still equalling `captured_generation` — the
+/// value read at snapshot load (`load_recap_snapshot`), ~20s before this
+/// commit. A turn claimed anywhere in the compose/persist window calls
+/// `bump_turn_generation`, which increments the same row's counter; the two
+/// UPDATEs serialize on the Postgres row, so if a claim committed first this
+/// CAS matches 0 rows and the caller deletes the just-posted card instead of
+/// stamping it over the now-active turn (closing Window 1 atomically). Returns
+/// the number of rows affected: `1` = card persisted, `0` = CAS lost (a turn
+/// raced in).
 pub(crate) async fn persist_recap_message_id(
     pool: &PgPool,
     session_key: &str,
     channel_id: u64,
     message_id: u64,
-) -> Result<(), sqlx::Error> {
+    captured_generation: i64,
+) -> Result<u64, sqlx::Error> {
     sqlx::query(
         "UPDATE sessions
          SET idle_recap_message_id = $1,
              idle_recap_channel_id = $2,
              idle_recap_posted_at  = NOW()
-         WHERE session_key = $3",
+         WHERE session_key = $3
+           AND idle_recap_turn_generation = $4",
     )
     .bind(message_id as i64)
     .bind(channel_id as i64)
     .bind(session_key)
+    .bind(captured_generation)
+    .execute(pool)
+    .await
+    .map(|result| result.rows_affected())
+}
+
+/// #3148: bump the per-channel turn-generation counter for the session(s) bound
+/// to `channel_id`. Called best-effort right after a turn is claimed (TUI or
+/// Discord-intake) and BEFORE the relocated recap-clear, so any idle-recap POST
+/// job whose persist CAS captured the pre-bump generation fails to persist its
+/// card over this now-active turn.
+///
+/// Keyed by the channel via the same `agents`-join path
+/// `load_recap_snapshot`/`resolve_post_channel` resolve channel→session, NOT by
+/// `idle_recap_channel_id` (which is NULL whenever no card is currently
+/// recorded — and the whole point is to bump even when no card exists yet so a
+/// mid-flight POST cannot persist one). The increment is a single atomic SQL
+/// UPDATE; Postgres row-level locking serializes it against the persist CAS, so
+/// there is no app-side read-modify-write gap.
+pub(crate) async fn bump_turn_generation(
+    pool: &PgPool,
+    channel_id: u64,
+) -> Result<(), sqlx::Error> {
+    let channel_text = channel_id.to_string();
+    sqlx::query(
+        "UPDATE sessions s
+         SET idle_recap_turn_generation = s.idle_recap_turn_generation + 1
+         FROM agents a
+         WHERE a.id = s.agent_id
+           AND (
+                a.discord_channel_id  = $1
+             OR a.discord_channel_cc  = $1
+             OR a.discord_channel_cdx = $1
+             OR a.discord_channel_alt = $1
+           )",
+    )
+    .bind(channel_text)
     .execute(pool)
     .await
     .map(|_| ())
@@ -1131,6 +1191,34 @@ pub(crate) fn post_recheck_action(active_turn_after_post: bool) -> PostRecheckAc
     }
 }
 
+/// #3148: what the post job does with the result of the conditional persist
+/// (`persist_recap_message_id`, which folds the turn-generation CAS into its
+/// `WHERE`). This is the atomic close of Window 1: a turn that claims in the
+/// post-recheck→persist gap bumps the generation, the persist matches 0 rows,
+/// and we treat the card the same as the `DeleteAndSkipPersist` path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PersistCasOutcome {
+    /// `rows_affected == 1`: the generation was unchanged, the pointer is now
+    /// persisted, log success.
+    Persisted,
+    /// `rows_affected == 0`: a turn claimed during the persist window and
+    /// bumped the generation, so the CAS lost. Delete the just-posted card and
+    /// skip persisting (an expected race outcome, NOT an error — the idle-cycle
+    /// stamp already deduped this cycle so it does not re-fire).
+    CasLostDeleteAndSkip,
+}
+
+/// Pure decision seam mapping the persist CAS `rows_affected` to the post job's
+/// action, so the "0 rows ⇒ delete + skip" branch is unit-testable without a
+/// live Postgres.
+pub(crate) fn persist_cas_outcome(rows_affected: u64) -> PersistCasOutcome {
+    if rows_affected == 0 {
+        PersistCasOutcome::CasLostDeleteAndSkip
+    } else {
+        PersistCasOutcome::Persisted
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1373,6 +1461,7 @@ mod tests {
             latest_turn_cache_read_tokens: None,
             previous_message_id: None,
             previous_channel_id: None,
+            idle_recap_turn_generation: 0,
             discord_channel_id: None,
             discord_channel_cc: None,
             discord_channel_cdx: Some("1506295335096549406".to_string()),
@@ -1694,6 +1783,167 @@ mod tests {
             persisted.borrow().as_slice(),
             &[(channel_id, posted_message_id)],
             "the pointer is persisted when the channel is still idle at the recheck"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // #3148 (per-channel turn-generation CAS): the persist folds a
+    // compare-and-swap on the generation captured at snapshot load. A turn
+    // claimed in the post-recheck→persist gap (residual Window 1) bumps the
+    // generation, so the conditional UPDATE matches 0 rows and the just-posted
+    // card is deleted instead of stamped over the now-active turn.
+    // ---------------------------------------------------------------
+
+    /// Pure decision seam: `rows_affected == 0` (CAS lost — a turn claimed in
+    /// the persist window and bumped the generation) → delete the just-posted
+    /// card and skip persist; `rows_affected == 1` → persisted.
+    #[test]
+    fn persist_cas_outcome_skips_when_generation_bumped_persists_otherwise() {
+        assert_eq!(
+            persist_cas_outcome(0),
+            PersistCasOutcome::CasLostDeleteAndSkip,
+            "0 rows ⇒ a turn claimed during the persist window bumped the generation ⇒ delete+skip"
+        );
+        assert_eq!(
+            persist_cas_outcome(1),
+            PersistCasOutcome::Persisted,
+            "1 row ⇒ generation unchanged ⇒ card persisted"
+        );
+    }
+
+    /// Interleaving (Window 1): the recap job captures generation `G` at
+    /// snapshot load; a turn claims between capture and persist, bumping the
+    /// row's generation to `G+1`. The persist's `... AND
+    /// idle_recap_turn_generation = G` then matches 0 rows. This models that
+    /// conditional UPDATE purely: the persist succeeds only when the captured
+    /// generation still equals the row's CURRENT generation. The post job must
+    /// then DELETE the just-posted card and NOT persist it.
+    #[tokio::test]
+    async fn persist_cas_noop_when_turn_claimed_between_capture_and_persist() {
+        // The recap job captured this at snapshot load (~20s before persist).
+        let captured_generation: i64 = 7;
+        // A turn claimed in the compose/persist window and bumped the row.
+        let row_generation_now: i64 = 8;
+
+        // Model the conditional persist UPDATE's row count: 1 iff the captured
+        // generation still matches the row's current generation, else 0.
+        let rows_affected: u64 = if captured_generation == row_generation_now {
+            1
+        } else {
+            0
+        };
+
+        let deleted: Rc<RefCell<Vec<(u64, u64)>>> = Rc::new(RefCell::new(Vec::new()));
+        let persisted: Rc<RefCell<Vec<(u64, u64)>>> = Rc::new(RefCell::new(Vec::new()));
+        let channel_id = 4242u64;
+        let posted_message_id = 9090u64;
+
+        match persist_cas_outcome(rows_affected) {
+            PersistCasOutcome::CasLostDeleteAndSkip => {
+                deleted.borrow_mut().push((channel_id, posted_message_id));
+            }
+            PersistCasOutcome::Persisted => {
+                persisted.borrow_mut().push((channel_id, posted_message_id));
+            }
+        }
+
+        assert_eq!(
+            deleted.borrow().as_slice(),
+            &[(channel_id, posted_message_id)],
+            "a turn claimed in the persist window bumped the generation ⇒ card deleted, not persisted"
+        );
+        assert!(
+            persisted.borrow().is_empty(),
+            "the card must NOT be persisted over the now-active turn (Window 1 closed by the CAS)"
+        );
+    }
+
+    /// Positive control: no claim raced in, so the captured generation still
+    /// equals the row's current generation → persist succeeds (1 row), the card
+    /// is persisted, nothing deleted. Guards against a false-skip on a genuinely
+    /// idle channel.
+    #[tokio::test]
+    async fn persist_cas_persists_when_generation_unchanged() {
+        let captured_generation: i64 = 3;
+        let row_generation_now: i64 = 3;
+        let rows_affected: u64 = if captured_generation == row_generation_now {
+            1
+        } else {
+            0
+        };
+
+        let deleted: Rc<RefCell<Vec<(u64, u64)>>> = Rc::new(RefCell::new(Vec::new()));
+        let persisted: Rc<RefCell<Vec<(u64, u64)>>> = Rc::new(RefCell::new(Vec::new()));
+        let channel_id = 555u64;
+        let posted_message_id = 6161u64;
+
+        match persist_cas_outcome(rows_affected) {
+            PersistCasOutcome::CasLostDeleteAndSkip => {
+                deleted.borrow_mut().push((channel_id, posted_message_id));
+            }
+            PersistCasOutcome::Persisted => {
+                persisted.borrow_mut().push((channel_id, posted_message_id));
+            }
+        }
+
+        assert!(
+            deleted.borrow().is_empty(),
+            "no false-skip on a genuinely idle channel: nothing deleted when generation unchanged"
+        );
+        assert_eq!(
+            persisted.borrow().as_slice(),
+            &[(channel_id, posted_message_id)],
+            "the card is persisted when no turn claimed during the persist window"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // #3148 Window 2 (capture-at-claim parity): the Discord-intake recap-clear
+    // (and the generation bump) was relocated to run AFTER the mailbox claim,
+    // ONLY when this message won the claim (`started == true`), and the bump
+    // runs BEFORE the clear — mirroring the TUI path exactly. These tests pin
+    // that ordering/gating without a live Postgres or Discord http.
+    // ---------------------------------------------------------------
+
+    /// Models the relocated Discord-intake claim sequence: when `started ==
+    /// true` the order is BUMP then CLEAR, both keyed to this channel; a queued
+    /// message that lost the claim (`started == false`) does NEITHER (the
+    /// winning turn does).
+    #[tokio::test]
+    async fn intake_clear_runs_after_claim_bump_before_clear_only_when_started() {
+        #[derive(Debug, PartialEq, Eq)]
+        enum Step {
+            Bump(u64),
+            Clear(u64),
+        }
+
+        async fn run_intake_claim_sequence(
+            started: bool,
+            channel_id: u64,
+            steps: &RefCell<Vec<Step>>,
+        ) {
+            // Mirrors intake_turn.rs: gated on `started`, bump BEFORE clear.
+            if started {
+                steps.borrow_mut().push(Step::Bump(channel_id));
+                steps.borrow_mut().push(Step::Clear(channel_id));
+            }
+        }
+
+        // Won the claim → bump precedes clear, both for this channel.
+        let steps = RefCell::new(Vec::new());
+        run_intake_claim_sequence(true, 1234, &steps).await;
+        assert_eq!(
+            steps.into_inner(),
+            vec![Step::Bump(1234), Step::Clear(1234)],
+            "started==true ⇒ bump THEN clear (parity with TUI claim → bump → clear)"
+        );
+
+        // Lost the claim race → no bump, no clear (the winning turn handles it).
+        let steps = RefCell::new(Vec::new());
+        run_intake_claim_sequence(false, 1234, &steps).await;
+        assert!(
+            steps.into_inner().is_empty(),
+            "started==false (queued/lost race) ⇒ neither bump nor clear"
         );
     }
 

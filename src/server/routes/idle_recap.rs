@@ -261,14 +261,46 @@ async fn run_idle_recap_post_job(
                 return Ok(());
             }
 
-            if let Err(e) =
-                idle_recap::persist_recap_message_id(&pool, &session_key, channel_id, message_id)
-                    .await
+            // #3148: the persist folds a compare-and-swap on the per-channel
+            // turn generation captured at snapshot load. A turn claimed in the
+            // (post-recheck → persist) gap — the residual TOCTOU Window 1 — has
+            // bumped the generation, so the conditional UPDATE matches 0 rows.
+            // The claim's increment and this persist serialize on the same
+            // Postgres row, so this CAS is the ATOMIC close of Window 1: if a
+            // claim committed first we delete the just-posted card and skip
+            // persisting (treated like `DeleteAndSkipPersist`; an expected race
+            // outcome, NOT an error — the idle-cycle stamp already deduped this
+            // cycle so it does not re-fire). If the persist committed first, the
+            // claim's relocated post-claim clear sees the just-committed pointer
+            // and removes the card.
+            let rows_affected = match idle_recap::persist_recap_message_id(
+                &pool,
+                &session_key,
+                channel_id,
+                message_id,
+                snapshot.idle_recap_turn_generation,
+            )
+            .await
             {
-                // Best-effort: clear the now-orphan card and report. The
-                // stamp at the top still dedupes this cycle.
+                Ok(rows) => rows,
+                Err(e) => {
+                    // Best-effort: clear the now-orphan card and report. The
+                    // stamp at the top still dedupes this cycle.
+                    idle_recap::delete_previous_card(http.as_ref(), channel_id, message_id).await;
+                    return Err(format!("persist: {e}"));
+                }
+            };
+            if idle_recap::persist_cas_outcome(rows_affected)
+                == idle_recap::PersistCasOutcome::CasLostDeleteAndSkip
+            {
                 idle_recap::delete_previous_card(http.as_ref(), channel_id, message_id).await;
-                return Err(format!("persist: {e}"));
+                tracing::info!(
+                    session_key = %session_key,
+                    channel_id = channel_id,
+                    message_id = message_id,
+                    "idle_recap: turn claimed during persist window (generation CAS lost); deleted just-posted card"
+                );
+                return Ok(());
             }
             tracing::info!(
                 session_key = %session_key,

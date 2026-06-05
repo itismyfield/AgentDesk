@@ -1067,6 +1067,18 @@ async fn claim_tui_direct_synthetic_turn(
     if let Some(pool) = shared.pg_pool.as_ref().cloned()
         && let Some(http) = shared.serenity_http_or_token_fallback()
     {
+        // #3148: bump the per-channel turn generation BEFORE the clear. This is
+        // the same claim-bump the Discord-intake path does — any idle-recap
+        // POST job whose persist CAS captured the pre-bump generation now fails
+        // to persist its card over this just-claimed TUI turn. The clear then
+        // removes any card the POST already persisted before this claim.
+        if let Err(e) = super::idle_recap::bump_turn_generation(&pool, channel_id.get()).await {
+            tracing::warn!(
+                error = %e,
+                channel_id = channel_id.get(),
+                "idle_recap: failed to bump turn generation on TUI claim"
+            );
+        }
         super::idle_recap::spawn_clear_captured_idle_recap_for_channel(
             http,
             pool,

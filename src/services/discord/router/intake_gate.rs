@@ -1994,31 +1994,18 @@ pub(in crate::services::discord) async fn handle_event(
                 .await;
                 return Ok(());
             }
-            // PR #3b: clear any active idle-recap card once a message is
-            // accepted as a real turn. This intentionally includes
-            // trigger-capable announce/allowed-bot messages used by
-            // `send-to-agent`; clearing only human messages left stale
-            // `📦 idle` cards under valid bot-origin E2E turns.
-            //
-            // codex R3 P2: use the SAME capture-at-claim + compare-and-clear
-            // variant the TUI claim path uses (`tui_prompt_relay` →
-            // `spawn_clear_captured_idle_recap_for_channel`). The non-captured
-            // `spawn_clear_idle_recap_for_channel` ran its
-            // `lookup_active_recap_for_channel` INSIDE the detached task, so a
-            // delayed clear could look up + delete a NEWER card posted by a
-            // later idle period (NOT self-healing — the policy posts at most
-            // once per idle period). Capturing the pointer synchronously here,
-            // at intake time, and clearing ONLY that captured id makes a
-            // delayed clear a no-op against any newer card. The http + pool +
-            // channel_id needed for the synchronous lookup are all in scope.
-            if let Some(pool) = data.shared.pg_pool.as_ref().cloned() {
-                crate::services::discord::idle_recap::spawn_clear_captured_idle_recap_for_channel(
-                    ctx.http.clone(),
-                    pool,
-                    channel_id.get(),
-                )
-                .await;
-            }
+            // #3148: the idle-recap card clear (and the per-channel
+            // turn-generation bump) was RELOCATED from here to
+            // `intake_turn::handle_text_message`, immediately AFTER the mailbox
+            // claim succeeds (`started == true`), mirroring the TUI path
+            // (`tui_prompt_relay` claim → bump → clear). Clearing at intake
+            // time — BEFORE the later mailbox claim — was not truly
+            // capture-at-claim: a recap POST could recheck-idle while intake had
+            // captured old/none but the claim had not happened, persist a fresh
+            // card, and the old-id-keyed clear could not remove it (Window 2).
+            // Performing the clear after the claim (and after the claim's
+            // generation bump) closes that window with the same capture-at-claim
+            // semantics the TUI path already has.
 
             // #189: Generic DM reply tracking — consume pending entry if present.
             // Keep this after auth so unauthorized DM senders cannot inject
