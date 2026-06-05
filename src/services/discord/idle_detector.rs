@@ -129,6 +129,44 @@ pub(crate) fn classify(
     }
 }
 
+/// DB/serde-free copy of the three inflight signals the idle gate consults.
+/// Keeping this a plain `Copy` struct lets `should_register_system_detected_idle`
+/// stay a pure, unit-testable function (no `InflightTurnState` / serde / disk).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct InflightWaitSignals {
+    /// Terminal response already committed to delivery. The turn is
+    /// intentionally quiet now (ScheduleWakeup sleep / agent-loop wind-down).
+    pub terminal_delivery_committed: bool,
+    /// `task_notification_kind.is_some()` — an explicit background-work
+    /// notification (Monitor / background Bash / Task / Agent) is in flight.
+    pub task_notification_kind_present: bool,
+    /// A long-running background placeholder is active for this turn.
+    pub long_running_placeholder_active: bool,
+}
+
+/// Pure gate: given that `classify()` decided `Idle` on the heartbeat
+/// anchor, should we actually register `system-detected:idle`? Returns
+/// `false` (suppress) when inflight signals prove the stalled-heartbeat
+/// turn is an INTENTIONAL wait, not a genuine hang. Mirrors the
+/// stall-watchdog #3126 suppression (recovery.rs `stall_watchdog_should_force_clean`).
+///
+/// The gate is the logical inverse of "if active then suppress": it
+/// suppresses ONLY on POSITIVE wait-evidence, so a genuine hang (no
+/// committed delivery, no background work) and a missing inflight row both
+/// still register — preserving pre-#3146 detection with no regression.
+pub(crate) fn should_register_system_detected_idle(inflight: Option<&InflightWaitSignals>) -> bool {
+    match inflight {
+        // A completed-then-idle turn (ScheduleWakeup / loop wind-down).
+        Some(s) if s.terminal_delivery_committed => false,
+        // Explicit background work in flight (Monitor / Bash / Task / Agent).
+        Some(s) if s.task_notification_kind_present || s.long_running_placeholder_active => false,
+        // Either: inflight present but none of the wait-signals set (genuine
+        // hang), OR no inflight row at all (genuine hang — preserves current
+        // behavior, no regression).
+        _ => true,
+    }
+}
+
 /// Parse `last_heartbeat` strings as written by either Postgres
 /// (`TIMESTAMPTZ` rendered to RFC3339) or SQLite (`datetime('now')` ⇒
 /// `YYYY-MM-DD HH:MM:SS` UTC). Returns `None` for empty / unrecognized values.
@@ -194,8 +232,34 @@ async fn run_pass(shared: &SharedData, provider: &ProviderKind) {
                 IDLE_THRESHOLD,
             )
         };
-        apply_classification(channel_id, classification, health_registry.as_ref()).await;
-        if classification == IdleClassification::Idle {
+        // #3146 Part 2: when the heartbeat anchor says `Idle`, consult the
+        // inflight signals before registering the banner. A TUI turn that is
+        // intentionally waiting (ScheduleWakeup sleep / committed-then-idle /
+        // explicit background work) produces no fresh tmux output, so its
+        // heartbeat stalls — but that is NOT a hang. We load inflight only on
+        // the `Idle` branch to avoid a disk read every poll for fresh channels.
+        // Downgrading to `ActiveAndFresh` (rather than just skipping) also
+        // CLEARS a banner that was registered while the turn was hung but has
+        // since transitioned into a committed/background wait.
+        let effective = if classification == IdleClassification::Idle {
+            let signals =
+                super::inflight::load_inflight_state(provider, channel_id.get()).map(|state| {
+                    InflightWaitSignals {
+                        terminal_delivery_committed: state.terminal_delivery_committed,
+                        task_notification_kind_present: state.task_notification_kind.is_some(),
+                        long_running_placeholder_active: state.long_running_placeholder_active,
+                    }
+                });
+            if should_register_system_detected_idle(signals.as_ref()) {
+                IdleClassification::Idle
+            } else {
+                IdleClassification::ActiveAndFresh
+            }
+        } else {
+            classification
+        };
+        apply_classification(channel_id, effective, health_registry.as_ref()).await;
+        if effective == IdleClassification::Idle {
             spawn_idle_expiry_reflect_if_needed(shared, provider, channel_id).await;
         }
     }
@@ -348,4 +412,79 @@ async fn fetch_last_heartbeat(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- #3146 Part 2: idle-registration gate ----
+    //
+    // The gate (`should_register_system_detected_idle`) is layered on top of
+    // the UNCHANGED `classify()`. `classify()` still produces the `Idle`
+    // decision from the heartbeat anchor; the gate then decides whether that
+    // `Idle` should actually surface the banner. These tests cover BOTH the
+    // suppress case (intentional wait) and the still-detect case (genuine
+    // hang) so we prove the gate does not regress detection.
+
+    fn signals(
+        terminal_delivery_committed: bool,
+        task_notification_kind_present: bool,
+        long_running_placeholder_active: bool,
+    ) -> InflightWaitSignals {
+        InflightWaitSignals {
+            terminal_delivery_committed,
+            task_notification_kind_present,
+            long_running_placeholder_active,
+        }
+    }
+
+    #[test]
+    fn suppress_when_terminal_delivery_committed() {
+        // ScheduleWakeup sleep / agent-loop wind-down: terminal response is
+        // already committed, so the stalled heartbeat is an intentional quiet,
+        // not a hang. Exactly the #3126 stall-watchdog gate.
+        let s = signals(true, false, false);
+        assert!(!should_register_system_detected_idle(Some(&s)));
+    }
+
+    #[test]
+    fn suppress_when_background_task_notification_present() {
+        // Explicit background work in flight (Monitor / Bash / Task / Agent).
+        let s = signals(false, true, false);
+        assert!(!should_register_system_detected_idle(Some(&s)));
+    }
+
+    #[test]
+    fn suppress_when_long_running_placeholder_active() {
+        // Long-running background placeholder — no tmux output expected.
+        let s = signals(false, false, true);
+        assert!(!should_register_system_detected_idle(Some(&s)));
+    }
+
+    #[test]
+    fn detect_genuine_hang_inflight_present_no_wait_signals() {
+        // Turn started, never committed output, no background work, heartbeat
+        // stale >= threshold => genuine hang. MUST still register.
+        let s = signals(false, false, false);
+        assert!(should_register_system_detected_idle(Some(&s)));
+    }
+
+    #[test]
+    fn detect_genuine_hang_when_no_inflight_row() {
+        // Critical regression guard: absence of an inflight row is NOT a wait.
+        // Preserves pre-#3146 behavior exactly (register on stale anchor).
+        assert!(should_register_system_detected_idle(None));
+    }
+
+    #[test]
+    fn classify_still_returns_idle_for_stale_anchor() {
+        // The gate is layered on top of an UNCHANGED classifier. A stale
+        // anchor on an active, non-recovery turn still yields `Idle`; the gate
+        // alone decides whether the banner surfaces.
+        let now = Utc::now();
+        let stale = now - chrono::Duration::minutes(30);
+        let result = classify(true, Some(stale), Some(stale), now, IDLE_THRESHOLD);
+        assert_eq!(result, IdleClassification::Idle);
+    }
 }
