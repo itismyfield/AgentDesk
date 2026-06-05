@@ -1072,7 +1072,14 @@ async fn claim_tui_direct_synthetic_turn(
         // POST job whose persist CAS captured the pre-bump generation now fails
         // to persist its card over this just-claimed TUI turn. The clear then
         // removes any card the POST already persisted before this claim.
-        if let Err(e) = super::idle_recap::bump_turn_generation(&pool, channel_id.get()).await {
+        if let Err(e) = super::idle_recap::bump_turn_generation(
+            &pool,
+            channel_id.get(),
+            provider,
+            lease.session_key.as_deref(),
+        )
+        .await
+        {
             tracing::warn!(
                 error = %e,
                 channel_id = channel_id.get(),

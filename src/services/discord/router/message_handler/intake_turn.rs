@@ -1629,9 +1629,13 @@ pub(in crate::services::discord) async fn handle_text_message(
     // card over this just-claimed turn; the clear then removes any card the
     // POST already persisted before this claim.
     if started && let Some(pool) = shared.pg_pool.as_ref().cloned() {
-        if let Err(e) =
-            crate::services::discord::idle_recap::bump_turn_generation(&pool, channel_id.get())
-                .await
+        if let Err(e) = crate::services::discord::idle_recap::bump_turn_generation(
+            &pool,
+            channel_id.get(),
+            &provider,
+            adk_session_key.as_deref(),
+        )
+        .await
         {
             tracing::warn!(
                 error = %e,

@@ -854,40 +854,138 @@ pub(crate) async fn persist_recap_message_id(
     .map(|result| result.rows_affected())
 }
 
-/// #3148: bump the per-channel turn-generation counter for the session(s) bound
-/// to `channel_id`. Called best-effort right after a turn is claimed (TUI or
-/// Discord-intake) and BEFORE the relocated recap-clear, so any idle-recap POST
-/// job whose persist CAS captured the pre-bump generation fails to persist its
-/// card over this now-active turn.
+/// #3148 / #3158: which row(s) a turn-claim bump targets.
 ///
-/// Keyed by the channel via the same `agents`-join path
-/// `load_recap_snapshot`/`resolve_post_channel` resolve channel→session, NOT by
-/// `idle_recap_channel_id` (which is NULL whenever no card is currently
-/// recorded — and the whole point is to bump even when no card exists yet so a
-/// mid-flight POST cannot persist one). The increment is a single atomic SQL
-/// UPDATE; Postgres row-level locking serializes it against the persist CAS, so
-/// there is no app-side read-modify-write gap.
+/// #3158 fixed a false-skip: the old bump joined `agents` with a 4-column OR
+/// and then incremented ALL sessions for the matched agent. A claim in one of
+/// an agent's channels (e.g. Claude `cc`) thus bumped the generation of the
+/// agent's OTHER provider sessions (e.g. Codex `cdx`) too, and a sibling
+/// channel's in-flight idle recap then lost its persist CAS and had its
+/// just-posted card FALSE-deleted though that channel stayed idle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BumpScope {
+    /// The normal case for both callers: a namespaced `session_key` is held,
+    /// so the bump targets the IDENTICAL single (UNIQUE) `sessions.session_key`
+    /// row that `load_recap_snapshot` reads the generation from and that
+    /// `persist_recap_message_id` CAS-keys on — they share scope.
+    SessionKey(String),
+    /// Fallback when `session_key` is absent (channel name unresolvable). Bump
+    /// only THIS channel's provider column(s) (mirroring `resolve_post_channel`)
+    /// AND additionally filter `lower(provider)`, so a sibling-provider session
+    /// of the same agent is never over-bumped.
+    ProviderChannel { channel_id: u64, provider: String },
+}
+
+/// Decide the bump scope from the claim's provider and optional `session_key`.
+///
+/// A non-empty (after trim) `session_key` selects the single-row primary path;
+/// `None`/empty/whitespace selects the provider-scoped channel fallback. Kept
+/// as a pure function so the keying decision is unit-testable without a DB.
+pub(crate) fn bump_scope_for_claim(
+    channel_id: u64,
+    provider: &ProviderKind,
+    session_key: Option<&str>,
+) -> BumpScope {
+    match session_key.map(str::trim).filter(|key| !key.is_empty()) {
+        Some(key) => BumpScope::SessionKey(key.to_string()),
+        None => BumpScope::ProviderChannel {
+            channel_id,
+            provider: provider.as_str().to_string(),
+        },
+    }
+}
+
+/// #3148/#3158: bump the per-channel turn-generation counter for the session
+/// the just-claimed turn belongs to. Called best-effort right after a turn is
+/// claimed (TUI or Discord-intake) and BEFORE the relocated recap-clear, so any
+/// idle-recap POST job whose persist CAS captured the pre-bump generation fails
+/// to persist its card over this now-active turn.
+///
+/// #3158: scoped to the SAME row the persist CAS reads.
+/// - PRIMARY (normal case): keyed `WHERE session_key = $1` on the caller's
+///   namespaced `session_key` — the IDENTICAL (UNIQUE) row identity that
+///   `load_recap_snapshot` reads the generation from and that
+///   `persist_recap_message_id` CAS-keys on. Bump and persist CAS share scope.
+/// - FALLBACK (`session_key` absent): a provider-scoped channel bump that
+///   matches only THIS channel's provider column(s) (mirroring
+///   `resolve_post_channel`) ANDed with `lower(provider)`, so a sibling-provider
+///   session of the same agent is never touched. As a belt-and-suspenders for
+///   any legacy non-namespaced row, the fallback also runs when the primary
+///   UPDATE matches 0 rows.
+///
+/// Keyed via the same channel→session resolution `load_recap_snapshot`/
+/// `resolve_post_channel` use, NOT by `idle_recap_channel_id` (which is NULL
+/// whenever no card is currently recorded — and the whole point is to bump even
+/// when no card exists yet so a mid-flight POST cannot persist one). Each
+/// increment is a single atomic SQL UPDATE; Postgres row-level locking
+/// serializes it against the persist CAS, so there is no app-side
+/// read-modify-write gap.
 pub(crate) async fn bump_turn_generation(
     pool: &PgPool,
     channel_id: u64,
+    provider: &ProviderKind,
+    session_key: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    let scope = bump_scope_for_claim(channel_id, provider, session_key);
+    let provider_fallback = match &scope {
+        BumpScope::SessionKey(key) => {
+            let affected = bump_by_session_key(pool, key).await?;
+            if affected > 0 {
+                return Ok(());
+            }
+            // Belt-and-suspenders: a legacy (non-namespaced) row would not
+            // match the namespaced caller key, leaving Window 1 unguarded. Fall
+            // through to the provider-scoped channel bump in that rare case.
+            ProviderKind::from_str(provider.as_str()).unwrap_or_else(|| provider.clone())
+        }
+        BumpScope::ProviderChannel { provider, .. } => ProviderKind::from_str(provider)
+            .unwrap_or_else(|| ProviderKind::Unsupported(provider.clone())),
+    };
+    bump_by_provider_channel(pool, channel_id, &provider_fallback).await
+}
+
+/// PRIMARY: increment the single UNIQUE `session_key` row. Returns rows affected.
+async fn bump_by_session_key(pool: &PgPool, session_key: &str) -> Result<u64, sqlx::Error> {
+    sqlx::query(
+        "UPDATE sessions
+         SET idle_recap_turn_generation = idle_recap_turn_generation + 1
+         WHERE session_key = $1",
+    )
+    .bind(session_key)
+    .execute(pool)
+    .await
+    .map(|result| result.rows_affected())
+}
+
+/// FALLBACK: provider-scoped channel bump. Mirrors `resolve_post_channel`'s
+/// provider→column mapping and `load_recap_snapshot`'s `lower(COALESCE(...))`
+/// provider comparison, so only THIS channel's same-provider session(s) are
+/// bumped — never a sibling-provider session of the same agent.
+async fn bump_by_provider_channel(
+    pool: &PgPool,
+    channel_id: u64,
+    provider: &ProviderKind,
 ) -> Result<(), sqlx::Error> {
     let channel_text = channel_id.to_string();
-    sqlx::query(
+    let column_predicate = match provider {
+        ProviderKind::Claude => "(a.discord_channel_cc = $1 OR a.discord_channel_id = $1)",
+        ProviderKind::Codex => "(a.discord_channel_cdx = $1 OR a.discord_channel_alt = $1)",
+        _ => "(a.discord_channel_id = $1 OR a.discord_channel_cc = $1)",
+    };
+    let query = format!(
         "UPDATE sessions s
          SET idle_recap_turn_generation = s.idle_recap_turn_generation + 1
          FROM agents a
          WHERE a.id = s.agent_id
-           AND (
-                a.discord_channel_id  = $1
-             OR a.discord_channel_cc  = $1
-             OR a.discord_channel_cdx = $1
-             OR a.discord_channel_alt = $1
-           )",
-    )
-    .bind(channel_text)
-    .execute(pool)
-    .await
-    .map(|_| ())
+           AND {column_predicate}
+           AND lower(COALESCE(s.provider, '')) = $2"
+    );
+    sqlx::query(&query)
+        .bind(channel_text)
+        .bind(provider.as_str().to_lowercase())
+        .execute(pool)
+        .await
+        .map(|_| ())
 }
 
 /// Stamp `idle_recap_posted_at = NOW()` for this cycle's dedupe window.
@@ -1468,6 +1566,80 @@ mod tests {
             discord_channel_alt: None,
             cwd: None,
         }
+    }
+
+    // #3158: the turn-claim bump must target the SAME single session row the
+    // persist CAS reads (keyed by session_key), with a provider-scoped channel
+    // fallback only when session_key is absent. These tests pin the keying
+    // decision seam so a claim in channel X cannot false-skip-delete a sibling
+    // channel/provider's idle recap.
+
+    #[test]
+    fn bump_scope_keys_on_session_key_when_present() {
+        // Window 1 (#3148): a claim in channel X bumps X's recap session — and
+        // it does so by the IDENTICAL session_key the persist CAS keys on.
+        let scope = bump_scope_for_claim(
+            123,
+            &ProviderKind::Claude,
+            Some("host:agent-x:claude:chan-cc"),
+        );
+        assert_eq!(
+            scope,
+            BumpScope::SessionKey("host:agent-x:claude:chan-cc".to_string())
+        );
+    }
+
+    #[test]
+    fn bump_scope_session_key_is_provider_independent() {
+        // A sibling provider's claim resolves to a DIFFERENT (UNIQUE)
+        // session_key, so it never touches another session's generation:
+        // no cross-provider over-bump, no false skip.
+        let cc = bump_scope_for_claim(123, &ProviderKind::Claude, Some("k-claude"));
+        let cdx = bump_scope_for_claim(123, &ProviderKind::Codex, Some("k-codex"));
+        assert_eq!(cc, BumpScope::SessionKey("k-claude".to_string()));
+        assert_eq!(cdx, BumpScope::SessionKey("k-codex".to_string()));
+        assert_ne!(cc, cdx);
+    }
+
+    #[test]
+    fn bump_scope_trims_and_treats_empty_session_key_as_absent() {
+        for empty in [None, Some(""), Some("   "), Some("\t\n")] {
+            assert_eq!(
+                bump_scope_for_claim(123, &ProviderKind::Claude, empty),
+                BumpScope::ProviderChannel {
+                    channel_id: 123,
+                    provider: "claude".to_string(),
+                },
+                "empty/whitespace session_key must fall back to provider-scoped channel bump"
+            );
+        }
+        // A surrounding-whitespace but non-empty key is trimmed, not dropped.
+        assert_eq!(
+            bump_scope_for_claim(123, &ProviderKind::Claude, Some("  k-claude  ")),
+            BumpScope::SessionKey("k-claude".to_string())
+        );
+    }
+
+    #[test]
+    fn bump_scope_fallback_carries_provider_for_provider_filtered_update() {
+        // Without a session_key the fallback still scopes to THIS channel's
+        // provider, so the agent's sibling-provider session is excluded.
+        let claude = bump_scope_for_claim(7, &ProviderKind::Claude, None);
+        let codex = bump_scope_for_claim(7, &ProviderKind::Codex, None);
+        assert_eq!(
+            claude,
+            BumpScope::ProviderChannel {
+                channel_id: 7,
+                provider: "claude".to_string(),
+            }
+        );
+        assert_eq!(
+            codex,
+            BumpScope::ProviderChannel {
+                channel_id: 7,
+                provider: "codex".to_string(),
+            }
+        );
     }
 
     #[test]
