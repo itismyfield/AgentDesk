@@ -534,25 +534,41 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         "every injected class must still deliver assistant output via the bridge tail",
     );
     if is_system_continuation {
-        let note = format_system_continuation_note(&prompt.tmux_session_name, &prompt.prompt);
-        match channel_id.say(&*notify_http, note).await {
-            Ok(message) => {
-                tracing::info!(
-                    provider = %prompt.provider,
-                    channel_id = channel_id.get(),
-                    tmux_session_name = %prompt.tmux_session_name,
-                    note_message_id = message.id.get(),
-                    "rendered system/compact continuation injection as neutral session note; no active-turn lifecycle, assistant output still relayed via bridge tail"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    provider = %prompt.provider,
-                    channel_id = channel_id.get(),
-                    tmux_session_name = %prompt.tmux_session_name,
-                    error = %error,
-                    "failed to send system/compact continuation session note"
-                );
+        if matches!(injected_class, InjectedPromptClass::SlashCommandControl) {
+            // #3153: a MACHINE slash-command control echo (/loop, /compact, the
+            // expanded <command-*> wrapper, or the Compacted stdout line). Unlike
+            // a SystemContinuation it posts NOTHING to Discord — no neutral note,
+            // no card, no ⏳, no anchor, no synthetic turn. It is a pure control
+            // echo. This suppresses the #3153 /loop double-post and the /compact
+            // command-echo leak. The resulting provider assistant output STILL
+            // reaches Discord via the bridge tail below (no early return).
+            tracing::info!(
+                provider = %prompt.provider,
+                channel_id = channel_id.get(),
+                tmux_session_name = %prompt.tmux_session_name,
+                "suppressed machine slash-command control echo (/loop|/compact|<command-*>|Compacted); no active-turn lifecycle, assistant output still relayed via bridge tail"
+            );
+        } else {
+            let note = format_system_continuation_note(&prompt.tmux_session_name, &prompt.prompt);
+            match channel_id.say(&*notify_http, note).await {
+                Ok(message) => {
+                    tracing::info!(
+                        provider = %prompt.provider,
+                        channel_id = channel_id.get(),
+                        tmux_session_name = %prompt.tmux_session_name,
+                        note_message_id = message.id.get(),
+                        "rendered system/compact continuation injection as neutral session note; no active-turn lifecycle, assistant output still relayed via bridge tail"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        provider = %prompt.provider,
+                        channel_id = channel_id.get(),
+                        tmux_session_name = %prompt.tmux_session_name,
+                        error = %error,
+                        "failed to send system/compact continuation session note"
+                    );
+                }
             }
         }
     } else {
@@ -3815,11 +3831,23 @@ fn resolve_owner_channel_authoritatively(
 ///   user-turn lifecycle: no `⏳`, no queue/inflight ownership, no
 ///   cancel-on-hourglass semantics (#3100). It is rendered as a neutral
 ///   session note if visible at all.
+/// * [`SlashCommandControl`](InjectedPromptClass::SlashCommandControl) — a
+///   MACHINE slash-command control echo (#3153): the raw `/loop …` / `/compact`
+///   text a `ScheduleWakeup` writes into the terminal, the Claude Code expanded
+///   `<command-message>…</command-message>` wrapper for that slash command, and
+///   the `<local-command-stdout>Compacted …` stdout line. Like
+///   [`SystemContinuation`] it is NOT a human request and must not occupy the
+///   user-turn lifecycle (no `⏳`, no anchor, no synthetic turn) — but unlike it
+///   this class posts NOTHING to Discord at all (no neutral note); it is a pure
+///   control echo. The resulting provider assistant output STILL flows via the
+///   bridge tail. This suppresses the #3153 double-post of the injected prompt
+///   and the `/compact` command-echo leak.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum InjectedPromptClass {
     HumanTuiDirect,
     TaskNotificationEvent,
     SystemContinuation,
+    SlashCommandControl,
 }
 
 impl InjectedPromptClass {
@@ -3831,10 +3859,16 @@ impl InjectedPromptClass {
 
     /// #3099 codex re-review (P1): whether this class must SKIP the user-turn
     /// lifecycle — the `⏳` reaction, the prompt anchor, and the synthetic
-    /// user-turn/inflight ownership. Only [`SystemContinuation`] does; it is a
-    /// system event, not a human request.
+    /// user-turn/inflight ownership. [`SystemContinuation`] (a system continuation
+    /// banner) and [`SlashCommandControl`] (#3153, a machine slash-command control
+    /// echo) both do; neither is a human request. Routing both through the
+    /// `is_system_continuation` branch makes them skip the active-turn `else`
+    /// block (anchor post + `⏳` + record_prompt_anchor + synthetic-turn claim).
     pub(super) fn suppresses_user_turn_lifecycle(self) -> bool {
-        matches!(self, InjectedPromptClass::SystemContinuation)
+        matches!(
+            self,
+            InjectedPromptClass::SystemContinuation | InjectedPromptClass::SlashCommandControl
+        )
     }
 
     /// #3099 codex re-review (P1): whether the provider turn's assistant OUTPUT
@@ -3853,15 +3887,65 @@ impl InjectedPromptClass {
 /// Order matters: a compact-continuation prologue can itself embed an
 /// arbitrary summary, so the system-continuation predicate is checked first
 /// (it is the most specific "not a human turn" signal), then the
-/// task-notification tag, otherwise it is treated as human direct input.
+/// task-notification tag, then (#3153) the machine slash-command control echo
+/// (`/loop` / `/compact` / the `<command-*>` wrapper / `Compacted` stdout),
+/// otherwise it is treated as human direct input.
+///
+/// The slash-command-control check is placed AFTER the continuation check so the
+/// compact CONTINUATION banner (which opens with "This session is being
+/// continued…" / "Please continue…", never with "/compact" or
+/// "<local-command-stdout>") is still caught as [`SystemContinuation`] and left
+/// untouched — the `/compact` COMMAND echo and the `Compacted` stdout are
+/// textually disjoint from that banner opening, so there is no overlap.
 pub(super) fn classify_injected_prompt(prompt: &str) -> InjectedPromptClass {
     if is_system_continuation_prompt(prompt) {
         InjectedPromptClass::SystemContinuation
     } else if is_task_notification_prompt(prompt) {
         InjectedPromptClass::TaskNotificationEvent
+    } else if is_slash_command_control_prompt(prompt) {
+        InjectedPromptClass::SlashCommandControl
     } else {
         InjectedPromptClass::HumanTuiDirect
     }
+}
+
+/// #3153: detects a MACHINE slash-command control echo that must be suppressed
+/// from relay (no `⏳`, no anchor, no synthetic turn, no Discord post at all).
+///
+/// Covers both halves of the #3153 `/loop` ScheduleWakeup double-post plus the
+/// `/compact` echo leak, all START-ANCHORED (mirroring
+/// [`is_system_continuation_prompt`]'s normalization pipeline) so a human merely
+/// quoting a "/loop" / "/compact" / `<command-*>` string mid-message is NEVER
+/// misclassified:
+///   * the raw `/loop …` echo a `ScheduleWakeup` writes into the terminal,
+///   * the Claude Code expanded `<command-message>…</command-message>` wrapper
+///     for that slash command,
+///   * the raw `/compact` echo (whole slash-token, so `/compactX` does not trip),
+///   * the `<local-command-stdout>Compacted …` stdout line.
+///
+/// Normalization peels a leading terminal-control prefix and a leading SSH-direct
+/// injection envelope (reusing [`strip_leading_injection_wrapper`]) so a
+/// round-tripped echo is still anchored, exactly as the continuation classifier
+/// relies on. Because each form is an independent OR-branch, both halves of the
+/// double-post are classified independently — neither relies on dedupe.
+fn is_slash_command_control_prompt(prompt: &str) -> bool {
+    let normalized = strip_terminal_controls(prompt);
+    let normalized = normalized.trim_start();
+    let normalized = strip_leading_injection_wrapper(normalized);
+    let normalized = normalized.trim_start();
+    if normalized.starts_with("<command-message>")
+        || normalized.starts_with("<local-command-stdout>Compacted")
+        || normalized.starts_with("/loop ")
+    {
+        return true;
+    }
+    // Raw `/compact` echo: match the whole slash-token only — the next char must
+    // be whitespace or end-of-string, so neither an embedded quote nor
+    // "/compactfoo" trips it. The bare no-arg "/compact" (EOS) is allowed.
+    if let Some(rest) = normalized.strip_prefix("/compact") {
+        return rest.is_empty() || rest.starts_with(char::is_whitespace);
+    }
+    false
 }
 
 /// Detects the `<task-notification>` auto-turn tag injected by Claude Code /
@@ -4412,6 +4496,113 @@ mod tests {
                 "This session is being continued from a previous conversation"
             )
             .is_human_active_turn()
+        );
+    }
+
+    // #3153: a MACHINE slash-command control echo must classify as
+    // SlashCommandControl — the raw `/loop …` ScheduleWakeup echo (HALF A of the
+    // double-post), the Claude Code expanded `<command-*>` wrapper (HALF B), the
+    // raw `/compact` echo (whole-token, incl. bare no-arg), and the
+    // `<local-command-stdout>Compacted` stdout line. Each is suppressed from
+    // relay (no ⏳/anchor/synthetic turn, no Discord post) yet still delivers
+    // assistant output via the bridge tail.
+    #[test]
+    fn classify_injected_prompt_slash_command_control() {
+        // HALF A — raw /loop echo.
+        assert_eq!(
+            classify_injected_prompt("/loop 5m /foo"),
+            InjectedPromptClass::SlashCommandControl,
+        );
+        // HALF B — Claude Code expanded <command-*> wrapper.
+        let wrapper = "<command-message>loop is running…</command-message>\
+                       <command-name>/loop</command-name><command-args>5m /foo</command-args>";
+        assert_eq!(
+            classify_injected_prompt(wrapper),
+            InjectedPromptClass::SlashCommandControl,
+        );
+        // Raw /compact echo with args.
+        assert_eq!(
+            classify_injected_prompt("/compact focus on the relay"),
+            InjectedPromptClass::SlashCommandControl,
+        );
+        // Bare no-arg /compact (whole-token, EOS).
+        assert_eq!(
+            classify_injected_prompt("/compact"),
+            InjectedPromptClass::SlashCommandControl,
+        );
+        // /compact command stdout line.
+        assert_eq!(
+            classify_injected_prompt("<local-command-stdout>Compacted (12.3k tokens)"),
+            InjectedPromptClass::SlashCommandControl,
+        );
+
+        // Suppressed from the user-turn lifecycle, not a human active turn, yet
+        // still delivers assistant output.
+        let ctrl = InjectedPromptClass::SlashCommandControl;
+        assert!(ctrl.suppresses_user_turn_lifecycle());
+        assert!(!ctrl.is_human_active_turn());
+        assert!(ctrl.still_delivers_assistant_output());
+    }
+
+    // #3153 double-echo + envelope coverage: a /loop or wrapper echo that
+    // round-trips through the SSH-direct injection envelope is still anchored
+    // (strip_leading_injection_wrapper peels the leading wrapper before the
+    // starts_with anchors) and still classifies as SlashCommandControl.
+    #[test]
+    fn classify_injected_prompt_wrapped_slash_command_control() {
+        let wrapped_loop = "터미널에 직접 주입된 입력 (tmux : `s`):\n```text\n/loop 5m /foo\n```";
+        assert_eq!(
+            classify_injected_prompt(wrapped_loop),
+            InjectedPromptClass::SlashCommandControl,
+        );
+        let wrapped_wrapper = "터미널에 직접 주입된 입력 (tmux : `s`):\n```text\n\
+                               <command-message>/loop</command-message>\n```";
+        assert_eq!(
+            classify_injected_prompt(wrapped_wrapper),
+            InjectedPromptClass::SlashCommandControl,
+        );
+    }
+
+    // #3153 FALSE-POSITIVE GUARD: a human merely quoting "/loop" / "/compact"
+    // mid-message must NOT be misclassified — detection is START-ANCHORED, and
+    // "/compactX" (no whole-token boundary) must also stay a human turn.
+    #[test]
+    fn classify_injected_prompt_human_quote_of_slash_is_not_control() {
+        let human = "Why does /loop keep appearing in my logs?";
+        assert_eq!(
+            classify_injected_prompt(human),
+            InjectedPromptClass::HumanTuiDirect,
+            "a human quoting /loop mid-message must stay a human turn",
+        );
+        assert!(classify_injected_prompt(human).is_human_active_turn());
+
+        // "/compactfoo" is not the whole `/compact` token → human turn.
+        assert_eq!(
+            classify_injected_prompt("/compactfoo do the thing"),
+            InjectedPromptClass::HumanTuiDirect,
+        );
+
+        // A human leading line that merely opens with the wrapped envelope but
+        // whose body is a plain request stays a human turn.
+        let wrapped_human =
+            "터미널에 직접 주입된 입력 (tmux : `s`):\n```text\nplease /loop later maybe\n```";
+        assert_eq!(
+            classify_injected_prompt(wrapped_human),
+            InjectedPromptClass::HumanTuiDirect,
+        );
+    }
+
+    // #3153 regression guard: the compact CONTINUATION banner must STILL classify
+    // as SystemContinuation (precedence — the continuation check runs before the
+    // slash-command-control check, and the banner opening is textually disjoint
+    // from the /compact echo / Compacted stdout anchors).
+    #[test]
+    fn classify_injected_prompt_continuation_still_wins_over_slash_control() {
+        assert_eq!(
+            classify_injected_prompt(
+                "This session is being continued from a previous conversation that ran out of context... Summary:"
+            ),
+            InjectedPromptClass::SystemContinuation,
         );
     }
 
