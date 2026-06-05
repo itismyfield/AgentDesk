@@ -1674,6 +1674,16 @@ mod pane_dead_identity_tests {
 struct SessionBoundRelayAckTarget {
     metrics: std::sync::Arc<crate::services::cluster::stream_relay::RelayMetrics>,
     sequence: u64,
+    /// #3041 P1-3 (codex P1-3 R6): the `turn_start_offset` of the turn this ACK
+    /// target belongs to — taken from the terminal frame's commit fence (the ONLY
+    /// frame that yields an ack target). The watcher's per-turn forward carries the
+    /// stored ack forward ONLY when it belongs to the turn currently being
+    /// ACK-waited (same `turn_start_offset`); a stale ack from a FINISHED/DIFFERENT
+    /// turn is reset to `None` so a new turn never inherits a previous turn's
+    /// terminal sequence (no false-Delivered black-hole). `None` means the fence
+    /// carried no `turn_start_offset` (legacy / no pinned identity) — treated as
+    /// "no turn binding", so it is never reused across a turn boundary.
+    turn_start_offset: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -1695,6 +1705,57 @@ impl SupervisorRelayForward {
             mirrored: false,
             ack_target: None,
         }
+    }
+}
+
+/// #3041 P1-3 (codex P1-3 R6): turn-scope the session-bound terminal ACK target so
+/// a NEW turn never inherits a FINISHED turn's stale ack.
+///
+/// The watcher carries `all_data_session_bound_relay_ack` across `'watcher_loop`
+/// passes (it is reset only at explicit turn-finalize/suppress sites). A single
+/// physical chunk can hold `result(A) + assistant(B) + result(B)`: turn A rides a
+/// terminal frame (ack = A.seq), and turn B completes ENTIRELY inside the split
+/// tail whose non-terminal frame sequence is DISCARDED. On the next pass B is
+/// processed from the leftover buffer; if no fresh bytes arrive the deferred
+/// forward emits no frame and returns NO ack target. With the legacy "store only
+/// when `Some`" rule the stored ack would stay pinned to A's sequence, and A's
+/// `Delivered` outcome would then FALSELY satisfy B's ACK → B black-holed.
+///
+/// This decides the ack target the watcher keeps for the turn whose pinned
+/// identity offset is `current_turn_start_offset` — the SAME coordinate the
+/// terminal fence stamps onto the ack target (`InflightTurnIdentity.turn_start_offset`,
+/// the inflight-recorded JSONL offset at which the turn began, monotonic per turn),
+/// NOT the watcher's per-pass buffer `turn_data_start_offset`:
+///   * `fresh` is `Some` → THIS pass just forwarded a terminal frame for the
+///     current turn; adopt it (a turn whose terminal frame WAS forwarded with a
+///     real ack keeps it).
+///   * `fresh` is `None` → keep `stored` ONLY when it belongs to the SAME turn
+///     (`stored.turn_start_offset == current_turn_start_offset`, and both `Some`),
+///     so an ack legitimately set earlier in THIS turn survives a later
+///     non-terminal pass. A `stored` from a DIFFERENT/finished turn — or either
+///     side lacking a turn binding (`None`) — is dropped to `None`. A `None` ack
+///     target makes `wait_for_session_bound_relay_delivery_ack` return
+///     `MissingTarget` (NOT `Delivered`), so the watcher falls through to the §3.2
+///     reconciliation against `committed_relay_offset` (committed >= end → Skip;
+///     committed < end → SendFull) → the turn is re-sent at worst (possible
+///     duplicate), NEVER black-holed.
+fn carry_session_bound_ack_for_turn(
+    stored: Option<SessionBoundRelayAckTarget>,
+    fresh: Option<SessionBoundRelayAckTarget>,
+    current_turn_start_offset: Option<u64>,
+) -> Option<SessionBoundRelayAckTarget> {
+    if let Some(fresh) = fresh {
+        return Some(fresh);
+    }
+    match (stored, current_turn_start_offset) {
+        // Same turn (both bound to the same pinned `turn_start_offset`): an ack set
+        // earlier in THIS turn survives a later non-terminal pass.
+        (Some(ack), Some(current)) if ack.turn_start_offset == Some(current) => Some(ack),
+        // A stale ack from a finished/different turn — or any case where the turn
+        // binding is unknown on either side — is never consulted: reset to `None`
+        // so the new turn reconciles instead of satisfying its ACK against the
+        // previous turn's sequence.
+        _ => None,
     }
 }
 
@@ -1948,6 +2009,12 @@ fn forward_chunk_to_supervisor_relay_inner(
     // file reads is forwarded after the next read completes it instead of being
     // replaced with U+FFFD.
     let payload = chunk.to_string();
+    // #3041 P1-3 R6: capture the terminal frame's `turn_start_offset` BEFORE the
+    // fence is moved into the send so the resulting ack target can be turn-scoped
+    // (a stored ack is reused across a watcher pass ONLY when it belongs to the
+    // turn now being ACK-waited). A non-terminal frame has no fence → no ack
+    // target is produced (the `outcome.sequence.map` below yields `None`).
+    let ack_turn_start_offset = terminal.as_ref().and_then(|fence| fence.turn_start_offset);
     let outcome = match terminal {
         Some(fence) => producer.try_send_terminal_frame_with_sequence(payload, fence),
         None => producer.try_send_frame_with_sequence(payload),
@@ -1965,6 +2032,7 @@ fn forward_chunk_to_supervisor_relay_inner(
         ack_target: outcome.sequence.map(|sequence| SessionBoundRelayAckTarget {
             metrics: producer.metrics().clone(),
             sequence,
+            turn_start_offset: ack_turn_start_offset,
         }),
     }
 }
@@ -3166,6 +3234,7 @@ mod matched_session_jsonl_gate_tests {
         let target = SessionBoundRelayAckTarget {
             metrics: metrics.clone(),
             sequence: 7,
+            turn_start_offset: None,
         };
         assert_eq!(
             wait_for_session_bound_relay_delivery_ack(
@@ -3187,6 +3256,7 @@ mod matched_session_jsonl_gate_tests {
         let dropped_target = SessionBoundRelayAckTarget {
             metrics: dropped_metrics.clone(),
             sequence: 9,
+            turn_start_offset: None,
         };
         dropped_metrics.record_dropped_sequence_for_test(9);
         assert_eq!(
@@ -3199,6 +3269,7 @@ mod matched_session_jsonl_gate_tests {
         let skipped_target = SessionBoundRelayAckTarget {
             metrics: skipped_metrics.clone(),
             sequence: 11,
+            turn_start_offset: None,
         };
         skipped_metrics.record_terminal_skipped_sequence_for_test(11);
         assert_eq!(
@@ -3211,6 +3282,7 @@ mod matched_session_jsonl_gate_tests {
         let delivered_target = SessionBoundRelayAckTarget {
             metrics: delivered_metrics.clone(),
             sequence: 3,
+            turn_start_offset: None,
         };
         delivered_metrics.record_delivered_sequence_for_test(3);
         assert_eq!(
@@ -3255,6 +3327,7 @@ mod matched_session_jsonl_gate_tests {
         let a_target = SessionBoundRelayAckTarget {
             metrics: metrics.clone(),
             sequence: 5,
+            turn_start_offset: None,
         };
         assert_eq!(
             session_bound_relay_ack_snapshot_outcome(Some(&a_target)),
@@ -3265,12 +3338,108 @@ mod matched_session_jsonl_gate_tests {
         let b_target = SessionBoundRelayAckTarget {
             metrics: metrics.clone(),
             sequence: 6,
+            turn_start_offset: None,
         };
         assert_eq!(
             session_bound_relay_ack_snapshot_outcome(Some(&b_target)),
             Some(SessionBoundRelayAckOutcome::Delivered),
             "B's ACK reads its own seq-6 committed outcome"
         );
+    }
+
+    // #3041 P1-3 R6: a single physical chunk holds `result(A) + assistant(B) +
+    // result(B)`. Turn A rides a TERMINAL frame (ack = A.seq, bound to A's pinned
+    // `turn_start_offset`); turn B completes ENTIRELY inside the split tail whose
+    // non-terminal frame sequence is DISCARDED. On B's processing pass the deferred
+    // forward emits NO frame (the leftover decoded text is empty) → NO fresh ack.
+    // B must NOT inherit A's stale ack: with B's own pinned identity, the carry
+    // helper resets the stored ack to `None` so B reconciles (None → MissingTarget
+    // → §3.2 committed-offset reconcile → SendFull/Skip) and is NEVER black-holed,
+    // even though A reported Delivered on A's own sequence.
+    #[test]
+    fn new_turn_does_not_inherit_finished_turn_stale_ack_target() {
+        let metrics =
+            std::sync::Arc::new(crate::services::cluster::stream_relay::RelayMetrics::default());
+        // A's terminal frame (seq 5) bound to A's pinned turn_start_offset = 100.
+        let a_ack = SessionBoundRelayAckTarget {
+            metrics: metrics.clone(),
+            sequence: 5,
+            turn_start_offset: Some(100),
+        };
+
+        // B's processing pass: pinned identity is B's turn (turn_start_offset = 240,
+        // the leftover/result(B) range), and the deferred forward produced NO fresh
+        // ack (B's tail frame sequence was discarded). The stored ack still holds
+        // A's seq-5 target. Carrying it forward for B must RESET to None.
+        let carried = carry_session_bound_ack_for_turn(Some(a_ack.clone()), None, Some(240));
+        assert!(
+            carried.is_none(),
+            "a NEW turn (different pinned turn_start_offset) with no fresh ack must \
+             NOT inherit the finished turn's stale ack_target → reconcile, no black-hole"
+        );
+
+        // Sanity: the same turn (A's own later non-terminal pass) keeps A's ack so a
+        // legitimately-set terminal ack is not clobbered within the SAME turn.
+        let same_turn = carry_session_bound_ack_for_turn(Some(a_ack.clone()), None, Some(100));
+        assert_eq!(
+            same_turn.map(|ack| ack.sequence),
+            Some(5),
+            "an ack set earlier in THIS turn survives a later non-terminal pass"
+        );
+    }
+
+    // #3041 P1-3 R6 (turn-boundary): a fresh turn with no terminal ack does not
+    // inherit the prior turn's ack_target, and a fresh `Some` always wins (the
+    // current turn's terminal frame ack replaces any stored value).
+    #[test]
+    fn carry_session_bound_ack_for_turn_is_turn_scoped() {
+        let metrics =
+            std::sync::Arc::new(crate::services::cluster::stream_relay::RelayMetrics::default());
+        let prior = SessionBoundRelayAckTarget {
+            metrics: metrics.clone(),
+            sequence: 11,
+            turn_start_offset: Some(50),
+        };
+        let fresh = SessionBoundRelayAckTarget {
+            metrics: metrics.clone(),
+            sequence: 12,
+            turn_start_offset: Some(80),
+        };
+
+        // Fresh Some always adopted (THIS turn forwarded a real terminal frame).
+        assert_eq!(
+            carry_session_bound_ack_for_turn(Some(prior.clone()), Some(fresh.clone()), Some(80))
+                .map(|ack| ack.sequence),
+            Some(12),
+            "a fresh terminal-frame ack for the current turn replaces the stored value"
+        );
+
+        // No fresh ack + different turn → reset (never inherit).
+        assert!(
+            carry_session_bound_ack_for_turn(Some(prior.clone()), None, Some(80)).is_none(),
+            "a fresh turn with no terminal ack does not inherit the prior turn's ack_target"
+        );
+
+        // No fresh ack + unknown current turn binding → reset (defensive: never
+        // reuse an ack we cannot prove belongs to the current turn).
+        assert!(
+            carry_session_bound_ack_for_turn(Some(prior.clone()), None, None).is_none(),
+            "an ack is not reused when the current turn's pinned offset is unknown"
+        );
+
+        // No fresh ack + stored ack with no turn binding → reset.
+        let unbound = SessionBoundRelayAckTarget {
+            metrics: metrics.clone(),
+            sequence: 13,
+            turn_start_offset: None,
+        };
+        assert!(
+            carry_session_bound_ack_for_turn(Some(unbound), None, Some(50)).is_none(),
+            "an ack lacking a turn binding is never carried across a pass"
+        );
+
+        // Nothing stored, nothing fresh → None.
+        assert!(carry_session_bound_ack_for_turn(None, None, Some(50)).is_none());
     }
 
     // #3041 P1-3 R5: a target sequence that was never terminally resolved (dropped
@@ -3286,6 +3455,7 @@ mod matched_session_jsonl_gate_tests {
         let target = SessionBoundRelayAckTarget {
             metrics: metrics.clone(),
             sequence: 42,
+            turn_start_offset: None,
         };
         assert_eq!(
             session_bound_relay_ack_snapshot_outcome(Some(&target)),
@@ -4893,9 +5063,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &mut cached_relay_producer,
             ),
         };
-        if let Some(ack_target) = data_mirrored_to_session_relay.ack_target.clone() {
-            all_data_session_bound_relay_ack = Some(ack_target);
-        }
+        // #3041 P1-3 R6: turn-scope the carried ack target. A fresh `Some` (THIS
+        // turn forwarded a terminal frame) replaces it; a `None` keeps the stored
+        // ack ONLY when it belongs to THIS turn (`turn_data_start_offset`), so a new
+        // turn processed from leftover bytes never inherits a finished turn's stale
+        // ACK (which would let the prior turn's `Delivered` falsely satisfy this
+        // turn → black-hole). A reset-to-`None` makes this turn reconcile against
+        // the committed offset instead of waiting on a foreign sequence.
+        all_data_session_bound_relay_ack = carry_session_bound_ack_for_turn(
+            all_data_session_bound_relay_ack.take(),
+            data_mirrored_to_session_relay.ack_target.clone(),
+            turn_identity_for_panel
+                .as_ref()
+                .and_then(|identity| identity.turn_start_offset),
+        );
         if initial_buffer_was_empty {
             all_data_fully_mirrored_to_session_relay = data_mirrored_to_session_relay.mirrored;
         } else {
@@ -5140,9 +5321,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 &mut cached_relay_producer,
                             ),
                         };
-                        if let Some(ack_target) = chunk_forwarded_to_session_relay.ack_target {
-                            all_data_session_bound_relay_ack = Some(ack_target);
-                        }
+                        // #3041 P1-3 R6: turn-scope the carried ack target (see the
+                        // initial-parse site above). A fresh terminal frame's ack
+                        // replaces it; a non-terminal pass keeps the stored ack ONLY
+                        // when it belongs to THIS turn (`turn_data_start_offset`), so
+                        // a later turn never inherits a finished turn's stale ACK.
+                        all_data_session_bound_relay_ack = carry_session_bound_ack_for_turn(
+                            all_data_session_bound_relay_ack.take(),
+                            chunk_forwarded_to_session_relay.ack_target.clone(),
+                            turn_identity_for_panel
+                                .as_ref()
+                                .and_then(|identity| identity.turn_start_offset),
+                        );
                         let chunk_mirrored_to_session_relay =
                             chunk_forwarded_to_session_relay.mirrored;
                         session_bound_relay_turn_fully_mirrored &= chunk_mirrored_to_session_relay;

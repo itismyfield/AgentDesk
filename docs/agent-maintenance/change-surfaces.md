@@ -128,7 +128,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (8592 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (8680 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -194,6 +194,15 @@
     `FrameAccepted` (never a terminal outcome) so turn B's tail post can never mask
     turn A's terminal-ACK (multi-RESULT-per-chunk per-turn fence deferred to #3151,
     no black-hole);
+    +R6 (PR #3150) codex P1-3 R6: TURN-SCOPE the carried session-bound
+    `ack_target` (`SessionBoundRelayAckTarget` now stamps the terminal frame's
+    pinned `turn_start_offset`; `carry_session_bound_ack_for_turn` resets a stored
+    ack to `None` on a turn boundary instead of the legacy "store only when Some").
+    A single chunk holding `result(A)+result(B)` where B completes inside the split
+    tail (its frame sequence discarded) no longer lets B inherit A's stale ack: B's
+    pass sees a different pinned turn identity → ack reset to `None` → B reconciles
+    against `committed_relay_offset` (None → MissingTarget → §3.2 SendFull/Skip),
+    NEVER black-holed even when A reported Delivered;
     split loop helpers further before adding behavior).
   - `src/services/discord/tui_prompt_relay.rs` (3874 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
