@@ -1212,6 +1212,101 @@ pub fn spawn_watchdog(port: u16) {
 /// #1446 (parent channel queues forever because thread inflight stayed
 /// behind after the dispatch terminated).
 ///
+/// #3041 B: decide whether a force-cleaned turn's provider session selector
+/// should be PRESERVED (persisted to DB so the next turn `--resume`s the same
+/// provider session) or DISCARDED (next turn cold-starts a fresh session).
+///
+/// Preserve only when we both KNOW the selector and have positive evidence the
+/// underlying session is intact:
+///   - `terminal_delivery_committed`: the turn finished and delivered its
+///     answer, so the session is idle-but-healthy and fully resumable; OR
+///   - `tmux_session_alive == Some(true)`: the provider pane is still live, so
+///     the transcript is coherent up to the interruption and `--resume` grafts
+///     clean context.
+///
+/// Discard when the selector is unknown, or the pane is dead AND the turn never
+/// committed — the genuine hang / abnormal-exit signature where the transcript
+/// may be truncated mid-write and resuming would carry corrupt context into the
+/// next turn. Discarding lets the next turn cold-start cleanly.
+pub(crate) fn force_clean_should_preserve_resume_selector(
+    session_id: Option<&str>,
+    session_key: Option<&str>,
+    terminal_delivery_committed: bool,
+    tmux_session_alive: Option<bool>,
+) -> bool {
+    let has_selector = session_id.is_some_and(|s| !s.trim().is_empty())
+        && session_key.is_some_and(|s| !s.trim().is_empty());
+    if !has_selector {
+        return false;
+    }
+    terminal_delivery_committed || tmux_session_alive == Some(true)
+}
+
+/// #3041 B side-effecting wrapper: classify via
+/// `force_clean_should_preserve_resume_selector` and, on the preserve branch,
+/// persist the selector to DB so the next turn restores it
+/// (`db_provider_session_restored`) instead of falling to
+/// `no_cached_provider_session`. The discard branch is a no-op (the next turn
+/// cold-starts) but is logged so the distinction is observable.
+async fn preserve_resume_selector_on_force_clean(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    shared: &Arc<SharedData>,
+    inflight: Option<&discord::inflight::InflightTurnState>,
+    tmux_session_alive: Option<bool>,
+) {
+    let Some(inflight) = inflight else {
+        return;
+    };
+    let preserve = force_clean_should_preserve_resume_selector(
+        inflight.session_id.as_deref(),
+        inflight.session_key.as_deref(),
+        inflight.terminal_delivery_committed,
+        tmux_session_alive,
+    );
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    let (Some(session_id), Some(session_key)) = (
+        inflight
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+        inflight
+            .session_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+    ) else {
+        // No selector to preserve — next turn cold-starts regardless.
+        return;
+    };
+    if !preserve {
+        tracing::info!(
+            "  [{ts}] 🧹 STALL-WATCHDOG: discarding resume selector for channel {} (provider={}, committed={}, pane_alive={:?}) — next turn cold-starts",
+            channel_id,
+            provider.as_str(),
+            inflight.terminal_delivery_committed,
+            tmux_session_alive,
+        );
+        return;
+    }
+    discord::adk_session::save_provider_session_id(
+        session_key,
+        session_id,
+        Some(session_id),
+        provider,
+        channel_id,
+        shared.api_port,
+    )
+    .await;
+    tracing::info!(
+        "  [{ts}] ♻ STALL-WATCHDOG: preserved resume selector for channel {} (provider={}, session_key={}) — next turn will --resume",
+        channel_id,
+        provider.as_str(),
+        session_key,
+    );
+}
+
 /// #3126 false-positive guard: a turn that finished normally commits its
 /// terminal response to the outbound delivery path
 /// (`InflightTurnState::terminal_delivery_committed`) and then leaves the
@@ -1223,6 +1318,17 @@ pub fn spawn_watchdog(port: u16) {
 /// killed a perfectly healthy wakeup-waiting session. Excluding committed
 /// turns keeps the watchdog targeting only genuinely hung (never-completed)
 /// turns.
+///
+/// #3041 post-restart grace: `inflight_updated_at` is frozen at the wall-clock
+/// time of the last relay write *before* a dcserver restart. Right after a
+/// deploy/restart every watcher is transiently `desynced` (relay offsets not
+/// yet re-synced) while its inflight row already reads arbitrarily stale — so
+/// the bare `now - updated_at >= threshold` test fires immediately and
+/// force-kills a perfectly healthy work session that simply hadn't re-synced
+/// yet. Anchoring the age at `max(updated_at, boot)` restarts the staleness
+/// clock at boot, giving the watcher a full `threshold_secs` window after the
+/// restart to re-sync (which clears `desynced` and the kill never happens).
+/// A genuinely hung turn stays desynced past that window and is still cleaned.
 pub(crate) fn stall_watchdog_should_force_clean(
     attached: bool,
     desynced: bool,
@@ -1230,6 +1336,7 @@ pub(crate) fn stall_watchdog_should_force_clean(
     inflight_updated_at: Option<&str>,
     now_unix_secs: i64,
     threshold_secs: u64,
+    boot_unix_secs: i64,
 ) -> bool {
     if !attached || !desynced {
         return false;
@@ -1245,7 +1352,11 @@ pub(crate) fn stall_watchdog_should_force_clean(
     let Some(updated_at_unix) = discord::inflight::parse_updated_at_unix(updated_at) else {
         return false;
     };
-    let age_secs = now_unix_secs.saturating_sub(updated_at_unix);
+    // #3041: never count staleness that accrued before this process booted —
+    // a pre-restart-frozen `updated_at` must not instantly satisfy the
+    // threshold the moment the watchdog's initial delay elapses.
+    let age_anchor = updated_at_unix.max(boot_unix_secs);
+    let age_secs = now_unix_secs.saturating_sub(age_anchor);
     age_secs >= 0 && (age_secs as u64) >= threshold_secs
 }
 
@@ -1558,6 +1669,7 @@ pub(crate) async fn run_stall_watchdog_pass(
             snapshot.inflight_updated_at.as_deref(),
             now_unix_secs,
             STALL_WATCHDOG_THRESHOLD_SECS,
+            registry.started_at_unix(),
         );
         if !should_clean {
             // Detection-only sibling probe for "completed-stale" inflight
@@ -1666,10 +1778,27 @@ pub(crate) async fn run_stall_watchdog_pass(
         // normal cleanup paths (`turn_bridge::mod.rs:3047-3048` and the four
         // `tmux_watcher` finalize sites) all skip this code path because the
         // turn never reached a watcher-side completion event.
-        let pending_hourglass_user_msg_id =
-            discord::inflight::load_inflight_state(provider, channel_id.get())
-                .filter(|state| state.user_msg_id != 0)
-                .map(|state| state.user_msg_id);
+        let force_clean_inflight =
+            discord::inflight::load_inflight_state(provider, channel_id.get());
+        let pending_hourglass_user_msg_id = force_clean_inflight
+            .as_ref()
+            .filter(|state| state.user_msg_id != 0)
+            .map(|state| state.user_msg_id);
+        // #3041 B: before we tear the turn down, decide whether the next turn
+        // should `--resume` this provider session or cold-start. A force-clean
+        // that fires on a still-healthy session (watcher desync, post-restart
+        // re-sync lag) must NOT silently drop the user's work, while a genuine
+        // hang / abnormal-exit must NOT graft a possibly-truncated transcript
+        // onto the next turn. `preserve_resume_selector_on_force_clean`
+        // persists the selector to DB only on the safe branch.
+        preserve_resume_selector_on_force_clean(
+            provider,
+            channel_id,
+            &shared,
+            force_clean_inflight.as_ref(),
+            snapshot.tmux_session_alive,
+        )
+        .await;
         discord::inflight::delete_inflight_state_file(provider, channel_id.get());
         let cleared = discord::mailbox_clear_channel(&shared, provider, channel_id).await;
         discord::stall_recovery::finalize_orphaned_clear(
@@ -2440,6 +2569,7 @@ async fn maybe_recover_completed_stale_leak(
 mod stall_watchdog_pure_tests {
     use super::{
         LeakRecoveryLedgerIdentity, STALL_WATCHDOG_THRESHOLD_SECS,
+        force_clean_should_preserve_resume_selector,
         inflight_completed_stale_leak_detected, leak_recovery_chunk_fingerprints,
         leak_recovery_clear_chunk_ledger, leak_recovery_confirmed_chunk_count,
         leak_recovery_confirmed_prefix_from_ledger, leak_recovery_record_confirmed_chunk,
@@ -3234,6 +3364,9 @@ mod stall_watchdog_pure_tests {
         };
         let stale_str = to_local(stale_unix);
         let fresh_str = to_local(now_unix - 5);
+        // Boot far in the past so `max(updated_at, boot)` resolves to
+        // `updated_at` — these cases assert the pre-#3041 semantics.
+        let boot_unix = stale_unix - 100;
 
         // Happy path: attached + desynced + stale + not-committed → clean.
         assert!(stall_watchdog_should_force_clean(
@@ -3243,6 +3376,7 @@ mod stall_watchdog_pure_tests {
             Some(stale_str.as_str()),
             now_unix,
             STALL_WATCHDOG_THRESHOLD_SECS,
+            boot_unix,
         ));
 
         // detached → no clean.
@@ -3253,6 +3387,7 @@ mod stall_watchdog_pure_tests {
             Some(stale_str.as_str()),
             now_unix,
             STALL_WATCHDOG_THRESHOLD_SECS,
+            boot_unix,
         ));
 
         // synced → no clean.
@@ -3263,6 +3398,7 @@ mod stall_watchdog_pure_tests {
             Some(stale_str.as_str()),
             now_unix,
             STALL_WATCHDOG_THRESHOLD_SECS,
+            boot_unix,
         ));
 
         // fresh updated_at → no clean (live-turn safety net).
@@ -3273,6 +3409,7 @@ mod stall_watchdog_pure_tests {
             Some(fresh_str.as_str()),
             now_unix,
             STALL_WATCHDOG_THRESHOLD_SECS,
+            boot_unix,
         ));
 
         // missing updated_at → no clean.
@@ -3283,6 +3420,7 @@ mod stall_watchdog_pure_tests {
             None,
             now_unix,
             STALL_WATCHDOG_THRESHOLD_SECS,
+            boot_unix,
         ));
 
         // unparseable updated_at → no clean.
@@ -3293,6 +3431,36 @@ mod stall_watchdog_pure_tests {
             Some("not-a-real-timestamp"),
             now_unix,
             STALL_WATCHDOG_THRESHOLD_SECS,
+            boot_unix,
+        ));
+
+        // #3041 post-restart grace: identical stale+desynced+uncommitted
+        // signature, but the process booted recently → the staleness clock
+        // restarts at boot, so the row is NOT yet old enough to clean. This is
+        // the watcher that simply hasn't re-synced since the restart.
+        assert!(
+            !stall_watchdog_should_force_clean(
+                true,
+                true,
+                false,
+                Some(stale_str.as_str()),
+                now_unix,
+                STALL_WATCHDOG_THRESHOLD_SECS,
+                /* boot_unix_secs */ now_unix - 5,
+            ),
+            "a pre-restart-stale row must get a full staleness window after boot before force-clean"
+        );
+
+        // …and once that post-boot window has fully elapsed, a still-desynced
+        // (genuinely hung) row IS cleaned even with the grace anchor.
+        assert!(stall_watchdog_should_force_clean(
+            true,
+            true,
+            false,
+            Some(stale_str.as_str()),
+            now_unix,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+            /* boot_unix_secs */ now_unix - (STALL_WATCHDOG_THRESHOLD_SECS as i64) - 1,
         ));
     }
 
@@ -3313,6 +3481,9 @@ mod stall_watchdog_pure_tests {
             .format("%Y-%m-%d %H:%M:%S")
             .to_string();
 
+        // Boot far in the past so the grace anchor is inert for this test.
+        let boot_unix = stale_unix - 100;
+
         // Same attached+desynced+stale signature as the happy path, but the
         // turn already committed its terminal response → completed-then-idle.
         assert!(
@@ -3323,6 +3494,7 @@ mod stall_watchdog_pure_tests {
                 Some(stale_str.as_str()),
                 now_unix,
                 STALL_WATCHDOG_THRESHOLD_SECS,
+                boot_unix,
             ),
             "completed-then-idle (wakeup-waiting) session must not be force-cleaned"
         );
@@ -3336,6 +3508,63 @@ mod stall_watchdog_pure_tests {
             Some(stale_str.as_str()),
             now_unix,
             STALL_WATCHDOG_THRESHOLD_SECS,
+            boot_unix,
+        ));
+    }
+
+    /// #3041 B: resume-selector preserve/discard classifier.
+    #[test]
+    fn force_clean_resume_selector_preserve_vs_discard() {
+        // Unknown selector → never preserve.
+        assert!(!force_clean_should_preserve_resume_selector(
+            None,
+            Some("host:sess"),
+            true,
+            Some(true),
+        ));
+        assert!(!force_clean_should_preserve_resume_selector(
+            Some("sid"),
+            None,
+            true,
+            Some(true),
+        ));
+        // Blank selector strings count as unknown.
+        assert!(!force_clean_should_preserve_resume_selector(
+            Some("   "),
+            Some("host:sess"),
+            true,
+            Some(true),
+        ));
+
+        // Committed turn → preserve even if the pane already exited.
+        assert!(force_clean_should_preserve_resume_selector(
+            Some("sid"),
+            Some("host:sess"),
+            /* terminal_delivery_committed */ true,
+            /* tmux_session_alive */ Some(false),
+        ));
+
+        // Live pane, not yet committed (interrupted but healthy) → preserve.
+        assert!(force_clean_should_preserve_resume_selector(
+            Some("sid"),
+            Some("host:sess"),
+            false,
+            Some(true),
+        ));
+
+        // Genuine hang signature: pane dead AND never committed → discard.
+        assert!(!force_clean_should_preserve_resume_selector(
+            Some("sid"),
+            Some("host:sess"),
+            false,
+            Some(false),
+        ));
+        // Pane liveness unknown AND never committed → discard (no evidence).
+        assert!(!force_clean_should_preserve_resume_selector(
+            Some("sid"),
+            Some("host:sess"),
+            false,
+            None,
         ));
     }
 }

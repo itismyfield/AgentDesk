@@ -59,6 +59,14 @@ pub(super) struct ProviderEntry {
 pub struct HealthRegistry {
     providers: tokio::sync::Mutex<Vec<ProviderEntry>>,
     started_at: Instant,
+    /// Wall-clock (Unix seconds) at which this dcserver process booted.
+    /// `started_at` is a monotonic `Instant` and cannot be compared against
+    /// the Unix timestamps parsed from inflight `updated_at` strings, so the
+    /// stall watchdog uses this field to grant a post-restart grace window:
+    /// an inflight row that went stale *before* the restart must not be
+    /// force-cleaned until the watcher has had a full staleness window after
+    /// boot to re-sync (#3041).
+    started_at_unix: i64,
     /// Discord HTTP clients keyed by provider name (for sending messages via correct bot)
     discord_http: tokio::sync::Mutex<Vec<(String, Arc<serenity::Http>)>>,
     /// Dedicated HTTP client for the announce bot (agent-to-agent routing).
@@ -78,12 +86,19 @@ impl HealthRegistry {
         Self {
             providers: tokio::sync::Mutex::new(Vec::new()),
             started_at: Instant::now(),
+            started_at_unix: chrono::Utc::now().timestamp(),
             discord_http: tokio::sync::Mutex::new(Vec::new()),
             announce_http: tokio::sync::Mutex::new(None),
             announce_user_id: tokio::sync::Mutex::new(None),
             notify_http: tokio::sync::Mutex::new(None),
             notify_user_id: tokio::sync::Mutex::new(None),
         }
+    }
+
+    /// Wall-clock Unix seconds at which this dcserver process booted. Used by
+    /// the stall watchdog to anchor its post-restart grace window (#3041).
+    pub(crate) fn started_at_unix(&self) -> i64 {
+        self.started_at_unix
     }
 
     /// Snapshot the notify-bot HTTP client (for non-actionable side channels
