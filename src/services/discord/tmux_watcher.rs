@@ -1868,6 +1868,21 @@ fn forward_terminal_chunk_with_trailing_to_supervisor_relay(
     // frame's ack_target (the watcher waits on THIS turn's delivery) and AND the
     // tail's mirror flag so a failed tail forward still surfaces "not fully
     // mirrored".
+    //
+    // #3041 P1-3 (codex P1-3 issue 1 R4 — DEFERRED multi-RESULT edge, #3151): a
+    // per-result split that gives turn B its OWN terminal fence is INFEASIBLE in
+    // this pass — a fence requires B's PINNED turn identity (`turn_start_offset` +
+    // `user_msg_id` + `started_at`), but only turn A's identity
+    // (`turn_identity_for_panel`) is loaded here; B's inflight is established on a
+    // LATER watcher loop pass. Any fence we emitted for B's bytes would carry A's
+    // identity and the sink's STRICT identity gate would (correctly) BLOCK it. So B
+    // rides this fence-less tail: it is MIRRORED (no black-hole) and gets its own
+    // real fence when B completes on a later pass. If this tail already contains
+    // B's COMPLETE result, the sink posts B from it; the watcher's later SendFull
+    // may then re-post B → a possible DUPLICATE (never a black-hole). The
+    // ACK-correlation hazard is closed in the sink (`deliver`): a fence-less frame
+    // reports `FrameAccepted`, NEVER a terminal commit, so B's post can never
+    // satisfy turn A's terminal-ACK and the ACK stays bound to A's terminal frame.
     let tail_forward =
         forward_chunk_to_supervisor_relay(tmux_session_name, tail_part, registry, cached_producer);
     SupervisorRelayForward {
@@ -2248,15 +2263,23 @@ fn watcher_terminal_commit_fence(
     if identity.tmux_session_name.as_deref() != Some(tmux_session_name) {
         return None;
     }
+    // #3041 P1-3 (codex P1-3 issue 2 R4): a fence MUST carry a real
+    // `turn_start_offset`. The sink's identity gate is STRICT on this field (no
+    // None fallback) so two consecutive `user_msg_id == 0` (TUI-direct) turns in
+    // the same one-second `started_at` cannot collide. If the would-be terminal
+    // turn's start offset is unknown, DO NOT emit a fence: returning None forwards
+    // a non-terminal frame instead, and the watcher reconciliation's SendFull then
+    // safely delivers this turn (no black-hole, no weakly-gated advance).
+    let turn_start_offset = identity.turn_start_offset?;
     Some(
         crate::services::cluster::stream_relay::TerminalCommitFence {
             consumed_end,
             turn_user_msg_id: identity.user_msg_id,
             turn_started_at: identity.started_at.clone(),
-            // #3041 P1-3 (codex P1-3 issue 2): carry the pinned turn's
-            // `turn_start_offset` so the sink's identity gate can disambiguate two
-            // consecutive `user_msg_id == 0` turns started in the same second.
-            turn_start_offset: identity.turn_start_offset,
+            // A fence ALWAYS carries a real `turn_start_offset` (guaranteed above)
+            // so the sink's identity gate can disambiguate two consecutive
+            // `user_msg_id == 0` turns started in the same second.
+            turn_start_offset: Some(turn_start_offset),
         },
     )
 }
@@ -3512,6 +3535,23 @@ mod matched_session_jsonl_gate_tests {
         };
         assert!(
             watcher_terminal_commit_fence(true, 0, 256, Some(&other_identity), session).is_none()
+        );
+
+        // #3041 P1-3 (codex P1-3 issue 2 R4): a fence MUST carry a real
+        // turn_start_offset. If the pinned identity's offset is None, the producer
+        // emits NO fence (forwards a non-terminal frame instead) so the sink's
+        // STRICT offset gate never sees a None and the watcher reconciliation's
+        // SendFull delivers this turn safely (no black-hole, no weak gate).
+        let no_offset_identity = InflightTurnIdentity {
+            user_msg_id: 0,
+            started_at: "2026-06-04T00:00:00Z".to_string(),
+            tmux_session_name: Some(session.to_string()),
+            turn_start_offset: None,
+        };
+        assert!(
+            watcher_terminal_commit_fence(true, 0, 256, Some(&no_offset_identity), session)
+                .is_none(),
+            "a turn with no known turn_start_offset must NOT emit a fence (strict-offset guarantee)"
         );
     }
 

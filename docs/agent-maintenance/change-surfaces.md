@@ -128,7 +128,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (8549 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (8572 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -186,6 +186,14 @@
     carries ONLY the just-completed turn's bytes, a trailing later-turn tail rides a
     separate non-terminal frame so it is never black-holed), and the
     `WatcherTerminalResendAction::SendFull` slow-sink-in-flight deferral doc (#3151);
+    +R4 (PR #3150) codex P1-3 R4: STRICT frame `turn_start_offset` identity gate
+    (no weak `is_none_or` None fallback) with the producer guarantee that
+    `watcher_terminal_commit_fence` only emits a fence when the turn's
+    `turn_start_offset` is known (else a non-terminal frame + watcher SendFull),
+    plus the issue-1 ACK-correlation close: a fence-less frame reports
+    `FrameAccepted` (never a terminal outcome) so turn B's tail post can never mask
+    turn A's terminal-ACK (multi-RESULT-per-chunk per-turn fence deferred to #3151,
+    no black-hole);
     split loop helpers further before adding behavior).
   - `src/services/discord/tui_prompt_relay.rs` (3874 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only

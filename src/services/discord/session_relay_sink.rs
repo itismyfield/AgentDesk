@@ -358,17 +358,23 @@ impl SessionBoundDiscordRelaySink {
             );
             return;
         };
-        // #3041 P1-3 (codex P1-3 issue 2): `turn_start_offset` is part of the gate
-        // so two consecutive `user_msg_id == 0` turns started in the SAME second
-        // (identical `started_at`) cannot collide. The frame carries the pinned
-        // turn's `turn_start_offset`; it must match the channel's current inflight.
-        // When the frame carries no offset (legacy / non-fence) we fall back to the
-        // `(user_msg_id, started_at)` pair so old producers still gate correctly.
+        // #3041 P1-3 (codex P1-3 issue 2 R4): STRICT `turn_start_offset` identity.
+        // Two consecutive `user_msg_id == 0` turns started in the SAME second
+        // (identical `started_at`) would collide on the weak `(user_msg_id,
+        // started_at)` pair alone, so `turn_start_offset` is a REQUIRED part of the
+        // gate — there is NO None fallback. A fenced terminal frame (the only kind
+        // that reaches this advance, since `terminal_consumed_end` is Some) is
+        // GUARANTEED by the producer (`watcher_terminal_commit_fence`) to carry a
+        // real `turn_start_offset`: the producer only sets the fence when the turn's
+        // start offset is known, otherwise it forwards a non-terminal frame and the
+        // watcher reconciliation's SendFull delivers (no black-hole). Therefore a
+        // frame reaching here with `frame_turn_start_offset == None`, or whose
+        // offset does not equal the current inflight's, MUST NOT advance — it is a
+        // stale/mismatched frame, never a legitimate fence for the current turn.
         let identity_matches = inflight.user_msg_id == delivery.frame_turn_user_msg_id
             && inflight.started_at == delivery.frame_turn_started_at
-            && delivery
-                .frame_turn_start_offset
-                .is_none_or(|frame_offset| inflight.turn_start_offset == Some(frame_offset));
+            && delivery.frame_turn_start_offset.is_some()
+            && inflight.turn_start_offset == delivery.frame_turn_start_offset;
         if !identity_matches {
             tracing::debug!(
                 provider = provider.as_str(),
@@ -727,6 +733,24 @@ enum SessionRelayDeliveryOutcome {
 #[async_trait]
 impl RelaySink for SessionBoundDiscordRelaySink {
     async fn deliver(&self, frame: &StreamFrame) -> Result<RelaySinkOutcome, RelaySinkError> {
+        // #3041 P1-3 (codex P1-3 issue 1 R4 — ACK correlation): only a FENCED
+        // (terminal) frame may report a terminal outcome to the relay metrics. A
+        // single physical chunk can carry turn A's result PLUS turn B's COMPLETE
+        // result; the split forwards A on a terminal (fenced) frame and B's tail on
+        // a SEPARATE non-terminal (fence-less) frame. The sink's parser still
+        // delivers B from that tail (so B is never black-holed), but that post is
+        // NOT a terminal commit for THIS frame — the frame carries no fence. If we
+        // bumped `last_terminal_committed_sequence` for the tail (B's higher
+        // sequence N+1), it would MASK turn A's true terminal outcome: A's
+        // terminal-ACK (target = A's seq N) would read `committed >= N` and report
+        // `Delivered` even when A's terminal frame was actually SKIPPED — the
+        // watcher would then suppress its SendFull reconciliation and BLACK-HOLE A.
+        // Gating the terminal outcome on the frame's own fence keeps A's
+        // terminal-ACK bound strictly to A's terminal frame. The deferred duplicate
+        // of B (the watcher's later SendFull re-posts B) is tracked in #3151; it is
+        // never a black-hole (B is delivered) and never a wrong-turn advance (B's
+        // tail has no fence so it cannot advance any offset).
+        let frame_is_terminal = frame.terminal_consumed_end.is_some();
         let deliveries = self.ingest_frame(frame);
         let mut terminal_committed = false;
         let mut terminal_skipped = false;
@@ -769,9 +793,14 @@ impl RelaySink for SessionBoundDiscordRelaySink {
                 }
             }
         }
-        if terminal_committed {
+        // Only a FENCED frame may surface a terminal outcome (see above). A
+        // fence-less frame that posted a delivery (e.g. turn B's complete result
+        // riding turn A's trailing tail) reports `FrameAccepted`: the relay records
+        // it as DELIVERED (mirrored) but NOT terminal-committed, so it can never
+        // satisfy another turn's terminal-ACK.
+        if frame_is_terminal && terminal_committed {
             Ok(RelaySinkOutcome::TerminalCommitted)
-        } else if terminal_skipped {
+        } else if frame_is_terminal && terminal_skipped {
             Ok(RelaySinkOutcome::TerminalSkipped)
         } else {
             Ok(RelaySinkOutcome::FrameAccepted)
@@ -2027,6 +2056,44 @@ mod tests {
         assert_eq!(outcome, RelaySinkOutcome::FrameAccepted);
     }
 
+    // #3041 P1-3 (codex P1-3 issue 1 R4 — ACK correlation): a FENCE-LESS
+    // (non-terminal) frame that carries a COMPLETE result (e.g. turn B's result
+    // riding turn A's trailing tail) produces a delivery whose
+    // `terminal_consumed_end` is None — so the identity-gated advance can NEVER
+    // fire for it (the advance requires `Some(end > 0)`), and `deliver` reports a
+    // terminal outcome ONLY when `frame.terminal_consumed_end.is_some()`. Both
+    // guarantee B's tail post can never advance an offset nor satisfy turn A's
+    // terminal-ACK (which would otherwise black-hole A). Driving a real terminal
+    // COMMIT needs Discord HTTP, so we assert the two load-bearing invariants
+    // directly: (a) the fence-less frame is non-terminal, and (b) its delivery
+    // carries no consumed_end.
+    #[test]
+    fn fenceless_frame_with_complete_result_carries_no_commit_fence() {
+        let binding = matched("44");
+        let mut parser = SessionRelayParser::default();
+        // A COMPLETE turn result on a fence-less frame (terminal_consumed_end=None).
+        let payload = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"turn B done\"}]}}\n",
+            "{\"type\":\"result\",\"result\":\"turn B done\"}\n"
+        );
+        let fenceless = frame(&binding, payload, 7);
+        assert!(
+            fenceless.terminal_consumed_end.is_none(),
+            "precondition: this is a fence-less (non-terminal) frame — `deliver` reports FrameAccepted, never a terminal outcome"
+        );
+
+        let deliveries = parser.ingest_frame(&fenceless);
+        assert_eq!(
+            deliveries.len(),
+            1,
+            "the complete result on the fence-less frame is still delivered (B is mirrored, not black-holed)"
+        );
+        assert_eq!(
+            deliveries[0].terminal_consumed_end, None,
+            "a fence-less frame's delivery carries NO consumed_end → it can never advance the offset authority (no wrong-turn advance, no shared-ACK reuse)"
+        );
+    }
+
     fn delivery_with_fence(
         session_name: &str,
         consumed_end: Option<u64>,
@@ -2112,7 +2179,15 @@ mod tests {
         let session = "AgentDesk-claude-8041";
         let sink = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
         // The channel's current inflight identity the frame must match to advance.
-        let inflight = inflight_with_identity(channel.get(), session, 0, "2026-06-04T00:00:00Z");
+        // A fence ALWAYS carries a real `turn_start_offset` (producer guarantee),
+        // and the STRICT gate requires it to match, so the inflight carries one too.
+        let inflight = inflight_with_identity_offset(
+            channel.get(),
+            session,
+            0,
+            "2026-06-04T00:00:00Z",
+            Some(0),
+        );
 
         // Before any delivery the authority is at 0.
         assert_eq!(shared.committed_relay_offset(channel), 0);
@@ -2124,7 +2199,7 @@ mod tests {
             &ProviderKind::Claude,
             channel.get(),
             session,
-            &delivery_with_fence(session, Some(256), 0, "2026-06-04T00:00:00Z"),
+            &delivery_with_fence_offset(session, Some(256), 0, "2026-06-04T00:00:00Z", Some(0)),
             Some(&inflight),
         );
         assert_eq!(
@@ -2140,7 +2215,7 @@ mod tests {
             &ProviderKind::Claude,
             channel.get(),
             session,
-            &delivery_with_fence(session, Some(256), 0, "2026-06-04T00:00:00Z"),
+            &delivery_with_fence_offset(session, Some(256), 0, "2026-06-04T00:00:00Z", Some(0)),
             Some(&inflight),
         );
         assert_eq!(shared.committed_relay_offset(channel), 256);
@@ -2152,7 +2227,7 @@ mod tests {
             &ProviderKind::Claude,
             channel.get(),
             session,
-            &delivery_with_fence(session, None, 0, "2026-06-04T00:00:00Z"),
+            &delivery_with_fence_offset(session, None, 0, "2026-06-04T00:00:00Z", Some(0)),
             Some(&inflight),
         );
         sink.advance_offset_for_confirmed_delegated_terminal(
@@ -2160,7 +2235,7 @@ mod tests {
             &ProviderKind::Claude,
             channel.get(),
             session,
-            &delivery_with_fence(session, Some(0), 0, "2026-06-04T00:00:00Z"),
+            &delivery_with_fence_offset(session, Some(0), 0, "2026-06-04T00:00:00Z", Some(0)),
             Some(&inflight),
         );
         assert_eq!(
@@ -2176,7 +2251,7 @@ mod tests {
             &ProviderKind::Claude,
             channel.get(),
             session,
-            &delivery_with_fence(session, Some(128), 0, "2026-06-04T00:00:00Z"),
+            &delivery_with_fence_offset(session, Some(128), 0, "2026-06-04T00:00:00Z", Some(0)),
             Some(&inflight),
         );
         assert_eq!(
@@ -2189,7 +2264,7 @@ mod tests {
             &ProviderKind::Claude,
             channel.get(),
             session,
-            &delivery_with_fence(session, Some(512), 0, "2026-06-04T00:00:00Z"),
+            &delivery_with_fence_offset(session, Some(512), 0, "2026-06-04T00:00:00Z", Some(0)),
             Some(&inflight),
         );
         assert_eq!(shared.committed_relay_offset(channel), 512);
@@ -2207,10 +2282,17 @@ mod tests {
         let sink = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
 
         // Current inflight is turn started_at=NEW; the frame carries the OLD turn's
-        // identity (same user_msg_id=0 external-input, different started_at).
-        let current_inflight =
-            inflight_with_identity(channel.get(), session, 0, "2026-06-04T00:00:09Z");
-        let stale_frame = delivery_with_fence(session, Some(256), 0, "2026-06-04T00:00:00Z");
+        // identity (same user_msg_id=0 external-input, different started_at). A fence
+        // ALWAYS carries a real `turn_start_offset` (producer guarantee).
+        let current_inflight = inflight_with_identity_offset(
+            channel.get(),
+            session,
+            0,
+            "2026-06-04T00:00:09Z",
+            Some(4096),
+        );
+        let stale_frame =
+            delivery_with_fence_offset(session, Some(256), 0, "2026-06-04T00:00:00Z", Some(0));
 
         sink.advance_offset_for_confirmed_delegated_terminal(
             &shared,
@@ -2243,8 +2325,13 @@ mod tests {
 
         // Different user_msg_id (a managed turn replaced the external-input turn)
         // → no advance even if started_at coincidentally matched.
-        let replaced_inflight =
-            inflight_with_identity(channel.get(), session, 999, "2026-06-04T00:00:00Z");
+        let replaced_inflight = inflight_with_identity_offset(
+            channel.get(),
+            session,
+            999,
+            "2026-06-04T00:00:00Z",
+            Some(0),
+        );
         sink.advance_offset_for_confirmed_delegated_terminal(
             &shared,
             &ProviderKind::Claude,
@@ -2259,10 +2346,15 @@ mod tests {
             "a frame whose user_msg_id != current inflight must NOT advance (identity gate)"
         );
 
-        // Sanity: the SAME identity DOES advance, proving the gate isn't blocking
-        // everything.
-        let matching_inflight =
-            inflight_with_identity(channel.get(), session, 0, "2026-06-04T00:00:00Z");
+        // Sanity: the SAME identity (including matching turn_start_offset) DOES
+        // advance, proving the gate isn't blocking everything.
+        let matching_inflight = inflight_with_identity_offset(
+            channel.get(),
+            session,
+            0,
+            "2026-06-04T00:00:00Z",
+            Some(0),
+        );
         sink.advance_offset_for_confirmed_delegated_terminal(
             &shared,
             &ProviderKind::Claude,
@@ -2333,6 +2425,80 @@ mod tests {
             shared.committed_relay_offset(channel),
             512,
             "the matching-offset frame for the current turn DOES advance the authority"
+        );
+    }
+
+    // #3041 P1-3 (codex P1-3 issue 2 R4 — STRICT offset gate, no weak fallback): a
+    // fenced terminal frame whose `turn_start_offset` is None must NOT advance, even
+    // when its `(user_msg_id, started_at)` pair matches the current inflight. The
+    // producer GUARANTEES every fence carries a real offset, so a None here is a
+    // malformed/legacy frame and the strict gate refuses the advance — closing the
+    // old `is_none_or` weak fallback that let a None authorize an advance and could
+    // collide for consecutive same-second `user_msg_id == 0` turns.
+    #[tokio::test]
+    async fn sink_strict_gate_blocks_advance_when_frame_offset_is_none() {
+        let shared = super::super::make_shared_data_for_tests();
+        let channel = ChannelId::new(8_041);
+        let session = "AgentDesk-claude-8041";
+        let sink = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
+
+        // Current inflight has a real turn_start_offset; the (user_msg_id, started_at)
+        // pair matches the frame exactly. Only the frame's missing offset differs.
+        let same_second = "2026-06-04T00:00:00Z";
+        let inflight =
+            inflight_with_identity_offset(channel.get(), session, 0, same_second, Some(4096));
+        // A fenced frame whose turn_start_offset is None (the weak-fallback case).
+        let none_offset_frame =
+            delivery_with_fence_offset(session, Some(256), 0, same_second, None);
+
+        sink.advance_offset_for_confirmed_delegated_terminal(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            session,
+            &none_offset_frame,
+            Some(&inflight),
+        );
+        assert_eq!(
+            shared.committed_relay_offset(channel),
+            0,
+            "a fenced frame with turn_start_offset=None must NOT advance (no weak None fallback)"
+        );
+
+        // Two `user_msg_id == 0` turns differing ONLY by turn_start_offset: only the
+        // frame whose offset matches the current inflight advances. The mismatched
+        // one (the prior turn's offset) is blocked even though user_msg_id+started_at
+        // are identical (same-second TUI-direct collision).
+        let mismatched_offset_frame =
+            delivery_with_fence_offset(session, Some(256), 0, same_second, Some(0));
+        sink.advance_offset_for_confirmed_delegated_terminal(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            session,
+            &mismatched_offset_frame,
+            Some(&inflight),
+        );
+        assert_eq!(
+            shared.committed_relay_offset(channel),
+            0,
+            "an offset-mismatched same-second frame must NOT advance"
+        );
+
+        let matching_offset_frame =
+            delivery_with_fence_offset(session, Some(256), 0, same_second, Some(4096));
+        sink.advance_offset_for_confirmed_delegated_terminal(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            session,
+            &matching_offset_frame,
+            Some(&inflight),
+        );
+        assert_eq!(
+            shared.committed_relay_offset(channel),
+            256,
+            "the offset-matching same-second frame DOES advance"
         );
     }
 
