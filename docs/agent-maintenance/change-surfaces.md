@@ -128,7 +128,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (8353 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (8428 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -171,10 +171,15 @@
     (skip-already-committed / send-suffix / send-full against
     `committed_relay_offset`), a dedicated `SkipAlreadyCommitted` relay arm that
     treats an already-committed range as a completed delegated delivery (no
-    duplicate, no placeholder double-handling), the watcher persisting its
-    authoritative consumed-terminal end (`session_bound_delegated_terminal_end`)
-    when it delegates so the sink can advance the offset (Part a, B1 close), and the
-    suffix-trim wiring; the ACK polling itself is preserved;
+    duplicate, no placeholder double-handling), and the suffix-trim wiring; the ACK
+    polling itself is preserved;
+    +75 from #3041 P1-3 Part a (frame-carried B1 commit fence): the RESULT-bearing
+    `StreamFrame` now carries `terminal_consumed_end` + the pinned turn identity
+    (`watcher_terminal_commit_fence`; deferred forward at both read sites so the
+    terminal frame is detected post-`process_watcher_lines` and rides the commit
+    data), the sink advances `confirmed_end_offset` identity-gated on its CONFIRMED
+    POST (`advance_offset_for_confirmed_delegated_terminal`), and the RACY
+    inflight-persist Part a (`session_bound_delegated_terminal_end`) is REMOVED;
     split loop helpers further before adding behavior).
   - `src/services/discord/tui_prompt_relay.rs` (3874 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only

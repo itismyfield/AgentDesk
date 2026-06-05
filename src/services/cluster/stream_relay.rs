@@ -82,6 +82,27 @@ pub struct StreamFrame {
     /// Monotonic sequence number assigned by the relay. Useful for sinks that
     /// want to detect drops / reorder.
     pub sequence: u64,
+    /// #3041 P1-3 (Part a, B1 — frame-carried commit fence): for the
+    /// RESULT-bearing (terminal) frame ONLY, the producer's AUTHORITATIVE
+    /// consumed-terminal END offset (`terminal_event_consumed_offset(..)`) for
+    /// the turn it is delegating to this sink. `None` on every non-terminal
+    /// frame. The sink CANNOT derive this from the opaque payload, so it rides
+    /// the frame and the sink advances `confirmed_end_offset` to it on a
+    /// CONFIRMED terminal Discord delivery — identity-gated against the channel's
+    /// current inflight so a delayed/wrong-turn frame can never advance.
+    pub terminal_consumed_end: Option<u64>,
+    /// #3041 P1-3 (Part a, B1): turn identity of the inflight the producer
+    /// pinned when it forwarded the terminal frame (`user_msg_id`). Paired with
+    /// `turn_started_at` it is the IDENTITY GATE: the sink advances the offset
+    /// only when this still matches the channel's current inflight identity.
+    /// `0` / empty on non-terminal frames (carries no commit data). Kept as
+    /// minimal scalars (NOT the discord-side `InflightTurnIdentity`) so the
+    /// cluster layer stays free of discord imports.
+    pub turn_user_msg_id: u64,
+    /// #3041 P1-3 (Part a, B1): the pinned inflight's `started_at` discriminator
+    /// (external-input turns share `user_msg_id == 0`, so `started_at`
+    /// distinguishes consecutive TUI-direct turns). Empty on non-terminal frames.
+    pub turn_started_at: String,
 }
 
 /// Per-session counters. Exposed via the supervisor for diagnostics.
@@ -332,6 +353,28 @@ impl RelayProducer {
             &self.metrics,
             &self.sequence,
             payload,
+            None,
+        )
+    }
+
+    /// #3041 P1-3 (Part a, B1): forward the RESULT-bearing chunk as a terminal
+    /// frame carrying the commit fence (`terminal.consumed_end` + the pinned turn
+    /// identity). The frame both triggers the sink's terminal delivery AND is the
+    /// unit the sink consumes, so the commit data MUST ride on it (a separate
+    /// later frame would arrive after the FIFO sink already dispatched delivery).
+    pub fn try_send_terminal_frame_with_sequence(
+        &self,
+        payload: String,
+        terminal: TerminalCommitFence,
+    ) -> RelaySendOutcome {
+        try_send_frame_inner(
+            &self.matched,
+            &self.queue,
+            &self.shutdown,
+            &self.metrics,
+            &self.sequence,
+            payload,
+            Some(terminal),
         )
     }
 }
@@ -443,6 +486,18 @@ impl RelayFrameQueue {
     }
 }
 
+/// #3041 P1-3 (Part a, B1): the commit-fence data the producer rides on the
+/// RESULT-bearing frame. The watcher computes the authoritative consumed-terminal
+/// `end` and pins the delegating turn's identity (from the inflight loaded BEFORE
+/// the relay, matching #3141 pinned-id semantics) so the sink can advance the
+/// offset authority identity-gated on a confirmed delivery.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalCommitFence {
+    pub consumed_end: u64,
+    pub turn_user_msg_id: u64,
+    pub turn_started_at: String,
+}
+
 fn try_send_frame_inner(
     matched: &MatchedChannel,
     queue: &Arc<RelayFrameQueue>,
@@ -450,16 +505,28 @@ fn try_send_frame_inner(
     metrics: &Arc<RelayMetrics>,
     sequence: &Arc<AtomicU64>,
     payload: String,
+    terminal: Option<TerminalCommitFence>,
 ) -> RelaySendOutcome {
     if shutdown.load(Ordering::Acquire) {
         return RelaySendOutcome::closed();
     }
     let seq = sequence.fetch_add(1, Ordering::AcqRel);
+    let (terminal_consumed_end, turn_user_msg_id, turn_started_at) = match terminal {
+        Some(fence) => (
+            Some(fence.consumed_end),
+            fence.turn_user_msg_id,
+            fence.turn_started_at,
+        ),
+        None => (None, 0, String::new()),
+    };
     let frame = StreamFrame {
         session_name: matched.expected_session_name.clone(),
         binding: matched.clone(),
         payload,
         sequence: seq,
+        terminal_consumed_end,
+        turn_user_msg_id,
+        turn_started_at,
     };
     metrics.frames_received.fetch_add(1, Ordering::AcqRel);
     match queue.push_drop_oldest(frame) {
@@ -516,6 +583,7 @@ impl StreamRelayHandle {
             &self.metrics,
             &self.sequence,
             payload,
+            None,
         )
     }
 
@@ -857,6 +925,47 @@ mod tests {
         }
         assert_eq!(handle.metrics().snapshot().frames_delivered, 5);
         assert_eq!(handle.metrics().snapshot().dropped_frames, 0);
+        handle.shutdown().await;
+    }
+
+    // #3041 P1-3 (Part a, B1): the terminal frame carries the commit fence
+    // (`terminal_consumed_end` + turn identity); non-terminal frames carry None/0/"".
+    #[tokio::test]
+    async fn terminal_frame_carries_consumed_end_and_turn_identity() {
+        let sink = Arc::new(CapturingSink::default());
+        let handle = spawn_stream_relay(matched_for("c-fence"), sink.clone());
+
+        // A normal (non-terminal) frame: no commit fence.
+        assert!(handle.try_send_frame("non-terminal".into()));
+        // The producer-side terminal send (the watcher uses the RelayProducer
+        // clone; the handle exposes the same path for tests).
+        let producer = handle.producer();
+        let outcome = producer.try_send_terminal_frame_with_sequence(
+            "result-bearing".into(),
+            TerminalCommitFence {
+                consumed_end: 512,
+                turn_user_msg_id: 77,
+                turn_started_at: "2026-06-04T00:00:00Z".to_string(),
+            },
+        );
+        assert!(outcome.is_alive());
+
+        flush_pending().await;
+        let delivered = sink.delivered();
+        assert_eq!(delivered.len(), 2);
+
+        // Non-terminal frame carries no fence.
+        assert_eq!(delivered[0].payload, "non-terminal");
+        assert_eq!(delivered[0].terminal_consumed_end, None);
+        assert_eq!(delivered[0].turn_user_msg_id, 0);
+        assert_eq!(delivered[0].turn_started_at, "");
+
+        // Terminal frame carries the consumed_end + pinned identity.
+        assert_eq!(delivered[1].payload, "result-bearing");
+        assert_eq!(delivered[1].terminal_consumed_end, Some(512));
+        assert_eq!(delivered[1].turn_user_msg_id, 77);
+        assert_eq!(delivered[1].turn_started_at, "2026-06-04T00:00:00Z");
+
         handle.shutdown().await;
     }
 

@@ -1791,6 +1791,49 @@ fn forward_chunk_to_supervisor_relay(
     >,
     cached_producer: &mut Option<crate::services::cluster::stream_relay::RelayProducer>,
 ) -> SupervisorRelayForward {
+    forward_chunk_to_supervisor_relay_inner(
+        tmux_session_name,
+        chunk,
+        registry,
+        cached_producer,
+        None,
+    )
+}
+
+/// #3041 P1-3 (Part a, B1): forward the RESULT-bearing chunk as a TERMINAL frame
+/// carrying the commit fence (`terminal.consumed_end` + the pinned turn identity).
+/// Every non-terminal chunk goes through `forward_chunk_to_supervisor_relay` with
+/// no fence (unchanged behaviour). Only the result-bearing chunk — detected AFTER
+/// `process_watcher_lines` sets `found_result` — uses this so the commit data rides
+/// the exact frame that triggers the sink's terminal delivery (FIFO single-task: a
+/// separate later frame would arrive after the delivery already dispatched).
+fn forward_terminal_chunk_to_supervisor_relay(
+    tmux_session_name: &str,
+    chunk: &str,
+    registry: &std::sync::Arc<
+        crate::services::cluster::relay_producer_registry::RelayProducerRegistry,
+    >,
+    cached_producer: &mut Option<crate::services::cluster::stream_relay::RelayProducer>,
+    terminal: crate::services::cluster::stream_relay::TerminalCommitFence,
+) -> SupervisorRelayForward {
+    forward_chunk_to_supervisor_relay_inner(
+        tmux_session_name,
+        chunk,
+        registry,
+        cached_producer,
+        Some(terminal),
+    )
+}
+
+fn forward_chunk_to_supervisor_relay_inner(
+    tmux_session_name: &str,
+    chunk: &str,
+    registry: &std::sync::Arc<
+        crate::services::cluster::relay_producer_registry::RelayProducerRegistry,
+    >,
+    cached_producer: &mut Option<crate::services::cluster::stream_relay::RelayProducer>,
+    terminal: Option<crate::services::cluster::stream_relay::TerminalCommitFence>,
+) -> SupervisorRelayForward {
     if chunk.is_empty() {
         return SupervisorRelayForward::mirrored_without_ack();
     }
@@ -1805,7 +1848,10 @@ fn forward_chunk_to_supervisor_relay(
     // file reads is forwarded after the next read completes it instead of being
     // replaced with U+FFFD.
     let payload = chunk.to_string();
-    let outcome = producer.try_send_frame_with_sequence(payload);
+    let outcome = match terminal {
+        Some(fence) => producer.try_send_terminal_frame_with_sequence(payload, fence),
+        None => producer.try_send_frame_with_sequence(payload),
+    };
     if !outcome.is_alive() {
         // Relay was torn down between our registry read and the send —
         // drop the cache so the next chunk re-resolves. If the supervisor
@@ -2065,17 +2111,46 @@ fn terminal_event_consumed_offset(current_offset: u64, unprocessed_tail: &str) -
 /// terminal delivery for this inflight (`sink_can_own`), and (3) the consumed
 /// range is real (`end > start`). A zero/inverted range or a bridge-owned /
 /// mismatched inflight yields `None` so no spurious end is recorded.
-fn watcher_delegated_terminal_end_for_persist(
-    has_current_response: bool,
-    sink_can_own: bool,
+/// #3041 P1-3 (Part a, B1 — frame-carried commit fence): build the
+/// `TerminalCommitFence` to ride on the RESULT-bearing chunk's frame, or `None`
+/// when this chunk is not the terminal one / has no real consumed range / has no
+/// pinned turn identity to gate the sink's advance.
+///
+/// The fence carries the watcher's AUTHORITATIVE consumed-terminal `end`
+/// (`terminal_event_consumed_offset(current_offset, all_data)` == the watcher's
+/// own lease `end`) plus the PINNED turn identity (`user_msg_id` + `started_at`,
+/// matching #3141 pinned-id semantics — taken from the inflight snapshot loaded at
+/// turn start, filtered to THIS tmux session). The sink advances
+/// `confirmed_end_offset` to `end` on a CONFIRMED delivery ONLY when this identity
+/// still matches the channel's current inflight (delayed-old-frame / wrong-turn
+/// protection). We DO NOT gate on `sink_can_own` here: the fence is inert unless
+/// the sink confirms a delivery (route-gated) AND the identity still matches, so
+/// carrying it on every real terminal chunk is safe and the sink's own gates
+/// decide whether it ever advances.
+fn watcher_terminal_commit_fence(
+    found_result: bool,
     turn_data_start_offset: u64,
-    delegated_consumed_end: u64,
-) -> Option<u64> {
-    if has_current_response && sink_can_own && delegated_consumed_end > turn_data_start_offset {
-        Some(delegated_consumed_end)
-    } else {
-        None
+    consumed_end: u64,
+    pinned_identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+    tmux_session_name: &str,
+) -> Option<crate::services::cluster::stream_relay::TerminalCommitFence> {
+    if !found_result || consumed_end <= turn_data_start_offset {
+        return None;
     }
+    let identity = pinned_identity?;
+    // Only pin an identity for THIS tmux session (the panel-identity snapshot is
+    // already filtered to it, but guard defensively so a cross-session snapshot
+    // can never seed a wrong-turn fence).
+    if identity.tmux_session_name.as_deref() != Some(tmux_session_name) {
+        return None;
+    }
+    Some(
+        crate::services::cluster::stream_relay::TerminalCommitFence {
+            consumed_end,
+            turn_user_msg_id: identity.user_msg_id,
+            turn_started_at: identity.started_at.clone(),
+        },
+    )
 }
 
 /// Resolve the provider session selector to durably persist at turn end.
@@ -3287,41 +3362,43 @@ mod matched_session_jsonl_gate_tests {
         );
     }
 
-    // #3041 P1-3 (Part a, B1 — codex real-close): the watcher's decision to persist
-    // the delegated consumed-terminal END (BEFORE the ACK wait / sink load) is
-    // gated exactly so a bridge-owned / mismatched / no-response / zero-range turn
-    // never records a spurious end, while a real delegated turn always does.
+    // #3041 P1-3 (Part a, B1 — FRAME-CARRIED): the watcher's decision to ATTACH the
+    // commit fence (consumed_end + pinned identity) to the RESULT-bearing frame is
+    // gated by `watcher_terminal_commit_fence`: only the terminal chunk, only a real
+    // (end > start) consumed range, and only with a pinned identity for THIS tmux
+    // session. A non-terminal chunk, a zero/inverted range, a missing identity, or a
+    // cross-session snapshot yields no fence (the frame stays non-terminal).
     #[test]
-    fn watcher_persists_delegated_end_only_for_a_real_delegated_range() {
-        // Real delegated turn: response present, sink eligible, end > start.
-        assert_eq!(
-            watcher_delegated_terminal_end_for_persist(true, true, 0, 256),
-            Some(256),
-            "a real delegated turn must record its consumed-terminal end"
-        );
-        // No visible response → nothing to delegate → no end.
-        assert_eq!(
-            watcher_delegated_terminal_end_for_persist(false, true, 0, 256),
-            None,
-            "no-response turn must not record a delegated end"
-        );
-        // Sink not eligible (bridge-owned / mismatched inflight) → no end.
-        assert_eq!(
-            watcher_delegated_terminal_end_for_persist(true, false, 0, 256),
-            None,
-            "sink-ineligible turn must not record a delegated end"
-        );
-        // Zero range (end == start) → no end (never advances/overshoots).
-        assert_eq!(
-            watcher_delegated_terminal_end_for_persist(true, true, 256, 256),
-            None,
-            "zero range must not record a delegated end"
-        );
-        // Inverted range (end < start) → no end.
-        assert_eq!(
-            watcher_delegated_terminal_end_for_persist(true, true, 300, 256),
-            None,
-            "inverted range must not record a delegated end"
+    fn watcher_terminal_commit_fence_only_for_a_real_terminal_chunk() {
+        use crate::services::discord::inflight::InflightTurnIdentity;
+        let session = "AgentDesk-claude-77";
+        let identity = InflightTurnIdentity {
+            user_msg_id: 0,
+            started_at: "2026-06-04T00:00:00Z".to_string(),
+            tmux_session_name: Some(session.to_string()),
+        };
+        // Real terminal chunk: found_result, end > start, identity for this session.
+        let fence = watcher_terminal_commit_fence(true, 0, 256, Some(&identity), session)
+            .expect("a real terminal chunk must carry a commit fence");
+        assert_eq!(fence.consumed_end, 256);
+        assert_eq!(fence.turn_user_msg_id, 0);
+        assert_eq!(fence.turn_started_at, "2026-06-04T00:00:00Z");
+        // Not the result chunk → no fence.
+        assert!(watcher_terminal_commit_fence(false, 0, 256, Some(&identity), session).is_none());
+        // Zero range (end == start) → no fence.
+        assert!(watcher_terminal_commit_fence(true, 256, 256, Some(&identity), session).is_none());
+        // Inverted range → no fence.
+        assert!(watcher_terminal_commit_fence(true, 300, 256, Some(&identity), session).is_none());
+        // No pinned identity → no fence (sink would have nothing to identity-gate).
+        assert!(watcher_terminal_commit_fence(true, 0, 256, None, session).is_none());
+        // Cross-session snapshot → no fence (never seed a wrong-turn fence).
+        let other_identity = InflightTurnIdentity {
+            user_msg_id: 0,
+            started_at: "2026-06-04T00:00:00Z".to_string(),
+            tmux_session_name: Some("AgentDesk-claude-99".to_string()),
+        };
+        assert!(
+            watcher_terminal_commit_fence(true, 0, 256, Some(&other_identity), session).is_none()
         );
     }
 
@@ -4365,38 +4442,21 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // previous iteration (multi-turn buffer split at the first `result`)
         // is processed before the new disk read.
         let decoded_data = utf8_decoder.decode(&data, data_start_offset);
-        let data_mirrored_to_session_relay = if decoded_data.text.is_empty() {
-            SupervisorRelayForward::mirrored_without_ack()
-        } else {
-            // E5 (#2412): mirror the freshly-read chunk into the
-            // supervisor-owned StreamRelay if one exists for this session.
-            // This is the *producer* side of the supervisor pipeline —
-            // without this call, `try_send_frame` is never invoked in
-            // production. The Discord sink consumes these frames directly for
-            // eligible session-bound inflight shapes; this watcher remains the
-            // fallback for bridge-owned/no-inflight envelopes.
-            forward_chunk_to_supervisor_relay(
-                &tmux_session_name,
-                &decoded_data.text,
-                &producer_registry,
-                &mut cached_relay_producer,
-            )
-        };
-        if let Some(ack_target) = data_mirrored_to_session_relay.ack_target.clone() {
-            all_data_session_bound_relay_ack = Some(ack_target);
-        }
-        if all_data.is_empty() {
+        // #3041 P1-3 (Part a, B1): the forward of this outer-read chunk is
+        // DEFERRED until AFTER `process_watcher_lines` below so the result-bearing
+        // chunk can ride a TERMINAL frame carrying the commit fence. Set only the
+        // buffer START offset here (independent of the forward); the mirror flags +
+        // ack target are set from the deferred forward result (see the
+        // `data_mirrored_to_session_relay` binding after the initial parse).
+        let initial_buffer_was_empty = all_data.is_empty();
+        if initial_buffer_was_empty {
             all_data_start_offset = decoded_data.start_offset.unwrap_or(data_start_offset);
-            all_data_fully_mirrored_to_session_relay = data_mirrored_to_session_relay.mirrored;
-        } else {
-            all_data_fully_mirrored_to_session_relay &= data_mirrored_to_session_relay.mirrored;
         }
         if decoded_data.text.is_empty() && all_data.is_empty() {
             continue;
         }
         all_data.push_str(&decoded_data.text);
         let turn_data_start_offset = all_data_start_offset;
-        let mut session_bound_relay_turn_fully_mirrored = all_data_fully_mirrored_to_session_relay;
         let mut state = StreamLineState::new();
         let restored_turn_seed = restored_turn.take();
         let discard_restored_seed = should_discard_restored_seed_for_idle_direct_prompt(
@@ -4423,13 +4483,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         });
         let restored_response_seed = stream_seed.full_response.clone();
         let restored_assistant_text_seen = !restored_response_seed.trim().is_empty();
-        if restored_assistant_text_seen {
-            // The restored response prefix came from watcher state, not from
-            // chunks mirrored into the session-bound StreamRelay parser. Keep
-            // the legacy watcher delivery owner for this terminal envelope so
-            // we do not delegate a partial response.
-            session_bound_relay_turn_fully_mirrored = false;
-        }
+        // #3041 P1-3 (Part a, B1): the `restored_assistant_text_seen` →
+        // "not fully mirrored" reset is now applied where
+        // `session_bound_relay_turn_fully_mirrored` is DECLARED (after the deferred
+        // initial forward below). A restored response prefix came from watcher
+        // state, not from chunks mirrored into the session-bound StreamRelay
+        // parser, so the legacy watcher delivery owner keeps this terminal envelope
+        // (we do not delegate a partial response).
         let mut full_response = stream_seed.full_response;
         let mut tool_state = WatcherToolState::new();
 
@@ -4522,6 +4582,49 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &mut full_response,
             &mut tool_state,
         );
+        // #3041 P1-3 (Part a, B1): DEFERRED forward of the outer-read chunk. We now
+        // know — from `initial_outcome.found_result` — whether THIS chunk is the
+        // RESULT-bearing (terminal) one. If so, forward it as a TERMINAL frame
+        // carrying the commit fence (`terminal_event_consumed_offset(..)` + the
+        // pinned turn identity loaded at turn start), so the SAME frame that
+        // triggers the sink's terminal delivery carries the consumed_end + identity
+        // (FIFO single-task: a separate later frame would arrive after the sink
+        // already dispatched). Non-terminal chunks forward exactly as before (no
+        // fence, no streaming-latency change beyond the synchronous parse reorder).
+        // The ACK target is captured from THIS forward, so the watcher's wait now
+        // correlates to the terminal frame's sequence (more precise).
+        let initial_terminal_fence = watcher_terminal_commit_fence(
+            initial_outcome.found_result,
+            turn_data_start_offset,
+            terminal_event_consumed_offset(current_offset, &all_data),
+            turn_identity_for_panel.as_ref(),
+            &tmux_session_name,
+        );
+        let data_mirrored_to_session_relay = match initial_terminal_fence {
+            Some(fence) => forward_terminal_chunk_to_supervisor_relay(
+                &tmux_session_name,
+                &decoded_data.text,
+                &producer_registry,
+                &mut cached_relay_producer,
+                fence,
+            ),
+            None => forward_chunk_to_supervisor_relay(
+                &tmux_session_name,
+                &decoded_data.text,
+                &producer_registry,
+                &mut cached_relay_producer,
+            ),
+        };
+        if let Some(ack_target) = data_mirrored_to_session_relay.ack_target.clone() {
+            all_data_session_bound_relay_ack = Some(ack_target);
+        }
+        if initial_buffer_was_empty {
+            all_data_fully_mirrored_to_session_relay = data_mirrored_to_session_relay.mirrored;
+        } else {
+            all_data_fully_mirrored_to_session_relay &= data_mirrored_to_session_relay.mirrored;
+        }
+        let mut session_bound_relay_turn_fully_mirrored =
+            all_data_fully_mirrored_to_session_relay && !restored_assistant_text_seen;
         all_data_start_offset =
             advance_buffer_start_offset(turn_data_start_offset, initial_buffer_len, all_data.len());
         let live_events_dirty = flush_placeholder_live_events(&shared, channel_id, &mut tool_state);
@@ -4698,37 +4801,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         ready_for_input_tracker.record_output();
                         let chunk_start_offset = current_offset.saturating_sub(chunk.len() as u64);
                         let decoded_chunk = utf8_decoder.decode(&chunk, chunk_start_offset);
-                        let chunk_forwarded_to_session_relay = if decoded_chunk.text.is_empty() {
-                            SupervisorRelayForward::mirrored_without_ack()
-                        } else {
-                            // E5 (#2412): producer-side wiring for the
-                            // supervisor-owned StreamRelay. Same rationale as
-                            // the outer read site in this fn — every decoded
-                            // chunk read off the tmux output file is also
-                            // pushed into the relay's MPSC so the
-                            // session-bound Discord sink receives frames in
-                            // production.
-                            forward_chunk_to_supervisor_relay(
-                                &tmux_session_name,
-                                &decoded_chunk.text,
-                                &producer_registry,
-                                &mut cached_relay_producer,
-                            )
-                        };
-                        if let Some(ack_target) = chunk_forwarded_to_session_relay.ack_target {
-                            all_data_session_bound_relay_ack = Some(ack_target);
-                        }
-                        let chunk_mirrored_to_session_relay =
-                            chunk_forwarded_to_session_relay.mirrored;
-                        session_bound_relay_turn_fully_mirrored &= chunk_mirrored_to_session_relay;
-                        if all_data.is_empty() {
+                        // #3041 P1-3 (Part a, B1): DEFER the forward until AFTER the
+                        // parse so the RESULT-bearing streaming chunk rides a TERMINAL
+                        // frame carrying the commit fence. Set only the buffer START
+                        // offset here (independent of the forward).
+                        let chunk_buffer_was_empty = all_data.is_empty();
+                        if chunk_buffer_was_empty {
                             all_data_start_offset =
                                 decoded_chunk.start_offset.unwrap_or(chunk_start_offset);
-                            all_data_fully_mirrored_to_session_relay =
-                                chunk_mirrored_to_session_relay;
-                        } else {
-                            all_data_fully_mirrored_to_session_relay &=
-                                chunk_mirrored_to_session_relay;
                         }
                         if decoded_chunk.text.is_empty() && all_data.is_empty() {
                             continue;
@@ -4747,6 +4827,47 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             &mut full_response,
                             &mut tool_state,
                         );
+                        // #3041 P1-3 (Part a, B1): deferred forward of THIS streaming
+                        // chunk. `outcome.found_result` now tells us whether this is
+                        // the RESULT-bearing chunk; if so it rides a TERMINAL frame
+                        // carrying the commit fence (consumed_end + pinned identity).
+                        // E5 (#2412): every decoded chunk is still pushed into the
+                        // relay MPSC; only the terminality of the frame changed.
+                        let streaming_terminal_fence = watcher_terminal_commit_fence(
+                            outcome.found_result,
+                            chunk_buffer_start_offset,
+                            terminal_event_consumed_offset(current_offset, &all_data),
+                            turn_identity_for_panel.as_ref(),
+                            &tmux_session_name,
+                        );
+                        let chunk_forwarded_to_session_relay = match streaming_terminal_fence {
+                            Some(fence) => forward_terminal_chunk_to_supervisor_relay(
+                                &tmux_session_name,
+                                &decoded_chunk.text,
+                                &producer_registry,
+                                &mut cached_relay_producer,
+                                fence,
+                            ),
+                            None => forward_chunk_to_supervisor_relay(
+                                &tmux_session_name,
+                                &decoded_chunk.text,
+                                &producer_registry,
+                                &mut cached_relay_producer,
+                            ),
+                        };
+                        if let Some(ack_target) = chunk_forwarded_to_session_relay.ack_target {
+                            all_data_session_bound_relay_ack = Some(ack_target);
+                        }
+                        let chunk_mirrored_to_session_relay =
+                            chunk_forwarded_to_session_relay.mirrored;
+                        session_bound_relay_turn_fully_mirrored &= chunk_mirrored_to_session_relay;
+                        if chunk_buffer_was_empty {
+                            all_data_fully_mirrored_to_session_relay =
+                                chunk_mirrored_to_session_relay;
+                        } else {
+                            all_data_fully_mirrored_to_session_relay &=
+                                chunk_mirrored_to_session_relay;
+                        }
                         last_output_at = tokio::time::Instant::now();
                         all_data_start_offset = advance_buffer_start_offset(
                             chunk_buffer_start_offset,
@@ -6885,52 +7006,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let current_response = full_response.get(response_sent_offset..).unwrap_or("");
         let has_current_response = !current_response.trim().is_empty();
 
-        // #3041 P1-3 (Part a, B1 — REAL close, codex): persist the watcher's
-        // AUTHORITATIVE consumed-terminal END for the range it is delegating to
-        // the session-bound sink BEFORE the sink can load inflight in
-        // `deliver_response`. The terminal frame has already been forwarded to the
-        // sink's MPSC during line collection, but the sink only runs
-        // `deliver_response` (and loads inflight) when it is scheduled to drain
-        // that frame — which is during/after the 10s ACK wait below. Writing the
-        // end HERE (synchronously, before that wait) means the sink reads a
-        // non-None end for THIS delivery and advances `confirmed_end_offset` on its
-        // confirmed POST. Reconciliation (Part b) then sees committed>=end → Skip,
-        // closing the ACK-lag duplicate vector. The OLD write at the
-        // post-ACK delegation arm was too late: it ran only AFTER the ACK already
-        // observed `Delivered`, i.e. after the sink had already loaded `None`.
-        //
-        // Identity-guarded: only writes when the on-disk row is still THIS turn
-        // (no newer turn / restart marker has taken the row), so it can never
-        // clobber a follow-up turn's state. Gated on the same terminal-delivery
-        // eligibility the sink uses + a real (non-empty) consumed range, so a
-        // bridge-owned / mismatched / zero-range turn never records a spurious end.
-        {
-            let sink_can_own =
-                crate::services::discord::session_relay_sink::session_bound_discord_relay_can_own_terminal_delivery(
-                    inflight_before_relay.as_ref(),
-                    &tmux_session_name,
-                );
-            let delegated_end_to_persist = watcher_delegated_terminal_end_for_persist(
-                has_current_response,
-                sink_can_own,
-                turn_data_start_offset,
-                terminal_event_consumed_offset(current_offset, &all_data),
-            );
-            if let Some(delegated_consumed_end) = delegated_end_to_persist
-                && let (Some(mut inflight), Some(identity)) = (
-                    inflight_before_relay.clone(),
-                    inflight_identity_before_relay.clone(),
-                )
-            {
-                let expected_turn_start_offset = inflight.turn_start_offset;
-                inflight.session_bound_delegated_terminal_end = Some(delegated_consumed_end);
-                let _ = crate::services::discord::inflight::save_inflight_state_if_matches_identity(
-                    &inflight,
-                    &identity,
-                    expected_turn_start_offset,
-                );
-            }
-        }
+        // #3041 P1-3 (Part a, B1 — FRAME-CARRIED, codex): the watcher's
+        // AUTHORITATIVE consumed-terminal END is NO LONGER persisted to the inflight
+        // FILE here. The old inflight-persist Part (a) was RACY (the sink read the
+        // end back from the file in `deliver_response`, a separate read/write across
+        // the relay's async drain). It is REPLACED by the frame-carried commit
+        // fence: the RESULT-bearing `StreamFrame` itself carries `consumed_end` +
+        // the pinned turn identity (forwarded during line collection above), and the
+        // sink advances `confirmed_end_offset` identity-gated on its CONFIRMED POST —
+        // POST + advance atomic per-frame, no file race. See
+        // `watcher_terminal_commit_fence` (producer) and
+        // `advance_offset_for_confirmed_delegated_terminal` (sink).
 
         let recent_stop_for_output =
             recent_turn_stop_for_watcher_range(channel_id, &tmux_session_name, data_start_offset);
@@ -7670,20 +7756,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         inflight.last_watcher_relayed_offset = Some(turn_data_start_offset);
                         inflight.last_watcher_relayed_generation_mtime_ns =
                             last_observed_generation_mtime_ns;
-                        // #3041 P1-3 (Part a, B1): the AUTHORITATIVE consumed
-                        // terminal END (`session_bound_delegated_terminal_end ==
-                        // watcher_lease_end == terminal_event_consumed_offset(..)`)
-                        // is now persisted EARLIER, at the top of the terminal-relay
-                        // block BEFORE the 10s ACK wait, so the sink reads a non-None
-                        // end for THIS delivery (the codex B1 fix). Writing it here
-                        // (post-ACK) was too late — the sink had already loaded
-                        // inflight during the wait. We keep the idempotent re-write
-                        // below as a belt-and-suspenders refresh so the value is
-                        // never lost if the early write was raced by a row rewrite,
-                        // but the load-bearing write is the early one.
-                        if watcher_lease_end > watcher_lease_start {
-                            inflight.session_bound_delegated_terminal_end = Some(watcher_lease_end);
-                        }
+                        // #3041 P1-3 (Part a, B1 — FRAME-CARRIED): the authoritative
+                        // consumed-terminal END is NO LONGER written to the inflight
+                        // file (the racy inflight-persist Part (a) is removed). It now
+                        // rides the RESULT-bearing `StreamFrame` and the sink advances
+                        // `confirmed_end_offset` identity-gated on its confirmed POST.
                         let _ = crate::services::discord::inflight::save_inflight_state(&inflight);
                     }
                 }

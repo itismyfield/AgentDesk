@@ -139,6 +139,9 @@ mod tests {
             binding: m.clone(),
             payload: "{}".into(),
             sequence: 7,
+            terminal_consumed_end: None,
+            turn_user_msg_id: 0,
+            turn_started_at: String::new(),
         };
         sink.deliver(&frame).await.expect("infallible");
         sink.deliver(&frame).await.expect("infallible");

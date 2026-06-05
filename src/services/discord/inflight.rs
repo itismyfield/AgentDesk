@@ -198,26 +198,6 @@ pub(super) struct InflightTurnState {
     /// (#1270). `None` for offsets persisted before this field existed.
     #[serde(default)]
     pub last_watcher_relayed_generation_mtime_ns: Option<i64>,
-    /// #3041 P1-3 (Part a, BLOCKER B1): the watcher's AUTHORITATIVE consumed
-    /// terminal-output END offset for the turn it DELEGATED to the session-bound
-    /// StreamRelay sink. Set by the watcher at the moment it delegates
-    /// (`session_bound_relay_owns_terminal_delivery`) to exactly the value the
-    /// watcher would have advanced `confirmed_end_offset` to had it delivered the
-    /// terminal itself (`terminal_event_consumed_offset(current_offset,
-    /// all_data)` == the watcher's lease `end`). The sink CANNOT derive this from
-    /// its opaque `StreamFrame` (payload + sequence only, NO JSONL byte offset),
-    /// and the only file offset it can read (the JSONL EOF) overshoots the
-    /// consumed-terminal end and would BLACK-HOLE undelivered later-appended bytes
-    /// (codex r4 P1). So the watcher — the byte-range AUTHORITY — persists its
-    /// exact consumed end here; on a CONFIRMED terminal Discord delivery the sink
-    /// advances `confirmed_end_offset` to THIS value (identity-gated, monotonic
-    /// CAS). This closes B1's "commit fence": a sink POST success now advances the
-    /// authority in the same path, so the watcher's §3.2 reconciliation (Part b)
-    /// sees `committed >= end` and SKIPS its blind re-send (no duplicate) even when
-    /// the terminal-commit ACK lagged the 10s wait. `None` until the watcher
-    /// delegates a terminal turn (and for legacy rows that pre-date this field).
-    #[serde(default)]
-    pub session_bound_delegated_terminal_end: Option<u64>,
     /// Lifecycle-aware restart/handoff mode for recovery semantics.
     #[serde(default)]
     pub restart_mode: Option<InflightRestartMode>,
@@ -602,7 +582,6 @@ impl InflightTurnState {
             dispatch_id: None,
             last_watcher_relayed_offset: None,
             last_watcher_relayed_generation_mtime_ns: None,
-            session_bound_delegated_terminal_end: None,
             restart_mode: None,
             restart_generation: None,
             rebind_origin: false,
@@ -3415,58 +3394,17 @@ mod stall_recovery_tests {
         assert!(load_inflight_states_from_root(temp.path(), &ProviderKind::Claude).is_empty());
     }
 
-    /// #3041 P1-3 (Part a, B1 — codex real-close): the watcher persists its
-    /// AUTHORITATIVE consumed-terminal END into inflight via the identity-guarded
-    /// save the watcher uses BEFORE the ACK wait. A subsequent load — exactly what
-    /// the session-bound sink's `deliver_response` does — must read a NON-None end
-    /// for THIS delivery (the ACK-lag path), so the sink can advance
-    /// `confirmed_end_offset` on its confirmed POST. The OLD code wrote this only
-    /// AFTER the ACK observed `Delivered`, i.e. AFTER the sink had already loaded
-    /// `None` → the duplicate vector stayed open. This pins the corrected ordering:
-    /// persist-before-load yields a readable end.
+    /// #3041 P1-3 (Part a, B1): the identity-guarded save must NOT let a stale write
+    /// clobber a NEWER turn that has taken over the inflight row (e.g. a fast
+    /// follow-up turn on the same channel between the watcher's compute and its
+    /// write). A mismatched identity yields `IdentityMismatch` and the newer turn's
+    /// row is preserved. (The frame-carried B1 commit fence removed the racy
+    /// delegated-terminal-end inflight persist; this keeps the generic guard covered
+    /// via a still-live field.)
     #[test]
-    fn delegated_terminal_end_is_persisted_before_sink_load_via_guarded_save() {
+    fn identity_guarded_save_rejects_stale_write_against_newer_turn() {
         let temp = TempDir::new().unwrap();
-        let mut state = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
-        state.turn_start_offset = Some(0);
-        // The sink has NOT yet loaded — the field starts None.
-        assert_eq!(state.session_bound_delegated_terminal_end, None);
-        save_inflight_state_in_root(temp.path(), &state).unwrap();
-
-        // Watcher's early persist (mirrors the terminal-relay block): identity-
-        // guarded save of the consumed-terminal end BEFORE the ACK wait.
-        let identity = InflightTurnIdentity::from_state(&state);
-        let mut to_persist = state.clone();
-        let delegated_end = 256u64;
-        to_persist.session_bound_delegated_terminal_end = Some(delegated_end);
-        let outcome = save_inflight_state_if_matches_identity_in_root(
-            temp.path(),
-            &to_persist,
-            &identity,
-            state.turn_start_offset,
-        );
-        assert_eq!(outcome, GuardedSaveOutcome::Saved);
-
-        // The sink's `deliver_response` load now reads a NON-None end for THIS
-        // delivery — the ACK-lag duplicate vector is closed.
-        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(
-            loaded[0].session_bound_delegated_terminal_end,
-            Some(delegated_end),
-            "sink must read the delegated end persisted BEFORE its load (B1 ordering)"
-        );
-    }
-
-    /// #3041 P1-3 (Part a, B1): the identity guard must NOT let the delegated-end
-    /// persist clobber a NEWER turn that has taken over the inflight row (e.g. a
-    /// fast follow-up turn on the same channel between the watcher's compute and
-    /// its write). A mismatched identity yields `IdentityMismatch` and the newer
-    /// turn's row is preserved — no cross-turn end leakage / overshoot.
-    #[test]
-    fn delegated_terminal_end_persist_is_identity_guarded_against_newer_turn() {
-        let temp = TempDir::new().unwrap();
-        // The original turn the watcher was delegating (user_msg_id = 100).
+        // The original turn (user_msg_id = 100).
         let mut original = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
         original.user_msg_id = 100;
         let original_identity = InflightTurnIdentity::from_state(&original);
@@ -3476,10 +3414,10 @@ mod stall_recovery_tests {
         newer.user_msg_id = 200;
         save_inflight_state_in_root(temp.path(), &newer).unwrap();
 
-        // Watcher tries to persist the OLD turn's delegated end under the OLD
-        // identity → must be rejected, leaving the newer turn intact.
+        // Stale write under the OLD identity → must be rejected, leaving the newer
+        // turn intact.
         let mut stale_persist = original.clone();
-        stale_persist.session_bound_delegated_terminal_end = Some(256);
+        stale_persist.last_watcher_relayed_offset = Some(256);
         let outcome = save_inflight_state_if_matches_identity_in_root(
             temp.path(),
             &stale_persist,
@@ -3492,8 +3430,8 @@ mod stall_recovery_tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].user_msg_id, 200, "newer turn must be preserved");
         assert_eq!(
-            rows[0].session_bound_delegated_terminal_end, None,
-            "the newer turn must NOT inherit the old turn's delegated end"
+            rows[0].last_watcher_relayed_offset, None,
+            "the newer turn must NOT inherit the old turn's stale write"
         );
     }
 
