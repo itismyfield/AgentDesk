@@ -155,6 +155,46 @@ fn fallback_sigint_pid_for_provider(
     }
 }
 
+/// #3169 (death #3 — warm-followup teardown SIGINT self-collision): the
+/// sentinel `reason` the turn_bridge cancel epilogue records when the
+/// cancellation carried NO user-attributable `cancel_source`
+/// (`CancelToken::cancel_source()` was `None`). This is the signature of an
+/// anonymous / internal `PreserveSession` teardown — supersede, redundant
+/// delivery, or a failed watcher handoff — NOT a user-initiated stop. Every
+/// user stop path (`/stop`, `!stop`, `⏳` reaction removal, restart, skill
+/// stop) and the watchdog timeout reach `stop_active_turn` under their own
+/// descriptive reason and never produce this sentinel. Defined here and
+/// referenced by the epilogue (`turn_bridge/mod.rs`) so the producer and this
+/// SIGINT guard share a single source of truth.
+pub(in crate::services::discord) const ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON: &str =
+    "turn_bridge_cancelled";
+
+/// #3169 (death #3): claude's ONLY interrupt is a direct SIGINT (it has no
+/// send-keys path — see `provider_turn_interrupt_plan`), and on a *busy* TUI
+/// that SIGINT is a process kill (#1260; the wrapper has no SIGINT handler, so
+/// claude exits and the pane/session collapses — see
+/// `fallback_sigint_pid_for_provider`). Killing the session is the correct,
+/// desired outcome for an explicit user stop. But for an anonymous internal
+/// teardown whose whole intent is to PRESERVE the reusable session, that SIGINT
+/// destroys the just-started warm-followup turn and the entire claude session
+/// (the #3169 self-collision: a busy-queue follow-up is injected, claude starts
+/// a fresh generation, the watcher handoff for that turn fails on the
+/// #2161/#2293 quiescence-gate timeout, the same bridge turn cancels, and the
+/// teardown SIGINTs the live busy claude → exit 0 → session death).
+///
+/// Suppress the teardown SIGINT for claude on that anonymous path only. The
+/// live turn is left running for the watcher to reconcile/finalize on its next
+/// pass (the quiescence-gate already hands a stalled handoff to a
+/// deadline-armed reconciler). A genuine claude *hang* is handled by the
+/// separate stall-watchdog, so the teardown SIGINT is not the safety net for
+/// hangs and dropping it here does not strand a stuck turn. User-explicit stops
+/// keep their SIGINT (stop still works), and providers with a real send-keys
+/// interrupt (codex/qwen) are unaffected — they are never claude and their
+/// interrupt does not kill the session.
+fn claude_teardown_sigint_suppressed(provider: &ProviderKind, reason: &str) -> bool {
+    matches!(provider, ProviderKind::Claude) && reason == ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON
+}
+
 fn tmux_ready_for_input_without_tui_pane(tmux_session_name: &str, provider: &ProviderKind) -> bool {
     let binding =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name);
@@ -394,8 +434,32 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
         (ready_for_input, provider_pid)
     };
 
-    let fallback_sigint_pid =
+    let resolved_sigint_pid =
         fallback_sigint_pid_for_provider(provider, ready_for_input, provider_pid);
+
+    // #3169 (death #3): on an anonymous/internal `PreserveSession` teardown
+    // (reason == `turn_bridge_cancelled`, i.e. no user `cancel_source`), claude
+    // must NOT receive the teardown SIGINT — for a busy claude that SIGINT is a
+    // process kill that tears down the reusable session (the warm-followup
+    // self-collision). Drop the fallback target on that path and leave the live
+    // turn for the watcher to reconcile. User-explicit stops and non-claude
+    // providers are unaffected (see `claude_teardown_sigint_suppressed`).
+    let suppress_claude_teardown_sigint = claude_teardown_sigint_suppressed(provider, reason);
+    if suppress_claude_teardown_sigint && (resolved_sigint_pid.is_some() || !ready_for_input) {
+        tracing::warn!(
+            "provider turn interrupt SIGINT suppressed: provider={} session={} reason={} \
+             detail=anonymous_preserve_session_teardown (claude SIGINT==process-kill on a busy TUI; \
+             leaving live turn for watcher reconcile to avoid #3169 warm-followup session kill)",
+            provider.as_str(),
+            tmux_session_name,
+            reason
+        );
+    }
+    let fallback_sigint_pid = if suppress_claude_teardown_sigint {
+        None
+    } else {
+        resolved_sigint_pid
+    };
 
     // #3029(A): on the SIGINT-only path (claude — empty key list, so the
     // direct SIGINT is the *only* way to reach the turn), an active turn
@@ -406,12 +470,22 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
     // pane correctly resolves to `None` and is intentionally left alone, #3021).
     // Flag this so the hard-stop path escalates instead of trusting an
     // unconditional success.
-    let sigint_target_missing = interrupt_sigint_target_missing(
-        provider,
-        plan.keys.is_empty(),
-        ready_for_input,
-        fallback_sigint_pid,
-    );
+    //
+    // #3169: when we deliberately suppressed claude's teardown SIGINT above,
+    // the absent target is INTENTIONAL — not a missed interrupt. Force
+    // `sigint_target_missing = false` so the hard-stop path does not "escalate"
+    // by re-delivering the very SIGINT we just suppressed (which would re-kill
+    // the session we are trying to preserve).
+    let sigint_target_missing = if suppress_claude_teardown_sigint {
+        false
+    } else {
+        interrupt_sigint_target_missing(
+            provider,
+            plan.keys.is_empty(),
+            ready_for_input,
+            fallback_sigint_pid,
+        )
+    };
     if sigint_target_missing {
         tracing::error!(
             "provider turn interrupt SIGINT target missing: provider={} session={} reason={} \
@@ -1396,5 +1470,66 @@ mod sigint_target_missing_tests {
             false,
             None
         ));
+    }
+}
+
+// #3169 (death #3): the teardown-SIGINT suppression decision is a pure boolean
+// and runs under the default `cargo test` invocation (the main suite is gated
+// behind the `legacy-sqlite-tests` feature, which CI does not enable).
+#[cfg(test)]
+mod claude_teardown_sigint_tests {
+    use super::{ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON, claude_teardown_sigint_suppressed};
+    use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn claude_anonymous_teardown_suppresses_sigint() {
+        // The forensic death path: an anonymous/internal PreserveSession
+        // teardown (no user cancel_source) reaches stop_active_turn under the
+        // sentinel reason. claude's SIGINT would kill the busy TUI + session, so
+        // it MUST be suppressed (#3169).
+        assert!(
+            claude_teardown_sigint_suppressed(
+                &ProviderKind::Claude,
+                ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON
+            ),
+            "claude on an anonymous turn_bridge teardown must NOT receive the session-killing SIGINT"
+        );
+    }
+
+    #[test]
+    fn claude_user_explicit_stop_keeps_sigint() {
+        // Every user-initiated stop passes its own descriptive reason directly
+        // to stop_active_turn — never the anonymous sentinel — so the stop
+        // feature is preserved: claude is still interrupted on an explicit stop.
+        for reason in [
+            "/stop",
+            "!stop",
+            "reaction remove ⏳",
+            "!skill stop",
+            "!cc stop",
+            "mailbox_cancel_active_turn",
+            "watchdog timeout",
+        ] {
+            assert!(
+                !claude_teardown_sigint_suppressed(&ProviderKind::Claude, reason),
+                "user-explicit / watchdog stop ({reason}) must still SIGINT claude (stop preserved)"
+            );
+        }
+    }
+
+    #[test]
+    fn non_claude_providers_are_unaffected() {
+        // codex/qwen have a real send-keys interrupt and their SIGINT does not
+        // kill the session, so the suppression never applies to them — even on
+        // the anonymous teardown reason. Existing behaviour is preserved.
+        for provider in [ProviderKind::Codex, ProviderKind::Qwen] {
+            assert!(
+                !claude_teardown_sigint_suppressed(
+                    &provider,
+                    ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON
+                ),
+                "non-claude provider must keep its existing teardown SIGINT behaviour"
+            );
+        }
     }
 }
