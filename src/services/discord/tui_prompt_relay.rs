@@ -43,17 +43,22 @@ static CLAUDE_IDLE_TRANSCRIPT_RELAY_STARTED: AtomicBool = AtomicBool::new(false)
 static CLAUDE_IDLE_RESPONSE_TAILS: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
-/// #3178: dedupe window for the machine slash-command control note. The #3153
+/// #3178: dedupe window for the machine slash-command control turn. The #3153
 /// `/loop` double-post arrives as TWO independent observed prompts — the raw
 /// `/loop …` ScheduleWakeup echo AND the Claude Code expanded `<command-*>`
 /// wrapper — both within a short window and both mapping to the same command
-/// kind. To show the trigger ONCE (not twice) we record the last-posted
-/// (tmux_session + command_kind) and drop a repeat seen inside this window.
-const SLASH_COMMAND_CONTROL_DEDUPE_WINDOW: Duration = Duration::from_secs(30);
-/// #3178: last-posted timestamp per (tmux_session, command_kind) for the
-/// slash-command-control note, so the two halves of the #3153 double-post post
-/// the trigger only once. Keyed by a stable string so the raw echo and the
-/// expanded `<command-*>` wrapper for the SAME command collapse to one entry.
+/// kind. They are the two halves of ONE injection and arrive within tens to
+/// hundreds of milliseconds, so a tight 2s window collapses them to a SINGLE
+/// active turn (the duplicate half is dropped BEFORE any lease/anchor is
+/// created). A genuine SECOND `/loop` or `/compact` arrives seconds later, well
+/// outside this window, so it gets its own active turn (no over-suppression).
+const SLASH_COMMAND_CONTROL_DEDUPE_WINDOW: Duration = Duration::from_secs(2);
+/// #3178: last-seen timestamp per (tmux_session, command_kind) for the
+/// slash-command-control turn, so the two halves of the #3153 double-post create
+/// the active turn only once. Keyed by a stable string built from the REAL
+/// command name (`/loop`, `/compact`, or the command name itself) so the raw echo
+/// and the expanded `<command-*>` wrapper for the SAME command collapse to one
+/// entry, while two DIFFERENT commands within the window never collapse together.
 static SLASH_COMMAND_CONTROL_LAST_POSTED: LazyLock<
     Mutex<std::collections::HashMap<String, std::time::Instant>>,
 > = LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
@@ -482,6 +487,39 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         );
         return;
     };
+    // #3178 (codex fix — P1 lease-overwrite / the 'state tangle'): classify and
+    // run the slash-command-control DEDUPE check BEFORE recording ANY
+    // external-input lease. A machine slash-command control echo (/loop, /compact,
+    // the expanded `<command-*>` wrapper) now claims a FULL active turn (lease +
+    // ⏳ anchor + synthetic inflight, below). The #3153 double-post delivers the
+    // SAME injection as two independent observed prompts (raw echo + expanded
+    // wrapper) within ~tens-of-ms; the FIRST claims the active turn, but the
+    // SECOND must NOT — and critically must NOT record a lease, because the lease
+    // table is one-per-(provider,session): a second `record_external_input_turn_lease`
+    // would overwrite the first turn's lease and the duplicate's own guard would
+    // then clear that generation, stranding the first turn's bridge tail. So the
+    // duplicate half is dropped HERE, before the lease record on the next line, and
+    // never creates a lease/anchor/inflight at all. A genuine SECOND /loop or
+    // /compact seconds later falls outside the 2s window → fresh first sighting →
+    // its own active turn.
+    let injected_class = classify_injected_prompt(&prompt.prompt);
+    if matches!(injected_class, InjectedPromptClass::SlashCommandControl) {
+        let kind = slash_command_control_kind(&prompt.prompt);
+        if !slash_command_control_turn_is_first_sighting(&prompt.tmux_session_name, &kind) {
+            // #3153 double-post second half within the 2s window: drop BEFORE any
+            // lease/anchor/inflight is created, so the first turn's lease is never
+            // overwritten and no guard/lease leaks (none was ever recorded). The
+            // first half already relays the assistant output via its own bridge tail.
+            tracing::info!(
+                provider = %prompt.provider,
+                channel_id = channel_id.get(),
+                tmux_session_name = %prompt.tmux_session_name,
+                slash_command_kind = %kind,
+                "deduped near-simultaneous machine slash-command control half (within 2s window); dropped BEFORE recording any external-input lease so the first active turn's lease is preserved"
+            );
+            return;
+        }
+    }
     let mut lease = record_observed_external_turn_lease(shared, &prompt, channel_id);
     // #3041 P1-4 codex: arm an early-return RAII guard the instant the lease is
     // recorded & stored. Every FAILURE early-return below (registry None, notify
@@ -567,10 +605,10 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
              (adding with a different bot would leave an un-removable hourglass)"
         );
     }
-    // #3099 / #3100: classify the injected text before it enters the active-turn
-    // reaction/inflight machinery. A compact/system continuation prologue is NOT
-    // a human request — it must be rendered as a neutral session note with no
-    // `⏳`, no prompt anchor, and no synthetic turn ownership.
+    // #3099 / #3100: `injected_class` was classified at the top of this function
+    // (before the slash-command-control dedupe / lease record). A compact/system
+    // continuation prologue is NOT a human request — it is rendered as a neutral
+    // session note with no `⏳`, no prompt anchor, and no synthetic turn ownership.
     //
     // #3099 codex re-review (P1): SystemContinuation must NOT short-circuit the
     // whole relay. The compact continuation IS fed to the provider and Claude
@@ -579,7 +617,11 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     // lifecycle (the `⏳` reaction, the prompt anchor, and the synthetic
     // user-turn/inflight ownership) — the assistant-output delivery path (the
     // Claude bridge tail below) still runs exactly as for any other injection.
-    let injected_class = classify_injected_prompt(&prompt.prompt);
+    //
+    // #3178 (codex fix): a SlashCommandControl is NO LONGER suppressed here — it
+    // takes the active-turn `else` block below (anchor + ⏳ + synthetic inflight)
+    // so a message injected mid-/loop queues cleanly (mailbox.has_active_turn()
+    // becomes true). Only SystemContinuation still suppresses the lifecycle.
     // #3099 codex re-review (P1): suppressing the user-turn lifecycle (⏳ + anchor
     // + synthetic ownership) is decoupled from output delivery. The bridge tail
     // below runs regardless so the provider's assistant output still reaches
@@ -595,87 +637,48 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     // self-deadlock) while still waiting on any genuinely distinct previous turn.
     let mut current_turn_anchor_id: Option<u64> = None;
     if is_system_continuation {
-        if matches!(injected_class, InjectedPromptClass::SlashCommandControl) {
-            // #3178: a MACHINE slash-command control echo (/loop, /compact, the
-            // expanded <command-*> wrapper, or the Compacted stdout line). Like a
-            // SystemContinuation it occupies NO active-turn lifecycle — no ⏳, no
-            // anchor, no synthetic turn (current_turn_anchor_id stays None). But
-            // unlike the original #3153 full-suppression it now posts a SINGLE
-            // neutral announce-bot note showing only the command KIND (never the
-            // raw /loop args, the <command-*> wrapper, or the Compacted stdout
-            // body) so the following `✅ 응답 완료` card has a visible, meaningful
-            // anchor. #3153's real target — the DOUBLE-post (the raw echo AND the
-            // expanded wrapper arrive as two independent observed prompts) — is
-            // collapsed via the (tmux_session + command_kind) dedupe window, so
-            // the trigger is shown exactly ONCE. The provider assistant output
-            // STILL reaches Discord via the bridge tail below (no early return).
-            let kind = slash_command_control_kind(&prompt.prompt);
-            if should_post_slash_command_control_note(&prompt.tmux_session_name, kind) {
-                let note = format_slash_command_control_note(&prompt.tmux_session_name, kind);
-                match channel_id.say(&*notify_http, note).await {
-                    Ok(message) => {
-                        tracing::info!(
-                            provider = %prompt.provider,
-                            channel_id = channel_id.get(),
-                            tmux_session_name = %prompt.tmux_session_name,
-                            slash_command_kind = kind,
-                            note_message_id = message.id.get(),
-                            "rendered machine slash-command control trigger as a single neutral session note (kind only, no raw body); no active-turn lifecycle, assistant output still relayed via bridge tail"
-                        );
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            provider = %prompt.provider,
-                            channel_id = channel_id.get(),
-                            tmux_session_name = %prompt.tmux_session_name,
-                            slash_command_kind = kind,
-                            error = %error,
-                            "failed to send machine slash-command control session note"
-                        );
-                    }
-                }
-            } else {
-                // #3153 double-post second half: the matching trigger note was
-                // already posted within the dedupe window. Suppress the repeat so
-                // the trigger is visible exactly once.
+        // #3178 (codex fix): only SystemContinuation reaches here now —
+        // SlashCommandControl was removed from `suppresses_user_turn_lifecycle`
+        // and takes the active-turn `else` block below.
+        let note = format_system_continuation_note(&prompt.tmux_session_name, &prompt.prompt);
+        match channel_id.say(&*notify_http, note).await {
+            Ok(message) => {
                 tracing::info!(
                     provider = %prompt.provider,
                     channel_id = channel_id.get(),
                     tmux_session_name = %prompt.tmux_session_name,
-                    slash_command_kind = kind,
-                    "deduped machine slash-command control trigger (already posted within window); no second note, assistant output still relayed via bridge tail"
+                    note_message_id = message.id.get(),
+                    "rendered system/compact continuation injection as neutral session note; no active-turn lifecycle, assistant output still relayed via bridge tail"
                 );
             }
-        } else {
-            let note = format_system_continuation_note(&prompt.tmux_session_name, &prompt.prompt);
-            match channel_id.say(&*notify_http, note).await {
-                Ok(message) => {
-                    tracing::info!(
-                        provider = %prompt.provider,
-                        channel_id = channel_id.get(),
-                        tmux_session_name = %prompt.tmux_session_name,
-                        note_message_id = message.id.get(),
-                        "rendered system/compact continuation injection as neutral session note; no active-turn lifecycle, assistant output still relayed via bridge tail"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        provider = %prompt.provider,
-                        channel_id = channel_id.get(),
-                        tmux_session_name = %prompt.tmux_session_name,
-                        error = %error,
-                        "failed to send system/compact continuation session note"
-                    );
-                }
+            Err(error) => {
+                tracing::warn!(
+                    provider = %prompt.provider,
+                    channel_id = channel_id.get(),
+                    tmux_session_name = %prompt.tmux_session_name,
+                    error = %error,
+                    "failed to send system/compact continuation session note"
+                );
             }
         }
     } else {
+        // #3178 (codex fix): a SlashCommandControl (/loop, /compact, the expanded
+        // <command-*> wrapper, or the Compacted stdout) is a FULL active turn now,
+        // so it posts an anchor + ⏳ + synthetic inflight like HumanTuiDirect. But
+        // its anchor CONTENT is a kind-only neutral note (never the raw /loop args,
+        // the <command-*> wrapper, or the Compacted stdout body). This is the
+        // highest-priority content arm so the machine slash payload is never
+        // disclosed. (The #3153 duplicate half was already dropped before any lease
+        // record at the top of this function.)
         // #3075: a `<task-notification>` auto-turn is a MACHINE event — render it
         // as a compact structured card and DEDUPE repeats by task-id (a repeat
         // edits its live card or drops as a no-op → no new ⏳/turn; the first
         // sighting returns content to post as the #3099 anchor). HumanTuiDirect
         // keeps the raw render; SystemContinuation is handled above (#3100).
-        let content = if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
+        let content = if matches!(injected_class, InjectedPromptClass::SlashCommandControl) {
+            let kind = slash_command_control_kind(&prompt.prompt);
+            format_slash_command_control_note(&prompt.tmux_session_name, &kind)
+        } else if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
             match super::tui_task_card::resolve_task_card_content(
                 &notify_http,
                 shared,
@@ -4038,16 +4041,22 @@ impl InjectedPromptClass {
 
     /// #3099 codex re-review (P1): whether this class must SKIP the user-turn
     /// lifecycle — the `⏳` reaction, the prompt anchor, and the synthetic
-    /// user-turn/inflight ownership. [`SystemContinuation`] (a system continuation
-    /// banner) and [`SlashCommandControl`] (#3153, a machine slash-command control
-    /// echo) both do; neither is a human request. Routing both through the
-    /// `is_system_continuation` branch makes them skip the active-turn `else`
-    /// block (anchor post + `⏳` + record_prompt_anchor + synthetic-turn claim).
+    /// user-turn/inflight ownership. Only [`SystemContinuation`] (a system
+    /// continuation banner) does; it is not a human request and earns no active
+    /// turn. Routing it through the `is_system_continuation` branch makes it skip
+    /// the active-turn `else` block (anchor post + `⏳` + record_prompt_anchor +
+    /// synthetic-turn claim).
+    ///
+    /// #3178 (codex fix): [`SlashCommandControl`] (#3153, a machine slash-command
+    /// control echo: /loop, /compact, the expanded `<command-*>` wrapper) is NO
+    /// LONGER suppressed. A machine slash turn is a FULL active turn so a message
+    /// injected mid-/loop registers the mailbox active turn and queues cleanly
+    /// (📬) instead of colliding with the busy pane; it gets the kind-only anchor +
+    /// `⏳` + synthetic inflight + `✅` lifecycle. The #3153 near-simultaneous
+    /// duplicate half is collapsed by the 2s dedupe gate at the top of
+    /// `relay_observed_prompt`, BEFORE any lease is recorded.
     pub(super) fn suppresses_user_turn_lifecycle(self) -> bool {
-        matches!(
-            self,
-            InjectedPromptClass::SystemContinuation | InjectedPromptClass::SlashCommandControl
-        )
+        matches!(self, InjectedPromptClass::SystemContinuation)
     }
 
     /// #3099 codex re-review (P1): whether the provider turn's assistant OUTPUT
@@ -4254,9 +4263,17 @@ pub(super) fn format_ssh_direct_prompt_notification(
 /// Mirrors [`is_slash_command_control_prompt`]'s normalization pipeline (peel a
 /// terminal-control prefix and the SSH-direct injection envelope) so a
 /// round-tripped echo still resolves to the same kind. The bare slash token
-/// (e.g. `/loop`, `/compact`) is returned — never any argument body — so the
-/// note shows only WHICH machine command ran, not its payload.
-fn slash_command_control_kind(prompt: &str) -> &'static str {
+/// (e.g. `/loop`, `/compact`, or any other command NAME) is returned — never any
+/// argument body — so the note shows only WHICH machine command ran, not its
+/// payload.
+///
+/// #3178 (codex fix): the kind is the REAL command name, not a single collapsed
+/// `"slash"`. An unknown `<command-message>` wrapper resolves to its actual
+/// `<command-name>` (e.g. `/foo`), so two DIFFERENT commands seen in the same
+/// session within the dedupe window are NOT collapsed into one turn. The note
+/// body still shows the command name only (no args), preserving kind-only
+/// disclosure.
+fn slash_command_control_kind(prompt: &str) -> String {
     let normalized = strip_terminal_controls(prompt);
     let normalized = normalized.trim_start();
     let normalized = strip_leading_injection_wrapper(normalized);
@@ -4269,27 +4286,35 @@ fn slash_command_control_kind(prompt: &str) -> &'static str {
         .map(|idx| &normalized[idx + "<command-name>".len()..])
     {
         let name = after.split('<').next().unwrap_or("").trim();
-        if name.starts_with("/loop") {
-            return "/loop";
-        }
-        if name.starts_with("/compact") {
-            return "/compact";
+        // The command NAME is the first whitespace-delimited token (drop any
+        // argument body so only the kind, never the payload, is disclosed).
+        let name = name.split_whitespace().next().unwrap_or("");
+        if !name.is_empty() {
+            return name.to_string();
         }
     }
     if normalized.starts_with("/loop ") || normalized.starts_with("/loop\t") {
-        return "/loop";
+        return "/loop".to_string();
     }
     if let Some(rest) = normalized.strip_prefix("/compact") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            return "/compact";
+            return "/compact".to_string();
         }
     }
     if normalized.starts_with("<local-command-stdout>Compacted") {
-        return "/compact";
+        return "/compact".to_string();
     }
-    // A generic `<command-message>` wrapper whose command name we could not
-    // resolve to a known kind.
-    "slash"
+    // A raw slash-command echo whose command token we can read directly: return
+    // the first whitespace-delimited token (the command name) so distinct
+    // commands are distinguished. Fall back to a generic marker only when no
+    // token is recoverable.
+    if normalized.starts_with('/') {
+        let name = normalized.split_whitespace().next().unwrap_or("");
+        if name.len() > 1 {
+            return name.to_string();
+        }
+    }
+    "slash".to_string()
 }
 
 /// #3178: neutral note for a machine slash-command control echo (#3153 trigger).
@@ -4313,14 +4338,23 @@ fn format_slash_command_control_note(tmux_session_name: &str, kind: &str) -> Str
     )
 }
 
-/// #3178: returns `true` if a slash-command-control note for this
-/// (tmux_session, command_kind) should be posted NOW, recording the post; or
-/// `false` if an identical note was posted within
-/// [`SLASH_COMMAND_CONTROL_DEDUPE_WINDOW`] (the second half of the #3153
-/// double-post). On `true` the timestamp is updated so a later genuine repeat
-/// outside the window posts again. Stale entries (older than the window) are
-/// pruned opportunistically so the map cannot grow unbounded.
-fn should_post_slash_command_control_note(tmux_session_name: &str, kind: &str) -> bool {
+/// #3178 (codex fix): the slash-command-control DEDUPE gate, evaluated BEFORE any
+/// external-input lease / anchor / synthetic inflight is created.
+///
+/// Returns `true` if THIS observation is the FIRST sighting of
+/// (tmux_session, command_kind) — meaning it should proceed to claim a full
+/// active turn (lease + ⏳ anchor + synthetic inflight). Returns `false` if a
+/// matching sighting was seen within [`SLASH_COMMAND_CONTROL_DEDUPE_WINDOW`] —
+/// i.e. this is the SECOND half of the #3153 double-post (raw echo + expanded
+/// `<command-*>` wrapper of the SAME injection) — so the caller must early-return
+/// WITHOUT recording a lease (the critical fix: a duplicate half can never
+/// overwrite the first turn's lease, because it never reaches the lease record).
+///
+/// On `true` the timestamp is recorded so the matching second half collapses;
+/// a genuine SECOND command seconds later falls outside the 2s window and is a
+/// fresh first sighting (its own active turn). Stale entries (older than the
+/// window) are pruned opportunistically so the map cannot grow unbounded.
+fn slash_command_control_turn_is_first_sighting(tmux_session_name: &str, kind: &str) -> bool {
     let now = std::time::Instant::now();
     let key = format!("{tmux_session_name}\u{0}{kind}");
     let mut guard = SLASH_COMMAND_CONTROL_LAST_POSTED
@@ -4778,9 +4812,10 @@ mod tests {
     // SlashCommandControl — the raw `/loop …` ScheduleWakeup echo (HALF A of the
     // double-post), the Claude Code expanded `<command-*>` wrapper (HALF B), the
     // raw `/compact` echo (whole-token, incl. bare no-arg), and the
-    // `<local-command-stdout>Compacted` stdout line. Each skips the active-turn
-    // lifecycle (no ⏳/anchor/synthetic turn) yet still delivers assistant
-    // output via the bridge tail. #3178: rendered as a single kind-only note.
+    // `<local-command-stdout>Compacted` stdout line. #3178 (codex fix): a machine
+    // slash turn is now a FULL active turn (NOT suppressed) so concurrent input
+    // queues; it gets a kind-only anchor + ⏳ + synthetic inflight + ✅, and the
+    // near-simultaneous duplicate half is collapsed by the 2s dedupe gate.
     #[test]
     fn classify_injected_prompt_slash_command_control() {
         // HALF A — raw /loop echo.
@@ -4811,10 +4846,15 @@ mod tests {
             InjectedPromptClass::SlashCommandControl,
         );
 
-        // Suppressed from the user-turn lifecycle, not a human active turn, yet
-        // still delivers assistant output.
+        // #3178 (codex fix): a machine slash turn is a FULL active turn — NOT
+        // suppressed from the user-turn lifecycle (so concurrent input queues),
+        // yet it is not a HUMAN active turn (no raw render), and it still delivers
+        // assistant output via the bridge tail.
         let ctrl = InjectedPromptClass::SlashCommandControl;
-        assert!(ctrl.suppresses_user_turn_lifecycle());
+        assert!(
+            !ctrl.suppresses_user_turn_lifecycle(),
+            "a machine slash turn must NOT suppress the active-turn lifecycle (it claims a full active turn so concurrent input queues)"
+        );
         assert!(!ctrl.is_human_active_turn());
         assert!(ctrl.still_delivers_assistant_output());
     }
@@ -4920,31 +4960,69 @@ mod tests {
         );
     }
 
-    // #3178 CORE: the same trigger (a /loop double-post: raw echo + expanded
-    // wrapper, both mapping to kind "/loop" for the same tmux session) posts the
-    // note exactly ONCE — the first observation posts, the immediate second is
-    // deduped. A different kind or a different session is NOT deduped.
+    // #3178 CORE (codex fix): the same trigger (a /loop double-post: raw echo +
+    // expanded wrapper, both mapping to kind "/loop" for the same tmux session)
+    // creates the active turn exactly ONCE — the first sighting proceeds, the
+    // immediate second (within the 2s window) is dropped BEFORE any lease/anchor.
+    // A DIFFERENT command kind (/loop vs /compact) in the same session is NOT
+    // collapsed (the kind is the real command name), and a different session is
+    // never deduped.
     #[test]
-    fn slash_command_control_note_dedupes_double_post_but_not_distinct_triggers() {
+    fn slash_command_control_turn_dedupes_double_post_but_not_distinct_commands() {
         // Unique session names so this test cannot collide with the shared
         // process-global dedupe map across parallel test runs.
         let sess = format!("dedupe-sess-{:p}", &0u8 as *const u8);
 
-        // HALF A — first sighting posts.
-        assert!(should_post_slash_command_control_note(&sess, "/loop"));
-        // HALF B — same (session, kind) within the window → deduped (no 2nd post).
-        assert!(!should_post_slash_command_control_note(&sess, "/loop"));
+        // HALF A — first sighting proceeds to claim the active turn.
+        assert!(slash_command_control_turn_is_first_sighting(&sess, "/loop"));
+        // HALF B — same (session, kind) within the 2s window → NOT a first
+        // sighting (dropped before any lease/anchor; the first turn is preserved).
+        assert!(!slash_command_control_turn_is_first_sighting(
+            &sess, "/loop"
+        ));
         // And again — still deduped.
-        assert!(!should_post_slash_command_control_note(&sess, "/loop"));
+        assert!(!slash_command_control_turn_is_first_sighting(
+            &sess, "/loop"
+        ));
 
-        // A DIFFERENT command kind in the same session is a distinct trigger.
-        assert!(should_post_slash_command_control_note(&sess, "/compact"));
-        // But its own repeat is deduped.
-        assert!(!should_post_slash_command_control_note(&sess, "/compact"));
+        // A DIFFERENT command kind in the same session is a DISTINCT turn —
+        // /compact must NOT collapse into the in-window /loop entry.
+        assert!(slash_command_control_turn_is_first_sighting(
+            &sess, "/compact"
+        ));
+        // But its own repeat within the window is deduped.
+        assert!(!slash_command_control_turn_is_first_sighting(
+            &sess, "/compact"
+        ));
 
-        // A DIFFERENT session with the same kind is a distinct trigger.
+        // Two DIFFERENT unknown commands in the same session within the window
+        // are distinct turns (no single "slash" collapse) — the codex P2 fix.
+        assert!(slash_command_control_turn_is_first_sighting(&sess, "/foo"));
+        assert!(slash_command_control_turn_is_first_sighting(&sess, "/bar"));
+
+        // A DIFFERENT session with the same kind is a distinct turn.
         let other = format!("{sess}-other");
-        assert!(should_post_slash_command_control_note(&other, "/loop"));
+        assert!(slash_command_control_turn_is_first_sighting(
+            &other, "/loop"
+        ));
+    }
+
+    // #3178 (codex P2 fix): the kind is the REAL command name, so two distinct
+    // unknown `<command-message>` wrappers do NOT collapse into a single "slash"
+    // kind (which would wrongly dedupe genuinely different commands).
+    #[test]
+    fn slash_command_control_kind_distinguishes_distinct_unknown_commands() {
+        let foo = "<command-message>foo running</command-message>\
+                   <command-name>/foo</command-name>";
+        let bar = "<command-message>bar running</command-message>\
+                   <command-name>/bar</command-name>";
+        assert_eq!(slash_command_control_kind(foo), "/foo");
+        assert_eq!(slash_command_control_kind(bar), "/bar");
+        assert_ne!(
+            slash_command_control_kind(foo),
+            slash_command_control_kind(bar),
+            "distinct unknown commands must NOT collapse to one kind"
+        );
     }
 
     // #3153 regression guard: the compact CONTINUATION banner must STILL classify
