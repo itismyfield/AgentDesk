@@ -584,10 +584,6 @@ async fn smoke_health_and_agents() {
 }
 
 #[tokio::test]
-#[cfg_attr(
-    target_os = "windows",
-    ignore = "server startup unreliable on Windows CI"
-)]
 #[ignore = "requires PG-aware smoke server boot; create_dispatch_with_options is PG-only after R4"]
 async fn smoke_cards_and_dispatches() {
     let ctx = TestContext::new("smoke-cards-and-dispatches").await;

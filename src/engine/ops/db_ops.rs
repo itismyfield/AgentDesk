@@ -522,27 +522,128 @@ fn translate_sqlite_rowid(sql: &str) -> String {
     let chars: Vec<char> = sql.chars().collect();
     let mut result = String::with_capacity(sql.len());
     let mut idx = 0usize;
-    let mut in_single_quote = false;
+    let mut last_word: Option<String> = None;
 
     while idx < chars.len() {
         let ch = chars[idx];
-        if ch == '\'' {
+
+        if ch == '-' && idx + 1 < chars.len() && chars[idx + 1] == '-' {
             result.push(ch);
-            if in_single_quote {
-                if idx + 1 < chars.len() && chars[idx + 1] == '\'' {
-                    result.push('\'');
-                    idx += 2;
-                    continue;
+            result.push(chars[idx + 1]);
+            idx += 2;
+            while idx < chars.len() {
+                let comment_ch = chars[idx];
+                result.push(comment_ch);
+                idx += 1;
+                if comment_ch == '\n' {
+                    break;
                 }
-                in_single_quote = false;
-            } else {
-                in_single_quote = true;
             }
-            idx += 1;
             continue;
         }
 
-        if !in_single_quote && (ch.is_ascii_alphabetic() || ch == '_') {
+        if ch == '/' && idx + 1 < chars.len() && chars[idx + 1] == '*' {
+            result.push(ch);
+            result.push(chars[idx + 1]);
+            idx += 2;
+            while idx < chars.len() {
+                let comment_ch = chars[idx];
+                result.push(comment_ch);
+                idx += 1;
+                if comment_ch == '*' && idx < chars.len() && chars[idx] == '/' {
+                    result.push(chars[idx]);
+                    idx += 1;
+                    break;
+                }
+            }
+            continue;
+        }
+
+        if ch == '$' {
+            let mut delimiter_end = idx + 1;
+            while delimiter_end < chars.len()
+                && (chars[delimiter_end].is_ascii_alphanumeric() || chars[delimiter_end] == '_')
+            {
+                delimiter_end += 1;
+            }
+            if delimiter_end < chars.len() && chars[delimiter_end] == '$' {
+                let delimiter: String = chars[idx..=delimiter_end].iter().collect();
+                for quoted_ch in &chars[idx..=delimiter_end] {
+                    result.push(*quoted_ch);
+                }
+                idx = delimiter_end + 1;
+                while idx < chars.len() {
+                    if idx + delimiter.len() <= chars.len()
+                        && chars[idx..idx + delimiter.len()].iter().collect::<String>() == delimiter
+                    {
+                        for quoted_ch in &chars[idx..idx + delimiter.len()] {
+                            result.push(*quoted_ch);
+                        }
+                        idx += delimiter.len();
+                        break;
+                    }
+                    result.push(chars[idx]);
+                    idx += 1;
+                }
+                last_word = None;
+                continue;
+            }
+        }
+
+        if ch == '\'' {
+            result.push(ch);
+            idx += 1;
+            while idx < chars.len() {
+                let literal_ch = chars[idx];
+                result.push(literal_ch);
+                idx += 1;
+                if literal_ch == '\'' {
+                    if idx < chars.len() && chars[idx] == '\'' {
+                        result.push(chars[idx]);
+                        idx += 1;
+                        continue;
+                    }
+                    break;
+                }
+            }
+            last_word = None;
+            continue;
+        }
+
+        if ch == '"' {
+            let quoted_start = idx;
+            let mut ident = String::new();
+            idx += 1;
+            let mut closed = false;
+            while idx < chars.len() {
+                let ident_ch = chars[idx];
+                if ident_ch == '"' {
+                    if idx + 1 < chars.len() && chars[idx + 1] == '"' {
+                        ident.push('"');
+                        idx += 2;
+                        continue;
+                    }
+                    idx += 1;
+                    closed = true;
+                    break;
+                }
+                ident.push(ident_ch);
+                idx += 1;
+            }
+
+            if closed && ident.eq_ignore_ascii_case("rowid") && last_word.as_deref() != Some("as") {
+                result.push_str("\"ctid\"");
+                last_word = Some("ctid".to_string());
+            } else {
+                for quoted_ch in &chars[quoted_start..idx] {
+                    result.push(*quoted_ch);
+                }
+                last_word = Some(ident.to_ascii_lowercase());
+            }
+            continue;
+        }
+
+        if ch.is_ascii_alphabetic() || ch == '_' {
             let start = idx;
             idx += 1;
             while idx < chars.len()
@@ -552,12 +653,14 @@ fn translate_sqlite_rowid(sql: &str) -> String {
             }
 
             let token: String = chars[start..idx].iter().collect();
+            let lower = token.to_ascii_lowercase();
+            last_word = Some(lower.clone());
+
             if token.eq_ignore_ascii_case("rowid") {
                 result.push_str("ctid");
                 continue;
             }
 
-            let lower = token.to_ascii_lowercase();
             if let Some(prefix) = lower.strip_suffix(".rowid") {
                 result.push_str(&token[..prefix.len()]);
                 result.push_str(".ctid");
@@ -566,6 +669,10 @@ fn translate_sqlite_rowid(sql: &str) -> String {
 
             result.push_str(&token);
             continue;
+        }
+
+        if !ch.is_whitespace() && ch != '.' {
+            last_word = None;
         }
 
         result.push(ch);
@@ -1232,15 +1339,54 @@ mod tests {
 
     #[test]
     fn prepare_policy_sql_for_pg_rewrites_rowid_tokens() {
-        let sql = "SELECT rowid, td.rowid, 'rowid' AS literal FROM task_dispatches td ORDER BY td.rowid DESC, rowid DESC";
+        let sql = "SELECT rowid, td.rowid, 'rowid' AS literal, \"rowid\" AS double_quoted, td.\"rowid\" FROM task_dispatches td ORDER BY td.rowid DESC, rowid DESC, td.\"rowid\" DESC";
         let prepared = prepare_policy_sql_for_pg(sql, &[]).expect("render rowid");
 
+        assert!(prepared.sql.contains(
+            "SELECT ctid, td.ctid, 'rowid' AS literal, \"ctid\" AS double_quoted, td.\"ctid\""
+        ));
         assert!(
             prepared
                 .sql
-                .contains("SELECT ctid, td.ctid, 'rowid' AS literal")
+                .contains("ORDER BY td.ctid DESC, ctid DESC, td.\"ctid\" DESC")
         );
-        assert!(prepared.sql.contains("ORDER BY td.ctid DESC, ctid DESC"));
+        assert!(prepared.params.is_empty());
+    }
+
+    #[test]
+    fn prepare_policy_sql_for_pg_preserves_quoted_rowid_aliases() {
+        let sql = "SELECT rowid AS \"rowid\", td.rowid AS \"ROWID\" FROM task_dispatches td";
+        let prepared = prepare_policy_sql_for_pg(sql, &[]).expect("render rowid aliases");
+
+        assert_eq!(
+            prepared.sql,
+            "SELECT ctid AS \"rowid\", td.ctid AS \"ROWID\" FROM task_dispatches td"
+        );
+        assert!(prepared.params.is_empty());
+    }
+
+    #[test]
+    fn prepare_policy_sql_for_pg_ignores_rowid_inside_comments() {
+        let sql = "SELECT rowid FROM task_dispatches -- \"debug rowid\nORDER BY rowid DESC /* \"debug rowid */";
+        let prepared = prepare_policy_sql_for_pg(sql, &[]).expect("render commented rowid");
+
+        assert_eq!(
+            prepared.sql,
+            "SELECT ctid FROM task_dispatches -- \"debug rowid\nORDER BY ctid DESC /* \"debug rowid */"
+        );
+        assert!(prepared.params.is_empty());
+    }
+
+    #[test]
+    fn prepare_policy_sql_for_pg_ignores_rowid_inside_dollar_quoted_literals() {
+        let sql =
+            "SELECT $$\"debug rowid$$ AS literal, rowid FROM task_dispatches ORDER BY rowid DESC";
+        let prepared = prepare_policy_sql_for_pg(sql, &[]).expect("render dollar quoted rowid");
+
+        assert_eq!(
+            prepared.sql,
+            "SELECT $$\"debug rowid$$ AS literal, ctid FROM task_dispatches ORDER BY ctid DESC"
+        );
         assert!(prepared.params.is_empty());
     }
 
