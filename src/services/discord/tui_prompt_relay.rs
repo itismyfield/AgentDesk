@@ -4437,11 +4437,17 @@ fn extract_loop_body(prompt: &str) -> Option<String> {
     let normalized = normalized.trim_start();
     // Expanded wrapper: the directive lives in <command-args>…</command-args>;
     // take only that block so the appended skill body never reaches the note.
+    // The CLOSING tag is REQUIRED: an unterminated `<command-args>` (no
+    // `</command-args>`) must NOT spill the trailing skill markdown into the note,
+    // so fall through to the raw-echo / kind-only path instead of returning the
+    // whole tail.
     if let Some(start) = normalized.find("<command-args>") {
         let after = &normalized[start + "<command-args>".len()..];
-        let body = after.split("</command-args>").next().unwrap_or("").trim();
-        if !body.is_empty() {
-            return Some(body.to_string());
+        if let Some((body, _rest)) = after.split_once("</command-args>") {
+            let body = body.trim();
+            if !body.is_empty() {
+                return Some(body.to_string());
+            }
         }
     }
     // Raw echo: `/loop <body>`.
@@ -5090,6 +5096,23 @@ mod tests {
         assert!(
             !wrapped.contains("SKILL BODY LEAK"),
             "the /loop note must NOT leak the trailing skill markdown",
+        );
+
+        // An UNTERMINATED wrapper (no closing </command-args>) must NOT spill the
+        // trailing skill markdown — the closing tag is required, so it falls back
+        // to kind-only rather than rendering the whole tail.
+        let unterminated = format_slash_command_control_note(
+            "sess-a",
+            "/loop",
+            "<command-name>/loop</command-name>\n<command-args>watch the relay\n# /loop — schedule\nSKILL BODY LEAK",
+        );
+        assert!(
+            !unterminated.contains("SKILL BODY LEAK"),
+            "unterminated wrapper must NOT leak the trailing skill markdown",
+        );
+        assert!(
+            !unterminated.contains("```"),
+            "unterminated wrapper falls back to the kind-only header",
         );
 
         // A bodyless /loop gracefully degrades to the kind-only header.

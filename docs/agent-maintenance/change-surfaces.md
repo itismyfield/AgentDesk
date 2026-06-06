@@ -304,12 +304,14 @@
     (incl. id==0 external/injected) NOT adopted/edited, in-range id==0
     watcher-direct STILL adopts+edits (over-suppression guard), and in-range id!=0
     unchanged.
-  - `src/services/discord/tui_prompt_relay.rs` (4512 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (4518 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
-    outside an extraction plan; +48 from #3189: the `/loop` control note carries
+    outside an extraction plan; +54 from #3189: the `/loop` control note carries
     its directive body via `extract_loop_body` (operator wants the recurring loop
     content visible; only the #3153 double-post is deduped, never the content) —
-    the `<command-args>` block or raw-echo args, never the trailing skill markdown;
+    the `<command-args>` block (closing tag REQUIRED via `split_once`, so an
+    unterminated wrapper falls back instead of spilling the appended skill body)
+    or raw-echo args, never the trailing skill markdown;
     every OTHER machine command (`/compact`, `Compacted …` stdout) stays
     kind-only; +185 from #3178: the machine slash-command
     control trigger (`/loop`/`/compact`/`<command-*>`) is a FULL active turn —
