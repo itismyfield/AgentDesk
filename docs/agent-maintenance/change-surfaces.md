@@ -413,9 +413,11 @@
   - `src/services/discord/health.rs` (2369 lines after #1879 snapshot/mailbox
     extraction; +3 from #3082 answer-flush-barrier field in the test SharedData
     constructor).
-  - `src/services/discord/health/recovery.rs` (2567 lines; health recovery
+  - `src/services/discord/health/recovery.rs` (2655 lines; health recovery
     extraction surface, split further before adding non-bugfix behavior; +70
-    from #3126 stall-watchdog completed-idle false-positive guard tests).
+    from #3126 stall-watchdog completed-idle false-positive guard tests; +88
+    from #3169 stall-watchdog jsonl-mtime liveness guard + tests, closing the
+    Death #1 force-clean false-positive on loop mid-write sessions).
   - `src/services/discord/router/message_handler/intake_turn.rs` (3655 lines;
     Discord message intake turn orchestration split from the router message
     handler; bugfix only outside a further extraction plan; +9 from #3082
@@ -661,7 +663,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `src/services/auto_queue/cancel_run.rs` (1032) is also giant-file territory;
   split before further non-bugfix growth.
 - `src/services/onboarding/mod.rs` (2936),
-  `src/services/dispatched_sessions.rs` (1326), and
+  `src/services/dispatched_sessions.rs` (1331), and
   `src/services/settings.rs` (1007) — service-layer route support surfaces
   split out of the large dashboard route modules. (`src/services/onboarding.rs`
   and `src/services/api_friction.rs` have been removed/decomposed.)
@@ -685,10 +687,12 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   readiness/cancel contract.
 - `src/services/memory/memento.rs` (1893).
 - `src/services/observability/pg_io.rs` (1047).
-- `src/services/dispatched_sessions.rs` (1326) — dispatched session domain
+- `src/services/dispatched_sessions.rs` (1331) — dispatched session domain
   service. This is the post-#1515 SRP extraction target for route/database
   callsites, but the module itself is now giant-file territory; split focused
-  helpers before adding non-bugfix behavior.
+  helpers before adding non-bugfix behavior. (+5 from #3169 exposing the idle-
+  kill `latest_runtime_activity_unix_nanos` jsonl-mtime probe to the stall-
+  watchdog liveness guard.)
 - `src/services/settings.rs` (1007) — settings domain service extracted from
   the route layer in #1519. Keep follow-up changes bugfix-only unless the file
   is split further.

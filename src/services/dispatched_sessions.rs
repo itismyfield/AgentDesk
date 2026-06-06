@@ -1055,7 +1055,12 @@ pub async fn kill_tmux_session(
 /// session-key heartbeat path silently misses the idle-kill row, so they are a
 /// reliable "is this tmux actually doing work?" signal at kill time. Returns 0
 /// when nothing is observable.
-fn latest_runtime_activity_unix_nanos(tmux_session_name: &str) -> i64 {
+///
+/// #3169: also reused by the stall-watchdog (`recovery.rs`) as a liveness probe
+/// before it force-cleans a `desynced` channel — a self-paced loop session that
+/// is mid-write touches its jsonl even while the inflight row reads stale, so a
+/// fresh probe here means the "desync" is a loop mid-write, not a hang.
+pub(crate) fn latest_runtime_activity_unix_nanos(tmux_session_name: &str) -> i64 {
     fn mtime_nanos(path: &str) -> i64 {
         std::fs::metadata(path)
             .and_then(|meta| meta.modified())
