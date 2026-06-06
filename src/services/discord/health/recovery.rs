@@ -1360,6 +1360,50 @@ pub(crate) fn stall_watchdog_should_force_clean(
     age_secs >= 0 && (age_secs as u64) >= threshold_secs
 }
 
+/// #3169 Death #1 (stall-watchdog false-positive): a self-paced `ScheduleWakeup`
+/// loop session that just posted a PR is a *healthy completed* state, yet its
+/// loop turns carry `user_msg_id == 0` and so never get
+/// `terminal_delivery_committed` marked (`tmux_watcher.rs` commit guard). That
+/// defeats the #3126 committed-turn guard and, once a ready-for-input TUI
+/// capture races past the relay offset (`capture_lagged` desync, #2965), the row
+/// reads `attached + desynced + uncommitted + stale` — the exact force-clean
+/// signature — and the watchdog destroys a perfectly healthy session
+/// (worktree/conversation reset, real loss).
+///
+/// This is the second-layer guard: before force-cleaning a desynced channel we
+/// probe the same runtime-activity signal idle-kill (#3053) uses — the session
+/// jsonl / `.generation` marker mtime (`latest_runtime_activity_unix_nanos`).
+/// A loop that is mid-write keeps touching its jsonl even while the inflight
+/// relay row looks stale, so a write inside `freshness_threshold_secs` means the
+/// "desync" is a loop mid-write, not a hang → defer the force-clean.
+///
+/// A genuinely hung turn writes no provider events: its jsonl stays stale past
+/// the window, the probe does NOT defer, and the force-clean still fires. The
+/// window is anchored at the force-clean threshold so a marginal real hang (last
+/// partial write a few seconds after the relay froze) is at worst deferred a
+/// single watchdog pass before it is cleaned — never blanket-suppressed.
+///
+/// Returns `true` to DEFER (skip) the force-clean for this pass.
+pub(crate) fn stall_watchdog_jsonl_liveness_defers_force_clean(
+    latest_runtime_activity_unix_nanos: i64,
+    now_unix_secs: i64,
+    freshness_threshold_secs: u64,
+) -> bool {
+    // No observable jsonl/generation activity → cannot vouch for liveness; let
+    // the force-clean proceed (this is the genuine-hang / dead-session case).
+    if latest_runtime_activity_unix_nanos <= 0 {
+        return false;
+    }
+    let now_nanos = now_unix_secs.saturating_mul(1_000_000_000);
+    // A write at/after "now" (clock skew, just-touched) is unambiguously fresh.
+    if latest_runtime_activity_unix_nanos >= now_nanos {
+        return true;
+    }
+    let age_nanos = now_nanos.saturating_sub(latest_runtime_activity_unix_nanos);
+    let age_secs = age_nanos / 1_000_000_000;
+    (age_secs as u64) < freshness_threshold_secs
+}
+
 /// Detection-only counterpart to `stall_watchdog_should_force_clean`:
 /// returns `true` for the "completed-stale inflight on a healthy watcher"
 /// pattern that the deadlock-manager 30-min alarms keep flagging. All five
@@ -1506,6 +1550,14 @@ pub(crate) const STALL_WATCHDOG_INITIAL_DELAY_SECS: u64 = 90;
 pub(crate) const STALL_WATCHDOG_THRESHOLD_SECS: u64 =
     2 * discord::inflight::INFLIGHT_STALENESS_THRESHOLD_SECS;
 
+/// #3169: freshness window for the jsonl-mtime liveness probe that gates the
+/// desynced force-clean. Anchored at the force-clean threshold: any provider
+/// event written within the same window the watchdog uses to judge staleness
+/// proves the "desync" is a loop mid-write, so the force-clean is deferred.
+/// A genuinely hung turn writes nothing for the whole window and is still
+/// cleaned (at most one extra pass for a boundary-marginal real hang).
+pub(crate) const STALL_WATCHDOG_LIVENESS_FRESHNESS_SECS: u64 = STALL_WATCHDOG_THRESHOLD_SECS;
+
 /// Run a single stall-watchdog pass against one provider+SharedData.
 ///
 /// Iterates every attached watcher (via `tmux_watchers.iter()`), pulls the
@@ -1575,6 +1627,16 @@ pub(crate) async fn run_stall_watchdog_pass(
             now_unix_secs,
             STALL_WATCHDOG_THRESHOLD_SECS,
         ) && let Some(tmux_session) = snapshot.tmux_session.clone()
+            // #3169: same loop-mid-write liveness guard as the desynced force-
+            // clean below — a freshly-written jsonl means this idle-foreground
+            // anchor is a live loop turn, not a stranded one, so do not clear it.
+            && !stall_watchdog_jsonl_liveness_defers_force_clean(
+                crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(
+                    &tmux_session,
+                ),
+                now_unix_secs,
+                STALL_WATCHDOG_LIVENESS_FRESHNESS_SECS,
+            )
             && idle_tmux_repair_ready_for_input(provider, channel_id.get(), &tmux_session)
             && discord::inflight_state_allows_idle_tmux_repair_for_channel(
                 provider,
@@ -1671,6 +1733,32 @@ pub(crate) async fn run_stall_watchdog_pass(
             STALL_WATCHDOG_THRESHOLD_SECS,
             registry.started_at_unix(),
         );
+        // #3169 Death #1: before the destructive desynced force-clean, probe the
+        // session's jsonl/.generation mtime (the same liveness signal idle-kill
+        // #3053 uses). A self-paced loop session that just posted a PR is mid-
+        // write — its loop turns carry user_msg_id==0 so the #3126 committed-turn
+        // guard never engages, and a capture_lagged (#2965) desync makes a
+        // healthy completed session read exactly like a hang. A fresh jsonl write
+        // means "loop mid-write != hang" → defer the force-clean this pass. A
+        // genuine hang writes no events, stays stale, and is still cleaned.
+        if should_clean
+            && let Some(tmux_session) = snapshot.tmux_session.as_deref()
+            && stall_watchdog_jsonl_liveness_defers_force_clean(
+                crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(
+                    tmux_session,
+                ),
+                now_unix_secs,
+                STALL_WATCHDOG_LIVENESS_FRESHNESS_SECS,
+            )
+        {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 🌱 STALL-WATCHDOG: deferring force-clean for desynced channel {} (provider={}) — session jsonl freshly written (loop mid-write != hang, #3169)",
+                channel_id,
+                provider.as_str(),
+            );
+            continue;
+        }
         if !should_clean {
             // Detection-only sibling probe for "completed-stale" inflight
             // leaks: bridge handed off cleanup to the watcher (or the watcher
@@ -2574,7 +2662,8 @@ mod stall_watchdog_pure_tests {
         leak_recovery_confirmed_chunk_count, leak_recovery_confirmed_prefix_from_ledger,
         leak_recovery_record_confirmed_chunk, leak_recovery_unrelayed_range,
         preserve_cancel_should_skip_provider_interrupt_for_idle_tui, render_leak_recovery_delivery,
-        stale_idle_foreground_queue_detected, stall_watchdog_should_force_clean,
+        stale_idle_foreground_queue_detected, stall_watchdog_jsonl_liveness_defers_force_clean,
+        stall_watchdog_should_force_clean,
         stall_watchdog_should_force_clean_orphan_explicit_background_work,
     };
     use crate::services::discord::relay_health::{RelayActiveTurn, RelayStallState};
@@ -3508,6 +3597,78 @@ mod stall_watchdog_pure_tests {
             now_unix,
             STALL_WATCHDOG_THRESHOLD_SECS,
             boot_unix,
+        ));
+    }
+
+    /// #3169 Death #1: the jsonl-mtime liveness probe must DEFER the force-clean
+    /// when the session wrote provider events inside the freshness window — even
+    /// though the channel reads as desynced (the #3126 commit guard is defeated
+    /// for loop turns with user_msg_id==0). A loop session that is mid-write is
+    /// healthy, not hung.
+    #[test]
+    fn stall_watchdog_liveness_defers_force_clean_when_jsonl_fresh() {
+        let now_unix = chrono::Utc::now().timestamp();
+        let now_nanos = now_unix.saturating_mul(1_000_000_000);
+
+        // jsonl written 30s ago — well inside the freshness window → defer.
+        let fresh_nanos = now_nanos - 30i64.saturating_mul(1_000_000_000);
+        assert!(
+            stall_watchdog_jsonl_liveness_defers_force_clean(
+                fresh_nanos,
+                now_unix,
+                STALL_WATCHDOG_THRESHOLD_SECS,
+            ),
+            "a session whose jsonl was just written is mid-write, not hung — force-clean must be deferred"
+        );
+
+        // A write at "now" (or future clock skew) is unambiguously fresh.
+        assert!(stall_watchdog_jsonl_liveness_defers_force_clean(
+            now_nanos,
+            now_unix,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+        ));
+        assert!(stall_watchdog_jsonl_liveness_defers_force_clean(
+            now_nanos + 5i64.saturating_mul(1_000_000_000),
+            now_unix,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+        ));
+    }
+
+    /// #3169 Death #1: the liveness probe must NOT suppress the force-clean for a
+    /// genuine hang — a hung turn writes no provider events, so its jsonl mtime
+    /// is stale past the window and the desynced force-clean still fires. This is
+    /// the "no blanket suppression" guarantee.
+    #[test]
+    fn stall_watchdog_liveness_keeps_force_clean_when_jsonl_stale() {
+        let now_unix = chrono::Utc::now().timestamp();
+        let now_nanos = now_unix.saturating_mul(1_000_000_000);
+
+        // jsonl stale by 2x the window → no liveness vouch → allow force-clean.
+        let stale_nanos =
+            now_nanos - (2 * STALL_WATCHDOG_THRESHOLD_SECS as i64).saturating_mul(1_000_000_000);
+        assert!(
+            !stall_watchdog_jsonl_liveness_defers_force_clean(
+                stale_nanos,
+                now_unix,
+                STALL_WATCHDOG_THRESHOLD_SECS,
+            ),
+            "a hung turn with a stale jsonl must still be force-cleaned — no blanket suppression"
+        );
+
+        // No observable jsonl/.generation activity (probe == 0) → never defer.
+        assert!(!stall_watchdog_jsonl_liveness_defers_force_clean(
+            0,
+            now_unix,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+        ));
+
+        // Boundary: exactly at the threshold is treated as stale (not < window).
+        let boundary_nanos =
+            now_nanos - (STALL_WATCHDOG_THRESHOLD_SECS as i64).saturating_mul(1_000_000_000);
+        assert!(!stall_watchdog_jsonl_liveness_defers_force_clean(
+            boundary_nanos,
+            now_unix,
+            STALL_WATCHDOG_THRESHOLD_SECS,
         ));
     }
 
