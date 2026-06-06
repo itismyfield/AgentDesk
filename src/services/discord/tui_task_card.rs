@@ -64,6 +64,13 @@ pub(super) struct TaskNotification {
     pub usage: Option<String>,
     pub duration: Option<String>,
     pub tool_uses: Option<String>,
+    /// #3169: the workflow/agent `<usage>` block nests `<subagent-tokens>`,
+    /// `<agent-count>`, `<duration-ms>` tags. Parsed individually so the footer
+    /// renders human-readable values (K/M tokens, `Xm Ys` duration) instead of
+    /// leaking the raw nested XML of `usage`.
+    pub subagent_tokens: Option<String>,
+    pub agent_count: Option<String>,
+    pub duration_ms: Option<String>,
 }
 
 /// Parse a `<task-notification>` payload into its structured fields (#3075).
@@ -79,15 +86,82 @@ pub(super) struct TaskNotification {
 pub(super) fn parse_task_notification(raw: &str) -> TaskNotification {
     let text = strip_terminal_controls(raw);
     let trimmed = text.trim();
+    // #3169 (codex R3/R5): the real `<usage>`/`<duration>` are top-level children
+    // that follow BOTH the `<summary>` and `<result>` prose fields. Restrict the
+    // search to the tail after the LATER of the two real prose-field closes (max,
+    // not first-found) so a literal `</result>`/`</summary>` or `<usage>…</usage>`
+    // written inside the prose cannot be mistaken for the real block.
+    let usage_search_from = trimmed
+        .rfind("</result>")
+        .into_iter()
+        .chain(trimmed.rfind("</summary>"))
+        .max()
+        .unwrap_or(0);
+    let usage = extract_tag(&trimmed[usage_search_from..], &["usage"]);
+    // #3169 (codex): parse the nested usage sub-fields from WITHIN the already-
+    // extracted `<usage>` block ONLY. Scanning the whole payload would let a
+    // literal `<subagent_tokens>`/`<agent_count>`/`<duration_ms>` appearing inside
+    // `<summary>`/`<result>` prose poison the footer metadata.
+    let usage_inner = usage.as_deref().unwrap_or("");
     TaskNotification {
         task_id: extract_tag(trimmed, &["task-id", "task_id"]),
         status: extract_tag(trimmed, &["status"]),
         summary: extract_tag(trimmed, &["summary"]),
         result: extract_tag(trimmed, &["result"]),
-        usage: extract_tag(trimmed, &["usage"]),
-        duration: extract_tag(trimmed, &["duration"]),
-        tool_uses: extract_tag(trimmed, &["tool-uses", "tool_uses", "tool-use-count"]),
+        // #3169 (codex R4): the footer-fallback `<duration>` is also a top-level
+        // metadata child after the prose fields — scope it to the same tail so a
+        // prose-literal `<duration>` can't poison the footer for legacy payloads.
+        duration: extract_tag(&trimmed[usage_search_from..], &["duration"]),
+        // #3169 (codex R2): scope the tool-use COUNT to the <usage> block too, so a
+        // prose-literal `<tool_uses>` before the real usage cannot poison the
+        // footer count (the count is always nested inside <usage>). `<tool-use-id>`
+        // is a distinct top-level tag and is unaffected.
+        tool_uses: extract_tag(usage_inner, &["tool-uses", "tool_uses", "tool-use-count"]),
+        subagent_tokens: extract_tag(usage_inner, &["subagent-tokens", "subagent_tokens"]),
+        agent_count: extract_tag(usage_inner, &["agent-count", "agent_count"]),
+        duration_ms: extract_tag(usage_inner, &["duration-ms", "duration_ms"]),
+        usage,
     }
+}
+
+/// #3169: format a raw integer token count as a compact `K`/`M` string
+/// (`66013` → `66K`, `359797` → `360K`, `1341096` → `1.3M`, `950` → `950`).
+/// Returns `None` if the input is not a parseable non-negative integer.
+fn format_token_count(raw: &str) -> Option<String> {
+    let n: u64 = raw.trim().parse().ok()?;
+    Some(if n >= 1_000_000 {
+        let m = n as f64 / 1_000_000.0;
+        // Trim a trailing `.0` (e.g. `2.0M` → `2M`).
+        let s = format!("{m:.1}");
+        let s = s.strip_suffix(".0").map(str::to_string).unwrap_or(s);
+        format!("{s}M")
+    } else if n >= 1_000 {
+        format!("{}K", (n as f64 / 1_000.0).round() as u64)
+    } else {
+        n.to_string()
+    })
+}
+
+/// #3169: format a raw millisecond duration as a human-readable string
+/// (`504983` → `8m 25s`, `45000` → `45s`, `900` → `900ms`).
+/// Returns `None` if the input is not a parseable non-negative integer.
+fn format_duration_ms(raw: &str) -> Option<String> {
+    let ms: u64 = raw.trim().parse().ok()?;
+    Some(if ms < 1_000 {
+        format!("{ms}ms")
+    } else {
+        let secs = ms / 1_000;
+        if secs < 60 {
+            format!("{secs}s")
+        } else {
+            let (m, s) = (secs / 60, secs % 60);
+            if s == 0 {
+                format!("{m}m")
+            } else {
+                format!("{m}m {s}s")
+            }
+        }
+    })
 }
 
 /// Extract the inner text of the first `<name>…</name>` for any of `names`.
@@ -173,14 +247,52 @@ pub(super) fn format_task_notification_card(note: &TaskNotification, update_coun
     if let Some(task_id) = note.task_id.as_deref().filter(|s| !s.is_empty()) {
         footer_parts.push(format!("task {}", short_task_id(task_id)));
     }
-    if let Some(usage) = note.usage.as_deref().filter(|s| !s.is_empty()) {
-        footer_parts.push(sanitize_oneline(usage));
+    // #3169: render the structured usage sub-fields human-readably. Multi-agent
+    // count, then K/M token total, then tool count, then `Xm Ys` duration. The
+    // raw `usage` block is only surfaced as a fallback when it carries NO nested
+    // tags (`<`) — the workflow/agent payload nests `<subagent-tokens>` etc.,
+    // which we parse above, so we must not dump that XML into the footer.
+    if let Some(agents) = note
+        .agent_count
+        .as_deref()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|n| *n > 1)
+    {
+        footer_parts.push(format!("{agents} agents"));
+    }
+    if let Some(tokens) = note
+        .subagent_tokens
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .and_then(format_token_count)
+    {
+        footer_parts.push(format!("{tokens} tok"));
     }
     if let Some(tool_uses) = note.tool_uses.as_deref().filter(|s| !s.is_empty()) {
         footer_parts.push(format!("{} tools", sanitize_oneline(tool_uses)));
     }
-    if let Some(duration) = note.duration.as_deref().filter(|s| !s.is_empty()) {
+    // Duration: prefer the millisecond field (human-formatted); fall back to a
+    // pre-formatted `<duration>` string if that is what the payload carried.
+    if let Some(dur) = note
+        .duration_ms
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .and_then(format_duration_ms)
+    {
+        footer_parts.push(dur);
+    } else if let Some(duration) = note.duration.as_deref().filter(|s| !s.is_empty()) {
         footer_parts.push(sanitize_oneline(duration));
+    }
+    // Fallback: a plain (non-XML) usage string, only when no structured
+    // sub-field was parsed and it is not itself nested XML.
+    if note.subagent_tokens.is_none() && note.agent_count.is_none() {
+        if let Some(usage) = note
+            .usage
+            .as_deref()
+            .filter(|s| !s.is_empty() && !s.contains('<'))
+        {
+            footer_parts.push(sanitize_oneline(usage));
+        }
     }
     if !footer_parts.is_empty() {
         lines.push(String::new());
@@ -966,5 +1078,129 @@ mod tests {
             reserve_card_slot(channel, task),
             CardSlot::Post { update_count: 1 },
         );
+    }
+
+    #[test]
+    fn format_token_count_uses_k_and_m_units() {
+        assert_eq!(format_token_count("950").as_deref(), Some("950"));
+        assert_eq!(format_token_count("66013").as_deref(), Some("66K"));
+        assert_eq!(format_token_count("359797").as_deref(), Some("360K"));
+        assert_eq!(format_token_count("1341096").as_deref(), Some("1.3M"));
+        assert_eq!(format_token_count("2000000").as_deref(), Some("2M"));
+        assert_eq!(format_token_count("not-a-number"), None);
+    }
+
+    #[test]
+    fn format_duration_ms_is_human_readable() {
+        assert_eq!(format_duration_ms("900").as_deref(), Some("900ms"));
+        assert_eq!(format_duration_ms("45000").as_deref(), Some("45s"));
+        assert_eq!(format_duration_ms("504983").as_deref(), Some("8m 24s"));
+        assert_eq!(format_duration_ms("120000").as_deref(), Some("2m"));
+        assert_eq!(format_duration_ms("bad"), None);
+    }
+
+    #[test]
+    fn footer_renders_nested_usage_readably_not_raw_xml() {
+        // #3169: a real agent payload nests `<subagent_tokens>`/`<tool_uses>`/
+        // `<duration_ms>` inside `<usage>`. The footer must render K/M tokens +
+        // human duration, never the raw nested XML, and never a duplicate count.
+        let raw = "<task-notification><task-id>a24eb9898b9662840</task-id>\
+            <status>completed</status><summary>done</summary>\
+            <usage><agent_count>1</agent_count><subagent_tokens>66013</subagent_tokens>\
+            <tool_uses>37</tool_uses><duration_ms>504983</duration_ms></usage>\
+            </task-notification>";
+        let note = parse_task_notification(raw);
+        let card = format_task_notification_card(&note, 0);
+        assert!(
+            !card.contains("<subagent_tokens>") && !card.contains("<duration_ms>"),
+            "raw nested usage XML must not leak into the card: {card}"
+        );
+        assert!(
+            card.contains("66K tok"),
+            "tokens should be K-formatted: {card}"
+        );
+        assert!(
+            card.contains("37 tools"),
+            "tool count should render once: {card}"
+        );
+        assert!(
+            card.contains("8m 24s"),
+            "duration should be human-readable: {card}"
+        );
+        // multi-agent count only shown when > 1
+        assert!(
+            !card.contains("1 agents"),
+            "single-agent count is suppressed: {card}"
+        );
+    }
+
+    #[test]
+    fn footer_ignores_prose_wrapped_usage_block() {
+        // #3169 (codex R3): a literal `<usage>...</usage>` written inside
+        // <summary>/<result> prose must NOT be mistaken for the real top-level
+        // usage block. The real block follows the prose fields.
+        let raw = "<task-notification><task-id>tp</task-id><status>completed</status>\
+            <summary>example: <usage><tool_uses>999</tool_uses>\
+            <subagent_tokens>888888</subagent_tokens></usage></summary>\
+            <result>done</result>\
+            <usage><tool_uses>5</tool_uses><subagent_tokens>66013</subagent_tokens>\
+            <duration_ms>504983</duration_ms></usage></task-notification>";
+        let note = parse_task_notification(raw);
+        assert_eq!(
+            note.tool_uses.as_deref(),
+            Some("5"),
+            "real usage, not prose 999"
+        );
+        assert_eq!(note.subagent_tokens.as_deref(), Some("66013"));
+        let card = format_task_notification_card(&note, 0);
+        assert!(
+            card.contains("5 tools") && card.contains("66K tok"),
+            "{card}"
+        );
+        assert!(
+            !card.contains("999 tools") && !card.contains("889K"),
+            "footer not poisoned: {card}"
+        );
+    }
+
+    #[test]
+    fn footer_ignores_usage_subfield_tags_in_prose() {
+        // #3169 (codex): a literal <subagent_tokens> inside <summary>/<result>
+        // prose must NOT be picked up as footer metadata — only the real value
+        // inside the <usage> block counts.
+        let raw = "<task-notification><task-id>t9</task-id><status>completed</status>\
+            <summary>note about <subagent_tokens>999999</subagent_tokens> in text</summary>\
+            <result>also <duration_ms>1</duration_ms> mentioned</result>\
+            <usage><subagent_tokens>66013</subagent_tokens><tool_uses>5</tool_uses>\
+            <duration_ms>504983</duration_ms></usage></task-notification>";
+        let note = parse_task_notification(raw);
+        // The scoped parse takes the <usage> value, not the prose-literal one.
+        assert_eq!(note.subagent_tokens.as_deref(), Some("66013"));
+        assert_eq!(note.duration_ms.as_deref(), Some("504983"));
+        let card = format_task_notification_card(&note, 0);
+        // Footer reflects the usage value (66K), NOT the poisoned 999999 (→1000K).
+        // (The summary prose may legitimately contain "999999" in the card body,
+        // so we assert on the footer-formatted value, not the raw number.)
+        assert!(card.contains("66K tok"), "{card}");
+        assert!(
+            !card.contains("1000K"),
+            "footer must not be poisoned by prose: {card}"
+        );
+        assert!(card.contains("8m 24s"), "{card}");
+    }
+
+    #[test]
+    fn footer_shows_agent_count_when_multiple() {
+        let raw = "<task-notification><task-id>wf123</task-id><status>completed</status>\
+            <usage><agent_count>6</agent_count><subagent_tokens>1341096</subagent_tokens>\
+            <tool_uses>178</tool_uses><duration_ms>1341096</duration_ms></usage>\
+            </task-notification>";
+        let note = parse_task_notification(raw);
+        let card = format_task_notification_card(&note, 0);
+        assert!(
+            card.contains("6 agents"),
+            "multi-agent count should show: {card}"
+        );
+        assert!(card.contains("1.3M tok"), "M-formatted tokens: {card}");
     }
 }
