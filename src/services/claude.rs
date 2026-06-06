@@ -2874,6 +2874,7 @@ fn try_claude_tui_warm_followup(
 /// Verbatim extraction of the pre-refactor `else if session_exists` branch.
 #[cfg(unix)]
 fn cleanup_stale_claude_tui_session(tmux_session_name: &str) {
+    debug_log("Stale Claude TUI tmux session found — recreating");
     crate::services::termination_audit::record_termination_for_tmux(
         tmux_session_name,
         None,
