@@ -574,6 +574,11 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         injected_class.still_delivers_assistant_output(),
         "every injected class must still deliver assistant output via the bridge tail",
     );
+    // #3176: the anchor message id of THIS turn's TUI-direct synthetic inflight, set
+    // only on the branch that actually posts an anchor + creates the synthetic. Used
+    // by the idle-tail drain-wait to identity-pin our own inflight (so it does not
+    // self-deadlock) while still waiting on any genuinely distinct previous turn.
+    let mut current_turn_anchor_id: Option<u64> = None;
     if is_system_continuation {
         if matches!(injected_class, InjectedPromptClass::SlashCommandControl) {
             // #3153: a MACHINE slash-command control echo (/loop, /compact, the
@@ -687,6 +692,9 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                 return;
             }
         };
+        // #3176: pin this turn's anchor id — it becomes the synthetic inflight's
+        // `user_msg_id` below, so the idle-tail drain-wait can recognise our own row.
+        current_turn_anchor_id = Some(anchor_message.id.get());
         // #3075: remember this card so a repeat completion edits it. #3164 codex R3
         // issue-2: keep this IMMEDIATELY after the successful post (before the awaited
         // `⏳` add) — `record_posted_card` is NOT used by lifecycle completion, and
@@ -795,8 +803,14 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             })
         });
         if bridge_adapter_owns_external_turn(lease.relay_owner)
-            && maybe_spawn_claude_idle_response_tail(shared.clone(), channel_id, &prompt, &lease)
-                .await
+            && maybe_spawn_claude_idle_response_tail(
+                shared.clone(),
+                channel_id,
+                &prompt,
+                &lease,
+                current_turn_anchor_id,
+            )
+            .await
             && let Some(guard) = lease_guard.as_mut()
         {
             guard.disarm();
@@ -1410,6 +1424,7 @@ async fn maybe_spawn_claude_idle_response_tail(
     channel_id: ChannelId,
     prompt: &ObservedTuiPrompt,
     lease: &ExternalInputRelayLease,
+    current_turn_anchor_id: Option<u64>,
 ) -> bool {
     if !prompt
         .provider
@@ -1431,7 +1446,13 @@ async fn maybe_spawn_claude_idle_response_tail(
         );
         return false;
     }
-    if !wait_for_claude_inflight_to_clear(channel_id).await {
+    if !wait_for_claude_inflight_to_clear(
+        channel_id,
+        &prompt.tmux_session_name,
+        current_turn_anchor_id,
+    )
+    .await
+    {
         tracing::warn!(
             provider = %prompt.provider,
             channel_id = channel_id.get(),
@@ -1496,17 +1517,60 @@ async fn maybe_spawn_claude_idle_response_tail(
 }
 
 #[cfg(unix)]
-async fn wait_for_claude_inflight_to_clear(channel_id: ChannelId) -> bool {
+/// #3176: is the present inflight THIS turn's own TUI-direct synthetic row?
+///
+/// The drain-wait must only skip waiting on the inflight WE just created for the
+/// current turn. The discriminator is the precise current-turn identity —
+/// `ExternalInput` + same tmux session + `user_msg_id == this turn's anchor
+/// message id` — NOT merely same-session `ExternalInput` (which would also match a
+/// still-draining PREVIOUS same-session TUI turn and wrongly skip it, risking
+/// interleaved or lost delivery). When the current turn created no synthetic
+/// (`current_turn_anchor_id == None` — e.g. system-continuation / slash-control
+/// paths), nothing here is "ours", so any present inflight remains a previous turn
+/// and still blocks.
+#[cfg(unix)]
+fn inflight_is_current_turn_synthetic(
+    state: Option<&InflightTurnState>,
+    tmux_session_name: &str,
+    current_turn_anchor_id: Option<u64>,
+) -> bool {
+    match (state, current_turn_anchor_id) {
+        (Some(state), Some(anchor_id)) => {
+            state.turn_source == TurnSource::ExternalInput
+                && state.tmux_session_name.as_deref() == Some(tmux_session_name)
+                && state.user_msg_id == anchor_id
+        }
+        _ => false,
+    }
+}
+
+#[cfg(unix)]
+async fn wait_for_claude_inflight_to_clear(
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    current_turn_anchor_id: Option<u64>,
+) -> bool {
     let mut observed_inflight = false;
     let cleared = wait_for_transient_state_to_clear(
         CLAUDE_IDLE_INFLIGHT_DRAIN_WAIT,
         CLAUDE_IDLE_INFLIGHT_DRAIN_POLL,
         || {
-            let present =
-                super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get())
-                    .is_some();
-            observed_inflight |= present;
-            present
+            // #3176: a present inflight only BLOCKS this turn's idle tail when it
+            // belongs to a DIFFERENT (previous) turn. Our OWN synthetic for THIS turn
+            // (created upstream in the notify/anchor block) must not be waited on —
+            // doing so self-deadlocks (we created it; it never "drains" within the
+            // window), permanently skipping the relay and silently dropping every
+            // subsequent response. Identity-pinned via `inflight_is_current_turn_synthetic`.
+            let state =
+                super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get());
+            let blocking = state.is_some()
+                && !inflight_is_current_turn_synthetic(
+                    state.as_ref(),
+                    tmux_session_name,
+                    current_turn_anchor_id,
+                );
+            observed_inflight |= blocking;
+            blocking
         },
     )
     .await;
@@ -5338,6 +5402,7 @@ mod tests {
                 channel_id,
                 &prompt,
                 &lease,
+                None,
             )
             .await;
             if spawned {
@@ -5532,6 +5597,68 @@ mod tests {
         assert_eq!(state.session_key.as_deref(), lease.session_key.as_deref());
         assert_eq!(state.runtime_kind, Some(RuntimeHandoffKind::CodexTui));
         assert_eq!(state.turn_start_offset, Some(333));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drain_wait_does_not_block_on_own_synthetic_inflight() {
+        // #3176: the idle-tail drain-wait must treat THIS turn's own TUI-direct
+        // synthetic inflight as non-blocking. If it waited on it, it would
+        // self-deadlock (we created it; it never drains) and permanently skip the
+        // relay. The discrimination is `tui_direct_synthetic_inflight_matches`:
+        // ExternalInput + same tmux session => our own => non-blocking.
+        let output_path = PathBuf::from("/tmp/adk-selfblock.jsonl");
+        let lease = ExternalInputRelayLease {
+            channel_id: Some(7),
+            turn_id: Some("external:claude:7:tmux:1".to_string()),
+            session_key: Some("token:AgentDesk-claude-self".to_string()),
+            relay_owner: ExternalInputRelayOwner::BridgeAdapter,
+            runtime_kind: Some(RuntimeHandoffKind::ClaudeTui),
+            generation:
+                crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+        };
+        let state = build_tui_direct_bridge_inflight_state(
+            ProviderKind::Claude,
+            ChannelId::new(7),
+            MessageId::new(11),
+            MessageId::new(22),
+            "typed in TUI",
+            "AgentDesk-claude-self",
+            &output_path,
+            0,
+            &lease,
+        );
+
+        // state.user_msg_id == 11 (the anchor id for this turn).
+        // Our own synthetic for THIS turn (matching anchor id) => non-blocking.
+        assert!(
+            inflight_is_current_turn_synthetic(Some(&state), "AgentDesk-claude-self", Some(11)),
+            "own synthetic (same session + matching anchor id) must be non-blocking"
+        );
+        // A PREVIOUS same-session TUI turn (different anchor id) => still blocks,
+        // even though it is also ExternalInput on the same session. This is the
+        // precision codex required: do not skip a genuinely distinct previous turn.
+        assert!(
+            !inflight_is_current_turn_synthetic(Some(&state), "AgentDesk-claude-self", Some(999)),
+            "a different turn's inflight (anchor id mismatch) must stay blocking"
+        );
+        // This turn created no synthetic (system-continuation / slash) => anchor None
+        // => any present inflight is a previous turn and still blocks.
+        assert!(
+            !inflight_is_current_turn_synthetic(Some(&state), "AgentDesk-claude-self", None),
+            "no current synthetic (anchor None) must keep any inflight blocking"
+        );
+        // A different tmux session is never ours.
+        assert!(
+            !inflight_is_current_turn_synthetic(Some(&state), "AgentDesk-claude-other", Some(11)),
+            "an inflight for a different tmux session must stay blocking"
+        );
+        // No inflight at all => nothing to wait on (not ours either).
+        assert!(!inflight_is_current_turn_synthetic(
+            None,
+            "AgentDesk-claude-self",
+            Some(11)
+        ));
     }
 
     #[cfg(unix)]
