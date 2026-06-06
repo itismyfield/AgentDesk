@@ -304,9 +304,11 @@
     (incl. id==0 external/injected) NOT adopted/edited, in-range id==0
     watcher-direct STILL adopts+edits (over-suppression guard), and in-range id!=0
     unchanged.
-  - `src/services/discord/tui_prompt_relay.rs` (4145 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (4209 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
-    outside an extraction plan; +12 from #3041 P1-4 codex: the lease record
+    outside an extraction plan; +64 from #3176: identity-pinned idle-tail
+    drain-wait (`inflight_is_current_turn_synthetic` + `current_turn_anchor_id`
+    threading) closes a relay self-deadlock; +12 from #3041 P1-4 codex: the lease record
     helpers now RETURN the recorded lease (with its per-record `generation`
     nonce) and callers adopt it back so a later exact-match/by-generation clear
     targets the precise stored identity (no clobber of a newer lease); +4 from
