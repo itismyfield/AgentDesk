@@ -306,7 +306,7 @@
     (incl. id==0 external/injected) NOT adopted/edited, in-range id==0
     watcher-direct STILL adopts+edits (over-suppression guard), and in-range id!=0
     unchanged.
-  - `src/services/discord/tui_prompt_relay.rs` (4656 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (4745 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3167: the self-paced TUI loop relay
     starts its synthetic turn with `ActiveTurnKind::Background` so a queued user
@@ -411,6 +411,19 @@
     `⏳`, posts `✅`, and clears the shared slot only when it still points at this
     turn's own anchor id (newer same-(provider,tmux,channel) turn keeps its `⏳`)
     (plus overtake-detector / no-double-removal / own-id-scoped-clear unit tests).
+    +89 from #3193 codex GATE_FAIL fix: the overtake TRIGGER is now bound to THIS
+    turn's identity, not the bare channel-wide watermark. `committed_relay_offset`
+    is per-CHANNEL, so an unrelated/different-turn commit in the same channel during
+    the relay window can strict-increase it → the bare signal mis-fired
+    (false-positive ⏳-removal/✅ for a turn whose own anchor was NOT overtaken).
+    `relay_watcher_overtook_anchor_record` now ALSO requires
+    `own_external_input_lease_consumed` (`external_input_lease_was_consumed`/
+    `relay_own_external_input_lease_consumed`): the watcher clears a turn's
+    external-input lease BY its unique `generation` exactly when it commits THAT
+    turn, so "our recorded generation is no longer the present lease" proves the
+    committing turn was ours. Unrelated commit → watermark up but our generation
+    still present → no trigger (plus unrelated-same-channel-commit false-positive
+    test + own-generation lease-consumption predicate test).
   - `src/services/discord/idle_recap.rs` (1881 prod lines; idle-recap card
     compose/post/clear surface, registered giant-file (#3036) — bugfix only
     outside an extraction plan. Crossed 1000 prod LoC with #3146 Part 1: the

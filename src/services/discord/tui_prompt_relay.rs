@@ -535,6 +535,13 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     // `⏳` ourselves, with no timing wait. The non-race case (watcher not yet
     // committed) leaves the watermark unchanged → we no-op and the watcher does
     // the normal removal later.
+    //
+    // #3193 codex GATE_FAIL fix: the watermark is per-CHANNEL, so a strict increase
+    // can also be produced by an UNRELATED / different-turn commit in the same
+    // channel during this window. The watermark snapshot is therefore NOT sufficient
+    // on its own to conclude OUR anchor was overtaken — the post-anchor re-check
+    // ALSO requires that THIS turn's own external-input lease was consumed (see the
+    // re-check site below), which the watcher does exactly when it commits OUR turn.
     let committed_relay_offset_before_relay = shared.committed_relay_offset(channel_id);
     let mut lease = record_observed_external_turn_lease(shared, &prompt, channel_id);
     // #3041 P1-4 codex: arm an early-return RAII guard the instant the lease is
@@ -831,9 +838,26 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             // identity). Re-reading the watermark here (post-anchor) catches a
             // watcher that committed + ran its no-op gate during the `⏳` add I/O.
             let committed_relay_offset_after_anchor = shared.committed_relay_offset(channel_id);
+            // #3193 codex GATE_FAIL fix: bind the overtake TRIGGER to THIS turn's
+            // identity, not the bare channel-wide watermark. The watermark is
+            // per-channel and advances on ANY commit in the window (an unrelated /
+            // different-turn commit included). The watcher consumes THIS turn's
+            // external-input lease (clearing it by its UNIQUE `generation`) EXACTLY
+            // when it commits THIS turn — so "our recorded lease generation is no
+            // longer the present lease" proves the commit that advanced the
+            // watermark was OURS. An unrelated commit advances the watermark but
+            // leaves our lease generation present → `own_lease_consumed == false` →
+            // no false-positive trigger.
+            let own_external_input_lease_consumed = relay_own_external_input_lease_consumed(
+                &prompt.provider,
+                &prompt.tmux_session_name,
+                channel_id,
+                lease.generation,
+            );
             if relay_watcher_overtook_anchor_record(
                 committed_relay_offset_before_relay,
                 committed_relay_offset_after_anchor,
+                own_external_input_lease_consumed,
             ) {
                 relay_recheck_complete_own_anchor_if_watcher_overtook(
                     command_http,
@@ -4066,19 +4090,84 @@ pub(super) async fn complete_tui_direct_anchor_lifecycle_for_inflight(
     Some(anchor)
 }
 
-/// #3174 (ported from #3164 codex R3): pure decision for whether the tmux watcher
-/// already committed a terminal turn (advancing `committed_relay_offset`) AND ran
-/// its anchor-completion gate BEFORE `relay_observed_prompt` finished recording the
-/// anchor — i.e. the watcher overtook the relay and its no-op gate left the `⏳`
-/// stranded. The watermark is monotonic (CAS advance), so a strict increase between
-/// the pre-relay snapshot and the post-anchor re-read is the overtake signal. Equal
-/// (the common case: watcher not yet committed) → no overtake → the relay no-ops
-/// and the watcher removes the `⏳` normally on its own later completion pass.
+/// #3174 (ported from #3164 codex R3; tightened per #3193 codex GATE_FAIL): pure
+/// decision for whether the tmux watcher already committed THIS turn's terminal
+/// output AND ran (and no-op'd) its anchor-completion gate BEFORE
+/// `relay_observed_prompt` finished recording the anchor — i.e. the watcher
+/// overtook THIS relay and left THIS turn's `⏳` stranded.
+///
+/// #3193 codex (the sole GATE_FAIL blocker): a bare channel-wide
+/// `committed_relay_offset` strict-increase is NOT a per-turn signal. The watermark
+/// is per-CHANNEL, advanced by ANY committed output in the channel during this relay
+/// window — including an UNRELATED / different-turn commit that never touched THIS
+/// turn's anchor. Triggering on the watermark alone therefore mis-fires
+/// (false-positive): it would remove `⏳` / post `✅` for a turn whose own anchor was
+/// NOT overtaken. (The downstream ACTION is already correctly scoped to this turn's
+/// own `anchor_message.id` — codex confirmed the anti-aliasing — so the breadth was
+/// purely in this TRIGGER.)
+///
+/// The fix binds the trigger to THIS turn's identity via its own external-input
+/// lease. The watcher consumes a turn's lease EXACTLY when it commits that turn's
+/// terminal output: it clears the lease by its UNIQUE `generation`
+/// (`clear_external_input_relay_lease_if_generation_matches`) on the SAME inline
+/// commit pass that advances `confirmed_end_offset` and runs the no-op
+/// anchor-completion gate. So the precise overtake signal for THIS turn is BOTH:
+///   1. the watermark strictly increased (a commit happened in the window), AND
+///   2. `own_external_input_lease_consumed` — THIS turn's recorded lease generation
+///      is no longer the present lease, i.e. the committing turn was OURS, not an
+///      unrelated same-channel turn.
+/// An unrelated commit advances the watermark (1) but leaves our lease generation
+/// present (2 is false) → no trigger → no false-positive. Equal watermark (the
+/// common case: watcher not yet committed) → no overtake regardless of (2).
 fn relay_watcher_overtook_anchor_record(
     committed_before_relay: u64,
     committed_after_anchor: u64,
+    own_external_input_lease_consumed: bool,
 ) -> bool {
-    committed_after_anchor > committed_before_relay
+    committed_after_anchor > committed_before_relay && own_external_input_lease_consumed
+}
+
+/// #3193 codex GATE_FAIL fix: pure decision for whether THIS turn's own
+/// external-input lease (identified by its UNIQUE recorded `generation`) has been
+/// consumed — i.e. is no longer the lease currently present for
+/// `(provider, tmux_session, channel)`. `present_generation` is the generation of
+/// the lease the state map holds NOW (the post-anchor re-read), or `None` if no
+/// lease is present.
+///
+/// "Consumed" is true when the present lease is gone (`None`) OR carries a
+/// DIFFERENT generation than ours — both mean the watcher (or a superseding turn)
+/// cleared/replaced the exact lease THIS turn recorded. The watcher clears a
+/// turn's lease by its generation EXACTLY on the commit pass for that turn, so this
+/// is the per-turn binding that distinguishes our own overtake from an unrelated
+/// same-channel commit (which leaves our generation present → returns `false`).
+/// `own_generation == UNRECORDED` (0) means our lease was never recorded, so there
+/// is nothing of ours to have been consumed → `false`.
+fn external_input_lease_was_consumed(own_generation: u64, present_generation: Option<u64>) -> bool {
+    if own_generation
+        == crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED
+    {
+        return false;
+    }
+    present_generation != Some(own_generation)
+}
+
+/// #3193 codex GATE_FAIL fix: runtime adapter that reads the lease state map NOW
+/// and applies [`external_input_lease_was_consumed`] against THIS turn's recorded
+/// `own_generation`. Returns `true` iff the watcher already consumed THIS turn's
+/// own external-input lease — the per-turn binding for the overtake trigger.
+fn relay_own_external_input_lease_consumed(
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: ChannelId,
+    own_generation: u64,
+) -> bool {
+    let present_generation = crate::services::tui_prompt_dedupe::external_input_relay_lease(
+        provider,
+        tmux_session_name,
+        channel_id.get(),
+    )
+    .map(|lease| lease.generation);
+    external_input_lease_was_consumed(own_generation, present_generation)
 }
 
 /// #3174 (ported from #3164 codex R3): relay-side completion that closes the
@@ -5596,23 +5685,71 @@ mod tests {
     // `⏳` itself later.
     #[test]
     fn relay_rechecks_when_watcher_committed_before_anchor_was_recorded() {
-        // Watermark advanced between the pre-relay snapshot and the post-anchor
-        // re-read → the watcher already committed a terminal turn and ran its
-        // no-op gate before our anchor was findable → relay must clean up its `⏳`.
-        assert!(relay_watcher_overtook_anchor_record(100, 240));
-        assert!(relay_watcher_overtook_anchor_record(0, 1));
+        // True positive: the watermark advanced between the pre-relay snapshot and
+        // the post-anchor re-read AND THIS turn's own external-input lease was
+        // consumed by that commit → the committing turn was OURS → the watcher ran
+        // its no-op gate before our anchor was findable → relay must clean up `⏳`.
+        assert!(relay_watcher_overtook_anchor_record(100, 240, true));
+        assert!(relay_watcher_overtook_anchor_record(0, 1, true));
     }
 
     #[test]
     fn relay_does_not_recheck_when_watcher_has_not_committed() {
         // Unchanged watermark (turn not yet complete) → no overtake → the relay is
         // a pure no-op and the watcher does the normal `⏳` removal later. This is
-        // what prevents the relay from double-removing in the common path.
-        assert!(!relay_watcher_overtook_anchor_record(100, 100));
-        assert!(!relay_watcher_overtook_anchor_record(0, 0));
+        // what prevents the relay from double-removing in the common path. (Even if
+        // some other path had cleared our lease, an unchanged watermark can never be
+        // an overtake of THIS turn.)
+        assert!(!relay_watcher_overtook_anchor_record(100, 100, true));
+        assert!(!relay_watcher_overtook_anchor_record(0, 0, true));
         // Defensive: the watermark is monotonic, so it never regresses; a (would-be
         // impossible) lower re-read must still be treated as "no overtake".
-        assert!(!relay_watcher_overtook_anchor_record(240, 100));
+        assert!(!relay_watcher_overtook_anchor_record(240, 100, true));
+    }
+
+    // #3193 codex GATE_FAIL fix: the FALSE-POSITIVE guard. The committed-relay
+    // watermark is per-CHANNEL, so an UNRELATED / different-turn commit in the SAME
+    // channel during this relay window advances it WITHOUT touching THIS turn's
+    // anchor. The bare watermark strict-increase alone (the pre-fix trigger) would
+    // mis-fire and remove `⏳` / post `✅` for a turn whose own anchor was NOT
+    // overtaken. The fix binds the trigger to THIS turn's identity: it fires ONLY
+    // when our OWN external-input lease was also consumed (`own_lease_consumed`),
+    // which the watcher does EXACTLY when it commits OUR turn. An unrelated commit
+    // advances the watermark but leaves our lease present → no trigger.
+    #[test]
+    fn relay_does_not_recheck_on_unrelated_same_channel_commit() {
+        // Watermark advanced (an unrelated same-channel turn committed) but THIS
+        // turn's own lease was NOT consumed → our anchor was NOT overtaken → the
+        // relay must NOT remove its `⏳` / post `✅`. This is the codex #3193
+        // false-positive case that the bare watermark trigger would have hit.
+        assert!(!relay_watcher_overtook_anchor_record(100, 240, false));
+        assert!(!relay_watcher_overtook_anchor_record(0, 999, false));
+    }
+
+    // #3193 codex GATE_FAIL fix: the per-turn lease-consumption predicate that backs
+    // the trigger binding. "Consumed" means the lease present NOW is no longer THIS
+    // turn's recorded generation — either gone (the watcher cleared it on OUR commit)
+    // or replaced by a different generation (a superseding turn). A present lease
+    // that STILL carries our own generation is NOT consumed: that is the unrelated-
+    // commit / not-yet-committed case that must NOT trigger the re-check.
+    #[test]
+    fn external_input_lease_consumption_is_bound_to_own_generation() {
+        // Our generation still present → not consumed (unrelated commit / pre-commit).
+        assert!(!external_input_lease_was_consumed(42, Some(42)));
+        // Our lease gone (watcher cleared it on OUR commit) → consumed.
+        assert!(external_input_lease_was_consumed(42, None));
+        // A DIFFERENT generation present (a superseding newer turn) → ours consumed.
+        assert!(external_input_lease_was_consumed(42, Some(43)));
+        // An UNRECORDED own generation (our lease was never recorded) → nothing of
+        // ours to consume, regardless of what is present.
+        assert!(!external_input_lease_was_consumed(
+            crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+            None,
+        ));
+        assert!(!external_input_lease_was_consumed(
+            crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+            Some(7),
+        ));
     }
 
     // #3174 (ported from #3164 codex R3): identity guard for the relay re-check's
