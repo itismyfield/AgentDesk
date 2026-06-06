@@ -1166,12 +1166,16 @@ async fn claim_tui_direct_synthetic_turn(
         tmux_session_name,
         "tui_direct_synthetic_inflight",
     );
-    let started = super::mailbox_try_start_turn(
+    // #3167 — the self-paced TUI loop / TUI-direct turn is a low-priority
+    // background turn; mark it `Background` so a queued external USER
+    // intervention is not starved behind the continuously-cycling loop.
+    let started = super::mailbox_try_start_turn_kinded(
         shared,
         channel_id,
         cancel_token,
         serenity::UserId::new(TUI_DIRECT_SYNTHETIC_OWNER_USER_ID),
         anchor_message_id,
+        crate::services::turn_orchestrator::ActiveTurnKind::Background,
     )
     .await;
     if !started {

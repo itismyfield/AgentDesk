@@ -165,8 +165,8 @@ pub(crate) use runtime_bootstrap::RunBotContext;
 pub(crate) use runtime_bootstrap::run_bot;
 
 use crate::services::turn_orchestrator::{
-    CancelActiveTurnResult, CancelQueuedMessageResult, ChannelMailboxSnapshot, ClearChannelResult,
-    FinishTurnResult, HydratePendingQueueResult, QueueExitEvent, QueueExitKind,
+    ActiveTurnKind, CancelActiveTurnResult, CancelQueuedMessageResult, ChannelMailboxSnapshot,
+    ClearChannelResult, FinishTurnResult, HydratePendingQueueResult, QueueExitEvent, QueueExitKind,
     QueuePersistenceContext, RecoveryKickoffResult, RequeueInterventionResult, TakeNextSoftResult,
     load_pending_queues, warn_legacy_pending_queue_files,
 };
@@ -3081,6 +3081,15 @@ async fn mailbox_has_active_turn(shared: &SharedData, channel_id: ChannelId) -> 
     shared.mailbox(channel_id).has_active_turn().await
 }
 
+/// #3167 — true only when a *real* (non-background) active turn holds the
+/// slot. The external-input dequeue uses this instead of
+/// `mailbox_has_active_turn` so a continuously-cycling background turn
+/// (monitor relay / self-paced TUI loop) does not starve a queued user
+/// intervention.
+async fn mailbox_has_blocking_active_turn(shared: &SharedData, channel_id: ChannelId) -> bool {
+    shared.mailbox(channel_id).has_blocking_active_turn().await
+}
+
 fn cleanup_retry_inflight_blocks_idle_kickoff(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -3106,9 +3115,16 @@ fn idle_queue_snapshot_has_kickable_backlog(
     channel_id: ChannelId,
     snapshot: &ChannelMailboxSnapshot,
 ) -> bool {
-    snapshot.cancel_token.is_none()
-        && snapshot.active_request_owner.is_none()
-        && snapshot.active_user_message_id.is_none()
+    // #3167 — a background turn (monitor relay / self-paced TUI loop) holds the
+    // slot but must NOT block a queued user intervention. Only a real
+    // (non-background) active turn blocks the kickoff. The previous
+    // `cancel_token.is_none()` / `active_request_owner.is_none()` /
+    // `active_user_message_id.is_none()` checks all proxied "no active turn at
+    // all" and so starved a queued user message behind a continuously-cycling
+    // background turn.
+    let blocked_by_real_turn =
+        snapshot.cancel_token.is_some() && !snapshot.active_turn_kind.is_background();
+    !blocked_by_real_turn
         && snapshot.recovery_started_at.is_none()
         && !snapshot.intervention_queue.is_empty()
         && !cleanup_retry_inflight_blocks_idle_kickoff(shared, provider, channel_id)
@@ -3219,6 +3235,24 @@ async fn mailbox_try_start_turn(
     shared
         .mailbox(channel_id)
         .try_start_turn(cancel_token, request_owner, user_message_id)
+        .await
+}
+
+/// #3167 — kinded variant of [`mailbox_try_start_turn`]. The monitor auto-turn
+/// and the self-paced TUI loop claim the slot as `ActiveTurnKind::Background`
+/// so a queued external USER intervention is not perpetually deferred behind
+/// the continuously-cycling background turn.
+async fn mailbox_try_start_turn_kinded(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    cancel_token: Arc<CancelToken>,
+    request_owner: UserId,
+    user_message_id: MessageId,
+    turn_kind: ActiveTurnKind,
+) -> bool {
+    shared
+        .mailbox(channel_id)
+        .try_start_turn_kinded(cancel_token, request_owner, user_message_id, turn_kind)
         .await
 }
 
@@ -3816,10 +3850,58 @@ async fn idle_queue_take_next_soft_if_ready(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> MailboxTakeNextSoftOutcome {
-    if mailbox_has_active_turn(shared, channel_id).await
+    // #3167 — only a real (non-background) active turn blocks the dequeue. The
+    // cleanup-retry and hosted-TUI-busy gates remain unchanged.
+    if mailbox_has_blocking_active_turn(shared, channel_id).await
         || cleanup_retry_inflight_blocks_idle_kickoff(shared, provider, channel_id)
         || idle_queue_blocked_by_hosted_tui_busy_pane(shared, provider, channel_id).await
     {
+        return MailboxTakeNextSoftOutcome::default();
+    }
+
+    // #3167 — the blocking gate above passed, but a *background* turn (monitor
+    // relay / self-paced TUI loop) may still hold the slot. Dequeuing now would
+    // race the background turn for the single active-turn slot. Instead, cancel
+    // the background turn's token and re-kick: the background turn's own
+    // identity-guarded finalizer releases the slot, and the immediate re-kick
+    // retries against a now-idle mailbox and dequeues the user intervention.
+    //
+    // RACE-SAFETY: the user turn only ever claims the slot through the normal
+    // actor-serialized `mailbox_try_start_turn` AFTER the background turn fully
+    // releases — never two concurrent real turns. Cancelling the monitor/loop
+    // turn loses no terminal output: the watcher relays output independently of
+    // the mailbox slot.
+    //
+    // #3167 BLOCKER-1 — the kind check and the cancel are performed as a SINGLE
+    // atomic, kind-guarded actor step. The previous code read
+    // `active_turn_kind()` and THEN sent a separate unguarded
+    // `cancel_active_turn_with_reason()`; between the two the background turn
+    // could finalize and a real user turn start, and the unguarded cancel would
+    // abort the freshly-started real turn. `cancel_active_background_turn_if_current`
+    // returns `true` ONLY when it performs a NEW cancel. We re-kick exactly once
+    // on that NEW cancel to drain the superseded slot once the background
+    // finalizer releases it.
+    //
+    // CRITICAL (no hot-loop): when the background token is ALREADY cancelling,
+    // the call returns `false` (no-op) — NOT `true`. If it returned `true` here,
+    // every re-kick would re-observe the same already-cancelled slot (finalizer
+    // not done yet), reply `true`, and spawn yet another immediate re-kick: a
+    // livelock. On `false` we spawn NO new re-kick and fall through to the
+    // normal dequeue/await path below; the deferred-retry cadence (queue_io.rs,
+    // ~2s) waits for the finalizer to release the slot. `false` also covers an
+    // idle slot (fall through to dequeue) or a real turn holding it (the
+    // blocking gate above would already have returned).
+    if shared
+        .mailbox(channel_id)
+        .cancel_active_background_turn_if_current()
+        .await
+    {
+        schedule_deferred_idle_queue_kickoff_immediate(
+            shared.clone(),
+            provider.clone(),
+            channel_id,
+            "background_supersede_drain",
+        );
         return MailboxTakeNextSoftOutcome::default();
     }
 
@@ -5566,6 +5648,106 @@ mod catch_up_recovery_tests {
         assert_eq!(
             classify_catch_up_message(&view, Some(owner_user_id), &existing, 300, &[], None),
             CatchUpClassification::SelfAuthored
+        );
+    }
+}
+
+// #3167 — a queued external USER intervention must be kickable while a
+// low-priority Background turn (monitor relay / self-paced TUI loop) holds the
+// active-turn slot, and the dequeue gate must cancel the background token so
+// the slot is released and the user turn can claim it.
+#[cfg(test)]
+mod idle_queue_background_supersede_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
+
+    const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+
+    struct EnvGuard;
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+        }
+    }
+
+    fn user_intervention(message_id: u64, text: &str) -> Intervention {
+        Intervention {
+            author_id: UserId::new(7),
+            author_is_bot: false,
+            message_id: MessageId::new(message_id),
+            source_message_ids: vec![MessageId::new(message_id)],
+            text: text.to_string(),
+            mode: InterventionMode::Soft,
+            created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            pending_uploads: Vec::new(),
+            voice_announcement: None,
+        }
+    }
+
+    // SAFETY (await_holding_lock): the test-env Mutex is held across awaits to
+    // serialize the process-global `AGENTDESK_ROOT_DIR` env mutation against
+    // other tests in this crate. #3167 B3: this MUST be the single crate-wide
+    // `test_support` lock shared with the turn_orchestrator env tests — a local
+    // per-module Mutex would not serialize against them and would recreate the
+    // parallel env-race. Test-only.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn queued_user_message_is_kickable_under_background_turn_and_cancels_token() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(3_167_900);
+
+        // A background turn (monitor relay / TUI loop) holds the slot.
+        let background_token = Arc::new(CancelToken::new());
+        assert!(
+            mailbox_try_start_turn_kinded(
+                &shared,
+                channel_id,
+                background_token.clone(),
+                UserId::new(1),
+                MessageId::new(1),
+                ActiveTurnKind::Background,
+            )
+            .await
+        );
+
+        // Queue an external user intervention behind it.
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                vec![user_intervention(900, "user reply while loop runs")],
+                queue_persistence_context(&shared, &provider, channel_id),
+            )
+            .await;
+
+        // #3167 — the kickoff gate must treat the background turn as
+        // non-blocking and report a kickable backlog.
+        let snapshot = mailbox_snapshot(&shared, channel_id).await;
+        assert!(
+            idle_queue_snapshot_has_kickable_backlog(&shared, &provider, channel_id, &snapshot),
+            "#3167: a queued user message must be kickable under a background turn"
+        );
+
+        // The dequeue gate detects the background turn still holding the slot,
+        // cancels its token, and defers (returns no intervention this pass).
+        let outcome = idle_queue_take_next_soft_if_ready(&shared, &provider, channel_id).await;
+        assert!(
+            outcome.intervention.is_none(),
+            "#3167: the supersede pass defers the dequeue until the background slot releases"
+        );
+        assert!(
+            background_token.cancelled.load(Ordering::Relaxed),
+            "#3167: the background token must be cancelled so the slot is released"
         );
     }
 }

@@ -116,7 +116,9 @@
   - `src/services/discord/watchers/lifecycle.rs` (2301 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior).
-  - `src/services/discord/tmux.rs` (2247 lines after #2558 dead-code sweep;
+  - `src/services/discord/tmux.rs` (2251 lines after #2558 dead-code sweep;
+    +4 from #3167: the monitor-auto-turn start passes `ActiveTurnKind::Background`
+    so a queued user message can supersede the low-priority monitor/loop turn;
     failover guard; #3087 `session_panel_instance_key`/`write_spawn_nonce`
     re-exports; #3107 `RestoredWatcherTurn.injected_prompt_message_id`;
     #3016 option A `normal_completion` finalize-decouple param;
@@ -745,7 +747,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   so a live thread-suffixed TUI session with no live watcher slot can be
   re-registered authoritatively instead of dropped forever),
   `src/services/discord_config_audit.rs` (1459).
-- `src/services/turn_orchestrator.rs` (2762).
+- `src/services/turn_orchestrator.rs` (3089).
 
 Decomposed below the giant-file threshold (no longer frozen; bugfix-scoped but
 normal test growth is allowed): `src/services/analytics.rs`,
