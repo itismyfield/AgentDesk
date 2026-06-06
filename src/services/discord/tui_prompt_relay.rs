@@ -43,6 +43,21 @@ static CLAUDE_IDLE_TRANSCRIPT_RELAY_STARTED: AtomicBool = AtomicBool::new(false)
 static CLAUDE_IDLE_RESPONSE_TAILS: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
+/// #3178: dedupe window for the machine slash-command control note. The #3153
+/// `/loop` double-post arrives as TWO independent observed prompts — the raw
+/// `/loop …` ScheduleWakeup echo AND the Claude Code expanded `<command-*>`
+/// wrapper — both within a short window and both mapping to the same command
+/// kind. To show the trigger ONCE (not twice) we record the last-posted
+/// (tmux_session + command_kind) and drop a repeat seen inside this window.
+const SLASH_COMMAND_CONTROL_DEDUPE_WINDOW: Duration = Duration::from_secs(30);
+/// #3178: last-posted timestamp per (tmux_session, command_kind) for the
+/// slash-command-control note, so the two halves of the #3153 double-post post
+/// the trigger only once. Keyed by a stable string so the raw echo and the
+/// expanded `<command-*>` wrapper for the SAME command collapse to one entry.
+static SLASH_COMMAND_CONTROL_LAST_POSTED: LazyLock<
+    Mutex<std::collections::HashMap<String, std::time::Instant>>,
+> = LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
 struct ClaudeIdleTailGuard {
     tmux_session_name: String,
 }
@@ -581,19 +596,56 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     let mut current_turn_anchor_id: Option<u64> = None;
     if is_system_continuation {
         if matches!(injected_class, InjectedPromptClass::SlashCommandControl) {
-            // #3153: a MACHINE slash-command control echo (/loop, /compact, the
-            // expanded <command-*> wrapper, or the Compacted stdout line). Unlike
-            // a SystemContinuation it posts NOTHING to Discord — no neutral note,
-            // no card, no ⏳, no anchor, no synthetic turn. It is a pure control
-            // echo. This suppresses the #3153 /loop double-post and the /compact
-            // command-echo leak. The resulting provider assistant output STILL
-            // reaches Discord via the bridge tail below (no early return).
-            tracing::info!(
-                provider = %prompt.provider,
-                channel_id = channel_id.get(),
-                tmux_session_name = %prompt.tmux_session_name,
-                "suppressed machine slash-command control echo (/loop|/compact|<command-*>|Compacted); no active-turn lifecycle, assistant output still relayed via bridge tail"
-            );
+            // #3178: a MACHINE slash-command control echo (/loop, /compact, the
+            // expanded <command-*> wrapper, or the Compacted stdout line). Like a
+            // SystemContinuation it occupies NO active-turn lifecycle — no ⏳, no
+            // anchor, no synthetic turn (current_turn_anchor_id stays None). But
+            // unlike the original #3153 full-suppression it now posts a SINGLE
+            // neutral announce-bot note showing only the command KIND (never the
+            // raw /loop args, the <command-*> wrapper, or the Compacted stdout
+            // body) so the following `✅ 응답 완료` card has a visible, meaningful
+            // anchor. #3153's real target — the DOUBLE-post (the raw echo AND the
+            // expanded wrapper arrive as two independent observed prompts) — is
+            // collapsed via the (tmux_session + command_kind) dedupe window, so
+            // the trigger is shown exactly ONCE. The provider assistant output
+            // STILL reaches Discord via the bridge tail below (no early return).
+            let kind = slash_command_control_kind(&prompt.prompt);
+            if should_post_slash_command_control_note(&prompt.tmux_session_name, kind) {
+                let note = format_slash_command_control_note(&prompt.tmux_session_name, kind);
+                match channel_id.say(&*notify_http, note).await {
+                    Ok(message) => {
+                        tracing::info!(
+                            provider = %prompt.provider,
+                            channel_id = channel_id.get(),
+                            tmux_session_name = %prompt.tmux_session_name,
+                            slash_command_kind = kind,
+                            note_message_id = message.id.get(),
+                            "rendered machine slash-command control trigger as a single neutral session note (kind only, no raw body); no active-turn lifecycle, assistant output still relayed via bridge tail"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            provider = %prompt.provider,
+                            channel_id = channel_id.get(),
+                            tmux_session_name = %prompt.tmux_session_name,
+                            slash_command_kind = kind,
+                            error = %error,
+                            "failed to send machine slash-command control session note"
+                        );
+                    }
+                }
+            } else {
+                // #3153 double-post second half: the matching trigger note was
+                // already posted within the dedupe window. Suppress the repeat so
+                // the trigger is visible exactly once.
+                tracing::info!(
+                    provider = %prompt.provider,
+                    channel_id = channel_id.get(),
+                    tmux_session_name = %prompt.tmux_session_name,
+                    slash_command_kind = kind,
+                    "deduped machine slash-command control trigger (already posted within window); no second note, assistant output still relayed via bridge tail"
+                );
+            }
         } else {
             let note = format_system_continuation_note(&prompt.tmux_session_name, &prompt.prompt);
             match channel_id.say(&*notify_http, note).await {
@@ -3961,11 +4013,14 @@ fn resolve_owner_channel_authoritatively(
 ///   `<command-message>…</command-message>` wrapper for that slash command, and
 ///   the `<local-command-stdout>Compacted …` stdout line. Like
 ///   [`SystemContinuation`] it is NOT a human request and must not occupy the
-///   user-turn lifecycle (no `⏳`, no anchor, no synthetic turn) — but unlike it
-///   this class posts NOTHING to Discord at all (no neutral note); it is a pure
-///   control echo. The resulting provider assistant output STILL flows via the
-///   bridge tail. This suppresses the #3153 double-post of the injected prompt
-///   and the `/compact` command-echo leak.
+///   user-turn lifecycle (no `⏳`, no anchor, no synthetic turn). #3178: it posts
+///   a SINGLE neutral note showing only the command KIND (`/loop` / `/compact`),
+///   never the raw prompt body, so the following completion card has a visible
+///   anchor — and the #3153 DOUBLE-post (the raw echo AND the expanded
+///   `<command-*>` wrapper arrive as two independent observed prompts) is
+///   collapsed by a (tmux_session + command_kind) dedupe window so the trigger
+///   shows exactly once. The resulting provider assistant output STILL flows via
+///   the bridge tail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum InjectedPromptClass {
     HumanTuiDirect,
@@ -4033,8 +4088,10 @@ pub(super) fn classify_injected_prompt(prompt: &str) -> InjectedPromptClass {
     }
 }
 
-/// #3153: detects a MACHINE slash-command control echo that must be suppressed
-/// from relay (no `⏳`, no anchor, no synthetic turn, no Discord post at all).
+/// #3153: detects a MACHINE slash-command control echo that must skip the
+/// active-turn lifecycle (no `⏳`, no anchor, no synthetic turn). #3178: it is
+/// rendered as a SINGLE neutral kind-only note (deduped across the double-post),
+/// not fully suppressed.
 ///
 /// Covers both halves of the #3153 `/loop` ScheduleWakeup double-post plus the
 /// `/compact` echo leak, all START-ANCHORED (mirroring
@@ -4187,6 +4244,100 @@ pub(super) fn format_ssh_direct_prompt_notification(
 /// Unlike [`format_ssh_direct_prompt_notification`], this does NOT present the
 /// text as "터미널에 직접 주입된 입력" (an active-turn marker); it is a passive
 /// session event so a reader does not mistake it for a pending human request.
+/// #3178: canonical command kind of a machine slash-command control echo, used
+/// BOTH as the dedupe key suffix and to render the neutral note WITHOUT exposing
+/// the raw prompt body. The raw `/loop …` echo and the expanded
+/// `<command-message>…<command-name>/loop</command-name>…` wrapper for the SAME
+/// command both map to `"/loop"`, so the two halves of the #3153 double-post
+/// collapse to one dedupe entry and the trigger is shown exactly once.
+///
+/// Mirrors [`is_slash_command_control_prompt`]'s normalization pipeline (peel a
+/// terminal-control prefix and the SSH-direct injection envelope) so a
+/// round-tripped echo still resolves to the same kind. The bare slash token
+/// (e.g. `/loop`, `/compact`) is returned — never any argument body — so the
+/// note shows only WHICH machine command ran, not its payload.
+fn slash_command_control_kind(prompt: &str) -> &'static str {
+    let normalized = strip_terminal_controls(prompt);
+    let normalized = normalized.trim_start();
+    let normalized = strip_leading_injection_wrapper(normalized);
+    let normalized = normalized.trim_start();
+    // The expanded Claude Code wrapper carries the canonical command in
+    // `<command-name>/loop</command-name>`; prefer that when present so the raw
+    // echo and the wrapper for the same command share a kind.
+    if let Some(after) = normalized
+        .find("<command-name>")
+        .map(|idx| &normalized[idx + "<command-name>".len()..])
+    {
+        let name = after.split('<').next().unwrap_or("").trim();
+        if name.starts_with("/loop") {
+            return "/loop";
+        }
+        if name.starts_with("/compact") {
+            return "/compact";
+        }
+    }
+    if normalized.starts_with("/loop ") || normalized.starts_with("/loop\t") {
+        return "/loop";
+    }
+    if let Some(rest) = normalized.strip_prefix("/compact") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return "/compact";
+        }
+    }
+    if normalized.starts_with("<local-command-stdout>Compacted") {
+        return "/compact";
+    }
+    // A generic `<command-message>` wrapper whose command name we could not
+    // resolve to a known kind.
+    "slash"
+}
+
+/// #3178: neutral note for a machine slash-command control echo (#3153 trigger).
+///
+/// Unlike [`format_system_continuation_note`] / [`format_ssh_direct_prompt_notification`]
+/// this NEVER renders the raw prompt body (no `/loop 5m /foo` args, no
+/// `<command-*>` wrapper, no `Compacted …` stdout) — only WHICH machine command
+/// kind ran, so the following `✅ 응답 완료` card has a visible, meaningful
+/// anchor without leaking the injected payload. It is a passive session event,
+/// not an active human turn.
+fn format_slash_command_control_note(tmux_session_name: &str, kind: &str) -> String {
+    let label = match kind {
+        "/loop" => "🔁 자동 점검(/loop)",
+        "/compact" => "🧹 컨텍스트 정리(/compact)",
+        _ => "⚙️ 머신 슬래시 명령",
+    };
+    format!(
+        "{} (tmux : `{}`) — 시스템 주입 (활성 턴 아님)",
+        label,
+        sanitize_inline_code(tmux_session_name),
+    )
+}
+
+/// #3178: returns `true` if a slash-command-control note for this
+/// (tmux_session, command_kind) should be posted NOW, recording the post; or
+/// `false` if an identical note was posted within
+/// [`SLASH_COMMAND_CONTROL_DEDUPE_WINDOW`] (the second half of the #3153
+/// double-post). On `true` the timestamp is updated so a later genuine repeat
+/// outside the window posts again. Stale entries (older than the window) are
+/// pruned opportunistically so the map cannot grow unbounded.
+fn should_post_slash_command_control_note(tmux_session_name: &str, kind: &str) -> bool {
+    let now = std::time::Instant::now();
+    let key = format!("{tmux_session_name}\u{0}{kind}");
+    let mut guard = SLASH_COMMAND_CONTROL_LAST_POSTED
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    guard.retain(|_, posted_at| {
+        now.duration_since(*posted_at) < SLASH_COMMAND_CONTROL_DEDUPE_WINDOW
+    });
+    if let Some(posted_at) = guard.get(&key) {
+        if now.duration_since(*posted_at) < SLASH_COMMAND_CONTROL_DEDUPE_WINDOW {
+            return false;
+        }
+    }
+    guard.insert(key, now);
+    true
+}
+
 pub(super) fn format_system_continuation_note(tmux_session_name: &str, prompt: &str) -> String {
     let prompt = strip_terminal_controls(prompt);
     let preview =
@@ -4627,9 +4778,9 @@ mod tests {
     // SlashCommandControl — the raw `/loop …` ScheduleWakeup echo (HALF A of the
     // double-post), the Claude Code expanded `<command-*>` wrapper (HALF B), the
     // raw `/compact` echo (whole-token, incl. bare no-arg), and the
-    // `<local-command-stdout>Compacted` stdout line. Each is suppressed from
-    // relay (no ⏳/anchor/synthetic turn, no Discord post) yet still delivers
-    // assistant output via the bridge tail.
+    // `<local-command-stdout>Compacted` stdout line. Each skips the active-turn
+    // lifecycle (no ⏳/anchor/synthetic turn) yet still delivers assistant
+    // output via the bridge tail. #3178: rendered as a single kind-only note.
     #[test]
     fn classify_injected_prompt_slash_command_control() {
         // HALF A — raw /loop echo.
@@ -4714,6 +4865,86 @@ mod tests {
             classify_injected_prompt(wrapped_human),
             InjectedPromptClass::HumanTuiDirect,
         );
+    }
+
+    // #3178: the machine slash-command control trigger now resolves to a stable
+    // command KIND that BOTH the raw `/loop` echo and the expanded `<command-*>`
+    // wrapper for the SAME command map to (so the #3153 double-post collapses to
+    // one dedupe entry), and the note shows ONLY that kind — never the raw body.
+    #[test]
+    fn slash_command_control_kind_is_stable_across_double_post_halves() {
+        // HALF A (raw echo) and HALF B (expanded wrapper) for /loop share a kind.
+        assert_eq!(slash_command_control_kind("/loop 5m /foo"), "/loop");
+        let wrapper = "<command-message>loop is running…</command-message>\
+                       <command-name>/loop</command-name><command-args>5m /foo</command-args>";
+        assert_eq!(slash_command_control_kind(wrapper), "/loop");
+
+        // /compact forms (raw echo, bare no-arg, Compacted stdout) share a kind.
+        assert_eq!(
+            slash_command_control_kind("/compact focus on the relay"),
+            "/compact",
+        );
+        assert_eq!(slash_command_control_kind("/compact"), "/compact");
+        assert_eq!(
+            slash_command_control_kind("<local-command-stdout>Compacted (12.3k tokens)"),
+            "/compact",
+        );
+
+        // A round-tripped SSH-direct envelope still resolves to the same kind.
+        let wrapped_loop = "터미널에 직접 주입된 입력 (tmux : `s`):\n```text\n/loop 5m /foo\n```";
+        assert_eq!(slash_command_control_kind(wrapped_loop), "/loop");
+    }
+
+    // #3178: the note shows only the command KIND and the tmux session — never
+    // the raw prompt body (no `/loop 5m /foo` args, no `<command-*>` wrapper, no
+    // `Compacted …` stdout), and marks it as a non-active system injection.
+    #[test]
+    fn slash_command_control_note_shows_kind_only_no_raw_body() {
+        let loop_note = format_slash_command_control_note("sess-a", "/loop");
+        assert!(
+            loop_note.contains("/loop"),
+            "note must name the command kind"
+        );
+        assert!(loop_note.contains("sess-a"));
+        assert!(loop_note.contains("활성 턴 아님"), "must mark non-active");
+        assert!(
+            !loop_note.contains("5m /foo"),
+            "note must NOT leak the raw prompt body",
+        );
+
+        let compact_note = format_slash_command_control_note("sess-a", "/compact");
+        assert!(compact_note.contains("/compact"));
+        assert!(
+            !compact_note.contains("Compacted"),
+            "note must NOT leak the compact stdout body",
+        );
+    }
+
+    // #3178 CORE: the same trigger (a /loop double-post: raw echo + expanded
+    // wrapper, both mapping to kind "/loop" for the same tmux session) posts the
+    // note exactly ONCE — the first observation posts, the immediate second is
+    // deduped. A different kind or a different session is NOT deduped.
+    #[test]
+    fn slash_command_control_note_dedupes_double_post_but_not_distinct_triggers() {
+        // Unique session names so this test cannot collide with the shared
+        // process-global dedupe map across parallel test runs.
+        let sess = format!("dedupe-sess-{:p}", &0u8 as *const u8);
+
+        // HALF A — first sighting posts.
+        assert!(should_post_slash_command_control_note(&sess, "/loop"));
+        // HALF B — same (session, kind) within the window → deduped (no 2nd post).
+        assert!(!should_post_slash_command_control_note(&sess, "/loop"));
+        // And again — still deduped.
+        assert!(!should_post_slash_command_control_note(&sess, "/loop"));
+
+        // A DIFFERENT command kind in the same session is a distinct trigger.
+        assert!(should_post_slash_command_control_note(&sess, "/compact"));
+        // But its own repeat is deduped.
+        assert!(!should_post_slash_command_control_note(&sess, "/compact"));
+
+        // A DIFFERENT session with the same kind is a distinct trigger.
+        let other = format!("{sess}-other");
+        assert!(should_post_slash_command_control_note(&other, "/loop"));
     }
 
     // #3153 regression guard: the compact CONTINUATION banner must STILL classify
