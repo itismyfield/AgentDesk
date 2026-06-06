@@ -171,8 +171,8 @@ use crate::services::turn_orchestrator::{
     load_pending_queues, warn_legacy_pending_queue_files,
 };
 pub(super) use crate::services::turn_orchestrator::{
-    ChannelMailboxRegistry, INTERVENTION_TTL, Intervention, InterventionMode,
-    MAX_INTERVENTIONS_PER_CHANNEL, PendingQueueItem,
+    ChannelMailboxRegistry, Intervention, InterventionMode, MAX_INTERVENTIONS_PER_CHANNEL,
+    PendingQueueItem,
 };
 pub use discord_io::{
     retry_failed_dm_notifications, send_file_to_channel, send_message_to_channel,

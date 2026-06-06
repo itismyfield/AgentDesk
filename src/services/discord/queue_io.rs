@@ -2,7 +2,8 @@ use super::*;
 
 #[cfg_attr(not(test), allow(dead_code))]
 fn prune_interventions_at(queue: &mut Vec<Intervention>, now: Instant) {
-    queue.retain(|i| now.duration_since(i.created_at) <= INTERVENTION_TTL);
+    // #3177: no age-based eviction — only the overflow cap bounds the queue.
+    let _ = now;
     if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
         let overflow = queue.len() - MAX_INTERVENTIONS_PER_CHANNEL;
         queue.drain(0..overflow);

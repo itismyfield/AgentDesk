@@ -716,7 +716,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   so a live thread-suffixed TUI session with no live watcher slot can be
   re-registered authoritatively instead of dropped forever),
   `src/services/discord_config_audit.rs` (1459).
-- `src/services/turn_orchestrator.rs` (2760).
+- `src/services/turn_orchestrator.rs` (2762).
 
 Decomposed below the giant-file threshold (no longer frozen; bugfix-scoped but
 normal test growth is allowed): `src/services/analytics.rs`,
