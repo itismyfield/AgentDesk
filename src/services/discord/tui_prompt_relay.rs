@@ -511,6 +511,47 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             return;
         }
     };
+    // #3164: the `⏳` lifecycle reaction MUST be added by the SAME bot identity that
+    // later removes it. The completion path
+    // (`complete_tui_direct_prompt_anchor_lifecycle_if_present`) calls
+    // `remove_reaction_raw(http, ..., '⏳')` with the *provider/command* bot's
+    // `ctx.http` (the watcher parameter, ultimately the provider runtime's serenity
+    // ctx). `remove_reaction_raw` only removes `@me`'s reaction, so if `⏳` is added
+    // by a DIFFERENT bot (previously `notify`), removal silently no-ops and the
+    // hourglass lingers forever. #750 invariant: the command bot is the SINGLE source
+    // of the `⏳` lifecycle emoji (announce/notify bots never carry it). So resolve
+    // the provider/command bot here and use it for the add below. Note: the
+    // *notification body* itself is still posted by `notify_http` — a different bot
+    // reacting to a notify-posted message is fine (Discord lets any bot react to any
+    // message). We intentionally do NOT fall back to `notify_http` for the reaction:
+    // adding with the wrong identity reintroduces the un-removable residual, so on
+    // resolve failure we skip the `⏳` add (with a warning) rather than mis-attribute it.
+    // #3164 codex R2 issue-1: resolve the add-bot from the SAME source the
+    // completion path removes with — this relay's own `shared`
+    // `serenity_http_or_token_fallback()`, NOT a name-only registry lookup.
+    // The completion `complete_tui_direct_prompt_anchor_lifecycle_if_present`
+    // is driven by the watcher's `http`, which is exactly
+    // `shared.serenity_http_or_token_fallback()` (turn_bridge/mod.rs:2187 etc.).
+    // A name-based `resolve_bot_http(registry, provider)` returns the FIRST
+    // client matching the provider name; in a multi-runtime/same-provider
+    // deployment that can be a DIFFERENT bot account than this `shared`'s ctx
+    // http, reintroducing the add≠remove asymmetry. Using `shared`'s own http
+    // guarantees identical `@me` identity, so `remove_reaction_raw` later
+    // removes exactly this `⏳`. On unavailability we SKIP the add (warn) rather
+    // than mis-attribute it via `notify_http` (which would relinger forever).
+    let command_http = shared.serenity_http_or_token_fallback();
+    if command_http.is_none() {
+        tracing::warn!(
+            provider = %prompt.provider,
+            channel_id = channel_id.get(),
+            turn_id = lease.turn_id.as_deref().unwrap_or(""),
+            session_key = lease.session_key.as_deref().unwrap_or(""),
+            relay_owner = lease.relay_owner.as_str(),
+            runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
+            "skipping TUI-direct ⏳ reaction; provider serenity http unavailable \
+             (adding with a different bot would leave an un-removable hourglass)"
+        );
+    }
     // #3099 / #3100: classify the injected text before it enters the active-turn
     // reaction/inflight machinery. A compact/system continuation prologue is NOT
     // a human request — it must be rendered as a neutral session note with no
@@ -646,13 +687,34 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                 return;
             }
         };
+        // #3075: remember this card so a repeat completion edits it. #3164 codex R3
+        // issue-2: keep this IMMEDIATELY after the successful post (before the awaited
+        // `⏳` add) — `record_posted_card` is NOT used by lifecycle completion, and
+        // deferring it behind the reaction await widens the task-card `Pending` no-op
+        // window (a repeat `<task-notification>` arriving while message_id is still 0
+        // is dropped as `Pending`, losing the only repeat/update).
         if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
-            // #3075: remember this card so a repeat completion edits it.
             super::tui_task_card::record_posted_card(
                 channel_id.get(),
                 &prompt.prompt,
                 anchor_message.id.get(),
             );
+        }
+        // #3164: add `⏳` with the command(provider) bot so it matches the bot that
+        // removes it in `complete_tui_direct_prompt_anchor_lifecycle_if_present`
+        // (watcher provider ctx.http via `shared.serenity_http_or_token_fallback()`).
+        // If that http was unavailable we skip the add entirely (warned above)
+        // rather than add with the wrong identity and strand the hourglass.
+        //
+        // #3164 codex R2 issue-2: add the `⏳` BEFORE the anchor becomes findable
+        // (`record_prompt_anchor` below). The completion path locates this turn via
+        // the dedupe anchor; if the anchor were recorded first, a fast watcher could
+        // complete (remove a not-yet-added `⏳`, post `✅`, clear the anchor) and THEN
+        // this delayed add would land — re-leaving `⏳ + ✅`. Adding first guarantees
+        // the `⏳` exists before any anchor-based completion can observe the turn.
+        if let Some(command_http) = command_http.as_ref() {
+            super::formatting::add_reaction_raw(command_http, channel_id, anchor_message.id, '⏳')
+                .await;
         }
         crate::services::tui_prompt_dedupe::record_prompt_anchor(
             &prompt.provider,
@@ -660,8 +722,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             channel_id.get(),
             anchor_message.id.get(),
         );
-        super::formatting::add_reaction_raw(&notify_http, channel_id, anchor_message.id, '⏳')
-            .await;
         // #3099: a `<task-notification>` auto-turn is still a real provider turn
         // that earns the same synthetic ownership as human direct input — the
         // difference is purely that its `⏳` completion cleanup must be anchored on
