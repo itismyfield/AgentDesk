@@ -304,7 +304,7 @@
     (incl. id==0 external/injected) NOT adopted/edited, in-range id==0
     watcher-direct STILL adopts+edits (over-suppression guard), and in-range id!=0
     unchanged.
-  - `src/services/discord/tui_prompt_relay.rs` (4394 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (4464 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +185 from #3178: the machine slash-command
     control trigger (`/loop`/`/compact`/`<command-*>`) is a FULL active turn —
@@ -381,7 +381,16 @@
     BY the recorded generation (`clear_external_input_relay_lease_if_generation_matches`)
     so a newer same-key lease recorded during the await is never clobbered; success
     persistence is preserved by disarming before the bridge legitimately retains the
-    turn (plus failure-clear / disarm-persist / no-clobber regression tests).
+    turn (plus failure-clear / disarm-persist / no-clobber regression tests);
+    +90 from #3183: the idle-response-tail start offset is now clamped to
+    `>= shared.committed_relay_offset(channel_id)` (the watcher's confirmed
+    delivery watermark, #3017) at the single `spawn_claude_idle_response_tail_once`
+    choke point, so when the tmux watcher already relayed a turn's terminal
+    response the idle tail starts past it and cannot re-relay the same byte range
+    (the double-relay duplicate). When the watcher stopped / never covered the turn
+    the watermark is 0 (or lags), so the clamp is a no-op and the tail still relays
+    from the prompt-timestamp offset — the #3176 outage fallback is preserved
+    (plus clamp-up / outage-noop unit tests).
   - `src/services/discord/idle_recap.rs` (1881 prod lines; idle-recap card
     compose/post/clear surface, registered giant-file (#3036) — bugfix only
     outside an extraction plan. Crossed 1000 prod LoC with #3146 Part 1: the

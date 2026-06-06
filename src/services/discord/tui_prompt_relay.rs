@@ -1698,6 +1698,35 @@ fn normalize_transcript_fallback_offset(transcript_path: &Path, fallback_offset:
     }
 }
 
+/// #3183: clamp the idle-tail start offset to at least the watcher's committed
+/// delivery offset.
+///
+/// The idle-tail start offset is derived purely from the prompt timestamp (or
+/// the just-scanned prompt's `line_end_offset`), so it does NOT account for what
+/// the tmux watcher already delivered for this turn. When the watcher relayed a
+/// terminal response and THEN the idle tail spawns (e.g. an owner-arbitration /
+/// watcher-registration race lets the tail through before the
+/// `watcher_covers_current_transcript` suppression observes it), the tail
+/// re-relays the SAME byte range — the duplicate message in #3183.
+///
+/// `committed_relay_offset` is the single authoritative "JSONL byte offset
+/// (exclusive) past which the watcher has confirmed delivery" (#3017), in the
+/// SAME transcript-byte space as `start_offset`. Clamping
+/// `start_offset = max(start_offset, committed)` means the tail only ever scans
+/// output the watcher has NOT delivered:
+///   - watcher delivered up to X  → tail starts at >= X (no duplicate; if the
+///     watcher covered the whole turn the tail finds nothing to relay).
+///   - watcher stopped / not covering (the #3176 outage case) → `committed` is
+///     0 or below the timestamp offset, so the clamp is a no-op and the tail
+///     still relays from the timestamp offset (no relay-loss regression).
+///
+/// Returns the clamped offset; `committed == 0` (no confirmed delivery this
+/// process lifetime) leaves `start_offset` untouched.
+#[cfg(unix)]
+fn clamp_idle_tail_start_offset_to_committed(start_offset: u64, committed_offset: u64) -> u64 {
+    start_offset.max(committed_offset)
+}
+
 #[cfg(unix)]
 fn spawn_claude_idle_response_tail_once(
     shared: Arc<SharedData>,
@@ -1708,6 +1737,47 @@ fn spawn_claude_idle_response_tail_once(
     prompt_text: String,
     lease: ExternalInputRelayLease,
 ) -> bool {
+    // #3183: never re-relay output the watcher already committed delivery for.
+    // Both spawn paths (the observed-prompt path and the background poll loop)
+    // funnel through here, so clamping once at this choke point covers both.
+    //
+    // #3183 codex (CRITICAL outage-safety): `committed_relay_offset` is a
+    // PER-CHANNEL watermark, not per-transcript. A stale-high watermark left by a
+    // PREVIOUS wrapper (e.g. 5000) would, after a respawn whose fresh transcript
+    // starts near 0, clamp this tail forward and SKIP the new turn's response —
+    // exactly the relay-loss the idle tail exists to prevent. Run the SAME
+    // generation-aware regression resets the watcher / idle-JSONL sink run BEFORE
+    // consulting the watermark (session_relay_sink.rs): a truncated/respawned
+    // transcript (EOF below the watermark) or a wrapper-generation change resets
+    // the shared watermark to 0, so the fresh range is relayed. Only a watermark
+    // that genuinely covers THIS transcript's bytes then clamps (dedupe).
+    let transcript_len = std::fs::metadata(&transcript_path)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    super::tmux::reset_stale_relay_watermark_if_output_regressed(
+        shared.as_ref(),
+        channel_id,
+        &tmux_session_name,
+        transcript_len,
+        "idle_response_tail",
+    );
+    super::tmux::reset_relay_watermark_on_generation_change(
+        shared.as_ref(),
+        channel_id,
+        &tmux_session_name,
+        "idle_response_tail",
+    );
+    let committed_offset = shared.committed_relay_offset(channel_id);
+    let start_offset = clamp_idle_tail_start_offset_to_committed(start_offset, committed_offset);
+    if committed_offset > 0 {
+        tracing::debug!(
+            channel_id = channel_id.get(),
+            tmux_session_name = %tmux_session_name,
+            committed_offset,
+            start_offset,
+            "Claude idle response tail start offset clamped to watcher committed delivery offset"
+        );
+    }
     {
         let mut active = CLAUDE_IDLE_RESPONSE_TAILS
             .lock()
@@ -6774,6 +6844,53 @@ mod tests {
             ),
             Some(recorded_turn2),
             "an old early-return guard (G1) must leave turn-2's newer lease (G2) intact"
+        );
+    }
+
+    // #3183: the idle-tail start offset must never fall below the watcher's
+    // committed delivery offset, so the tail cannot re-relay a byte range the
+    // tmux watcher already delivered (the double-relay regression).
+    #[cfg(unix)]
+    #[test]
+    fn idle_tail_start_offset_clamps_up_to_watcher_committed_offset() {
+        // Watcher already committed delivery up to byte 500. A prompt-timestamp
+        // derived start offset of 200 sits BELOW the committed end, so the tail
+        // would re-relay [200, 500) — exactly the duplicate. The clamp lifts the
+        // start to the committed end so nothing the watcher delivered is re-sent.
+        assert_eq!(
+            clamp_idle_tail_start_offset_to_committed(200, 500),
+            500,
+            "start offset below the watcher committed offset must clamp up to it"
+        );
+        // When the watcher covered the whole turn (committed == EOF-ish), the
+        // tail starts at the committed end and finds nothing new to relay.
+        assert_eq!(
+            clamp_idle_tail_start_offset_to_committed(500, 500),
+            500,
+            "equal start offset is unchanged (no re-relay, no over-skip)"
+        );
+    }
+
+    // #3183 outage fallback (#3176): when the watcher stopped / never covered the
+    // turn, `committed_relay_offset` is 0 (no confirmed delivery this process),
+    // so the clamp is a no-op and the tail still relays from the timestamp
+    // offset — no relay-loss regression.
+    #[cfg(unix)]
+    #[test]
+    fn idle_tail_start_offset_clamp_is_noop_when_watcher_not_covering() {
+        // committed == 0: watcher delivered nothing → the tail keeps its
+        // timestamp-derived start offset and relays the full turn.
+        assert_eq!(
+            clamp_idle_tail_start_offset_to_committed(200, 0),
+            200,
+            "no committed delivery must leave the timestamp start offset intact (outage fallback)"
+        );
+        // A committed offset that lags the timestamp offset (watcher delivered an
+        // OLDER region only) also must not pull the start backwards.
+        assert_eq!(
+            clamp_idle_tail_start_offset_to_committed(800, 300),
+            800,
+            "a lagging committed offset must not drag the start offset backwards"
         );
     }
 }
