@@ -36,6 +36,7 @@ export default function OfficeSelectorBar({
     >
       <button
         onClick={() => onSelectOffice(null)}
+        aria-pressed={selectedOfficeId === null}
         className="whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-medium transition-all"
         style={
           selectedOfficeId === null
@@ -55,6 +56,7 @@ export default function OfficeSelectorBar({
         <button
           key={o.id}
           onClick={() => onSelectOffice(o.id)}
+          aria-pressed={selectedOfficeId === o.id}
           className="flex items-center gap-1 whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-medium transition-all"
           style={
             selectedOfficeId === o.id
@@ -66,7 +68,7 @@ export default function OfficeSelectorBar({
               : inactiveButtonStyle
           }
         >
-          <span>{o.icon}</span>
+          <span aria-hidden="true">{o.icon}</span>
           <span>{isKo ? o.name_ko || o.name : o.name}</span>
           {o.agent_count !== undefined && o.agent_count > 0 && (
             <span
@@ -92,6 +94,7 @@ export default function OfficeSelectorBar({
           border: "1px solid color-mix(in srgb, var(--th-border) 70%, transparent)",
         }}
         title={isKo ? "오피스 관리" : "Manage Offices"}
+        aria-label={isKo ? "오피스 관리" : "Manage Offices"}
       >
         <Settings size={14} />
       </button>
