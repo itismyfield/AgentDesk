@@ -4697,6 +4697,29 @@ pub(super) async fn kickoff_idle_queues(
             channel_id
         );
 
+        // #3182 codex P1 (idle/restart kickoff leaks queue reactions): the live
+        // dispatch path (`DiscordGateway::dispatch_queued_turn`) clears the
+        // `📬`/`➕` queue-pending REACTIONS on every `source_message_ids` entry
+        // BEFORE re-entering `handle_text_message`, but this idle/restart
+        // kickoff entrypoint only drained the placeholder CARDS below — never
+        // the reactions. So a queued item promoted via `kickoff_idle_queues`
+        // (e.g. one whose visible queued card POST failed, leaving no
+        // `queued_placeholders` mapping for the head, or a merged group whose
+        // non-head sources never get a head hand-off) kept its `📬`/`➕`
+        // alongside the eventual `✅` — the queue version of the #3164 stuck
+        // marker. Mirror `dispatch_queued_turn`'s reaction drain here so both
+        // queued-dispatch entrypoints produce identical post-conditions
+        // regardless of any per-head mapping. `source_message_ids` collects
+        // every contributing message INCLUDING the head, and the removal is
+        // best-effort (`remove_reaction_raw` no-ops on a missing/already-cleared
+        // reaction), so this is safe for standalone, merged, and no-mapping
+        // cases alike. Background-trigger turns never reacted the user message,
+        // so a redundant remove on them is a harmless no-op.
+        for message_id in &intervention.source_message_ids {
+            formatting::remove_reaction_raw(&ctx.http, channel_id, *message_id, '📬').await;
+            formatting::remove_reaction_raw(&ctx.http, channel_id, *message_id, '➕').await;
+        }
+
         // codex review round-5 P2 (finding 3 — drain merged placeholders on
         // idle kickoff): when a merged-source intervention is restored from
         // the persisted queue (or scheduled by `schedule_deferred_idle_queue_kickoff`)

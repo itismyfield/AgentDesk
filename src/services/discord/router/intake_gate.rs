@@ -352,6 +352,54 @@ pub(super) fn queue_pending_reaction_for(outcome: super::super::MailboxEnqueueOu
     if outcome.merged { '➕' } else { '📬' }
 }
 
+/// #3182: add the queue-pending reaction (📬 standalone / ➕ merged) and
+/// self-heal the late-add race.
+///
+/// Every `intake_gate` enqueue path adds this reaction AFTER one or more
+/// Discord `await`s (placeholder POST, queued-card render, dispatch-guard
+/// bookkeeping). During that await the active turn can finish and the
+/// queued-dispatch entrypoints (`DiscordGateway::dispatch_queued_turn` /
+/// `kickoff_idle_queues`) can dequeue THIS message and run their 📬/➕ reaction
+/// drain BEFORE the add lands — stranding the reaction on an
+/// already-promoted/processed message (the gate-path analog of the
+/// `intake_turn.rs` Surface-3 self-heal, #2036). So after the add await
+/// resolves, re-snapshot the mailbox and strip the reaction if the message is
+/// no longer queued.
+///
+/// Validity uses SOURCE MEMBERSHIP — head id OR any `source_message_ids`
+/// entry — for BOTH standalone and merged. The head-only rule is correct only
+/// for placeholder-card OWNERSHIP (one card per active turn); a merged source
+/// `B` that is still queued under a newer head `C` keeps a valid `➕`, so a
+/// head-only check would wrongly remove it. `remove_reaction_raw` is
+/// best-effort (no-op when already cleared), and only the calling provider
+/// bot's own @me reaction is removed.
+async fn add_queue_pending_reaction_self_healing(
+    ctx: &serenity::Context,
+    data: &Data,
+    channel_id: serenity::ChannelId,
+    user_msg_id: serenity::MessageId,
+    emoji: char,
+) {
+    add_reaction(&ctx.http, channel_id, user_msg_id, emoji).await;
+    let still_queued = {
+        let snapshot = mailbox_snapshot(&data.shared, channel_id).await;
+        snapshot.intervention_queue.iter().any(|intervention| {
+            intervention.message_id == user_msg_id
+                || intervention.source_message_ids.contains(&user_msg_id)
+        })
+    };
+    if !still_queued {
+        super::super::formatting::remove_reaction_raw(&ctx.http, channel_id, user_msg_id, emoji)
+            .await;
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] 🔁 RACE: queue-pending {emoji} reacted after dequeue promotion (channel {}, msg {}); removed stale reaction",
+            channel_id,
+            user_msg_id
+        );
+    }
+}
+
 /// #1446 Layer 2 — load the thread's persisted inflight state and report
 /// whether its `updated_at` is older than `INFLIGHT_STALENESS_THRESHOLD_SECS`.
 /// Returns `false` when no state file exists (nothing to clean) or when
@@ -2290,8 +2338,9 @@ pub(in crate::services::discord) async fn handle_event(
                                 resolved_voice_announcement.clone(),
                             )
                             .await;
-                            add_reaction(
-                                &ctx.http,
+                            add_queue_pending_reaction_self_healing(
+                                ctx,
+                                data,
                                 channel_id,
                                 new_message.id,
                                 queue_pending_reaction_for(outcome),
@@ -2353,8 +2402,9 @@ pub(in crate::services::discord) async fn handle_event(
                         "  [{ts}] 📬 DISPATCH-GUARD: queued dispatch message in channel {} (active turn in progress)",
                         channel_id
                     );
-                    add_reaction(
-                        &ctx.http,
+                    add_queue_pending_reaction_self_healing(
+                        ctx,
+                        data,
                         channel_id,
                         new_message.id,
                         queue_pending_reaction_for(outcome),
@@ -2435,9 +2485,12 @@ pub(in crate::services::discord) async fn handle_event(
                     .await;
                 }
 
-                // React 📬 (standalone queue head) or ➕ (merged into previous head).
-                add_reaction(
-                    &ctx.http,
+                // React 📬 (standalone queue head) or ➕ (merged into previous
+                // head), self-healing against the #3182 late-add race (see
+                // `add_queue_pending_reaction_self_healing`).
+                add_queue_pending_reaction_self_healing(
+                    ctx,
+                    data,
                     channel_id,
                     new_message.id,
                     queue_pending_reaction_for(outcome),
@@ -2556,8 +2609,9 @@ pub(in crate::services::discord) async fn handle_event(
                 );
 
                 // React 📬 (standalone) or ➕ (merged into previous queue head).
-                add_reaction(
-                    &ctx.http,
+                add_queue_pending_reaction_self_healing(
+                    ctx,
+                    data,
                     channel_id,
                     new_message.id,
                     queue_pending_reaction_for(outcome),
@@ -2647,8 +2701,9 @@ pub(in crate::services::discord) async fn handle_event(
                         "  [{ts}] 📬 IDLE-QUEUE: queued message from [{user_name}] in channel {} behind pending backlog",
                         channel_id
                     );
-                    add_reaction(
-                        &ctx.http,
+                    add_queue_pending_reaction_self_healing(
+                        ctx,
+                        data,
                         channel_id,
                         new_message.id,
                         queue_pending_reaction_for(outcome),

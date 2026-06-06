@@ -1,5 +1,23 @@
 use super::*;
 
+/// #3182: the queue-pending reaction(s) to strip from a user message when its
+/// queued turn is dequeued and promoted to active.
+///
+/// The intake gate reacts a queued user message with `📬` (standalone queue
+/// head) or `➕` (merged into a previous head) via `queue_pending_reaction_for`.
+/// At the normal dequeue/promotion point (`handle_text_message`, `started==true`)
+/// we only know the head `user_msg_id`, not whether it carried `📬` or `➕`, so
+/// we attempt to remove BOTH candidates. Removing a reaction that was never
+/// added is a harmless no-op, and this mirrors the existing live-dispatch
+/// cleanup in `DiscordGateway::dispatch_queued_turn` (gateway.rs) and the
+/// queue-exit drain (mod.rs), both of which remove `📬` and `➕` together.
+///
+/// Returned as a fixed array so the emoji set is unit-testable without driving
+/// the full async intake path.
+pub(super) const fn queue_pending_reactions_to_clear() -> [char; 2] {
+    ['📬', '➕']
+}
+
 pub(super) async fn send_restore_notification(
     shared: &Arc<SharedData>,
     fallback_http: &Arc<serenity::Http>,
@@ -1673,6 +1691,51 @@ pub(in crate::services::discord) async fn handle_text_message(
     } else {
         None
     };
+
+    // #3182: the normal dequeue path removed the `📬 메시지 대기 중` placeholder
+    // CARD above (`remove_queued_placeholder`) but historically left the
+    // queue-pending REACTION (`📬` standalone / `➕` merged) on the user message,
+    // so a processed message kept showing `📬`+`✅` together — the queue version
+    // of the #3164 stuck-hourglass. The reaction was added in `intake_gate` via
+    // the provider bot's `ctx.http`, which is the SAME @me identity as the `http`
+    // available here (kickoff passes `&ctx.http`, the live dispatch passes
+    // `&live_turn.ctx.http`; both resolve to `cached_serenity_ctx` = the provider
+    // bot — see runtime_bootstrap.rs `cached_serenity_ctx.set(ctx)`), so this
+    // `http` can actually remove the bot's own reaction (Discord remove-reaction
+    // only clears the calling bot's @me reaction).
+    //
+    // AUTHORITATIVE cleanup lives at the two queued-dispatch ENTRYPOINTS, which
+    // each clear `📬`/`➕` on EVERY `source_message_ids` entry (head + merged
+    // tails) BEFORE re-entering `handle_text_message`:
+    //   • live dispatch — `DiscordGateway::dispatch_queued_turn` (gateway.rs)
+    //   • idle/restart kickoff — `kickoff_idle_queues` (mod.rs, #3182 codex P1)
+    // That entrypoint pass covers the merged-tail and no-mapping cases the
+    // per-head hand-off cannot see. This block is an idempotent HEAD-level
+    // belt-and-suspenders for the dispatch hand-off (where a `queued_placeholders`
+    // mapping for the head was consumed just above): it re-asserts the head is
+    // clear even if the message reached here by some path other than the two
+    // entrypoints. Gate: only when THIS message actually held a queued
+    // placeholder mapping (`queued_placeholder_handoff.is_some()`), and not for
+    // background-trigger turns (#796 — those keep their info-only placeholder and
+    // never reacted the user message). A redundant remove is a no-op, so this
+    // composes safely with the entrypoint drains.
+    if queued_placeholder_handoff.is_some() && !turn_kind.is_background_trigger() {
+        for emoji in queue_pending_reactions_to_clear() {
+            super::super::super::formatting::remove_reaction_raw(
+                http,
+                channel_id,
+                user_msg_id,
+                emoji,
+            )
+            .await;
+        }
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] 📭 DEQUEUE: cleared queue-pending reaction(s) on promoted message (channel {}, msg {})",
+            channel_id,
+            user_msg_id
+        );
+    }
 
     // codex review P1/P2: when this turn lost the race, drive the entire
     // race-loss path (placeholder POST, mapping insert, enqueue, idle-drain
@@ -3846,5 +3909,54 @@ mod voice_route_tests {
 
         pool.close().await;
         pg_db.drop().await;
+    }
+}
+
+#[cfg(test)]
+mod queue_pending_reaction_clear_tests {
+    use super::*;
+
+    /// #3182: the dequeue cleanup must attempt to remove BOTH queue-pending
+    /// reactions — `📬` (standalone head) and `➕` (merged) — because the
+    /// promotion point only knows the head message id, not which emoji it
+    /// carried. This guards against a regression that drops one (which would
+    /// re-strand the other variant, as in the original bug).
+    #[test]
+    fn clears_both_standalone_and_merged_queue_reactions() {
+        let emojis = queue_pending_reactions_to_clear();
+        assert!(
+            emojis.contains(&'📬'),
+            "standalone queue-head 📬 must be cleared on dequeue"
+        );
+        assert!(
+            emojis.contains(&'➕'),
+            "merged queue ➕ must be cleared on dequeue"
+        );
+        assert_eq!(
+            emojis.len(),
+            2,
+            "exactly the two intake-gate queue-pending emojis are cleared"
+        );
+    }
+
+    /// The cleared set must match exactly what the intake gate ADDS via
+    /// `queue_pending_reaction_for`, so no queued message can be reacted with an
+    /// emoji the dequeue path will not later remove.
+    #[test]
+    fn cleared_set_covers_every_intake_gate_queue_reaction() {
+        let cleared = queue_pending_reactions_to_clear();
+        for merged in [false, true] {
+            let added = crate::services::discord::router::intake_gate::queue_pending_reaction_for(
+                crate::services::discord::MailboxEnqueueOutcome {
+                    enqueued: true,
+                    merged,
+                    ..Default::default()
+                },
+            );
+            assert!(
+                cleared.contains(&added),
+                "intake-gate add emoji {added:?} (merged={merged}) must be in the dequeue clear set"
+            );
+        }
     }
 }

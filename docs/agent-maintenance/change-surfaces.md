@@ -440,12 +440,15 @@
     from #3126 stall-watchdog completed-idle false-positive guard tests; +88
     from #3169 stall-watchdog jsonl-mtime liveness guard + tests, closing the
     Death #1 force-clean false-positive on loop mid-write sessions).
-  - `src/services/discord/router/message_handler/intake_turn.rs` (3655 lines;
+  - `src/services/discord/router/message_handler/intake_turn.rs` (3719 lines;
     Discord message intake turn orchestration split from the router message
     handler; bugfix only outside a further extraction plan; +9 from #3082
     queued-only answer-flush gate (`is_queued_notice` on the two
     `send_intake_placeholder` call sites: `true` for the race-lost queued card,
-    `false` for the active-turn placeholder)).
+    `false` for the active-turn placeholder); +57 from #3182 normal-dequeue
+    queue-pending reaction cleanup (`queue_pending_reactions_to_clear` helper +
+    `remove_reaction_raw` at the `started==true` promotion point, removing the
+    stranded `📬`/`➕` so a processed message no longer shows `📬`+`✅`)).
   - `src/services/discord/router/message_handler/headless_turn.rs` (1316 lines;
     headless Discord turn launch/terminal-response path split from the router
     message handler; bugfix only outside a further extraction plan).
