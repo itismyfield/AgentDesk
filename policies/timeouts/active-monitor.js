@@ -360,19 +360,12 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
       }
 
       // Clean up deadlock counters for sessions no longer working
-      var activeKeys = agentdesk.db.query(
-        "SELECT key FROM kv_meta WHERE key LIKE 'deadlock_check:%'"
+      agentdesk.db.execute(
+        "DELETE FROM kv_meta WHERE key LIKE 'deadlock_check:%' AND " +
+        "REPLACE(key, 'deadlock_check:', '') NOT IN (" +
+        "  SELECT session_key FROM sessions WHERE status IN ('turn_active', 'working')" +
+        ")"
       );
-      for (var ak = 0; ak < activeKeys.length; ak++) {
-        var sessKey = activeKeys[ak].key.replace("deadlock_check:", "");
-        var stillWorking = agentdesk.db.query(
-          "SELECT COUNT(*) as cnt FROM sessions WHERE session_key = ? AND status IN ('turn_active', 'working')",
-          [sessKey]
-        );
-        if (stillWorking.length > 0 && stillWorking[0].cnt === 0) {
-          agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [activeKeys[ak].key]);
-        }
-      }
 
       // Clean up old deadlock history entries (7일 이상)
       var historyKeys = agentdesk.db.query(
