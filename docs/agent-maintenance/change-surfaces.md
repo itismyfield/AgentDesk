@@ -130,7 +130,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (9193 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (9215 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -306,6 +306,18 @@
     (incl. id==0 external/injected) NOT adopted/edited, in-range id==0
     watcher-direct STILL adopts+edits (over-suppression guard), and in-range id!=0
     unchanged.
+    +22 from #3169 P1: `mark_watcher_terminal_delivery_committed` now lets a
+    self-paced loop turn (`user_msg_id == 0`) set `terminal_delivery_committed` on a
+    fully-anchored completion (the original `user_msg_id != 0` requirement skipped
+    every loop turn, so the #3126 stall-watchdog guard had no architectural
+    finished-delivery signal → death #1 false-positive force-clean). NOT a blanket
+    relaxation: a loop turn is admitted only when its frame-carried
+    `turn_start_offset` is known AND matches the loaded inflight (loop turns are
+    disambiguated by `started_at` + `turn_start_offset` per #3041 P1-3, since the
+    1-second `started_at` can collide across two consecutive self-triggered turns)
+    so a late completion can never commit the WRONG newer loop turn; the
+    `user_msg_id != 0` path is byte-for-byte unchanged. New test
+    `watcher_terminal_delivery_commit_marks_loop_turn_with_zero_user_msg_id`.
   - `src/services/discord/tui_prompt_relay.rs` (4522 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3167: the self-paced TUI loop relay

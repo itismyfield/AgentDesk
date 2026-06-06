@@ -4981,7 +4981,21 @@ fn mark_watcher_terminal_delivery_committed(
     let Some(expected_identity) = expected_identity else {
         return false;
     };
-    if expected_identity.user_msg_id == 0 || full_response.trim().is_empty() {
+    if full_response.trim().is_empty() {
+        return false;
+    }
+    // #3169 P1: self-paced loop turns carry `user_msg_id == 0` (no anchored
+    // Discord user message), so the original `user_msg_id != 0` requirement
+    // skipped them entirely — they never set `terminal_delivery_committed`, and
+    // the #3126 stall-watchdog guard (recovery.rs:1346) had no architectural
+    // "this turn finished delivering" signal for them, producing the death #1
+    // false-positive force-clean. Allow `user_msg_id == 0` turns to commit, but
+    // (NOT a blanket relaxation) only when the frame-carried identity is fully
+    // anchored: such turns are disambiguated solely by `started_at` +
+    // `turn_start_offset` (#3041 P1-3, inflight.rs:669), so a loop turn without a
+    // known `turn_start_offset` cannot be safely matched and is still skipped.
+    let is_loop_turn = expected_identity.user_msg_id == 0;
+    if is_loop_turn && expected_identity.turn_start_offset.is_none() {
         return false;
     }
     let Some(mut inflight) =
@@ -4997,6 +5011,14 @@ fn mark_watcher_terminal_delivery_committed(
         || inflight.tmux_session_name.as_deref() != expected_identity.tmux_session_name.as_deref()
         || inflight.tmux_session_name.as_deref() != Some(tmux_session_name)
     {
+        return false;
+    }
+    // #3169 P1: for a loop turn (`user_msg_id == 0`) the 1-second-resolution
+    // `started_at` can collide across two consecutive self-triggered turns, so it
+    // is insufficient to prove this completion belongs to the loaded inflight.
+    // Require the monotonic `turn_start_offset` (#3041 P1-3) to match as well so a
+    // late completion can never commit the WRONG (newer, still-running) loop turn.
+    if is_loop_turn && inflight.turn_start_offset != expected_identity.turn_start_offset {
         return false;
     }
 
@@ -11793,6 +11815,85 @@ mod tests {
         assert_eq!(persisted.last_offset, 128);
         assert_eq!(persisted.last_watcher_relayed_offset, Some(64));
         assert_eq!(persisted.last_watcher_relayed_generation_mtime_ns, Some(7));
+    }
+
+    // #3169 P1: a self-paced loop turn (`user_msg_id == 0`) must now set
+    // `terminal_delivery_committed` on a fully-anchored completion. The original
+    // guard rejected every `user_msg_id == 0` turn, so loop sessions never got the
+    // architectural signal the #3126 stall-watchdog guard relies on (death #1).
+    #[test]
+    fn watcher_terminal_delivery_commit_marks_loop_turn_with_zero_user_msg_id() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(987_3169);
+        let tmux_session_name = "AgentDesk-claude-adk-cc";
+        let mut state = InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            Some("adk-cc".to_string()),
+            42,
+            0, // user_msg_id == 0 -> self-paced loop turn (no anchored Discord message)
+            1002,
+            "loop prompt".to_string(),
+            Some("session-3169".to_string()),
+            Some(tmux_session_name.to_string()),
+            Some("/tmp/agentdesk-3169-output.jsonl".to_string()),
+            None,
+            64,
+        );
+        state.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        state.turn_start_offset = Some(64);
+        crate::services::discord::inflight::save_inflight_state(&state).expect("save inflight");
+        let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(&state);
+        assert_eq!(identity.user_msg_id, 0, "fixture is a loop turn");
+
+        assert!(
+            mark_watcher_terminal_delivery_committed(
+                &provider,
+                channel_id,
+                tmux_session_name,
+                Some(&identity),
+                "loop delivered response",
+                64,
+                Some(7),
+                128,
+            ),
+            "a fully-anchored loop turn (user_msg_id == 0) must commit"
+        );
+
+        let persisted =
+            crate::services::discord::inflight::load_inflight_state(&provider, channel_id.get())
+                .expect("load inflight");
+        assert!(
+            persisted.terminal_delivery_committed,
+            "loop turn must set terminal_delivery_committed for the #3126 guard"
+        );
+
+        // A loop turn whose frame-carried `turn_start_offset` is missing cannot be
+        // safely disambiguated from a sibling same-second loop turn, so it is still
+        // skipped (NOT a blanket relaxation).
+        crate::services::discord::inflight::clear_inflight_state(&provider, channel_id.get());
+        crate::services::discord::inflight::save_inflight_state(&state).expect("re-save inflight");
+        let mut unanchored_identity = identity.clone();
+        unanchored_identity.turn_start_offset = None;
+        assert!(
+            !mark_watcher_terminal_delivery_committed(
+                &provider,
+                channel_id,
+                tmux_session_name,
+                Some(&unanchored_identity),
+                "loop delivered response",
+                64,
+                Some(7),
+                128,
+            ),
+            "a loop turn without a known turn_start_offset must NOT commit"
+        );
     }
 
     // #3107 (CHANGE 3): a missing inflight is abandonment ONLY when the pane is
