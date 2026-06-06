@@ -304,14 +304,19 @@
     (incl. id==0 external/injected) NOT adopted/edited, in-range id==0
     watcher-direct STILL adopts+edits (over-suppression guard), and in-range id!=0
     unchanged.
-  - `src/services/discord/tui_prompt_relay.rs` (4464 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (4512 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
-    outside an extraction plan; +185 from #3178: the machine slash-command
+    outside an extraction plan; +48 from #3189: the `/loop` control note carries
+    its directive body via `extract_loop_body` (operator wants the recurring loop
+    content visible; only the #3153 double-post is deduped, never the content) —
+    the `<command-args>` block or raw-echo args, never the trailing skill markdown;
+    every OTHER machine command (`/compact`, `Compacted …` stdout) stays
+    kind-only; +185 from #3178: the machine slash-command
     control trigger (`/loop`/`/compact`/`<command-*>`) is a FULL active turn —
     it claims the mailbox active turn (so a message injected mid-`/loop` queues
-    cleanly via `mailbox_try_start_turn`) and gets a kind-only anchor
+    cleanly via `mailbox_try_start_turn`) and gets an anchor
     (`format_slash_command_control_note` + `slash_command_control_kind`) + ⏳ +
-    synthetic inflight + ✅, no raw body leaked. The #3153 near-simultaneous
+    synthetic inflight + ✅. The #3153 near-simultaneous
     duplicate half (raw echo + expanded wrapper of the same injection) is dropped
     by the 2s dedupe gate (`slash_command_control_turn_is_first_sighting`) BEFORE
     any external-input lease is recorded, so it can never overwrite the first
