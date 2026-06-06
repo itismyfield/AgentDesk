@@ -426,11 +426,12 @@
     headless Discord turn launch/terminal-response path split from the router
     message handler; bugfix only outside a further extraction plan).
   - `src/services/discord/meeting_orchestrator.rs` (3227 lines).
-  - `src/services/discord/turn_bridge/tmux_runtime.rs` (1242 lines; provider
+  - `src/services/discord/turn_bridge/tmux_runtime.rs` (1320 lines; provider
     stop-token/tmux binding runtime + PID-exit observation helper (#2426),
-    split before adding non-bugfix behavior).
+    split before adding non-bugfix behavior. #3169: added the
+    claude-anonymous-teardown SIGINT suppression guard (death #3)).
   - `src/services/discord/turn_bridge/completion_guard.rs` (1849 lines).
-  - `src/services/discord/turn_bridge/tmux_runtime.rs` (1242 lines).
+  - `src/services/discord/turn_bridge/tmux_runtime.rs` (1320 lines).
   - `src/services/discord/turn_bridge/terminal_delivery.rs` (1341 prod lines;
     registered giant-file (#3036) — bugfix only outside an extraction plan.
     Crossed 1000 prod LoC with #3041 P1-2: the `BridgeDeliveryLease`
