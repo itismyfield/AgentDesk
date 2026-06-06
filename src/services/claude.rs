@@ -839,6 +839,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         model_override,
                         effective_prompt,
                         hook_endpoint,
+                        compact_percent,
                     );
                 }
                 tracing::warn!(
@@ -2155,6 +2156,13 @@ fn execute_streaming_local_tui_tmux(
     model_override: Option<&str>,
     system_prompt: Option<&str>,
     hook_endpoint: String,
+    // #3166: provider-specific compact threshold (context_compact_percent_claude),
+    // resolved by the caller via fetch_context_thresholds. Threaded into the TUI
+    // launch script so `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is exported for BOTH fresh
+    // and `--resume` spawns. Before #3166 this path silently dropped it, so every
+    // TUI-hosted claude session (the default local-tmux driver since #2110) ran
+    // without the configured auto-compact override.
+    compact_percent: Option<u64>,
 ) -> Result<(), String> {
     debug_log(&format!(
         "=== execute_streaming_local_tui_tmux START: {} ===",
@@ -2724,6 +2732,7 @@ fn execute_streaming_local_tui_tmux(
             system_prompt: system_prompt.map(str::to_string),
             model: model_override.map(str::to_string),
             resume,
+            compact_percent,
         };
         let session_files =
             crate::services::claude_tui::session::prepare_claude_tui_launch(&launch_config)?;

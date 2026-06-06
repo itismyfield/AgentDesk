@@ -399,7 +399,8 @@
     atomic read, closing the present/generation TOCTOU) plus its dedicated accessor unit
     test; the watcher-snapshot no-clobber regression test is retained, rewritten to take
     its G1/G2 snapshots from `external_input_relay_lease(...).map(|l| l.generation)`).
-  - `src/services/discord/recovery_engine.rs` (4037 lines; +36 from #3099
+  - `src/services/discord/recovery_engine.rs` (4046 lines; +9 from #3166
+    fetching real context thresholds for the recovered-turn status panel; +36 from #3099
     task-notification anchor `⏳` cleanup for `user_msg_id == 0` recovery; +4
     from the #3099 re-review pinned-injected-message-id cleanup target; +55 from
     #3078 PR-2 routing recovery completion through `StatusPanelController` behind
@@ -671,7 +672,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
 - `src/services/dispatches/outbox_route.rs` (1118) — dispatch outbox route
   support extracted from the route layer; split before adding non-bugfix
   behavior.
-- `src/services/claude.rs` (3786), `src/services/gemini.rs` (1416),
+- `src/services/claude.rs` (3795), `src/services/gemini.rs` (1416),
   `src/services/qwen.rs` (2200), `src/services/codex.rs` (2928),
   `src/services/opencode.rs` (1881), `src/services/provider.rs` (1738) —
   provider adapters.

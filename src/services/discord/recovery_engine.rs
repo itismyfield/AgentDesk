@@ -3961,6 +3961,16 @@ pub(super) async fn restore_inflight_turns(
         let mut state = state;
         state.session_key = state.session_key.or_else(|| adk_session_key.clone());
         state.dispatch_id = state.dispatch_id.or_else(|| recovery_dispatch_id.clone());
+        // #3166: read the real configured thresholds (e.g.
+        // `context_compact_percent_claude`) instead of `ContextThresholds::default()`
+        // so the recovered turn's status panel reflects the user-set auto-compact
+        // percent, matching the live launch paths (intake_turn/headless_turn).
+        // This is the display value; the spawn-side `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`
+        // env is exported by the launch script (claude_tui/session.rs, #3166).
+        let recovery_compact_percent =
+            super::adk_session::fetch_context_thresholds(shared.api_port)
+                .await
+                .compact_pct_for(&provider);
         spawn_turn_bridge(
             shared.clone(),
             cancel_token,
@@ -3986,8 +3996,7 @@ pub(super) async fn restore_inflight_turns(
                 dispatch_kind: recovery_dispatch_kind,
                 memory_recall_usage: crate::services::memory::TokenUsage::default(),
                 context_window_tokens: provider.default_context_window(),
-                context_compact_percent: super::adk_session::ContextThresholds::default()
-                    .compact_pct_for(&provider),
+                context_compact_percent: recovery_compact_percent,
                 current_msg_id,
                 response_sent_offset: state.response_sent_offset,
                 full_response: state.full_response.clone(),
