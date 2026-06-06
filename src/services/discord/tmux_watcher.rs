@@ -280,6 +280,28 @@ fn watcher_inflight_is_external_input_for_session(
         })
 }
 
+/// status-panel-v2 variant of `watcher_inflight_is_external_input_for_session`.
+///
+/// Identical session + watcher-relay-owner guards (same orphan-panel reasoning),
+/// but gated on the broader `watcher_inflight_is_panel_eligible` predicate so the
+/// synthetic monitor/self-paced-loop turns also get a watcher-owned status panel.
+/// Used ONLY at the panel-lifecycle sites; the lease/⏳-anchor sites keep the
+/// narrower external-input predicate.
+fn watcher_inflight_is_panel_eligible_for_session(
+    inflight: Option<&InflightTurnState>,
+    tmux_session_name: &str,
+) -> bool {
+    inflight
+        .filter(|state| state.tmux_session_name.as_deref() == Some(tmux_session_name))
+        .is_some_and(|state| {
+            watcher_inflight_is_panel_eligible(Some(state))
+                && matches!(
+                    state.effective_relay_owner_kind(),
+                    crate::services::discord::inflight::RelayOwnerKind::Watcher
+                )
+        })
+}
+
 /// #3003 single-chokepoint orphan reclaim: has the in-flight TUI-direct turn
 /// been abandoned, so a watcher-created v2 panel can never reach terminal
 /// completion?
@@ -545,6 +567,26 @@ fn watcher_inflight_represents_external_input(inflight: Option<&InflightTurnStat
             crate::services::discord::inflight::TurnSource::ExternalInput
                 | crate::services::discord::inflight::TurnSource::ExternalAdopted
         )
+    })
+}
+
+/// status-panel-v2 eligibility for a watcher-driven inflight turn.
+///
+/// SEPARATE from `watcher_inflight_represents_external_input` on purpose: that
+/// shared predicate backs the external-input delivery LEASE and the `⏳` anchor
+/// lifecycle (#3164/#3174), and broadening it there would regress both. The
+/// panel only needs to know whether the watcher should create/update/clean up a
+/// live status panel for this turn, so it ALSO covers the synthetic
+/// monitor/self-paced-loop turns (`TurnSource::MonitorTriggered`, created by
+/// `ensure_monitor_auto_turn_inflight`) — which the lease/anchor sites must
+/// keep ignoring.
+fn watcher_inflight_is_panel_eligible(inflight: Option<&InflightTurnState>) -> bool {
+    inflight.is_some_and(|state| {
+        watcher_inflight_represents_external_input(Some(state))
+            || matches!(
+                state.turn_source,
+                crate::services::discord::inflight::TurnSource::MonitorTriggered
+            )
     })
 }
 
@@ -2140,6 +2182,69 @@ mod pane_dead_identity_tests {
             None,
             "AgentDesk-codex-adk-cdx"
         ));
+    }
+
+    // status-panel-v2: the synthetic monitor/self-paced-loop turn
+    // (`TurnSource::MonitorTriggered`, made watcher-relay-owned by
+    // `ensure_monitor_auto_turn_inflight`) must be panel-eligible for its own
+    // tmux session — but only when the watcher owns the relay and the session
+    // matches, mirroring the external-input guard.
+    #[test]
+    fn watcher_panel_eligible_for_session_includes_monitor_turn() {
+        let mut monitor = state_for_turn(0, "AgentDesk-claude-monitor-relay");
+        monitor.turn_source = crate::services::discord::inflight::TurnSource::MonitorTriggered;
+        monitor.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+        assert!(watcher_inflight_is_panel_eligible_for_session(
+            Some(&monitor),
+            "AgentDesk-claude-monitor-relay"
+        ));
+
+        // relay_owner=None (the pre-fix synthetic shape) is NOT watcher-owned, so
+        // the panel guard rejects it.
+        let mut owner_none = state_for_turn(0, "AgentDesk-claude-monitor-relay");
+        owner_none.turn_source = crate::services::discord::inflight::TurnSource::MonitorTriggered;
+        owner_none.set_relay_owner_kind(
+            crate::services::discord::inflight::RelayOwnerKind::SessionBoundRelay,
+        );
+        assert!(!watcher_inflight_is_panel_eligible_for_session(
+            Some(&owner_none),
+            "AgentDesk-claude-monitor-relay"
+        ));
+
+        // Wrong session must not adopt the monitor panel.
+        assert!(!watcher_inflight_is_panel_eligible_for_session(
+            Some(&monitor),
+            "AgentDesk-claude-monitor-relay-other"
+        ));
+
+        // A plain managed turn is never panel-eligible via this path.
+        let mut managed = state_for_turn(100, "AgentDesk-claude-monitor-relay");
+        managed.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+        assert!(!watcher_inflight_is_panel_eligible_for_session(
+            Some(&managed),
+            "AgentDesk-claude-monitor-relay"
+        ));
+    }
+
+    // Regression guard: broadening panel eligibility must NOT leak into the
+    // shared external-input predicate that backs the delivery lease and the
+    // ⏳ anchor lifecycle (#3164/#3174). A MonitorTriggered turn stays false there.
+    #[test]
+    fn watcher_external_input_predicate_excludes_monitor_turn() {
+        let mut monitor = state_for_turn(0, "AgentDesk-claude-monitor-relay");
+        monitor.turn_source = crate::services::discord::inflight::TurnSource::MonitorTriggered;
+        assert!(!watcher_inflight_represents_external_input(Some(&monitor)));
+    }
+
+    // The monitor/self-paced-loop synthetic (user_msg_id == 0, rebind_origin)
+    // must NOT enter the anchor-lifecycle cleanup — that path is external-input
+    // only, and the synthetic has no injected notify-bot anchor to clean up.
+    #[test]
+    fn watcher_monitor_turn_never_needs_anchor_cleanup() {
+        let mut monitor = state_for_turn(0, "AgentDesk-claude-monitor-relay");
+        monitor.turn_source = crate::services::discord::inflight::TurnSource::MonitorTriggered;
+        monitor.rebind_origin = true;
+        assert!(!watcher_inflight_needs_anchor_lifecycle_cleanup(&monitor));
     }
 }
 
@@ -5921,7 +6026,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &watcher_provider,
             channel_id.get(),
         );
-        let mut turn_is_external_input_for_session = watcher_inflight_is_external_input_for_session(
+        // status-panel-v2: panel eligibility (external-input OR synthetic
+        // monitor/self-paced-loop) drives the panel-lifecycle sites that read
+        // this flag. The lease/⏳-anchor sites keep the narrower external-input
+        // predicate and are untouched.
+        let mut turn_is_external_input_for_session = watcher_inflight_is_panel_eligible_for_session(
             startup_inflight_snapshot.as_ref(),
             &tmux_session_name,
         );
@@ -6906,11 +7015,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             inflight_for_panel.as_ref(),
                             &tmux_session_name,
                         );
-                        let external_input_turn = watcher_inflight_is_external_input_for_session(
+                        // status-panel-v2: panel eligibility (external-input OR
+                        // synthetic monitor/self-paced-loop) drives panel
+                        // creation here; the lease/⏳-anchor sites keep the
+                        // narrower external-input predicate.
+                        let panel_eligible_turn = watcher_inflight_is_panel_eligible_for_session(
                             inflight_for_panel.as_ref(),
                             &tmux_session_name,
                         );
-                        if external_input_turn {
+                        if panel_eligible_turn {
                             turn_is_external_input_for_session = true;
                             // #3003 (codex P2 r15): when the watcher started before
                             // this turn's inflight existed, the startup identity
@@ -6942,7 +7055,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         } else if watcher_should_create_external_input_status_panel(
                             shared.status_panel_v2_enabled,
                             status_panel_msg_id.is_some(),
-                            external_input_turn,
+                            panel_eligible_turn,
                         ) && !watcher_external_input_turn_abandoned(
                             &watcher_provider,
                             channel_id,

@@ -1315,6 +1315,12 @@ fn ensure_monitor_auto_turn_inflight(
     // originating Discord message. The session-bound relay does NOT branch
     // on this — recorded for diagnostics only.
     synthetic.turn_source = super::inflight::TurnSource::MonitorTriggered;
+    // status-panel-v2: make this watcher-owned so the panel-eligibility
+    // predicate (watcher_inflight_is_panel_eligible_for_session) recognises the
+    // synthetic monitor/self-paced-loop turn and the watcher can create/update/
+    // clean up a live status panel for it. The shared external-input predicate
+    // (lease + ⏳ anchor lifecycle, #3164/#3174) stays untouched.
+    synthetic.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
 
     match super::inflight::save_inflight_state_create_new(&synthetic) {
         Ok(()) => {
