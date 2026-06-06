@@ -128,11 +128,22 @@ fn watcher_fallback_edit_failure_can_delete_original_placeholder(
     false
 }
 
+/// #3016 A2: defer fresh-idle finalization for a delegated turn that the watcher
+/// still owns but has not yet committed any terminal assistant text for.
+///
+/// `delegated_turn_owned` is the "this is a live bridge→watcher delegated turn
+/// the watcher owns" signal. It was historically the in-memory
+/// `mailbox_finalize_owed` flag; as of A2 the call site feeds the LEDGER
+/// authority (`TurnFinalizer::has_live_watcher_pending`) instead, so the flag is
+/// no longer load-bearing here. The two are equivalent for a fresh delegated
+/// turn — the bridge publishes the flag AND the watcher-owned `register_start`
+/// ledger entry together at the unpause handoff. The boolean contract (and the
+/// pure-function unit tests) are unchanged.
 fn watcher_should_defer_delegated_fresh_idle(
-    delegated_finalize_owed: bool,
+    delegated_turn_owned: bool,
     full_response: &str,
 ) -> bool {
-    delegated_finalize_owed && full_response.trim().is_empty()
+    delegated_turn_owned && full_response.trim().is_empty()
 }
 
 fn watcher_should_clear_stale_terminal_message_ids(
@@ -7477,12 +7488,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
 
             if fresh_ready_for_input_idle {
-                let delegated_finalize_owed_pending =
-                    mailbox_finalize_owed.load(std::sync::atomic::Ordering::Acquire);
-                if watcher_should_defer_delegated_fresh_idle(
-                    delegated_finalize_owed_pending,
-                    &full_response,
-                ) {
+                // #3016 A2 (phase-5 enabler): drive the defer decision from the
+                // LEDGER, not the in-memory `mailbox_finalize_owed` flag. The
+                // bridge publishes BOTH together at the watcher-unpause handoff
+                // (flag store + watcher-owned `register_start`), so a live
+                // watcher-owned Pending entry is exactly the "delegated turn the
+                // watcher still owns" condition the flag expressed — without the
+                // flag being load-bearing. This is the flag's last load-bearing
+                // use at the fresh-idle site; making it ledger-driven unblocks
+                // the flag deletion (separate phase-5 PR).
+                let delegated_turn_owned = shared
+                    .turn_finalizer
+                    .has_live_watcher_pending(channel_id, shared.current_generation)
+                    .await;
+                if watcher_should_defer_delegated_fresh_idle(delegated_turn_owned, &full_response) {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
                         "  [{ts}] 👁 watcher observed fresh ready-for-input idle for {tmux_session_name} at offset {current_offset}, but bridge-delegated turn has no terminal assistant text yet; preserving inflight and waiting for terminal commit"
@@ -7566,56 +7585,72 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 if !panel_cleanup_committed {
                     continue;
                 }
+                // #3016 A2 (phase-5 enabler): the fresh-idle finalize is now
+                // LEDGER-driven, not flag-driven. Reaching here means every
+                // upstream guard already decided this is a REAL idle to act on:
+                //   * `watcher_should_defer_delegated_fresh_idle` (now ledger-fed)
+                //     already `continue`d for a delegated turn with no terminal
+                //     assistant text yet — so a turn merely PAUSED at a
+                //     selector/subagent prompt (empty committed response) never
+                //     reaches this point; and
+                //   * the placeholder + orphan-panel cleanup guards committed.
+                // We still `swap(false)` the legacy flag to keep its revoke
+                // lifecycle intact (the flag is NOT deleted in this PR — only made
+                // non-load-bearing), exactly as the canonical option-A site does.
                 let owed = mailbox_finalize_owed.swap(false, std::sync::atomic::Ordering::AcqRel);
-                let should_finish_mailbox = finish_mailbox_on_completion || owed;
-                if should_finish_mailbox {
-                    // #3016: capture the turn's real id BEFORE clearing inflight,
-                    // so the finalizer ledger match is exact (id-0 would risk a
-                    // stale terminal finalizing a queued follow-up).
-                    let fresh_idle_user_msg_id =
-                        crate::services::discord::inflight::load_inflight_state(
-                            &watcher_provider,
-                            channel_id.get(),
-                        )
-                        .map(|s| s.user_msg_id)
-                        .unwrap_or(0);
-                    crate::services::discord::inflight::clear_inflight_state(
+                // #3016: capture the turn's real id BEFORE clearing inflight, so
+                // the finalizer ledger match is exact (id-0 would risk a stale
+                // terminal finalizing a queued follow-up).
+                let fresh_idle_user_msg_id =
+                    crate::services::discord::inflight::load_inflight_state(
                         &watcher_provider,
                         channel_id.get(),
-                    );
-                    crate::services::observability::emit_inflight_lifecycle_event(
-                        watcher_provider.as_str(),
-                        channel_id.get(),
-                        None,
-                        None,
-                        None,
-                        "cleared_by_watcher_fresh_idle",
-                        serde_json::json!({
-                            "owed_finalize": owed,
-                            "finish_mailbox_on_completion": finish_mailbox_on_completion,
-                            "tmux_session": tmux_session_name.as_str(),
-                            "offset": current_offset,
-                        }),
-                    );
-                    finish_restored_watcher_active_turn(
-                        &shared,
-                        &watcher_provider,
-                        channel_id,
-                        fresh_idle_user_msg_id,
-                        finish_mailbox_on_completion,
-                        owed,
-                        // #3016 option A: this fresh-idle arm is already gated by
-                        // the outer `if should_finish_mailbox` (= flag-driven), so
-                        // it keeps the legacy flag semantics — `normal_completion`
-                        // stays `false` here. (No new assistant text was committed
-                        // in this pass, so it is not the canonical-completion
-                        // point that the decoupling targets.)
-                        false,
-                        true,
-                        "watcher fresh ready-for-input idle with queued backlog",
                     )
-                    .await;
-                }
+                    .map(|s| s.user_msg_id)
+                    .unwrap_or(0);
+                crate::services::discord::inflight::clear_inflight_state(
+                    &watcher_provider,
+                    channel_id.get(),
+                );
+                crate::services::observability::emit_inflight_lifecycle_event(
+                    watcher_provider.as_str(),
+                    channel_id.get(),
+                    None,
+                    None,
+                    None,
+                    "cleared_by_watcher_fresh_idle",
+                    serde_json::json!({
+                        "owed_finalize": owed,
+                        "finish_mailbox_on_completion": finish_mailbox_on_completion,
+                        "tmux_session": tmux_session_name.as_str(),
+                        "offset": current_offset,
+                    }),
+                );
+                finish_restored_watcher_active_turn(
+                    &shared,
+                    &watcher_provider,
+                    channel_id,
+                    fresh_idle_user_msg_id,
+                    finish_mailbox_on_completion,
+                    owed,
+                    // #3016 A2: this fresh-idle commit point is a confirmed real
+                    // idle (the defer + cleanup guards above gated out the
+                    // paused-live / not-yet-committed cases), so drive the
+                    // single-authority finalizer UNCONDITIONALLY — independent of
+                    // the legacy `owed` / `finish_mailbox_on_completion` flags.
+                    // This is an empty/suppressed delegated completion: no new
+                    // assistant text was committed this pass, but the turn IS done
+                    // and must finalize via the ledger. The finalizer is
+                    // idempotent (bridge winner → AlreadyFinalized) and
+                    // identity-guarded (real `fresh_idle_user_msg_id` →
+                    // `finish_turn_if_matches`, so a stale/wrong id cannot release
+                    // a newer live turn), so an unconditional submit here cannot
+                    // over-finalize.
+                    true,
+                    true,
+                    "watcher fresh ready-for-input idle with queued backlog",
+                )
+                .await;
                 all_data.clear();
                 all_data_start_offset = current_offset;
                 all_data_fully_mirrored_to_session_relay = true;
@@ -12501,6 +12536,169 @@ mod tests {
                 .cancel_token
                 .is_none(),
             "turn B is released by its matching finalize"
+        );
+    }
+
+    // #3016 A2 (fresh-idle ledger authority). Proves the THREE properties the
+    // PR depends on, end-to-end through the real `TurnFinalizer` actor:
+    //
+    //   (i)   An empty/suppressed DELEGATED completion at fresh-idle finalizes
+    //         via the LEDGER even with the legacy `mailbox_finalize_owed` flag
+    //         FALSE — the finalize is no longer gated on the flag.
+    //   (ii)  The fresh-idle DEFER decision is now ledger-driven: a live
+    //         watcher-owned Pending entry makes `has_live_watcher_pending` (the
+    //         defer-guard input) report `true` BEFORE finalize, then `false`
+    //         after — so a paused-live turn (empty response + live entry) is
+    //         deferred, not finalized.
+    //   (iii) Idempotency: a second fresh-idle submit for the same turn is a
+    //         no-op (AlreadyFinalized) — no double-finalize, no counter
+    //         underflow.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn fresh_idle_empty_delegated_completion_finalizes_via_ledger_flag_false() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(987_3018);
+        let tmux_session_name = "AgentDesk-claude-adk-cc-9873018";
+        let user_msg_id = 8001u64;
+        let generation = shared.current_generation;
+
+        // Real watcher handle with the legacy flag FALSE: the fresh-idle
+        // finalize must NOT depend on the flag.
+        shared
+            .tmux_watchers
+            .insert(channel_id, test_watcher_handle(tmux_session_name, false));
+
+        // Bridge→watcher unpause handoff (LEDGER half): register a live
+        // watcher-owned Pending entry under the turn's real id. This is what the
+        // ledger-driven defer guard reads instead of the flag.
+        shared.turn_finalizer.register_start(
+            crate::services::discord::turn_finalizer::TurnKey::new(
+                channel_id,
+                user_msg_id,
+                generation,
+            ),
+            provider.clone(),
+            crate::services::discord::inflight::RelayOwnerKind::Watcher,
+        );
+        // Allow the actor to drain the Start before we query.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // (ii) BEFORE finalize: the ledger reports a live watcher-owned entry,
+        // so the defer guard would defer an empty-response paused-live turn.
+        assert!(
+            shared
+                .turn_finalizer
+                .has_live_watcher_pending(channel_id, generation)
+                .await,
+            "live watcher-owned Pending entry → defer guard input is true (paused-live deferred)"
+        );
+        assert!(
+            watcher_should_defer_delegated_fresh_idle(true, ""),
+            "empty response + live delegated entry → DEFER (paused-live not finalized)"
+        );
+        // A genuine empty completion is the one that proceeds past the guard:
+        // the guard only defers while the response is empty AND the turn is a
+        // live delegated entry; the proceed decision below is the post-guard
+        // commit point.
+
+        // Live active mailbox turn with the turn's real id, so we can observe
+        // the finalize releasing exactly THIS turn's token.
+        assert!(
+            mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                std::sync::Arc::new(CancelToken::new()),
+                UserId::new(42),
+                MessageId::new(user_msg_id),
+            )
+            .await
+        );
+
+        // (i) Precondition: the legacy flag is FALSE on the real handle.
+        let watcher = shared
+            .tmux_watchers
+            .get(&channel_id)
+            .expect("real watcher handle present");
+        assert!(
+            !watcher
+                .mailbox_finalize_owed
+                .load(std::sync::atomic::Ordering::Acquire),
+            "precondition: mailbox_finalize_owed FALSE — finalize must drive via the ledger"
+        );
+        drop(watcher);
+
+        // Fresh-idle commit point: clear inflight inline (mirrors the call site)
+        // then drive the finalizer UNCONDITIONALLY with normal_completion = true.
+        crate::services::discord::inflight::clear_inflight_state(&provider, channel_id.get());
+        let drove = super::finish_restored_watcher_active_turn(
+            &shared,
+            &provider,
+            channel_id,
+            user_msg_id,
+            false, // finish_mailbox_on_completion — fresh live watcher
+            false, // delegated_finalize_owed — flag FALSE (swapped at the site)
+            true,  // normal_completion — A2: ledger-driven, flag-independent
+            true,  // kickoff_queue
+            "fresh_idle_ledger_test",
+        )
+        .await;
+        assert!(
+            drove,
+            "fresh-idle finalize must drive the finalizer (flag-independent, normal_completion=true)"
+        );
+
+        // (i) The empty/suppressed completion finalized via the ledger even with
+        // the flag false: the matching turn's mailbox token is released.
+        let snapshot = mailbox_snapshot(&shared, channel_id).await;
+        assert!(
+            snapshot.cancel_token.is_none(),
+            "empty/suppressed delegated completion finalizes via the ledger with the flag FALSE"
+        );
+
+        // (ii) AFTER finalize: the ledger entry is Finalized → defer guard input
+        // flips to false (the turn is done; nothing left to defer).
+        assert!(
+            !shared
+                .turn_finalizer
+                .has_live_watcher_pending(channel_id, generation)
+                .await,
+            "finalized entry → defer guard input is false"
+        );
+
+        // (iii) Idempotency: a second fresh-idle submit for the same turn is a
+        // no-op (AlreadyFinalized) — no double-finalize, no counter underflow.
+        let global_before = shared
+            .global_active
+            .load(std::sync::atomic::Ordering::Acquire);
+        let drove_again = super::finish_restored_watcher_active_turn(
+            &shared,
+            &provider,
+            channel_id,
+            user_msg_id,
+            false,
+            false,
+            true,
+            true,
+            "fresh_idle_ledger_test_double",
+        )
+        .await;
+        assert!(
+            drove_again,
+            "second submit still passes the helper gate (normal_completion=true) but is a no-op"
+        );
+        let global_after = shared
+            .global_active
+            .load(std::sync::atomic::Ordering::Acquire);
+        assert_eq!(
+            global_before, global_after,
+            "double fresh-idle finalize must NOT underflow the active counter (AlreadyFinalized)"
         );
     }
 

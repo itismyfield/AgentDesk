@@ -375,6 +375,18 @@ enum FinalizeMsg {
         shared: Arc<SharedData>,
         ack: oneshot::Sender<FinalizeOutcome>,
     },
+    /// #3016 A2 (phase-5 enabler): read-only ledger probe. Answers "does this
+    /// `(channel, generation)` have a live (non-`Finalized`) entry owned by the
+    /// watcher?" — the LEDGER equivalent of the legacy in-memory
+    /// `mailbox_finalize_owed` flag, set together with the entry's
+    /// `register_start` at the bridge→watcher unpause handoff. Used ONLY by the
+    /// fresh-idle defer guard so it no longer reads the in-memory flag. Pure
+    /// query: never mutates the ledger.
+    QueryLivePending {
+        channel_id: ChannelId,
+        generation: u64,
+        ack: oneshot::Sender<bool>,
+    },
     /// #3041 §2-§3 (DORMANT until P1-2..): CAS-acquire `(key, [start,end))` for
     /// `holder` via the actor. The watcher acquires the cell directly (B4
     /// fast-path), so this variant has no sender yet — it is reserved for the
@@ -504,6 +516,43 @@ impl TurnFinalizer {
             return FinalizeOutcome::AlreadyFinalized;
         }
         rx.await.unwrap_or(FinalizeOutcome::AlreadyFinalized)
+    }
+
+    /// #3016 A2 (phase-5 enabler): is there a live (non-`Finalized`) ledger
+    /// entry for this `(channel, generation)` that the WATCHER owns?
+    ///
+    /// This is the LEDGER authority that replaces the in-memory
+    /// `mailbox_finalize_owed` flag at the fresh-idle defer guard. The bridge
+    /// publishes BOTH together at the watcher-unpause handoff
+    /// (`mailbox_finalize_owed.store(true)` AND `register_start(.., Watcher)`),
+    /// so a `true` here is exactly the "this is a live bridge→watcher delegated
+    /// turn the watcher still owns" condition the flag used to express — without
+    /// reading the flag. The watcher-owner filter mirrors the flag's meaning:
+    /// the flag was only ever set when the watcher took over relay/finalize, so
+    /// a bridge-owned (`RelayOwnerKind::None`/non-watcher) entry must NOT make
+    /// the defer guard fire (it never did under the flag).
+    ///
+    /// Read-only: it never mutates the ledger, so it cannot affect the
+    /// exactly-once gate. On actor teardown it returns `false` (no live entry to
+    /// defer for), matching `submit_terminal`'s teardown convention.
+    pub(in crate::services::discord) async fn has_live_watcher_pending(
+        &self,
+        channel_id: ChannelId,
+        generation: u64,
+    ) -> bool {
+        let (ack, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(FinalizeMsg::QueryLivePending {
+                channel_id,
+                generation,
+                ack,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
     }
 
     /// #3041: route a three-way `CommitDelivery` through the actor so the lease
@@ -647,6 +696,23 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                             handle_terminal(&mut ledger, key, provider, event, ctx, &shared)
                                 .await;
                         let _ = ack.send(outcome);
+                    }
+                    FinalizeMsg::QueryLivePending {
+                        channel_id,
+                        generation,
+                        ack,
+                    } => {
+                        // Read-only probe: no ledger mutation, no exactly-once
+                        // interaction. Runs on the actor task so it observes a
+                        // consistent snapshot of the same map the terminal/start
+                        // handlers mutate.
+                        let live = ledger.iter().any(|(lk, e)| {
+                            lk.channel_id == channel_id
+                                && lk.generation == generation
+                                && e.phase != Phase::Finalized
+                                && e.relay_owner == RelayOwnerKind::Watcher
+                        });
+                        let _ = ack.send(live);
                     }
                     // #3041 §2-§3 P1-0 (DORMANT, UNREACHABLE today). Routing these
                     // through the actor serializes lease transitions on the finalize
@@ -1265,6 +1331,84 @@ mod tests {
                 )
                 .await;
             assert!(matches!(second, FinalizeOutcome::AlreadyFinalized));
+        })
+        .await;
+    }
+
+    /// #3016 A2: `has_live_watcher_pending` is the LEDGER authority that
+    /// replaces the in-memory `mailbox_finalize_owed` flag at the fresh-idle
+    /// defer guard. It must report a live, watcher-owned, non-finalized entry as
+    /// `true`, and flip to `false` once that entry finalizes — so the defer
+    /// guard no longer needs the flag.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn has_live_watcher_pending_tracks_ledger_not_flag() {
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            shared.global_active.store(1, Ordering::Relaxed);
+            let fin = TurnFinalizer::spawn();
+            let ch = ChannelId::new(3_016_021);
+            let generation = 0;
+            let k = TurnKey::new(ch, 7001, generation);
+
+            // No entry yet → no live pending.
+            assert!(
+                !fin.has_live_watcher_pending(ch, generation).await,
+                "no ledger entry → not pending"
+            );
+
+            // Bridge→watcher unpause handoff: register_start with the watcher
+            // owner (the LEDGER half of the old `flag store + register_start`
+            // pairing).
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            assert!(
+                fin.has_live_watcher_pending(ch, generation).await,
+                "live watcher-owned Pending entry → pending (ledger == old flag)"
+            );
+
+            // A different generation must NOT match (cross-restart isolation).
+            assert!(
+                !fin.has_live_watcher_pending(ch, generation + 1).await,
+                "different generation → not pending"
+            );
+
+            // Finalize the turn → the entry is Finalized → no longer pending.
+            let outcome = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(matches!(outcome, FinalizeOutcome::Finalized { .. }));
+            assert!(
+                !fin.has_live_watcher_pending(ch, generation).await,
+                "finalized entry → not pending (defer guard stops deferring)"
+            );
+        })
+        .await;
+    }
+
+    /// #3016 A2: a bridge-owned (non-watcher) live entry must NOT be reported as
+    /// watcher-pending — the old `mailbox_finalize_owed` flag was only ever set
+    /// when the watcher took over relay/finalize, so a bridge-owned turn must not
+    /// make the fresh-idle defer guard fire.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn has_live_watcher_pending_ignores_bridge_owned_entry() {
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            let _ = shared;
+            let fin = TurnFinalizer::spawn();
+            let ch = ChannelId::new(3_016_022);
+            let generation = 0;
+            let k = TurnKey::new(ch, 7002, generation);
+            // Registered, live, but NOT watcher-owned.
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::None);
+            assert!(
+                !fin.has_live_watcher_pending(ch, generation).await,
+                "bridge-owned (RelayOwnerKind::None) entry → not watcher-pending"
+            );
         })
         .await;
     }
