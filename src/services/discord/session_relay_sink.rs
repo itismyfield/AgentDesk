@@ -349,17 +349,21 @@ impl SinkDeliveryLeaseGuard {
         })
     }
 
-    /// SUCCESS-path commit. Called AFTER the committed offset has already been
-    /// advanced, so the watcher reconciliation reads `committed >= end` the moment
-    /// the marker clears. Compare-and-X on the full `(Sink, turn, [start,end))`
-    /// identity → a stale clear from an older turn no-ops. Drop still releases.
-    fn commit(&self) {
+    /// Terminal-decision commit. Called AFTER the committed-offset advance was
+    /// attempted; `outcome` reflects whether the advance ACTUALLY happened —
+    /// `Delivered` only when the offset advanced (so the watcher reads
+    /// `committed >= end` the moment the marker clears → Skip), `NotDelivered`
+    /// when the identity gate REFUSED the advance (the offset stayed `< end`, so
+    /// the watcher reconciliation re-sends → SendFull, no black-hole). Compare-and-X
+    /// on the full `(Sink, turn, [start,end))` identity → a stale clear from an
+    /// older turn no-ops. Drop still releases.
+    fn commit(&self, outcome: super::LeaseOutcome) {
         self.cell.commit(
             super::LeaseHolder::Sink,
             self.turn,
             self.start,
             self.end,
-            super::LeaseOutcome::Delivered,
+            outcome,
         );
     }
 }
@@ -543,7 +547,7 @@ impl SessionBoundDiscordRelaySink {
         sink_lease_guard: Option<&SinkDeliveryLeaseGuard>,
     ) {
         let fresh_inflight = super::inflight::load_inflight_state(provider, channel_id);
-        self.advance_offset_for_confirmed_delegated_terminal(
+        let advanced = self.advance_offset_for_confirmed_delegated_terminal(
             shared,
             provider,
             channel_id,
@@ -551,14 +555,23 @@ impl SessionBoundDiscordRelaySink {
             delivery,
             fresh_inflight.as_ref(),
         );
-        // #3151 CLEAR (success): advance committed FIRST (above), THEN commit the
-        // marker. Ordering matters — the instant the marker clears the watcher
-        // reconciliation must read `committed >= end` (→ Skip), never re-send into
-        // a just-cleared marker. `commit` is full-identity-gated, so a stale frame
-        // whose `(turn, range)` no longer matches the live lease no-ops. Drop on
+        // #3151 CLEAR: advance committed FIRST (above), THEN commit the marker.
+        // Ordering matters — the instant the marker clears the watcher reconciliation
+        // reads the committed offset. The commit outcome MUST reflect whether the
+        // advance ACTUALLY happened (#3159 BUG 1): if the identity gate refused the
+        // advance, the offset stayed `< end`, so committing `Delivered` would let the
+        // watcher treat the range as delivered (under-delivery / black-hole). Commit
+        // `Delivered` ONLY when `advanced` (committed >= end → Skip); otherwise commit
+        // `NotDelivered` so the watcher's committed-offset reconciliation re-sends
+        // (committed < end → SendFull). `commit` is full-identity-gated, so a stale
+        // frame whose `(turn, range)` no longer matches the live lease no-ops. Drop on
         // exit releases the lease (Committed → Unleased) regardless.
         if let Some(guard) = sink_lease_guard {
-            guard.commit();
+            guard.commit(if advanced {
+                super::LeaseOutcome::Delivered
+            } else {
+                super::LeaseOutcome::NotDelivered
+            });
         }
     }
 
@@ -570,9 +583,9 @@ impl SessionBoundDiscordRelaySink {
         session_name: &str,
         delivery: &SessionRelayDelivery,
         inflight: Option<&super::inflight::InflightTurnState>,
-    ) {
+    ) -> bool {
         let Some(end) = delivery.terminal_consumed_end.filter(|end| *end > 0) else {
-            return;
+            return false;
         };
         // IDENTITY GATE: the frame's pinned turn identity must still match the
         // channel's current inflight. A delayed frame from an already-replaced
@@ -585,7 +598,7 @@ impl SessionBoundDiscordRelaySink {
                 frame_user_msg_id = delivery.frame_turn_user_msg_id,
                 "session-bound sink: terminal frame carried a commit fence but inflight is gone; identity gate blocks advance"
             );
-            return;
+            return false;
         };
         // #3041 P1-3 (codex P1-3 issue 2 R4): STRICT `turn_start_offset` identity.
         // Two consecutive `user_msg_id == 0` turns started in the SAME second
@@ -615,7 +628,7 @@ impl SessionBoundDiscordRelaySink {
                 inflight_turn_start_offset = inflight.turn_start_offset,
                 "session-bound sink: terminal frame identity != current inflight; identity gate blocks advance (delayed/wrong-turn frame)"
             );
-            return;
+            return false;
         }
         super::tmux::advance_watcher_confirmed_end(
             shared,
@@ -625,6 +638,7 @@ impl SessionBoundDiscordRelaySink {
             end,
             "src/services/discord/session_relay_sink.rs:sink_confirmed_terminal_advance",
         );
+        true
     }
 
     async fn deliver_response(
@@ -3511,7 +3525,7 @@ mod tests {
             {
                 let guard =
                     SinkDeliveryLeaseGuard::acquire(&cell, turn, START, END).expect("acquire wins");
-                guard.commit();
+                guard.commit(LeaseOutcome::Delivered);
                 match cell.read() {
                     LeaseSnapshot::Committed {
                         holder, outcome, ..
@@ -3526,6 +3540,40 @@ mod tests {
             assert!(
                 matches!(cell.read(), LeaseSnapshot::Unleased),
                 "Drop releases the committed marker back to Unleased"
+            );
+        }
+
+        /// #3159 BUG 1: REFUSED-ADVANCE path. When the identity gate refuses the
+        /// offset advance, `advance_after_confirmed_post` commits `NotDelivered`
+        /// instead of `Delivered`. The marker is `Committed{Sink, NotDelivered}`,
+        /// which the watcher routes through committed-offset reconciliation (committed
+        /// stayed < end because the advance never ran) → SendFull. No under-delivery.
+        #[tokio::test]
+        async fn commit_not_delivered_marks_refused_advance() {
+            let ch = ChannelId::new(7306);
+            let cell = Arc::new(DeliveryLeaseCell::new(ch));
+            let turn = TurnKey::new(ch, 5, 0);
+            {
+                let guard =
+                    SinkDeliveryLeaseGuard::acquire(&cell, turn, START, END).expect("acquire wins");
+                guard.commit(LeaseOutcome::NotDelivered);
+                match cell.read() {
+                    LeaseSnapshot::Committed {
+                        holder, outcome, ..
+                    } => {
+                        assert_eq!(holder, LeaseHolder::Sink);
+                        assert_eq!(
+                            outcome,
+                            LeaseOutcome::NotDelivered,
+                            "a refused advance must commit NotDelivered, not Delivered"
+                        );
+                    }
+                    other => panic!("expected Committed{{Sink, NotDelivered}}, got {other:?}"),
+                }
+            }
+            assert!(
+                matches!(cell.read(), LeaseSnapshot::Unleased),
+                "Drop releases the NotDelivered marker back to Unleased"
             );
         }
 
