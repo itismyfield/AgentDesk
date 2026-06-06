@@ -306,7 +306,7 @@
     (incl. id==0 external/injected) NOT adopted/edited, in-range id==0
     watcher-direct STILL adopts+edits (over-suppression guard), and in-range id!=0
     unchanged.
-  - `src/services/discord/tui_prompt_relay.rs` (4745 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (4767 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3167: the self-paced TUI loop relay
     starts its synthetic turn with `ActiveTurnKind::Background` so a queued user

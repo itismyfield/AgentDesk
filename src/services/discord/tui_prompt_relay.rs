@@ -4114,11 +4114,17 @@ pub(super) async fn complete_tui_direct_anchor_lifecycle_for_inflight(
 /// anchor-completion gate. So the precise overtake signal for THIS turn is BOTH:
 ///   1. the watermark strictly increased (a commit happened in the window), AND
 ///   2. `own_external_input_lease_consumed` — THIS turn's recorded lease generation
-///      is no longer the present lease, i.e. the committing turn was OURS, not an
-///      unrelated same-channel turn.
+///      is ABSENT (the watcher's generation-matched clear removed our entry), i.e.
+///      the committing turn was OURS, not an unrelated same-channel turn AND not a
+///      newer turn that merely OVERWROTE our lease (#3193 codex R3: a newer same-key
+///      lease replacing ours during our notify/POST window leaves a DIFFERENT
+///      generation present, which is NOT consumed → see
+///      `external_input_lease_was_consumed`).
 /// An unrelated commit advances the watermark (1) but leaves our lease generation
-/// present (2 is false) → no trigger → no false-positive. Equal watermark (the
-/// common case: watcher not yet committed) → no overtake regardless of (2).
+/// present (2 is false) → no trigger → no false-positive. A newer turn replacing
+/// our lease also leaves a (different) generation present (2 is false) → no trigger.
+/// Equal watermark (the common case: watcher not yet committed) → no overtake
+/// regardless of (2).
 fn relay_watcher_overtook_anchor_record(
     committed_before_relay: u64,
     committed_after_anchor: u64,
@@ -4127,19 +4133,31 @@ fn relay_watcher_overtook_anchor_record(
     committed_after_anchor > committed_before_relay && own_external_input_lease_consumed
 }
 
-/// #3193 codex GATE_FAIL fix: pure decision for whether THIS turn's own
-/// external-input lease (identified by its UNIQUE recorded `generation`) has been
-/// consumed — i.e. is no longer the lease currently present for
-/// `(provider, tmux_session, channel)`. `present_generation` is the generation of
-/// the lease the state map holds NOW (the post-anchor re-read), or `None` if no
-/// lease is present.
+/// #3193 codex GATE_FAIL fix (R3, decisive): pure decision for whether THIS turn's
+/// own external-input lease (identified by its UNIQUE recorded `generation`) was
+/// consumed by the WATCHER committing THIS turn — i.e. the watcher's
+/// generation-MATCHED clear
+/// (`clear_external_input_relay_lease_if_generation_matches`) removed exactly our
+/// entry. `present_generation` is the generation of the lease the state map holds
+/// NOW (the post-anchor re-read), or `None` if no lease is present.
 ///
-/// "Consumed" is true when the present lease is gone (`None`) OR carries a
-/// DIFFERENT generation than ours — both mean the watcher (or a superseding turn)
-/// cleared/replaced the exact lease THIS turn recorded. The watcher clears a
-/// turn's lease by its generation EXACTLY on the commit pass for that turn, so this
-/// is the per-turn binding that distinguishes our own overtake from an unrelated
-/// same-channel commit (which leaves our generation present → returns `false`).
+/// "Consumed" is true ONLY when the present lease is ABSENT (`None`). The watcher's
+/// generation-matched clear `remove`s the entry from the map (it does NOT leave an
+/// `Unassigned` sentinel behind), so our generation being GONE is the exact
+/// per-turn signal that the watcher committed OUR turn.
+///
+/// A DIFFERENT (newer) generation being present must return `false`: per #3193
+/// codex R3, a NEWER same-key external-input lease can be RECORDED (a new, distinct
+/// generation) while THIS older relay is still awaiting notify/POST — see the guard
+/// tests `..._preserves_newer_unassigned` / no-clobber tests in `tui_prompt_dedupe`
+/// that explicitly allow newer same-key leases to coexist with an older awaiting
+/// relay. In that case our generation is gone because a newer turn OVERWROTE the
+/// lease, NOT because the watcher generation-matched-cleared OUR turn. Treating a
+/// different-generation-present as "consumed" reintroduces the false-positive:
+/// newer-turn-replaces-lease + watermark-increase would falsely trigger the
+/// ⏳-removal/✅. Keying strictly on ABSENT (`None`) ties the trigger to the
+/// watcher clearing THIS turn's own generation and nothing else.
+///
 /// `own_generation == UNRECORDED` (0) means our lease was never recorded, so there
 /// is nothing of ours to have been consumed → `false`.
 fn external_input_lease_was_consumed(own_generation: u64, present_generation: Option<u64>) -> bool {
@@ -4148,7 +4166,11 @@ fn external_input_lease_was_consumed(own_generation: u64, present_generation: Op
     {
         return false;
     }
-    present_generation != Some(own_generation)
+    // Consumed ONLY when our recorded generation is ABSENT/cleared (the watcher's
+    // generation-matched clear removed the entry). A present-but-DIFFERENT
+    // generation means a newer turn replaced the lease, not our watcher commit
+    // (#3193 codex R3) → NOT consumed.
+    present_generation.is_none()
 }
 
 /// #3193 codex GATE_FAIL fix: runtime adapter that reads the lease state map NOW
@@ -5726,20 +5748,29 @@ mod tests {
         assert!(!relay_watcher_overtook_anchor_record(0, 999, false));
     }
 
-    // #3193 codex GATE_FAIL fix: the per-turn lease-consumption predicate that backs
-    // the trigger binding. "Consumed" means the lease present NOW is no longer THIS
-    // turn's recorded generation — either gone (the watcher cleared it on OUR commit)
-    // or replaced by a different generation (a superseding turn). A present lease
-    // that STILL carries our own generation is NOT consumed: that is the unrelated-
-    // commit / not-yet-committed case that must NOT trigger the re-check.
+    // #3193 codex GATE_FAIL fix (R3, decisive): the per-turn lease-consumption
+    // predicate that backs the trigger binding. "Consumed" means the watcher
+    // generation-MATCHED-cleared THIS turn's recorded lease — which `remove`s the
+    // entry, so our generation is ABSENT (`None`) on the re-read. A present lease is
+    // NEVER "consumed", regardless of generation:
+    //   - same generation → unrelated commit / not yet committed.
+    //   - DIFFERENT (newer) generation → a newer same-key turn RECORDED a fresh lease
+    //     while THIS older relay is still awaiting notify/POST (the dedupe guard tests
+    //     explicitly allow this). Our generation is gone because a newer turn
+    //     OVERWROTE the lease, NOT because the watcher committed OUR turn. Treating
+    //     this as "consumed" reintroduces the #3193 false-positive, so it must be
+    //     `false`.
     #[test]
     fn external_input_lease_consumption_is_bound_to_own_generation() {
         // Our generation still present → not consumed (unrelated commit / pre-commit).
         assert!(!external_input_lease_was_consumed(42, Some(42)));
-        // Our lease gone (watcher cleared it on OUR commit) → consumed.
+        // Our lease gone (the watcher's generation-matched clear removed OUR entry on
+        // OUR commit) → consumed.
         assert!(external_input_lease_was_consumed(42, None));
-        // A DIFFERENT generation present (a superseding newer turn) → ours consumed.
-        assert!(external_input_lease_was_consumed(42, Some(43)));
+        // A DIFFERENT (newer) generation present (a newer turn REPLACED our lease,
+        // NOT our watcher commit) → NOT consumed. #3193 codex R3: this is the
+        // false-positive that the predicate must reject.
+        assert!(!external_input_lease_was_consumed(42, Some(43)));
         // An UNRECORDED own generation (our lease was never recorded) → nothing of
         // ours to consume, regardless of what is present.
         assert!(!external_input_lease_was_consumed(
@@ -5750,6 +5781,37 @@ mod tests {
             crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
             Some(7),
         ));
+    }
+
+    // #3193 codex GATE_FAIL fix (R3): the decisive false-positive guard. A NEWER
+    // same-key external-input lease can be RECORDED (a fresh, distinct generation)
+    // while THIS older relay is still awaiting notify/POST — the dedupe guard tests
+    // (`clear_external_input_relay_lease_if_generation_matches_preserves_newer_unassigned`)
+    // explicitly allow this. If that newer-turn replacement also coincides with the
+    // per-CHANNEL watermark advancing (`committed_after > committed_before`), the
+    // OLD bind (different-generation-present == "consumed") would FALSELY trigger the
+    // re-check and remove OUR `⏳` / post `✅` for a turn the watcher never committed.
+    // Keying "consumed" strictly on our generation being ABSENT closes this: a
+    // newer/different generation present → NOT consumed → no trigger.
+    #[test]
+    fn relay_does_not_recheck_when_newer_turn_replaced_lease() {
+        // own generation 42; a newer turn replaced the lease (generation 43 present).
+        let own_generation = 42_u64;
+        let newer_generation_present = Some(43_u64);
+        // The newer-turn replacement is NOT a consumption of OUR lease.
+        let own_lease_consumed =
+            external_input_lease_was_consumed(own_generation, newer_generation_present);
+        assert!(
+            !own_lease_consumed,
+            "a newer same-key lease replacing ours is NOT our watcher commit"
+        );
+        // Even WITH the watermark advanced, the composite trigger must be false:
+        // newer-turn-replaces-lease + watermark-increase must NOT fire the re-check.
+        assert!(
+            !relay_watcher_overtook_anchor_record(100, 240, own_lease_consumed),
+            "newer-turn lease replacement during the notify/POST window must not \
+             falsely trigger the ⏳-removal/✅ (#3193 codex R3)"
+        );
     }
 
     // #3174 (ported from #3164 codex R3): identity guard for the relay re-check's
