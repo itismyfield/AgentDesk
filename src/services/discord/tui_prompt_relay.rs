@@ -664,12 +664,12 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     } else {
         // #3178 (codex fix): a SlashCommandControl (/loop, /compact, the expanded
         // <command-*> wrapper, or the Compacted stdout) is a FULL active turn now,
-        // so it posts an anchor + ⏳ + synthetic inflight like HumanTuiDirect. But
-        // its anchor CONTENT is a kind-only neutral note (never the raw /loop args,
-        // the <command-*> wrapper, or the Compacted stdout body). This is the
-        // highest-priority content arm so the machine slash payload is never
-        // disclosed. (The #3153 duplicate half was already dropped before any lease
-        // record at the top of this function.)
+        // so it posts an anchor + ⏳ + synthetic inflight like HumanTuiDirect. Its
+        // anchor CONTENT carries the /loop directive body (the operator wants the
+        // recurring loop content visible — only the #3153 double-post is deduped,
+        // not the content) but NEVER the <command-*> wrapper boilerplate or the
+        // Compacted stdout body. (The #3153 duplicate half was already dropped
+        // before any lease record at the top of this function.)
         // #3075: a `<task-notification>` auto-turn is a MACHINE event — render it
         // as a compact structured card and DEDUPE repeats by task-id (a repeat
         // edits its live card or drops as a no-op → no new ⏳/turn; the first
@@ -677,7 +677,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         // keeps the raw render; SystemContinuation is handled above (#3100).
         let content = if matches!(injected_class, InjectedPromptClass::SlashCommandControl) {
             let kind = slash_command_control_kind(&prompt.prompt);
-            format_slash_command_control_note(&prompt.tmux_session_name, &kind)
+            format_slash_command_control_note(&prompt.tmux_session_name, &kind, &prompt.prompt)
         } else if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
             match super::tui_task_card::resolve_task_card_content(
                 &notify_http,
@@ -4389,23 +4389,77 @@ fn slash_command_control_kind(prompt: &str) -> String {
 
 /// #3178: neutral note for a machine slash-command control echo (#3153 trigger).
 ///
-/// Unlike [`format_system_continuation_note`] / [`format_ssh_direct_prompt_notification`]
-/// this NEVER renders the raw prompt body (no `/loop 5m /foo` args, no
-/// `<command-*>` wrapper, no `Compacted …` stdout) — only WHICH machine command
-/// kind ran, so the following `✅ 응답 완료` card has a visible, meaningful
-/// anchor without leaking the injected payload. It is a passive session event,
-/// not an active human turn.
-fn format_slash_command_control_note(tmux_session_name: &str, kind: &str) -> String {
+/// `/loop` is special: the recurring directive body IS the human-authored content
+/// the operator wants to see (only the #3153 double-post is deduped, NOT the
+/// content), so its note carries a preview of the loop body via
+/// [`extract_loop_body`]. Every OTHER machine command (`/compact`, the expanded
+/// `<command-*>` wrapper of a non-loop command, the `Compacted …` stdout) keeps a
+/// kind-only note — its payload is machine noise, not an operator directive — so
+/// the following `✅ 응답 완료` card still has a visible anchor without leaking it.
+/// It is a passive session event, not an active human turn.
+fn format_slash_command_control_note(
+    tmux_session_name: &str,
+    kind: &str,
+    raw_prompt: &str,
+) -> String {
     let label = match kind {
         "/loop" => "🔁 자동 점검(/loop)",
         "/compact" => "🧹 컨텍스트 정리(/compact)",
         _ => "⚙️ 머신 슬래시 명령",
     };
-    format!(
+    let header = format!(
         "{} (tmux : `{}`) — 시스템 주입 (활성 턴 아님)",
         label,
         sanitize_inline_code(tmux_session_name),
-    )
+    );
+    if kind == "/loop" {
+        if let Some(body) = extract_loop_body(raw_prompt) {
+            let preview = truncate_chars(body.trim(), SSH_DIRECT_PROMPT_PREVIEW_LIMIT)
+                .replace("```", "` ` `");
+            if !preview.is_empty() {
+                return format!("{header}:\n```text\n{preview}\n```");
+            }
+        }
+    }
+    header
+}
+
+/// Pull the human-facing `/loop` directive body from either injection half — the
+/// raw echo (`/loop <body>`) or the expanded Claude Code wrapper
+/// (`<command-args>…</command-args>`). Returns `None` when no body is recoverable
+/// so [`format_slash_command_control_note`] falls back to the kind-only header.
+/// Only the loop ARGS are returned — never the trailing skill markdown the
+/// wrapper appends after `</command-args>`.
+fn extract_loop_body(prompt: &str) -> Option<String> {
+    let normalized = strip_terminal_controls(prompt);
+    let normalized = normalized.trim_start();
+    let normalized = strip_leading_injection_wrapper(normalized);
+    let normalized = normalized.trim_start();
+    // Expanded wrapper: the directive lives in <command-args>…</command-args>;
+    // take only that block so the appended skill body never reaches the note.
+    // The CLOSING tag is REQUIRED: an unterminated `<command-args>` (no
+    // `</command-args>`) must NOT spill the trailing skill markdown into the note,
+    // so fall through to the raw-echo / kind-only path instead of returning the
+    // whole tail.
+    if let Some(start) = normalized.find("<command-args>") {
+        let after = &normalized[start + "<command-args>".len()..];
+        if let Some((body, _rest)) = after.split_once("</command-args>") {
+            let body = body.trim();
+            if !body.is_empty() {
+                return Some(body.to_string());
+            }
+        }
+    }
+    // Raw echo: `/loop <body>`.
+    for prefix in ["/loop ", "/loop\t"] {
+        if let Some(rest) = normalized.strip_prefix(prefix) {
+            let body = rest.trim();
+            if !body.is_empty() {
+                return Some(body.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// #3178 (codex fix): the slash-command-control DEDUPE gate, evaluated BEFORE any
@@ -5005,12 +5059,18 @@ mod tests {
         assert_eq!(slash_command_control_kind(wrapped_loop), "/loop");
     }
 
-    // #3178: the note shows only the command KIND and the tmux session — never
-    // the raw prompt body (no `/loop 5m /foo` args, no `<command-*>` wrapper, no
-    // `Compacted …` stdout), and marks it as a non-active system injection.
+    // The note always names the command KIND + tmux session and marks the
+    // injection non-active. `/loop` ALSO carries its directive body (operator
+    // wants the recurring loop content visible). Every OTHER machine command
+    // (`/compact`, the `Compacted …` stdout) stays kind-only and never leaks its
+    // payload.
     #[test]
-    fn slash_command_control_note_shows_kind_only_no_raw_body() {
-        let loop_note = format_slash_command_control_note("sess-a", "/loop");
+    fn slash_command_control_note_loop_shows_body_others_kind_only() {
+        let loop_note = format_slash_command_control_note(
+            "sess-a",
+            "/loop",
+            "/loop 290s relay check directive",
+        );
         assert!(
             loop_note.contains("/loop"),
             "note must name the command kind"
@@ -5018,11 +5078,53 @@ mod tests {
         assert!(loop_note.contains("sess-a"));
         assert!(loop_note.contains("활성 턴 아님"), "must mark non-active");
         assert!(
-            !loop_note.contains("5m /foo"),
-            "note must NOT leak the raw prompt body",
+            loop_note.contains("290s relay check directive"),
+            "the /loop note MUST carry the directive body",
         );
 
-        let compact_note = format_slash_command_control_note("sess-a", "/compact");
+        // The expanded wrapper half exposes only the <command-args> block, never
+        // the trailing skill markdown the wrapper appends.
+        let wrapped = format_slash_command_control_note(
+            "sess-a",
+            "/loop",
+            "<command-name>/loop</command-name>\n<command-args>watch the relay</command-args>\n# /loop — schedule\nSKILL BODY LEAK",
+        );
+        assert!(
+            wrapped.contains("watch the relay"),
+            "the /loop note MUST carry the wrapped directive body",
+        );
+        assert!(
+            !wrapped.contains("SKILL BODY LEAK"),
+            "the /loop note must NOT leak the trailing skill markdown",
+        );
+
+        // An UNTERMINATED wrapper (no closing </command-args>) must NOT spill the
+        // trailing skill markdown — the closing tag is required, so it falls back
+        // to kind-only rather than rendering the whole tail.
+        let unterminated = format_slash_command_control_note(
+            "sess-a",
+            "/loop",
+            "<command-name>/loop</command-name>\n<command-args>watch the relay\n# /loop — schedule\nSKILL BODY LEAK",
+        );
+        assert!(
+            !unterminated.contains("SKILL BODY LEAK"),
+            "unterminated wrapper must NOT leak the trailing skill markdown",
+        );
+        assert!(
+            !unterminated.contains("```"),
+            "unterminated wrapper falls back to the kind-only header",
+        );
+
+        // A bodyless /loop gracefully degrades to the kind-only header.
+        let bare = format_slash_command_control_note("sess-a", "/loop", "/loop");
+        assert!(bare.contains("/loop") && bare.contains("활성 턴 아님"));
+        assert!(!bare.contains("```"), "bodyless /loop has no preview block");
+
+        let compact_note = format_slash_command_control_note(
+            "sess-a",
+            "/compact",
+            "<local-command-stdout>Compacted 12 messages</local-command-stdout>",
+        );
         assert!(compact_note.contains("/compact"));
         assert!(
             !compact_note.contains("Compacted"),
