@@ -797,6 +797,11 @@ pub(crate) struct ChannelMailboxSnapshot {
     pub(crate) cancel_token: Option<Arc<CancelToken>>,
     pub(crate) active_request_owner: Option<UserId>,
     pub(crate) active_user_message_id: Option<MessageId>,
+    /// #3167 — priority class of the active-turn slot. `UserOrAgent` (default)
+    /// when idle or carrying a real user/agent turn; `Background` while a
+    /// monitor relay / self-paced TUI loop owns the slot. Lets the kickoff
+    /// snapshot gate treat a background turn as non-blocking.
+    pub(crate) active_turn_kind: ActiveTurnKind,
     pub(crate) intervention_queue: Vec<Intervention>,
     pub(crate) recovery_started_at: Option<Instant>,
     /// #1031: wall-clock instant the current active turn began (UTC). Set by
@@ -1080,17 +1085,60 @@ impl ChannelMailboxHandle {
         .await
     }
 
+    /// #3167 — atomically cancel the active turn IFF it is a *background* turn
+    /// (monitor relay / self-paced TUI loop). Returns `true` ONLY when this call
+    /// performs a NEW cancel (a background turn held the slot and was not already
+    /// cancelling); returns `false` when the slot is idle, holds a real
+    /// user/agent turn (left untouched), OR already holds an already-cancelling
+    /// background turn (no-op). #3167 BLOCKER-1: the already-cancelling `false`
+    /// is what stops the caller's immediate re-kick from hot-looping while the
+    /// background finalizer drains the slot. Replaces the racy
+    /// `active_turn_kind()`-read-then-`cancel_active_turn_with_reason()`
+    /// sequence in the idle-queue dequeue gate: the actor observes the kind
+    /// check and the cancel flip as one serialized step, so a real user turn
+    /// that starts after the background turn finalizes is never aborted by a
+    /// stale supersede.
+    pub(crate) async fn cancel_active_background_turn_if_current(&self) -> bool {
+        self.request(
+            |reply| ChannelMailboxMsg::CancelActiveBackgroundTurnIfCurrent { reply },
+            false,
+        )
+        .await
+    }
+
     pub(crate) async fn try_start_turn(
         &self,
         cancel_token: Arc<CancelToken>,
         request_owner: UserId,
         user_message_id: MessageId,
     ) -> bool {
+        // #3167 — default callers claim the slot as a real user/agent turn.
+        self.try_start_turn_kinded(
+            cancel_token,
+            request_owner,
+            user_message_id,
+            ActiveTurnKind::UserOrAgent,
+        )
+        .await
+    }
+
+    /// #3167 — kinded variant of [`Self::try_start_turn`]. The monitor
+    /// auto-turn and the self-paced TUI loop pass `ActiveTurnKind::Background`
+    /// so a queued external USER intervention is not perpetually deferred
+    /// behind the continuously-cycling background turn.
+    pub(crate) async fn try_start_turn_kinded(
+        &self,
+        cancel_token: Arc<CancelToken>,
+        request_owner: UserId,
+        user_message_id: MessageId,
+        turn_kind: ActiveTurnKind,
+    ) -> bool {
         self.request(
             |reply| ChannelMailboxMsg::TryStartTurn {
                 cancel_token,
                 request_owner,
                 user_message_id,
+                turn_kind,
                 reply,
             },
             false,
@@ -1104,17 +1152,58 @@ impl ChannelMailboxHandle {
         request_owner: UserId,
         user_message_id: MessageId,
     ) {
+        // #3167 — default restore re-binds a real user/agent turn.
+        self.restore_active_turn_kinded(
+            cancel_token,
+            request_owner,
+            user_message_id,
+            ActiveTurnKind::UserOrAgent,
+        )
+        .await;
+    }
+
+    /// #3167 — kinded variant of [`Self::restore_active_turn`]. Preserves the
+    /// background classification across a restore so the dequeue gates stay
+    /// background-aware after a re-bind.
+    pub(crate) async fn restore_active_turn_kinded(
+        &self,
+        cancel_token: Arc<CancelToken>,
+        request_owner: UserId,
+        user_message_id: MessageId,
+        turn_kind: ActiveTurnKind,
+    ) {
         let _ = self
             .request(
                 |reply| ChannelMailboxMsg::RestoreActiveTurn {
                     cancel_token,
                     request_owner,
                     user_message_id,
+                    turn_kind,
                     reply,
                 },
                 (),
             )
             .await;
+    }
+
+    /// #3167 — current active-turn kind, or `None` when the channel is idle
+    /// (no `cancel_token`). Lets the dequeue path detect a background turn
+    /// holding the slot so it can cancel-then-redispatch instead of starving
+    /// a queued user intervention.
+    pub(crate) async fn active_turn_kind(&self) -> Option<ActiveTurnKind> {
+        self.request(|reply| ChannelMailboxMsg::ActiveTurnKind { reply }, None)
+            .await
+    }
+
+    /// #3167 — true only when a *real* (non-background) active turn holds the
+    /// slot. Distinct from [`Self::has_active_turn`], which reports any active
+    /// turn (background included) and whose semantics 30+ callers rely on.
+    pub(crate) async fn has_blocking_active_turn(&self) -> bool {
+        self.request(
+            |reply| ChannelMailboxMsg::HasBlockingActiveTurn { reply },
+            false,
+        )
+        .await
     }
 
     pub(crate) async fn recovery_kickoff(
@@ -1720,6 +1809,14 @@ enum ChannelMailboxMsg {
     HasActiveTurn {
         reply: oneshot::Sender<bool>,
     },
+    /// #3167 — true only when a non-background active turn holds the slot.
+    HasBlockingActiveTurn {
+        reply: oneshot::Sender<bool>,
+    },
+    /// #3167 — current active-turn kind, or `None` when the channel is idle.
+    ActiveTurnKind {
+        reply: oneshot::Sender<Option<ActiveTurnKind>>,
+    },
     CancelToken {
         reply: oneshot::Sender<Option<Arc<CancelToken>>>,
     },
@@ -1750,16 +1847,32 @@ enum ChannelMailboxMsg {
         reason: String,
         reply: oneshot::Sender<CancelActiveTurnResult>,
     },
+    /// #3167 — atomic, kind-guarded cancel of a *background* active turn. The
+    /// idle-queue dequeue gate uses this to supersede a background relay/loop
+    /// turn without the TOCTOU window of a separate `active_turn_kind()` read
+    /// followed by an unguarded cancel: between that read and the cancel the
+    /// background turn could finalize and a real user turn start, and the
+    /// unguarded cancel would then abort the real turn. The actor performs the
+    /// `is_background` check and the cancel flip as a single serialized step.
+    /// Replies `true` when a background turn was cancelled, `false` otherwise
+    /// (idle slot, or a real user/agent turn holds the slot — left untouched).
+    CancelActiveBackgroundTurnIfCurrent {
+        reply: oneshot::Sender<bool>,
+    },
     TryStartTurn {
         cancel_token: Arc<CancelToken>,
         request_owner: UserId,
         user_message_id: MessageId,
+        /// #3167 — priority class to record on the success branch.
+        turn_kind: ActiveTurnKind,
         reply: oneshot::Sender<bool>,
     },
     RestoreActiveTurn {
         cancel_token: Arc<CancelToken>,
         request_owner: UserId,
         user_message_id: MessageId,
+        /// #3167 — priority class to record on the restored slot.
+        turn_kind: ActiveTurnKind,
         reply: oneshot::Sender<()>,
     },
     RecoveryKickoff {
@@ -1863,12 +1976,63 @@ enum ChannelMailboxMsg {
     },
 }
 
+/// #3167 — priority class of the mailbox active-turn slot. Lets the external-input
+/// dequeue distinguish a low-priority background relay (monitor terminal-output relay,
+/// self-paced TUI loop) from a real user/agent turn, so a queued external USER
+/// intervention is not perpetually deferred behind a continuously-cycling background turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ActiveTurnKind {
+    #[default]
+    UserOrAgent,
+    Background,
+}
+impl ActiveTurnKind {
+    pub(crate) fn is_background(self) -> bool {
+        matches!(self, ActiveTurnKind::Background)
+    }
+}
+
+/// #3167 BLOCKER-2 safety valve — max consecutive `Background` starts refused
+/// SOLELY because a dequeued-but-not-yet-claimed user dispatch holds the
+/// `pending_user_dispatch` reservation (the queue is already empty). After this
+/// many refusals with no intervening user claim/requeue, the reservation is
+/// force-cleared so a lost/never-claimed dequeue cannot permanently lock out
+/// `Background` turns. Bounded + reset on every (re)set/claim/requeue ⇒
+/// provably non-permanent.
+const PENDING_USER_DISPATCH_MAX_YIELDS: u32 = 5;
+
 #[derive(Default)]
 struct ChannelMailboxState {
     cancel_token: Option<Arc<CancelToken>>,
     active_request_owner: Option<UserId>,
     active_user_message_id: Option<MessageId>,
+    /// #3167 — priority class of the active-turn slot. `UserOrAgent` (default)
+    /// for a real user/agent turn; `Background` for a monitor terminal-output
+    /// relay or self-paced TUI loop turn. Reset to default wherever the
+    /// active-turn anchor is cleared.
+    active_turn_kind: ActiveTurnKind,
     intervention_queue: Vec<Intervention>,
+    /// #3167 BLOCKER-2 — reservation that closes the dequeue→claim starvation
+    /// window. `TakeNextSoft` REMOVES the queued head before the dequeued
+    /// UserOrAgent turn actually claims the slot (the claim happens later, in
+    /// `intake_turn`, after async kickoff cleanup). During that window the
+    /// `intervention_queue` is empty, so a `Background` `TryStartTurn` would
+    /// otherwise acquire the freed slot AHEAD of the in-flight user turn. While
+    /// `Some`, a `Background` start yields exactly as it does for a non-empty
+    /// queue. Set when `TakeNextSoft` hands out a head for dispatch; cleared
+    /// when a `UserOrAgent` turn claims the slot, when the reserved id is
+    /// re-enqueued/requeued (dispatch failed → queue-non-empty then covers it),
+    /// or by the bounded safety valve below.
+    pending_user_dispatch: Option<MessageId>,
+    /// #3167 BLOCKER-2 SAFETY VALVE — consecutive `Background` starts refused
+    /// SOLELY because of `pending_user_dispatch` (the queue is already empty).
+    /// If a dequeued user turn is lost and never claims nor requeues, the
+    /// reservation would otherwise lock `Background` out forever. After
+    /// `PENDING_USER_DISPATCH_MAX_YIELDS` such refusals with no intervening
+    /// user claim/requeue, the reservation is force-cleared. Reset to 0 whenever
+    /// the reservation is (re)set or a user claim/requeue clears it ⇒ the valve
+    /// is bounded and provably non-permanent.
+    pending_user_dispatch_yield_count: u32,
     last_persistence: Option<QueuePersistenceContext>,
     recovery_started_at: Option<Instant>,
     /// #1031: see `ChannelMailboxSnapshot::turn_started_at`. Mirrors the
@@ -2013,6 +2177,8 @@ fn finalize_turn_state(
     let removed_token = state.cancel_token.take();
     state.active_request_owner = None;
     state.active_user_message_id = None;
+    // #3167 — clear the priority class with the rest of the active-turn anchor.
+    state.active_turn_kind = ActiveTurnKind::default();
     state.recovery_started_at = None;
     state.turn_started_at = None;
     reset_watchdog_extension_state(state);
@@ -2201,6 +2367,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         cancel_token: state.cancel_token.clone(),
                         active_request_owner: state.active_request_owner,
                         active_user_message_id: state.active_user_message_id,
+                        active_turn_kind: state.active_turn_kind,
                         intervention_queue: state.intervention_queue.clone(),
                         recovery_started_at: state.recovery_started_at,
                         turn_started_at: state.turn_started_at,
@@ -2208,6 +2375,18 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 }
                 ChannelMailboxMsg::HasActiveTurn { reply } => {
                     let _ = reply.send(state.cancel_token.is_some());
+                }
+                ChannelMailboxMsg::HasBlockingActiveTurn { reply } => {
+                    // #3167 — a background turn (monitor relay / TUI loop)
+                    // does not block dequeuing a queued user intervention.
+                    let _ = reply.send(
+                        state.cancel_token.is_some() && !state.active_turn_kind.is_background(),
+                    );
+                }
+                ChannelMailboxMsg::ActiveTurnKind { reply } => {
+                    // #3167 — `None` when idle; otherwise the slot's kind.
+                    let kind = state.cancel_token.as_ref().map(|_| state.active_turn_kind);
+                    let _ = reply.send(kind);
                 }
                 ChannelMailboxMsg::CancelToken { reply } => {
                     let _ = reply.send(state.cancel_token.clone());
@@ -2354,19 +2533,121 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         already_stopping,
                     });
                 }
+                ChannelMailboxMsg::CancelActiveBackgroundTurnIfCurrent { reply } => {
+                    // #3167 — atomic, kind-guarded supersede. ONLY cancel when
+                    // a background turn currently holds the slot; a real
+                    // user/agent turn (or an idle slot) is left untouched. This
+                    // closes the TOCTOU window the previous dequeue gate had: it
+                    // read `active_turn_kind()` and THEN sent a separate
+                    // unguarded `cancel_active_turn_with_reason()`, so between
+                    // the read and the cancel the background turn could finalize
+                    // and a real user turn start — and the cancel would abort
+                    // the real turn. Doing the `is_background` check and the
+                    // cancel flip in one serialized actor step removes that gap.
+                    //
+                    // Cancel semantics mirror `CancelActiveTurnWithReason`
+                    // exactly: set the reason, flip `cancelled`, and leave the
+                    // slot-release to the background turn's own
+                    // identity-guarded finalizer (the slot is NOT cleared here).
+                    //
+                    // #3167 BLOCKER-1 — reply `true` ONLY when this step performs
+                    // a NEW cancel: a background token is present AND it is not
+                    // already cancelled/stopping. If the background token is
+                    // ALREADY cancelling, this is a no-op and we reply `false`.
+                    // Rationale: the mod.rs caller schedules an immediate re-kick
+                    // on `true`. If we replied `true` for an already-cancelling
+                    // slot, each re-kick would re-observe the same already-
+                    // cancelled slot (the finalizer has not released it yet),
+                    // reply `true`, and spawn yet another immediate re-kick — a
+                    // HOT-LOOP/LIVELOCK. On `false` the caller spawns NO new
+                    // re-kick and falls through to the normal dequeue/await path;
+                    // the existing deferred-retry cadence (queue_io.rs, ~2s) waits
+                    // for the background finalizer to release the slot.
+                    let is_background_active =
+                        state.cancel_token.is_some() && state.active_turn_kind.is_background();
+                    let newly_cancelled = if is_background_active {
+                        match state.cancel_token.as_ref() {
+                            Some(token)
+                                if !token.cancelled.load(std::sync::atomic::Ordering::Relaxed) =>
+                            {
+                                token.set_cancel_source(
+                                    "idle_queue_user_supersede_background".to_string(),
+                                );
+                                token
+                                    .cancelled
+                                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                                true
+                            }
+                            // Already cancelling (or, defensively, no token): no-op.
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    };
+                    let _ = reply.send(newly_cancelled);
+                }
                 ChannelMailboxMsg::TryStartTurn {
                     cancel_token,
                     request_owner,
                     user_message_id,
+                    turn_kind,
                     reply,
                 } => {
-                    let started = if state.cancel_token.is_some() {
+                    // #3167 BLOCKER-2 — background yields to a queued backlog AND
+                    // to a reserved dequeue→claim window. The start rule used to
+                    // only check `cancel_token.is_some()`. After a background
+                    // finalizer releases the slot, another background cycle
+                    // (monitor relay / self-paced TUI loop) could win the race
+                    // for the freed slot AHEAD of the deferred kickoff that
+                    // drains a queued user intervention — starving the user
+                    // indefinitely. Refuse a Background start whenever a backlog
+                    // is already queued, OR while a `pending_user_dispatch`
+                    // reservation is live: `TakeNextSoft` REMOVES the queued
+                    // head before the dequeued user turn actually claims the
+                    // slot, leaving an EMPTY queue during that window — without
+                    // the reservation a Background start would slip in and
+                    // race-win ahead of the user. A `false` return is the
+                    // background callers' normal lost-race path (they do not
+                    // error or hot-spin; the watcher relays terminal output
+                    // independently of the mailbox slot, so no output is
+                    // dropped). UserOrAgent starts are UNCHANGED.
+                    let queue_non_empty = !state.intervention_queue.is_empty();
+                    let reservation_held = state.pending_user_dispatch.is_some();
+                    let background_yields = turn_kind == ActiveTurnKind::Background
+                        && (queue_non_empty || reservation_held);
+                    // SAFETY VALVE: only the dequeue→claim window (queue empty,
+                    // reservation held) can deadlock if the dequeued user turn is
+                    // lost. Count those refusals; a queue-backed refusal is a real
+                    // backlog and is never counted. After N consecutive
+                    // reservation-only refusals, drop the (possibly stale)
+                    // reservation so Background can proceed next time.
+                    if background_yields && !queue_non_empty && reservation_held {
+                        state.pending_user_dispatch_yield_count += 1;
+                        if state.pending_user_dispatch_yield_count
+                            >= PENDING_USER_DISPATCH_MAX_YIELDS
+                        {
+                            state.pending_user_dispatch = None;
+                            state.pending_user_dispatch_yield_count = 0;
+                        }
+                    }
+                    let started = if state.cancel_token.is_some() || background_yields {
                         false
                     } else {
                         reset_turn_finished_signal(channel_id);
                         state.cancel_token = Some(cancel_token);
                         state.active_request_owner = Some(request_owner);
                         state.active_user_message_id = Some(user_message_id);
+                        // #3167 — record the slot's priority class so the
+                        // dequeue gates can treat a background turn as
+                        // non-blocking.
+                        state.active_turn_kind = turn_kind;
+                        // #3167 BLOCKER-2 — a real (UserOrAgent) turn claiming the
+                        // slot satisfies any reserved dequeue→claim window: clear
+                        // the reservation and reset the valve counter.
+                        if turn_kind == ActiveTurnKind::UserOrAgent {
+                            state.pending_user_dispatch = None;
+                            state.pending_user_dispatch_yield_count = 0;
+                        }
                         state.recovery_started_at = None;
                         state.turn_started_at = Some(Utc::now());
                         reset_watchdog_extension_state(&mut state);
@@ -2378,6 +2659,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     cancel_token,
                     request_owner,
                     user_message_id,
+                    turn_kind,
                     reply,
                 } => {
                     reset_turn_finished_signal(channel_id);
@@ -2385,6 +2667,8 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     state.cancel_token = Some(cancel_token);
                     state.active_request_owner = Some(request_owner);
                     state.active_user_message_id = Some(user_message_id);
+                    // #3167 — preserve the priority class across the re-bind.
+                    state.active_turn_kind = turn_kind;
                     if was_idle || state.turn_started_at.is_none() {
                         state.turn_started_at = Some(Utc::now());
                     }
@@ -2402,6 +2686,8 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     state.cancel_token = Some(cancel_token);
                     state.active_request_owner = Some(request_owner);
                     state.active_user_message_id = user_message_id;
+                    // #3167 — a recovery turn is a real (non-background) turn.
+                    state.active_turn_kind = ActiveTurnKind::default();
                     state.recovery_started_at = Some(Instant::now());
                     if activated_turn || state.turn_started_at.is_none() {
                         state.turn_started_at = Some(Utc::now());
@@ -2486,6 +2772,10 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     let previous_queue = state.intervention_queue.clone();
                     let next_result = dequeue_next_soft_intervention(&mut state.intervention_queue);
                     let queue_len_after = state.intervention_queue.len();
+                    // #3167 BLOCKER-2 — capture the dispatched head id BEFORE the
+                    // intervention is moved into the reply, so we can reserve the
+                    // dequeue→claim window against a racing Background start.
+                    let dispatched_head = next_result.intervention.as_ref().map(|i| i.message_id);
                     let result = if let Err(error) = persist_queue_or_restore(
                         &mut state,
                         channel_id,
@@ -2493,6 +2783,9 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         previous_queue,
                         "take_next_soft",
                     ) {
+                        // Persistence failed → `persist_queue_or_restore` rolled
+                        // the dequeue back (head re-inserted); no dispatch happens,
+                        // so do NOT set the reservation.
                         TakeNextSoftResult {
                             intervention: None,
                             has_more: state
@@ -2504,6 +2797,13 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             persistence_error: Some(error),
                         }
                     } else {
+                        // #3167 BLOCKER-2 — a head was handed out for dispatch but
+                        // the slot is not claimed until `intake_turn` runs. Reserve
+                        // the window so a Background start cannot slip in ahead.
+                        if let Some(head) = dispatched_head {
+                            state.pending_user_dispatch = Some(head);
+                            state.pending_user_dispatch_yield_count = 0;
+                        }
                         TakeNextSoftResult {
                             intervention: next_result.intervention,
                             has_more: next_result.has_more,
@@ -2520,6 +2820,15 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     reply,
                 } => {
                     state.last_persistence = Some(persistence.clone());
+                    // #3167 BLOCKER-2 — a failed dispatch requeues the reserved
+                    // head: clear the dequeue→claim reservation so the now
+                    // non-empty queue (not the stale reservation) governs the
+                    // Background gate, and reset the safety-valve counter.
+                    let requeued_id = intervention.message_id;
+                    if state.pending_user_dispatch == Some(requeued_id) {
+                        state.pending_user_dispatch = None;
+                        state.pending_user_dispatch_yield_count = 0;
+                    }
                     let previous_queue = state.intervention_queue.clone();
                     let requeue_result =
                         requeue_intervention_front(&mut state.intervention_queue, intervention);
@@ -2662,6 +2971,8 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     let removed_token = state.cancel_token.take();
                     state.active_request_owner = None;
                     state.active_user_message_id = None;
+                    // #3167 — clear the priority class with the anchor.
+                    state.active_turn_kind = ActiveTurnKind::default();
                     state.recovery_started_at = None;
                     state.turn_started_at = None;
                     reset_watchdog_extension_state(&mut state);
@@ -2720,6 +3031,8 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         state.cancel_token = None;
                         state.active_request_owner = None;
                         state.active_user_message_id = None;
+                        // #3167 — clear the priority class with the anchor.
+                        state.active_turn_kind = ActiveTurnKind::default();
                         state.recovery_started_at = None;
                         state.turn_started_at = None;
                         reset_watchdog_extension_state(&mut state);
@@ -2812,15 +3125,58 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
     ChannelMailboxHandle { sender: tx }
 }
 
+// #3167 BLOCKER-3 — a SINGLE process-wide lock shared by EVERY test in this
+// file that mutates (or depends on) the process-global `AGENTDESK_ROOT_DIR`
+// env (the durable-queue persistence root). Previously each test module
+// declared its OWN `static TEST_ENV_LOCK`; separate Mutex instances do NOT
+// serialize across modules, so under the default parallel `cargo test --lib`
+// an env-mutating test in module A could clobber the root that an env-reading
+// test in module B (e.g. `purge_queue_tests`) relied on → spurious failures.
+// All env-touching test modules below now share THIS one lock, so any two such
+// tests are mutually exclusive regardless of which module they live in.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{MutexGuard, PoisonError};
+
+    pub(crate) const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+
+    /// The SINGLE crate-wide env lock. `.lock()` delegates to
+    /// `crate::config::shared_test_env_lock()` so EVERY turn_orchestrator env
+    /// test serializes against every OTHER env-mutating test in the crate
+    /// (config / tmux_watcher / turn_finalizer / standby_relay). A module-local
+    /// `Mutex` (the previous impl) only serialized within turn_orchestrator and
+    /// let a concurrent root-mutating test on the config lock (e.g. tmux_watcher)
+    /// stomp the tempdir `AGENTDESK_ROOT_DIR` env mid-test. This zero-sized type
+    /// keeps the `TEST_ENV_LOCK.lock()` call shape so all existing callers are
+    /// unchanged while routing through the one shared mutex.
+    pub(crate) struct SharedEnvLock;
+
+    impl SharedEnvLock {
+        pub(crate) fn lock(
+            &self,
+        ) -> Result<MutexGuard<'static, ()>, PoisonError<MutexGuard<'static, ()>>> {
+            crate::config::shared_test_env_lock().lock()
+        }
+    }
+
+    pub(crate) static TEST_ENV_LOCK: SharedEnvLock = SharedEnvLock;
+
+    pub(crate) fn lock_test_env() -> MutexGuard<'static, ()> {
+        TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 #[cfg(test)]
 mod actor_hydrate_regression_tests {
+    use super::test_support::TEST_ENV_LOCK;
     use super::*;
     use std::path::Path;
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::MutexGuard;
     use std::time::SystemTime;
 
     const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
-    static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     struct EnvGuard;
 
@@ -3325,6 +3681,545 @@ mod actor_hydrate_regression_tests {
     }
 }
 
+// #3167 — the active-turn priority class lets the external-input dequeue treat
+// a low-priority background relay (monitor terminal-output relay / self-paced
+// TUI loop) as non-blocking, so a queued external USER intervention is not
+// starved behind a continuously-cycling background turn.
+#[cfg(test)]
+mod active_turn_kind_tests {
+    use super::test_support::{AGENTDESK_ROOT_DIR_ENV, lock_test_env};
+    use super::*;
+
+    // #3167 BLOCKER-3 — serialize every test in this module that mutates the
+    // process-global `AGENTDESK_ROOT_DIR` env (the durable-queue persistence
+    // root) via the SINGLE crate-wide `test_support::TEST_ENV_LOCK` shared by
+    // ALL env-touching test modules in this file (per-module locks do not
+    // serialize cross-module). A RAII `EnvGuard` removes the var on drop.
+    // Without this, `background_start_yields_to_queued_backlog` (and the new
+    // reservation tests) clobbered the var under the default parallel
+    // `cargo test --lib`, contaminating other modules' tests → spurious failures.
+    struct EnvGuard;
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+        }
+    }
+
+    #[tokio::test]
+    async fn background_turn_is_active_but_not_blocking() {
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(ChannelId::new(3_167_001));
+
+        assert!(
+            handle
+                .try_start_turn_kinded(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(1),
+                    MessageId::new(11),
+                    ActiveTurnKind::Background,
+                )
+                .await
+        );
+
+        assert!(
+            handle.has_active_turn().await,
+            "a background turn still holds the slot for `has_active_turn`"
+        );
+        assert!(
+            !handle.has_blocking_active_turn().await,
+            "#3167: a background turn must NOT block a queued user intervention"
+        );
+        assert_eq!(
+            handle.active_turn_kind().await,
+            Some(ActiveTurnKind::Background),
+        );
+    }
+
+    #[tokio::test]
+    async fn user_turn_is_blocking() {
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(ChannelId::new(3_167_002));
+
+        assert!(
+            handle
+                .try_start_turn(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(2),
+                    MessageId::new(22),
+                )
+                .await
+        );
+
+        assert!(handle.has_active_turn().await);
+        assert!(
+            handle.has_blocking_active_turn().await,
+            "a real user/agent turn must block the dequeue"
+        );
+        assert_eq!(
+            handle.active_turn_kind().await,
+            Some(ActiveTurnKind::UserOrAgent),
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_clears_kind() {
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(ChannelId::new(3_167_003));
+
+        assert!(
+            handle
+                .try_start_turn_kinded(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(3),
+                    MessageId::new(33),
+                    ActiveTurnKind::Background,
+                )
+                .await
+        );
+        assert_eq!(
+            handle.active_turn_kind().await,
+            Some(ActiveTurnKind::Background),
+        );
+
+        let _ = handle.hard_stop().await;
+
+        assert!(!handle.has_active_turn().await);
+        assert_eq!(
+            handle.active_turn_kind().await,
+            None,
+            "#3167: finalize must clear the priority class with the anchor"
+        );
+
+        // A fresh default turn after a background finalize is UserOrAgent, not
+        // a leaked Background.
+        assert!(
+            handle
+                .try_start_turn(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(3),
+                    MessageId::new(34),
+                )
+                .await
+        );
+        assert_eq!(
+            handle.active_turn_kind().await,
+            Some(ActiveTurnKind::UserOrAgent),
+            "the kind must not leak from the previous background turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_preserves_kind() {
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(ChannelId::new(3_167_004));
+
+        handle
+            .restore_active_turn_kinded(
+                Arc::new(CancelToken::new()),
+                UserId::new(4),
+                MessageId::new(44),
+                ActiveTurnKind::Background,
+            )
+            .await;
+
+        assert!(handle.has_active_turn().await);
+        assert!(
+            !handle.has_blocking_active_turn().await,
+            "#3167: restore must preserve the background classification"
+        );
+        assert_eq!(
+            handle.active_turn_kind().await,
+            Some(ActiveTurnKind::Background),
+        );
+    }
+
+    fn test_intervention(message_id: u64) -> Intervention {
+        Intervention {
+            author_id: UserId::new(1),
+            author_is_bot: false,
+            message_id: MessageId::new(message_id),
+            source_message_ids: vec![MessageId::new(message_id)],
+            text: format!("msg-{message_id}"),
+            mode: InterventionMode::Soft,
+            created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            pending_uploads: Vec::new(),
+            voice_announcement: None,
+        }
+    }
+
+    fn test_persistence() -> QueuePersistenceContext {
+        QueuePersistenceContext::new(&ProviderKind::Claude, "background-supersede-test", None)
+    }
+
+    // #3167 BLOCKER-1 — the atomic, kind-guarded supersede cancels ONLY a
+    // background turn. A real user/agent turn (or an idle slot) is never
+    // cancelled, which is what closes the TOCTOU window: a stale supersede that
+    // arrives after the background turn finalized and a real user turn started
+    // must NOT abort that real turn.
+    #[tokio::test]
+    async fn cancel_active_background_turn_if_current_cancels_only_background() {
+        let registry = ChannelMailboxRegistry::default();
+
+        // (1) Background turn → cancelled, returns true, reason recorded.
+        let bg = registry.handle(ChannelId::new(3_167_101));
+        let bg_token = Arc::new(CancelToken::new());
+        assert!(
+            bg.try_start_turn_kinded(
+                bg_token.clone(),
+                UserId::new(1),
+                MessageId::new(11),
+                ActiveTurnKind::Background,
+            )
+            .await
+        );
+        assert!(
+            bg.cancel_active_background_turn_if_current().await,
+            "a background turn holding the slot must be cancelled (returns true)"
+        );
+        assert!(
+            bg_token.cancelled.load(Ordering::Relaxed),
+            "the background turn's token must be flipped cancelled"
+        );
+        assert_eq!(
+            bg_token.cancel_source().as_deref(),
+            Some("idle_queue_user_supersede_background"),
+            "the supersede reason must be recorded in the same actor step"
+        );
+
+        // (2) Real user/agent turn → NEVER cancelled, returns false (no-op).
+        let user = registry.handle(ChannelId::new(3_167_102));
+        let user_token = Arc::new(CancelToken::new());
+        assert!(
+            user.try_start_turn(user_token.clone(), UserId::new(2), MessageId::new(22))
+                .await
+        );
+        assert!(
+            !user.cancel_active_background_turn_if_current().await,
+            "a real user/agent turn must NOT be cancelled by a stale supersede (returns false)"
+        );
+        assert!(
+            !user_token.cancelled.load(Ordering::Relaxed),
+            "the real turn's token must remain un-cancelled — this is the TOCTOU fix"
+        );
+        assert!(
+            user.has_active_turn().await,
+            "the real turn must still hold the slot"
+        );
+
+        // (3) Idle slot → no-op, returns false.
+        let idle = registry.handle(ChannelId::new(3_167_103));
+        assert!(
+            !idle.cancel_active_background_turn_if_current().await,
+            "an idle slot is a no-op (returns false)"
+        );
+    }
+
+    // #3167 BLOCKER-2 — a Background start yields to a queued backlog. Once a
+    // user/dispatch intervention is queued, no new Background turn may
+    // re-acquire the freed slot ahead of it (starvation/livelock fix). A
+    // UserOrAgent start is unaffected by queue contents.
+    //
+    // SAFETY (await_holding_lock): `TEST_ENV_LOCK` is held across awaits to
+    // serialize tests that mutate the process-global `AGENTDESK_ROOT_DIR`;
+    // releasing before the awaits would race concurrent tests. Test-only.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn background_start_yields_to_queued_backlog() {
+        // `enqueue` durably persists the queue; point the persistence root at a
+        // throwaway tempdir so the enqueue succeeds deterministically (the real
+        // home dir / a stale tempdir leaked by another test would make this
+        // flaky). #3167 BLOCKER-3: serialize the env mutation under the parallel
+        // default `cargo test --lib` (NOT --test-threads=1).
+        let _lock = lock_test_env();
+        let _env_guard = EnvGuard;
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let registry = ChannelMailboxRegistry::default();
+
+        // Empty queue → Background start acquires the slot (returns true).
+        let empty = registry.handle(ChannelId::new(3_167_201));
+        assert!(
+            empty
+                .try_start_turn_kinded(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(1),
+                    MessageId::new(11),
+                    ActiveTurnKind::Background,
+                )
+                .await,
+            "with an empty queue a Background turn may start"
+        );
+
+        // Non-empty queue → Background start REFUSES (returns false, no slot).
+        let backlog = registry.handle(ChannelId::new(3_167_202));
+        let enqueued = backlog
+            .enqueue(test_intervention(101), test_persistence())
+            .await;
+        assert!(enqueued.enqueued, "fixture intervention must enqueue");
+        assert!(
+            !backlog
+                .try_start_turn_kinded(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(2),
+                    MessageId::new(22),
+                    ActiveTurnKind::Background,
+                )
+                .await,
+            "a Background turn must NOT acquire the slot ahead of a queued backlog"
+        );
+        assert!(
+            !backlog.has_active_turn().await,
+            "the slot must stay free so the kickoff can drain the queued user"
+        );
+
+        // UserOrAgent start is UNAFFECTED by a queued backlog.
+        let user = registry.handle(ChannelId::new(3_167_203));
+        let enqueued = user
+            .enqueue(test_intervention(201), test_persistence())
+            .await;
+        assert!(enqueued.enqueued);
+        assert!(
+            user.try_start_turn(
+                Arc::new(CancelToken::new()),
+                UserId::new(3),
+                MessageId::new(33)
+            )
+            .await,
+            "a real user/agent turn must still start even with a queued backlog"
+        );
+        assert!(user.has_active_turn().await);
+        // `EnvGuard` removes `AGENTDESK_ROOT_DIR` on drop.
+    }
+
+    // #3167 BLOCKER-1 — a SECOND supersede against an already-cancelling
+    // background slot is a no-op and returns `false`. This is what stops the
+    // caller's immediate re-kick from hot-looping while the background finalizer
+    // drains the slot.
+    #[tokio::test]
+    async fn cancel_active_background_turn_if_current_second_call_is_noop_false() {
+        let registry = ChannelMailboxRegistry::default();
+        let bg = registry.handle(ChannelId::new(3_167_301));
+        let bg_token = Arc::new(CancelToken::new());
+        assert!(
+            bg.try_start_turn_kinded(
+                bg_token.clone(),
+                UserId::new(1),
+                MessageId::new(11),
+                ActiveTurnKind::Background,
+            )
+            .await
+        );
+
+        // First supersede performs the NEW cancel → true.
+        assert!(
+            bg.cancel_active_background_turn_if_current().await,
+            "first supersede performs a NEW cancel and returns true"
+        );
+        assert!(bg_token.cancelled.load(Ordering::Relaxed));
+
+        // The slot is still held by the (now cancelling) background turn — its
+        // identity-guarded finalizer has not released it yet. A second supersede
+        // must be a NO-OP and return false so the caller spawns NO new re-kick.
+        assert!(
+            !bg.cancel_active_background_turn_if_current().await,
+            "#3167 BLOCKER-1: an already-cancelling background slot returns false (no hot-loop)"
+        );
+        // And a third, to prove it stays false (no livelock cadence).
+        assert!(
+            !bg.cancel_active_background_turn_if_current().await,
+            "repeated supersede of an already-cancelling slot stays false"
+        );
+    }
+
+    // #3167 BLOCKER-2 — the dequeue→claim window. `TakeNextSoft` removes the
+    // queued head BEFORE the dequeued user turn claims the slot, leaving an
+    // EMPTY queue. A Background start arriving in that window must still yield
+    // because the `pending_user_dispatch` reservation is live.
+    //
+    // SAFETY (await_holding_lock): see `background_start_yields_to_queued_backlog`.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn background_yields_during_dequeue_to_claim_window() {
+        let _lock = lock_test_env();
+        let _env_guard = EnvGuard;
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(ChannelId::new(3_167_401));
+
+        // Queue one user intervention, then dequeue it for dispatch. After the
+        // dequeue the queue is EMPTY but the reservation is set.
+        assert!(
+            handle
+                .enqueue(test_intervention(101), test_persistence())
+                .await
+                .enqueued
+        );
+        let taken = handle.take_next_soft(test_persistence()).await;
+        assert!(
+            taken.intervention.is_some(),
+            "the queued head must be dequeued for dispatch"
+        );
+        assert_eq!(
+            taken.queue_len_after, 0,
+            "the queue is EMPTY after the dequeue — only the reservation guards the window"
+        );
+
+        // A Background start in this window must YIELD even though the queue is
+        // empty (this is the BLOCKER-2 starvation fix).
+        assert!(
+            !handle
+                .try_start_turn_kinded(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(2),
+                    MessageId::new(22),
+                    ActiveTurnKind::Background,
+                )
+                .await,
+            "Background must yield during the dequeue→claim window (reservation held, queue empty)"
+        );
+        assert!(
+            !handle.has_active_turn().await,
+            "the slot must stay free so the dequeued user can claim it"
+        );
+
+        // The reserved user turn now claims the slot → reservation cleared.
+        assert!(
+            handle
+                .try_start_turn(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(2),
+                    MessageId::new(101)
+                )
+                .await,
+            "the dequeued UserOrAgent turn claims the slot"
+        );
+        // Release and prove the reservation is GONE: a Background start with an
+        // empty queue now succeeds.
+        let _ = handle.hard_stop().await;
+        assert!(
+            handle
+                .try_start_turn_kinded(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(3),
+                    MessageId::new(33),
+                    ActiveTurnKind::Background,
+                )
+                .await,
+            "after the user claim cleared the reservation, Background may start again"
+        );
+    }
+
+    // #3167 BLOCKER-2 SAFETY VALVE — if the dequeued user turn is lost (never
+    // claims, never requeues), the reservation must not lock Background out
+    // forever. After PENDING_USER_DISPATCH_MAX_YIELDS consecutive
+    // reservation-only refusals, the reservation is force-cleared.
+    //
+    // SAFETY (await_holding_lock): see `background_start_yields_to_queued_backlog`.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn safety_valve_clears_stuck_reservation_after_n_refusals() {
+        let _lock = lock_test_env();
+        let _env_guard = EnvGuard;
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(ChannelId::new(3_167_402));
+
+        // Set a reservation, then NEVER claim/requeue it (simulate a lost turn).
+        assert!(
+            handle
+                .enqueue(test_intervention(201), test_persistence())
+                .await
+                .enqueued
+        );
+        let taken = handle.take_next_soft(test_persistence()).await;
+        assert!(taken.intervention.is_some());
+        assert_eq!(taken.queue_len_after, 0);
+
+        // The first N refusals all yield (queue empty, reservation held).
+        for attempt in 1..=PENDING_USER_DISPATCH_MAX_YIELDS {
+            assert!(
+                !handle
+                    .try_start_turn_kinded(
+                        Arc::new(CancelToken::new()),
+                        UserId::new(9),
+                        MessageId::new(900 + attempt as u64),
+                        ActiveTurnKind::Background,
+                    )
+                    .await,
+                "refusal {attempt}/{PENDING_USER_DISPATCH_MAX_YIELDS} must still yield"
+            );
+            assert!(!handle.has_active_turn().await);
+        }
+
+        // The Nth refusal force-cleared the (stuck) reservation. The NEXT
+        // Background start succeeds — proving the valve is non-permanent.
+        assert!(
+            handle
+                .try_start_turn_kinded(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(9),
+                    MessageId::new(999),
+                    ActiveTurnKind::Background,
+                )
+                .await,
+            "after N reservation-only refusals the safety valve clears the reservation"
+        );
+        assert!(handle.has_active_turn().await);
+    }
+
+    // #3167 BLOCKER-2 — a failed dispatch requeues the reserved head; that
+    // clears the reservation (the now non-empty queue covers the Background
+    // gate) and resets the valve counter.
+    //
+    // SAFETY (await_holding_lock): see `background_start_yields_to_queued_backlog`.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn requeue_of_reserved_head_clears_reservation() {
+        let _lock = lock_test_env();
+        let _env_guard = EnvGuard;
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(ChannelId::new(3_167_403));
+
+        let intervention = test_intervention(301);
+        assert!(
+            handle
+                .enqueue(intervention.clone(), test_persistence())
+                .await
+                .enqueued
+        );
+        let taken = handle.take_next_soft(test_persistence()).await;
+        assert!(taken.intervention.is_some());
+        assert_eq!(taken.queue_len_after, 0);
+
+        // Dispatch failed → requeue the reserved head. The reservation is now
+        // cleared, but the queue is non-empty so Background still yields.
+        handle.requeue_front(intervention, test_persistence()).await;
+        assert!(
+            !handle
+                .try_start_turn_kinded(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(4),
+                    MessageId::new(44),
+                    ActiveTurnKind::Background,
+                )
+                .await,
+            "Background still yields — now because the queue is non-empty, not the reservation"
+        );
+        assert!(!handle.has_active_turn().await);
+    }
+}
+
 // #2728 — verify the refusal_reason field correctly tags each of the
 // three false-return paths in `enqueue_intervention` / the handle layer.
 // Without this signal callers could only infer the path from code
@@ -3467,12 +4362,11 @@ mod no_ttl_evict_tests {
 
 #[cfg(test)]
 mod persistence_tests {
+    use super::test_support::TEST_ENV_LOCK;
     use super::*;
     use std::path::{Path, PathBuf};
 
     const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
-    static TEST_ENV_LOCK: LazyLock<std::sync::Mutex<()>> =
-        LazyLock::new(|| std::sync::Mutex::new(()));
 
     struct EnvGuard {
         previous: Option<String>,
@@ -3855,6 +4749,7 @@ mod purge_queue_tests {
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
     use crate::services::provider::ProviderKind;
+    use crate::services::turn_orchestrator::test_support::lock_test_env;
     use crate::services::turn_orchestrator::{
         CancelToken, ChannelMailboxRegistry, Intervention, InterventionMode,
         QueuePersistenceContext,
@@ -3880,8 +4775,17 @@ mod purge_queue_tests {
     // PurgeQueue empties the intervention queue without touching the
     // active cancel_token, so a turn that entered the mailbox between
     // force-kill and the purge survives.
+    //
+    // #3167 BLOCKER-3 — this test PERSISTS to (and reads back from) the default
+    // `AGENTDESK_ROOT_DIR`; hold the shared env lock so a concurrent
+    // env-mutating test cannot redirect the persistence root mid-run (the
+    // `drained == 3` assertion was the observed flake). SAFETY
+    // (await_holding_lock): the lock must stay held across the awaits to
+    // serialize against env mutators. Test-only.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn purge_queue_drains_queue_without_disturbing_active_turn() {
+        let _env_lock = lock_test_env();
         let provider = ProviderKind::Claude;
         let registry = ChannelMailboxRegistry::default();
         let channel_id = ChannelId::new(2706);
@@ -3919,8 +4823,11 @@ mod purge_queue_tests {
     }
 
     // purge_queue is a no-op on an empty mailbox.
+    // #3167 BLOCKER-3: shares the env lock (persists to the default root).
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn purge_queue_is_idempotent_on_empty_mailbox() {
+        let _env_lock = lock_test_env();
         let provider = ProviderKind::Claude;
         let registry = ChannelMailboxRegistry::default();
         let channel_id = ChannelId::new(2707);
@@ -3938,8 +4845,11 @@ mod purge_queue_tests {
     // #3029(D): a force purge (clear_cancelled_active_anchor=true) against an
     // already-cancelled active turn releases the anchor so the next dispatch
     // is not blocked by a stale cancel_token / active_user_message_id.
+    // #3167 BLOCKER-3: shares the env lock (persists to the default root).
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn force_purge_clears_cancelled_active_anchor() {
+        let _env_lock = lock_test_env();
         let provider = ProviderKind::Claude;
         let registry = ChannelMailboxRegistry::default();
         let channel_id = ChannelId::new(30290);
@@ -3970,8 +4880,11 @@ mod purge_queue_tests {
     // #3029(D) / #2706: a force purge must NOT clear the anchor of a fresh,
     // *uncancelled* turn that raced into the actor after the force-kill —
     // otherwise force=true would collaterally cancel the new turn.
+    // #3167 BLOCKER-3: shares the env lock (persists to the default root).
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn force_purge_preserves_uncancelled_active_anchor() {
+        let _env_lock = lock_test_env();
         let provider = ProviderKind::Claude;
         let registry = ChannelMailboxRegistry::default();
         let channel_id = ChannelId::new(30291);
@@ -3998,19 +4911,19 @@ mod purge_queue_tests {
 
 #[cfg(test)]
 mod finish_cancelled_turn_tests {
-    use std::sync::{Arc, LazyLock, Mutex};
+    use std::sync::Arc;
     use std::time::Instant;
 
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
     use crate::services::provider::ProviderKind;
+    use crate::services::turn_orchestrator::test_support::TEST_ENV_LOCK;
     use crate::services::turn_orchestrator::{
         CancelToken, ChannelMailboxRegistry, Intervention, InterventionMode,
         QueuePersistenceContext, save_channel_queue,
     };
 
     const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
-    static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     fn make_intervention(message_id: u64, text: &str) -> Intervention {
         Intervention {

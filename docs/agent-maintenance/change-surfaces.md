@@ -116,7 +116,9 @@
   - `src/services/discord/watchers/lifecycle.rs` (2301 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior).
-  - `src/services/discord/tmux.rs` (2247 lines after #2558 dead-code sweep;
+  - `src/services/discord/tmux.rs` (2251 lines after #2558 dead-code sweep;
+    +4 from #3167: the monitor-auto-turn start passes `ActiveTurnKind::Background`
+    so a queued user message can supersede the low-priority monitor/loop turn;
     failover guard; #3087 `session_panel_instance_key`/`write_spawn_nonce`
     re-exports; #3107 `RestoredWatcherTurn.injected_prompt_message_id`;
     #3016 option A `normal_completion` finalize-decouple param;
@@ -304,9 +306,11 @@
     (incl. id==0 external/injected) NOT adopted/edited, in-range id==0
     watcher-direct STILL adopts+edits (over-suppression guard), and in-range id!=0
     unchanged.
-  - `src/services/discord/tui_prompt_relay.rs` (4518 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (4522 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
-    outside an extraction plan; +54 from #3189: the `/loop` control note carries
+    outside an extraction plan; +4 from #3167: the self-paced TUI loop relay
+    starts its synthetic turn with `ActiveTurnKind::Background` so a queued user
+    message can supersede it; +54 from #3189: the `/loop` control note carries
     its directive body via `extract_loop_body` (operator wants the recurring loop
     content visible; only the #3153 double-post is deduped, never the content) —
     the `<command-args>` block (closing tag REQUIRED via `split_once`, so an
@@ -745,7 +749,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   so a live thread-suffixed TUI session with no live watcher slot can be
   re-registered authoritatively instead of dropped forever),
   `src/services/discord_config_audit.rs` (1459).
-- `src/services/turn_orchestrator.rs` (2762).
+- `src/services/turn_orchestrator.rs` (3089).
 
 Decomposed below the giant-file threshold (no longer frozen; bugfix-scoped but
 normal test growth is allowed): `src/services/analytics.rs`,
