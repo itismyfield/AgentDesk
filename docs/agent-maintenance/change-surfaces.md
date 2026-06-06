@@ -306,9 +306,11 @@
     (incl. id==0 external/injected) NOT adopted/edited, in-range id==0
     watcher-direct STILL adopts+edits (over-suppression guard), and in-range id!=0
     unchanged.
-  - `src/services/discord/tui_prompt_relay.rs` (4518 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (4522 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
-    outside an extraction plan; +54 from #3189: the `/loop` control note carries
+    outside an extraction plan; +4 from #3167: the self-paced TUI loop relay
+    starts its synthetic turn with `ActiveTurnKind::Background` so a queued user
+    message can supersede it; +54 from #3189: the `/loop` control note carries
     its directive body via `extract_loop_body` (operator wants the recurring loop
     content visible; only the #3153 double-post is deduped, never the content) —
     the `<command-args>` block (closing tag REQUIRED via `split_once`, so an

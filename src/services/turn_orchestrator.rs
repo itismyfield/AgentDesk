@@ -3136,10 +3136,30 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
 // tests are mutually exclusive regardless of which module they live in.
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::sync::{LazyLock, Mutex, MutexGuard};
+    use std::sync::{MutexGuard, PoisonError};
 
     pub(crate) const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
-    pub(crate) static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    /// The SINGLE crate-wide env lock. `.lock()` delegates to
+    /// `crate::config::shared_test_env_lock()` so EVERY turn_orchestrator env
+    /// test serializes against every OTHER env-mutating test in the crate
+    /// (config / tmux_watcher / turn_finalizer / standby_relay). A module-local
+    /// `Mutex` (the previous impl) only serialized within turn_orchestrator and
+    /// let a concurrent root-mutating test on the config lock (e.g. tmux_watcher)
+    /// stomp the tempdir `AGENTDESK_ROOT_DIR` env mid-test. This zero-sized type
+    /// keeps the `TEST_ENV_LOCK.lock()` call shape so all existing callers are
+    /// unchanged while routing through the one shared mutex.
+    pub(crate) struct SharedEnvLock;
+
+    impl SharedEnvLock {
+        pub(crate) fn lock(
+            &self,
+        ) -> Result<MutexGuard<'static, ()>, PoisonError<MutexGuard<'static, ()>>> {
+            crate::config::shared_test_env_lock().lock()
+        }
+    }
+
+    pub(crate) static TEST_ENV_LOCK: SharedEnvLock = SharedEnvLock;
 
     pub(crate) fn lock_test_env() -> MutexGuard<'static, ()> {
         TEST_ENV_LOCK
