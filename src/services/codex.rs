@@ -1564,6 +1564,181 @@ fn execute_streaming_remote_tmux(
     Err("Remote SSH tmux execution is not available in AgentDesk".to_string())
 }
 
+/// Tear down a pre-existing tmux session before relaunching a Codex Direct TUI
+/// on the same name. Records the termination audit + exit reason and kills the
+/// session. No-op when the session does not exist.
+#[cfg(unix)]
+fn cleanup_existing_codex_tui_session(
+    tmux_session_name: &str,
+    force_fresh_provider_session: bool,
+    has_live_pane: bool,
+) {
+    let cleanup_reason =
+        codex_tui_existing_session_termination_reason(force_fresh_provider_session, has_live_pane);
+    record_codex_tmux_termination(
+        tmux_session_name,
+        "codex_tui_provider",
+        cleanup_reason.reason_code,
+        cleanup_reason.reason_text,
+        None,
+    );
+    record_tmux_exit_reason(tmux_session_name, cleanup_reason.reason_text);
+    crate::services::platform::tmux::kill_session(tmux_session_name, cleanup_reason.reason_text);
+}
+
+/// Paths and timing produced while preparing a Codex Direct TUI launch script.
+#[cfg(unix)]
+struct CodexTuiLaunchScript {
+    script_path: String,
+    owner_path: String,
+    rollout_modified_since: std::time::SystemTime,
+}
+
+/// Resolve the Codex binary, build the launch args + env, render and write the
+/// launch script, and register the Discord-originated prompt for dedupe.
+///
+/// Returns the resolved binary, script path, owner-marker path, and the
+/// rollout "modified since" stamp captured just before the script is written.
+/// Errors propagate exactly as the inline body did (`?`).
+#[cfg(unix)]
+fn prepare_codex_tui_launch_script(
+    tmux_session_name: &str,
+    session_id: Option<&str>,
+    prompt: &str,
+    launch_options: &CodexLaunchOptions,
+    report_channel_id: Option<u64>,
+    report_provider: Option<ProviderKind>,
+) -> Result<CodexTuiLaunchScript, String> {
+    write_tmux_owner_marker(tmux_session_name)?;
+    crate::services::tmux_common::write_tmux_runtime_kind_marker(
+        tmux_session_name,
+        crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+    )?;
+    let owner_path = tmux_owner_path(tmux_session_name);
+
+    let resolution = resolve_codex_binary();
+    let codex_bin = resolution
+        .resolved_path
+        .clone()
+        .ok_or_else(|| "Codex CLI not found".to_string())?;
+    let script_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "sh");
+    let env_lines = build_tmux_launch_env_lines(
+        resolution.exec_path.as_deref(),
+        report_channel_id,
+        report_provider,
+    );
+    let mut args = build_codex_tui_args(launch_options);
+    let codex_hook_overrides = if codex_direct_tui_hook_overrides_enabled() {
+        prepare_codex_tui_hook_overrides(
+            tmux_session_name,
+            session_id,
+            &codex_bin,
+            resolution.exec_path.as_deref(),
+        )
+    } else {
+        tracing::info!(
+            tmux_session_name,
+            "Codex direct TUI session hook overrides disabled; using rollout transcript tail for relay"
+        );
+        Vec::new()
+    };
+    if !codex_hook_overrides.is_empty() {
+        append_codex_config_overrides(&mut args, codex_hook_overrides);
+        if codex_resume_supports_hook_trust_bypass(&codex_bin, &resolution) {
+            insert_codex_resume_option_before_other_options(
+                &mut args,
+                "--dangerously-bypass-hook-trust",
+            );
+        } else {
+            tracing::warn!(
+                codex_bin,
+                "Codex resume does not advertise --dangerously-bypass-hook-trust; relying on session hook trust hashes"
+            );
+        }
+    }
+    let script_content = render_codex_tui_tmux_script(&env_lines, &codex_bin, &args);
+    let rollout_modified_since = std::time::SystemTime::now();
+
+    std::fs::write(&script_path, &script_content)
+        .map_err(|e| format!("Failed to write Codex TUI launch script: {}", e))?;
+    crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
+        ProviderKind::Codex.as_str(),
+        tmux_session_name,
+        prompt,
+    );
+    if let Some(channel_id) = report_channel_id {
+        crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
+    }
+
+    Ok(CodexTuiLaunchScript {
+        script_path,
+        owner_path,
+        rollout_modified_since,
+    })
+}
+
+/// Wire the cancel token to the freshly created tmux session: record the
+/// session name and (best-effort) the pane PID so a later /stop can target it.
+#[cfg(unix)]
+fn wire_cancel_token_to_tmux_session(
+    cancel_token: Option<&std::sync::Arc<CancelToken>>,
+    tmux_session_name: &str,
+) {
+    if let Some(token) = cancel_token {
+        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(tmux_session_name.to_string());
+        if let Some(pid) = crate::services::platform::tmux::pane_pid(tmux_session_name) {
+            *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(pid);
+        }
+    }
+}
+
+/// Dispatch the rollout tail for the Direct TUI launch: a resume tails the
+/// selected session's rollout from its committed offset, otherwise we tail the
+/// latest rollout for the cwd. Mirrors the inline resume-vs-fresh branch.
+///
+/// `resume` carries the validated `(rollout_path, start_offset,
+/// selected_session_id)` for the resume branch; `None` selects the fresh tail.
+/// The resume-metadata validation lives in the orchestrator so a missing
+/// rollout-path / session-id short-circuits the launch *before* any tail
+/// dispatch (no tmux leak-kill), matching the pre-refactor inline ordering.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn dispatch_codex_tui_rollout_tail(
+    resume: Option<(&std::path::Path, u64, &str)>,
+    working_dir: &str,
+    rollout_modified_since: std::time::SystemTime,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<std::sync::Arc<CancelToken>>,
+    tmux_session_name: &str,
+    prompt: &str,
+) -> Result<crate::services::codex_tui::rollout_tail::CodexTuiTailResult, String> {
+    if let Some((rollout_path, start_offset, selected_session_id)) = resume {
+        crate::services::codex_tui::rollout_tail::tail_resumed_rollout_for_session_with_handoff_for_tmux(
+            std::path::Path::new(working_dir),
+            selected_session_id,
+            rollout_path,
+            start_offset,
+            rollout_modified_since,
+            sender,
+            cancel_token,
+            || tmux_session_has_live_pane(tmux_session_name),
+            tmux_session_name,
+            Some(prompt),
+        )
+    } else {
+        crate::services::codex_tui::rollout_tail::tail_latest_rollout_for_cwd_with_handoff_for_tmux(
+            std::path::Path::new(working_dir),
+            rollout_modified_since,
+            sender,
+            cancel_token,
+            || tmux_session_has_live_pane(tmux_session_name),
+            tmux_session_name,
+            Some(prompt),
+        )
+    }
+}
+
 #[cfg(unix)]
 fn execute_streaming_local_tui_tmux(
     prompt: &str,
@@ -1628,87 +1803,29 @@ fn execute_streaming_local_tui_tmux(
     let has_live_pane = tmux_session_has_live_pane(tmux_session_name);
 
     if session_exists {
-        let cleanup_reason = codex_tui_existing_session_termination_reason(
+        cleanup_existing_codex_tui_session(
+            tmux_session_name,
             force_fresh_provider_session,
             has_live_pane,
-        );
-        record_codex_tmux_termination(
-            tmux_session_name,
-            "codex_tui_provider",
-            cleanup_reason.reason_code,
-            cleanup_reason.reason_text,
-            None,
-        );
-        record_tmux_exit_reason(tmux_session_name, cleanup_reason.reason_text);
-        crate::services::platform::tmux::kill_session(
-            tmux_session_name,
-            cleanup_reason.reason_text,
         );
     }
 
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
     crate::services::codex_tui::session::CodexTuiSessionFiles::for_tmux_session(tmux_session_name)
         .cleanup_best_effort();
-    write_tmux_owner_marker(tmux_session_name)?;
-    crate::services::tmux_common::write_tmux_runtime_kind_marker(
-        tmux_session_name,
-        crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
-    )?;
-    let owner_path = tmux_owner_path(tmux_session_name);
 
-    let resolution = resolve_codex_binary();
-    let codex_bin = resolution
-        .resolved_path
-        .clone()
-        .ok_or_else(|| "Codex CLI not found".to_string())?;
-    let script_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "sh");
-    let env_lines = build_tmux_launch_env_lines(
-        resolution.exec_path.as_deref(),
+    let CodexTuiLaunchScript {
+        script_path,
+        owner_path,
+        rollout_modified_since,
+    } = prepare_codex_tui_launch_script(
+        tmux_session_name,
+        session_id,
+        prompt,
+        &launch_options,
         report_channel_id,
         report_provider,
-    );
-    let mut args = build_codex_tui_args(&launch_options);
-    let codex_hook_overrides = if codex_direct_tui_hook_overrides_enabled() {
-        prepare_codex_tui_hook_overrides(
-            tmux_session_name,
-            session_id,
-            &codex_bin,
-            resolution.exec_path.as_deref(),
-        )
-    } else {
-        tracing::info!(
-            tmux_session_name,
-            "Codex direct TUI session hook overrides disabled; using rollout transcript tail for relay"
-        );
-        Vec::new()
-    };
-    if !codex_hook_overrides.is_empty() {
-        append_codex_config_overrides(&mut args, codex_hook_overrides);
-        if codex_resume_supports_hook_trust_bypass(&codex_bin, &resolution) {
-            insert_codex_resume_option_before_other_options(
-                &mut args,
-                "--dangerously-bypass-hook-trust",
-            );
-        } else {
-            tracing::warn!(
-                codex_bin,
-                "Codex resume does not advertise --dangerously-bypass-hook-trust; relying on session hook trust hashes"
-            );
-        }
-    }
-    let script_content = render_codex_tui_tmux_script(&env_lines, &codex_bin, &args);
-    let rollout_modified_since = std::time::SystemTime::now();
-
-    std::fs::write(&script_path, &script_content)
-        .map_err(|e| format!("Failed to write Codex TUI launch script: {}", e))?;
-    crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
-        ProviderKind::Codex.as_str(),
-        tmux_session_name,
-        prompt,
-    );
-    if let Some(channel_id) = report_channel_id {
-        crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
-    }
+    )?;
 
     let tmux_result = crate::services::platform::tmux::create_session(
         tmux_session_name,
@@ -1737,13 +1854,7 @@ fn execute_streaming_local_tui_tmux(
         tracing::warn!("failed to write spawn nonce for {tmux_session_name} (codex-tui): {e}");
     }
 
-    if let Some(ref token) = cancel_token {
-        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(tmux_session_name.to_string());
-        if let Some(pid) = crate::services::platform::tmux::pane_pid(tmux_session_name) {
-            *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(pid);
-        }
-    }
+    wire_cancel_token_to_tmux_session(cancel_token.as_ref(), tmux_session_name);
 
     // #2172 cancel boundary: keep a clone of the cancel token so that
     // post-tail emission (RuntimeReady / SessionDied Done) and the
@@ -1751,7 +1862,12 @@ fn execute_streaming_local_tui_tmux(
     // without re-acquiring it. The tail call itself moves its clone into
     // the rollout-tail thread; this clone stays in the launch frame.
     let cancel_token_for_post_tail = cancel_token.clone();
-    let tail_result = if session_selection.resume {
+    // Resume-metadata validation runs HERE — after the cancel-token clone and
+    // immediately before the tail dispatch, matching the pre-refactor inline
+    // ordering. A missing rollout-path / session-id short-circuits the whole
+    // launch with Err *without* the tail-error tmux leak-kill, exactly as the
+    // original did (the validations were `?` above the tail_result assignment).
+    let resume_params = if session_selection.resume {
         let rollout_path = session_selection
             .rollout_path
             .as_deref()
@@ -1761,34 +1877,57 @@ fn execute_streaming_local_tui_tmux(
             .selected_session_id
             .as_deref()
             .ok_or_else(|| "Codex TUI resume selected without session id".to_string())?;
-        crate::services::codex_tui::rollout_tail::tail_resumed_rollout_for_session_with_handoff_for_tmux(
-            std::path::Path::new(working_dir),
-            selected_session_id,
-            rollout_path,
-            start_offset,
-            rollout_modified_since,
-            sender.clone(),
-            cancel_token,
-            || tmux_session_has_live_pane(tmux_session_name),
-            tmux_session_name,
-            Some(prompt),
-        )
+        Some((rollout_path, start_offset, selected_session_id))
     } else {
-        crate::services::codex_tui::rollout_tail::tail_latest_rollout_for_cwd_with_handoff_for_tmux(
-            std::path::Path::new(working_dir),
-            rollout_modified_since,
-            sender.clone(),
-            cancel_token,
-            || tmux_session_has_live_pane(tmux_session_name),
-            tmux_session_name,
-            Some(prompt),
-        )
+        None
     };
-    let cancel_observed =
-        || crate::services::provider::cancel_requested(cancel_token_for_post_tail.as_deref());
+    let tail_result = dispatch_codex_tui_rollout_tail(
+        resume_params,
+        working_dir,
+        rollout_modified_since,
+        sender.clone(),
+        cancel_token,
+        tmux_session_name,
+        prompt,
+    );
+    let tail_result = match resolve_codex_tui_tail_result(
+        tail_result,
+        cancel_token_for_post_tail.as_ref(),
+        tmux_session_name,
+    )? {
+        Some(result) => result,
+        // Cancel observed before the transcript was discovered: suppress the
+        // tail Err and defer tmux cleanup to the cancel path (return Ok(())).
+        None => return Ok(()),
+    };
 
-    let tail_result = match tail_result {
-        Ok(result) => result,
+    emit_codex_tui_post_tail_handoff(
+        tail_result,
+        sender,
+        cancel_token_for_post_tail,
+        tmux_session_name,
+    )
+}
+
+/// Resolve the rollout-tail result for the Codex Direct TUI launch.
+///
+/// - `Ok(Some(result))` — tail succeeded; proceed to post-tail emission.
+/// - `Ok(None)` — tail failed but a cancel was observed first; the caller
+///   must suppress the Err and return `Ok(())` (the bridge's cancel arm owns
+///   finalisation and tmux teardown).
+/// - `Err(error)` — genuine tail failure; the tmux session has been killed to
+///   avoid a leak and the error propagates.
+#[cfg(unix)]
+fn resolve_codex_tui_tail_result(
+    tail_result: Result<crate::services::codex_tui::rollout_tail::CodexTuiTailResult, String>,
+    cancel_token_for_post_tail: Option<&std::sync::Arc<CancelToken>>,
+    tmux_session_name: &str,
+) -> Result<Option<crate::services::codex_tui::rollout_tail::CodexTuiTailResult>, String> {
+    let cancel_observed =
+        || crate::services::provider::cancel_requested(cancel_token_for_post_tail.map(|t| &**t));
+
+    match tail_result {
+        Ok(result) => Ok(Some(result)),
         Err(error) => {
             // #2172 cancel boundary: a user /stop that arrives before the
             // rollout file is discovered surfaces as an Err from the
@@ -1808,7 +1947,7 @@ fn execute_streaming_local_tui_tmux(
             //       bridge run its error-finalisation path on a
             //       cancelled turn.
             //
-            // Return Ok(()) with no StreamMessage emitted: the producer
+            // Return Ok(None) with no StreamMessage emitted: the producer
             // is silent post-cancel and the bridge's cancel arm drives
             // finalisation.
             if cancel_observed() {
@@ -1817,7 +1956,7 @@ fn execute_streaming_local_tui_tmux(
                     error = %error,
                     "Codex rollout tail cancelled before transcript; suppressing tail Err and deferring tmux cleanup to cancel path"
                 );
-                return Ok(());
+                return Ok(None);
             }
             // #2182 follow-up: rollout wait / tail failures used to leak the
             // tmux session because `?` propagated Err without cleaning the
@@ -1840,9 +1979,25 @@ fn execute_streaming_local_tui_tmux(
                 tmux_session_name,
                 "codex rollout tail failed",
             );
-            return Err(error);
+            Err(error)
         }
-    };
+    }
+}
+
+/// Post-tail StreamMessage emission for the Codex Direct TUI launch: handles
+/// the cancel-suppression guards, the SessionDied failure `Done`, the idle
+/// relay binding, and the gated RuntimeReady handoff (with its readiness /
+/// session-death / timeout outcomes). Always returns `Ok(())`; early returns
+/// stand in for the orchestrator's post-cancel suppression paths.
+#[cfg(unix)]
+fn emit_codex_tui_post_tail_handoff(
+    tail_result: crate::services::codex_tui::rollout_tail::CodexTuiTailResult,
+    sender: Sender<StreamMessage>,
+    cancel_token_for_post_tail: Option<std::sync::Arc<CancelToken>>,
+    tmux_session_name: &str,
+) -> Result<(), String> {
+    let cancel_observed =
+        || crate::services::provider::cancel_requested(cancel_token_for_post_tail.as_deref());
 
     let read_result = tail_result.read_result.clone();
     // #2172 cancel boundary: relay suppression is enforced at every

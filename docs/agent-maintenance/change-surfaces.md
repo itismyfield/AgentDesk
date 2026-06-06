@@ -720,7 +720,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   support extracted from the route layer; split before adding non-bugfix
   behavior.
 - `src/services/claude.rs` (3795), `src/services/gemini.rs` (1416),
-  `src/services/qwen.rs` (2200), `src/services/codex.rs` (2928),
+  `src/services/qwen.rs` (2200), `src/services/codex.rs` (3083),
   `src/services/opencode.rs` (1881), `src/services/provider.rs` (1738) —
   provider adapters.
 - `src/services/codex_tui/rollout_tail.rs` (1738) — Codex TUI rollout tail
