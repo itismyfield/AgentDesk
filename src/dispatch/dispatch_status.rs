@@ -672,10 +672,7 @@ async fn set_dispatch_status_on_pg_with_sync(
             Some(&current_status),
             to_status,
             transition_source,
-            result_json
-                .as_ref()
-                .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
-                .as_ref(),
+            result,
         );
         emit_dispatch_quality_event(
             dispatch_id,
@@ -685,10 +682,7 @@ async fn set_dispatch_status_on_pg_with_sync(
             Some(&current_status),
             to_status,
             transition_source,
-            result_json
-                .as_ref()
-                .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
-                .as_ref(),
+            result,
         );
 
         if plan.enqueue_status_reaction {
