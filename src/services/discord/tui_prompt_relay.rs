@@ -520,6 +520,22 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             return;
         }
     }
+    // #3174 (ported from #3164 codex R3): snapshot the channel's authoritative
+    // committed-relay watermark BEFORE we post the notify / add the `⏳` / record
+    // the anchor. The tmux watcher advances `confirmed_end_offset` (read here) on
+    // the SAME inline commit pass that, a few statements later, runs the
+    // anchor-completion gate
+    // (`complete_tui_direct_prompt_anchor_lifecycle_if_present`). If THIS turn's
+    // terminal output is fast, the watcher can commit (advancing the watermark)
+    // and run that gate BEFORE `record_prompt_anchor` below has made our anchor
+    // findable — the gate then observes `None`, no-ops, and (with no further
+    // terminal output) never removes the `⏳` we are about to add → the stranded
+    // hourglass. Capturing the watermark NOW lets us detect that overtake AFTER we
+    // record the anchor (`committed_after > committed_before`) and remove our own
+    // `⏳` ourselves, with no timing wait. The non-race case (watcher not yet
+    // committed) leaves the watermark unchanged → we no-op and the watcher does
+    // the normal removal later.
+    let committed_relay_offset_before_relay = shared.committed_relay_offset(channel_id);
     let mut lease = record_observed_external_turn_lease(shared, &prompt, channel_id);
     // #3041 P1-4 codex: arm an early-return RAII guard the instant the lease is
     // recorded & stored. Every FAILURE early-return below (registry None, notify
@@ -785,6 +801,50 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             channel_id.get(),
             anchor_message.id.get(),
         );
+        // #3174 (ported from #3164 codex R3): relay-side re-check that closes the
+        // lease/anchor ordering race WITHOUT any timing wait. The watcher's
+        // anchor-completion gate
+        // (`complete_tui_direct_prompt_anchor_lifecycle_if_present`) can open on the
+        // external-input LEASE alone — `external_input_lease_before_relay == true`,
+        // `prompt_anchor_present_before_relay == false` — and run BEFORE the
+        // `record_prompt_anchor` above made our anchor findable. The gate then reads
+        // the anchor as `None`, no-ops, and (with no further terminal output) leaves
+        // our just-added `⏳` stranded forever.
+        //
+        // The watcher advances `confirmed_end_offset` (= `committed_relay_offset`) on
+        // the SAME inline commit pass, strictly BEFORE that gate. So if the watermark
+        // has advanced past our pre-relay snapshot, the watcher has already committed
+        // a terminal turn and already run (and no-op'd) the gate for it — exactly the
+        // overtake. We then remove our OWN `⏳` and post `✅` here.
+        //
+        // Identity guard: we act ONLY on `anchor_message.id` (this turn's own posted
+        // message), never on a re-read of the shared `prompt_anchor_by_tmux` slot,
+        // and we clear that shared slot only if it STILL points at our id — a newer
+        // same-(provider,tmux,channel) turn that already overwrote the slot keeps its
+        // own `⏳`. No double-completion: clearing the shared slot makes any later
+        // watcher gate read `None` → no-op; `remove_reaction_raw`/`✅` add target our
+        // own message and are idempotent. The common (non-overtake) case leaves the
+        // watermark unchanged → this is a pure no-op and the watcher removes the `⏳`
+        // normally on its own completion pass.
+        if let Some(command_http) = command_http.as_ref() {
+            // Only meaningful when we actually added the `⏳` above (same `@me`
+            // identity). Re-reading the watermark here (post-anchor) catches a
+            // watcher that committed + ran its no-op gate during the `⏳` add I/O.
+            let committed_relay_offset_after_anchor = shared.committed_relay_offset(channel_id);
+            if relay_watcher_overtook_anchor_record(
+                committed_relay_offset_before_relay,
+                committed_relay_offset_after_anchor,
+            ) {
+                relay_recheck_complete_own_anchor_if_watcher_overtook(
+                    command_http,
+                    &prompt.provider,
+                    &prompt.tmux_session_name,
+                    channel_id,
+                    anchor_message.id,
+                )
+                .await;
+            }
+        }
         // #3099: a `<task-notification>` auto-turn is still a real provider turn
         // that earns the same synthetic ownership as human direct input — the
         // difference is purely that its `⏳` completion cleanup must be anchored on
@@ -4006,6 +4066,80 @@ pub(super) async fn complete_tui_direct_anchor_lifecycle_for_inflight(
     Some(anchor)
 }
 
+/// #3174 (ported from #3164 codex R3): pure decision for whether the tmux watcher
+/// already committed a terminal turn (advancing `committed_relay_offset`) AND ran
+/// its anchor-completion gate BEFORE `relay_observed_prompt` finished recording the
+/// anchor — i.e. the watcher overtook the relay and its no-op gate left the `⏳`
+/// stranded. The watermark is monotonic (CAS advance), so a strict increase between
+/// the pre-relay snapshot and the post-anchor re-read is the overtake signal. Equal
+/// (the common case: watcher not yet committed) → no overtake → the relay no-ops
+/// and the watcher removes the `⏳` normally on its own later completion pass.
+fn relay_watcher_overtook_anchor_record(
+    committed_before_relay: u64,
+    committed_after_anchor: u64,
+) -> bool {
+    committed_after_anchor > committed_before_relay
+}
+
+/// #3174 (ported from #3164 codex R3): relay-side completion that closes the
+/// lease/anchor ordering race. Called from `relay_observed_prompt` ONLY after it
+/// has detected — via the `committed_relay_offset` watermark advancing past the
+/// pre-relay snapshot — that the watcher already committed a terminal turn and
+/// already ran (and no-op'd) its anchor-completion gate before our
+/// `record_prompt_anchor` made the anchor findable. In that overtake the watcher's
+/// gate left our `⏳` un-removed, so we remove it ourselves and post `✅`.
+///
+/// Scoped strictly to `own_anchor_message_id` — THIS turn's own posted message —
+/// so it can never touch a newer same-(provider,tmux,channel) turn's `⏳`. We use
+/// the SAME `command_http` (`@me`) identity that added the `⏳` so
+/// `remove_reaction_raw` (which only removes `@me`'s reaction) actually removes
+/// it. The shared `prompt_anchor_by_tmux` slot is cleared only when it still
+/// points at our id (a later injection that overwrote it keeps its own `⏳`),
+/// which also makes any subsequent watcher gate read `None` → no-op (no
+/// double-completion). All reaction ops are idempotent.
+async fn relay_recheck_complete_own_anchor_if_watcher_overtook(
+    http: &serenity::Http,
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: ChannelId,
+    own_anchor_message_id: MessageId,
+) {
+    super::formatting::remove_reaction_raw(http, channel_id, own_anchor_message_id, '⏳').await;
+    let completion_reaction = serenity::ReactionType::Unicode('✅'.to_string());
+    if let Err(error) = channel_id
+        .create_reaction(http, own_anchor_message_id, completion_reaction)
+        .await
+    {
+        tracing::warn!(
+            provider = %provider,
+            channel_id = channel_id.get(),
+            tmux_session_name = %tmux_session_name,
+            anchor_message_id = own_anchor_message_id.get(),
+            error = %error,
+            "relay re-check: failed to post ✅ after removing own ⏳ for watcher-overtaken turn; keeping anchor for the watcher's retry"
+        );
+        return;
+    }
+    // Clear the shared slot ONLY if it still points at our own message id, so a
+    // newer injection that already overwrote it keeps its own `⏳`/anchor. This
+    // also disarms any later watcher gate for this id (it reads `None` → no-op).
+    crate::services::tui_prompt_dedupe::clear_prompt_anchor_for_response(
+        provider,
+        tmux_session_name,
+        crate::services::tui_prompt_dedupe::TuiPromptAnchor {
+            channel_id: channel_id.get(),
+            message_id: own_anchor_message_id.get(),
+        },
+    );
+    tracing::info!(
+        provider = %provider,
+        channel_id = channel_id.get(),
+        tmux_session_name = %tmux_session_name,
+        anchor_message_id = own_anchor_message_id.get(),
+        "relay re-check: watcher committed terminal output before the anchor was findable; relay removed its own ⏳ and posted ✅ (lease/anchor race closed without a timing wait)"
+    );
+}
+
 fn owner_channel_for_prompt(
     shared: &Arc<SharedData>,
     prompt: &ObservedTuiPrompt,
@@ -5449,6 +5583,86 @@ mod tests {
             },
         ));
         assert_eq!(prompt_anchor_for_response("claude", tmux, channel), None);
+    }
+
+    // #3174 (ported from #3164 codex R3): the lease/anchor ordering race detector.
+    // The tmux watcher advances `committed_relay_offset` on the SAME inline commit
+    // pass that runs its anchor-completion gate, strictly BEFORE that gate. So when
+    // the watcher overtakes the relay (commits + no-op gate BEFORE
+    // `record_prompt_anchor` made the anchor findable), the post-anchor watermark is
+    // STRICTLY GREATER than the pre-relay snapshot → the relay must remove its own
+    // `⏳`. When the watcher has not yet committed (the common case) the watermark is
+    // unchanged → the relay must NOT act (no double-removal); the watcher removes the
+    // `⏳` itself later.
+    #[test]
+    fn relay_rechecks_when_watcher_committed_before_anchor_was_recorded() {
+        // Watermark advanced between the pre-relay snapshot and the post-anchor
+        // re-read → the watcher already committed a terminal turn and ran its
+        // no-op gate before our anchor was findable → relay must clean up its `⏳`.
+        assert!(relay_watcher_overtook_anchor_record(100, 240));
+        assert!(relay_watcher_overtook_anchor_record(0, 1));
+    }
+
+    #[test]
+    fn relay_does_not_recheck_when_watcher_has_not_committed() {
+        // Unchanged watermark (turn not yet complete) → no overtake → the relay is
+        // a pure no-op and the watcher does the normal `⏳` removal later. This is
+        // what prevents the relay from double-removing in the common path.
+        assert!(!relay_watcher_overtook_anchor_record(100, 100));
+        assert!(!relay_watcher_overtook_anchor_record(0, 0));
+        // Defensive: the watermark is monotonic, so it never regresses; a (would-be
+        // impossible) lower re-read must still be treated as "no overtake".
+        assert!(!relay_watcher_overtook_anchor_record(240, 100));
+    }
+
+    // #3174 (ported from #3164 codex R3): identity guard for the relay re-check's
+    // shared-slot clear. When the relay cleans up its OWN overtaken `⏳`, it must
+    // clear the shared `prompt_anchor_by_tmux` slot ONLY if the slot still points at
+    // its own message id. A newer same-(provider,tmux,channel) injection that already
+    // overwrote the slot must keep its own `⏳`/anchor — exactly the same
+    // match-guarded clear the cross-turn cleanup relies on. This proves the relay
+    // re-check cannot strand or double-complete a later turn.
+    #[test]
+    fn relay_recheck_slot_clear_is_scoped_to_own_message_id() {
+        use crate::services::tui_prompt_dedupe::{
+            TuiPromptAnchor, clear_prompt_anchor_for_response, prompt_anchor_for_response,
+            record_prompt_anchor,
+        };
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+
+        let tmux = "AgentDesk-claude-relay-recheck-race";
+        let channel = 64_u64;
+        let own = 3003_u64;
+        let newer = 4004_u64;
+
+        // Our turn recorded the slot, then a NEWER injection overwrote it.
+        record_prompt_anchor("claude", tmux, channel, own);
+        record_prompt_anchor("claude", tmux, channel, newer);
+
+        // The relay re-check clears the shared slot for ITS OWN id; the slot now
+        // holds the newer turn, so the match guard refuses → newer `⏳` preserved.
+        assert!(
+            !clear_prompt_anchor_for_response(
+                "claude",
+                tmux,
+                TuiPromptAnchor {
+                    channel_id: channel,
+                    message_id: own,
+                },
+            ),
+            "relay re-check must NOT clear a newer turn's shared slot",
+        );
+        assert_eq!(
+            prompt_anchor_for_response("claude", tmux, channel),
+            Some(TuiPromptAnchor {
+                channel_id: channel,
+                message_id: newer,
+            }),
+            "the newer turn's anchor survives the relay re-check",
+        );
     }
 
     #[test]

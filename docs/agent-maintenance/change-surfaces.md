@@ -306,7 +306,7 @@
     (incl. id==0 external/injected) NOT adopted/edited, in-range id==0
     watcher-direct STILL adopts+edits (over-suppression guard), and in-range id!=0
     unchanged.
-  - `src/services/discord/tui_prompt_relay.rs` (4522 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (4656 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3167: the self-paced TUI loop relay
     starts its synthetic turn with `ActiveTurnKind::Background` so a queued user
@@ -401,7 +401,16 @@
     (the double-relay duplicate). When the watcher stopped / never covered the turn
     the watermark is 0 (or lags), so the clamp is a no-op and the tail still relays
     from the prompt-timestamp offset — the #3176 outage fallback is preserved
-    (plus clamp-up / outage-noop unit tests).
+    (plus clamp-up / outage-noop unit tests). +134 from #3174 (ported from #3164
+    codex R3): relay-side re-check closes the lease/anchor ordering race without a
+    timing wait — `relay_observed_prompt` snapshots `committed_relay_offset` BEFORE
+    the notify-post and re-reads it AFTER `record_prompt_anchor`; a strict increase
+    (`relay_watcher_overtook_anchor_record`) proves the watcher committed + ran its
+    no-op anchor gate before the anchor was findable, so
+    `relay_recheck_complete_own_anchor_if_watcher_overtook` removes this turn's own
+    `⏳`, posts `✅`, and clears the shared slot only when it still points at this
+    turn's own anchor id (newer same-(provider,tmux,channel) turn keeps its `⏳`)
+    (plus overtake-detector / no-double-removal / own-id-scoped-clear unit tests).
   - `src/services/discord/idle_recap.rs` (1881 prod lines; idle-recap card
     compose/post/clear surface, registered giant-file (#3036) — bugfix only
     outside an extraction plan. Crossed 1000 prod LoC with #3146 Part 1: the
