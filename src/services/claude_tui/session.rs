@@ -27,6 +27,13 @@ pub struct ClaudeTuiLaunchConfig {
     pub system_prompt: Option<String>,
     pub model: Option<String>,
     pub resume: bool,
+    /// #3166: provider-specific auto-compact threshold
+    /// (`context_compact_percent_claude`), resolved by the caller via
+    /// `fetch_context_thresholds`. When `Some(pct)` with `pct > 0` the launch
+    /// script exports `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=pct` so BOTH fresh and
+    /// `--resume` TUI spawns honour the configured override. Mirrors the
+    /// `p > 0` guard used by the non-TUI tmux/process spawn paths.
+    pub compact_percent: Option<u64>,
 }
 
 impl ClaudeTuiLaunchConfig {
@@ -147,13 +154,24 @@ fn write_launch_script(
     // prompt entirely, the placeholder semantics here should be
     // revisited. Track upstream PY6 changes and reflect them in this
     // comment + the unit tests.
+    // #3166: export the configured Claude auto-compact override so TUI-hosted
+    // sessions (fresh AND `--resume`) honour `context_compact_percent_claude`.
+    // Gated on `pct > 0`, mirroring the non-TUI spawn paths
+    // (`build_tmux_launch_env_lines` / `execute_streaming_local_process`); a 0
+    // or absent value leaves the var unset so the Claude CLI keeps its default.
+    let compact_export = match config.compact_percent.filter(|&pct| pct > 0) {
+        Some(pct) => format!("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={pct}\n"),
+        None => String::new(),
+    };
     let script = format!(
         "#!/bin/bash\n\
          cd {cwd}\n\
          export CLAUDE_CODE_RESUME_PROMPT=\"_\"\n\
+         {compact_export}\
          exec {claude_bin} {args}\n",
         cwd = shell_escape(&config.working_dir.display().to_string()),
         claude_bin = shell_escape(&config.claude_bin.display().to_string()),
+        compact_export = compact_export,
         args = args,
     );
     std::fs::write(path, script)
@@ -175,6 +193,7 @@ mod tests {
             system_prompt: Some("system prompt".to_string()),
             model: Some("sonnet".to_string()),
             resume: false,
+            compact_percent: None,
         }
     }
 
@@ -278,6 +297,81 @@ mod tests {
             !script.contains("export CLAUDE_CODE_RESUME_PROMPT=\" \""),
             "single-space placeholder is truthy but whitespace-only; #2730 reproduced this poisoning the API conversation history"
         );
+    }
+
+    #[test]
+    fn launch_script_exports_compact_override_when_configured() {
+        // #3166: a configured context_compact_percent_claude must reach the TUI
+        // launch script as CLAUDE_AUTOCOMPACT_PCT_OVERRIDE so resume/restore-
+        // spawned TUI sessions honour the user-set auto-compact threshold.
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = sample_config();
+        config.compact_percent = Some(60);
+        let launch_script_path = dir.path().join("launch.sh");
+
+        write_launch_script(
+            &launch_script_path,
+            &config,
+            Path::new("/tmp/settings.json"),
+        )
+        .unwrap();
+
+        let script = std::fs::read_to_string(&launch_script_path).unwrap();
+        assert!(
+            script.contains("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=60\n"),
+            "launch script must export the configured compact override, got:\n{script}"
+        );
+        // The export must precede the `exec` line so the env is in scope for claude.
+        let export_pos = script.find("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE").unwrap();
+        let exec_pos = script.find("exec ").unwrap();
+        assert!(
+            export_pos < exec_pos,
+            "compact override must be exported before exec"
+        );
+    }
+
+    #[test]
+    fn launch_script_resume_exports_compact_override() {
+        // #3166: the resume path is the reported live regression — a --resume
+        // spawn must still carry the override.
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = sample_config();
+        config.resume = true;
+        config.compact_percent = Some(60);
+        let launch_script_path = dir.path().join("launch.sh");
+
+        write_launch_script(
+            &launch_script_path,
+            &config,
+            Path::new("/tmp/settings.json"),
+        )
+        .unwrap();
+
+        let script = std::fs::read_to_string(&launch_script_path).unwrap();
+        assert!(script.contains("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=60\n"));
+    }
+
+    #[test]
+    fn launch_script_omits_compact_override_when_absent_or_zero() {
+        // Mirror the `p > 0` guard used by the non-TUI spawn paths: None or 0
+        // leaves the var unset so the Claude CLI keeps its built-in default.
+        let dir = tempfile::tempdir().unwrap();
+        for value in [None, Some(0)] {
+            let mut config = sample_config();
+            config.compact_percent = value;
+            let launch_script_path = dir.path().join("launch.sh");
+            write_launch_script(
+                &launch_script_path,
+                &config,
+                Path::new("/tmp/settings.json"),
+            )
+            .unwrap();
+            let script = std::fs::read_to_string(&launch_script_path).unwrap();
+            assert!(
+                !script.contains("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"),
+                "value {value:?} must not export the override, got:\n{script}"
+            );
+        }
     }
 
     #[test]
