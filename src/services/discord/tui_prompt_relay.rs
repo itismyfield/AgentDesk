@@ -1131,6 +1131,89 @@ async fn claim_tui_direct_synthetic_turn(
     anchor_message_id: MessageId,
     lease: &ExternalInputRelayLease,
 ) -> TuiDirectSyntheticTurnClaim {
+    // #3154: serialize the wakeup/loop (self-paced) turn START against the
+    // PREVIOUS turn's still-inflight relay drain. Without this, a wakeup turn
+    // begins writing `response_sent_offset` while turn1's terminal relay is
+    // still draining → the two turns' offset bookkeeping collide and the
+    // `response_sent_offset_monotonic` invariant goes backwards (74 production
+    // violations on channel 1479671298497183835). #3041 serialized DELIVERY but
+    // NOT turn-START.
+    //
+    // We BLOCK here only on a genuinely DIFFERENT (previous) turn's inflight: our
+    // own synthetic for THIS turn does not exist yet (created below), so nothing
+    // here can be ours and the wait can never self-deadlock. The wait is BOUNDED
+    // by `CLAUDE_IDLE_INFLIGHT_DRAIN_WAIT` and channel-scoped (it loads the single
+    // per-channel Claude inflight row; one channel maps to one tmux session, and
+    // `inflight_is_current_turn_synthetic` further requires the same
+    // `tmux_session_name`).
+    //
+    // codex GATE fix: on TIMEOUT we must NOT proceed to start + save a fresh
+    // synthetic over a STILL-PRESENT prior inflight — that overwrite resets
+    // `response_sent_offset` to 0 and trips the very `response_sent_offset_monotonic`
+    // invariant this change exists to close (`save_inflight_state`'s monotonic
+    // observer fires on the overwrite even if the mailbox happened to free up).
+    // Instead we DECLINE the synthetic claim (return `claimed: false`) BEFORE
+    // touching the mailbox or inflight store — identical in effect to the existing
+    // "mailbox already owns a different turn" decline. Nothing was started, so no
+    // cleanup is needed; this can only DELAY/decline a synthetic claim, never drop
+    // or duplicate delivery (the bridge tail / next observation still handles the
+    // turn). A genuinely-distinct prior inflight must STILL be present at this
+    // instant to decline — if it cleared between the last poll and now, we fall
+    // through and start normally.
+    #[cfg(unix)]
+    if matches!(provider, ProviderKind::Claude)
+        && !wait_for_claude_inflight_to_clear(
+            channel_id,
+            tmux_session_name,
+            // Our synthetic for THIS turn is not yet created, so the anchor id
+            // matches no inflight here; threading it keeps identity-pinning
+            // symmetric with the idle-tail drain-wait and harmless if a racing
+            // refresh of our own row lands mid-wait.
+            Some(anchor_message_id.get()),
+        )
+        .await
+    {
+        let prior = super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get());
+        if prior.is_some()
+            && !inflight_is_current_turn_synthetic(
+                prior.as_ref(),
+                tmux_session_name,
+                Some(anchor_message_id.get()),
+            )
+        {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = channel_id.get(),
+                tmux_session_name = %tmux_session_name,
+                anchor_message_id = anchor_message_id.get(),
+                wait_ms = CLAUDE_IDLE_INFLIGHT_DRAIN_WAIT.as_millis(),
+                "declining TUI-direct synthetic turn-start; prior inflight relay still draining after bounded wait (avoids overwriting its response_sent_offset)"
+            );
+            let relay_owner = if tui_direct_watcher_can_own_output(
+                &shared.tmux_watchers,
+                tmux_session_name,
+                external_input_relay_output_path(
+                    shared,
+                    provider.as_str(),
+                    tmux_session_name,
+                    channel_id,
+                    crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
+                        tmux_session_name,
+                    )
+                    .as_ref(),
+                )
+                .as_deref(),
+            ) {
+                ExternalInputRelayOwner::TmuxWatcher
+            } else {
+                ExternalInputRelayOwner::BridgeAdapter
+            };
+            return TuiDirectSyntheticTurnClaim {
+                relay_owner,
+                claimed: false,
+            };
+        }
+    }
     let binding =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name);
     let output_path = external_input_relay_output_path(
@@ -6144,6 +6227,198 @@ mod tests {
             "AgentDesk-claude-self",
             Some(11)
         ));
+    }
+
+    /// #3154: the wakeup/loop turn-START drain-wait must WAIT while the PREVIOUS
+    /// turn's inflight is still draining and PROCEED once it clears — and must
+    /// NOT wait when there is no draining inflight. This drives the exact helper
+    /// (`wait_for_claude_inflight_to_clear`) the turn-START path now calls before
+    /// `mailbox_try_start_turn_kinded`, against the real persisted inflight store.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn turn_start_drain_wait_blocks_until_prior_inflight_clears() {
+        // `load_inflight_state` reads the process-wide `AGENTDESK_ROOT_DIR`;
+        // serialize on the shared env lock and isolate the root to our temp dir.
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().expect("temp dir");
+        struct EnvReset(Option<std::ffi::OsString>);
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+                }
+            }
+        }
+        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", dir.path()) };
+
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(940_000_000_003_154);
+        let tmux_session_name = "AgentDesk-claude-3154-turnstart";
+        // The NEW (wakeup) turn's anchor id — distinct from the previous turn's.
+        let new_turn_anchor = MessageId::new(940_000_000_003_200);
+        let output_path = dir.path().join("prior.jsonl");
+        let lease = ExternalInputRelayLease {
+            channel_id: Some(channel_id.get()),
+            turn_id: Some("external:claude:940000000003154:turnstart:1".to_string()),
+            session_key: Some("token:AgentDesk-claude-3154-turnstart".to_string()),
+            relay_owner: ExternalInputRelayOwner::BridgeAdapter,
+            runtime_kind: Some(RuntimeHandoffKind::ClaudeTui),
+            generation:
+                crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+        };
+
+        // (1) No inflight at all => the turn-START drain-wait returns immediately.
+        super::super::inflight::clear_inflight_state(&provider, channel_id.get());
+        let started = std::time::Instant::now();
+        assert!(
+            wait_for_claude_inflight_to_clear(
+                channel_id,
+                tmux_session_name,
+                Some(new_turn_anchor.get()),
+            )
+            .await,
+            "no draining inflight => turn-start proceeds without waiting"
+        );
+        assert!(
+            started.elapsed() < CLAUDE_IDLE_INFLIGHT_DRAIN_WAIT,
+            "with no inflight the wait must not consume the full timeout"
+        );
+
+        // (2) A PREVIOUS turn's inflight (DIFFERENT anchor id) is draining. The
+        // turn-START drain-wait must BLOCK until it clears, then PROCEED. The
+        // previous turn's `user_msg_id` differs from `new_turn_anchor`, so it is
+        // NOT recognised as "ours" and correctly blocks.
+        let prior = build_tui_direct_synthetic_inflight_state(
+            provider.clone(),
+            channel_id,
+            MessageId::new(940_000_000_003_100), // previous turn's anchor id
+            None,
+            "prior turn still draining",
+            tmux_session_name,
+            Some(&output_path),
+            0,
+            &lease,
+            RelayOwnerKind::None,
+        );
+        super::super::inflight::save_inflight_state(&prior).expect("save prior inflight");
+
+        // Clear the prior inflight after a delay that exceeds at least one poll
+        // interval but stays well within the bounded timeout, so the wait must
+        // observe the "blocking" state at least once before it clears.
+        let clear_after = CLAUDE_IDLE_INFLIGHT_DRAIN_POLL * 3;
+        let clear_provider = provider.clone();
+        let clearer = tokio::spawn(async move {
+            tokio::time::sleep(clear_after).await;
+            super::super::inflight::clear_inflight_state(&clear_provider, channel_id.get());
+        });
+
+        let started = std::time::Instant::now();
+        let proceeded = wait_for_claude_inflight_to_clear(
+            channel_id,
+            tmux_session_name,
+            Some(new_turn_anchor.get()),
+        )
+        .await;
+        let waited = started.elapsed();
+        clearer.await.expect("clearer task");
+
+        assert!(
+            proceeded,
+            "once the prior inflight drains the turn-start must proceed (never hang)"
+        );
+        assert!(
+            waited >= clear_after,
+            "turn-start must WAIT while the prior inflight is still draining \
+             (waited {waited:?}, prior cleared after {clear_after:?})"
+        );
+        assert!(
+            waited < CLAUDE_IDLE_INFLIGHT_DRAIN_WAIT,
+            "the wait is bounded and returns as soon as the prior inflight clears, \
+             not at the full timeout (waited {waited:?})"
+        );
+    }
+
+    /// #3154 codex GATE fix: on a TIMED-OUT turn-start drain-wait, the synthetic
+    /// claim must DECLINE only when a genuinely-distinct prior inflight is STILL
+    /// present (so it never overwrites that row's `response_sent_offset` and trips
+    /// the monotonic invariant), and must NOT decline when the present row is our
+    /// own synthetic or when nothing remains. This drives the exact decline
+    /// predicate `claim_tui_direct_synthetic_turn` evaluates after the wait
+    /// returns `false`.
+    #[cfg(unix)]
+    #[test]
+    fn turn_start_decline_predicate_only_fires_on_distinct_prior_inflight() {
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(940_000_000_003_155);
+        let tmux_session_name = "AgentDesk-claude-3154-decline";
+        let new_turn_anchor: u64 = 940_000_000_003_300;
+        let output_path = PathBuf::from("/tmp/adk-3154-decline.jsonl");
+        let lease = ExternalInputRelayLease {
+            channel_id: Some(channel_id.get()),
+            turn_id: Some("external:claude:940000000003155:decline:1".to_string()),
+            session_key: Some("token:AgentDesk-claude-3154-decline".to_string()),
+            relay_owner: ExternalInputRelayOwner::BridgeAdapter,
+            runtime_kind: Some(RuntimeHandoffKind::ClaudeTui),
+            generation:
+                crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+        };
+
+        // A PREVIOUS turn's inflight (DIFFERENT anchor id) still present at timeout
+        // => the predicate says DECLINE (do not overwrite its offset).
+        let prior = build_tui_direct_synthetic_inflight_state(
+            provider.clone(),
+            channel_id,
+            MessageId::new(940_000_000_003_111),
+            None,
+            "prior turn",
+            tmux_session_name,
+            Some(&output_path),
+            0,
+            &lease,
+            RelayOwnerKind::None,
+        );
+        let should_decline = !inflight_is_current_turn_synthetic(
+            Some(&prior),
+            tmux_session_name,
+            Some(new_turn_anchor),
+        );
+        assert!(
+            should_decline,
+            "a still-present DIFFERENT prior inflight must make the timed-out turn-start DECLINE"
+        );
+
+        // The present row is OUR OWN synthetic (matching anchor id) => do NOT
+        // decline (we would just be waiting on ourselves; let the claim proceed).
+        let own = build_tui_direct_synthetic_inflight_state(
+            provider.clone(),
+            channel_id,
+            MessageId::new(new_turn_anchor),
+            None,
+            "our own synthetic",
+            tmux_session_name,
+            Some(&output_path),
+            0,
+            &lease,
+            RelayOwnerKind::None,
+        );
+        assert!(
+            inflight_is_current_turn_synthetic(
+                Some(&own),
+                tmux_session_name,
+                Some(new_turn_anchor),
+            ),
+            "our own synthetic must NOT trigger a decline"
+        );
+
+        // Nothing present => no decline (the `prior.is_some()` guard is false).
+        assert!(
+            !inflight_is_current_turn_synthetic(None, tmux_session_name, Some(new_turn_anchor)),
+            "an absent inflight must not be treated as a blocking prior turn"
+        );
     }
 
     #[cfg(unix)]

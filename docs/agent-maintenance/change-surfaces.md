@@ -318,7 +318,7 @@
     so a late completion can never commit the WRONG newer loop turn; the
     `user_msg_id != 0` path is byte-for-byte unchanged. New test
     `watcher_terminal_delivery_commit_marks_loop_turn_with_zero_user_msg_id`.
-  - `src/services/discord/tui_prompt_relay.rs` (4522 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (4605 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3167: the self-paced TUI loop relay
     starts its synthetic turn with `ActiveTurnKind::Background` so a queued user
@@ -413,7 +413,25 @@
     (the double-relay duplicate). When the watcher stopped / never covered the turn
     the watermark is 0 (or lags), so the clamp is a no-op and the tail still relays
     from the prompt-timestamp offset — the #3176 outage fallback is preserved
-    (plus clamp-up / outage-noop unit tests).
+    (plus clamp-up / outage-noop unit tests); +83 from #3154: the wakeup/loop
+    (self-paced) synthetic turn-START now serializes against the PREVIOUS turn's
+    inflight relay drain — `claim_tui_direct_synthetic_turn` runs the SAME bounded
+    `wait_for_claude_inflight_to_clear` drain-wait (Claude-only, per-channel
+    inflight row, `CLAUDE_IDLE_INFLIGHT_DRAIN_WAIT`-bounded; our own synthetic is
+    exempted via `inflight_is_current_turn_synthetic` which also requires the same
+    `tmux_session_name`) BEFORE `mailbox_try_start_turn_kinded`, so a new wakeup
+    turn cannot begin writing `response_sent_offset` while turn1's terminal relay
+    is still draining (closes the `response_sent_offset_monotonic` regression /
+    double-relay). Our own synthetic does not exist yet at this point so the wait
+    can never self-deadlock. On TIMEOUT, if a genuinely-distinct prior inflight is
+    STILL present, the claim is DECLINED (`claimed: false`) BEFORE the mailbox/save
+    so a fresh synthetic never overwrites the prior row's `response_sent_offset`
+    (which would itself trip the invariant) — identical to the existing
+    "mailbox already owns a different turn" decline; nothing was started so no
+    cleanup is needed. The change can only DELAY or decline a synthetic claim,
+    never drop/duplicate delivery (plus the
+    `turn_start_drain_wait_blocks_until_prior_inflight_clears` end-to-end
+    regression test).
   - `src/services/discord/idle_recap.rs` (1881 prod lines; idle-recap card
     compose/post/clear surface, registered giant-file (#3036) — bugfix only
     outside an extraction plan. Crossed 1000 prod LoC with #3146 Part 1: the
