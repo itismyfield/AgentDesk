@@ -995,8 +995,11 @@ pub(super) async fn auto_restore_session_force(
 /// defensive belt-and-braces guard. If the single row carries a DIFFERENT
 /// non-null `channel_id`, the fallback is refused — that would reintroduce the
 /// #3207 cross-channel hazard. New heartbeats stamp `channel_id`, so this
-/// self-heals over time. Returns the resolved cwd (non-empty) for this
-/// `session_key`.
+/// self-heals over time. Returns a [`RestoredCwd`] for this `session_key`:
+/// `channel_scoped = true` for an exact channel-id match (whose `path` may be
+/// empty when the owned row's `cwd` is NULL/missing — ownership comes from row
+/// existence, #3219), or `channel_scoped = false` with a non-empty path for the
+/// legacy NULL fallback.
 async fn resolve_cwd_for_session_key(
     pool: &sqlx::PgPool,
     session_key: &str,
