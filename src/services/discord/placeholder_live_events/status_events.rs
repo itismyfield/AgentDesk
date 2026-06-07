@@ -172,6 +172,16 @@ pub(in crate::services::discord) fn status_events_from_json(value: &Value) -> Ve
         return workflow_events;
     }
 
+    // A nested subagent record carries the launching Task's tool-use id as a
+    // top-level `parent_tool_use_id`. Its tool activity belongs to that subagent
+    // slot, not the main panel status, so route it to `SubagentActivity` keyed by
+    // the parent id (matched against the slot's stored Task tool-use id) rather
+    // than emitting a top-level `ToolStart` that would clobber the panel header
+    // and resurrect the foreground "tool running" status.
+    if let Some(parent_id) = subagent_parent_tool_use_id(value) {
+        return subagent_activity_status_events(value, parent_id);
+    }
+
     match value.get("type").and_then(Value::as_str).unwrap_or("") {
         "assistant" => assistant_status_events(value),
         "content_block_start" => content_block_start_status_events(value),
@@ -543,6 +553,81 @@ fn system_status_events(value: &Value) -> Vec<StatusEvent> {
     let status = value.get("status").and_then(Value::as_str).unwrap_or("");
     let summary = value.get("summary").and_then(Value::as_str).unwrap_or("");
     status_events_from_task_notification(kind, status, summary)
+}
+
+/// Returns the launching Task's tool-use id from a nested subagent record's
+/// top-level `parent_tool_use_id` (Claude Code stream-json marks every
+/// subagent-internal `assistant`/`content_block_start` record with it). `None`
+/// for top-level records (no parent) so they take the normal panel path.
+fn subagent_parent_tool_use_id(value: &Value) -> Option<String> {
+    ["parent_tool_use_id", "parentToolUseId"]
+        .into_iter()
+        .find_map(|key| value.get(key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+/// Builds [`StatusEvent::SubagentActivity`] events for a nested subagent record,
+/// one per tool_use block, keyed by the parent Task id so the panel updates the
+/// owning subagent slot's recent line. The activity line is the same
+/// `[Tool] args` summary the main panel uses for a tool, so a long background
+/// subagent surfaces its current step instead of an opaque "running".
+fn subagent_activity_status_events(value: &Value, parent_id: String) -> Vec<StatusEvent> {
+    let blocks: Vec<(&str, String)> = match value.get("type").and_then(Value::as_str) {
+        Some("assistant") => value
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+            .map(|block| {
+                let name = block.get("name").and_then(Value::as_str).unwrap_or("Tool");
+                let input = value_to_compact_string(block.get("input").unwrap_or(&Value::Null));
+                (name, input)
+            })
+            .collect(),
+        Some("content_block_start") => value
+            .get("content_block")
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+            .map(|block| {
+                let name = block.get("name").and_then(Value::as_str).unwrap_or("Tool");
+                let input = block
+                    .get("input")
+                    .map(value_to_compact_string)
+                    .unwrap_or_default();
+                vec![(name, input)]
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+
+    blocks
+        .into_iter()
+        .filter_map(|(name, input)| {
+            subagent_activity_line(name, &input).map(|summary| StatusEvent::SubagentActivity {
+                tool_use_id: Some(parent_id.clone()),
+                summary,
+            })
+        })
+        .collect()
+}
+
+/// Formats a subagent's tool step into a compact activity line, e.g.
+/// `[Bash] cargo test`. Falls back to the bare tool label when no args summary
+/// is available. Returns `None` only when the tool name is unusable.
+fn subagent_activity_line(name: &str, input: &str) -> Option<String> {
+    use super::common::tool_prefix;
+    let args = format_tool_input(name, input);
+    let args = args.trim();
+    let line = if args.is_empty() {
+        tool_prefix(name)
+    } else {
+        format!("{} {}", tool_prefix(name), args)
+    };
+    let line = normalize_summary(&line);
+    (!line.trim().is_empty()).then_some(truncate_chars(&line, EVENT_LINE_MAX_CHARS))
 }
 
 fn background_status_events(value: &Value) -> Vec<StatusEvent> {

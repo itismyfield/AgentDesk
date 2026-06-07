@@ -1692,6 +1692,205 @@ fn status_panel_pairs_subagent_by_tool_use_id_despite_interleaving() {
     );
 }
 
+// Live subagent activity: a nested subagent record carries the launching Task's
+// id as a top-level `parent_tool_use_id`. Its tool step must surface on the
+// owning subagent slot (`└ type desc — [Tool] args`), not the panel header, so a
+// long (background) subagent is not an opaque "running".
+#[test]
+fn status_panel_shows_live_subagent_activity_by_parent_id() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(900);
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({"subagent_type": "general-purpose", "description": "Audit logs"}).to_string(),
+            Some("task-z"),
+        ),
+    );
+    // Nested subagent tool_use record (parent = the Task's id).
+    events.push_status_events(
+        channel_id,
+        status_events_from_json(&json!({
+            "type": "assistant",
+            "parent_tool_use_id": "task-z",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "name": "Bash",
+                    "input": {"command": "grep ERROR app.log"}
+                }]
+            }
+        })),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(rendered.contains("general-purpose Audit logs"));
+    assert!(
+        rendered.contains("[Bash]") && rendered.contains("grep ERROR app.log"),
+        "subagent activity line missing, got: {rendered}"
+    );
+    // Nested activity must NOT turn the panel header into a foreground tool run.
+    assert!(
+        !rendered.contains("🔧 도구 실행 중"),
+        "nested subagent step must not clobber the panel header, got: {rendered}"
+    );
+}
+
+// The activity line updates to the subagent's LATEST step on each new event.
+#[test]
+fn status_panel_subagent_activity_updates_to_latest_step() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(901);
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({"subagent_type": "explorer", "description": "Trace"}).to_string(),
+            Some("t1"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_json(&json!({
+            "type": "assistant",
+            "parent_tool_use_id": "t1",
+            "message": {"content": [{"type": "tool_use", "name": "Read", "input": {"file_path": "/a"}}]}
+        })),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_json(&json!({
+            "type": "assistant",
+            "parent_tool_use_id": "t1",
+            "message": {"content": [{"type": "tool_use", "name": "Grep", "input": {"pattern": "needle"}}]}
+        })),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(
+        rendered.contains("[Grep]"),
+        "latest step missing, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("[Read]"),
+        "stale step retained, got: {rendered}"
+    );
+}
+
+// #3198 safety: activity whose parent id matches a FINISHED slot must not
+// resurrect it (no re-mark, no recent line on a closed background subagent), and
+// an id-bearing activity that matches no slot is dropped, never mis-routed to an
+// unrelated running subagent.
+#[test]
+fn status_panel_subagent_activity_never_resurrects_or_misroutes() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(902);
+
+    // Slot A finished (foreground, closed by its ack).
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({"subagent_type": "alpha", "description": "Done work"}).to_string(),
+            Some("a"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Task"), false, Some("a")),
+    );
+    // Slot B still running.
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({"subagent_type": "beta", "description": "Live work"}).to_string(),
+            Some("b"),
+        ),
+    );
+
+    // Late activity for the FINISHED slot A — must be ignored, not resurrected.
+    events.push_status_events(
+        channel_id,
+        status_events_from_json(&json!({
+            "type": "assistant",
+            "parent_tool_use_id": "a",
+            "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": "late-ghost"}}]}
+        })),
+    );
+    // Activity for an UNKNOWN id — must be dropped, not routed to slot B.
+    events.push_status_events(
+        channel_id,
+        status_events_from_json(&json!({
+            "type": "assistant",
+            "parent_tool_use_id": "ghost",
+            "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": "stray"}}]}
+        })),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(
+        !rendered.contains("late-ghost"),
+        "finished slot must not be resurrected, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("stray"),
+        "unmatched activity must not mis-route onto running slot B, got: {rendered}"
+    );
+}
+
+// A background subagent keeps running past its launch ack (#3198), and its live
+// activity surfaces on the still-open slot — exactly the visibility this feature
+// adds.
+#[test]
+fn status_panel_background_subagent_shows_live_activity_while_running() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(903);
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({
+                "subagent_type": "general-purpose",
+                "description": "Long background job",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("bg-1"),
+        ),
+    );
+    // Launch ack — background slot stays open (not ✓).
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Task"), false, Some("bg-1")),
+    );
+    // Live step from the still-running background subagent.
+    events.push_status_events(
+        channel_id,
+        status_events_from_json(&json!({
+            "type": "content_block_start",
+            "parent_tool_use_id": "bg-1",
+            "content_block": {"type": "tool_use", "name": "WebSearch", "input": {"query": "rust async"}}
+        })),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(rendered.contains("general-purpose Long background job"));
+    assert!(
+        rendered.contains("[WebSearch]"),
+        "background subagent live activity missing, got: {rendered}"
+    );
+    // Still running — no completion marker yet.
+    assert!(
+        !rendered.contains('✓'),
+        "background subagent must not show ✓ on a launch ack, got: {rendered}"
+    );
+}
+
 // #3084: two parallel subagents whose results return in reverse order must each
 // close their own slot. The previous "first unfinished slot" logic closed the
 // wrong slot, mis-attributing success/failure across parallel subagents.

@@ -10,6 +10,7 @@ use super::common::{
 use super::context_panel::{ContextPanelSnapshot, render_context_panel_line};
 use super::session_panel::{SessionPanelSnapshot, render_session_panel_line};
 use super::status_events::{is_schedule_wakeup_tool, parse_eta_secs};
+use super::subagent_summary::render_subagent_done_summary;
 use super::task_panel::{
     TaskPanelSnapshot, TaskToolSlot, clean_task_tool_value, render_task_panel_line,
     render_task_tool_slot,
@@ -162,6 +163,10 @@ impl StatusPanelState {
                     };
                 }
             }
+            StatusEvent::SubagentActivity {
+                tool_use_id,
+                summary,
+            } => self.set_subagent_activity(tool_use_id, summary),
             StatusEvent::SubagentEnd {
                 success,
                 tool_use_id,
@@ -330,6 +335,33 @@ impl StatusPanelState {
                 if matches!(self.status, DerivedStatus::Running) {
                     self.status = DerivedStatus::Running;
                 }
+            }
+        }
+    }
+
+    /// Routes a still-running subagent's live step (#3204) onto its slot's
+    /// recent line. Prefers the UNFINISHED slot whose Task id matches the
+    /// nested record's `parent_tool_use_id`; an id-bearing activity that matches
+    /// no slot is dropped (never mis-routed). Only unfinished slots are touched,
+    /// so a finished/background-finalized slot is never resurrected (#3198). The
+    /// panel header is left unchanged — the subagent is already on its own line.
+    fn set_subagent_activity(&mut self, tool_use_id: Option<String>, summary: String) {
+        let id = tool_use_id.as_deref();
+        let target =
+            match id {
+                Some(id) => self.subagents.iter_mut().rev().find(|slot| {
+                    slot.finished.is_none() && slot.tool_use_id.as_deref() == Some(id)
+                }),
+                None => self
+                    .subagents
+                    .iter_mut()
+                    .rev()
+                    .find(|slot| slot.finished.is_none()),
+            };
+        if let Some(slot) = target {
+            let summary = normalize_summary(&summary);
+            if !summary.trim().is_empty() {
+                slot.recent = Some(summary);
             }
         }
     }
@@ -614,70 +646,6 @@ fn render_subagent_slot(slot: &SubagentSlot) -> String {
         line.push_str(marker);
     }
     truncate_chars(&line, EVENT_LINE_MAX_CHARS)
-}
-
-/// Formats the TUI-parity `Done (N tools · M tokens · Xs)` summary. Each part is
-/// included only when present, so a partial summary still renders what it has.
-/// Returns `None` when no part is available.
-fn render_subagent_done_summary(summary: &SubagentSummary) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(count) = summary.tool_count {
-        let noun = if count == 1 { "tool" } else { "tools" };
-        parts.push(format!("{count} {noun}"));
-    }
-    if let Some(tokens) = summary.tokens {
-        parts.push(format!("{} tokens", format_compact_count(tokens)));
-    }
-    if let Some(secs) = summary.duration_secs {
-        parts.push(format_duration_secs(secs));
-    }
-    if parts.is_empty() {
-        return None;
-    }
-    Some(format!("Done ({})", parts.join(" · ")))
-}
-
-/// Compact count formatting mirroring the TUI (`28824` → `28.8k`, `1_500_000`
-/// → `1.5m`). Values under 1000 render verbatim.
-fn format_compact_count(value: u64) -> String {
-    if value < 1_000 {
-        return value.to_string();
-    }
-    if value < 1_000_000 {
-        let scaled = value as f64 / 1_000.0;
-        return format!("{}k", trim_one_decimal(scaled));
-    }
-    let scaled = value as f64 / 1_000_000.0;
-    format!("{}m", trim_one_decimal(scaled))
-}
-
-/// Renders a one-decimal number without a trailing `.0` (`28.8` stays,
-/// `19.0` → `19`).
-fn trim_one_decimal(value: f64) -> String {
-    let rounded = (value * 10.0).round() / 10.0;
-    if (rounded.fract()).abs() < f64::EPSILON {
-        format!("{}", rounded as u64)
-    } else {
-        format!("{rounded:.1}")
-    }
-}
-
-/// Humanizes a duration in seconds the way the TUI does: `45s`, `19m`, `1h2m`.
-fn format_duration_secs(secs: u64) -> String {
-    if secs < 60 {
-        return format!("{secs}s");
-    }
-    let minutes = secs / 60;
-    if minutes < 60 {
-        return format!("{minutes}m");
-    }
-    let hours = minutes / 60;
-    let rem_minutes = minutes % 60;
-    if rem_minutes == 0 {
-        format!("{hours}h")
-    } else {
-        format!("{hours}h{rem_minutes}m")
-    }
 }
 
 fn sanitize_label(raw: &str) -> String {

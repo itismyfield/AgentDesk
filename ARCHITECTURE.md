@@ -407,6 +407,7 @@ src/
 │   │   │   ├── status_events.rs
 │   │   │   ├── status_panel.rs
 │   │   │   ├── subagent_rollout.rs
+│   │   │   ├── subagent_summary.rs
 │   │   │   ├── task_panel.rs
 │   │   │   ├── tests.rs
 │   │   │   └── workflow_panel.rs

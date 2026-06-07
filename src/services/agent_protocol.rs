@@ -316,6 +316,19 @@ pub enum StatusEvent {
     SubagentEvent {
         summary: String,
     },
+    /// Live activity from a still-running subagent (especially a
+    /// `run_in_background` one), attributed to its slot via the nested record's
+    /// top-level `parent_tool_use_id` — the launching Task's tool-use id stored
+    /// on [`StatusEvent::SubagentStart::tool_use_id`]. Carries the subagent's
+    /// latest activity line (current tool / short summary) so a long background
+    /// task is not an opaque "running". The panel updates the slot's recent line
+    /// on each new activity and NEVER resurrects a finished slot (#3198 ack-only
+    /// / background-finalize semantics are preserved). `tool_use_id` is the
+    /// parent Task id; `None` falls back to the last unfinished slot.
+    SubagentActivity {
+        tool_use_id: Option<String>,
+        summary: String,
+    },
     SubagentEnd {
         success: bool,
         /// Tool-use id of the Task whose result closed this subagent. Matched

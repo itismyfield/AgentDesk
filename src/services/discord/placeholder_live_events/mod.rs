@@ -14,6 +14,7 @@ mod session_panel;
 mod status_events;
 mod status_panel;
 mod subagent_rollout;
+mod subagent_summary;
 mod task_panel;
 mod workflow_panel;
 
