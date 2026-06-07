@@ -305,6 +305,13 @@ pub enum StatusEvent {
         /// one (which mis-attributes across parallel subagents). `None` when
         /// the backend cannot surface an id.
         tool_use_id: Option<String>,
+        /// `true` when the Task/Agent was launched with `run_in_background`.
+        /// A background dispatch's immediate `tool_result` is only a launch
+        /// ack — the subagent keeps running and outlives the launching turn —
+        /// so the panel must NOT mark it ✓ (completed) on that ack-only
+        /// `SubagentEnd`; only a genuine completion (summary-bearing end or a
+        /// terminal task_notification) finalizes it (#3041 / status panel).
+        background: bool,
     },
     SubagentEvent {
         summary: String,
@@ -315,10 +322,18 @@ pub enum StatusEvent {
         /// against [`StatusEvent::SubagentStart::tool_use_id`]; `None` falls
         /// back to closing the first unfinished slot.
         tool_use_id: Option<String>,
-        /// TUI-parity accounting (tool count / tokens / duration) reconstructed
+        /// TUI-parity accounting (tool count / tokens · duration) reconstructed
         /// from the Task `toolUseResult` and/or `subagents/*.jsonl` (#3086).
         /// `None` when no summary fields were recoverable.
         summary: Option<SubagentSummary>,
+        /// `true` when this end is only the immediate `tool_result` launch ack
+        /// for a Task (it always fires when the Task tool returns, even for a
+        /// `run_in_background` dispatch whose subagent keeps running). The panel
+        /// uses this to avoid marking a still-running background subagent ✓: an
+        /// ack-only end finalizes a foreground slot but NOT a background slot.
+        /// A genuine completion (summary-bearing end, or a terminal
+        /// task_notification) sets this `false` and always finalizes.
+        ack_only: bool,
     },
     TaskToolUpdate {
         name: String,

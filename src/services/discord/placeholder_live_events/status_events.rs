@@ -55,6 +55,10 @@ pub(in crate::services::discord) fn status_events_from_tool_use_with_id(
     }
     if is_task_tool(name) {
         let value = tool_input_value(input);
+        let background = value
+            .get("run_in_background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         events.push(StatusEvent::SubagentStart {
             subagent_type: value
                 .get("subagent_type")
@@ -64,6 +68,7 @@ pub(in crate::services::discord) fn status_events_from_tool_use_with_id(
                 .or_else(|| Some(name.to_string())),
             desc: subagent_description(&value).or(args_summary.clone()),
             tool_use_id: tool_use_id.map(str::to_string),
+            background,
         });
     }
     if is_todo_write_tool(name) {
@@ -105,6 +110,14 @@ pub(in crate::services::discord) fn status_events_from_tool_result_with_id(
             success: !is_error,
             tool_use_id: tool_use_id.map(str::to_string),
             summary: None,
+            // The Task `tool_result` always fires when the tool returns. Only a
+            // SUCCESSFUL `run_in_background` launch is an ack-only end: the
+            // dispatch succeeded and the subagent keeps running (often
+            // outliving the launching turn), so the panel must NOT mark it ✓.
+            // A FAILED launch (`is_error`) is terminal — the subagent never
+            // started — so it is not ack-only and the panel finalizes the slot
+            // as failed (✗), exactly like a foreground failure.
+            ack_only: !is_error,
         });
     }
     events
@@ -128,6 +141,10 @@ pub(in crate::services::discord) fn status_events_from_task_notification(
                     success: !task_notification_is_error(status),
                     tool_use_id: None,
                     summary: None,
+                    // A terminal task_notification is the subagent's REAL
+                    // completion (including background subagents), so it always
+                    // finalizes the slot — not an ack.
+                    ack_only: false,
                 });
             }
         }
@@ -474,6 +491,10 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
                         success: !is_error,
                         tool_use_id,
                         summary: Some(summary),
+                        // A summary-bearing end carries real accounting
+                        // (`toolUseResult`/rollout) — a genuine completion that
+                        // always finalizes the slot, never just an ack.
+                        ack_only: false,
                     },
                 ];
             }

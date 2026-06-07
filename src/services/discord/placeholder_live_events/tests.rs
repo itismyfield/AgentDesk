@@ -1973,6 +1973,145 @@ fn status_panel_subagent_summary_attaches_only_to_matching_slot() {
     );
 }
 
+// Status-panel premature-✓ bug: a subagent launched with `run_in_background`
+// returns its Task `tool_result` immediately (a launch ack) while the subagent
+// keeps running and outlives the launching turn. The panel must NOT mark such a
+// background subagent ✓ on that ack-only end; it stays running until a GENUINE
+// completion (terminal task_notification) arrives.
+#[test]
+fn status_panel_background_subagent_not_marked_done_on_launch_ack() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(871);
+
+    // Background subagent launched.
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({
+                "subagent_type": "bgworker",
+                "description": "Long background job",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_bg"),
+        ),
+    );
+    // The Task tool_result fires immediately — only a launch ack. For a
+    // background dispatch the subagent is still running, so this MUST NOT
+    // finalize the slot.
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Task"), false, Some("toolu_bg")),
+    );
+
+    let rendered_running =
+        events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let bg_line = rendered_running
+        .lines()
+        .find(|line| line.contains("bgworker Long background job"))
+        .unwrap_or_else(|| panic!("background subagent slot missing in: {rendered_running}"));
+    assert!(
+        !bg_line.contains('✓') && !bg_line.contains('✗'),
+        "background subagent must stay running on the launch ack (no ✓), got: {bg_line}"
+    );
+
+    // A terminal task_notification is the real completion → now it is ✓.
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification("subagent", "completed", "all done"),
+    );
+    let rendered_done =
+        events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let bg_done_line = rendered_done
+        .lines()
+        .find(|line| line.contains("bgworker Long background job"))
+        .unwrap_or_else(|| panic!("background subagent slot missing in: {rendered_done}"));
+    assert!(
+        bg_done_line.contains('✓'),
+        "background subagent must be ✓ after a terminal task_notification, got: {bg_done_line}"
+    );
+}
+
+// Edge case of the premature-✓ fix: a `run_in_background` LAUNCH that FAILS
+// (the Task `tool_result` is an error — the subagent never started) is TERMINAL,
+// not a launch ack. The slot must finalize as failed (✗) instead of being stuck
+// 'running' forever. Guards against the ack-only suppression swallowing a failed
+// background launch.
+#[test]
+fn status_panel_background_subagent_failed_launch_marked_failed() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(873);
+
+    // Background subagent launched.
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({
+                "subagent_type": "bgworker",
+                "description": "Doomed background job",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_bg_fail"),
+        ),
+    );
+    // The Task tool_result returns an ERROR: the background launch FAILED, the
+    // subagent never started. This is terminal — the slot must render ✗, not
+    // stay stuck running.
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Task"), true, Some("toolu_bg_fail")),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let bg_line = rendered
+        .lines()
+        .find(|line| line.contains("bgworker Doomed background job"))
+        .unwrap_or_else(|| panic!("background subagent slot missing in: {rendered}"));
+    assert!(
+        bg_line.contains('✗'),
+        "failed background launch must finalize as ✗, got: {bg_line}"
+    );
+    assert!(
+        !bg_line.contains('✓'),
+        "failed background launch must not be marked ✓, got: {bg_line}"
+    );
+}
+
+// A FOREGROUND subagent's Task tool_result IS its real completion, so the
+// ack-only end still finalizes it (✓). Guards against the background fix
+// regressing the foreground path.
+#[test]
+fn status_panel_foreground_subagent_marked_done_on_tool_result() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(872);
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({"subagent_type": "fgworker", "description": "Quick job"}).to_string(),
+            Some("toolu_fg"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Task"), false, Some("toolu_fg")),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let fg_line = rendered
+        .lines()
+        .find(|line| line.contains("fgworker Quick job"))
+        .unwrap_or_else(|| panic!("foreground subagent slot missing in: {rendered}"));
+    assert!(
+        fg_line.contains('✓'),
+        "foreground subagent must be ✓ on its tool_result, got: {fg_line}"
+    );
+}
+
 // #3086 P1: a single `user` record may BATCH multiple finished subagents, each
 // `tool_result` block carrying its OWN `toolUseResult` aggregate. Each Done
 // summary must land on ITS OWN slot (keyed by that block's tool_use_id), not all
@@ -2094,6 +2233,7 @@ fn status_panel_unmatched_summary_end_is_dropped_not_misrouted() {
                 tokens: Some(99_999),
                 duration_secs: Some(99),
             }),
+            ack_only: false,
         }],
     );
 
@@ -2695,6 +2835,9 @@ fn status_tool_result_closes_subagent_only_for_task_tools() {
         status_events_from_tool_result(Some("TaskCreate"), false),
         vec![StatusEvent::ToolEnd { success: true }]
     );
+    // A FAILED Task tool_result is terminal (the launch errored — the subagent
+    // never ran), so it is NOT ack-only: the panel must finalize the slot (✗)
+    // rather than keep a background slot 'running' forever.
     assert_eq!(
         status_events_from_tool_result(Some("Task"), true),
         vec![
@@ -2702,7 +2845,22 @@ fn status_tool_result_closes_subagent_only_for_task_tools() {
             StatusEvent::SubagentEnd {
                 success: false,
                 tool_use_id: None,
-                summary: None
+                summary: None,
+                ack_only: false
+            }
+        ]
+    );
+    // A SUCCESSFUL Task tool_result is the (possibly background) launch ack →
+    // ack_only so a still-running background subagent is not prematurely ✓.
+    assert_eq!(
+        status_events_from_tool_result(Some("Task"), false),
+        vec![
+            StatusEvent::ToolEnd { success: true },
+            StatusEvent::SubagentEnd {
+                success: true,
+                tool_use_id: None,
+                summary: None,
+                ack_only: true
             }
         ]
     );
