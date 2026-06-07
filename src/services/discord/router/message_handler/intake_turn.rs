@@ -766,6 +766,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                                     &shared.token_hash,
                                     &provider,
                                     ch,
+                                    channel_id.get(),
                                     &canonical,
                                 );
                                 if let Some(wt) = reused {

@@ -526,7 +526,7 @@
     from #3126 stall-watchdog completed-idle false-positive guard tests; +88
     from #3169 stall-watchdog jsonl-mtime liveness guard + tests, closing the
     Death #1 force-clean false-positive on loop mid-write sessions).
-  - `src/services/discord/router/message_handler/intake_turn.rs` (3745 lines;
+  - `src/services/discord/router/message_handler/intake_turn.rs` (3746 lines;
     Discord message intake turn orchestration split from the router message
     handler; bugfix only outside a further extraction plan; +9 from #3082
     queued-only answer-flush gate (`is_queued_notice` on the two
@@ -587,7 +587,7 @@
     are net-zero. The poise framework-builder/setup closure (~580 lines) is left
     inline — its move-captured locals make a clean extraction risky and is
     deferred).
-  - `src/services/discord/session_runtime.rs` (1424 lines).
+  - `src/services/discord/session_runtime.rs` (1448 lines).
   - `src/services/discord/voice_barge_in.rs` (4835 lines; voice STT/TTS,
     lobby routing, progress mirroring, and barge-in orchestration surface;
     tracked decompose target — see `giant-file-registry.md` (owner
@@ -746,7 +746,7 @@
   - `src/db/kanban_cards/` (1932 total lines; kanban card persistence and
     GitHub sync lookup surface).
   - `src/db/postgres.rs` (1018 lines).
-  - `src/db/dispatched_sessions.rs` (1554 lines; dispatched session
+  - `src/db/dispatched_sessions.rs` (1562 lines; dispatched session
     persistence helpers).
   - `src/db/session_transcripts.rs` is a retained PG-cleanup surface (now below
     the giant-file threshold; bugfix only).
@@ -775,7 +775,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `src/services/auto_queue/cancel_run.rs` (1032) is also giant-file territory;
   split before further non-bugfix growth.
 - `src/services/onboarding/mod.rs` (2936),
-  `src/services/dispatched_sessions.rs` (1331), and
+  `src/services/dispatched_sessions.rs` (1342), and
   `src/services/settings.rs` (1007) — service-layer route support surfaces
   split out of the large dashboard route modules. (`src/services/onboarding.rs`
   and `src/services/api_friction.rs` have been removed/decomposed.)
@@ -799,7 +799,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   readiness/cancel contract.
 - `src/services/memory/memento.rs` (1893).
 - `src/services/observability/pg_io.rs` (1047).
-- `src/services/dispatched_sessions.rs` (1331) — dispatched session domain
+- `src/services/dispatched_sessions.rs` (1342) — dispatched session domain
   service. This is the post-#1515 SRP extraction target for route/database
   callsites, but the module itself is now giant-file territory; split focused
   helpers before adding non-bugfix behavior. (+5 from #3169 exposing the idle-

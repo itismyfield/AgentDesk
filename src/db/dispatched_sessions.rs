@@ -1799,6 +1799,11 @@ pub(crate) struct HookSessionUpsert<'a> {
     pub(crate) cwd: Option<&'a str>,
     pub(crate) active_dispatch_id: Option<&'a str>,
     pub(crate) thread_channel_id: Option<&'a str>,
+    /// #3207 (part 2) P0: the unique Discord channel the turn runs in (thread id
+    /// for threads, channel id for ordinary channels). Persisted so worktree
+    /// reuse can require an exact channel match and never cross two channels
+    /// whose names collide onto the same `session_key`.
+    pub(crate) channel_id: Option<&'a str>,
     pub(crate) claude_session_id: Option<&'a str>,
     pub(crate) raw_provider_session_id: Option<&'a str>,
 }
@@ -1852,6 +1857,7 @@ pub(crate) async fn upsert_hook_session_pg(
             cwd,
             active_dispatch_id,
             thread_channel_id,
+            channel_id,
             claude_session_id,
             raw_provider_session_id,
             last_heartbeat
@@ -1859,7 +1865,7 @@ pub(crate) async fn upsert_hook_session_pg(
             $1, $2, $3, $4, $5, $6, $7,
             COALESCE($8, 0),
             CASE WHEN $8 IS NOT NULL THEN NOW() ELSE NULL END,
-            $9, $10, $11, $12, $13, NOW()
+            $9, $10, $11, $12, $13, $14, NOW()
          )
          ON CONFLICT(session_key) DO UPDATE SET
             status = EXCLUDED.status,
@@ -1877,6 +1883,7 @@ pub(crate) async fn upsert_hook_session_pg(
             END,
             agent_id = COALESCE(NULLIF(BTRIM(EXCLUDED.agent_id), ''), NULLIF(BTRIM(sessions.agent_id), '')),
             thread_channel_id = COALESCE(EXCLUDED.thread_channel_id, sessions.thread_channel_id),
+            channel_id = COALESCE(EXCLUDED.channel_id, sessions.channel_id),
             claude_session_id = COALESCE(EXCLUDED.claude_session_id, sessions.claude_session_id),
             raw_provider_session_id = COALESCE(EXCLUDED.raw_provider_session_id, sessions.raw_provider_session_id),
             last_heartbeat = NOW()
@@ -1893,6 +1900,7 @@ pub(crate) async fn upsert_hook_session_pg(
     .bind(params.cwd)
     .bind(params.active_dispatch_id)
     .bind(params.thread_channel_id)
+    .bind(params.channel_id)
     .bind(params.claude_session_id)
     .bind(params.raw_provider_session_id)
     .fetch_one(pool)

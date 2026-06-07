@@ -91,9 +91,10 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
     // very worktree the next message will resume into — re-creating the original
     // "worktree rotation → resume impossible" loss. Also protect cwds of recent
     // resumable sessions (a recorded provider session id + a fresh heartbeat).
-    // The recency bound keeps genuinely-abandoned worktrees collectable, and the
-    // #3207 reuse path means a channel reuses ONE worktree rather than growing a
-    // new one per turn, so this does not reintroduce unbounded growth.
+    // The keep-set is bounded — only the LATEST fresh-heartbeat resumable session
+    // PER CHANNEL is protected (see `fetch_resumable_cwds`) — so abandoned /
+    // never-heartbeated sessions can no longer pin a worktree forever, while a
+    // live channel still keeps its single in-flight reuse worktree.
     let resumable_cwds = fetch_resumable_cwds(&pool).await.unwrap_or_default();
     active_cwds.extend(resumable_cwds);
     report.active_cwd_count = active_cwds.len() as u64;
@@ -162,19 +163,35 @@ async fn fetch_active_cwds(pool: &PgPool) -> Result<HashSet<String>> {
         .collect())
 }
 
-/// #3207 (part 2): cwds of recent resumable sessions — those carrying a recorded
-/// provider session id (`claude_session_id` / `raw_provider_session_id`) with a
-/// fresh-or-unknown heartbeat. These worktrees are reused by the next turn's
-/// `--resume`, so they must not be swept while idle between turns. The 7-day
-/// recency bound (NULL heartbeat treated as "keep", since legacy/in-flight rows
-/// may not stamp it) keeps long-abandoned worktrees collectable.
+/// #3207 (part 2) P1: cwds of recent resumable sessions — those carrying a
+/// recorded provider session id (`claude_session_id` / `raw_provider_session_id`)
+/// whose worktree the next turn's `--resume` reuses, so they must not be swept
+/// while idle between turns.
+///
+/// The keep-set is BOUNDED so abandoned sessions cannot permanently leak disk:
+///   * only the LATEST resumable session PER CHANNEL is protected
+///     (`DISTINCT ON (channel partition) ... ORDER BY last_heartbeat DESC`), so
+///     a channel reuses ONE worktree rather than pinning every historical row;
+///   * the heartbeat must be NON-NULL and within the freshness window. The
+///     previous query kept `last_heartbeat IS NULL` rows forever, so a session
+///     that recorded a provider id but never (or long-ago) heartbeated pinned
+///     its worktree permanently. Excluding NULL/stale heartbeats lets genuinely
+///     abandoned worktrees become collectable again.
+///
+/// The channel partition prefers the unique `channel_id` (#3207 P0), falling
+/// back to `thread_channel_id`/`session_key` for legacy rows that predate the
+/// `channel_id` column so each still collapses to a single protected worktree.
 async fn fetch_resumable_cwds(pool: &PgPool) -> Result<HashSet<String>> {
     let rows: Vec<(Option<String>,)> = sqlx::query_as(
-        "SELECT DISTINCT cwd
+        "SELECT DISTINCT ON (COALESCE(channel_id, thread_channel_id, session_key)) cwd
          FROM sessions
          WHERE cwd IS NOT NULL
+           AND cwd <> ''
            AND (claude_session_id IS NOT NULL OR raw_provider_session_id IS NOT NULL)
-           AND (last_heartbeat IS NULL OR last_heartbeat >= NOW() - INTERVAL '7 days')",
+           AND last_heartbeat IS NOT NULL
+           AND last_heartbeat >= NOW() - INTERVAL '7 days'
+         ORDER BY COALESCE(channel_id, thread_channel_id, session_key),
+                  last_heartbeat DESC",
     )
     .fetch_all(pool)
     .await?;
@@ -281,5 +298,132 @@ mod resumable_keep_set_tests {
         let mut keep: HashSet<String> = HashSet::new();
         keep.insert("/home/u/.adk/release/worktrees/other".to_string());
         assert!(!is_dir_active(Path::new(dir), &keep));
+    }
+}
+
+#[cfg(test)]
+mod resumable_keep_set_query_tests {
+    //! #3207 (part 2) P1: exercise the REAL `fetch_resumable_cwds` query against
+    //! Postgres so the bound (latest fresh-heartbeat resumable session PER
+    //! CHANNEL; NULL/stale heartbeats excluded) is verified, not just the
+    //! `is_dir_active` path-matching stub. The previous query kept every session
+    //! with a provider id forever (`last_heartbeat IS NULL` matched), so an
+    //! abandoned session permanently pinned its worktree — a disk leak. These
+    //! assertions are RED against that query and GREEN against the bounded one.
+    use super::fetch_resumable_cwds;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn seed(
+        pool: &sqlx::PgPool,
+        session_key: &str,
+        channel_id: Option<&str>,
+        cwd: &str,
+        claude_session_id: Option<&str>,
+        heartbeat_sql: &str,
+    ) {
+        let query = format!(
+            "INSERT INTO sessions \
+             (session_key, provider, status, cwd, channel_id, claude_session_id, last_heartbeat) \
+             VALUES ($1, 'claude', 'idle', $2, $3, $4, {heartbeat_sql})"
+        );
+        sqlx::query(&query)
+            .bind(session_key)
+            .bind(cwd)
+            .bind(channel_id)
+            .bind(claude_session_id)
+            .execute(pool)
+            .await
+            .expect("seed sessions row");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn keep_set_is_bounded_and_per_channel() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        // (1) fresh resumable session → KEPT.
+        seed(
+            &pool,
+            "k-fresh",
+            Some("1001"),
+            "/wt/fresh",
+            Some("sid-fresh"),
+            "NOW()",
+        )
+        .await;
+        // (2) NULL heartbeat resumable → EXCLUDED (the unbounded-leak case).
+        seed(
+            &pool,
+            "k-null-hb",
+            Some("1002"),
+            "/wt/null-hb",
+            Some("sid-null"),
+            "NULL",
+        )
+        .await;
+        // (3) stale heartbeat (older than the freshness window) → EXCLUDED.
+        seed(
+            &pool,
+            "k-stale",
+            Some("1003"),
+            "/wt/stale",
+            Some("sid-stale"),
+            "NOW() - INTERVAL '30 days'",
+        )
+        .await;
+        // (4) fresh heartbeat but NO provider session id → EXCLUDED (nothing to
+        //     resume into).
+        seed(&pool, "k-no-sid", Some("1004"), "/wt/no-sid", None, "NOW()").await;
+        // (5) two resumable sessions for the SAME channel → only the LATEST
+        //     heartbeat's cwd is kept (per-channel bound).
+        seed(
+            &pool,
+            "k-chan5-old",
+            Some("1005"),
+            "/wt/chan5-old",
+            Some("sid-5-old"),
+            "NOW() - INTERVAL '3 hours'",
+        )
+        .await;
+        seed(
+            &pool,
+            "k-chan5-new",
+            Some("1005"),
+            "/wt/chan5-new",
+            Some("sid-5-new"),
+            "NOW() - INTERVAL '10 minutes'",
+        )
+        .await;
+
+        let kept = fetch_resumable_cwds(&pool).await.expect("query keep-set");
+
+        assert!(
+            kept.contains("/wt/fresh"),
+            "fresh resumable cwd must be kept"
+        );
+        assert!(
+            !kept.contains("/wt/null-hb"),
+            "NULL-heartbeat session must NOT pin its worktree forever"
+        );
+        assert!(
+            !kept.contains("/wt/stale"),
+            "stale-heartbeat session must be collectable"
+        );
+        assert!(
+            !kept.contains("/wt/no-sid"),
+            "a session without a provider id has nothing to resume into"
+        );
+        assert!(
+            kept.contains("/wt/chan5-new"),
+            "the latest session for a channel must keep its worktree"
+        );
+        assert!(
+            !kept.contains("/wt/chan5-old"),
+            "an older session for the same channel must NOT add a second worktree"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }

@@ -365,6 +365,11 @@
       "path": "migrations/postgres/0070_sessions_idle_recap_turn_generation.sql",
       "sha256": "e26b2d553427bf383a354ad1e2754ff441f72bd02ed718a8c2a28a64f877680c",
       "version": 70
+    },
+    {
+      "path": "migrations/postgres/0071_sessions_channel_id.sql",
+      "sha256": "905ce219bee23ff0857e39c7de0797fb1b96ba85f88593a40b3bd4ec0716f856",
+      "version": 71
     }
   ],
   "version": 1
