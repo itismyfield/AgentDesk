@@ -113,7 +113,7 @@
   parsing), `src/services/discord/inflight.rs` (state file contract).
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/services/discord/watchers/lifecycle.rs` (2329 lines — canonical
+  - `src/services/discord/watchers/lifecycle.rs` (2336 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior).
   - `src/services/discord/tmux.rs` (2251 lines after #2558 dead-code sweep;
@@ -626,7 +626,7 @@
     are net-zero. The poise framework-builder/setup closure (~580 lines) is left
     inline — its move-captured locals make a clean extraction risky and is
     deferred).
-  - `src/services/discord/session_runtime.rs` (1662 lines).
+  - `src/services/discord/session_runtime.rs` (1781 lines).
   - `src/services/discord/voice_barge_in.rs` (4835 lines; voice STT/TTS,
     lobby routing, progress mirroring, and barge-in orchestration surface;
     tracked decompose target — see `giant-file-registry.md` (owner

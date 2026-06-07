@@ -43,11 +43,57 @@ pub(super) fn select_restored_session_path(
     db_cwd: Option<String>,
     yaml_path: Option<String>,
     remote_profile_name: Option<&str>,
+    db_cwd_is_reusable_worktree: bool,
 ) -> Option<String> {
+    // #3219: when the channel-scoped DB cwd is the channel's OWN existing managed
+    // worktree (caller-validated by `db_cwd_is_reusable_worktree`: under
+    // `worktrees_root`, a linked worktree, and sharing the configured parent
+    // repo's git common dir), prefer it over the configured *base* workspace.
+    // Otherwise crash/kill recovery installs the base as cwd, provider-channel
+    // worktree isolation re-derives a FRESH worktree + provider session-id, and
+    // `--resume` breaks — abandoning the session's transcript. The live-TUI
+    // -binding recovery path masks this only while the tmux pane survives; once
+    // the pane dies there is no fallback (root cause of the 2026-06-07 resume
+    // failure: recovery read the correct worktree from the DB, logged "Ignoring
+    // restored DB cwd", then built a fresh worktree + session-id).
+    //
+    // The predicate uses the SAME guard set as `resolve_reusable_worktree`, so a
+    // stale/foreign/relocated worktree — including a workspace repointed to a
+    // different repo under the same `worktrees_root` — is NOT elevated and falls
+    // through to the configured path below.
+    if db_cwd_is_reusable_worktree
+        && let Some(worktree) = db_cwd
+            .as_ref()
+            .filter(|path| session_path_is_usable(path, remote_profile_name))
+    {
+        return Some(worktree.clone());
+    }
+
     configured_path
         .filter(|path| session_path_is_usable(path, remote_profile_name))
         .or_else(|| db_cwd.filter(|path| session_path_is_usable(path, remote_profile_name)))
         .or_else(|| yaml_path.filter(|path| session_path_is_usable(path, remote_profile_name)))
+}
+
+/// #3219: true when the recovered DB cwd is the channel's own reusable managed
+/// worktree and must therefore outrank the configured base workspace in
+/// [`select_restored_session_path`]. Mirrors the exact guard set used by
+/// [`resolve_reusable_worktree`]: the cwd must be an AgentDesk-managed
+/// (`is_managed_worktree_path`) linked worktree that shares the configured
+/// parent repo's git common dir (`restored_worktree_belongs_to_parent`, which
+/// also rejects non-existent and remote-only paths). Returns `false` when there
+/// is no configured parent (then `select_restored_session_path`'s existing
+/// configured→db_cwd→yaml fallback already does the right thing).
+pub(super) fn db_cwd_is_reusable_worktree(
+    configured_path: Option<&str>,
+    db_cwd: Option<&str>,
+) -> bool {
+    match (configured_path, db_cwd) {
+        (Some(parent), Some(cwd)) => {
+            is_managed_worktree_path(cwd) && restored_worktree_belongs_to_parent(parent, cwd)
+        }
+        _ => false,
+    }
 }
 
 /// #3216 GAP 2: decide whether a live tmux pane's cwd should override the
@@ -735,10 +781,9 @@ pub(super) async fn auto_restore_session_force(
         // Use the effective tmux channel name here so restart recovery keeps
         // looking up the same session key for thread sessions that intentionally
         // use a synthetic "{parent}-t{thread_id}" channel name.
-        let mut db_cwd: Option<String> = restore_ch_name.as_ref().and_then(|ch| {
-            // #3207 (part 2) P0-a: the DB cwd resolve is channel-scoped (see
-            // `restore_session_cwd_from_db`); only a usable path is honored for
-            // install into `session.current_path`.
+        // #3207 (part 2) P0-a: the DB cwd resolve is channel-scoped (see
+        // `restore_session_cwd_from_db`).
+        let restored_cwd = restore_ch_name.as_ref().and_then(|ch| {
             restore_session_cwd_from_db(
                 shared.pg_pool.as_ref(),
                 &shared.token_hash,
@@ -746,8 +791,25 @@ pub(super) async fn auto_restore_session_force(
                 ch,
                 channel_id.get(),
             )
-            .filter(|p| !p.is_empty() && session_path_is_usable(p, saved_remote.as_deref()))
         });
+        // #3219: capture ownership from the resolver's exact `channel_id = $2`
+        // match BEFORE the path-usability filter — a stale/unusable persisted cwd
+        // does not change WHO owns the row. Only a channel-scoped cwd may outrank
+        // the configured base; a NULL-channel_id legacy fallback returns false and
+        // is never elevated. This flag is preserved across the tmux reconcile
+        // below (reconcile changes a row's cwd value, not its ownership), so an
+        // owned channel whose persisted cwd went stale can still elevate the valid
+        // live worktree the reconcile supplies (the #3216 GAP2 phantom-rotation
+        // case). The final db_cwd is still re-validated by `db_cwd_is_reusable
+        // _worktree` before it can win.
+        let db_cwd_channel_scoped = restored_cwd
+            .as_ref()
+            .map(|r| r.channel_scoped)
+            .unwrap_or(false);
+        // Only a usable path is honored for install into `session.current_path`.
+        let mut db_cwd: Option<String> = restored_cwd
+            .map(|r| r.path)
+            .filter(|p| !p.is_empty() && session_path_is_usable(p, saved_remote.as_deref()));
 
         // #3216 GAP 2: reconcile the DB cwd against the live tmux pane. The live
         // pane is the source of truth for where the session actually runs; if the
@@ -788,6 +850,16 @@ pub(super) async fn auto_restore_session_force(
                     &reconciled,
                 );
                 db_cwd = Some(reconciled);
+                // #3219: do NOT recompute channel-ownership here. Reconcile only
+                // changes a row's cwd VALUE, not WHO owns the row, so we preserve
+                // `db_cwd_channel_scoped` from the resolver's bulletproof exact
+                // `channel_id = $2` match. `session_key` is globally unique, so
+                // under a tmux-name collision only the TRUE owner ever gets
+                // `channel_scoped = true` from the resolver; the intruder gets
+                // false and is never elevated into the owner's worktree. (A row
+                // freshly stamped from a NULL legacy row stays non-scoped — its
+                // ownership is ambiguous under collision — so it is not elevated;
+                // it self-heals to an exact match on the next heartbeat.)
             }
         }
         let persisted_path = load_last_session_path(
@@ -796,8 +868,15 @@ pub(super) async fn auto_restore_session_force(
             channel_id.get(),
         );
 
+        // #3219: validate whether the restored DB cwd is the channel's own
+        // reusable managed worktree BEFORE selecting, so the log below reflects
+        // the actual decision (we only "ignore" it when it is NOT reused). Only a
+        // channel-scoped cwd is eligible — never a NULL-fallback cwd.
+        let reusable_worktree = db_cwd_channel_scoped
+            && db_cwd_is_reusable_worktree(configured_path.as_deref(), db_cwd.as_deref());
         if let (Some(configured), Some(restored)) = (configured_path.as_ref(), db_cwd.as_ref())
             && configured != restored
+            && !reusable_worktree
         {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -813,6 +892,7 @@ pub(super) async fn auto_restore_session_force(
             db_cwd,
             persisted_path,
             saved_remote.as_deref(),
+            reusable_worktree,
         );
 
         (last_path, saved_remote, provider)
@@ -915,14 +995,24 @@ pub(super) async fn auto_restore_session_force(
 /// defensive belt-and-braces guard. If the single row carries a DIFFERENT
 /// non-null `channel_id`, the fallback is refused — that would reintroduce the
 /// #3207 cross-channel hazard. New heartbeats stamp `channel_id`, so this
-/// self-heals over time. Returns the resolved cwd (non-empty) for this
-/// `session_key`.
+/// self-heals over time. Returns a [`RestoredCwd`] for this `session_key`:
+/// `channel_scoped = true` for an exact channel-id match (whose `path` may be
+/// empty when the owned row's `cwd` is NULL/missing — ownership comes from row
+/// existence, #3219), or `channel_scoped = false` with a non-empty path for the
+/// legacy NULL fallback.
 async fn resolve_cwd_for_session_key(
     pool: &sqlx::PgPool,
     session_key: &str,
     channel_id: &str,
-) -> Result<Option<String>, String> {
-    // 1. Channel-scoped match (the #3207 cross-channel guard).
+) -> Result<Option<RestoredCwd>, String> {
+    // 1. Channel-scoped match (the #3207 cross-channel guard). `fetch_optional`
+    //    returns the OUTER Option: `Some(_)` iff an exact channel-owned row
+    //    exists, independent of whether its `cwd` is currently populated. #3219:
+    //    ownership is reported (`channel_scoped: true`) from row EXISTENCE — a
+    //    NULL/empty cwd must NOT erase ownership, or an owned channel whose row
+    //    has a stale/missing cwd could not elevate the valid worktree the tmux
+    //    reconcile later supplies. The caller filters the (possibly empty) path
+    //    for usability separately.
     let scoped = sqlx::query_scalar::<_, Option<String>>(
         "SELECT cwd FROM sessions \
          WHERE session_key = $1 AND channel_id = $2 LIMIT 1",
@@ -931,10 +1021,12 @@ async fn resolve_cwd_for_session_key(
     .bind(channel_id)
     .fetch_optional(pool)
     .await
-    .map_err(|error| format!("load session cwd {session_key}: {error}"))?
-    .flatten();
-    if let Some(path) = scoped.filter(|p| !p.is_empty()) {
-        return Ok(Some(path));
+    .map_err(|error| format!("load session cwd {session_key}: {error}"))?;
+    if let Some(cwd) = scoped {
+        return Ok(Some(RestoredCwd {
+            path: cwd.unwrap_or_default(),
+            channel_scoped: true,
+        }));
     }
 
     // 2. #3216 GAP 1 safe legacy fallback: inspect ALL rows for this
@@ -959,7 +1051,14 @@ async fn resolve_cwd_for_session_key(
                 session_key,
                 channel_id
             );
-            return Ok(Some(path));
+            // #3219: a NULL-channel_id row is NOT proven to belong to THIS
+            // channel (a name-collision channel resolves the same globally-unique
+            // session_key). Mark it non-channel-scoped so it never gets elevated
+            // over the safe configured base in `select_restored_session_path`.
+            return Ok(Some(RestoredCwd {
+                path,
+                channel_scoped: false,
+            }));
         }
     }
     Ok(None)
@@ -975,13 +1074,25 @@ async fn resolve_cwd_for_session_key(
 ///
 /// The on-disk usability filter (`session_path_is_usable`) is applied by the
 /// caller so this helper stays a pure DB resolve.
+/// A persisted `sessions.cwd` resolved during restart recovery, tagged with
+/// whether it came from an exact channel-id match (`channel_scoped = true`) or
+/// the #3216 legacy NULL-channel_id fallback (`false`). Only a channel-scoped
+/// cwd is eligible to outrank the configured base in
+/// [`select_restored_session_path`] (#3219) — a NULL-fallback cwd is not proven
+/// to belong to this channel.
+#[derive(Debug, Clone)]
+struct RestoredCwd {
+    path: String,
+    channel_scoped: bool,
+}
+
 fn restore_session_cwd_from_db(
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     provider: &ProviderKind,
     channel_name: &str,
     channel_id: u64,
-) -> Option<String> {
+) -> Option<RestoredCwd> {
     let tmux_name = provider.build_tmux_session_name(channel_name);
     let session_keys = build_session_key_candidates(token_hash, provider, &tmux_name);
     let channel_id = channel_id.to_string();
@@ -990,10 +1101,10 @@ fn restore_session_cwd_from_db(
         pg_pool,
         move |pool| async move {
             for session_key in session_keys {
-                if let Some(path) =
+                if let Some(restored) =
                     resolve_cwd_for_session_key(&pool, &session_key, &channel_id).await?
                 {
-                    return Ok(Some(path));
+                    return Ok(Some(restored));
                 }
             }
             Ok(None)
@@ -1010,6 +1121,7 @@ fn restore_session_cwd_from_db(
 /// row (the #3207 cross-channel guard). A legacy NULL-channel_id row is matched
 /// too — only the row whose id equals THIS channel OR is NULL is updated — so the
 /// row both adopts the correct cwd and gets self-healed onto this channel.
+///
 fn correct_session_cwd_to_tmux(
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
@@ -1101,10 +1213,16 @@ fn restore_thread_worktree_path_from_db(
         pg_pool,
         move |pool| async move {
             for session_key in session_keys {
-                if let Some(path) =
+                if let Some(restored) =
                     resolve_cwd_for_session_key(&pool, &session_key, &channel_id).await?
                 {
-                    return Ok(Some(path));
+                    // The worktree-reuse path applies its own managed/belongs-to
+                    // -parent guards downstream; it only needs the path here. Skip
+                    // an owned row whose cwd is empty/NULL (#3219) — it carries no
+                    // reusable worktree, so continue scanning the remaining keys.
+                    if !restored.path.is_empty() {
+                        return Ok(Some(restored.path));
+                    }
                 }
             }
             Ok(None)
@@ -1661,6 +1779,81 @@ pub(super) async fn resolve_thread_parent(
 }
 
 #[cfg(test)]
+mod select_restored_session_path_tests {
+    //! #3219: `select_restored_session_path` must prefer the channel's own
+    //! reusable managed worktree (the channel-scoped DB cwd) over the configured
+    //! *base* workspace, or crash/kill recovery re-derives a fresh worktree and
+    //! `--resume` breaks. The reusable-worktree decision is made by the caller
+    //! (`db_cwd_is_reusable_worktree`, git-validated against the configured parent
+    //! repo); here we verify the selector honors that decision and otherwise
+    //! preserves the configured→db_cwd→yaml fallback order unchanged.
+    use super::{db_cwd_is_reusable_worktree, select_restored_session_path};
+
+    const BASE: &str = "/repo/workspaces/agentdesk";
+    const WT: &str = "/repo/worktrees/claude-adk-cc-113822";
+
+    #[test]
+    fn reusable_worktree_outranks_configured_base() {
+        let selected = select_restored_session_path(
+            Some(BASE.into()),
+            Some(WT.into()),
+            None,
+            // remote profile set → session_path_is_usable short-circuits true so
+            // the assertion does not depend on these paths existing on disk.
+            Some("remote"),
+            true,
+        );
+        assert_eq!(selected.as_deref(), Some(WT));
+    }
+
+    #[test]
+    fn non_reusable_db_cwd_keeps_configured_priority() {
+        // When the caller's git validation says the worktree is NOT reusable
+        // (stale/foreign/relocated/remote), configured base wins as before.
+        let selected = select_restored_session_path(
+            Some(BASE.into()),
+            Some(WT.into()),
+            None,
+            Some("remote"),
+            false,
+        );
+        assert_eq!(selected.as_deref(), Some(BASE));
+    }
+
+    #[test]
+    fn falls_back_to_db_cwd_then_yaml_when_no_configured() {
+        // No configured path: existing fallback order is unchanged regardless of
+        // the reusable flag.
+        let selected = select_restored_session_path(
+            None,
+            Some(WT.into()),
+            Some("/yaml/path".into()),
+            Some("remote"),
+            false,
+        );
+        assert_eq!(selected.as_deref(), Some(WT));
+
+        let selected = select_restored_session_path(
+            None,
+            None,
+            Some("/yaml/path".into()),
+            Some("remote"),
+            true,
+        );
+        assert_eq!(selected.as_deref(), Some("/yaml/path"));
+    }
+
+    #[test]
+    fn reusable_predicate_requires_configured_and_db_cwd() {
+        // No git work here: a missing configured parent or missing db_cwd can
+        // never be "reusable" (the full git validation only runs when both exist).
+        assert!(!db_cwd_is_reusable_worktree(None, Some(WT)));
+        assert!(!db_cwd_is_reusable_worktree(Some(BASE), None));
+        assert!(!db_cwd_is_reusable_worktree(None, None));
+    }
+}
+
+#[cfg(test)]
 mod worktree_reuse_channel_isolation_tests {
     //! #3207 (part 2) P0: the worktree-reuse DB lookup
     //! (`restore_thread_worktree_path_from_db`) must be scoped by the unique
@@ -1857,9 +2050,13 @@ mod worktree_reuse_channel_isolation_tests {
             channel_a,
         );
         assert_eq!(
-            owner.as_deref(),
+            owner.as_ref().map(|r| r.path.as_str()),
             Some(owner_cwd),
             "the owning channel must resolve its own restart-restore cwd"
+        );
+        assert!(
+            owner.as_ref().map(|r| r.channel_scoped).unwrap_or(false),
+            "an exact channel-id match must be marked channel_scoped (#3219)"
         );
 
         // The colliding (different-id) channel must NOT install channel A's cwd
@@ -1871,8 +2068,8 @@ mod worktree_reuse_channel_isolation_tests {
             collide_name,
             channel_b,
         );
-        assert_eq!(
-            cross, None,
+        assert!(
+            cross.is_none(),
             "a different channel sharing the same session_key must NOT resolve \
              another channel's restart-restore cwd"
         );
@@ -1906,10 +2103,66 @@ mod worktree_reuse_channel_isolation_tests {
             channel_id,
         );
         assert_eq!(
-            resolved.as_deref(),
+            resolved.as_ref().map(|r| r.path.as_str()),
             Some(cwd),
             "a single legacy NULL-channel_id row must be reused for restart \
              restore via the #3216 safe fallback"
+        );
+        assert!(
+            !resolved.as_ref().map(|r| r.channel_scoped).unwrap_or(true),
+            "a NULL-channel_id legacy fallback must NOT be channel_scoped, so it \
+             is never elevated over the configured base (#3219)"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    // #3219: an EXACT channel-owned row whose `cwd` is NULL must still report
+    // ownership (channel_scoped=true) with an empty path, so an owned channel
+    // whose persisted cwd went stale/missing can still elevate the valid worktree
+    // the tmux reconcile later supplies. Ownership comes from row EXISTENCE, not
+    // the cwd value.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exact_owned_row_with_null_cwd_is_channel_scoped_empty_path() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let provider = ProviderKind::Claude;
+        let token_hash = "tok-3219-null-cwd";
+        let channel_name = "null-cwd-owner";
+        let tmux_name = provider.build_tmux_session_name(channel_name);
+        let session_key = build_namespaced_session_key(token_hash, &provider, &tmux_name);
+        let channel_id: u64 = 777_777_777_777_777_777;
+
+        // Seed an exact channel-owned row with a NULL cwd.
+        sqlx::query(
+            "INSERT INTO sessions (session_key, provider, status, cwd, channel_id, last_heartbeat)
+             VALUES ($1, 'claude', 'idle', NULL, $2, NOW())",
+        )
+        .bind(&session_key)
+        .bind(channel_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("seed NULL-cwd owned row");
+
+        let resolved = restore_session_cwd_from_db(
+            Some(&pool),
+            token_hash,
+            &provider,
+            channel_name,
+            channel_id,
+        );
+        assert!(
+            resolved.as_ref().map(|r| r.channel_scoped).unwrap_or(false),
+            "an exact channel-owned row must be channel_scoped even when its cwd \
+             is NULL (#3219 ownership from row existence)"
+        );
+        assert_eq!(
+            resolved.as_ref().map(|r| r.path.as_str()),
+            Some(""),
+            "a NULL cwd resolves to an empty path; the caller's usability filter \
+             then drops it from db_cwd while preserving ownership"
         );
 
         pool.close().await;
