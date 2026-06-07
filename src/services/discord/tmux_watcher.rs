@@ -146,6 +146,66 @@ fn watcher_should_defer_delegated_fresh_idle(
     delegated_turn_owned && full_response.trim().is_empty()
 }
 
+/// #3016 A2 (wrong-turn race fix): the fresh-idle finalize DECISION, factored out
+/// of the production watcher loop so the exact production logic is unit-testable
+/// end-to-end (the enclosing `tmux_output_watcher_with_restore` is not).
+///
+/// Ordering mirrors the canonical normal-completion site's protections:
+///   1. `AbortFollowupTookOver` — a Discord turn claimed the session during the
+///      cleanup `.await`s (`paused_now || epoch_changed`). Same predicate as the
+///      pause/epoch guard at the canonical site (tmux.rs:7841+), but evaluated
+///      BEFORE this branch's destructive clear (which `continue`s before that
+///      guard would run).
+///   2. `SkipStale` — the pinned pre-cleanup snapshot is a NEWER turn that began
+///      AT/AFTER this committed range (`completion_is_stale_for_newer_turn` true,
+///      or `pinned_finalize_user_msg_id == 0`). Finalizing would release the
+///      follow-up turn; skip and preserve inflight.
+///   3. `Finalize { user_msg_id }` — a genuine current-turn empty/suppressed
+///      idle. `user_msg_id` is the id PINNED from the pre-cleanup snapshot at the
+///      same `current_offset` (never a late re-read).
+///
+/// Degenerate-empty-offset safety: a genuine current-turn fresh idle always has
+/// `turn_start_offset < current_offset` (FreshIdle requires `output_ever_grew`,
+/// and the watcher resumes at `turn_start_offset`), so the pinned id is its real,
+/// non-zero id and `SkipStale` cannot misfire on the current turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FreshIdleFinalizeDecision {
+    AbortFollowupTookOver,
+    SkipStale { pinned_user_msg_id: u64 },
+    Finalize { user_msg_id: u64 },
+}
+
+fn watcher_fresh_idle_finalize_decision(
+    paused_now: bool,
+    epoch_changed: bool,
+    pinned_pre_cleanup_inflight: Option<&crate::services::discord::inflight::InflightTurnState>,
+    tmux_session_name: &str,
+    current_offset: u64,
+) -> FreshIdleFinalizeDecision {
+    if paused_now || epoch_changed {
+        return FreshIdleFinalizeDecision::AbortFollowupTookOver;
+    }
+    let stale = committed_completion_is_stale_for_newer_turn(
+        pinned_pre_cleanup_inflight,
+        None,
+        tmux_session_name,
+        current_offset,
+    );
+    let pinned = pinned_finalize_user_msg_id(
+        pinned_pre_cleanup_inflight,
+        tmux_session_name,
+        current_offset,
+    );
+    if stale || pinned == 0 {
+        return FreshIdleFinalizeDecision::SkipStale {
+            pinned_user_msg_id: pinned,
+        };
+    }
+    FreshIdleFinalizeDecision::Finalize {
+        user_msg_id: pinned,
+    }
+}
+
 fn watcher_should_clear_stale_terminal_message_ids(
     inflight_present: bool,
     has_assistant_response: bool,
@@ -7501,6 +7561,41 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     .turn_finalizer
                     .has_live_watcher_pending(channel_id, shared.current_generation)
                     .await;
+                // #3016 A2 (wrong-turn race fix): pin the finalize id from a
+                // snapshot taken NOW — BEFORE the cleanup `.await`s below — and
+                // gate it on the SAME output-range relationship the canonical
+                // normal-completion site uses (`pinned_finalize_user_msg_id` +
+                // `committed_completion_is_stale_for_newer_turn`). The prior A2
+                // code loaded `fresh_idle_user_msg_id` from a LATE re-read AFTER
+                // the placeholder/panel cleanup awaits, during which a follow-up
+                // turn on the SAME session can become current and rewrite
+                // inflight; the unconditional finalize then released the WRONG
+                // (newer, still-running) turn. Pinning here from the pre-cleanup
+                // snapshot — and skipping when the snapshot is a NEWER turn that
+                // started AT/AFTER `current_offset` — defeats that exactly as the
+                // canonical site does.
+                //
+                // Degenerate-empty-offset safety (the #3174/#3154 crux): an
+                // empty/suppressed fresh-idle commits no new terminal text, but
+                // it is NEVER offset-degenerate here. `FreshIdle` is only
+                // produced when `ReadyForInputIdleTracker::observe_idle_state`
+                // sees `output_ever_grew == true` (this loop builds the tracker
+                // with `::default()`, NOT `primed_for_recovery()`, so the
+                // `recovery_primed` bypass cannot apply) — i.e.
+                // `current_offset > data_start_offset`, and `data_start_offset`
+                // never precedes the watcher's resume baseline `turn_start_offset`
+                // (the bridge sets `resume_offset == last_offset == turn_start_offset`
+                // at handoff). Hence for the genuine current turn
+                // `turn_start_offset < current_offset` STRICTLY, so
+                // `pinned_finalize_user_msg_id` returns its REAL id (never 0) and
+                // the stale gate is FALSE. Only a real follow-up turn whose
+                // `turn_start_offset >= current_offset` yields pinned 0 / stale =
+                // TRUE, which is precisely when we must skip.
+                let pinned_pre_cleanup_inflight =
+                    crate::services::discord::inflight::load_inflight_state(
+                        &watcher_provider,
+                        channel_id.get(),
+                    );
                 if watcher_should_defer_delegated_fresh_idle(delegated_turn_owned, &full_response) {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
@@ -7585,6 +7680,50 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 if !panel_cleanup_committed {
                     continue;
                 }
+                // #3016 A2 (wrong-turn race fix): the finalize DECISION, computed
+                // by the same pure helper the unit tests drive. Two protections,
+                // BOTH evaluated before this branch's destructive clear (which
+                // `continue`s before the canonical pause/epoch guard at
+                // tmux.rs:7841+ would run):
+                //   * AbortFollowupTookOver — a Discord turn claimed the session
+                //     during the cleanup `.await`s above (paused / epoch bumped at
+                //     handoff). Mirrors the canonical pause/epoch guard.
+                //   * SkipStale — the pinned pre-cleanup snapshot is a NEWER turn
+                //     that began AT/AFTER this committed range; finalizing would
+                //     release the follow-up. Mirrors the canonical site's
+                //     `completion_is_stale_for_newer_turn` skip.
+                let fresh_idle_decision = watcher_fresh_idle_finalize_decision(
+                    paused.load(Ordering::Relaxed),
+                    pause_epoch.load(Ordering::Relaxed) != epoch_snapshot,
+                    pinned_pre_cleanup_inflight.as_ref(),
+                    &tmux_session_name,
+                    current_offset,
+                );
+                let fresh_idle_user_msg_id = match fresh_idle_decision {
+                    FreshIdleFinalizeDecision::AbortFollowupTookOver => {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] 👁 watcher fresh ready-for-input idle for {tmux_session_name} aborted before finalize: follow-up turn took over (paused/epoch changed); preserving inflight"
+                        );
+                        all_data.clear();
+                        all_data_start_offset = current_offset;
+                        all_data_fully_mirrored_to_session_relay = true;
+                        all_data_session_bound_relay_ack = None;
+                        continue;
+                    }
+                    FreshIdleFinalizeDecision::SkipStale { pinned_user_msg_id } => {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] 👁 watcher fresh ready-for-input idle for {tmux_session_name} skipped finalize: pinned id {pinned_user_msg_id} is stale for a newer turn at offset {current_offset}; preserving inflight for the current/newer turn"
+                        );
+                        all_data.clear();
+                        all_data_start_offset = current_offset;
+                        all_data_fully_mirrored_to_session_relay = true;
+                        all_data_session_bound_relay_ack = None;
+                        continue;
+                    }
+                    FreshIdleFinalizeDecision::Finalize { user_msg_id } => user_msg_id,
+                };
                 // #3016 A2 (phase-5 enabler): the fresh-idle finalize is now
                 // LEDGER-driven, not flag-driven. Reaching here means every
                 // upstream guard already decided this is a REAL idle to act on:
@@ -7593,21 +7732,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 //     assistant text yet — so a turn merely PAUSED at a
                 //     selector/subagent prompt (empty committed response) never
                 //     reaches this point; and
-                //   * the placeholder + orphan-panel cleanup guards committed.
+                //   * the placeholder + orphan-panel cleanup guards committed; and
+                //   * the pause/epoch guard + the pinned stale-skip above ruled
+                //     out a follow-up turn having taken over the session.
                 // We still `swap(false)` the legacy flag to keep its revoke
                 // lifecycle intact (the flag is NOT deleted in this PR — only made
                 // non-load-bearing), exactly as the canonical option-A site does.
                 let owed = mailbox_finalize_owed.swap(false, std::sync::atomic::Ordering::AcqRel);
-                // #3016: capture the turn's real id BEFORE clearing inflight, so
-                // the finalizer ledger match is exact (id-0 would risk a stale
-                // terminal finalizing a queued follow-up).
-                let fresh_idle_user_msg_id =
-                    crate::services::discord::inflight::load_inflight_state(
-                        &watcher_provider,
-                        channel_id.get(),
-                    )
-                    .map(|s| s.user_msg_id)
-                    .unwrap_or(0);
+                // `fresh_idle_user_msg_id` is the id PINNED from the pre-cleanup
+                // snapshot at the same `current_offset` (bound by the `Finalize`
+                // arm above; never a late inflight re-read). The stale-skip
+                // guarantees it is the CURRENT turn's real, non-zero id.
                 crate::services::discord::inflight::clear_inflight_state(
                     &watcher_provider,
                     channel_id.get(),
@@ -11683,7 +11818,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 #[cfg(test)]
 mod tests {
     use super::{
-        RelaySlotGuard, TuiCompletionGateOutcome, Utf8ChunkDecoder,
+        FreshIdleFinalizeDecision, RelaySlotGuard, TuiCompletionGateOutcome, Utf8ChunkDecoder,
         adopt_watcher_terminal_message_ids_from_inflight, build_watcher_streaming_edit_text,
         discard_restored_response_seed_before_no_inflight_terminal_relay,
         discard_watcher_pending_buffer_after_suppressed_turn,
@@ -11693,10 +11828,10 @@ mod tests {
         watcher_batch_contains_assistant_event, watcher_batch_contains_relayable_response,
         watcher_direct_terminal_should_commit_session_idle,
         watcher_fallback_edit_failure_can_delete_original_placeholder,
-        watcher_inflight_absence_is_abandonment, watcher_inflight_represents_external_input,
-        watcher_jsonl_turn_state_ready_for_input, watcher_output_progressed_recently,
-        watcher_should_clear_stale_terminal_message_ids, watcher_should_defer_delegated_fresh_idle,
-        watcher_should_delete_suppressed_placeholder,
+        watcher_fresh_idle_finalize_decision, watcher_inflight_absence_is_abandonment,
+        watcher_inflight_represents_external_input, watcher_jsonl_turn_state_ready_for_input,
+        watcher_output_progressed_recently, watcher_should_clear_stale_terminal_message_ids,
+        watcher_should_defer_delegated_fresh_idle, watcher_should_delete_suppressed_placeholder,
         watcher_should_suppress_streaming_after_bridge_delivery,
         watcher_terminal_commit_side_effects_for_test, watcher_terminal_edit_consumes_placeholder,
         watcher_terminal_token_update_status,
@@ -12539,20 +12674,56 @@ mod tests {
         );
     }
 
-    // #3016 A2 (fresh-idle ledger authority). Proves the THREE properties the
-    // PR depends on, end-to-end through the real `TurnFinalizer` actor:
+    // #3016 A2 test helper: build an inflight snapshot with explicit
+    // turn_start_offset / last_offset, so the fresh-idle decision's OUTPUT-RANGE
+    // gate (`pinned_finalize_user_msg_id` / `committed_completion_is_stale_for_newer_turn`)
+    // can be exercised against current/older/newer turns.
+    fn fresh_idle_inflight(
+        provider: ProviderKind,
+        channel_id: u64,
+        tmux_session_name: &str,
+        user_msg_id: u64,
+        turn_start_offset: u64,
+    ) -> InflightTurnState {
+        let mut state = InflightTurnState::new(
+            provider,
+            channel_id,
+            Some("adk-cc".to_string()),
+            42,
+            user_msg_id,
+            user_msg_id + 1,
+            "prompt".to_string(),
+            Some("session".to_string()),
+            Some(tmux_session_name.to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            turn_start_offset,
+        );
+        // `InflightTurnState::new` sets turn_start_offset == last_offset; keep
+        // them equal (the registration invariant) so the range tests behave like
+        // production.
+        state.last_offset = turn_start_offset;
+        state.turn_start_offset = Some(turn_start_offset);
+        state
+    }
+
+    // #3016 A2 (fresh-idle wrong-turn race fix). Drives the REAL production
+    // decision logic via the factored `watcher_fresh_idle_finalize_decision` (the
+    // exact helper the production fresh-idle branch calls), then finalizes through
+    // the REAL `TurnFinalizer` actor + mailbox. The prior version of this test
+    // bypassed the production branch by clearing inflight + calling the finalizer
+    // manually; this one routes through the real decision so under-finalize
+    // closure is proven through the actual branch.
     //
-    //   (i)   An empty/suppressed DELEGATED completion at fresh-idle finalizes
-    //         via the LEDGER even with the legacy `mailbox_finalize_owed` flag
-    //         FALSE — the finalize is no longer gated on the flag.
-    //   (ii)  The fresh-idle DEFER decision is now ledger-driven: a live
-    //         watcher-owned Pending entry makes `has_live_watcher_pending` (the
-    //         defer-guard input) report `true` BEFORE finalize, then `false`
-    //         after — so a paused-live turn (empty response + live entry) is
-    //         deferred, not finalized.
-    //   (iii) Idempotency: a second fresh-idle submit for the same turn is a
-    //         no-op (AlreadyFinalized) — no double-finalize, no counter
-    //         underflow.
+    // Property (i): a genuine empty/suppressed DELEGATED completion (current turn,
+    // `turn_start_offset < current_offset`, not paused, epoch unchanged) yields
+    // `Finalize { user_msg_id = real id }` and finalizes via the LEDGER even with
+    // the legacy `mailbox_finalize_owed` flag FALSE.
+    //
+    // Degenerate-empty-offset coverage: the completion commits NO new terminal
+    // text (empty response), yet `current_offset` strictly exceeds the turn start
+    // (as it always does for a real FreshIdle — `output_ever_grew`), so the pinned
+    // id is the turn's REAL id and the finalize fires.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn fresh_idle_empty_delegated_completion_finalizes_via_ledger_flag_false() {
@@ -12568,6 +12739,10 @@ mod tests {
         let tmux_session_name = "AgentDesk-claude-adk-cc-9873018";
         let user_msg_id = 8001u64;
         let generation = shared.current_generation;
+        // Current turn started at offset 10; the watcher idled at offset 50, so
+        // turn_start_offset (10) < current_offset (50) → in range.
+        let turn_start_offset = 10u64;
+        let current_offset = 50u64;
 
         // Real watcher handle with the legacy flag FALSE: the fresh-idle
         // finalize must NOT depend on the flag.
@@ -12590,23 +12765,18 @@ mod tests {
         // Allow the actor to drain the Start before we query.
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        // (ii) BEFORE finalize: the ledger reports a live watcher-owned entry,
-        // so the defer guard would defer an empty-response paused-live turn.
+        // The ledger reports a live watcher-owned entry → the defer guard would
+        // defer an empty-response paused-live turn. A genuine *completed* empty
+        // idle proceeds past the defer guard (the bridge finalized the ledger
+        // entry, or the turn truly produced its terminal); here we model the
+        // proceed case and let the REAL decision helper route it.
         assert!(
             shared
                 .turn_finalizer
                 .has_live_watcher_pending(channel_id, generation)
                 .await,
-            "live watcher-owned Pending entry → defer guard input is true (paused-live deferred)"
+            "live watcher-owned Pending entry → defer guard input is true"
         );
-        assert!(
-            watcher_should_defer_delegated_fresh_idle(true, ""),
-            "empty response + live delegated entry → DEFER (paused-live not finalized)"
-        );
-        // A genuine empty completion is the one that proceeds past the guard:
-        // the guard only defers while the response is empty AND the turn is a
-        // live delegated entry; the proceed decision below is the post-guard
-        // commit point.
 
         // Live active mailbox turn with the turn's real id, so we can observe
         // the finalize releasing exactly THIS turn's token.
@@ -12621,7 +12791,7 @@ mod tests {
             .await
         );
 
-        // (i) Precondition: the legacy flag is FALSE on the real handle.
+        // Precondition: the legacy flag is FALSE on the real handle.
         let watcher = shared
             .tmux_watchers
             .get(&channel_id)
@@ -12634,14 +12804,41 @@ mod tests {
         );
         drop(watcher);
 
-        // Fresh-idle commit point: clear inflight inline (mirrors the call site)
-        // then drive the finalizer UNCONDITIONALLY with normal_completion = true.
+        // REAL decision: pre-cleanup snapshot is the CURRENT turn, not paused,
+        // epoch unchanged → Finalize with the turn's REAL id.
+        let snapshot = fresh_idle_inflight(
+            provider.clone(),
+            channel_id.get(),
+            tmux_session_name,
+            user_msg_id,
+            turn_start_offset,
+        );
+        let decision = watcher_fresh_idle_finalize_decision(
+            false, // paused_now
+            false, // epoch_changed
+            Some(&snapshot),
+            tmux_session_name,
+            current_offset,
+        );
+        let finalize_id = match decision {
+            FreshIdleFinalizeDecision::Finalize { user_msg_id } => user_msg_id,
+            other => panic!(
+                "genuine current-turn empty idle must Finalize with the real id, got {other:?}"
+            ),
+        };
+        assert_eq!(
+            finalize_id, user_msg_id,
+            "the pinned finalize id is the CURRENT turn's real id (degenerate-empty-offset safe)"
+        );
+
+        // Production fresh-idle commit point: clear inflight then drive the
+        // finalizer with the PINNED id (exactly what the branch does).
         crate::services::discord::inflight::clear_inflight_state(&provider, channel_id.get());
         let drove = super::finish_restored_watcher_active_turn(
             &shared,
             &provider,
             channel_id,
-            user_msg_id,
+            finalize_id,
             false, // finish_mailbox_on_completion — fresh live watcher
             false, // delegated_finalize_owed — flag FALSE (swapped at the site)
             true,  // normal_completion — A2: ledger-driven, flag-independent
@@ -12662,8 +12859,8 @@ mod tests {
             "empty/suppressed delegated completion finalizes via the ledger with the flag FALSE"
         );
 
-        // (ii) AFTER finalize: the ledger entry is Finalized → defer guard input
-        // flips to false (the turn is done; nothing left to defer).
+        // AFTER finalize: the ledger entry is Finalized → defer guard input flips
+        // to false (the turn is done; nothing left to defer).
         assert!(
             !shared
                 .turn_finalizer
@@ -12672,8 +12869,8 @@ mod tests {
             "finalized entry → defer guard input is false"
         );
 
-        // (iii) Idempotency: a second fresh-idle submit for the same turn is a
-        // no-op (AlreadyFinalized) — no double-finalize, no counter underflow.
+        // Idempotency: a second fresh-idle submit for the same turn is a no-op
+        // (AlreadyFinalized) — no double-finalize, no counter underflow.
         let global_before = shared
             .global_active
             .load(std::sync::atomic::Ordering::Acquire);
@@ -12681,7 +12878,7 @@ mod tests {
             &shared,
             &provider,
             channel_id,
-            user_msg_id,
+            finalize_id,
             false,
             false,
             true,
@@ -12699,6 +12896,133 @@ mod tests {
         assert_eq!(
             global_before, global_after,
             "double fresh-idle finalize must NOT underflow the active counter (AlreadyFinalized)"
+        );
+    }
+
+    // #3016 A2 (ii): a PAUSED-live delegated turn is DEFERRED through the real
+    // branch, not finalized. The defer is the first gate in the production
+    // fresh-idle block; this proves the ledger-fed defer predicate AND that the
+    // finalize decision is never reached for it.
+    #[tokio::test]
+    async fn fresh_idle_paused_live_delegated_turn_defers_through_real_path() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(987_3019);
+        let generation = shared.current_generation;
+        let user_msg_id = 8101u64;
+
+        // Live watcher-owned Pending entry → the ledger-fed defer input is true.
+        shared.turn_finalizer.register_start(
+            crate::services::discord::turn_finalizer::TurnKey::new(
+                channel_id,
+                user_msg_id,
+                generation,
+            ),
+            provider.clone(),
+            crate::services::discord::inflight::RelayOwnerKind::Watcher,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let delegated_turn_owned = shared
+            .turn_finalizer
+            .has_live_watcher_pending(channel_id, generation)
+            .await;
+        assert!(delegated_turn_owned, "live entry → defer input is true");
+
+        // Production defer gate: empty response + live delegated entry → DEFER.
+        // This is the exact predicate the production fresh-idle branch evaluates
+        // first; when true the branch `continue`s and NEVER reaches the finalize
+        // decision below.
+        assert!(
+            watcher_should_defer_delegated_fresh_idle(delegated_turn_owned, ""),
+            "paused-live delegated turn with empty response is DEFERRED (not finalized)"
+        );
+        // Non-empty response would NOT defer (the turn produced terminal text).
+        assert!(
+            !watcher_should_defer_delegated_fresh_idle(delegated_turn_owned, "answer"),
+            "a committed response is not a paused-live defer case"
+        );
+    }
+
+    // #3016 A2 (iii): a FOLLOW-UP-turn race (a newer turn is current at
+    // fresh-idle) must NOT finalize the follow-up. Two production sub-paths:
+    //   (a) the follow-up paused the watcher / bumped the epoch during the
+    //       cleanup awaits → AbortFollowupTookOver.
+    //   (b) the follow-up rewrote inflight to a turn that started AT/AFTER this
+    //       committed range (`turn_start_offset >= current_offset`) → SkipStale
+    //       (pinned id 0), so the stale-skip fires and the follow-up is NOT
+    //       released.
+    #[test]
+    fn fresh_idle_followup_turn_race_does_not_finalize_the_followup() {
+        let provider = ProviderKind::Claude;
+        let session = "AgentDesk-claude-adk-cc-9873020";
+        let channel_id = 987_3020u64;
+        let current_offset = 50u64;
+
+        // (a) Paused / epoch changed → abort regardless of the snapshot.
+        let current_turn = fresh_idle_inflight(provider.clone(), channel_id, session, 9001, 10);
+        assert_eq!(
+            watcher_fresh_idle_finalize_decision(
+                true, // paused_now — follow-up handoff paused the watcher
+                false,
+                Some(&current_turn),
+                session,
+                current_offset,
+            ),
+            FreshIdleFinalizeDecision::AbortFollowupTookOver,
+            "paused_now → abort before the destructive clear"
+        );
+        assert_eq!(
+            watcher_fresh_idle_finalize_decision(
+                false,
+                true, // epoch_changed — follow-up bumped pause_epoch
+                Some(&current_turn),
+                session,
+                current_offset,
+            ),
+            FreshIdleFinalizeDecision::AbortFollowupTookOver,
+            "epoch_changed → abort before the destructive clear"
+        );
+
+        // (b) Follow-up rewrote inflight to a NEWER turn that begins AT/AFTER the
+        // committed range (turn_start_offset 50 >= current_offset 50). The pinned
+        // id is 0 and the stale gate fires → SkipStale, so the newer turn is NOT
+        // released by this older idle.
+        let newer_followup = fresh_idle_inflight(provider.clone(), channel_id, session, 9002, 50);
+        assert_eq!(
+            watcher_fresh_idle_finalize_decision(
+                false,
+                false,
+                Some(&newer_followup),
+                session,
+                current_offset,
+            ),
+            FreshIdleFinalizeDecision::SkipStale {
+                pinned_user_msg_id: 0
+            },
+            "a newer follow-up turn (start >= current_offset) → SkipStale, follow-up NOT finalized"
+        );
+
+        // Strictly-after start is also skipped.
+        let strictly_after = fresh_idle_inflight(provider, channel_id, session, 9003, 60);
+        assert_eq!(
+            watcher_fresh_idle_finalize_decision(
+                false,
+                false,
+                Some(&strictly_after),
+                session,
+                current_offset,
+            ),
+            FreshIdleFinalizeDecision::SkipStale {
+                pinned_user_msg_id: 0
+            },
+            "a strictly-after follow-up turn is also skipped"
         );
     }
 

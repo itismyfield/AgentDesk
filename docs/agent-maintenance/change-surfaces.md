@@ -130,7 +130,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (9250 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (9385 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -318,6 +318,35 @@
     so a late completion can never commit the WRONG newer loop turn; the
     `user_msg_id != 0` path is byte-for-byte unchanged. New test
     `watcher_terminal_delivery_commit_marks_loop_turn_with_zero_user_msg_id`.
+    +135 from #3016 A2 (fresh-idle ledger authority + wrong-turn race fix): the
+    fresh-idle delegated completion finalizes via the single-authority
+    `TurnFinalizer` ledger (`has_live_watcher_pending`) rather than the in-memory
+    `mailbox_finalize_owed` flag (the last load-bearing flag use; phase-5 deletion
+    enabler — the flag is NOT deleted here). The adversarial-review wrong-turn RACE
+    is closed by REUSING the canonical option-A machinery instead of a late
+    inflight re-read: the finalize id is PINNED from a pre-cleanup inflight snapshot
+    via `pinned_finalize_user_msg_id(snapshot, session, current_offset)` and the
+    decision is gated by `committed_completion_is_stale_for_newer_turn`. The whole
+    routing is FACTORED into a pure helper `watcher_fresh_idle_finalize_decision`
+    (→ `FreshIdleFinalizeDecision::{AbortFollowupTookOver, SkipStale, Finalize}`)
+    so the production branch and the unit tests share the EXACT decision: (1) a
+    pause/epoch guard runs BEFORE the destructive clear (mirroring the canonical
+    pause/epoch guard which sits AFTER this branch's `continue`) → abort if a
+    follow-up turn took over during the cleanup `.await`s; (2) SkipStale when the
+    pinned snapshot is a NEWER turn that began AT/AFTER this committed range
+    (`turn_start_offset >= current_offset`, pinned id 0) → the follow-up is NOT
+    finalized; (3) Finalize with the CURRENT turn's real pinned id otherwise.
+    Degenerate-empty-offset safety: a genuine current-turn empty/suppressed
+    FreshIdle always has `turn_start_offset < current_offset` (the loop builds the
+    idle tracker with `::default()`, never `primed_for_recovery()`, so FreshIdle
+    requires `output_ever_grew`; the watcher resumes at `turn_start_offset`), so
+    the pinned id is the turn's real non-zero id and SkipStale cannot misfire on
+    the current turn. Tests rewritten to drive the REAL path:
+    `fresh_idle_empty_delegated_completion_finalizes_via_ledger_flag_false`
+    (routes through `watcher_fresh_idle_finalize_decision` then finalizes via the
+    real actor + mailbox, flag FALSE),
+    `fresh_idle_paused_live_delegated_turn_defers_through_real_path`,
+    `fresh_idle_followup_turn_race_does_not_finalize_the_followup` (abort + stale-skip).
   - `src/services/discord/tui_prompt_relay.rs` (4522 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3167: the self-paced TUI loop relay
