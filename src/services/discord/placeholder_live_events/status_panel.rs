@@ -33,6 +33,12 @@ pub(super) struct SubagentSlot {
     /// finishing `SubagentEnd` (#3086). Drives the `Done (N tools · M tokens ·
     /// Xs)` summary on the slot's render line.
     summary: Option<SubagentSummary>,
+    /// `true` when this subagent was launched with `run_in_background`. Such a
+    /// subagent's immediate Task `tool_result` is only a launch ack and the
+    /// subagent keeps running (often outliving the launching turn), so an
+    /// ack-only `SubagentEnd` must NOT mark it ✓ — only a genuine completion
+    /// (summary-bearing end or a terminal task_notification) finalizes it.
+    background: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum DerivedStatus {
@@ -123,6 +129,7 @@ impl StatusPanelState {
                 subagent_type,
                 desc,
                 tool_use_id,
+                background,
             } => {
                 let desc = desc
                     .filter(|value| !value.trim().is_empty())
@@ -137,6 +144,7 @@ impl StatusPanelState {
                     finished: None,
                     tool_use_id,
                     summary: None,
+                    background,
                 });
                 self.status = DerivedStatus::SubagentRunning { desc };
                 trim_subagents(&mut self.subagents);
@@ -158,6 +166,7 @@ impl StatusPanelState {
                 success,
                 tool_use_id,
                 summary,
+                ack_only,
             } => {
                 // #3084: prefer closing the slot whose Task tool-use id matches
                 // the result. This pairs a long-running subagent to its own
@@ -190,7 +199,16 @@ impl StatusPanelState {
                 };
                 let slot = target.map(|index| &mut self.subagents[index]);
                 if let Some(slot) = slot {
-                    slot.finished = Some(success);
+                    // A background subagent's ack-only end is just a launch ack
+                    // (it keeps running, often past the launching turn), so
+                    // finalizing here would render a premature ✓. Skip it for
+                    // background slots on ack-only ends; a genuine completion
+                    // (`ack_only == false`) still closes it. Foreground finalizes
+                    // on the ack as before.
+                    let finalize = !(ack_only && slot.background);
+                    if finalize {
+                        slot.finished = Some(success);
+                    }
                     // #3086: attach the TUI-parity Done summary to the closing
                     // slot. Only overwrite when the event actually carries
                     // accounting, so an id-less terminal notification does not
