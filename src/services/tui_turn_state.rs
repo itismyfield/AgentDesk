@@ -435,6 +435,12 @@ fn envelope_is_turn_end_terminator(provider: &ProviderKind, json: &Value) -> boo
         ProviderKind::Codex => type_str == "turn.completed",
         ProviderKind::Claude => match type_str {
             "result" => true,
+            // #3221: the `[Request interrupted by user]` marker is a genuine
+            // turn boundary (the turn was aborted), so the turn-END-only scan
+            // used by the finalize `Done` decision must treat it as a
+            // terminator too — keeping the strict scan consistent with the
+            // standard observer's Idle classification of the same envelope.
+            "user" => claude_user_envelope_is_interrupt_marker(json),
             "system" => matches!(
                 json.get("subtype").and_then(Value::as_str),
                 Some("turn_duration" | "stop_hook_summary")
@@ -621,10 +627,48 @@ fn read_recent_jsonl_window(
     })
 }
 
+/// #3221: detect the trailing `[Request interrupted by user]` envelope claude
+/// writes when a turn is aborted by a session-preserving interrupt (ESC for the
+/// TUI / stream-json `control_request{interrupt}` for the wrapper, #3207).
+///
+/// The marker is a `type=user` envelope whose `message.content` carries a text
+/// block beginning with `[Request interrupted by user` (the plain and the
+/// `… for tool use` variants). Matching is deliberately narrow — only a genuine
+/// `text` block with that exact prefix — so coincidental conversation text or
+/// `tool_result` payloads that merely mention "interrupted" never trip it.
+fn claude_user_envelope_is_interrupt_marker(json: &Value) -> bool {
+    let Some(content) = json
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    content.iter().any(|block| {
+        block.get("type").and_then(Value::as_str) == Some("text")
+            && block
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| {
+                    text.trim_start()
+                        .starts_with("[Request interrupted by user")
+                })
+    })
+}
+
 fn claude_envelope_turn_state(json: &Value) -> Option<TuiTurnState> {
     match json.get("type").and_then(Value::as_str)? {
         "result" => Some(TuiTurnState::Idle),
         "assistant" => Some(TuiTurnState::Streaming),
+        // #3221: a turn aborted via a session-preserving interrupt leaves a
+        // trailing `[Request interrupted by user]` user envelope as the newest
+        // entry. It is `type=user` but marks the turn as ENDED, not a fresh
+        // submission. Classifying it `UserSubmitted` left the JSONL-authoritative
+        // busy gate (#3208) reporting the stopped turn as in-flight forever, so
+        // the next user message was wrongly queued as `*_tui_busy_pre_submit`
+        // after a ⏳-removal / `!stop` / `/stop` / watchdog stop. Treat the
+        // interrupt marker as Idle so the next input starts a fresh turn.
+        "user" if claude_user_envelope_is_interrupt_marker(json) => Some(TuiTurnState::Idle),
         "user" => Some(TuiTurnState::UserSubmitted),
         // `permission-mode` envelopes (e.g. `bypassPermissions` adoption after
         // a fresh session start triggered by hard_reset or `/compact`) are not
@@ -859,6 +903,114 @@ mod tests {
             observe_claude_jsonl_turn_state(file.path()),
             TuiTurnState::UserSubmitted
         );
+    }
+
+    // #3221: a turn aborted via a session-preserving interrupt (ESC / wrapper
+    // control_request{interrupt}, #3207) leaves a trailing
+    // `[Request interrupted by user]` user envelope. That marks the turn ENDED,
+    // not a fresh submission, so the JSONL-authoritative busy gate (#3208) must
+    // see Idle — otherwise the stopped turn looks in-flight forever and the next
+    // message is wrongly queued as `*_tui_busy_pre_submit`.
+    #[test]
+    fn claude_interrupt_marker_marks_idle() {
+        let file = write_jsonl(&[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"do something"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#,
+        ]);
+
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::Idle
+        );
+    }
+
+    // The `… for tool use` interrupt variant must be recognized too.
+    #[test]
+    fn claude_interrupt_marker_for_tool_use_marks_idle() {
+        let file = write_jsonl(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"running tool"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#,
+        ]);
+
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::Idle
+        );
+    }
+
+    // Realistic tail: claude appends a `file-history-snapshot` after the
+    // interrupt marker. The observer walks past the snapshot (no turn-state
+    // signal) and still reads the marker as Idle.
+    #[test]
+    fn claude_interrupt_marker_then_file_history_snapshot_marks_idle() {
+        let file = write_jsonl(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#,
+            r#"{"type":"file-history-snapshot","messageId":"x"}"#,
+        ]);
+
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::Idle
+        );
+    }
+
+    // Suppression must be one-shot: once the user submits a NEW prompt after the
+    // interrupt marker, the turn is genuinely busy again.
+    #[test]
+    fn claude_new_prompt_after_interrupt_marker_is_user_submitted() {
+        let file = write_jsonl(&[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"actually do this instead"}]}}"#,
+        ]);
+
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::UserSubmitted
+        );
+    }
+
+    // Precision guard: a real user prompt that merely *mentions* the word
+    // interrupted (or a tool_result echoing it) must NOT be mistaken for the
+    // turn-end marker.
+    #[test]
+    fn claude_user_text_mentioning_interrupted_stays_user_submitted() {
+        let file = write_jsonl(&[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"why was the request interrupted by user earlier?"}]}}"#,
+        ]);
+
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::UserSubmitted
+        );
+    }
+
+    // The turn-END-only strict scan (finalize `Done` decision) must agree with
+    // the standard observer that the interrupt marker is a genuine terminator.
+    #[test]
+    fn claude_interrupt_marker_is_turn_end_terminator() {
+        let marker: Value = serde_json::from_str(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            claude_envelope_turn_state(&marker),
+            Some(TuiTurnState::Idle)
+        );
+        assert!(envelope_is_turn_end_terminator(
+            &ProviderKind::Claude,
+            &marker
+        ));
+
+        let plain_user: Value = serde_json::from_str(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#,
+        )
+        .unwrap();
+        assert!(!envelope_is_turn_end_terminator(
+            &ProviderKind::Claude,
+            &plain_user
+        ));
     }
 
     #[test]
