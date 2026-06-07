@@ -1425,6 +1425,61 @@ mod pane_dead_identity_tests {
         );
     }
 
+    // #3016 Stage 4 / #3154 — drained-frontier id-derivation proof.
+    //
+    // SCENARIO: a prior USER turn produced bytes up to 900 (its
+    // turn_start_offset=0, last_watcher_relayed_offset=900). A TUI-direct
+    // synthetic turn is then claimed BEFORE that prior turn drained. A terminal
+    // for the PRIOR range arrives at current_offset=500.
+    //
+    // POST-FIX: the synthetic's start_offset is raised to the DRAINED FRONTIER
+    // (900) and flows UNCHANGED into InflightTurnState::new, so
+    // synthetic.turn_start_offset == Some(900). 900 < 500 is FALSE → the
+    // synthetic is NOT a finalize candidate for the prior range →
+    // pinned_finalize_user_msg_id(Some(&synthetic), .., 500) == 0 (no wrong-turn
+    // finalize). The prior turn at the same offset still resolves to its own id.
+    //
+    // PRE-FIX RED: start_offset was relay_last_offset (the lagging 0), so
+    // synthetic.turn_start_offset == Some(0); 0 < 500 is TRUE → the synthetic
+    // would have been finalized by the prior range's terminal = WRONG-TURN.
+    #[test]
+    fn synthetic_frontier_blocks_wrong_turn_finalize_3154() {
+        let session = "AgentDesk-claude-adk";
+        let current_offset = 500u64;
+
+        // The synthetic turn built with the DRAINED FRONTIER (900) as its
+        // start_offset → turn_start_offset == Some(900). user_msg_id is the
+        // synthetic anchor (non-zero), so it would pass the `user_msg_id != 0`
+        // gate — only the offset gate keeps it out.
+        let synthetic_post_fix = state_with_offsets(4242, session, Some(900), 900);
+        assert_eq!(
+            synthetic_post_fix.turn_start_offset,
+            Some(900),
+            "frontier (900) >= all prior bytes flows into turn_start_offset"
+        );
+        assert_eq!(
+            pinned_finalize_user_msg_id(Some(&synthetic_post_fix), session, current_offset),
+            0,
+            "POST-FIX GREEN: synthetic at frontier 900 is NOT finalized by a prior-range terminal at 500"
+        );
+
+        // The PRIOR turn at the same offset still resolves to its OWN id.
+        let prior = state_with_offsets(555, session, Some(0), 0);
+        assert_eq!(
+            pinned_finalize_user_msg_id(Some(&prior), session, current_offset),
+            555,
+            "the real prior turn (start 0 < 500) still finalizes correctly"
+        );
+
+        // PRE-FIX RED witness: start_offset == lagging relay_last_offset (0).
+        let synthetic_pre_fix = state_with_offsets(4242, session, Some(0), 0);
+        assert_eq!(
+            pinned_finalize_user_msg_id(Some(&synthetic_pre_fix), session, current_offset),
+            4242,
+            "RED: pre-fix synthetic (start 0 < 500) is WRONGLY finalized by the prior range"
+        );
+    }
+
     #[test]
     fn pinned_finalize_id_falls_back_to_last_offset_like_the_guard() {
         // Mirror the guard's `turn_start_offset.unwrap_or(last_offset)`: with no

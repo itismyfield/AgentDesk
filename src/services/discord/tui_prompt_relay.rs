@@ -1113,6 +1113,111 @@ struct TuiDirectSyntheticTurnClaim {
     claimed: bool,
 }
 
+/// #3016 Stage 4 / #3154 — the DRAINED-FRONTIER for a TUI-direct synthetic turn.
+///
+/// The synthetic turn's `start_offset` becomes BOTH the relay-cursor base AND
+/// the `turn_start_offset` finalize-identity key (`InflightTurnState::new`
+/// `last_offset == turn_start_offset`, `response_sent_offset: 0`). When the
+/// immediately-prior turn has NOT yet drained, `relay_last_offset()` lags the
+/// prior turn's actual output frontier, so the synthetic's `turn_start_offset`
+/// sits BELOW bytes the prior turn already produced. That causes (1) the watcher
+/// to re-relay the prior range (DUPLICATE) and (2)
+/// `pinned_finalize_user_msg_id`'s `turn_start_offset < current_offset` gate to
+/// match the synthetic for a PRIOR-range terminal (WRONG-TURN finalize).
+///
+/// The fix raises the synthetic's single offset to the prior turn's END — the
+/// max of three CURRENT-FILE-scoped contributors, capped at file EOF:
+///   1. the prior on-disk inflight's `last_watcher_relayed_offset` for THIS
+///      session (only when the loaded state's `tmux_session_name` matches AND it
+///      belongs to the SAME tmux wrapper/generation — see the same-wrapper guard
+///      via `last_watcher_relayed_generation_mtime_ns` vs the live `.generation`
+///      mtime),
+///   2. the process-local authoritative committed relay watermark for the
+///      channel (`SharedData::committed_relay_offset`, which the watcher resets
+///      on a wrapper generation change, so it is inherently current-wrapper),
+///   3. file EOF as the conservative ceiling AND the cap.
+///
+/// On a DIFFERENT wrapper (cancel→respawn, file rotated) contributors (1) and
+/// (2) are suppressed via the same-wrapper guard / watermark reset, so the
+/// frontier falls back to file EOF (or, with no prior bytes, the caller's
+/// `relay_last_offset()` floor) — never over-pinning a fresh file's real start.
+fn synthetic_drained_frontier(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    output_path: Option<&Path>,
+) -> u64 {
+    // Contributor 3 (ceiling + cap): the current file's EOF. Inherently
+    // current-wrapper-scoped — a rotated file's EOF is the fresh file's length.
+    let file_eof = output_path
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+
+    // Same-wrapper guard: only borrow persisted/cross-actor frontiers that were
+    // observed under the SAME `.generation` wrapper as the live file.
+    let current_generation_mtime_ns = super::tmux::read_generation_file_mtime_ns(tmux_session_name);
+
+    // Contributor 1: the prior on-disk inflight's watcher-relayed frontier for
+    // THIS session, guarded to the same wrapper.
+    let prior_inflight_frontier = super::inflight::load_inflight_state(provider, channel_id.get())
+        .and_then(|state| {
+            synthetic_prior_inflight_frontier(
+                state.tmux_session_name.as_deref(),
+                tmux_session_name,
+                state.last_watcher_relayed_generation_mtime_ns,
+                current_generation_mtime_ns,
+                state.last_watcher_relayed_offset,
+            )
+        })
+        .unwrap_or(0);
+
+    // Contributor 2: the process-local authoritative committed relay watermark.
+    // The watcher resets this on a wrapper generation change
+    // (`reset_relay_watermark_on_generation_change`), so it is current-wrapper.
+    let committed = shared.committed_relay_offset(channel_id);
+
+    synthetic_drained_frontier_value(prior_inflight_frontier, committed, file_eof)
+}
+
+/// Pure contributor-1 extraction: the prior on-disk inflight's
+/// `last_watcher_relayed_offset`, GATED by (a) the inflight belonging to THIS
+/// session and (b) the SAME tmux wrapper (its persisted `.generation` mtime
+/// snapshot equals the live `.generation` mtime). Returns `None` (suppressed)
+/// on a session mismatch, a different/unknown wrapper, or a missing offset —
+/// the same-wrapper safety required so a fast cancel→respawn (file rotated)
+/// never pins the synthetic above a fresh file's real start.
+fn synthetic_prior_inflight_frontier(
+    state_session: Option<&str>,
+    tmux_session_name: &str,
+    state_generation_mtime_ns: Option<i64>,
+    current_generation_mtime_ns: i64,
+    last_watcher_relayed_offset: Option<u64>,
+) -> Option<u64> {
+    let same_session = state_session.map(str::trim) == Some(tmux_session_name.trim());
+    // Mirror `tmux::watermark_after_output_regression`: a live mtime of 0 or a
+    // missing/mismatched snapshot cannot prove same-wrapper.
+    let same_wrapper = current_generation_mtime_ns != 0
+        && state_generation_mtime_ns == Some(current_generation_mtime_ns);
+    if same_session && same_wrapper {
+        last_watcher_relayed_offset
+    } else {
+        None
+    }
+}
+
+/// Pure frontier math: the max of the (already same-wrapper-gated) contributors,
+/// capped at file EOF so the synthetic's `turn_start_offset` can never exceed the
+/// bytes that actually exist in the current file.
+fn synthetic_drained_frontier_value(
+    prior_inflight_frontier: u64,
+    committed: u64,
+    file_eof: u64,
+) -> u64 {
+    prior_inflight_frontier.max(committed).min(file_eof)
+}
+
 async fn finish_tui_direct_synthetic_pre_save_failure(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -1140,10 +1245,23 @@ async fn claim_tui_direct_synthetic_turn(
         channel_id,
         binding.as_ref(),
     );
-    let start_offset = binding
+    // #3016 Stage 4 / #3154: the synthetic turn's `start_offset` drives BOTH the
+    // relay-cursor base AND the `turn_start_offset` finalize-identity key. Keep
+    // `relay_last_offset()` as the FLOOR but raise it to the prior turn's DRAINED
+    // FRONTIER so `turn_start_offset` sits AT/ABOVE every byte the prior turn
+    // produced — closing the duplicate re-relay and wrong-turn-finalize windows
+    // that opened when the prior turn had not yet drained.
+    let relay_last_offset = binding
         .as_ref()
         .map(crate::services::tui_prompt_dedupe::TuiRuntimeBinding::relay_last_offset)
         .unwrap_or(0);
+    let start_offset = relay_last_offset.max(synthetic_drained_frontier(
+        shared,
+        provider,
+        channel_id,
+        tmux_session_name,
+        output_path.as_deref(),
+    ));
     let relay_owner = if tui_direct_watcher_can_own_output(
         &shared.tmux_watchers,
         tmux_session_name,
@@ -4523,6 +4641,149 @@ use super::tui_task_card::{strip_terminal_controls, truncate_chars_ascii as trun
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #3016 Stage 4 / #3154 — drained-frontier id-derivation (core).
+    //
+    // Prior USER turn: turn_start_offset=Some(0), last_watcher_relayed_offset=
+    // Some(900), file EOF 950, SAME wrapper. The frontier helper must return 900
+    // so the synthetic's `start_offset` (== turn_start_offset) sits AT/ABOVE
+    // every byte the prior turn produced.
+    #[test]
+    fn synthetic_drained_frontier_uses_prior_relayed_offset_3154() {
+        let gen_mtime = 111_111_i64;
+        // Contributor 1 (same session + same wrapper) yields 900.
+        let prior = synthetic_prior_inflight_frontier(
+            Some("AgentDesk-claude-adk"),
+            "AgentDesk-claude-adk",
+            Some(gen_mtime),
+            gen_mtime,
+            Some(900),
+        )
+        .unwrap();
+        assert_eq!(prior, 900, "same-wrapper prior frontier must surface 900");
+
+        // committed watermark lags (e.g. 0); file EOF 950 caps. Frontier == 900.
+        let frontier = synthetic_drained_frontier_value(prior, 0, 950);
+        assert_eq!(
+            frontier, 900,
+            "frontier = max(prior 900, committed 0).min(EOF 950) == 900"
+        );
+
+        // POST-FIX: the synthetic's start_offset (== relay_last_offset.max(frontier))
+        // flows UNCHANGED into InflightTurnState::new → turn_start_offset == 900.
+        // PRE-FIX it was relay_last_offset == 0 (the lag), which produced the
+        // wrong-turn finalize. See the id-derivation proof in tmux_watcher.rs:
+        // `synthetic_frontier_blocks_wrong_turn_finalize_3154`.
+        let pre_fix_start_offset = 0u64; // relay_last_offset (lagging)
+        let post_fix_start_offset = pre_fix_start_offset.max(frontier);
+        assert_eq!(post_fix_start_offset, 900);
+        assert_ne!(
+            post_fix_start_offset, pre_fix_start_offset,
+            "RED witness: pre-fix start_offset (0) != post-fix frontier (900)"
+        );
+    }
+
+    // #3016 Stage 4 / #3154 — file EOF caps the frontier so the synthetic's
+    // turn_start_offset never exceeds the bytes that actually exist.
+    #[test]
+    fn synthetic_drained_frontier_caps_at_file_eof_3154() {
+        // committed claims 1200 but the live file is only 900 long.
+        assert_eq!(synthetic_drained_frontier_value(0, 1200, 900), 900);
+        // prior frontier 950 also capped to EOF 900.
+        assert_eq!(synthetic_drained_frontier_value(950, 0, 900), 900);
+    }
+
+    // #3016 Stage 4 / #3154 — same-wrapper fallback: a DIFFERENT
+    // generation/wrapper (cancel→respawn, file rotated) suppresses contributor 1
+    // so the frontier does not over-pin a fresh file's real start.
+    #[test]
+    fn synthetic_drained_frontier_different_wrapper_falls_back_3154() {
+        // Different generation mtime → contributor 1 suppressed (None).
+        assert!(
+            synthetic_prior_inflight_frontier(
+                Some("AgentDesk-claude-adk"),
+                "AgentDesk-claude-adk",
+                Some(111_111),
+                222_222, // live wrapper differs
+                Some(900),
+            )
+            .is_none(),
+            "different wrapper must suppress the persisted prior frontier"
+        );
+        // Missing persisted mtime snapshot (legacy row) → suppressed.
+        assert!(
+            synthetic_prior_inflight_frontier(
+                Some("AgentDesk-claude-adk"),
+                "AgentDesk-claude-adk",
+                None,
+                222_222,
+                Some(900),
+            )
+            .is_none()
+        );
+        // Live mtime of 0 (unavailable) cannot prove same-wrapper → suppressed.
+        assert!(
+            synthetic_prior_inflight_frontier(
+                Some("AgentDesk-claude-adk"),
+                "AgentDesk-claude-adk",
+                Some(0),
+                0,
+                Some(900),
+            )
+            .is_none()
+        );
+        // Different SESSION (another session's frontier) → suppressed.
+        assert!(
+            synthetic_prior_inflight_frontier(
+                Some("AgentDesk-claude-other"),
+                "AgentDesk-claude-adk",
+                Some(111_111),
+                111_111,
+                Some(900),
+            )
+            .is_none(),
+            "must not borrow another session's frontier"
+        );
+    }
+
+    // #3016 Stage 4 / #3154 — normal cases: no prior frontier and no committed
+    // watermark → frontier 0, so the caller's `relay_last_offset()` floor wins
+    // unchanged (no behavior change for the already-drained / no-prior case).
+    #[test]
+    fn synthetic_drained_frontier_no_prior_yields_zero_3154() {
+        assert_eq!(synthetic_drained_frontier_value(0, 0, 950), 0);
+        // With a relay_last_offset floor of 500, max(500, frontier 0) == 500.
+        let relay_last_offset = 500u64;
+        assert_eq!(
+            relay_last_offset.max(synthetic_drained_frontier_value(0, 0, 950)),
+            500
+        );
+    }
+
+    // #3016 Stage 4 / #3154 — no-re-relay: the watcher's duplicate guard
+    // (tmux_watcher.rs ~8730) suppresses a read whose data_start_offset < the
+    // previously-relayed offset. With the frontier base at 900, a read starting
+    // at 900 has data_start(900) >= prev(900) → guard does NOT fire → bytes
+    // 0..900 are not re-sent. PRE-FIX base 0 → data_start(0) would be a fresh
+    // walk re-relaying 0..900.
+    #[test]
+    fn synthetic_frontier_prevents_duplicate_re_relay_3154() {
+        let frontier = synthetic_drained_frontier_value(900, 0, 950);
+        let prev_relayed = 900u64;
+        // Mirror the guard's `data_start_offset < prev_offset` suppression test.
+        let data_start_offset = frontier;
+        assert!(
+            !(data_start_offset < prev_relayed),
+            "POST-FIX: read at frontier 900 is NOT < prev 900 → no duplicate guard, no re-relay"
+        );
+        // PRE-FIX RED witness: base 0 walks from the start → < prev → would have
+        // re-relayed the prior range.
+        let pre_fix_data_start = 0u64;
+        assert!(
+            pre_fix_data_start < prev_relayed,
+            "RED witness: pre-fix base 0 < prev 900 → prior range re-relayed"
+        );
+    }
 
     // #3018: the tmux_watchers registry is the SINGLE authority for
     // tmux-session→channel resolution. When the registry has a mapping it wins

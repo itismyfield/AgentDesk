@@ -381,7 +381,7 @@
     the REAL atomic helper against REAL on-disk inflight: a follow-up's inflight on
     disk → atomic clear is a no-op (follow-up preserved); the pinned turn on disk →
     atomic clear removes it (happy path).
-  - `src/services/discord/tui_prompt_relay.rs` (4522 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (4640 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3167: the self-paced TUI loop relay
     starts its synthetic turn with `ActiveTurnKind::Background` so a queued user
@@ -476,7 +476,24 @@
     (the double-relay duplicate). When the watcher stopped / never covered the turn
     the watermark is 0 (or lags), so the clamp is a no-op and the tail still relays
     from the prompt-timestamp offset — the #3176 outage fallback is preserved
-    (plus clamp-up / outage-noop unit tests).
+    (plus clamp-up / outage-noop unit tests);
+    +118 from #3016 Stage 4 / #3154: `claim_tui_direct_synthetic_turn`'s
+    `start_offset` is raised from the lagging `relay_last_offset()` to the
+    prior turn's DRAINED FRONTIER via `synthetic_drained_frontier` (max of: the
+    same-session + same-wrapper prior on-disk inflight `last_watcher_relayed_offset`,
+    the process-local `committed_relay_offset` watermark, capped at file EOF).
+    Because this single value is BOTH the relay-cursor base AND the
+    `turn_start_offset` finalize-identity key (`InflightTurnState::new`), raising
+    it AT/ABOVE every byte the prior turn produced closes simultaneously the
+    duplicate prior-range re-relay (watcher dedupe guard) and the wrong-turn
+    finalize (`pinned_finalize_user_msg_id`'s `turn_start_offset < current_offset`
+    gate). The same-wrapper guard (`synthetic_prior_inflight_frontier`, mirroring
+    `tmux::watermark_after_output_regression` against the live `.generation`
+    mtime) suppresses contributors on a cancel→respawn so a rotated file is never
+    over-pinned; the math is the pure `synthetic_drained_frontier_value`. No
+    watcher edit — raising `turn_start_offset` suffices (plus id-derivation /
+    no-re-relay / EOF-cap / different-wrapper-fallback / no-prior unit tests with
+    pre-fix RED witnesses).
   - `src/services/discord/idle_recap.rs` (1881 prod lines; idle-recap card
     compose/post/clear surface, registered giant-file (#3036) — bugfix only
     outside an extraction plan. Crossed 1000 prod LoC with #3146 Part 1: the
