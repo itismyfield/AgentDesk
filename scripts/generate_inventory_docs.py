@@ -120,7 +120,6 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "receipt.rs": "Receipt parsing and workspace attribution helpers.",
     "reconcile.rs": "Boot-time reconciliation for persisted state and dispatch-runtime drift.",
     "manual_intervention.rs": "Manual intervention parsing and helpers shared by Discord reply/requeue flows.",
-    "runtime.rs": "Session runtime abstraction (`SessionRuntime`) plus the tmux-backed implementation.",
     "runtime_layout/": "Managed runtime layout, memory-path migration, shared prompt sync, and skill deployment.",
     "server/": "Axum server boot, routes, workers, background loops, and WebSocket broadcast.",
     "services/": "Core runtime services: provider runners, Discord bot, queueing, memory, and platform helpers.",
