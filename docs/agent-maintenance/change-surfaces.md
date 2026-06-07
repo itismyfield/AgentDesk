@@ -489,7 +489,7 @@
     delivery through the shared delivery-lease, the watcher-owner-channel
     resolution, and the skip-epilogue/identity-guarded-save decision seams. Split
     the lease wiring vs the delivery helpers before adding behavior).
-  - `src/services/discord/turn_finalizer.rs` (1011 prod lines; single-authority
+  - `src/services/discord/turn_finalizer.rs` (1306 prod lines; single-authority
     turn-finalize state machine — ledger/actor-loop/reconciler. Crossed the
     giant-file threshold when #3041 P1-0 added the dormant `DeliveryLeaseCell`
     finalizer messages/handlers on top of #3143's `FinalizeContext::monitor()` +

@@ -150,6 +150,24 @@ fn resolve_ledger_key(ledger: &HashMap<LedgerKey, LedgerEntry>, key: TurnKey) ->
     )
 }
 
+/// #3016 S1 (read-only): does the channel's `generation` have a live
+/// (non-`Finalized`) ledger entry whose relay owner is the watcher? Pure read;
+/// the actor's `QueryWatcherPending` arm calls this without mutating the ledger.
+/// Dead until S3/S4.
+#[allow(dead_code)] // #3016 S1: wired in S3/S4
+fn ledger_has_live_watcher_pending(
+    ledger: &HashMap<LedgerKey, LedgerEntry>,
+    channel_id: ChannelId,
+    generation: u64,
+) -> bool {
+    ledger.iter().any(|(lk, entry)| {
+        lk.channel_id == channel_id
+            && lk.generation == generation
+            && entry.phase != Phase::Finalized
+            && entry.relay_owner == RelayOwnerKind::Watcher
+    })
+}
+
 /// Channel-only collapse over an explicit candidate set. The finalizer keeps
 /// its in-line `HashMap` walk above; the `StatusPanelController` (#3078) passes
 /// its own `(LedgerKey, is_terminal)` pairs here so the identical
@@ -329,6 +347,28 @@ pub(in crate::services::discord) enum FinalizeOutcome {
     Deferred,
 }
 
+/// #3016 S1 (read-only, additive): the structural completion signal derived
+/// from the provider's JSONL transcript, independent of the ledger. Stage 3/4
+/// wires the finalizer to consult this as a turn-lifecycle authority alongside
+/// the ledger; it is dead until then.
+///
+/// - `Done` — the transcript's strict reverse-scan found a definitive
+///   terminator (Claude `result` / `system{turn_duration,stop_hook_summary,
+///   init}`, Codex `turn.completed`), so the turn is structurally over.
+/// - `PausedLive` — the transcript shows in-flight or inconclusive evidence (a
+///   `user`/`assistant`/streaming envelope, a partial/selector line, or no
+///   terminator at all); conservatively treated as a live, paused turn.
+/// - `Unknown` — the runtime does not expose a structured on-disk JSONL turn
+///   state (LegacyTmuxWrapper / ProcessBackend / ClaudeEAdapter, or a non-JSONL
+///   provider), so the transcript probe cannot speak to completion.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)] // #3016 S1: wired in S3/S4
+pub(in crate::services::discord) enum CompletionSignal {
+    Done,
+    PausedLive,
+    Unknown,
+}
+
 /// Ledger phase for a single turn. Owned solely by the actor task; the
 /// check-and-set on this enum is the one place exactly-once is decided.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -426,6 +466,15 @@ enum FinalizeMsg {
         holder: LeaseHolder,
         start: u64,
         end: u64,
+        ack: oneshot::Sender<bool>,
+    },
+    /// #3016 S1 (A2-banked, read-only): ask the ledger whether the channel's
+    /// `generation` has a live (non-`Finalized`) entry that the watcher owns.
+    /// Pure read of the actor-owned ledger; mutates nothing. Dead until S3/S4.
+    #[allow(dead_code)] // #3016 S1: wired in S3/S4
+    QueryWatcherPending {
+        channel_id: ChannelId,
+        generation: u64,
         ack: oneshot::Sender<bool>,
     },
 }
@@ -585,6 +634,77 @@ impl TurnFinalizer {
         }
         rx.await.unwrap_or(false)
     }
+
+    /// #3016 S1 (PURE, READ-ONLY): the structural completion signal for a turn,
+    /// derived solely from the provider's on-disk JSONL transcript. Does NOT
+    /// touch the ledger, the actor channel, or any mutable state — it is a
+    /// stateless transcript read, so it runs directly on the caller's task.
+    ///
+    /// Mirrors EXACTLY how the idle-queue drain consults the structured turn
+    /// state in `tui_turn_state.rs`: first gate on
+    /// `provider_runtime_has_structured_jsonl_turn_state(provider, runtime_kind)`
+    /// (the same gate `jsonl_ready_for_input` / `runtime_binding_ready_for_input`
+    /// apply), then — on the offset-behind drain path — consult
+    /// `jsonl_strict_terminator_idle(provider, transcript_path)` (the
+    /// relay-offset-independent strict reverse-scan). The strict probe is
+    /// offset-independent by construction, so this read needs only the provider,
+    /// runtime kind, and transcript path; `turn_start_offset` is accepted to make
+    /// the call shape explicit for S3/S4 wiring but, like the strict scan itself,
+    /// does not change the structural verdict.
+    ///
+    ///   - non-JSONL runtime (LegacyTmuxWrapper/ProcessBackend/ClaudeEAdapter or
+    ///     a non-JSONL provider) → `Unknown`,
+    ///   - else `jsonl_strict_terminator_idle == Idle` → `Done`,
+    ///   - else (Busy/Inconclusive) → `PausedLive`.
+    ///
+    /// Dead until S3/S4 (#3016).
+    #[allow(dead_code)] // #3016 S1: wired in S3/S4
+    pub(in crate::services::discord) fn completion_signal_state(
+        &self,
+        provider: &ProviderKind,
+        runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+        transcript_path: &std::path::Path,
+        _turn_start_offset: Option<u64>,
+    ) -> CompletionSignal {
+        if !crate::services::tui_turn_state::provider_runtime_has_structured_jsonl_turn_state(
+            provider,
+            runtime_kind,
+        ) {
+            return CompletionSignal::Unknown;
+        }
+        if crate::services::tui_turn_state::jsonl_strict_terminator_idle(provider, transcript_path)
+        {
+            CompletionSignal::Done
+        } else {
+            CompletionSignal::PausedLive
+        }
+    }
+
+    /// #3016 S1 (A2-banked, READ-ONLY): whether the channel's `generation` has a
+    /// live (non-`Finalized`) ledger entry owned by the watcher. Routes a
+    /// read-only `QueryWatcherPending` through the actor (the ledger is owned by
+    /// the actor task) and awaits the answer; it mutates nothing. If the actor
+    /// task is gone (teardown) it returns `false`. Dead until S3/S4 (#3016).
+    #[allow(dead_code)] // #3016 S1: wired in S3/S4
+    pub(in crate::services::discord) async fn has_live_watcher_pending(
+        &self,
+        channel_id: ChannelId,
+        generation: u64,
+    ) -> bool {
+        let (ack, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(FinalizeMsg::QueryWatcherPending {
+                channel_id,
+                generation,
+                ack,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
 }
 
 /// The single owning task. Owns the ledger and a NON-owning cached handle to
@@ -705,6 +825,16 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                     } => {
                         let released = handle_release_delivery(&lease, key, holder, start, end);
                         let _ = ack.send(released);
+                    }
+                    // #3016 S1: pure read of the actor-owned ledger — no mutation.
+                    FinalizeMsg::QueryWatcherPending {
+                        channel_id,
+                        generation,
+                        ack,
+                    } => {
+                        let pending =
+                            ledger_has_live_watcher_pending(&ledger, channel_id, generation);
+                        let _ = ack.send(pending);
                     }
                 }
             }
@@ -2919,6 +3049,235 @@ mod tests {
             "with a terminal entry present, id-0 routes to the orphan no-op key, \
              not the newer live entry"
         );
+    }
+
+    // =======================================================================
+    // #3016 S1 — read-only completion-signal + watcher-pending probes.
+    // Additive, dead until S3/S4; these prove the read-only contract now.
+    // =======================================================================
+
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+
+    fn write_transcript(lines: &[&str]) -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), lines.join("\n")).unwrap();
+        file
+    }
+
+    // (a) Claude transcript ending in a real terminator → Done.
+    #[test]
+    fn completion_signal_claude_terminator_is_done() {
+        let fin = TurnFinalizer::spawn();
+        let file = write_transcript(&[
+            r#"{"type":"user","message":{"content":"hi"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#,
+            r#"{"type":"result","result":"done","session_id":"s"}"#,
+        ]);
+        assert_eq!(
+            fin.completion_signal_state(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                file.path(),
+                Some(0),
+            ),
+            CompletionSignal::Done,
+        );
+    }
+
+    // (b) Claude transcript still streaming (no terminator) → PausedLive.
+    #[test]
+    fn completion_signal_claude_streaming_is_paused_live() {
+        let fin = TurnFinalizer::spawn();
+        let file = write_transcript(&[
+            r#"{"type":"user","message":{"content":"hi"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#,
+        ]);
+        assert_eq!(
+            fin.completion_signal_state(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                file.path(),
+                Some(0),
+            ),
+            CompletionSignal::PausedLive,
+        );
+    }
+
+    // (b) Claude transcript whose latest line is a partial selector fragment
+    // after a terminator (a just-restarted turn) → PausedLive (the strict scan
+    // refuses to fall through a partial new envelope).
+    #[test]
+    fn completion_signal_claude_partial_after_terminator_is_paused_live() {
+        let fin = TurnFinalizer::spawn();
+        let file = write_transcript(&[
+            r#"{"type":"result","result":"done","session_id":"s"}"#,
+            r#"{"ty"#,
+        ]);
+        assert_eq!(
+            fin.completion_signal_state(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                file.path(),
+                Some(0),
+            ),
+            CompletionSignal::PausedLive,
+        );
+    }
+
+    // (a) Codex transcript ending in `turn.completed` → Done.
+    #[test]
+    fn completion_signal_codex_terminator_is_done() {
+        let fin = TurnFinalizer::spawn();
+        let file = write_transcript(&[
+            r#"{"type":"session_meta","payload":{"id":"s","cwd":"/repo"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}"#,
+            r#"{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":3}}"#,
+        ]);
+        assert_eq!(
+            fin.completion_signal_state(
+                &ProviderKind::Codex,
+                Some(RuntimeHandoffKind::CodexTui),
+                file.path(),
+                Some(0),
+            ),
+            CompletionSignal::Done,
+        );
+    }
+
+    // (b) Codex transcript mid-tool-call (no terminator) → PausedLive.
+    #[test]
+    fn completion_signal_codex_inflight_is_paused_live() {
+        let fin = TurnFinalizer::spawn();
+        let file = write_transcript(&[
+            r#"{"type":"session_meta","payload":{"id":"s","cwd":"/repo"}}"#,
+            r#"{"type":"response_item","payload":{"type":"function_call","name":"run_cmd","arguments":"{}","call_id":"c1"}}"#,
+        ]);
+        assert_eq!(
+            fin.completion_signal_state(
+                &ProviderKind::Codex,
+                Some(RuntimeHandoffKind::CodexTui),
+                file.path(),
+                Some(0),
+            ),
+            CompletionSignal::PausedLive,
+        );
+    }
+
+    // (c) Non-JSONL runtime (LegacyTmuxWrapper) → Unknown even with a terminator
+    // on disk: the probe must not speak to completion for a runtime that has no
+    // structured on-disk turn state.
+    #[test]
+    fn completion_signal_non_jsonl_runtime_is_unknown() {
+        let fin = TurnFinalizer::spawn();
+        let file = write_transcript(&[r#"{"type":"result","result":"done","session_id":"s"}"#]);
+        assert_eq!(
+            fin.completion_signal_state(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::LegacyTmuxWrapper),
+                file.path(),
+                Some(0),
+            ),
+            CompletionSignal::Unknown,
+        );
+        // ProcessBackend and ClaudeEAdapter are also non-JSONL.
+        assert_eq!(
+            fin.completion_signal_state(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ProcessBackend),
+                file.path(),
+                None,
+            ),
+            CompletionSignal::Unknown,
+        );
+        assert_eq!(
+            fin.completion_signal_state(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeEAdapter),
+                file.path(),
+                None,
+            ),
+            CompletionSignal::Unknown,
+        );
+    }
+
+    // (c) Non-JSONL PROVIDER (Qwen) → Unknown regardless of runtime kind.
+    #[test]
+    fn completion_signal_non_jsonl_provider_is_unknown() {
+        let fin = TurnFinalizer::spawn();
+        let file = write_transcript(&[r#"{"type":"result","result":"done","session_id":"s"}"#]);
+        assert_eq!(
+            fin.completion_signal_state(
+                &ProviderKind::Qwen,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                file.path(),
+                Some(0),
+            ),
+            CompletionSignal::Unknown,
+        );
+    }
+
+    // has_live_watcher_pending: true for a watcher-owned non-finalized entry.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn watcher_pending_true_for_live_watcher_entry() {
+        let fin = TurnFinalizer::spawn();
+        let ch = ChannelId::new(7001);
+        fin.register_start(
+            TurnKey::new(ch, 1, 5),
+            ProviderKind::Claude,
+            RelayOwnerKind::Watcher,
+        );
+        // Let the actor drain the Start before querying.
+        tokio::task::yield_now().await;
+        assert!(fin.has_live_watcher_pending(ch, 5).await);
+        // Different generation → no match.
+        assert!(!fin.has_live_watcher_pending(ch, 6).await);
+        // Different channel → no match.
+        assert!(!fin.has_live_watcher_pending(ChannelId::new(7002), 5).await);
+    }
+
+    // has_live_watcher_pending: false for a bridge-owned entry (relay owner is
+    // not the watcher).
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn watcher_pending_false_for_bridge_owned_entry() {
+        let fin = TurnFinalizer::spawn();
+        let ch = ChannelId::new(7101);
+        // `RelayOwnerKind::SessionBoundRelay` is a bridge-owned (non-watcher)
+        // owner — the probe must not report it as a live watcher-pending turn.
+        fin.register_start(
+            TurnKey::new(ch, 1, 0),
+            ProviderKind::Claude,
+            RelayOwnerKind::SessionBoundRelay,
+        );
+        tokio::task::yield_now().await;
+        assert!(!fin.has_live_watcher_pending(ch, 0).await);
+    }
+
+    // has_live_watcher_pending: false once the watcher entry is finalized.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn watcher_pending_false_after_finalized() {
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            let fin = TurnFinalizer::spawn();
+            let ch = ChannelId::new(7201);
+            let k = TurnKey::new(ch, 42, 0);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            tokio::task::yield_now().await;
+            assert!(fin.has_live_watcher_pending(ch, 0).await);
+
+            let _ = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+
+            // The entry is now `Finalized` → no longer watcher-pending.
+            assert!(!fin.has_live_watcher_pending(ch, 0).await);
+        })
+        .await;
     }
 
     // =======================================================================
