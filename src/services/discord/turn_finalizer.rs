@@ -64,6 +64,21 @@ const RECONCILE_INTERVAL: Duration = Duration::from_millis(1000);
 /// guarantees finalize eventually fires.
 const GATE_BACKSTOP: Duration = Duration::from_secs(8);
 
+/// #3016 phase-5a — the FAR backstop for a watcher-owned `register_start`
+/// Pending that never received a terminal (the under-finalize gap: the watcher
+/// delegated relay, delivered content, but the fresh-idle finalize never fired,
+/// and the legacy `placeholder_sweeper` SKIPS such rows because content was
+/// already delivered — see `placeholder_sweeper.rs` ~393). Reusing the legacy
+/// 1800s placeholder-sweeper abandon horizon keeps the window GENEROUS on
+/// purpose: it must NOT prematurely finalize a legitimately long paused-live
+/// turn (a selector / permission prompt, a subagent, or a long silent tool
+/// call can idle for minutes). This is explicitly NOT the short 8s
+/// `GATE_BACKSTOP`, and at the deadline the reconciler additionally re-checks
+/// liveness (`watcher_backstop_turn_is_terminal`) so a still-live turn is
+/// deferred rather than finalized.
+const WATCHER_REGISTER_BACKSTOP: Duration =
+    Duration::from_secs(super::placeholder_sweeper::ABANDON_THRESHOLD_SECS);
+
 /// TTL after which a `Finalized` ledger entry is garbage-collected so the
 /// ledger stays bounded while still suppressing a late double-submit.
 const FINALIZED_TTL: Duration = Duration::from_secs(60);
@@ -389,6 +404,14 @@ struct LedgerEntry {
     /// Backstop deadline for a deferred gate-timeout. `None` unless a
     /// `GateTimeout{Some(false)}` armed it.
     terminal_deadline: Option<Instant>,
+    /// #3016 phase-5a — FAR backstop deadline armed at `register_start` for a
+    /// watcher-owned turn. Distinct from `terminal_deadline` (the short 8s
+    /// gate-timeout backstop): this is the generous `WATCHER_REGISTER_BACKSTOP`
+    /// horizon that makes a never-terminated watcher handoff VISIBLE to the
+    /// reconciler so the mailbox/inflight is finalized even when no terminal is
+    /// ever submitted. The reconciler re-checks liveness before finalizing it.
+    /// `None` for non-watcher owners (bridge/standby finalize inline).
+    watcher_backstop_deadline: Option<Instant>,
     /// When the entry reached `Finalized`, for TTL-based GC.
     finalized_at: Option<Instant>,
 }
@@ -685,20 +708,7 @@ impl TurnFinalizer {
         runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
         transcript_path: &std::path::Path,
     ) -> CompletionSignal {
-        if !crate::services::tui_turn_state::provider_runtime_has_structured_jsonl_turn_state(
-            provider,
-            runtime_kind,
-        ) {
-            return CompletionSignal::Unknown;
-        }
-        if crate::services::tui_turn_state::jsonl_turn_end_terminator_idle(
-            provider,
-            transcript_path,
-        ) {
-            CompletionSignal::Done
-        } else {
-            CompletionSignal::PausedLive
-        }
+        completion_signal_from_transcript(provider, runtime_kind, transcript_path)
     }
 
     /// #3016 S1 (A2-banked, READ-ONLY): whether the channel's `generation` has a
@@ -753,6 +763,20 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         provider,
                         relay_owner,
                     } => {
+                        // #3016 phase-5a: a watcher-owned handoff arms the FAR
+                        // backstop so a never-terminated turn still becomes visible
+                        // to the reconciler. `get_or_insert`: set ONCE — never push
+                        // an armed deadline forward on a repeat `Start` (the EPIC's
+                        // never-finalizing bug, mirrored from the gate-timeout arm).
+                        // The reconcile that consumes this deadline runs off the
+                        // actor's cached `Weak<SharedData>`, which is populated by
+                        // the first `Terminal` the finalizer ever processes; a live
+                        // runtime finalizes turns continuously, so the cache is set
+                        // long before any `WATCHER_REGISTER_BACKSTOP` horizon
+                        // elapses (a `Start` carries no `SharedData` to cache here,
+                        // and the rows the backstop catches never submit a terminal
+                        // of their own).
+                        let arm_watcher_backstop = relay_owner == RelayOwnerKind::Watcher;
                         // A `Start` always carries the real `user_msg_id`, so it
                         // registers under the exact full-identity key.
                         ledger
@@ -764,6 +788,11 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                                     e.relay_owner = relay_owner;
                                     e.provider = provider.clone();
                                     e.turn_key = key;
+                                    if arm_watcher_backstop {
+                                        e.watcher_backstop_deadline.get_or_insert_with(|| {
+                                            Instant::now() + WATCHER_REGISTER_BACKSTOP
+                                        });
+                                    }
                                 }
                             })
                             .or_insert(LedgerEntry {
@@ -772,6 +801,8 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                                 provider,
                                 turn_key: key,
                                 terminal_deadline: None,
+                                watcher_backstop_deadline: arm_watcher_backstop
+                                    .then(|| Instant::now() + WATCHER_REGISTER_BACKSTOP),
                                 finalized_at: None,
                             });
                     }
@@ -914,6 +945,9 @@ async fn handle_terminal(
         provider,
         turn_key: key,
         terminal_deadline: None,
+        // Orphan/terminal-first entries (no prior `register_start`) finalize
+        // right here, so they never need the watcher far-backstop.
+        watcher_backstop_deadline: None,
         finalized_at: None,
     });
 
@@ -1244,9 +1278,146 @@ fn handle_release_delivery(
     lease.release(holder, key, start, end)
 }
 
+/// #3016 S1 (PURE) — the structural completion signal derived solely from the
+/// provider's on-disk JSONL transcript. Free-function core shared by the public
+/// `TurnFinalizer::completion_signal_state` (caller-task read) and the
+/// reconciler's watcher-backstop liveness re-check, which has no `&self`
+/// `TurnFinalizer` to call the method on. See `completion_signal_state` for the
+/// full Done/PausedLive/Unknown rationale.
+fn completion_signal_from_transcript(
+    provider: &ProviderKind,
+    runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+    transcript_path: &std::path::Path,
+) -> CompletionSignal {
+    if !crate::services::tui_turn_state::provider_runtime_has_structured_jsonl_turn_state(
+        provider,
+        runtime_kind,
+    ) {
+        return CompletionSignal::Unknown;
+    }
+    if crate::services::tui_turn_state::jsonl_turn_end_terminator_idle(provider, transcript_path) {
+        CompletionSignal::Done
+    } else {
+        CompletionSignal::PausedLive
+    }
+}
+
+/// #3016 phase-5a — the reconciler's liveness re-check at a watcher-owned
+/// `register_start` far-backstop deadline. Returns `true` ONLY when the turn is
+/// genuinely terminal, so a legitimately long paused-live turn is NEVER
+/// finalized at the deadline (the over-finalize hazard the EPIC must avoid):
+///   * NO live watcher handle → terminal. Nothing left will drive the pane to
+///     quiescence or submit a terminal, so finalizing is the only way the
+///     mailbox/inflight is ever released (mirrors the no-owner immediate
+///     gate-timeout path in `handle_terminal`).
+///   * `paused` (a Discord turn took the session over during the long wait) →
+///     NOT terminal: defer, exactly like the fresh-idle `AbortFollowupTookOver`
+///     guard, so the backstop never releases a follow-up turn.
+///   * `PausedLive` (JSONL terminator absent — selector / permission prompt /
+///     subagent / long silent tool call) → NOT terminal: defer.
+///   * `Done` (JSONL terminator PROVEN, offset-independent by construction) →
+///     terminal.
+///   * `Unknown` (non-JSONL runtime: legacy tmux wrapper, or a non-JSONL
+///     provider — Gemini / OpenCode / Qwen) → terminal ONLY when the tmux pane
+///     is idle / ready-for-input. With no structured transcript, `deadline +
+///     pane-idle` is the sole terminal criterion available, and the pane-idle
+///     probe is the SAME one the live watcher's `watcher_session_ready_for_input`
+///     fallback uses.
+fn watcher_backstop_turn_is_terminal(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    provider: &ProviderKind,
+) -> bool {
+    let (tmux_session_name, output_path, paused) = {
+        let Some(handle) = shared.tmux_watchers.get(&channel_id) else {
+            return true;
+        };
+        (
+            handle.tmux_session_name.clone(),
+            handle.output_path.clone(),
+            handle.paused.load(std::sync::atomic::Ordering::Acquire),
+        )
+        // dashmap `Ref` dropped here, BEFORE the (blocking) pane capture below.
+    };
+    if paused {
+        return false;
+    }
+    let runtime_kind =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&tmux_session_name)
+            .map(|binding| binding.runtime_kind)
+            .or_else(|| {
+                crate::services::tmux_common::resolve_tmux_runtime_kind_marker(&tmux_session_name)
+            });
+    match completion_signal_from_transcript(
+        provider,
+        runtime_kind,
+        std::path::Path::new(&output_path),
+    ) {
+        CompletionSignal::PausedLive => false,
+        CompletionSignal::Done => true,
+        CompletionSignal::Unknown => {
+            crate::services::tui_turn_state::pane_ready_fallback_allowed(provider, runtime_kind)
+                && crate::services::provider::tmux_session_ready_for_input(
+                    &tmux_session_name,
+                    provider,
+                )
+        }
+    }
+}
+
+/// Run the deadline-elapsed backstop finalize for ONE entry: flip
+/// `Pending → Finalizing` (skip if a concurrent terminal already advanced it),
+/// run `do_finalize` on the backstop context, revoke the legacy
+/// `mailbox_finalize_owed` debt (still present until phase-5b), then flip
+/// `Finalized`. Shared by the gate-timeout deadline arm and the phase-5a
+/// watcher far-backstop arm so exactly-once is decided in one place.
+async fn run_backstop_finalize(
+    ledger: &mut HashMap<LedgerKey, LedgerEntry>,
+    ledger_key: LedgerKey,
+    turn_key: TurnKey,
+    provider: ProviderKind,
+    shared: &Arc<SharedData>,
+    now: Instant,
+) {
+    match ledger.get_mut(&ledger_key) {
+        Some(entry) if entry.phase == Phase::Pending => entry.phase = Phase::Finalizing,
+        _ => return,
+    }
+    // Backstop finalize: the deferred terminal originated from the watcher but
+    // no caller is around to clear inflight, so the backstop context clears it
+    // here.
+    let _ = do_finalize(
+        turn_key,
+        provider,
+        &TerminalEvent::GateTimeout {
+            pane_quiescent: Some(true),
+        },
+        FinalizeContext::gate_backstop(),
+        shared,
+    )
+    .await;
+    // Codex P1 — the watcher skipped its cleanup block (lifecycle paused), so
+    // its legacy `mailbox_finalize_owed` flag is still `true`. The backstop just
+    // released the mailbox/inflight, so revoke that debt now; otherwise the
+    // watcher could later `swap(true)` and run stale cleanup against the NEXT
+    // active turn. (Flag removed wholesale in phase-5b.)
+    if let Some(watcher) = shared.tmux_watchers.get(&turn_key.channel_id) {
+        watcher
+            .mailbox_finalize_owed
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+    if let Some(entry) = ledger.get_mut(&ledger_key) {
+        entry.phase = Phase::Finalized;
+        entry.finalized_at = Some(now);
+        entry.terminal_deadline = None;
+        entry.watcher_backstop_deadline = None;
+    }
+}
+
 /// The one reconciler. Finalizes deadline-armed gate-timeouts whose backstop
-/// elapsed (the deadline-armed path; pane-quiescence/owner-death re-checks land
-/// with the watcher rewire in Phase 3 and Phase 4 respectively) and
+/// elapsed, GUARANTEES the phase-5a watcher far-backstop for watcher-owned
+/// `register_start` Pending entries that never received a terminal (re-checking
+/// liveness so a paused-live turn is deferred, never over-finalized), and
 /// garbage-collects `Finalized` entries past their TTL so the ledger stays
 /// bounded.
 async fn reconcile(ledger: &mut HashMap<LedgerKey, LedgerEntry>, shared: &Arc<SharedData>) {
@@ -1280,39 +1451,39 @@ async fn reconcile(ledger: &mut HashMap<LedgerKey, LedgerEntry>, shared: &Arc<Sh
         .collect();
 
     for (ledger_key, turn_key, provider) in due {
-        if let Some(entry) = ledger.get_mut(&ledger_key) {
-            if entry.phase != Phase::Pending {
-                continue;
+        run_backstop_finalize(ledger, ledger_key, turn_key, provider, shared, now).await;
+    }
+
+    // #3016 phase-5a — the watcher-owned `register_start` FAR backstop. Collect
+    // watcher-owned Pending entries whose generous `watcher_backstop_deadline`
+    // elapsed (those the watcher fresh-idle finalize never caught — the
+    // under-finalize gap the `placeholder_sweeper` SKIPS once content was
+    // delivered). Snapshot first so no `&mut` borrow is held across the awaits.
+    let watcher_due: Vec<(LedgerKey, TurnKey, ProviderKind)> = ledger
+        .iter()
+        .filter_map(|(ledger_key, entry)| {
+            if entry.phase == Phase::Pending
+                && entry.relay_owner == RelayOwnerKind::Watcher
+                && let Some(deadline) = entry.watcher_backstop_deadline
+                && now >= deadline
+            {
+                Some((*ledger_key, entry.turn_key, entry.provider.clone()))
+            } else {
+                None
             }
-            entry.phase = Phase::Finalizing;
-        }
-        // Backstop finalize: the deferred gate-timeout originated from the
-        // watcher terminal but no caller is around to clear inflight, so the
-        // backstop context clears it here.
-        let _ = do_finalize(
-            turn_key,
-            provider,
-            &TerminalEvent::GateTimeout {
-                pane_quiescent: Some(true),
-            },
-            FinalizeContext::gate_backstop(),
-            shared,
-        )
-        .await;
-        // Codex P1 — the watcher skipped its cleanup block (lifecycle paused),
-        // so its legacy `mailbox_finalize_owed` flag is still `true`. The
-        // backstop just released the mailbox/inflight, so revoke that debt now;
-        // otherwise the watcher could later `swap(true)` and run stale cleanup
-        // against the NEXT active turn. (Flag removed wholesale in phase 5.)
-        if let Some(watcher) = shared.tmux_watchers.get(&turn_key.channel_id) {
-            watcher
-                .mailbox_finalize_owed
-                .store(false, std::sync::atomic::Ordering::Release);
-        }
-        if let Some(entry) = ledger.get_mut(&ledger_key) {
-            entry.phase = Phase::Finalized;
-            entry.finalized_at = Some(now);
-            entry.terminal_deadline = None;
+        })
+        .collect();
+
+    for (ledger_key, turn_key, provider) in watcher_due {
+        // Liveness re-check: NEVER finalize a paused-live / still-busy turn at
+        // the deadline. Only a genuinely terminal turn is finalized; a still-live
+        // one EXTENDS its backstop and is re-checked next horizon.
+        if watcher_backstop_turn_is_terminal(shared, turn_key.channel_id, &provider) {
+            run_backstop_finalize(ledger, ledger_key, turn_key, provider, shared, now).await;
+        } else if let Some(entry) = ledger.get_mut(&ledger_key) {
+            if entry.phase == Phase::Pending {
+                entry.watcher_backstop_deadline = Some(now + WATCHER_REGISTER_BACKSTOP);
+            }
         }
     }
 
@@ -4148,5 +4319,271 @@ mod tests {
             assert!(handle_release_delivery(&c, turn(), h, 0, 6));
             assert!(matches!(c.read(), LeaseSnapshot::Unleased));
         }
+    }
+
+    // ===================================================================
+    // #3016 phase-5a — reconciler watcher-owned `register_start` far-backstop.
+    //
+    // Actor × terminal-path matrix (#3140 guard discipline):
+    //   * watcher-owned, content delivered but UNTERMINATED → finalized by the
+    //     backstop after the deadline, no flag needed;
+    //   * paused-live past the deadline → NOT finalized (no over-finalize);
+    //   * JSONL Done terminal → finalizes PROMPTLY even with the backstop armed;
+    //   * exactly-once → no double-finalize when both a terminal and the
+    //     backstop window apply.
+    // ===================================================================
+
+    /// A live, non-stale watcher handle so the reconciler liveness re-check
+    /// resolves a real `tmux_session_name` + transcript `output_path` for the
+    /// channel. Mirrors `tmux_watcher::tests::test_watcher_handle`.
+    fn backstop_watcher_handle(
+        tmux_session_name: &str,
+        output_path: &str,
+    ) -> crate::services::discord::TmuxWatcherHandle {
+        crate::services::discord::TmuxWatcherHandle {
+            tmux_session_name: tmux_session_name.to_string(),
+            output_path: output_path.to_string(),
+            paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                crate::services::discord::tmux_watcher_now_ms(),
+            )),
+            mailbox_finalize_owed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// The reconciler runs off the actor's cached `Weak<SharedData>`, which the
+    /// production finalizer populates from its continuous stream of `Terminal`
+    /// submissions (a `Start` carries no `SharedData`). A test exercising the
+    /// far-backstop on a turn that never submits its OWN terminal must prime that
+    /// cache the same way — one unrelated orphan terminal (no mailbox token, so a
+    /// harmless no-op beyond setting the cache).
+    async fn prime_reconcile_shared(fin: &TurnFinalizer, shared: &Arc<SharedData>) {
+        let _ = fin
+            .submit_terminal(
+                TurnKey::new(ChannelId::new(9_999_999), 0, 0),
+                ProviderKind::Claude,
+                TerminalEvent::Complete,
+                FinalizeContext::watcher(),
+                shared.clone(),
+            )
+            .await;
+    }
+
+    /// A watcher-owned `register_start` Pending whose content was delivered but
+    /// whose mailbox was NEVER finalized (no terminal ever submitted — the
+    /// under-finalize gap the `placeholder_sweeper` SKIPS once content is
+    /// delivered) is finalized by the reconciler far-backstop after the deadline,
+    /// WITHOUT any `mailbox_finalize_owed` flag. The active mailbox token is
+    /// released exactly once (counter decremented). No live watcher handle exists
+    /// for the channel, so the liveness re-check treats the turn as terminal
+    /// (nothing left will ever drive it).
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn watcher_register_start_backstop_finalizes_unterminated_turn() {
+        use serenity::model::id::{MessageId, UserId};
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            shared.global_active.store(1, Ordering::Relaxed);
+            let ch = ChannelId::new(5101);
+            let active_token = Arc::new(CancelToken::new());
+            shared
+                .mailbox(ch)
+                .restore_active_turn(active_token, UserId::new(7), MessageId::new(70))
+                .await;
+
+            let fin = TurnFinalizer::spawn();
+            prime_reconcile_shared(&fin, &shared).await;
+            // Watcher handoff registered the turn; NO terminal is ever submitted
+            // for it (the stuck row).
+            let k = TurnKey::new(ch, 70, 0);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+
+            tokio::time::sleep(WATCHER_REGISTER_BACKSTOP + RECONCILE_INTERVAL * 3).await;
+            tokio::task::yield_now().await;
+
+            assert_eq!(
+                shared.global_active.load(Ordering::Relaxed),
+                0,
+                "the far-backstop must finalize the stuck watcher turn and release its token"
+            );
+            let late = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(
+                matches!(late, FinalizeOutcome::AlreadyFinalized),
+                "a late terminal must lose the exactly-once gate after the backstop finalized"
+            );
+        })
+        .await;
+    }
+
+    /// A watcher-owned turn that is genuinely PAUSED-LIVE at the deadline (a
+    /// live watcher whose JSONL transcript shows NO turn terminator: selector /
+    /// permission prompt / subagent / long tool call) must NOT be finalized by
+    /// the far-backstop — over-finalizing it would strand a follow-up and kill a
+    /// legitimately long turn. The liveness re-check returns `PausedLive`, so the
+    /// backstop defers (re-arms) and the token stays held.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn watcher_register_start_backstop_defers_paused_live_turn() {
+        use serenity::model::id::{MessageId, UserId};
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            shared.global_active.store(1, Ordering::Relaxed);
+            let ch = ChannelId::new(5202);
+            let active_token = Arc::new(CancelToken::new());
+            shared
+                .mailbox(ch)
+                .restore_active_turn(active_token, UserId::new(7), MessageId::new(80))
+                .await;
+
+            // A live watcher whose transcript has content but NO Claude turn
+            // terminator → `completion_signal == PausedLive`.
+            let session = format!("3016-phase5a-paused-{}", std::process::id());
+            let transcript = std::env::temp_dir().join(format!("{session}.jsonl"));
+            std::fs::write(
+                &transcript,
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"working…\"}]}}\n",
+            )
+            .unwrap();
+            shared.tmux_watchers.insert(
+                ch,
+                backstop_watcher_handle(&session, transcript.to_str().unwrap()),
+            );
+
+            let fin = TurnFinalizer::spawn();
+            prime_reconcile_shared(&fin, &shared).await;
+            let k = TurnKey::new(ch, 80, 0);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+
+            tokio::time::sleep(WATCHER_REGISTER_BACKSTOP + RECONCILE_INTERVAL * 3).await;
+            tokio::task::yield_now().await;
+
+            // NOT finalized: token still held, counter unchanged.
+            assert_eq!(
+                shared.global_active.load(Ordering::Relaxed),
+                1,
+                "a paused-live turn must NOT be finalized by the far-backstop"
+            );
+            // The entry is still Pending → an explicit terminal now finalizes it
+            // (returns Finalized, not AlreadyFinalized), proving the backstop did
+            // not consume it.
+            let outcome = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(
+                matches!(outcome, FinalizeOutcome::Finalized { .. }),
+                "the deferred paused-live turn must still be live for its real terminal"
+            );
+            let _ = std::fs::remove_file(&transcript);
+        })
+        .await;
+    }
+
+    /// With the watcher far-backstop ARMED at `register_start`, a JSONL Done
+    /// terminal still finalizes PROMPTLY (the backstop only catches turns that
+    /// never terminate; it must never delay a real terminal). Exactly once.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn jsonl_done_terminal_finalizes_promptly_with_backstop_armed() {
+        use serenity::model::id::{MessageId, UserId};
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            shared.global_active.store(1, Ordering::Relaxed);
+            let ch = ChannelId::new(5303);
+            let active_token = Arc::new(CancelToken::new());
+            shared
+                .mailbox(ch)
+                .restore_active_turn(active_token, UserId::new(7), MessageId::new(90))
+                .await;
+
+            let fin = TurnFinalizer::spawn();
+            let k = TurnKey::new(ch, 90, 0);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+
+            // No sleep — the real terminal must win immediately despite the armed
+            // 1800s backstop.
+            let outcome = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(
+                matches!(
+                    outcome,
+                    FinalizeOutcome::Finalized {
+                        removed_token: Some(_),
+                        ..
+                    }
+                ),
+                "a Done terminal must finalize promptly and release the token, backstop armed"
+            );
+            assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+        })
+        .await;
+    }
+
+    /// Exactly-once across the backstop window: a turn finalized PROMPTLY by its
+    /// real terminal must NOT be finalized a second time when the
+    /// `WATCHER_REGISTER_BACKSTOP` horizon later elapses — the entry is already
+    /// `Finalized`, so the reconciler's watcher pass skips it (no double counter
+    /// decrement, no double side-effects).
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn watcher_backstop_no_double_finalize_after_terminal() {
+        use serenity::model::id::{MessageId, UserId};
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            shared.global_active.store(1, Ordering::Relaxed);
+            let ch = ChannelId::new(5404);
+            let active_token = Arc::new(CancelToken::new());
+            shared
+                .mailbox(ch)
+                .restore_active_turn(active_token, UserId::new(7), MessageId::new(100))
+                .await;
+
+            let fin = TurnFinalizer::spawn();
+            let k = TurnKey::new(ch, 100, 0);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            let first = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(matches!(first, FinalizeOutcome::Finalized { .. }));
+            assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+
+            // Cross the far-backstop horizon. The reconciler watcher pass must
+            // find the entry already Finalized (or GC'd) and do nothing.
+            tokio::time::sleep(WATCHER_REGISTER_BACKSTOP + RECONCILE_INTERVAL * 3).await;
+            tokio::task::yield_now().await;
+
+            assert_eq!(
+                shared.global_active.load(Ordering::Relaxed),
+                0,
+                "the far-backstop must not double-finalize an already-finalized turn"
+            );
+        })
+        .await;
     }
 }

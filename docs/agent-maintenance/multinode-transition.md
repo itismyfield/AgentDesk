@@ -405,3 +405,16 @@
   it owns); this change only narrows which in-process side-effects fire on a
   turn boundary and introduces no new multinode ownership/singleton/lease
   assumption.
+- #3016 phase-5a (reconciler far-backstop enabler): `turn_finalizer.rs` changed
+  by arming a generous `WATCHER_REGISTER_BACKSTOP` (the legacy 1800s
+  placeholder-sweeper horizon) on watcher-owned `register_start` Pending entries
+  and adding a reconciler pass that finalizes them ONLY after a liveness
+  re-check (`watcher_backstop_turn_is_terminal`: never a `PausedLive`/paused/
+  pane-busy turn; `Unknown` non-JSONL runtimes gated on pane-idle). The
+  `TurnFinalizer` actor is already **worker-local** (one actor per in-process
+  `SharedData`, owning its ledger and a `Weak<SharedData>`); the backstop reads
+  only this process's ledger plus the local tmux pane/transcript via the
+  existing `tmux_watchers` registry and `tui_turn_state`/`provider` probes. It
+  acquires no lease, touches no durable queue, and changes no leader/standby
+  ownership — finalize remains the same per-process exactly-once unit. No new
+  multinode ownership/singleton/lease assumption is introduced.
