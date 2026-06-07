@@ -83,6 +83,17 @@ async fn hook_session_pg(
             cwd: body.cwd.as_deref(),
             active_dispatch_id: active_dispatch_id.as_deref(),
             thread_channel_id: thread_channel_id.as_deref(),
+            // #3207 (part 2) P0: persist the unique channel id so worktree reuse
+            // can require an exact channel match. Prefer the explicit channel id
+            // from the hook body; fall back to the resolved thread channel id so
+            // thread sessions (which set `thread_channel_id` but may omit
+            // `channel_id`) still scope correctly.
+            channel_id: body
+                .channel_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .or(thread_channel_id.as_deref()),
             claude_session_id,
             raw_provider_session_id,
         },

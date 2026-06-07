@@ -195,6 +195,16 @@ pub fn run(
                     // Detect fatal startup errors (e.g. auth failure).
                     // If Claude reports is_error with zero cost, it failed before
                     // making any API call — no point keeping the session alive.
+                    //
+                    // #3207 (part 1): a stream-json `control_request{interrupt}`
+                    // aborts the active turn and ALSO emits an
+                    // `is_error=true, total_cost_usd=0` result
+                    // (`subtype=error_during_execution`,
+                    // `terminal_reason=aborted_streaming`). That is a deliberate
+                    // turn cancel, NOT a startup failure — the session is healthy
+                    // and must stay open for the next user turn. Excluding the
+                    // abort shape here is what makes the wrapper-host interrupt
+                    // session-preserving.
                     let is_error = json
                         .get("is_error")
                         .and_then(|v| v.as_bool())
@@ -203,7 +213,7 @@ pub fn run(
                         .get("total_cost_usd")
                         .and_then(|v| v.as_f64())
                         .unwrap_or(1.0);
-                    if is_error && cost == 0.0 {
+                    if is_error && cost == 0.0 && !result_event_is_turn_abort(&json) {
                         eprintln!("\x1b[31m[fatal startup error — session will exit]\x1b[0m");
                         break;
                     }
@@ -437,6 +447,23 @@ pub fn run(
     eprintln!("\x1b[90m--- Session ended ({exit_reason}) ---\x1b[0m");
 }
 
+/// #3207 (part 1): is this `result` event a deliberate turn-abort (from a
+/// stream-json `control_request{interrupt}`) rather than a fatal startup error?
+/// The interrupt path emits `is_error=true, total_cost_usd=0` just like a
+/// startup failure, so the wrapper distinguishes them by the abort markers
+/// (`subtype=error_during_execution` and/or `terminal_reason` containing
+/// "abort"). When true the session is healthy and must NOT be torn down.
+fn result_event_is_turn_abort(json: &serde_json::Value) -> bool {
+    let subtype = json.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+    if subtype == "error_during_execution" {
+        return true;
+    }
+    json.get("terminal_reason")
+        .and_then(|v| v.as_str())
+        .map(|reason| reason.to_ascii_lowercase().contains("abort"))
+        .unwrap_or(false)
+}
+
 /// Extract a short human-readable detail from a tool_use content block.
 fn format_tool_detail(name: &str, item: &serde_json::Value) -> String {
     let input = match item.get("input") {
@@ -646,4 +673,48 @@ fn append_jsonl_line_and_sync(path: &str, line: &str) -> std::io::Result<()> {
     let mut output = crate::services::tmux_common::RotatingJsonlWriter::open(path)?;
     output.write_line(line)?;
     output.sync_all()
+}
+
+#[cfg(test)]
+mod turn_abort_classification_tests {
+    use super::result_event_is_turn_abort;
+
+    #[test]
+    fn interrupt_aborted_result_is_classified_as_turn_abort() {
+        // The exact shape claude CLI 2.1.168 emits after a stream-json
+        // control_request{interrupt}: is_error + cost 0 + abort markers. Must
+        // NOT be treated as a fatal startup error (session stays alive).
+        let json = serde_json::json!({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": true,
+            "total_cost_usd": 0.0,
+            "terminal_reason": "aborted_streaming"
+        });
+        assert!(result_event_is_turn_abort(&json));
+    }
+
+    #[test]
+    fn fatal_startup_error_is_not_a_turn_abort() {
+        // Synthetic auth-failure result (no abort markers) must still tear the
+        // session down — unchanged behavior.
+        let json = serde_json::json!({
+            "type": "result",
+            "is_error": true,
+            "result": "Authentication error: not logged in",
+            "total_cost_usd": 0.0
+        });
+        assert!(!result_event_is_turn_abort(&json));
+    }
+
+    #[test]
+    fn terminal_reason_abort_alone_is_a_turn_abort() {
+        let json = serde_json::json!({
+            "type": "result",
+            "is_error": true,
+            "total_cost_usd": 0.0,
+            "terminal_reason": "aborted_by_user"
+        });
+        assert!(result_event_is_turn_abort(&json));
+    }
 }

@@ -8,7 +8,7 @@
 > [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-06-03 (against #3105 dead/orphaned TUI-session mirror eviction made flake-resistant and run off the Tokio executor, on top of #3099/#3100/#3103 system-continuation bridge-tail output delivery + anchored continuation classifier + injection-wrapper strip + pinned injected-message-id cleanup).
+> Last refreshed: 2026-06-07 (against #3207 comprehensive channel_id scoping of session-cwd DB resolves — auto_restore_session_force restart restore via restore_session_cwd_from_db and watcher recovery via load_restored_session_cwd now require channel_id = $2, growing the session_runtime/lifecycle freeze surfaces; on top of #3105 dead/orphaned TUI-session mirror eviction made flake-resistant and run off the Tokio executor).
 
 ## Read This First
 
@@ -113,7 +113,7 @@
   parsing), `src/services/discord/inflight.rs` (state file contract).
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/services/discord/watchers/lifecycle.rs` (2309 lines — canonical
+  - `src/services/discord/watchers/lifecycle.rs` (2329 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior).
   - `src/services/discord/tmux.rs` (2251 lines after #2558 dead-code sweep;
@@ -565,7 +565,7 @@
     from #3126 stall-watchdog completed-idle false-positive guard tests; +88
     from #3169 stall-watchdog jsonl-mtime liveness guard + tests, closing the
     Death #1 force-clean false-positive on loop mid-write sessions).
-  - `src/services/discord/router/message_handler/intake_turn.rs` (3744 lines;
+  - `src/services/discord/router/message_handler/intake_turn.rs` (3771 lines;
     Discord message intake turn orchestration split from the router message
     handler; bugfix only outside a further extraction plan; +9 from #3082
     queued-only answer-flush gate (`is_queued_notice` on the two
@@ -578,12 +578,12 @@
     headless Discord turn launch/terminal-response path split from the router
     message handler; bugfix only outside a further extraction plan).
   - `src/services/discord/meeting_orchestrator.rs` (3227 lines).
-  - `src/services/discord/turn_bridge/tmux_runtime.rs` (1320 lines; provider
+  - `src/services/discord/turn_bridge/tmux_runtime.rs` (1545 lines; provider
     stop-token/tmux binding runtime + PID-exit observation helper (#2426),
     split before adding non-bugfix behavior. #3169: added the
     claude-anonymous-teardown SIGINT suppression guard (death #3)).
   - `src/services/discord/turn_bridge/completion_guard.rs` (1849 lines).
-  - `src/services/discord/turn_bridge/tmux_runtime.rs` (1320 lines).
+  - `src/services/discord/turn_bridge/tmux_runtime.rs` (1545 lines).
   - `src/services/discord/turn_bridge/terminal_delivery.rs` (1341 prod lines;
     registered giant-file (#3036) — bugfix only outside an extraction plan.
     Crossed 1000 prod LoC with #3041 P1-2: the `BridgeDeliveryLease`
@@ -626,7 +626,7 @@
     are net-zero. The poise framework-builder/setup closure (~580 lines) is left
     inline — its move-captured locals make a clean extraction risky and is
     deferred).
-  - `src/services/discord/session_runtime.rs` (1396 lines).
+  - `src/services/discord/session_runtime.rs` (1482 lines).
   - `src/services/discord/voice_barge_in.rs` (4835 lines; voice STT/TTS,
     lobby routing, progress mirroring, and barge-in orchestration surface;
     tracked decompose target — see `giant-file-registry.md` (owner
@@ -785,7 +785,7 @@
   - `src/db/kanban_cards/` (1932 total lines; kanban card persistence and
     GitHub sync lookup surface).
   - `src/db/postgres.rs` (1018 lines).
-  - `src/db/dispatched_sessions.rs` (1554 lines; dispatched session
+  - `src/db/dispatched_sessions.rs` (1562 lines; dispatched session
     persistence helpers).
   - `src/db/session_transcripts.rs` is a retained PG-cleanup surface (now below
     the giant-file threshold; bugfix only).
@@ -814,7 +814,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `src/services/auto_queue/cancel_run.rs` (1032) is also giant-file territory;
   split before further non-bugfix growth.
 - `src/services/onboarding/mod.rs` (2936),
-  `src/services/dispatched_sessions.rs` (1331), and
+  `src/services/dispatched_sessions.rs` (1342), and
   `src/services/settings.rs` (1007) — service-layer route support surfaces
   split out of the large dashboard route modules. (`src/services/onboarding.rs`
   and `src/services/api_friction.rs` have been removed/decomposed.)
@@ -838,7 +838,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   readiness/cancel contract.
 - `src/services/memory/memento.rs` (1893).
 - `src/services/observability/pg_io.rs` (1047).
-- `src/services/dispatched_sessions.rs` (1331) — dispatched session domain
+- `src/services/dispatched_sessions.rs` (1342) — dispatched session domain
   service. This is the post-#1515 SRP extraction target for route/database
   callsites, but the module itself is now giant-file territory; split focused
   helpers before adding non-bugfix behavior. (+5 from #3169 exposing the idle-
