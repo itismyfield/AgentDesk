@@ -313,8 +313,7 @@ pub(crate) fn has_live_tmux_owner(dir: &Path, live_tmux_paths: &HashSet<String>)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| dir_str.clone());
     live_tmux_paths.iter().any(|pane| {
-        path_equals_or_nested_under(pane, &dir_str)
-            || path_equals_or_nested_under(pane, &canonical)
+        path_equals_or_nested_under(pane, &dir_str) || path_equals_or_nested_under(pane, &canonical)
     })
 }
 
@@ -330,23 +329,43 @@ pub(crate) fn has_live_tmux_owner(dir: &Path, live_tmux_paths: &HashSet<String>)
 /// temporarily unavailable). Only a SUCCESSFUL query (even an empty one) lets the
 /// sweep proceed.
 fn collect_live_tmux_pane_paths() -> Option<HashSet<String>> {
-    let mut paths = HashSet::new();
     let sessions = crate::services::platform::tmux::list_session_names().ok()?;
+    fold_pane_paths(sessions, |session| {
+        crate::services::platform::tmux::pane_current_path(session)
+    })
+}
+
+/// Pure core of [`collect_live_tmux_pane_paths`], parameterised on the pane-path
+/// query so it can be unit-tested without a live tmux server.
+///
+/// Fail-closed (returns `None`) the moment an AgentDesk-owned session's pane path
+/// cannot be determined — either the query FAILS (`None`) or returns an empty
+/// string. A per-session failure means the live-owner set would be INCOMPLETE,
+/// and an incomplete set could let the caller sweep a worktree whose live pane we
+/// simply failed to read (#3216 P0). Non-AgentDesk sessions are skipped BEFORE the
+/// query, so an unrelated operator session failing has no effect.
+fn fold_pane_paths(
+    sessions: Vec<String>,
+    query: impl Fn(&str) -> Option<String>,
+) -> Option<HashSet<String>> {
+    let mut paths = HashSet::new();
     for session in sessions {
         // Only AgentDesk-managed panes are relevant; operator-created sessions
         // must not influence the sweep.
         if !session.starts_with("AgentDesk-") {
             continue;
         }
-        if let Some(path) = crate::services::platform::tmux::pane_current_path(&session) {
-            if path.is_empty() {
-                continue;
-            }
-            if let Ok(canonical) = std::path::Path::new(&path).canonicalize() {
-                paths.insert(canonical.to_string_lossy().to_string());
-            }
-            paths.insert(path);
+        // A live AgentDesk session must report a non-empty pane cwd. If we cannot
+        // read it, fail-closed for the whole run rather than proceed with a
+        // partial set (which would risk deleting a live worktree).
+        let path = query(&session)?;
+        if path.is_empty() {
+            return None;
         }
+        if let Ok(canonical) = std::path::Path::new(&path).canonicalize() {
+            paths.insert(canonical.to_string_lossy().to_string());
+        }
+        paths.insert(path);
     }
     Some(paths)
 }
@@ -436,7 +455,7 @@ mod phantom_sweep_decision_tests {
     //! phantom (a full checkout with its own branch, no transcript, no live
     //! owner) is a genuine orphan and must be swept — while the worktree that is
     //! a kept session's cwd OR the live tmux pane's cwd must survive.
-    use super::{has_live_tmux_owner, should_sweep_worktree};
+    use super::{fold_pane_paths, has_live_tmux_owner, should_sweep_worktree};
     use std::collections::HashSet;
     use std::path::Path;
 
@@ -494,7 +513,11 @@ mod phantom_sweep_decision_tests {
     fn phantom_is_swept_when_tmux_available_with_zero_panes() {
         let kept: HashSet<String> = HashSet::new();
         let live: HashSet<String> = HashSet::new(); // tmux up, but no AgentDesk panes
-        assert!(should_sweep_worktree(Path::new(PHANTOM), &kept, Some(&live)));
+        assert!(should_sweep_worktree(
+            Path::new(PHANTOM),
+            &kept,
+            Some(&live)
+        ));
     }
 
     /// (a) tmux UNAVAILABLE (`None`, the query FAILED): NOTHING is swept — not
@@ -538,7 +561,11 @@ mod phantom_sweep_decision_tests {
         live.insert(format!("{ORIGINAL}-sibling"));
 
         assert!(!has_live_tmux_owner(Path::new(ORIGINAL), &live));
-        assert!(should_sweep_worktree(Path::new(ORIGINAL), &kept, Some(&live)));
+        assert!(should_sweep_worktree(
+            Path::new(ORIGINAL),
+            &kept,
+            Some(&live)
+        ));
     }
 
     /// `has_live_tmux_owner` returns false against an empty live set and true on
@@ -552,6 +579,50 @@ mod phantom_sweep_decision_tests {
         live.insert(ORIGINAL.to_string());
         assert!(has_live_tmux_owner(Path::new(ORIGINAL), &live));
         assert!(!has_live_tmux_owner(Path::new(PHANTOM), &live));
+    }
+
+    /// #3216 P0: a successful, complete query yields `Some(set)` containing every
+    /// AgentDesk pane path; non-AgentDesk sessions are excluded.
+    #[test]
+    fn fold_pane_paths_collects_agentdesk_panes_only() {
+        let sessions = vec![
+            "AgentDesk-claude-adk-cc".to_string(),
+            "operator-shell".to_string(),
+        ];
+        let result = fold_pane_paths(sessions, |s| match s {
+            "AgentDesk-claude-adk-cc" => Some(ORIGINAL.to_string()),
+            _ => None, // non-AgentDesk failing must NOT abort the collection
+        })
+        .expect("complete agentdesk query yields Some");
+        assert!(result.contains(ORIGINAL));
+        assert_eq!(result.len(), 1);
+    }
+
+    /// #3216 P0 (fail-closed): if ANY AgentDesk session's pane path cannot be read
+    /// (`None`), the whole collection fails-closed (`None`) so the caller skips
+    /// deletion — a partial set must never drive a sweep.
+    #[test]
+    fn fold_pane_paths_fails_closed_on_agentdesk_query_failure() {
+        let sessions = vec![
+            "AgentDesk-claude-adk-cc".to_string(),
+            "AgentDesk-flaky".to_string(),
+        ];
+        let result = fold_pane_paths(sessions, |s| match s {
+            "AgentDesk-claude-adk-cc" => Some(ORIGINAL.to_string()),
+            _ => None, // a live AgentDesk session whose pane path query failed
+        });
+        assert!(
+            result.is_none(),
+            "partial AgentDesk failure must fail-closed"
+        );
+    }
+
+    /// #3216 P0 (fail-closed): an empty pane path is also indeterminate.
+    #[test]
+    fn fold_pane_paths_fails_closed_on_empty_pane_path() {
+        let sessions = vec!["AgentDesk-claude-adk-cc".to_string()];
+        let result = fold_pane_paths(sessions, |_| Some(String::new()));
+        assert!(result.is_none(), "empty pane path must fail-closed");
     }
 }
 
