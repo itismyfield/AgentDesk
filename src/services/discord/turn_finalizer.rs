@@ -640,22 +640,41 @@ impl TurnFinalizer {
     /// touch the ledger, the actor channel, or any mutable state — it is a
     /// stateless transcript read, so it runs directly on the caller's task.
     ///
-    /// Mirrors EXACTLY how the idle-queue drain consults the structured turn
-    /// state in `tui_turn_state.rs`: first gate on
-    /// `provider_runtime_has_structured_jsonl_turn_state(provider, runtime_kind)`
-    /// (the same gate `jsonl_ready_for_input` / `runtime_binding_ready_for_input`
-    /// apply), then — on the offset-behind drain path — consult
-    /// `jsonl_strict_terminator_idle(provider, transcript_path)` (the
-    /// relay-offset-independent strict reverse-scan). The strict probe is
-    /// offset-independent by construction, so this read needs only the provider,
-    /// runtime kind, and transcript path; `turn_start_offset` is accepted to make
-    /// the call shape explicit for S3/S4 wiring but, like the strict scan itself,
-    /// does not change the structural verdict.
+    /// Mirrors how the idle-queue drain consults the structured turn state in
+    /// `tui_turn_state.rs`, but applies the STRICTER turn-END terminator: first
+    /// gate on `provider_runtime_has_structured_jsonl_turn_state(provider,
+    /// runtime_kind)` (the same gate `jsonl_ready_for_input` /
+    /// `runtime_binding_ready_for_input` apply), then consult
+    /// `jsonl_turn_end_terminator_idle(provider, transcript_path)`.
+    ///
+    /// #3016 S3 (Concern 1): the drain uses the LENIENT
+    /// `jsonl_strict_terminator_idle`, which treats the whole provider
+    /// "Idle-class" family as at-rest (Codex `session_meta`/`thread.started`/
+    /// `task_complete`/completed `agent_message`; Claude `system{init}`). That is
+    /// correct for "is the session ready for input?" but WRONG for "did THIS turn
+    /// end?": a completed `agent_message` right before a tool call is mid-turn.
+    /// The finalize `Done` decision must therefore use the turn-END-only probe,
+    /// which accepts ONLY the authoritative per-provider turn terminator
+    /// (Codex `turn.completed`; Claude `result` / `system{turn_duration |
+    /// stop_hook_summary}`).
     ///
     ///   - non-JSONL runtime (LegacyTmuxWrapper/ProcessBackend/ClaudeEAdapter or
     ///     a non-JSONL provider) → `Unknown`,
-    ///   - else `jsonl_strict_terminator_idle == Idle` → `Done`,
-    ///   - else (Busy/Inconclusive) → `PausedLive`.
+    ///   - else `jsonl_turn_end_terminator_idle == Idle` → `Done`,
+    ///   - else (no turn terminator: Busy/Inconclusive) → `PausedLive`.
+    ///
+    /// #3016 S3 (Concern 3): there is intentionally NO `turn_start_offset`
+    /// parameter. The turn-END reverse scan is relay-offset-INDEPENDENT by
+    /// construction (it reverse-scans the transcript tail for the newest TURN
+    /// terminator and never consults a relay offset), and TURN-correctness is
+    /// guaranteed at the call site, NOT here: the watcher fresh-idle decision
+    /// pins the finalize id from a pre-cleanup inflight snapshot and SKIPS the
+    /// finalize when that snapshot is stale for a newer turn
+    /// (`pinned_finalize_user_msg_id` / `committed_completion_is_stale_for_newer_turn`).
+    /// A range-scoped scan here would add nothing — the terminator it would find
+    /// in `[turn_start_offset, EOF)` is the same newest terminator the tail scan
+    /// finds — so an offset param could only be silently ignored. We omit it
+    /// rather than pass a value that is ignored.
     ///
     /// #3016 S3: wired into the watcher fresh-idle finalize decision
     /// (`tmux_watcher.rs` `watcher_fresh_idle_finalize_decision`) — Done →
@@ -665,7 +684,6 @@ impl TurnFinalizer {
         provider: &ProviderKind,
         runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
         transcript_path: &std::path::Path,
-        _turn_start_offset: Option<u64>,
     ) -> CompletionSignal {
         if !crate::services::tui_turn_state::provider_runtime_has_structured_jsonl_turn_state(
             provider,
@@ -673,8 +691,10 @@ impl TurnFinalizer {
         ) {
             return CompletionSignal::Unknown;
         }
-        if crate::services::tui_turn_state::jsonl_strict_terminator_idle(provider, transcript_path)
-        {
+        if crate::services::tui_turn_state::jsonl_turn_end_terminator_idle(
+            provider,
+            transcript_path,
+        ) {
             CompletionSignal::Done
         } else {
             CompletionSignal::PausedLive
@@ -3079,7 +3099,6 @@ mod tests {
                 &ProviderKind::Claude,
                 Some(RuntimeHandoffKind::ClaudeTui),
                 file.path(),
-                Some(0),
             ),
             CompletionSignal::Done,
         );
@@ -3098,7 +3117,6 @@ mod tests {
                 &ProviderKind::Claude,
                 Some(RuntimeHandoffKind::ClaudeTui),
                 file.path(),
-                Some(0),
             ),
             CompletionSignal::PausedLive,
         );
@@ -3119,7 +3137,6 @@ mod tests {
                 &ProviderKind::Claude,
                 Some(RuntimeHandoffKind::ClaudeTui),
                 file.path(),
-                Some(0),
             ),
             CompletionSignal::PausedLive,
         );
@@ -3139,7 +3156,6 @@ mod tests {
                 &ProviderKind::Codex,
                 Some(RuntimeHandoffKind::CodexTui),
                 file.path(),
-                Some(0),
             ),
             CompletionSignal::Done,
         );
@@ -3158,9 +3174,103 @@ mod tests {
                 &ProviderKind::Codex,
                 Some(RuntimeHandoffKind::CodexTui),
                 file.path(),
-                Some(0),
             ),
             CompletionSignal::PausedLive,
+        );
+    }
+
+    // #3016 S3 (Concern 1): a COMPLETED Codex `agent_message` written right
+    // before a tool call is MID-TURN — the turn has not ended. The lenient drain
+    // probe would call this Idle, but the finalize `Done` decision uses the
+    // turn-END-only probe, so it must resolve to PausedLive (NOT Done) and the
+    // watcher therefore CANNOT over-finalize the live turn.
+    #[test]
+    fn completion_signal_codex_completed_agent_message_is_paused_live_not_done() {
+        let fin = TurnFinalizer::spawn();
+        let file = write_transcript(&[
+            r#"{"type":"session_meta","payload":{"id":"s","cwd":"/repo"}}"#,
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"on it, running a tool next"}}"#,
+        ]);
+        assert_eq!(
+            fin.completion_signal_state(
+                &ProviderKind::Codex,
+                Some(RuntimeHandoffKind::CodexTui),
+                file.path(),
+            ),
+            CompletionSignal::PausedLive,
+            "a completed agent_message with no turn.completed is mid-turn → not Done",
+        );
+    }
+
+    // #3016 S3 (Concern 1): a Codex `event_msg{task_complete}` (a task signal,
+    // not the turn record) is likewise NOT the turn terminator → PausedLive.
+    #[test]
+    fn completion_signal_codex_task_complete_is_paused_live_not_done() {
+        let fin = TurnFinalizer::spawn();
+        let file = write_transcript(&[
+            r#"{"type":"session_meta","payload":{"id":"s","cwd":"/repo"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#,
+        ]);
+        assert_eq!(
+            fin.completion_signal_state(
+                &ProviderKind::Codex,
+                Some(RuntimeHandoffKind::CodexTui),
+                file.path(),
+            ),
+            CompletionSignal::PausedLive,
+        );
+    }
+
+    // #3016 S3 (Concern 1): a Claude mid-turn assistant message (no terminator)
+    // → PausedLive; and a Claude `system{init}` (session-start, not turn-end) is
+    // at-rest to the drain probe but must NOT be Done for the finalize decision.
+    #[test]
+    fn completion_signal_claude_init_and_mid_turn_are_paused_live_not_done() {
+        let fin = TurnFinalizer::spawn();
+        let mid_turn = write_transcript(&[
+            r#"{"type":"user","message":{"content":"hi"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"thinking"}]}}"#,
+        ]);
+        assert_eq!(
+            fin.completion_signal_state(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                mid_turn.path(),
+            ),
+            CompletionSignal::PausedLive,
+        );
+
+        let init_only =
+            write_transcript(&[r#"{"type":"system","subtype":"init","session_id":"s"}"#]);
+        assert_eq!(
+            fin.completion_signal_state(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                init_only.path(),
+            ),
+            CompletionSignal::PausedLive,
+            "system{{init}} is a session-start marker, not a turn-end terminator → not Done",
+        );
+    }
+
+    // #3016 S3 (Concern 1): a Claude `system{turn_duration}` IS a real turn-end
+    // terminator → Done (the stricter probe still accepts the genuine
+    // system-family turn boundary, not only `result`).
+    #[test]
+    fn completion_signal_claude_turn_duration_is_done() {
+        let fin = TurnFinalizer::spawn();
+        let file = write_transcript(&[
+            r#"{"type":"user","message":{"content":"hi"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#,
+            r#"{"type":"system","subtype":"turn_duration","session_id":"s"}"#,
+        ]);
+        assert_eq!(
+            fin.completion_signal_state(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                file.path(),
+            ),
+            CompletionSignal::Done,
         );
     }
 
@@ -3176,7 +3286,6 @@ mod tests {
                 &ProviderKind::Claude,
                 Some(RuntimeHandoffKind::LegacyTmuxWrapper),
                 file.path(),
-                Some(0),
             ),
             CompletionSignal::Unknown,
         );
@@ -3186,7 +3295,6 @@ mod tests {
                 &ProviderKind::Claude,
                 Some(RuntimeHandoffKind::ProcessBackend),
                 file.path(),
-                None,
             ),
             CompletionSignal::Unknown,
         );
@@ -3195,7 +3303,6 @@ mod tests {
                 &ProviderKind::Claude,
                 Some(RuntimeHandoffKind::ClaudeEAdapter),
                 file.path(),
-                None,
             ),
             CompletionSignal::Unknown,
         );
@@ -3211,7 +3318,6 @@ mod tests {
                 &ProviderKind::Qwen,
                 Some(RuntimeHandoffKind::ClaudeTui),
                 file.path(),
-                Some(0),
             ),
             CompletionSignal::Unknown,
         );

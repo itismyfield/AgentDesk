@@ -7606,7 +7606,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     &watcher_provider,
                     watcher_runtime_kind,
                     std::path::Path::new(&output_path),
-                    Some(current_offset),
                 );
                 // #3016 S3 (A2 wrong-turn race fix): pin the finalize id from a
                 // snapshot taken NOW — BEFORE the cleanup `.await`s below — and
@@ -7800,25 +7799,62 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         // pre-cleanup snapshot at this `current_offset` (never a
                         // late re-read), so the ledger match is the CURRENT turn's
                         // real, non-zero id.
-                        crate::services::discord::inflight::clear_inflight_state(
-                            &watcher_provider,
-                            channel_id.get(),
-                        );
-                        crate::services::observability::emit_inflight_lifecycle_event(
-                            watcher_provider.as_str(),
-                            channel_id.get(),
-                            None,
-                            None,
-                            None,
-                            "cleared_by_watcher_fresh_idle",
-                            serde_json::json!({
-                                "owed_finalize": owed,
-                                "finish_mailbox_on_completion": finish_mailbox_on_completion,
-                                "completion_signal": "Done",
-                                "tmux_session": tmux_session_name.as_str(),
-                                "offset": current_offset,
-                            }),
-                        );
+                        //
+                        // #3016 S3 (Concern 2): the destructive on-disk clear has
+                        // a TOCTOU the decision helper's pinned-snapshot stale gate
+                        // does NOT close: the helper checked staleness against the
+                        // PRE-cleanup snapshot, but `clear_inflight_state` deletes
+                        // whatever is on disk NOW — and a follow-up turn may have
+                        // saved its inflight during the cleanup `.await`s between
+                        // the snapshot and here. Mirror EXACTLY the canonical
+                        // normal-completion clear (tmux.rs ~11251): re-read the
+                        // on-disk inflight NOW and gate the clear with
+                        // `committed_completion_is_stale_for_newer_turn`, passing
+                        // BOTH the pinned snapshot AND the late re-read (the same
+                        // two-snapshot shape the canonical site uses). When the
+                        // late re-read is a NEWER turn (started AT/AFTER this
+                        // committed range) the clear is SKIPPED so the follow-up's
+                        // inflight survives. The finalize below still runs on the
+                        // PINNED id — identity-matched and idempotent — so the
+                        // current turn is finalized without wiping the follow-up.
+                        let late_reread_inflight =
+                            crate::services::discord::inflight::load_inflight_state(
+                                &watcher_provider,
+                                channel_id.get(),
+                            );
+                        let clear_is_stale_for_newer_turn =
+                            committed_completion_is_stale_for_newer_turn(
+                                pinned_pre_cleanup_inflight.as_ref(),
+                                late_reread_inflight.as_ref(),
+                                &tmux_session_name,
+                                current_offset,
+                            );
+                        if !clear_is_stale_for_newer_turn {
+                            crate::services::discord::inflight::clear_inflight_state(
+                                &watcher_provider,
+                                channel_id.get(),
+                            );
+                            crate::services::observability::emit_inflight_lifecycle_event(
+                                watcher_provider.as_str(),
+                                channel_id.get(),
+                                None,
+                                None,
+                                None,
+                                "cleared_by_watcher_fresh_idle",
+                                serde_json::json!({
+                                    "owed_finalize": owed,
+                                    "finish_mailbox_on_completion": finish_mailbox_on_completion,
+                                    "completion_signal": "Done",
+                                    "tmux_session": tmux_session_name.as_str(),
+                                    "offset": current_offset,
+                                }),
+                            );
+                        } else {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::info!(
+                                "  [{ts}] 👁 watcher fresh ready-for-input idle for {tmux_session_name}: a follow-up turn saved inflight during cleanup (late re-read stale for offset {current_offset}); skipping the on-disk clear and finalizing the pinned current turn only"
+                            );
+                        }
                         finish_restored_watcher_active_turn(
                             &shared,
                             &watcher_provider,
@@ -12983,6 +13019,69 @@ mod tests {
         );
     }
 
+    // #3016 S3 (Concern 2): the destructive on-disk `clear_inflight_state` in the
+    // Done/Finalize arm is gated EXACTLY like the canonical normal-completion
+    // clear (tmux.rs ~11251): `committed_completion_is_stale_for_newer_turn` is
+    // passed BOTH the pre-cleanup PINNED snapshot AND a LATE on-disk re-read.
+    // This proves the TOCTOU is closed: even when the pinned snapshot is the
+    // CURRENT turn (so the decision helper returned Finalize, not SkipStale), a
+    // follow-up turn that saved inflight DURING the cleanup awaits is caught by
+    // the late-re-read arm → the clear is skipped and the follow-up's inflight
+    // survives.
+    #[test]
+    fn fresh_idle_clear_gate_skips_when_late_reread_is_newer_turn() {
+        let provider = ProviderKind::Claude;
+        let session = "AgentDesk-claude-adk-cc-9873200";
+        let channel_id = 987_3200u64;
+        let current_offset = 50u64;
+
+        // Pinned pre-cleanup snapshot: the CURRENT turn (start 10 < 50). On this
+        // snapshot alone the decision helper returns Finalize (NOT stale), so the
+        // Done arm is entered and the clear is reached.
+        let pinned_current = fresh_idle_inflight(provider.clone(), channel_id, session, 9001, 10);
+        // Late on-disk re-read AFTER the cleanup awaits: a follow-up turn that
+        // started AT/AFTER the committed range (start 50 >= 50) saved its inflight.
+        let late_followup = fresh_idle_inflight(provider.clone(), channel_id, session, 9002, 50);
+
+        // The decision helper (pinned-only) does NOT see the follow-up → Finalize.
+        assert_eq!(
+            watcher_fresh_idle_finalize_decision(
+                crate::services::discord::turn_finalizer::CompletionSignal::Done,
+                false,
+                false,
+                Some(&pinned_current),
+                session,
+                current_offset,
+            ),
+            FreshIdleFinalizeDecision::Finalize { user_msg_id: 9001 },
+            "pinned snapshot alone is the current turn → Finalize (clear arm entered)"
+        );
+
+        // The clear gate (the EXACT call the Done arm makes before clearing): the
+        // two-snapshot check catches the follow-up via the late-re-read arm.
+        assert!(
+            super::committed_completion_is_stale_for_newer_turn(
+                Some(&pinned_current),
+                Some(&late_followup),
+                session,
+                current_offset,
+            ),
+            "a follow-up saved during cleanup is caught by the late-re-read arm → clear SKIPPED"
+        );
+
+        // Sanity: when the late re-read is ALSO the current turn (no follow-up),
+        // the gate is FALSE → the clear runs, exactly as before.
+        assert!(
+            !super::committed_completion_is_stale_for_newer_turn(
+                Some(&pinned_current),
+                Some(&pinned_current),
+                session,
+                current_offset,
+            ),
+            "no follow-up → clear runs"
+        );
+    }
+
     // #3016 S3 — end-to-end through the REAL completion signal AND the REAL
     // finalizer actor: a genuine empty/suppressed delegated completion whose
     // on-disk transcript HAS a structural terminator (Claude `result`) finalizes
@@ -13028,7 +13127,6 @@ mod tests {
             &provider,
             Some(RuntimeHandoffKind::ClaudeTui),
             transcript.as_path(),
-            Some(current_offset),
         );
         assert_eq!(
             signal,

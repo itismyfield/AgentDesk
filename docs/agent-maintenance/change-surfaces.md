@@ -130,7 +130,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (9488 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (9524 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -346,6 +346,19 @@
     end-to-end `fresh_idle_empty_terminated_completion_finalizes_via_completion_signal_flag_false`
     (drives the REAL completion signal over a real JSONL transcript + the REAL
     finalizer actor, NOT a re-implementation).
+    +36 from #3016 S3 gate-fix iteration (3 adversarial-gate concerns): (1) the
+    `Done` decision now reads the STRICTER turn-END-only terminator
+    (`jsonl_turn_end_terminator_idle`, accepts ONLY Codex `turn.completed` /
+    Claude `result`+`system{turn_duration|stop_hook_summary}`) so a completed
+    Codex `agent_message` / Claude mid-turn message cannot over-finalize a LIVE
+    turn; (2) the Done-arm destructive `clear_inflight_state` is now gated by
+    `committed_completion_is_stale_for_newer_turn` with BOTH the pinned snapshot
+    AND a LATE on-disk re-read (closing the TOCTOU where a follow-up turn saved
+    inflight during the cleanup awaits), mirroring the canonical clear at
+    tmux.rs; (3) the ignored `turn_start_offset` param was REMOVED from
+    `completion_signal_state` (range-independence is documented: the turn-END
+    scan is offset-independent and turn-correctness comes from the pinned-id +
+    stale-skip). New test `fresh_idle_clear_gate_skips_when_late_reread_is_newer_turn`.
   - `src/services/discord/tui_prompt_relay.rs` (4522 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3167: the self-paced TUI loop relay

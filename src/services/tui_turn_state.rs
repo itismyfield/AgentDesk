@@ -216,12 +216,58 @@ pub(crate) fn jsonl_ready_for_input(
 ///     own `full_response`-non-empty guard, so this skip cannot tear down a
 ///     spinning-up turn — see #2712.)
 pub(crate) fn jsonl_strict_terminator_idle(provider: &ProviderKind, path: &Path) -> bool {
+    scan_strict_terminator_idle_with_strictness(provider, path, TerminatorStrictness::Lenient)
+}
+
+/// #3016 S3 (Concern 1): the STRICTER turn-END-only sibling of
+/// [`jsonl_strict_terminator_idle`], used ONLY by the finalize `Done` decision
+/// (`TurnFinalizer::completion_signal_state`).
+///
+/// The lenient probe above accepts the whole "Idle-class" envelope family as
+/// proof the session is at rest — for Codex that includes `session_meta`,
+/// `thread.started`, `event_msg{task_complete}`, AND a *completed*
+/// `agent_message` (`item.completed`). That leniency is correct for the
+/// idle-queue *drain* (it asks "is the session ready to accept input?"), but it
+/// is WRONG as a turn-END terminator: a completed `agent_message` written
+/// immediately BEFORE a tool call is mid-turn — the turn is still LIVE — yet the
+/// lenient scan reads it as Idle. Finalizing on that signal over-finalizes a
+/// live turn.
+///
+/// This probe accepts as Idle ONLY the authoritative per-provider TURN
+/// terminator:
+///   - Codex: ONLY `type == "turn.completed"` (NOT `task_complete`, NOT a
+///     completed `agent_message`, NOT `session_meta`/`thread.started`).
+///   - Claude: ONLY the real turn terminator — `type == "result"` or the
+///     `system{turn_duration | stop_hook_summary}` turn-end envelope. NOT
+///     `system{init}` (a SESSION-start marker, never a turn-end), NOT any
+///     housekeeping/mode envelope.
+///
+/// Everything else (the lenient Idle-class markers, housekeeping, unknown
+/// metadata) is treated as "keep looking" so the reverse scan walks back to the
+/// real terminator beneath trailing housekeeping — while streaming/user
+/// envelopes and torn non-housekeeping fragments still report Busy. The
+/// torn-trailing skip and the housekeeping-walk-back are preserved verbatim; the
+/// ONLY behavioural change versus the lenient scan is which envelopes are
+/// allowed to *produce* an Idle verdict.
+pub(crate) fn jsonl_turn_end_terminator_idle(provider: &ProviderKind, path: &Path) -> bool {
+    scan_strict_terminator_idle_with_strictness(provider, path, TerminatorStrictness::TurnEndOnly)
+}
+
+/// Shared windowed reverse-scan driver for both the lenient
+/// ([`jsonl_strict_terminator_idle`]) and the turn-END-only
+/// ([`jsonl_turn_end_terminator_idle`]) probes. Only the `strictness` argument
+/// differs — the windowing, widen-once, and torn-write handling are identical.
+fn scan_strict_terminator_idle_with_strictness(
+    provider: &ProviderKind,
+    path: &Path,
+    strictness: TerminatorStrictness,
+) -> bool {
     // First pass over the default 64KB tail window.
     let Ok(window) = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES) else {
         // A read error cannot prove the turn has ended → conservative Busy.
         return false;
     };
-    match scan_strict_terminator(provider, &window.lines) {
+    match scan_strict_terminator(provider, &window.lines, strictness) {
         StrictTerminatorScan::Idle => return true,
         StrictTerminatorScan::Busy => return false,
         // The window contained no definitive turn-state envelope. If it already
@@ -239,13 +285,26 @@ pub(crate) fn jsonl_strict_terminator_idle(provider: &ProviderKind, path: &Path)
     let Ok(wide) = read_recent_jsonl_window(path, TURN_STATE_MAX_TAIL_BYTES) else {
         return false;
     };
-    match scan_strict_terminator(provider, &wide.lines) {
+    match scan_strict_terminator(provider, &wide.lines, strictness) {
         StrictTerminatorScan::Idle => true,
         // Even in the widened window we found no terminator (or the terminator
         // is still older than the 1MB ceiling): stay conservatively Busy rather
         // than assume idle on an ambiguous, unbounded transcript.
         StrictTerminatorScan::Busy | StrictTerminatorScan::Inconclusive => false,
     }
+}
+
+/// How permissive the reverse scan is about what counts as an Idle verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminatorStrictness {
+    /// The whole provider "Idle-class" family proves at-rest (the idle-queue
+    /// drain's readiness question). Used by [`jsonl_strict_terminator_idle`].
+    Lenient,
+    /// ONLY the authoritative per-provider TURN terminator proves the turn
+    /// ENDED. Every other envelope (including the lenient Idle-class markers) is
+    /// walked past. Used by [`jsonl_turn_end_terminator_idle`] for the finalize
+    /// `Done` decision (#3016 S3, Concern 1).
+    TurnEndOnly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,7 +323,11 @@ enum StrictTerminatorScan {
 /// envelope. Conservatism rule (#3030): never report `Idle` while there is any
 /// plausible evidence of an in-flight turn — false-idle (input injected
 /// mid-turn) is strictly worse than false-busy.
-fn scan_strict_terminator(provider: &ProviderKind, lines: &[String]) -> StrictTerminatorScan {
+fn scan_strict_terminator(
+    provider: &ProviderKind,
+    lines: &[String],
+    strictness: TerminatorStrictness,
+) -> StrictTerminatorScan {
     let mut allow_torn_trailing_skip = true;
     for (rev_index, line) in lines.iter().rev().enumerate() {
         let trimmed = line.trim();
@@ -314,7 +377,25 @@ fn scan_strict_terminator(provider: &ProviderKind, lines: &[String]) -> StrictTe
             _ => return StrictTerminatorScan::Busy,
         };
         match classified {
-            Some(TuiTurnState::Idle) => return StrictTerminatorScan::Idle,
+            Some(TuiTurnState::Idle) => match strictness {
+                // Lenient: any Idle-class envelope proves at-rest.
+                TerminatorStrictness::Lenient => return StrictTerminatorScan::Idle,
+                // Turn-END-only (#3016 S3, Concern 1): an Idle-class envelope
+                // proves the TURN ended ONLY when it is the authoritative
+                // per-provider turn terminator. A non-terminator Idle-class
+                // marker (Codex `session_meta`/`thread.started`/`task_complete`/
+                // completed `agent_message`; Claude `system{init}`) is NOT a
+                // turn boundary — a completed `agent_message` right before a tool
+                // call is mid-turn — so walk PAST it to the real terminator
+                // beneath, exactly like trailing housekeeping. It can never
+                // *create* a Done verdict on its own.
+                TerminatorStrictness::TurnEndOnly => {
+                    if envelope_is_turn_end_terminator(provider, &json) {
+                        return StrictTerminatorScan::Idle;
+                    }
+                    continue;
+                }
+            },
             Some(TuiTurnState::Streaming | TuiTurnState::UserSubmitted) => {
                 return StrictTerminatorScan::Busy;
             }
@@ -328,6 +409,40 @@ fn scan_strict_terminator(provider: &ProviderKind, lines: &[String]) -> StrictTe
         }
     }
     StrictTerminatorScan::Inconclusive
+}
+
+/// #3016 S3 (Concern 1): is this fully-parsed envelope the AUTHORITATIVE
+/// per-provider TURN-END terminator (the genuine turn boundary), as opposed to a
+/// merely "Idle-class" / at-rest marker that the lenient scan also trusts?
+///
+/// This is intentionally the NARROW subset of the Idle-class family:
+///   - Codex: ONLY `turn.completed`. `session_meta`/`thread.started` (session
+///     bring-up), `event_msg{task_complete}` (a task signal, not the turn
+///     record), and a completed `agent_message` (`item.completed`, which can be
+///     written mid-turn right before a tool call) are EXCLUDED.
+///   - Claude: ONLY `result` and the `system{turn_duration | stop_hook_summary}`
+///     turn-end envelopes. `system{init}` is a SESSION-start marker — never a
+///     turn end — and is EXCLUDED.
+///
+/// Callers guarantee `json` already classified as `TuiTurnState::Idle` via the
+/// per-provider classifier, so a `false` here means "Idle-class but not a turn
+/// boundary → keep scanning back".
+fn envelope_is_turn_end_terminator(provider: &ProviderKind, json: &Value) -> bool {
+    let Some(type_str) = json.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+    match provider {
+        ProviderKind::Codex => type_str == "turn.completed",
+        ProviderKind::Claude => match type_str {
+            "result" => true,
+            "system" => matches!(
+                json.get("subtype").and_then(Value::as_str),
+                Some("turn_duration" | "stop_hook_summary")
+            ),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// A truncated trailing JSON fragment looks like the writer was interrupted
@@ -1655,5 +1770,198 @@ mod tests {
         assert!(is_torn_trailing_fragment(r#"{"type":"mode","mode":"def"#));
         assert!(!is_torn_trailing_fragment(r#"{"type":"result"}"#));
         assert!(!is_torn_trailing_fragment("not-json-at-all"));
+    }
+
+    // =======================================================================
+    // #3016 S3 (Concern 1): the STRICTER turn-END-only terminator probe
+    // (`jsonl_turn_end_terminator_idle`) vs. the lenient drain probe
+    // (`jsonl_strict_terminator_idle`). The finalize `Done` decision must read
+    // the turn-END probe so a non-terminator Idle-class envelope (a completed
+    // Codex `agent_message` mid-turn, a Claude `system{init}`) cannot
+    // over-finalize a LIVE turn.
+    // =======================================================================
+
+    // Codex: a completed `agent_message` written right before a tool call is
+    // MID-TURN. The lenient drain probe reports Idle (it is ready for input by
+    // its definition), but the turn-END probe must NOT — the turn has not ended.
+    #[test]
+    fn codex_completed_agent_message_is_not_turn_end_but_is_lenient_idle() {
+        let file = write_jsonl(&[
+            r#"{"type":"session_meta","payload":{"id":"s","cwd":"/repo"}}"#,
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"on it"}}"#,
+        ]);
+        assert!(
+            jsonl_strict_terminator_idle(&ProviderKind::Codex, file.path()),
+            "lenient drain probe treats a completed agent_message as at-rest"
+        );
+        assert!(
+            !jsonl_turn_end_terminator_idle(&ProviderKind::Codex, file.path()),
+            "turn-END probe must NOT treat a completed agent_message as a turn boundary"
+        );
+    }
+
+    // Codex: the AUTHORITATIVE turn terminator `turn.completed` → BOTH probes
+    // Idle. This is the only Codex envelope the turn-END probe accepts.
+    #[test]
+    fn codex_turn_completed_is_turn_end() {
+        let file = write_jsonl(&[
+            r#"{"type":"session_meta","payload":{"id":"s","cwd":"/repo"}}"#,
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"done"}}"#,
+            r#"{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":3}}"#,
+        ]);
+        assert!(jsonl_strict_terminator_idle(
+            &ProviderKind::Codex,
+            file.path()
+        ));
+        assert!(
+            jsonl_turn_end_terminator_idle(&ProviderKind::Codex, file.path()),
+            "turn.completed is the authoritative Codex turn-end terminator"
+        );
+    }
+
+    // Codex: `event_msg{task_complete}` and `session_meta`/`thread.started` are
+    // Idle-class to the lenient probe but are NOT turn-end terminators.
+    #[test]
+    fn codex_task_complete_and_session_markers_are_not_turn_end() {
+        let task_complete = write_jsonl(&[
+            r#"{"type":"session_meta","payload":{"id":"s","cwd":"/repo"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#,
+        ]);
+        assert!(jsonl_strict_terminator_idle(
+            &ProviderKind::Codex,
+            task_complete.path()
+        ));
+        assert!(
+            !jsonl_turn_end_terminator_idle(&ProviderKind::Codex, task_complete.path()),
+            "event_msg{{task_complete}} is not the turn record terminator"
+        );
+
+        let session_only = write_jsonl(&[r#"{"type":"thread.started","thread_id":"t"}"#]);
+        assert!(jsonl_strict_terminator_idle(
+            &ProviderKind::Codex,
+            session_only.path()
+        ));
+        assert!(
+            !jsonl_turn_end_terminator_idle(&ProviderKind::Codex, session_only.path()),
+            "thread.started is session bring-up, not a turn end"
+        );
+    }
+
+    // Codex: the turn-END probe still walks BACK across trailing non-terminator
+    // Idle-class markers to a real `turn.completed` beneath them (housekeeping
+    // walk-back preserved). A completed agent_message AFTER the terminator that
+    // does NOT belong to a new turn boundary is skipped; the terminator wins.
+    #[test]
+    fn codex_turn_end_walks_back_across_trailing_session_meta() {
+        let file = write_jsonl(&[
+            r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#,
+            r#"{"type":"session_meta","payload":{"id":"s2","cwd":"/repo"}}"#,
+        ]);
+        assert!(
+            jsonl_turn_end_terminator_idle(&ProviderKind::Codex, file.path()),
+            "a trailing session_meta is walked past to the real turn.completed beneath"
+        );
+    }
+
+    // Claude: a mid-turn assistant message → neither probe Idle (streaming is
+    // Busy). And `system{init}` is a SESSION-start marker the lenient probe
+    // trusts as idle, but the turn-END probe must NOT.
+    #[test]
+    fn claude_mid_turn_assistant_is_not_turn_end() {
+        let streaming = write_jsonl(&[
+            r#"{"type":"user","message":{"content":"hi"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#,
+        ]);
+        assert!(!jsonl_strict_terminator_idle(
+            &ProviderKind::Claude,
+            streaming.path()
+        ));
+        assert!(
+            !jsonl_turn_end_terminator_idle(&ProviderKind::Claude, streaming.path()),
+            "a mid-turn assistant message is not a turn end"
+        );
+
+        let init_only = write_jsonl(&[r#"{"type":"system","subtype":"init","session_id":"s"}"#]);
+        assert!(
+            jsonl_strict_terminator_idle(&ProviderKind::Claude, init_only.path()),
+            "lenient probe treats system{{init}} as at-rest (ready for input)"
+        );
+        assert!(
+            !jsonl_turn_end_terminator_idle(&ProviderKind::Claude, init_only.path()),
+            "system{{init}} is a session-start marker, NOT a turn-end terminator"
+        );
+    }
+
+    // Claude: `result` and `system{turn_duration|stop_hook_summary}` ARE the real
+    // turn terminators → turn-END probe Idle.
+    #[test]
+    fn claude_real_terminators_are_turn_end() {
+        for terminator in [
+            r#"{"type":"result","result":"done","session_id":"s"}"#,
+            r#"{"type":"system","subtype":"turn_duration","session_id":"s"}"#,
+            r#"{"type":"system","subtype":"stop_hook_summary","session_id":"s"}"#,
+        ] {
+            let file = write_jsonl(&[
+                r#"{"type":"user","message":{"content":"hi"}}"#,
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#,
+                terminator,
+            ]);
+            assert!(
+                jsonl_turn_end_terminator_idle(&ProviderKind::Claude, file.path()),
+                "{terminator} is a real Claude turn-end terminator"
+            );
+        }
+    }
+
+    // Claude: the turn-END probe still walks BACK across trailing post-turn
+    // housekeeping (`mode`, `permission-mode`, `pr-link`) to the real terminator
+    // beneath (the #3030 walk-back is preserved under the stricter mode).
+    #[test]
+    fn claude_turn_end_walks_back_across_trailing_housekeeping() {
+        let file = write_jsonl(&[
+            r#"{"type":"user","message":{"content":"hi"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#,
+            r#"{"type":"result","result":"done","session_id":"s"}"#,
+            r#"{"type":"mode","mode":"default"}"#,
+            r#"{"type":"permission-mode","mode":"default"}"#,
+            r#"{"type":"pr-link","url":"https://example.com/pr/1"}"#,
+        ]);
+        assert!(
+            jsonl_turn_end_terminator_idle(&ProviderKind::Claude, file.path()),
+            "trailing housekeeping is walked past to the real result terminator"
+        );
+    }
+
+    // The turn-END terminator classifier directly: only the narrow per-provider
+    // subset returns true.
+    #[test]
+    fn envelope_is_turn_end_terminator_narrow_subset() {
+        let p = |s: &str| serde_json::from_str::<Value>(s).unwrap();
+        // Codex: only turn.completed.
+        assert!(envelope_is_turn_end_terminator(
+            &ProviderKind::Codex,
+            &p(r#"{"type":"turn.completed"}"#)
+        ));
+        assert!(!envelope_is_turn_end_terminator(
+            &ProviderKind::Codex,
+            &p(r#"{"type":"session_meta"}"#)
+        ));
+        assert!(!envelope_is_turn_end_terminator(
+            &ProviderKind::Codex,
+            &p(r#"{"type":"item.completed","item":{"type":"agent_message"}}"#)
+        ));
+        // Claude: result + turn_duration/stop_hook_summary, NOT init.
+        assert!(envelope_is_turn_end_terminator(
+            &ProviderKind::Claude,
+            &p(r#"{"type":"result"}"#)
+        ));
+        assert!(envelope_is_turn_end_terminator(
+            &ProviderKind::Claude,
+            &p(r#"{"type":"system","subtype":"turn_duration"}"#)
+        ));
+        assert!(!envelope_is_turn_end_terminator(
+            &ProviderKind::Claude,
+            &p(r#"{"type":"system","subtype":"init"}"#)
+        ));
     }
 }
