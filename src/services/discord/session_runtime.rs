@@ -50,6 +50,39 @@ pub(super) fn select_restored_session_path(
         .or_else(|| yaml_path.filter(|path| session_path_is_usable(path, remote_profile_name)))
 }
 
+/// #3216 GAP 2: decide whether a live tmux pane's cwd should override the
+/// DB-resolved cwd during recovery. The live tmux pane is the authoritative
+/// source of truth for where a session is actually running — if the DB cwd has
+/// diverged (e.g. a phantom worktree rotation stamped a transcript-less path),
+/// trusting the DB blindly relaunches `--resume` against the wrong cwd and the
+/// conversation is lost.
+///
+/// Returns `Some(tmux_cwd)` only when ALL hold:
+///   * a live tmux pane cwd is present (`tmux_cwd`);
+///   * it is a real AgentDesk-managed, on-disk-usable worktree
+///     (guarded by `tmux_cwd_is_managed` / `tmux_cwd_is_usable` predicates so we
+///     never adopt a transient or garbage path);
+///   * it actually DIFFERS from the DB cwd (nothing to reconcile otherwise).
+///
+/// Kept as a pure function (predicate results injected) so the reconcile policy
+/// is unit-testable without a live tmux / filesystem.
+fn reconcile_recovery_cwd(
+    db_cwd: Option<&str>,
+    tmux_cwd: Option<&str>,
+    tmux_cwd_is_managed: bool,
+    tmux_cwd_is_usable: bool,
+) -> Option<String> {
+    let tmux_cwd = tmux_cwd?.trim();
+    if tmux_cwd.is_empty() || !tmux_cwd_is_managed || !tmux_cwd_is_usable {
+        return None;
+    }
+    if db_cwd.map(str::trim) == Some(tmux_cwd) {
+        // DB already agrees with the live pane — nothing to reconcile.
+        return None;
+    }
+    Some(tmux_cwd.to_string())
+}
+
 impl DiscordSession {
     pub(super) fn clear_provider_session(&mut self) {
         self.session_id = None;
@@ -702,7 +735,7 @@ pub(super) async fn auto_restore_session_force(
         // Use the effective tmux channel name here so restart recovery keeps
         // looking up the same session key for thread sessions that intentionally
         // use a synthetic "{parent}-t{thread_id}" channel name.
-        let db_cwd: Option<String> = restore_ch_name.as_ref().and_then(|ch| {
+        let mut db_cwd: Option<String> = restore_ch_name.as_ref().and_then(|ch| {
             // #3207 (part 2) P0-a: the DB cwd resolve is channel-scoped (see
             // `restore_session_cwd_from_db`); only a usable path is honored for
             // install into `session.current_path`.
@@ -715,6 +748,48 @@ pub(super) async fn auto_restore_session_force(
             )
             .filter(|p| !p.is_empty() && session_path_is_usable(p, saved_remote.as_deref()))
         });
+
+        // #3216 GAP 2: reconcile the DB cwd against the live tmux pane. The live
+        // pane is the source of truth for where the session actually runs; if the
+        // DB cwd diverged (e.g. a phantom worktree rotation), adopting it would
+        // relaunch `--resume` against a transcript-less path. When a live tmux
+        // session exists and its pane cwd is a real managed/usable worktree that
+        // DIFFERS from the DB cwd, adopt the tmux cwd AND correct the DB row.
+        if let Some(ch) = restore_ch_name.as_ref() {
+            let tmux_name = provider.build_tmux_session_name(ch);
+            let tmux_cwd = crate::services::platform::tmux::pane_current_path(&tmux_name);
+            let tmux_cwd_is_managed = tmux_cwd
+                .as_deref()
+                .map(is_managed_worktree_path)
+                .unwrap_or(false);
+            let tmux_cwd_is_usable = tmux_cwd
+                .as_deref()
+                .map(|p| session_path_is_usable(p, saved_remote.as_deref()))
+                .unwrap_or(false);
+            if let Some(reconciled) = reconcile_recovery_cwd(
+                db_cwd.as_deref(),
+                tmux_cwd.as_deref(),
+                tmux_cwd_is_managed,
+                tmux_cwd_is_usable,
+            ) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ↻ #3216 reconciling recovery cwd for channel {}: DB {:?} → live tmux {}",
+                    channel_id,
+                    db_cwd.as_deref(),
+                    reconciled
+                );
+                correct_session_cwd_to_tmux(
+                    shared.pg_pool.as_ref(),
+                    &shared.token_hash,
+                    &provider,
+                    ch,
+                    channel_id.get(),
+                    &reconciled,
+                );
+                db_cwd = Some(reconciled);
+            }
+        }
         let persisted_path = load_last_session_path(
             shared.pg_pool.as_ref(),
             &shared.token_hash,
@@ -819,24 +894,87 @@ pub(super) async fn auto_restore_session_force(
     }
 }
 
+/// Resolve a channel's persisted `sessions.cwd` for the given `session_key`,
+/// scoped to the unique Discord `channel_id`, with a SAFE legacy fallback for
+/// rows that predate the `channel_id` column.
+///
+/// #3216 GAP 1: migration `0071_sessions_channel_id.sql` only added the column;
+/// existing rows kept `channel_id = NULL`. The strict `channel_id = $2` guard
+/// (#3207) therefore never matches a legacy row, so the FIRST restore after
+/// deploy still rotates a brand-new worktree and divorces the live session from
+/// its transcript. We cannot backfill the numeric id in pure SQL (the id is not
+/// derivable from `session_key`, which holds the channel NAME), so instead we
+/// fall back to a name-only lookup — but ONLY when it is unambiguous:
+///
+///   * channel-scoped match (`session_key = $1 AND channel_id = $2`) wins first;
+///   * otherwise, fall back ONLY when there is EXACTLY ONE row for the
+///     `session_key` AND that row's `channel_id IS NULL` (a true legacy row).
+///
+/// `sessions.session_key` is globally UNIQUE (migration `001_initial.sql`), so
+/// there is at most one row per key; the `rows.len() == 1` check is therefore a
+/// defensive belt-and-braces guard. If the single row carries a DIFFERENT
+/// non-null `channel_id`, the fallback is refused — that would reintroduce the
+/// #3207 cross-channel hazard. New heartbeats stamp `channel_id`, so this
+/// self-heals over time. Returns the resolved cwd (non-empty) for this
+/// `session_key`.
+async fn resolve_cwd_for_session_key(
+    pool: &sqlx::PgPool,
+    session_key: &str,
+    channel_id: &str,
+) -> Result<Option<String>, String> {
+    // 1. Channel-scoped match (the #3207 cross-channel guard).
+    let scoped = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT cwd FROM sessions \
+         WHERE session_key = $1 AND channel_id = $2 LIMIT 1",
+    )
+    .bind(session_key)
+    .bind(channel_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load session cwd {session_key}: {error}"))?
+    .flatten();
+    if let Some(path) = scoped.filter(|p| !p.is_empty()) {
+        return Ok(Some(path));
+    }
+
+    // 2. #3216 GAP 1 safe legacy fallback: inspect ALL rows for this
+    //    session_key. Honor only the unambiguous single-NULL-channel_id case.
+    let rows = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        "SELECT cwd, channel_id FROM sessions WHERE session_key = $1",
+    )
+    .bind(session_key)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("load legacy session cwd {session_key}: {error}"))?;
+
+    if rows.len() == 1 {
+        let (cwd, row_channel_id) = &rows[0];
+        if row_channel_id.is_none()
+            && let Some(path) = cwd.clone().filter(|p| !p.is_empty())
+        {
+            tracing::info!(
+                "  ↻ #3216 legacy NULL-channel_id fallback: reusing cwd {} for \
+                 session_key={} (channel_id={}); row will self-heal on next heartbeat",
+                path,
+                session_key,
+                channel_id
+            );
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
 /// Resolve a channel's persisted `sessions.cwd` for restart restore, scoped to
-/// the unique Discord `channel_id`.
+/// the unique Discord `channel_id` (with the #3216 safe legacy fallback).
 ///
 /// Backs the `db_cwd` lookup in [`auto_restore_session_force`], which installs
-/// the resolved path into `session.current_path`.
-///
-/// #3207 (part 2) P0-a: `session_key` is derived from the sanitized/truncated
-/// channel NAME, so two distinct channels whose names collide produce the SAME
-/// `session_key` and would resolve EACH OTHER's persisted cwd — silently
-/// installing another channel's working tree into the restored runtime. The
-/// `channel_id = $2` predicate is the cross-channel guard: a colliding row that
-/// belongs to another channel simply yields no match. Legacy rows with a NULL
-/// `channel_id` (written before this column existed) are intentionally NOT
-/// reused — returning their cwd is exactly the cross-channel hazard we are
-/// closing, and reuse self-heals on the next turn once the row is stamped.
+/// the resolved path into `session.current_path`. See
+/// [`resolve_cwd_for_session_key`] for the channel-scoping / legacy-fallback
+/// semantics.
 ///
 /// The on-disk usability filter (`session_path_is_usable`) is applied by the
-/// caller so this helper stays a pure channel-scoped DB resolve.
+/// caller so this helper stays a pure DB resolve.
 fn restore_session_cwd_from_db(
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
@@ -852,17 +990,9 @@ fn restore_session_cwd_from_db(
         pg_pool,
         move |pool| async move {
             for session_key in session_keys {
-                let path = sqlx::query_scalar::<_, Option<String>>(
-                    "SELECT cwd FROM sessions \
-                     WHERE session_key = $1 AND channel_id = $2 LIMIT 1",
-                )
-                .bind(&session_key)
-                .bind(&channel_id)
-                .fetch_optional(&pool)
-                .await
-                .map_err(|error| format!("load session cwd {session_key}: {error}"))?
-                .flatten();
-                if let Some(path) = path.filter(|p| !p.is_empty()) {
+                if let Some(path) =
+                    resolve_cwd_for_session_key(&pool, &session_key, &channel_id).await?
+                {
                     return Ok(Some(path));
                 }
             }
@@ -872,6 +1002,66 @@ fn restore_session_cwd_from_db(
     )
     .ok()
     .flatten()
+}
+
+/// #3216 GAP 2: correct the persisted `sessions.cwd` to the authoritative live
+/// tmux pane cwd during recovery reconciliation. Scoped by `session_key` AND the
+/// unique `channel_id` so a name collision can never write into another channel's
+/// row (the #3207 cross-channel guard). A legacy NULL-channel_id row is matched
+/// too — only the row whose id equals THIS channel OR is NULL is updated — so the
+/// row both adopts the correct cwd and gets self-healed onto this channel.
+fn correct_session_cwd_to_tmux(
+    pg_pool: Option<&sqlx::PgPool>,
+    token_hash: &str,
+    provider: &ProviderKind,
+    channel_name: &str,
+    channel_id: u64,
+    tmux_cwd: &str,
+) {
+    let Some(pool) = pg_pool else {
+        return;
+    };
+    let tmux_name = provider.build_tmux_session_name(channel_name);
+    let session_keys = build_session_key_candidates(token_hash, provider, &tmux_name);
+    let channel_id_str = channel_id.to_string();
+    let tmux_cwd = tmux_cwd.to_string();
+    let result = crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            let mut total = 0u64;
+            for session_key in session_keys {
+                let updated = sqlx::query(
+                    "UPDATE sessions \
+                     SET cwd = $1, channel_id = $2 \
+                     WHERE session_key = $3 \
+                       AND (channel_id = $2 OR channel_id IS NULL)",
+                )
+                .bind(&tmux_cwd)
+                .bind(&channel_id_str)
+                .bind(&session_key)
+                .execute(&bridge_pool)
+                .await
+                .map_err(|err| format!("reconcile cwd for {session_key}: {err}"))?
+                .rows_affected();
+                total += updated;
+            }
+            Ok(total)
+        },
+        |error| error,
+    );
+    match result {
+        Ok(updated) if updated > 0 => tracing::info!(
+            "  ↻ #3216 reconciled DB cwd to live tmux pane for channel {} ({} row(s))",
+            channel_id,
+            updated
+        ),
+        Ok(_) => {}
+        Err(err) => tracing::warn!(
+            "  ⚠ #3216 failed to reconcile DB cwd to live tmux for channel {}: {}",
+            channel_id,
+            err
+        ),
+    }
 }
 
 /// Look up the persisted worktree path for a thread session from the `sessions`
@@ -887,11 +1077,15 @@ fn restore_session_cwd_from_db(
 /// channel NAME, so two distinct channels whose names collide produce the SAME
 /// `session_key` and would resolve EACH OTHER's persisted cwd. The lookup is
 /// therefore scoped by the unique `channel_id` — only a row stamped with THIS
-/// channel's id is honored, so a name collision can never cross channels (it
-/// just falls through to a fresh worktree). Legacy rows with a NULL
-/// `channel_id` (written before this column existed) are intentionally NOT
-/// reused: returning their cwd is exactly the cross-channel hazard we are
-/// closing, and reuse self-heals on the next turn once the row is stamped.
+/// channel's id is honored, so a name collision can never cross channels.
+///
+/// #3216 GAP 1: legacy rows written before the `channel_id` column existed carry
+/// `channel_id = NULL` and so never match the strict scoped predicate, forcing a
+/// worktree rotation on the first restore after deploy. [`resolve_cwd_for_session_key`]
+/// adds a SAFE fallback that reuses such a row ONLY when it is unambiguous
+/// (exactly one row for the `session_key` and its `channel_id IS NULL`), which
+/// preserves the cross-channel guard while letting legacy sessions keep their
+/// transcript-bearing worktree.
 fn restore_thread_worktree_path_from_db(
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
@@ -907,23 +1101,9 @@ fn restore_thread_worktree_path_from_db(
         pg_pool,
         move |pool| async move {
             for session_key in session_keys {
-                // `sessions.cwd` is nullable: decode as Option so a NULL /
-                // metadata-only row for an earlier session-key candidate does
-                // not fail the decode and abort the loop before the legacy
-                // fallback key is tried. The `channel_id = $2` predicate is the
-                // #3207 P0 cross-channel guard: a colliding session_key whose
-                // row belongs to another channel simply yields no match.
-                let path = sqlx::query_scalar::<_, Option<String>>(
-                    "SELECT cwd FROM sessions \
-                     WHERE session_key = $1 AND channel_id = $2 LIMIT 1",
-                )
-                .bind(&session_key)
-                .bind(&channel_id)
-                .fetch_optional(&pool)
-                .await
-                .map_err(|error| format!("load thread session cwd {session_key}: {error}"))?
-                .flatten();
-                if let Some(path) = path.filter(|p| !p.is_empty()) {
+                if let Some(path) =
+                    resolve_cwd_for_session_key(&pool, &session_key, &channel_id).await?
+                {
                     return Ok(Some(path));
                 }
             }
@@ -1489,6 +1669,9 @@ mod worktree_reuse_channel_isolation_tests {
     //! channel would resolve the first channel's persisted cwd and resume into
     //! its working tree (silent corruption). These tests are RED before the
     //! `channel_id = $2` predicate was added and GREEN after.
+    //!
+    //! #3216 extends this with the safe legacy NULL-channel_id fallback (GAP 1)
+    //! and the live-tmux recovery-cwd reconcile policy (GAP 2).
     use super::{restore_session_cwd_from_db, restore_thread_worktree_path_from_db};
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::services::discord::adk_session::build_namespaced_session_key;
@@ -1563,13 +1746,17 @@ mod worktree_reuse_channel_isolation_tests {
         pg_db.drop().await;
     }
 
+    // #3216 GAP 1: a SINGLE legacy NULL-channel_id row IS now reused via the
+    // safe fallback (it cannot be cross-channel because it is the only row for
+    // that session_key). Previously (#3207) this returned None and forced a
+    // worktree rotation that divorced the live session from its transcript.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn legacy_null_channel_id_row_is_not_reused() {
+    async fn legacy_null_channel_id_single_row_is_reused() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
         let provider = ProviderKind::Claude;
-        let token_hash = "tok-3207-legacy";
+        let token_hash = "tok-3216-legacy";
         let channel_name = "legacy-chan";
         let tmux_name = provider.build_tmux_session_name(channel_name);
         let session_key = build_namespaced_session_key(token_hash, &provider, &tmux_name);
@@ -1587,9 +1774,51 @@ mod worktree_reuse_channel_isolation_tests {
             channel_id,
         );
         assert_eq!(
+            resolved.as_deref(),
+            Some(cwd),
+            "a single legacy NULL-channel_id row must be reused via the #3216 \
+             safe fallback so the legacy session keeps its transcript worktree"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    // #3216 GAP 1 guard: a SINGLE row that carries a DIFFERENT non-null
+    // channel_id must NOT be reused by another channel (cross-channel hazard).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fallback_refused_when_single_row_has_different_channel() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let provider = ProviderKind::Claude;
+        let token_hash = "tok-3216-wrongchan";
+        let channel_name = "wrong-chan";
+        let tmux_name = provider.build_tmux_session_name(channel_name);
+        let session_key = build_namespaced_session_key(token_hash, &provider, &tmux_name);
+        let owner_channel: u64 = 121_212_121_212_121_212;
+        let requester_channel: u64 = 343_434_343_434_343_434;
+
+        // Single row, but stamped with a different (non-null) channel.
+        seed_session(
+            &pool,
+            &session_key,
+            Some(&owner_channel.to_string()),
+            "/home/u/.adk/release/worktrees/claude-wrong-chan-owner",
+        )
+        .await;
+
+        let resolved = restore_thread_worktree_path_from_db(
+            Some(&pool),
+            token_hash,
+            &provider,
+            channel_name,
+            requester_channel,
+        );
+        assert_eq!(
             resolved, None,
-            "a legacy NULL-channel_id row must not be reused — returning its cwd \
-             is exactly the cross-channel hazard the P0 fix closes"
+            "a single row with a different non-null channel_id must not be \
+             reused by another channel"
         );
 
         pool.close().await;
@@ -1652,13 +1881,15 @@ mod worktree_reuse_channel_isolation_tests {
         pg_db.drop().await;
     }
 
+    // #3216 GAP 1: restart-restore resolves a single legacy NULL row via the
+    // safe fallback too (mirrors the worktree-reuse path).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn restart_restore_cwd_legacy_null_channel_id_not_reused() {
+    async fn restart_restore_cwd_legacy_null_single_row_is_reused() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
         let provider = ProviderKind::Claude;
-        let token_hash = "tok-3207-restore-legacy";
+        let token_hash = "tok-3216-restore-legacy";
         let channel_name = "legacy-restore-chan";
         let tmux_name = provider.build_tmux_session_name(channel_name);
         let session_key = build_namespaced_session_key(token_hash, &provider, &tmux_name);
@@ -1675,8 +1906,109 @@ mod worktree_reuse_channel_isolation_tests {
             channel_id,
         );
         assert_eq!(
-            resolved, None,
-            "a legacy NULL-channel_id row must not be reused for restart restore"
+            resolved.as_deref(),
+            Some(cwd),
+            "a single legacy NULL-channel_id row must be reused for restart \
+             restore via the #3216 safe fallback"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    // #3216 GAP 2: reconcile policy is a pure decision function; verify it picks
+    // the live tmux cwd over a divergent DB cwd only when the tmux cwd is a real
+    // managed/usable worktree, and is a no-op otherwise.
+    #[test]
+    fn reconcile_prefers_live_tmux_over_divergent_db_cwd() {
+        let db = "/home/u/.adk/release/worktrees/claude-chan-PHANTOM-212437";
+        let live = "/home/u/.adk/release/worktrees/claude-chan-LIVE-113822";
+        // Divergent DB cwd, live tmux is managed + usable → adopt live.
+        assert_eq!(
+            super::reconcile_recovery_cwd(Some(db), Some(live), true, true).as_deref(),
+            Some(live),
+            "a divergent live tmux managed/usable cwd must be adopted as authoritative"
+        );
+    }
+
+    #[test]
+    fn reconcile_noop_when_db_matches_tmux() {
+        let same = "/home/u/.adk/release/worktrees/claude-chan-SAME";
+        assert_eq!(
+            super::reconcile_recovery_cwd(Some(same), Some(same), true, true),
+            None,
+            "no reconcile when DB cwd already equals the live tmux cwd"
+        );
+    }
+
+    #[test]
+    fn reconcile_refused_when_tmux_cwd_not_managed_or_unusable() {
+        let db = "/home/u/.adk/release/worktrees/claude-chan-DB";
+        let transient = "/tmp/some-transient-path";
+        // Not managed → refuse even though it differs.
+        assert_eq!(
+            super::reconcile_recovery_cwd(Some(db), Some(transient), false, true),
+            None,
+            "an unmanaged tmux cwd must never override the DB cwd"
+        );
+        // Managed but not usable on disk → refuse.
+        assert_eq!(
+            super::reconcile_recovery_cwd(Some(db), Some(transient), true, false),
+            None,
+            "an unusable tmux cwd must never override the DB cwd"
+        );
+        // No live tmux pane → refuse.
+        assert_eq!(
+            super::reconcile_recovery_cwd(Some(db), None, false, false),
+            None,
+            "absent live tmux must keep existing behavior"
+        );
+    }
+
+    // #3216 GAP 2: end-to-end DB correction — after reconcile, the DB row's cwd
+    // is rewritten to the live tmux path and the channel_id is stamped (so a
+    // legacy NULL row both adopts the right cwd and self-heals onto this channel).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconcile_corrects_db_cwd_and_stamps_channel() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let provider = ProviderKind::Claude;
+        let token_hash = "tok-3216-reconcile";
+        let channel_name = "reconcile-chan";
+        let tmux_name = provider.build_tmux_session_name(channel_name);
+        let session_key = build_namespaced_session_key(token_hash, &provider, &tmux_name);
+        let channel_id: u64 = 999_999_999_999_999_999;
+        let phantom = "/home/u/.adk/release/worktrees/claude-reconcile-PHANTOM";
+        let live = "/home/u/.adk/release/worktrees/claude-reconcile-LIVE";
+
+        // Legacy NULL-channel_id row pointing at the phantom (transcript-less) cwd.
+        seed_session(&pool, &session_key, None, phantom).await;
+
+        super::correct_session_cwd_to_tmux(
+            Some(&pool),
+            token_hash,
+            &provider,
+            channel_name,
+            channel_id,
+            live,
+        );
+
+        let (cwd, stamped): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT cwd, channel_id FROM sessions WHERE session_key = $1")
+                .bind(&session_key)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch reconciled row");
+        assert_eq!(
+            cwd.as_deref(),
+            Some(live),
+            "DB cwd must be corrected to live tmux cwd"
+        );
+        assert_eq!(
+            stamped.as_deref(),
+            Some(channel_id.to_string().as_str()),
+            "the reconciled row must be stamped with this channel_id (self-heal)"
         );
 
         pool.close().await;
