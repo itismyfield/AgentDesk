@@ -130,7 +130,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (9215 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (9549 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -318,6 +318,69 @@
     so a late completion can never commit the WRONG newer loop turn; the
     `user_msg_id != 0` path is byte-for-byte unchanged. New test
     `watcher_terminal_delivery_commit_marks_loop_turn_with_zero_user_msg_id`.
+    +273 from #3016 S3 (the A2 / phase-5 enabler): REWRITE the watcher fresh-idle
+    finalize decision to consult the S1 STRUCTURAL completion signal
+    (`TurnFinalizer::completion_signal_state` → `CompletionSignal{Done,PausedLive,
+    Unknown}`) instead of the in-memory `mailbox_finalize_owed` flag as the sole
+    finalize signal. A new pure helper `watcher_fresh_idle_finalize_decision`
+    (→ `FreshIdleFinalizeDecision{DeferPausedLive,AbortFollowupTookOver,SkipStale,
+    Finalize,LegacyFlagGated}`) fuses the signal with the #3197 A2 wrong-turn-race
+    defenses (pinned pre-cleanup `pinned_finalize_user_msg_id` + stale-skip via
+    `committed_completion_is_stale_for_newer_turn` + the pause/epoch guard, all
+    evaluated BEFORE the destructive clear because this branch `continue`s before
+    the canonical guard at tmux.rs runs). Done (structural terminator proven, even
+    when the response is EMPTY) → finalize via
+    `finish_restored_watcher_active_turn(.., normal_completion=true, ..)` with the
+    pinned current-turn id; PausedLive (no terminator — paused at selector /
+    permission prompt / subagent running / long silent tool) → DEFER, never
+    finalize; Unknown (non-JSONL runtime: LegacyTmuxWrapper/ProcessBackend/
+    ClaudeEAdapter) → KEEP the legacy `mailbox_finalize_owed` flag path VERBATIM.
+    The DEFER decision now keys on the STRUCTURAL TERMINATOR (not on response
+    emptiness), which is the fix for the contradiction that killed the first A2
+    attempt (deferring `delegated && empty` made the empty-but-done completion's
+    finalize unreachable). The flag is NOT deleted (stage 5); it stays read for the
+    Unknown arm and is still `swap(false)`'d to keep its revoke lifecycle. New tests
+    `fresh_idle_paused_live_defers_via_completion_signal`,
+    `fresh_idle_done_finalizes_and_unknown_falls_through_to_legacy`,
+    `fresh_idle_done_wrong_turn_race_does_not_finalize_followup`, and the
+    end-to-end `fresh_idle_empty_terminated_completion_finalizes_via_completion_signal_flag_false`
+    (drives the REAL completion signal over a real JSONL transcript + the REAL
+    finalizer actor, NOT a re-implementation).
+    +36 from #3016 S3 gate-fix iteration (3 adversarial-gate concerns): (1) the
+    `Done` decision now reads the STRICTER turn-END-only terminator
+    (`jsonl_turn_end_terminator_idle`, accepts ONLY Codex `turn.completed` /
+    Claude `result`+`system{turn_duration|stop_hook_summary}`) so a completed
+    Codex `agent_message` / Claude mid-turn message cannot over-finalize a LIVE
+    turn; (2) the Done-arm destructive `clear_inflight_state` is now gated by
+    `committed_completion_is_stale_for_newer_turn` with BOTH the pinned snapshot
+    AND a LATE on-disk re-read (closing the TOCTOU where a follow-up turn saved
+    inflight during the cleanup awaits), mirroring the canonical clear at
+    tmux.rs; (3) the ignored `turn_start_offset` param was REMOVED from
+    `completion_signal_state` (range-independence is documented: the turn-END
+    scan is offset-independent and turn-correctness comes from the pinned-id +
+    stale-skip). New test `fresh_idle_clear_gate_skips_when_late_reread_is_newer_turn`.
+    +25 from #3016 S3 FINAL fix (residual TOCTOU on the Done-arm clear): the
+    gate-fix iteration above still split the clear across TWO locks (late re-read +
+    `committed_completion_is_stale_for_newer_turn` check under one lock, then the
+    UNCONDITIONAL `clear_inflight_state` under another) — on a multi-threaded tokio
+    runtime a follow-up turn could save a NEW inflight between the re-read and the
+    clear, so the unconditional delete wiped it (check-then-act not atomic). The
+    Done arm now performs the on-disk clear with the EXISTING atomic
+    compare-and-clear helper `clear_inflight_state_if_matches_identity`
+    (inflight.rs: read+validate+unlink under a SINGLE sidecar lock), keyed on the
+    PINNED turn's `InflightTurnIdentity::from_state` (the same snapshot the decision
+    helper derived `user_msg_id` from). It deletes ONLY if the on-disk identity is
+    STILL the pinned turn; a follow-up's different identity → `UserMsgMismatch`
+    no-op → its inflight survives. The window is closed atomically (no separate
+    re-read). The finalize-skip stays a SEPARATE pinned-snapshot decision in
+    `watcher_fresh_idle_finalize_decision`; only the destructive CLEAR moved to the
+    atomic helper. The CANONICAL normal-completion clear (tmux_watcher.rs ~11251)
+    still uses the weaker non-atomic re-read+clear pattern — left UNCHANGED (out of
+    scope; the S3 arm is now strictly safer). Test
+    `fresh_idle_clear_gate_skips_when_late_reread_is_newer_turn` rewritten to drive
+    the REAL atomic helper against REAL on-disk inflight: a follow-up's inflight on
+    disk → atomic clear is a no-op (follow-up preserved); the pinned turn on disk →
+    atomic clear removes it (happy path).
   - `src/services/discord/tui_prompt_relay.rs` (4522 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3167: the self-paced TUI loop relay
