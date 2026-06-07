@@ -781,10 +781,9 @@ pub(super) async fn auto_restore_session_force(
         // Use the effective tmux channel name here so restart recovery keeps
         // looking up the same session key for thread sessions that intentionally
         // use a synthetic "{parent}-t{thread_id}" channel name.
+        // #3207 (part 2) P0-a: the DB cwd resolve is channel-scoped (see
+        // `restore_session_cwd_from_db`).
         let restored_cwd = restore_ch_name.as_ref().and_then(|ch| {
-            // #3207 (part 2) P0-a: the DB cwd resolve is channel-scoped (see
-            // `restore_session_cwd_from_db`); only a usable path is honored for
-            // install into `session.current_path`.
             restore_session_cwd_from_db(
                 shared.pg_pool.as_ref(),
                 &shared.token_hash,
@@ -792,20 +791,25 @@ pub(super) async fn auto_restore_session_force(
                 ch,
                 channel_id.get(),
             )
-            .filter(|r| {
-                !r.path.is_empty() && session_path_is_usable(&r.path, saved_remote.as_deref())
-            })
         });
-        let mut db_cwd: Option<String> = restored_cwd.as_ref().map(|r| r.path.clone());
-        // #3219: only a channel-scoped cwd (the resolver's exact `channel_id = $2`
-        // match) may outrank the configured base. A NULL-channel_id legacy
-        // fallback is not proven to be this channel's worktree, so it is not
-        // elevated. This flag is preserved across the tmux reconcile below —
-        // reconcile changes a row's cwd value, not its ownership.
+        // #3219: capture ownership from the resolver's exact `channel_id = $2`
+        // match BEFORE the path-usability filter — a stale/unusable persisted cwd
+        // does not change WHO owns the row. Only a channel-scoped cwd may outrank
+        // the configured base; a NULL-channel_id legacy fallback returns false and
+        // is never elevated. This flag is preserved across the tmux reconcile
+        // below (reconcile changes a row's cwd value, not its ownership), so an
+        // owned channel whose persisted cwd went stale can still elevate the valid
+        // live worktree the reconcile supplies (the #3216 GAP2 phantom-rotation
+        // case). The final db_cwd is still re-validated by `db_cwd_is_reusable
+        // _worktree` before it can win.
         let db_cwd_channel_scoped = restored_cwd
             .as_ref()
             .map(|r| r.channel_scoped)
             .unwrap_or(false);
+        // Only a usable path is honored for install into `session.current_path`.
+        let mut db_cwd: Option<String> = restored_cwd
+            .map(|r| r.path)
+            .filter(|p| !p.is_empty() && session_path_is_usable(p, saved_remote.as_deref()));
 
         // #3216 GAP 2: reconcile the DB cwd against the live tmux pane. The live
         // pane is the source of truth for where the session actually runs; if the
