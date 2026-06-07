@@ -435,6 +435,12 @@ fn envelope_is_turn_end_terminator(provider: &ProviderKind, json: &Value) -> boo
         ProviderKind::Codex => type_str == "turn.completed",
         ProviderKind::Claude => match type_str {
             "result" => true,
+            // #3221: the `[Request interrupted by user]` marker is a genuine
+            // turn boundary (the turn was aborted), so the turn-END-only scan
+            // used by the finalize `Done` decision must treat it as a
+            // terminator too — keeping the strict scan consistent with the
+            // standard observer's Idle classification of the same envelope.
+            "user" => claude_user_envelope_is_interrupt_marker(json),
             "system" => matches!(
                 json.get("subtype").and_then(Value::as_str),
                 Some("turn_duration" | "stop_hook_summary")
@@ -621,10 +627,84 @@ fn read_recent_jsonl_window(
     })
 }
 
+/// #3221: the exact set of trailing `[Request interrupted by user…]` markers
+/// claude writes when a turn is aborted by a session-preserving interrupt (ESC
+/// for the TUI / stream-json `control_request{interrupt}` for the wrapper,
+/// #3207). Verified from real transcripts — these are the only two variants.
+///
+/// Matching is by EXACT equality (not prefix), so a user-TYPED prompt like
+/// `[Request interrupted by user story…]` can never false-positive. A future
+/// unknown variant becoming a false-NEGATIVE is safe (the turn merely stays busy
+/// and self-heals on the next turn); a false-POSITIVE is not (it would drop a
+/// real in-flight user turn). Add new variants here as they are observed.
+const CLAUDE_INTERRUPT_MARKERS: [&str; 2] = [
+    "[Request interrupted by user]",
+    "[Request interrupted by user for tool use]",
+];
+
+/// #3221: detect the trailing `[Request interrupted by user]` envelope claude
+/// writes when a turn is aborted by a session-preserving interrupt (ESC for the
+/// TUI / stream-json `control_request{interrupt}` for the wrapper, #3207).
+///
+/// The marker is a `type=user` envelope whose `message.content` is effectively a
+/// SINGLE text block that IS exactly one of `CLAUDE_INTERRUPT_MARKERS` (the
+/// plain and the `… for tool use` variants). Matching is deliberately narrow on
+/// two axes:
+///   - single-block only: a multi-block user message that merely *includes* a
+///     marker-looking block alongside real content is rejected, so a genuine
+///     in-flight user turn is never dropped;
+///   - exact equality (not prefix): a user-typed prompt such as
+///     `[Request interrupted by user story…]` never trips it.
+/// `content` may also be a plain string (older shape); the same exact check
+/// applies. Coincidental conversation text or `tool_result` payloads that merely
+/// mention "interrupted" therefore never match.
+fn claude_user_envelope_is_interrupt_marker(json: &Value) -> bool {
+    let Some(content) = json
+        .get("message")
+        .and_then(|message| message.get("content"))
+    else {
+        return false;
+    };
+    let text = match content {
+        // Plain-string content: the whole string must be the marker.
+        Value::String(text) => text.as_str(),
+        // Array content: must be exactly one block, and that block must be a
+        // `text` block whose text is the marker. Rejecting >1 block prevents a
+        // multi-block message that merely embeds a marker-looking block from
+        // being misclassified as a turn terminator.
+        Value::Array(blocks) => {
+            let [block] = blocks.as_slice() else {
+                return false;
+            };
+            if block.get("type").and_then(Value::as_str) != Some("text") {
+                return false;
+            }
+            let Some(text) = block.get("text").and_then(Value::as_str) else {
+                return false;
+            };
+            text
+        }
+        _ => return false,
+    };
+    let text = text.trim();
+    CLAUDE_INTERRUPT_MARKERS
+        .iter()
+        .any(|marker| text == *marker)
+}
+
 fn claude_envelope_turn_state(json: &Value) -> Option<TuiTurnState> {
     match json.get("type").and_then(Value::as_str)? {
         "result" => Some(TuiTurnState::Idle),
         "assistant" => Some(TuiTurnState::Streaming),
+        // #3221: a turn aborted via a session-preserving interrupt leaves a
+        // trailing `[Request interrupted by user]` user envelope as the newest
+        // entry. It is `type=user` but marks the turn as ENDED, not a fresh
+        // submission. Classifying it `UserSubmitted` left the JSONL-authoritative
+        // busy gate (#3208) reporting the stopped turn as in-flight forever, so
+        // the next user message was wrongly queued as `*_tui_busy_pre_submit`
+        // after a ⏳-removal / `!stop` / `/stop` / watchdog stop. Treat the
+        // interrupt marker as Idle so the next input starts a fresh turn.
+        "user" if claude_user_envelope_is_interrupt_marker(json) => Some(TuiTurnState::Idle),
         "user" => Some(TuiTurnState::UserSubmitted),
         // `permission-mode` envelopes (e.g. `bypassPermissions` adoption after
         // a fresh session start triggered by hard_reset or `/compact`) are not
@@ -859,6 +939,170 @@ mod tests {
             observe_claude_jsonl_turn_state(file.path()),
             TuiTurnState::UserSubmitted
         );
+    }
+
+    // #3221: a turn aborted via a session-preserving interrupt (ESC / wrapper
+    // control_request{interrupt}, #3207) leaves a trailing
+    // `[Request interrupted by user]` user envelope. That marks the turn ENDED,
+    // not a fresh submission, so the JSONL-authoritative busy gate (#3208) must
+    // see Idle — otherwise the stopped turn looks in-flight forever and the next
+    // message is wrongly queued as `*_tui_busy_pre_submit`.
+    #[test]
+    fn claude_interrupt_marker_marks_idle() {
+        let file = write_jsonl(&[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"do something"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#,
+        ]);
+
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::Idle
+        );
+    }
+
+    // The `… for tool use` interrupt variant must be recognized too.
+    #[test]
+    fn claude_interrupt_marker_for_tool_use_marks_idle() {
+        let file = write_jsonl(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"running tool"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#,
+        ]);
+
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::Idle
+        );
+    }
+
+    // Realistic tail: claude appends a `file-history-snapshot` after the
+    // interrupt marker. The observer walks past the snapshot (no turn-state
+    // signal) and still reads the marker as Idle.
+    #[test]
+    fn claude_interrupt_marker_then_file_history_snapshot_marks_idle() {
+        let file = write_jsonl(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#,
+            r#"{"type":"file-history-snapshot","messageId":"x"}"#,
+        ]);
+
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::Idle
+        );
+    }
+
+    // Suppression must be one-shot: once the user submits a NEW prompt after the
+    // interrupt marker, the turn is genuinely busy again.
+    #[test]
+    fn claude_new_prompt_after_interrupt_marker_is_user_submitted() {
+        let file = write_jsonl(&[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"actually do this instead"}]}}"#,
+        ]);
+
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::UserSubmitted
+        );
+    }
+
+    // Precision guard: a real user prompt that merely *mentions* the word
+    // interrupted (or a tool_result echoing it) must NOT be mistaken for the
+    // turn-end marker.
+    #[test]
+    fn claude_user_text_mentioning_interrupted_stays_user_submitted() {
+        let file = write_jsonl(&[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"why was the request interrupted by user earlier?"}]}}"#,
+        ]);
+
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::UserSubmitted
+        );
+    }
+
+    // Precision guard (#3222 codex follow-up): a user-TYPED prompt that merely
+    // *starts with* the marker prefix (`[Request interrupted by user story…]`)
+    // must NOT match. Exact-equality matching keeps it `UserSubmitted` and not a
+    // terminator, so a real in-flight turn is never dropped.
+    #[test]
+    fn claude_interrupt_marker_prefixed_prose_stays_user_submitted() {
+        let prose: Value = serde_json::from_str(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user story]"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            claude_envelope_turn_state(&prose),
+            Some(TuiTurnState::UserSubmitted)
+        );
+        assert!(!envelope_is_turn_end_terminator(
+            &ProviderKind::Claude,
+            &prose
+        ));
+
+        let file = write_jsonl(&[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user story]"}]}}"#,
+        ]);
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::UserSubmitted
+        );
+    }
+
+    // Precision guard (#3222 codex follow-up): a multi-block user message where
+    // one block equals the marker but another carries real user content must NOT
+    // match. Single-block-only matching keeps it `UserSubmitted` and not a
+    // terminator, so the in-flight turn is preserved.
+    #[test]
+    fn claude_interrupt_marker_with_extra_block_stays_user_submitted() {
+        let multi_block: Value = serde_json::from_str(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"},{"type":"text","text":"actually keep going"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            claude_envelope_turn_state(&multi_block),
+            Some(TuiTurnState::UserSubmitted)
+        );
+        assert!(!envelope_is_turn_end_terminator(
+            &ProviderKind::Claude,
+            &multi_block
+        ));
+
+        let file = write_jsonl(&[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"},{"type":"text","text":"actually keep going"}]}}"#,
+        ]);
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::UserSubmitted
+        );
+    }
+
+    // The turn-END-only strict scan (finalize `Done` decision) must agree with
+    // the standard observer that the interrupt marker is a genuine terminator.
+    #[test]
+    fn claude_interrupt_marker_is_turn_end_terminator() {
+        let marker: Value = serde_json::from_str(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            claude_envelope_turn_state(&marker),
+            Some(TuiTurnState::Idle)
+        );
+        assert!(envelope_is_turn_end_terminator(
+            &ProviderKind::Claude,
+            &marker
+        ));
+
+        let plain_user: Value = serde_json::from_str(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#,
+        )
+        .unwrap();
+        assert!(!envelope_is_turn_end_terminator(
+            &ProviderKind::Claude,
+            &plain_user
+        ));
     }
 
     #[test]
