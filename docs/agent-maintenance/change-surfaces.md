@@ -381,7 +381,7 @@
     the REAL atomic helper against REAL on-disk inflight: a follow-up's inflight on
     disk → atomic clear is a no-op (follow-up preserved); the pinned turn on disk →
     atomic clear removes it (happy path).
-  - `src/services/discord/tui_prompt_relay.rs` (4777 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (4881 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3167: the self-paced TUI loop relay
     starts its synthetic turn with `ActiveTurnKind::Background` so a queued user
@@ -476,7 +476,18 @@
     (the double-relay duplicate). When the watcher stopped / never covered the turn
     the watermark is 0 (or lags), so the clamp is a no-op and the tail still relays
     from the prompt-timestamp offset — the #3176 outage fallback is preserved
-    (plus clamp-up / outage-noop unit tests).
+    (plus clamp-up / outage-noop unit tests);
+    +104 from #3154 codex P1/P2: the deferred synthetic turn-start path now (P1-3)
+    routes the relay-owner handoff through two shared pure decisions —
+    `observer_should_spawn_bridge_tail` (the observer stands down whenever the
+    start was deferred OR a watcher already owns the lease) and
+    `claim_should_adopt_relay_owner` (a successful claim that flips the owner
+    re-records the lease as the watcher owner) — so the deferred worker is the
+    SINGLE relayer: not zero (no relay GAP) and not two (no duplicate relay). Both
+    the inline and the deferred (`pending_start_claim_fn`) claim paths call the
+    same adoption decision, and the post-anchor bridge-tail block consults
+    `observer_should_spawn_bridge_tail` instead of an inline guard (plus the
+    no-GAP / observer-skip / failed-claim-no-adopt regression tests).
   - `src/services/discord/idle_recap.rs` (1881 prod lines; idle-recap card
     compose/post/clear surface, registered giant-file (#3036) — bugfix only
     outside an extraction plan. Crossed 1000 prod LoC with #3146 Part 1: the
