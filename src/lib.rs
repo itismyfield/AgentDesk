@@ -116,7 +116,6 @@ pub(crate) mod receipt;
 // Reconciliation sweep jobs are invoked by maintenance scheduling, not by every
 // compile target.
 pub(crate) mod reconcile;
-pub(crate) mod runtime;
 // Runtime layout exposes migration helpers used by setup and repair commands.
 pub(crate) mod runtime_layout;
 mod server;

@@ -1,4 +1,3 @@
-pub mod dod;
 pub mod sync;
 pub mod triage;
 

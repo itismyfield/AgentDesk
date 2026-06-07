@@ -152,7 +152,6 @@ src/
 │   ├── transition.rs
 │   └── transition_executor_pg.rs
 ├── github/
-│   ├── dod.rs
 │   ├── mod.rs
 │   ├── sync.rs
 │   └── triage.rs
@@ -734,8 +733,7 @@ src/
 ├── manual_intervention.rs
 ├── pipeline.rs
 ├── receipt.rs
-├── reconcile.rs
-└── runtime.rs
+└── reconcile.rs
 ```
 <!-- END GENERATED: SRC TREE -->
 
@@ -777,7 +775,6 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/pipeline.rs` | Pipeline stage loading, resolution, and transition helpers. |
 | `src/receipt.rs` | Receipt parsing and workspace attribution helpers. |
 | `src/reconcile.rs` | Boot-time reconciliation for persisted state and dispatch-runtime drift. |
-| `src/runtime.rs` | Session runtime abstraction (`SessionRuntime`) plus the tmux-backed implementation. |
 <!-- END GENERATED: TOP LEVEL MODULE MAP -->
 
 ### Discord Runtime
