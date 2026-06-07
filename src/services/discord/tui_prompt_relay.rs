@@ -1253,24 +1253,48 @@ fn bridge_adapter_owns_external_turn(owner: ExternalInputRelayOwner) -> bool {
 /// The relay of a turn's output must come from EXACTLY ONE owner — never zero (a
 /// GAP: the output is silently dropped) and never two (a DUPLICATE relay).
 ///
-/// * When the synthetic turn-start was DEFERRED, the detached worker owns the
-///   relay-owner handoff end-to-end: it claims after the prior turn drains and
-///   re-records the lease as its claimed owner (the watcher), which then relays.
-///   The observer must therefore STAND DOWN — otherwise the SAME output relays
-///   twice (the original duplicate-relay bug).
+/// * When the synthetic turn-start was DEFERRED, the OBSERVER cannot yet know the
+///   RESOLVED relay owner: the claim runs LATER in the detached worker (it reads
+///   the runtime binding FRESH, post-drain, and only then resolves TmuxWatcher vs
+///   BridgeAdapter — see `claim_tui_direct_synthetic_turn`). Spawning here on the
+///   stale, pre-claim lease would either double-relay (watcher case) or relay the
+///   wrong (undrained) offset. So the observer STANDS DOWN unconditionally on the
+///   deferred path and hands the bridge-tail decision to the worker, which re-runs
+///   the OWNER-KIND-AWARE [`deferred_claim_requires_bridge_tail_relayer`] against
+///   the RESOLVED owner.
 /// * When NOT deferred, the observer spawns the bridge tail iff the lease's owner
 ///   is still the BridgeAdapter (the inline claim already adopted any watcher
 ///   handoff into `lease.relay_owner`, so a watcher-owned lease means the watcher
 ///   relays and the observer stands down).
 ///
-/// Pairing this with the deferred worker's relay-owner adoption (which guarantees
-/// a watcher relayer exists once `deferred == true`) is what proves there is no
-/// GAP: deferred ⇒ observer skips AND worker relays = exactly one relayer.
+/// Pairing this with the deferred worker's owner-kind-aware bridge-tail spawn
+/// (which guarantees EXACTLY ONE relayer for EITHER resolved owner) is what proves
+/// there is no GAP and no duplicate on the deferred path.
 fn observer_should_spawn_bridge_tail(
     deferred_synthetic_start: bool,
     lease_owner: ExternalInputRelayOwner,
 ) -> bool {
     !deferred_synthetic_start && bridge_adapter_owns_external_turn(lease_owner)
+}
+
+/// #3154 P1 (BridgeAdapter-GAP fix). The OWNER-KIND-AWARE decision the deferred
+/// worker runs AFTER its claim resolves the relay owner. It mirrors the inline
+/// (non-deferred) observer path exactly:
+///
+/// * Resolved owner == TmuxWatcher ⇒ the watcher relays the turn's output, so the
+///   bridge tail must STAND DOWN (else DUPLICATE relay — the original P1-3 bug).
+/// * Resolved owner == BridgeAdapter ⇒ NO watcher will relay this turn, and the
+///   observer already stood down (deferred). The bridge tail MUST run exactly once
+///   here, or the synthetic turn's output is never relayed (the BridgeAdapter-GAP:
+///   `relayer_count == 0`). The observer's unconditional deferred skip in
+///   [`observer_should_spawn_bridge_tail`] is only correct BECAUSE this worker-side
+///   fallback closes the BridgeAdapter case.
+///
+/// The downstream [`maybe_spawn_claude_idle_response_tail`] independently re-checks
+/// `bridge_adapter_owns_external_turn` before spawning, so a stale/watcher lease can
+/// never produce a second relayer even if this predicate were called too eagerly.
+fn deferred_claim_requires_bridge_tail_relayer(resolved_owner: ExternalInputRelayOwner) -> bool {
+    bridge_adapter_owns_external_turn(resolved_owner)
 }
 
 /// #3154 P1-3 relay-owner adoption decision. After a synthetic claim resolves,
@@ -1715,6 +1739,56 @@ fn pending_start_claim_fn() -> super::tui_direct_pending_start::ClaimFn {
                     prior_relay_owner = lease.relay_owner.as_str(),
                     adopted_relay_owner = claim.relay_owner.as_str(),
                     "tui_direct_pending_start: deferred claim adopted watcher relay_owner into the in-memory lease (bridge tail will stand down)"
+                );
+            }
+
+            // #3154 P1 (BridgeAdapter-GAP fix). The observer stood down for ALL
+            // deferred starts because it could not know the RESOLVED owner before
+            // the claim ran. Now that the claim has resolved it, the worker is the
+            // single place that knows the owner kind, so it MIRRORS the inline path:
+            // when the claim resolved to the BridgeAdapter (no watcher will relay
+            // this turn), the worker spawns EXACTLY ONE bridge tail here — otherwise
+            // the synthetic turn's output is never relayed (relayer_count == 0). When
+            // the claim resolved to the watcher this predicate is false (the watcher
+            // is the sole relayer; spawning would double-relay). The spawn is on the
+            // detached worker task (unix), exactly like the observer's unix-only tail.
+            #[cfg(unix)]
+            if claim.claimed && deferred_claim_requires_bridge_tail_relayer(claim.relay_owner) {
+                // The lease the bridge tail reads must reflect the resolved owner.
+                // `claim_should_adopt_relay_owner` above is false for the BridgeAdapter
+                // case (the rehydrated lease was already BridgeAdapter), so re-read the
+                // stored lease (or fall back to the rehydrated one) and ensure it carries
+                // the resolved owner before handing it to the self-gating tail.
+                let mut tail_lease =
+                    crate::services::tui_prompt_dedupe::external_input_relay_lease(
+                        provider.as_str(),
+                        &record.tmux_session_name,
+                        record.channel_id,
+                    )
+                    .unwrap_or_else(|| lease.clone());
+                tail_lease.relay_owner = claim.relay_owner;
+                let observed = ObservedTuiPrompt {
+                    provider: record.provider.clone(),
+                    tmux_session_name: record.tmux_session_name.clone(),
+                    prompt: record.prompt_text.clone(),
+                    observed_at: chrono::Utc::now(),
+                };
+                let spawned = maybe_spawn_claude_idle_response_tail(
+                    shared.clone(),
+                    channel_id,
+                    &observed,
+                    &tail_lease,
+                    Some(record.anchor_message_id),
+                )
+                .await;
+                tracing::info!(
+                    provider = %record.provider,
+                    channel_id = record.channel_id,
+                    tmux_session_name = %record.tmux_session_name,
+                    anchor_message_id = record.anchor_message_id,
+                    resolved_relay_owner = claim.relay_owner.as_str(),
+                    bridge_tail_spawned = spawned,
+                    "tui_direct_pending_start: deferred claim resolved to BridgeAdapter owner; worker spawned the bridge tail (no relay GAP)"
                 );
             }
             claim.claimed
@@ -5104,6 +5178,79 @@ mod tests {
         // Hygiene: clear the test lease.
         let _ = crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
             provider, tmux, channel_id,
+        );
+    }
+
+    /// #3154 P1 (BridgeAdapter-GAP) — the PARALLEL no-GAP invariant for the OTHER
+    /// resolved owner. When the deferred claim resolves to the BridgeAdapter (NO
+    /// watcher will relay this turn), there must STILL be exactly one relayer: the
+    /// worker spawns the bridge tail. We count relayers explicitly:
+    ///   * observer(0) — stood down on the deferred path, AND
+    ///   * watcher(0) — the resolved owner is the BridgeAdapter, not the watcher, SO
+    ///   * worker bridge tail(1) — `deferred_claim_requires_bridge_tail_relayer` fires.
+    ///
+    /// RED before this fix: the worker never spawned a bridge tail for the
+    /// BridgeAdapter owner, so observer(0) + watcher(0) + worker(0) == 0 == GAP.
+    /// Neutralizing the new branch the OTHER direction (forcing the worker to spawn
+    /// for the WATCHER owner) is covered by the watcher test below staying at 1.
+    #[test]
+    fn deferred_claim_resolves_bridge_owner_exactly_one_relayer_no_gap() {
+        // Deferred ⇒ the observer stands down regardless of owner (it cannot know
+        // the resolved owner pre-claim and hands the decision to the worker).
+        let observer_relays =
+            observer_should_spawn_bridge_tail(true, ExternalInputRelayOwner::BridgeAdapter);
+        assert!(
+            !observer_relays,
+            "deferred path: the observer always stands down (the worker owns the \
+             post-claim bridge-tail decision)"
+        );
+
+        // The claim resolved to the BridgeAdapter: the watcher will NOT relay.
+        let resolved_owner = ExternalInputRelayOwner::BridgeAdapter;
+        let watcher_relays = matches!(resolved_owner, ExternalInputRelayOwner::TmuxWatcher);
+        assert!(!watcher_relays, "BridgeAdapter owner ⇒ no watcher relayer");
+
+        // PRODUCTION decision: the worker MUST spawn its bridge tail for the
+        // BridgeAdapter owner — this is the GAP fix.
+        let worker_bridge_tail = deferred_claim_requires_bridge_tail_relayer(resolved_owner);
+        assert!(
+            worker_bridge_tail,
+            "BridgeAdapter-owned deferred claim MUST get a worker bridge tail — \
+             RED before this fix (worker spawned nothing ⇒ relayer_count == 0 == GAP)"
+        );
+
+        let relayer_count =
+            u8::from(observer_relays) + u8::from(watcher_relays) + u8::from(worker_bridge_tail);
+        assert_eq!(
+            relayer_count, 1,
+            "EXACTLY ONE relayer on the deferred BridgeAdapter path: not zero (no \
+             GAP) and not two (no duplicate). RED if the worker bridge tail is \
+             dropped (count == 0, GAP) or if the observer also relays (count == 2)."
+        );
+    }
+
+    /// #3154 P1 (BridgeAdapter-GAP) — the symmetric guard: when the deferred claim
+    /// resolves to the WATCHER, the worker must NOT spawn a bridge tail (the watcher
+    /// is the sole relayer). This pins the owner-kind-awareness in the OTHER
+    /// direction: neutralizing the branch so the worker spawns unconditionally would
+    /// push the watcher path to relayer_count == 2 (DUPLICATE) and turn this RED.
+    #[test]
+    fn deferred_claim_resolves_watcher_owner_worker_bridge_tail_stands_down() {
+        let resolved_owner = ExternalInputRelayOwner::TmuxWatcher;
+        let observer_relays = observer_should_spawn_bridge_tail(true, resolved_owner);
+        let watcher_relays = matches!(resolved_owner, ExternalInputRelayOwner::TmuxWatcher);
+        let worker_bridge_tail = deferred_claim_requires_bridge_tail_relayer(resolved_owner);
+        assert!(
+            !worker_bridge_tail,
+            "watcher-owned deferred claim MUST NOT get a worker bridge tail — else \
+             DUPLICATE relay (the watcher already relays)"
+        );
+        let relayer_count =
+            u8::from(observer_relays) + u8::from(watcher_relays) + u8::from(worker_bridge_tail);
+        assert_eq!(
+            relayer_count, 1,
+            "EXACTLY ONE relayer on the deferred watcher path (the watcher); RED if \
+             the worker also spawns a bridge tail (count == 2, DUPLICATE)."
         );
     }
 

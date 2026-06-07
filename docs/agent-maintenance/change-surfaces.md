@@ -381,7 +381,7 @@
     the REAL atomic helper against REAL on-disk inflight: a follow-up's inflight on
     disk → atomic clear is a no-op (follow-up preserved); the pinned turn on disk →
     atomic clear removes it (happy path).
-  - `src/services/discord/tui_prompt_relay.rs` (4997 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (5071 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3167: the self-paced TUI loop relay
     starts its synthetic turn with `ActiveTurnKind::Background` so a queued user
@@ -487,7 +487,21 @@
     the inline and the deferred (`pending_start_claim_fn`) claim paths call the
     same adoption decision, and the post-anchor bridge-tail block consults
     `observer_should_spawn_bridge_tail` instead of an inline guard (plus the
-    no-GAP / observer-skip / failed-claim-no-adopt regression tests).
+    no-GAP / observer-skip / failed-claim-no-adopt regression tests); +74 from
+    #3154 codex P1 (BridgeAdapter-GAP): the P1-3 fix only closed the TmuxWatcher
+    owner path — a deferred claim that RESOLVED to a BridgeAdapter owner had the
+    observer stand down (deferred) AND no worker bridge tail AND background idle
+    relay suppressed by the inflight, so `relayer_count == 0` (the synthetic
+    turn's output was lost). The observer cannot know the resolved owner pre-claim
+    (the claim runs later in the worker), so the worker (`pending_start_claim_fn`)
+    now mirrors the inline path: after its claim resolves, the new owner-kind-aware
+    `deferred_claim_requires_bridge_tail_relayer` (true iff the resolved owner is
+    the BridgeAdapter) makes the worker spawn EXACTLY ONE bridge tail for the
+    BridgeAdapter case and stand down for the watcher case — `maybe_spawn_claude_idle_response_tail`
+    self-gates on `bridge_adapter_owns_external_turn`, so a watcher/stale lease can
+    never double-relay. New parallel no-GAP tests assert `relayer_count == 1` for
+    BOTH resolved owners (RED before this fix: BridgeAdapter count == 0 == GAP;
+    over-eager spawn would push the watcher path to count == 2 == DUPLICATE).
   - `src/services/discord/idle_recap.rs` (1881 prod lines; idle-recap card
     compose/post/clear surface, registered giant-file (#3036) — bugfix only
     outside an extraction plan. Crossed 1000 prod LoC with #3146 Part 1: the
