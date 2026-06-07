@@ -381,7 +381,7 @@
     the REAL atomic helper against REAL on-disk inflight: a follow-up's inflight on
     disk → atomic clear is a no-op (follow-up preserved); the pinned turn on disk →
     atomic clear removes it (happy path).
-  - `src/services/discord/tui_prompt_relay.rs` (5071 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (5142 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3167: the self-paced TUI loop relay
     starts its synthetic turn with `ActiveTurnKind::Background` so a queued user
@@ -501,7 +501,21 @@
     self-gates on `bridge_adapter_owns_external_turn`, so a watcher/stale lease can
     never double-relay. New parallel no-GAP tests assert `relayer_count == 1` for
     BOTH resolved owners (RED before this fix: BridgeAdapter count == 0 == GAP;
-    over-eager spawn would push the watcher path to count == 2 == DUPLICATE).
+    over-eager spawn would push the watcher path to count == 2 == DUPLICATE);
+    +71 from #3154 codex P1 (timestamp-anchor output loss): the worker-spawned
+    BridgeAdapter tail used to synthesize `observed_at = Utc::now()` AFTER the
+    deferred-claim wait, so `maybe_spawn_claude_idle_response_tail`'s timestamp
+    scan skipped every transcript byte written during the wait window (the bytes
+    of THIS synthetic turn). The claim now carries its post-drain EOF
+    `turn_start_offset` (the `relay_last_offset()` it already seeded into the
+    inflight) on `TuiDirectSyntheticTurnClaim`, and the worker passes it as the
+    new `explicit_start_offset` arg; the shared `resolve_idle_tail_start_offset`
+    choke point anchors DIRECTLY to that offset (bypassing the `Utc::now()` scan)
+    for the deferred path while the inline path keeps the timestamp scan
+    (`None`). The committed-offset clamp still dedupes against watcher delivery,
+    so the relayed window is exactly `[turn_start_offset, EOF)` — no byte skip,
+    no prior-turn re-relay (RED→GREEN test: stale-high fallback skips the turn
+    under the old scan, explicit anchor relays it whole).
   - `src/services/discord/idle_recap.rs` (1881 prod lines; idle-recap card
     compose/post/clear surface, registered giant-file (#3036) — bugfix only
     outside an extraction plan. Crossed 1000 prod LoC with #3146 Part 1: the

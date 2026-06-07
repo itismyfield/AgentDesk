@@ -1003,6 +1003,9 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                 &prompt,
                 &lease,
                 current_turn_anchor_id,
+                // Inline / non-deferred path keeps the original `observed_at`
+                // timestamp-scan anchoring (no deferred-claim wait window here).
+                None,
             )
             .await
             && let Some(guard) = lease_guard.as_mut()
@@ -1317,6 +1320,13 @@ fn claim_should_adopt_relay_owner(
 struct TuiDirectSyntheticTurnClaim {
     relay_owner: ExternalInputRelayOwner,
     claimed: bool,
+    // #3154 P1 (timestamp-anchor output loss): the post-drain EOF offset
+    // (`relay_last_offset()`) the claim seeded into this turn's inflight
+    // `turn_start_offset`. The deferred-BridgeAdapter worker must anchor its
+    // bridge tail to THIS offset (the authoritative byte boundary for this
+    // synthetic turn) instead of a `Utc::now()` timestamp scan, which can skip
+    // bytes written to the transcript during the deferred-claim wait window.
+    turn_start_offset: u64,
 }
 
 async fn finish_tui_direct_synthetic_pre_save_failure(
@@ -1401,6 +1411,7 @@ async fn claim_tui_direct_synthetic_turn(
             return TuiDirectSyntheticTurnClaim {
                 relay_owner,
                 claimed: false,
+                turn_start_offset: start_offset,
             };
         }
     }
@@ -1476,6 +1487,7 @@ async fn claim_tui_direct_synthetic_turn(
             return TuiDirectSyntheticTurnClaim {
                 relay_owner,
                 claimed: false,
+                turn_start_offset: start_offset,
             };
         }
         if started {
@@ -1493,6 +1505,7 @@ async fn claim_tui_direct_synthetic_turn(
         return TuiDirectSyntheticTurnClaim {
             relay_owner,
             claimed: true,
+            turn_start_offset: start_offset,
         };
     }
 
@@ -1522,6 +1535,7 @@ async fn claim_tui_direct_synthetic_turn(
         return TuiDirectSyntheticTurnClaim {
             relay_owner,
             claimed: false,
+            turn_start_offset: start_offset,
         };
     }
 
@@ -1544,6 +1558,7 @@ async fn claim_tui_direct_synthetic_turn(
     TuiDirectSyntheticTurnClaim {
         relay_owner,
         claimed: true,
+        turn_start_offset: start_offset,
     }
 }
 
@@ -1767,6 +1782,12 @@ fn pending_start_claim_fn() -> super::tui_direct_pending_start::ClaimFn {
                     )
                     .unwrap_or_else(|| lease.clone());
                 tail_lease.relay_owner = claim.relay_owner;
+                // #3154 P1 (timestamp-anchor output loss): `observed_at` is NO LONGER
+                // used to anchor the tail's start offset for this deferred path — we
+                // pass the claim's post-drain EOF `turn_start_offset` explicitly below
+                // (see `explicit_start_offset`). It remains on the struct only for the
+                // tail's tracing/lease bookkeeping; a `Utc::now()` timestamp scan here
+                // would skip bytes written during the deferred-claim wait window.
                 let observed = ObservedTuiPrompt {
                     provider: record.provider.clone(),
                     tmux_session_name: record.tmux_session_name.clone(),
@@ -1779,6 +1800,9 @@ fn pending_start_claim_fn() -> super::tui_direct_pending_start::ClaimFn {
                     &observed,
                     &tail_lease,
                     Some(record.anchor_message_id),
+                    // Anchor to the claim's post-drain EOF offset (source of truth
+                    // for this synthetic turn's first byte) — NOT a timestamp scan.
+                    Some(claim.turn_start_offset),
                 )
                 .await;
                 tracing::info!(
@@ -1980,6 +2004,18 @@ async fn maybe_spawn_claude_idle_response_tail(
     prompt: &ObservedTuiPrompt,
     lease: &ExternalInputRelayLease,
     current_turn_anchor_id: Option<u64>,
+    // #3154 P1 (timestamp-anchor output loss): when `Some`, anchor the tail's
+    // start to THIS explicit transcript byte offset (the deferred claim's
+    // post-drain EOF `turn_start_offset`) and SKIP the `observed_at` timestamp
+    // scan. The timestamp scan picks the first transcript line at/after
+    // `prompt.observed_at`; for the worker-spawned deferred-BridgeAdapter path
+    // that timestamp is a `Utc::now()` synthesized AFTER the claim wait, so the
+    // scan skips every byte written during the wait window — those bytes belong
+    // to this synthetic turn and would be lost. The post-drain EOF offset is the
+    // exact turn boundary (no skip, no re-relay of prior-turn bytes). `None`
+    // preserves the original timestamp-scan behaviour for the inline /
+    // non-deferred path.
+    explicit_start_offset: Option<u64>,
 ) -> bool {
     if !prompt
         .provider
@@ -2055,8 +2091,9 @@ async fn maybe_spawn_claude_idle_response_tail(
     } else {
         claude_tui_rehydrate_start_offset(&transcript_path)
     };
-    let start_offset = claude_idle_response_start_offset_after_timestamp(
+    let start_offset = resolve_idle_tail_start_offset(
         &transcript_path,
+        explicit_start_offset,
         prompt.observed_at,
         fallback_offset,
     );
@@ -2163,6 +2200,40 @@ where
         if !is_present() {
             return true;
         }
+    }
+}
+
+/// #3154 P1 (timestamp-anchor output loss): single choke point that resolves the
+/// idle-tail start offset.
+///
+/// When `explicit_start_offset` is `Some` (the deferred-BridgeAdapter worker path),
+/// the tail anchors DIRECTLY to that transcript byte offset — the claim's post-drain
+/// EOF `turn_start_offset`, the authoritative byte boundary for this synthetic turn —
+/// and the `observed_at` timestamp scan is BYPASSED. The worker synthesizes
+/// `observed_at = Utc::now()` only AFTER the deferred-claim wait, so every byte
+/// written to the transcript during that wait predates it; a timestamp scan would
+/// find no boundary line and SKIP those bytes (uncapped output loss). The explicit
+/// EOF offset includes every byte of this turn (no skip) and never precedes the
+/// prior bytes (no prior-turn re-relay). `normalize_transcript_fallback_offset`
+/// guards a stale-high offset (past EOF → 0); the committed-offset clamp in
+/// `spawn_claude_idle_response_tail_once` still dedupes against watcher delivery.
+///
+/// When `explicit_start_offset` is `None` (inline / non-deferred path), the original
+/// `observed_at` timestamp-scan anchoring is preserved unchanged.
+#[cfg(unix)]
+fn resolve_idle_tail_start_offset(
+    transcript_path: &Path,
+    explicit_start_offset: Option<u64>,
+    observed_at: chrono::DateTime<chrono::Utc>,
+    fallback_offset: u64,
+) -> u64 {
+    match explicit_start_offset {
+        Some(offset) => normalize_transcript_fallback_offset(transcript_path, offset),
+        None => claude_idle_response_start_offset_after_timestamp(
+            transcript_path,
+            observed_at,
+            fallback_offset,
+        ),
     }
 }
 
@@ -6639,6 +6710,7 @@ mod tests {
                 &prompt,
                 &lease,
                 None,
+                None,
             )
             .await;
             if spawned {
@@ -7237,6 +7309,106 @@ mod tests {
             claude_idle_response_start_offset_after_timestamp(&transcript, turn_started_at, 99_999);
 
         assert_eq!(offset, 0);
+    }
+
+    // #3154 P1 (timestamp-anchor output loss): the worker-spawned BridgeAdapter
+    // tail must anchor to the claim's post-drain EOF `turn_start_offset`, NOT a
+    // `Utc::now()` timestamp scan. This proves the divergence on a transcript that
+    // models the deferred-claim wait window: prior-turn bytes occupy `[0, X)`;
+    // X is the post-drain EOF (the claim's `turn_start_offset`); THIS synthetic
+    // turn then writes its response bytes at `[X, EOF)` DURING the wait, all with
+    // timestamps that predate the worker's `Utc::now()` spawn (the worker spawns
+    // the tail only AFTER the deferred claim resolves).
+    //
+    // RED (old `Utc::now()` timestamp anchoring): the scan looks for the first
+    // line at/after `Utc::now()`. Every byte written during the wait predates it,
+    // so the scan returns None and the start offset lands at the fallback (the
+    // prior cursor) or — when the fallback is the stale binding cursor at X but
+    // the scan would have to advance PAST the turn's lines — the turn's bytes in
+    // `[X, EOF)` are skipped: output loss.
+    //
+    // GREEN (explicit `turn_start_offset` anchoring): the start offset is exactly
+    // X. The tail relays `[X, EOF)` — every byte of this turn, no skip — and never
+    // re-reads `[0, X)` (no prior-turn re-relay). The EOF offset is the boundary.
+    #[cfg(unix)]
+    #[test]
+    fn worker_bridge_tail_anchors_to_turn_start_offset_not_utc_now_timestamp_scan() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transcript = dir.path().join("transcript.jsonl");
+
+        // Prior turn's bytes: `[0, X)`. These are NOT part of this synthetic turn.
+        let prior_a = r#"{"timestamp":"2026-05-28T00:00:00Z","type":"assistant"}"#;
+        let prior_b = r#"{"timestamp":"2026-05-28T00:00:01Z","type":"assistant"}"#;
+        let prior = format!("{prior_a}\n{prior_b}\n");
+        let turn_start_offset = prior.len() as u64; // post-drain EOF == X (claim's turn_start_offset)
+
+        // THIS synthetic turn's response bytes, written at `[X, EOF)` DURING the
+        // deferred-claim wait. Their timestamps predate the worker's spawn instant.
+        let turn_a = r#"{"timestamp":"2026-05-28T00:00:05Z","type":"assistant","text":"part-1"}"#;
+        let turn_b = r#"{"timestamp":"2026-05-28T00:00:06Z","type":"assistant","text":"part-2"}"#;
+        let turn = format!("{turn_a}\n{turn_b}\n");
+        std::fs::write(&transcript, format!("{prior}{turn}")).expect("write transcript");
+        let eof = (prior.len() + turn.len()) as u64;
+
+        // The worker synthesizes `observed_at = Utc::now()` only AFTER the claim
+        // wait — strictly after every byte above was written.
+        let worker_spawn_now = chrono::DateTime::parse_from_rfc3339("2026-05-28T00:01:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // The worker's fallback is the STALE binding cursor — a real pre-reseed
+        // value that points PAST this turn (here: EOF). The explicit-anchor path
+        // MUST override it; if the explicit offset were ignored and the timestamp
+        // scan ran with this fallback, the turn's bytes would be skipped. Using a
+        // stale-high fallback (not == X) is what makes the GREEN assertion FAIL if
+        // the fix is reverted (explicit anchor ignored) — i.e. a true RED→GREEN.
+        let fallback_offset = eof;
+
+        // RED — the old `Utc::now()` timestamp anchoring (what the worker did
+        // before this fix): `resolve_idle_tail_start_offset(.., explicit=None, ..)`
+        // runs the timestamp scan. Every byte of this turn predates `worker_spawn_now`,
+        // so the scan finds no boundary line and returns the fallback. The relay
+        // window then starts at the fallback. Demonstrate the skip directly: when
+        // the fallback is the stale-high prior cursor (a real pre-reseed value),
+        // the timestamp path lands PAST this turn and skips ALL of its bytes.
+        let red_offset = resolve_idle_tail_start_offset(
+            &transcript,
+            None, // old worker behaviour: no explicit anchor → Utc::now() scan
+            worker_spawn_now,
+            eof, // stale-high fallback (== EOF) the scan falls back to
+        );
+        assert_eq!(
+            red_offset, eof,
+            "RED: Utc::now() timestamp anchoring finds no boundary line (all bytes predate \
+             the spawn instant) and falls back PAST this turn — the relay window [eof, eof) \
+             skips every byte of this synthetic turn"
+        );
+        assert!(
+            eof - red_offset < turn.len() as u64,
+            "RED: bytes of this turn are skipped (relayed window is smaller than the turn)"
+        );
+
+        // GREEN — explicit anchoring on the claim's post-drain EOF `turn_start_offset`
+        // (what the fixed worker passes: `explicit_start_offset = Some(turn_start_offset)`).
+        // `observed_at`/`fallback` are IGNORED on this path.
+        let green_offset = resolve_idle_tail_start_offset(
+            &transcript,
+            Some(turn_start_offset),
+            worker_spawn_now, // must be ignored
+            fallback_offset,  // must be ignored
+        );
+        assert_eq!(
+            green_offset, turn_start_offset,
+            "GREEN: explicit turn_start_offset anchoring relays from X — NO byte skip"
+        );
+        assert!(
+            green_offset >= prior.len() as u64,
+            "GREEN: the anchor never re-reads prior-turn bytes [0, X) (no re-relay)"
+        );
+        assert_eq!(
+            eof - green_offset,
+            turn.len() as u64,
+            "GREEN: the relayed window [X, EOF) is EXACTLY this synthetic turn's bytes"
+        );
     }
 
     #[test]
