@@ -53,6 +53,15 @@ pub(crate) fn discord_pending_queue_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_pending_queue"))
 }
 
+/// #3154: durable store for TUI-direct synthetic turn-starts that must be
+/// claimed only AFTER the prior turn on the same channel finalizes. A wakeup/
+/// loop turn writes one record here (before any wait); a detached per-channel
+/// worker claims it post-drain and deletes the record. Restored on startup so a
+/// dcserver restart mid-wait neither loses the turn nor resubmits the prompt.
+pub(crate) fn tui_direct_pending_start_root() -> Option<PathBuf> {
+    runtime_root().map(|root| root.join("discord_tui_direct_pending_start"))
+}
+
 /// #3003: durable retry store for orphaned status-panel-v2 message deletes that
 /// failed transiently when no per-turn inflight handle survived (e.g. a
 /// stopped/cancelled TUI-direct turn). Drained by the placeholder sweeper.

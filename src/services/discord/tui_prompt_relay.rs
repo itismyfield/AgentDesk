@@ -416,6 +416,11 @@ pub(super) fn spawn_tui_prompt_relay(shared: Arc<SharedData>, provider: Provider
         spawn_claude_idle_transcript_relay(shared.clone());
     }
 
+    // #3154 restart durability: restore any durable pending synthetic
+    // turn-starts for this provider before the observer loop runs, so a dcserver
+    // restart mid-wait neither loses the wakeup turn nor resubmits its prompt.
+    restore_pending_starts(&shared, &provider);
+
     let provider_name = provider.as_str().to_string();
     let observer_span = tracing::info_span!(
         "tui_prompt_relay_observer",
@@ -636,6 +641,11 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     // by the idle-tail drain-wait to identity-pin our own inflight (so it does not
     // self-deadlock) while still waiting on any genuinely distinct previous turn.
     let mut current_turn_anchor_id: Option<u64> = None;
+    // #3154 P1-3: declared at function scope so the post-block bridge-tail guard
+    // can read it. Set true when the synthetic turn-start is deferred to the
+    // detached worker (see the active-turn block below); the observer then skips
+    // its own BridgeAdapter idle-response tail to avoid duplicate relay.
+    let mut deferred_synthetic_start = false;
     if is_system_continuation {
         // #3178 (codex fix): only SystemContinuation reaches here now —
         // SlashCommandControl was removed from `suppresses_user_turn_lifecycle`
@@ -785,6 +795,69 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             channel_id.get(),
             anchor_message.id.get(),
         );
+        // #3174: turn-identity guard on the ⏳ lifecycle vs the watcher's
+        // lease-gated completion. If the provider committed terminal output
+        // inside the sub-second `notify-post + ⏳-add` window above, the watcher's
+        // lease-gated completion already fired BEFORE this `record_prompt_anchor`
+        // landed — it found no anchor, was a no-op, and recorded a deferred-
+        // completion marker (the lease it gated on is cleared after that
+        // delivery, so no later watcher pass would reconcile the ⏳). Now that
+        // THIS turn's anchor exists, drain that marker and finish the
+        // ⏳ → ✅ swap against the just-recorded anchor.
+        //
+        // #3174 codex P1 (turn identity): the marker is stamped with the
+        // `generation` of the lease the watcher completion gated on; drain ONLY
+        // the marker matching THIS relay invocation's lease generation
+        // (`lease.generation`), so a NEWER same-(provider,tmux) turn's marker is
+        // never cross-consumed and the wrong turn's ⏳ is never completed.
+        //
+        // #3174 codex P2 (HTTP fail-open): PEEK the marker first, then only
+        // consume (`take_...`) once we have a `command_http` to actually deliver
+        // the ⏳ → ✅ swap. If command_http is unavailable we leave the marker in
+        // place rather than silently dropping it — mirrors the #3164 ⏳-add
+        // fail-open (skip rather than strand worse than before); a later anchor
+        // record / watcher pass can still reconcile it within the marker TTL.
+        // No-op on the common path (no terminal output yet → no marker). The
+        // peek + consume/fail-open DECISION is in
+        // [`decide_deferred_anchor_completion_drain`] (pure, against the real
+        // dedupe state) so it is integration-testable: a test that records a
+        // matching marker and drives this block must see the marker consumed and
+        // the completion delivered; neutralizing the decision (or the consume)
+        // makes that test fail.
+        match decide_deferred_anchor_completion_drain(
+            &prompt.provider,
+            &prompt.tmux_session_name,
+            lease.generation,
+            command_http.is_some(),
+        ) {
+            DeferredAnchorCompletionDrain::Complete => {
+                // command_http is available (decision required it) — deliver.
+                let command_http = command_http
+                    .as_ref()
+                    .expect("decision returns Complete only when command_http is_some");
+                let _ = complete_tui_direct_prompt_anchor_lifecycle_if_present(
+                    command_http,
+                    &prompt.provider,
+                    &prompt.tmux_session_name,
+                    channel_id,
+                    "relay_record_prompt_anchor_drains_deferred_lease_gated_completion",
+                )
+                .await;
+            }
+            DeferredAnchorCompletionDrain::LeftIntactHttpUnavailable => {
+                // #3174 codex P2: command_http unavailable — the decision LEFT the
+                // marker set (did not consume it), so the deferred completion stays
+                // claimable (within its TTL) instead of losing the ⏳ → ✅ swap.
+                tracing::warn!(
+                    provider = %prompt.provider,
+                    channel_id = channel_id.get(),
+                    tmux_session_name = %prompt.tmux_session_name,
+                    turn_lease_generation = lease.generation,
+                    "#3174: deferred lease-gated completion owed but command_http unavailable; left marker intact (fail-open) rather than dropping the ⏳ swap"
+                );
+            }
+            DeferredAnchorCompletionDrain::NoMarker => {}
+        }
         // #3099: a `<task-notification>` auto-turn is still a real provider turn
         // that earns the same synthetic ownership as human direct input — the
         // difference is purely that its `⏳` completion cleanup must be anchored on
@@ -797,28 +870,81 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                 || matches!(injected_class, InjectedPromptClass::TaskNotificationEvent),
             "system-continuation injections must not reach active-turn handling",
         );
+        // #3154 P1-3: set when the synthetic turn-start is DEFERRED to the
+        // detached per-channel worker. In that case the observer must NOT spawn
+        // its own BridgeAdapter idle-response tail below: the deferred worker
+        // claims the turn (often as the WATCHER owner) only after the prior turn
+        // drains, and re-records the lease accordingly. Letting the observer
+        // spawn a bridge tail here on the (stale, pre-claim) BridgeAdapter lease
+        // would run a second relay of the SAME output once the watcher claims →
+        // duplicate relay (the original bug). The deferred worker owns the
+        // relay-owner handoff end-to-end.
         if let Some(provider) = ProviderKind::from_str(&prompt.provider) {
-            let claim = claim_tui_direct_synthetic_turn(
+            // #3154 — TEMPORAL fix for turn-interleaving. If the PRIOR turn on
+            // this channel has not finalized (its relay tail is still draining),
+            // claiming the synthetic turn-start INLINE here (on the shared
+            // per-provider observer loop) seeds `turn_start_offset` from the
+            // prior relay cursor while that tail is undrained → the
+            // `response_sent_offset_monotonic` collision / duplicate relay this
+            // issue tracks. AND any inline wait here starves OTHER channels'
+            // relays (single observer loop). So: when the prior turn is not
+            // finalized, persist a DURABLE pending-start record and hand the
+            // claim to a DETACHED per-channel worker, then return to the loop.
+            // The worker waits for the prior turn to finalize, then claims with
+            // a FRESH EOF `turn_start_offset`. The common no-interleave case
+            // (prior turn already finalized) stays on the inline fast path.
+            let prior = synthetic_start_prior_turn_view(
                 shared,
                 &provider,
                 channel_id,
                 &prompt.tmux_session_name,
-                &prompt.prompt,
-                anchor_message.id,
-                &lease,
+                anchor_message.id.get(),
             )
             .await;
-            if claim.claimed && lease.relay_owner != claim.relay_owner {
-                lease.relay_owner = claim.relay_owner;
-                // Re-record overwrites the lease with a FRESH generation; adopt it
-                // back into `lease` so the bridge-tail guard below captures the
-                // exact stored identity (otherwise the guard would hold the stale
-                // generation and its Drop would clear nothing / the wrong lease).
-                lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
-                    provider.as_str(),
-                    &prompt.tmux_session_name,
-                    lease,
+            if super::tui_direct_pending_start::should_defer_synthetic_turn_start(prior) {
+                deferred_synthetic_start = true;
+                defer_synthetic_turn_start(
+                    shared,
+                    &provider,
+                    channel_id,
+                    &prompt,
+                    anchor_message.id,
+                    &lease,
                 );
+                tracing::info!(
+                    provider = %prompt.provider,
+                    channel_id = channel_id.get(),
+                    tmux_session_name = %prompt.tmux_session_name,
+                    anchor_message_id = anchor_message.id.get(),
+                    "deferred TUI-direct synthetic turn-start off the observer loop; prior turn not yet finalized (durable record persisted, detached per-channel worker spawned)"
+                );
+            } else {
+                let claim = claim_tui_direct_synthetic_turn(
+                    shared,
+                    &provider,
+                    channel_id,
+                    &prompt.tmux_session_name,
+                    &prompt.prompt,
+                    anchor_message.id,
+                    &lease,
+                )
+                .await;
+                if claim_should_adopt_relay_owner(
+                    claim.claimed,
+                    lease.relay_owner,
+                    claim.relay_owner,
+                ) {
+                    lease.relay_owner = claim.relay_owner;
+                    // Re-record overwrites the lease with a FRESH generation; adopt it
+                    // back into `lease` so the bridge-tail guard below captures the
+                    // exact stored identity (otherwise the guard would hold the stale
+                    // generation and its Drop would clear nothing / the wrong lease).
+                    lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+                        provider.as_str(),
+                        &prompt.tmux_session_name,
+                        lease,
+                    );
+                }
             }
         }
         tracing::info!(
@@ -845,25 +971,41 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
 
     #[cfg(unix)]
     {
-        let mut lease_guard = ProviderKind::from_str(&prompt.provider).and_then(|provider| {
-            (matches!(provider, ProviderKind::Claude)
-                && bridge_adapter_owns_external_turn(lease.relay_owner))
-            .then(|| {
-                TuiDirectExternalInputLeaseGuard::new(
-                    provider,
-                    &prompt.tmux_session_name,
-                    channel_id,
-                    &lease,
-                )
+        // #3154 P1-3: when the synthetic turn-start was deferred, the detached
+        // worker owns the relay-owner handoff (it claims after the prior turn
+        // drains and re-records the lease as the watcher owner). The observer
+        // must NOT also spawn a BridgeAdapter tail here on the pre-claim lease,
+        // or the SAME output relays twice once the watcher claims.
+        let mut lease_guard: Option<TuiDirectExternalInputLeaseGuard> = if deferred_synthetic_start
+        {
+            None
+        } else {
+            ProviderKind::from_str(&prompt.provider).and_then(|provider| {
+                (matches!(provider, ProviderKind::Claude)
+                    && observer_should_spawn_bridge_tail(
+                        deferred_synthetic_start,
+                        lease.relay_owner,
+                    ))
+                .then(|| {
+                    TuiDirectExternalInputLeaseGuard::new(
+                        provider,
+                        &prompt.tmux_session_name,
+                        channel_id,
+                        &lease,
+                    )
+                })
             })
-        });
-        if bridge_adapter_owns_external_turn(lease.relay_owner)
+        };
+        if observer_should_spawn_bridge_tail(deferred_synthetic_start, lease.relay_owner)
             && maybe_spawn_claude_idle_response_tail(
                 shared.clone(),
                 channel_id,
                 &prompt,
                 &lease,
                 current_turn_anchor_id,
+                // Inline / non-deferred path keeps the original `observed_at`
+                // timestamp-scan anchoring (no deferred-claim wait window here).
+                None,
             )
             .await
             && let Some(guard) = lease_guard.as_mut()
@@ -874,6 +1016,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     #[cfg(not(unix))]
     {
         let _ = &mut lease;
+        let _ = deferred_synthetic_start;
     }
 }
 
@@ -1107,10 +1250,83 @@ fn bridge_adapter_owns_external_turn(owner: ExternalInputRelayOwner) -> bool {
     matches!(owner, ExternalInputRelayOwner::BridgeAdapter)
 }
 
+/// #3154 P1-3 no-relay-GAP guard. Decides whether the OBSERVER loop may spawn its
+/// own BridgeAdapter idle-response tail for this turn.
+///
+/// The relay of a turn's output must come from EXACTLY ONE owner — never zero (a
+/// GAP: the output is silently dropped) and never two (a DUPLICATE relay).
+///
+/// * When the synthetic turn-start was DEFERRED, the OBSERVER cannot yet know the
+///   RESOLVED relay owner: the claim runs LATER in the detached worker (it reads
+///   the runtime binding FRESH, post-drain, and only then resolves TmuxWatcher vs
+///   BridgeAdapter — see `claim_tui_direct_synthetic_turn`). Spawning here on the
+///   stale, pre-claim lease would either double-relay (watcher case) or relay the
+///   wrong (undrained) offset. So the observer STANDS DOWN unconditionally on the
+///   deferred path and hands the bridge-tail decision to the worker, which re-runs
+///   the OWNER-KIND-AWARE [`deferred_claim_requires_bridge_tail_relayer`] against
+///   the RESOLVED owner.
+/// * When NOT deferred, the observer spawns the bridge tail iff the lease's owner
+///   is still the BridgeAdapter (the inline claim already adopted any watcher
+///   handoff into `lease.relay_owner`, so a watcher-owned lease means the watcher
+///   relays and the observer stands down).
+///
+/// Pairing this with the deferred worker's owner-kind-aware bridge-tail spawn
+/// (which guarantees EXACTLY ONE relayer for EITHER resolved owner) is what proves
+/// there is no GAP and no duplicate on the deferred path.
+fn observer_should_spawn_bridge_tail(
+    deferred_synthetic_start: bool,
+    lease_owner: ExternalInputRelayOwner,
+) -> bool {
+    !deferred_synthetic_start && bridge_adapter_owns_external_turn(lease_owner)
+}
+
+/// #3154 P1 (BridgeAdapter-GAP fix). The OWNER-KIND-AWARE decision the deferred
+/// worker runs AFTER its claim resolves the relay owner. It mirrors the inline
+/// (non-deferred) observer path exactly:
+///
+/// * Resolved owner == TmuxWatcher ⇒ the watcher relays the turn's output, so the
+///   bridge tail must STAND DOWN (else DUPLICATE relay — the original P1-3 bug).
+/// * Resolved owner == BridgeAdapter ⇒ NO watcher will relay this turn, and the
+///   observer already stood down (deferred). The bridge tail MUST run exactly once
+///   here, or the synthetic turn's output is never relayed (the BridgeAdapter-GAP:
+///   `relayer_count == 0`). The observer's unconditional deferred skip in
+///   [`observer_should_spawn_bridge_tail`] is only correct BECAUSE this worker-side
+///   fallback closes the BridgeAdapter case.
+///
+/// The downstream [`maybe_spawn_claude_idle_response_tail`] independently re-checks
+/// `bridge_adapter_owns_external_turn` before spawning, so a stale/watcher lease can
+/// never produce a second relayer even if this predicate were called too eagerly.
+fn deferred_claim_requires_bridge_tail_relayer(resolved_owner: ExternalInputRelayOwner) -> bool {
+    bridge_adapter_owns_external_turn(resolved_owner)
+}
+
+/// #3154 P1-3 relay-owner adoption decision. After a synthetic claim resolves,
+/// the in-memory lease must adopt the claim's `relay_owner` iff the claim
+/// SUCCEEDED and the owner actually changed. Re-recording the lease with the
+/// claimed (watcher) owner is what makes [`observer_should_spawn_bridge_tail`]
+/// (and the bridge-tail guard) read a watcher-owned lease and stand down — so
+/// the deferred worker's claimed owner is the SINGLE relayer (no GAP, no dup).
+/// Shared by the inline (non-deferred) path and the deferred worker so both
+/// adopt identically.
+fn claim_should_adopt_relay_owner(
+    claimed: bool,
+    current_owner: ExternalInputRelayOwner,
+    claimed_owner: ExternalInputRelayOwner,
+) -> bool {
+    claimed && current_owner != claimed_owner
+}
+
 #[derive(Debug)]
 struct TuiDirectSyntheticTurnClaim {
     relay_owner: ExternalInputRelayOwner,
     claimed: bool,
+    // #3154 P1 (timestamp-anchor output loss): the post-drain EOF offset
+    // (`relay_last_offset()`) the claim seeded into this turn's inflight
+    // `turn_start_offset`. The deferred-BridgeAdapter worker must anchor its
+    // bridge tail to THIS offset (the authoritative byte boundary for this
+    // synthetic turn) instead of a `Utc::now()` timestamp scan, which can skip
+    // bytes written to the transcript during the deferred-claim wait window.
+    turn_start_offset: u64,
 }
 
 async fn finish_tui_direct_synthetic_pre_save_failure(
@@ -1195,6 +1411,7 @@ async fn claim_tui_direct_synthetic_turn(
             return TuiDirectSyntheticTurnClaim {
                 relay_owner,
                 claimed: false,
+                turn_start_offset: start_offset,
             };
         }
     }
@@ -1270,6 +1487,7 @@ async fn claim_tui_direct_synthetic_turn(
             return TuiDirectSyntheticTurnClaim {
                 relay_owner,
                 claimed: false,
+                turn_start_offset: start_offset,
             };
         }
         if started {
@@ -1287,6 +1505,7 @@ async fn claim_tui_direct_synthetic_turn(
         return TuiDirectSyntheticTurnClaim {
             relay_owner,
             claimed: true,
+            turn_start_offset: start_offset,
         };
     }
 
@@ -1316,6 +1535,7 @@ async fn claim_tui_direct_synthetic_turn(
         return TuiDirectSyntheticTurnClaim {
             relay_owner,
             claimed: false,
+            turn_start_offset: start_offset,
         };
     }
 
@@ -1338,6 +1558,306 @@ async fn claim_tui_direct_synthetic_turn(
     TuiDirectSyntheticTurnClaim {
         relay_owner,
         claimed: true,
+        turn_start_offset: start_offset,
+    }
+}
+
+// ===========================================================================
+// #3154 — deferred synthetic turn-start (off the observer loop)
+// ===========================================================================
+
+/// Build the [`PriorTurnView`](super::tui_direct_pending_start::PriorTurnView)
+/// for the synthetic-start deferral decision: read inflight, mailbox, and the
+/// fresh runtime binding for this provider/channel/session.
+async fn synthetic_start_prior_turn_view(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    own_anchor_id: u64,
+) -> super::tui_direct_pending_start::PriorTurnView {
+    let inflight = super::inflight::load_inflight_state(provider, channel_id.get());
+    let inflight_present = inflight.is_some();
+    let inflight_is_own_anchor = inflight
+        .as_ref()
+        .map(|state| {
+            state.turn_source == TurnSource::ExternalInput
+                && state.tmux_session_name.as_deref() == Some(tmux_session_name)
+                && state.user_msg_id == own_anchor_id
+        })
+        .unwrap_or(false);
+
+    let snapshot = super::mailbox_snapshot(shared, channel_id).await;
+    // A BACKGROUND turn (monitor relay / self-paced loop) does not block — only a
+    // real (non-background) active turn is a blocking prior turn (mirrors the
+    // idle-queue kickoff gate at mod.rs `idle_queue_snapshot_has_kickable_backlog`).
+    let mailbox_blocking_turn_present =
+        snapshot.cancel_token.is_some() && !snapshot.active_turn_kind.is_background();
+    let mailbox_turn_is_own_anchor =
+        snapshot.active_user_message_id == Some(MessageId::new(own_anchor_id));
+
+    let runtime_binding_present =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name)
+            .is_some();
+
+    super::tui_direct_pending_start::PriorTurnView {
+        inflight_present,
+        inflight_is_own_anchor,
+        mailbox_blocking_turn_present,
+        mailbox_turn_is_own_anchor,
+        runtime_binding_present,
+    }
+}
+
+/// Persist a durable pending-start record and spawn the detached per-channel
+/// worker. Returns immediately (non-blocking for the observer loop).
+fn defer_synthetic_turn_start(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    prompt: &ObservedTuiPrompt,
+    anchor_message_id: MessageId,
+    lease: &ExternalInputRelayLease,
+) {
+    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let record = super::tui_direct_pending_start::TuiDirectPendingStart {
+        provider: provider.as_str().to_string(),
+        channel_id: channel_id.get(),
+        tmux_session_name: prompt.tmux_session_name.clone(),
+        prompt_text: prompt.prompt.clone(),
+        anchor_message_id: anchor_message_id.get(),
+        lease_relay_owner: lease.relay_owner.as_str().to_string(),
+        lease_runtime_kind: lease.runtime_kind.map(|k| k.as_str().to_string()),
+        lease_turn_id: lease.turn_id.clone(),
+        lease_session_key: lease.session_key.clone(),
+        generation: shared.current_generation,
+        created_at_ms: now_ms,
+        observed_at_ms: prompt.observed_at.timestamp_millis().max(0) as u64,
+        state: super::tui_direct_pending_start::PendingStartState::Waiting,
+        attempt_count: 0,
+    };
+    if let Err(error) = super::tui_direct_pending_start::persist(&record) {
+        tracing::warn!(
+            provider = %record.provider,
+            channel_id = record.channel_id,
+            anchor_message_id = record.anchor_message_id,
+            error = %error,
+            "failed to persist durable TUI-direct pending-start record; spawning worker anyway off the in-memory presence index"
+        );
+    }
+    super::tui_direct_pending_start::spawn_worker(
+        shared.clone(),
+        record,
+        pending_start_view_fn(),
+        pending_start_claim_fn(),
+    );
+}
+
+/// The worker's per-poll view builder (see [`synthetic_start_prior_turn_view`]).
+fn pending_start_view_fn() -> super::tui_direct_pending_start::ViewFn {
+    Box::new(|shared, record| {
+        Box::pin(async move {
+            let provider = ProviderKind::from_str(&record.provider)?;
+            let channel_id = ChannelId::new(record.channel_id);
+            Some(
+                synthetic_start_prior_turn_view(
+                    shared,
+                    &provider,
+                    channel_id,
+                    &record.tmux_session_name,
+                    record.anchor_message_id,
+                )
+                .await,
+            )
+        })
+    })
+}
+
+/// The worker's claim action: rehydrate the lease (in case a restart dropped the
+/// in-memory map), then run the normal [`claim_tui_direct_synthetic_turn`] which
+/// reads the runtime binding FRESH and seeds `turn_start_offset = relay_last_offset()`
+/// (post-drain == EOF) with `response_sent_offset = 0`.
+fn pending_start_claim_fn() -> super::tui_direct_pending_start::ClaimFn {
+    Box::new(|shared, record| {
+        Box::pin(async move {
+            let Some(provider) = ProviderKind::from_str(&record.provider) else {
+                return false;
+            };
+            let channel_id = ChannelId::new(record.channel_id);
+            let anchor_message_id = MessageId::new(record.anchor_message_id);
+
+            // Rehydrate the external-input lease from the durable record's
+            // fields (a restart clears the in-memory lease map). NEVER resubmit
+            // the provider prompt — only the relay lease is restored.
+            let mut lease = ExternalInputRelayLease::unassigned(Some(record.channel_id));
+            lease.turn_id = record.lease_turn_id.clone();
+            lease.session_key = record.lease_session_key.clone();
+            lease.relay_owner = parse_external_input_relay_owner(&record.lease_relay_owner);
+            lease.runtime_kind = record
+                .lease_runtime_kind
+                .as_deref()
+                .and_then(RuntimeHandoffKind::from_str);
+            let lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+                provider.as_str(),
+                &record.tmux_session_name,
+                lease,
+            );
+
+            // #3154 design point 6: register the turn with the single-authority
+            // finalizer BEFORE the claim saves the inflight + (implicitly, via
+            // the lease/inflight) releases the watcher gate — mirrors the bridge
+            // register-before-unpause at turn_bridge/mod.rs.
+            shared.turn_finalizer.register_start(
+                super::turn_finalizer::TurnKey::new(
+                    channel_id,
+                    record.anchor_message_id,
+                    shared.current_generation,
+                ),
+                provider.clone(),
+                super::inflight::RelayOwnerKind::Watcher,
+            );
+
+            let claim = claim_tui_direct_synthetic_turn(
+                shared,
+                &provider,
+                channel_id,
+                &record.tmux_session_name,
+                &record.prompt_text,
+                anchor_message_id,
+                &lease,
+            )
+            .await;
+
+            // #3154 P1-3: adopt the claim's relay_owner into the in-memory lease
+            // EXACTLY like the inline (non-deferred) path does (see
+            // `relay_observed_prompt` lines ~854-865). The claim may decide the
+            // tmux WATCHER owns this turn's output; if so, the persisted lease
+            // (rehydrated as BridgeAdapter) is stale. Without re-recording it,
+            // the observer-side `maybe_spawn_claude_idle_response_tail` / bridge
+            // tail keeps running on the stale BridgeAdapter lease while the
+            // watcher relays the same output → DUPLICATE relay (the original
+            // bug). Re-record with the adopted owner so any bridge-tail guard
+            // reading the lease sees the watcher owns it and stops.
+            if claim_should_adopt_relay_owner(claim.claimed, lease.relay_owner, claim.relay_owner) {
+                let mut adopted = lease.clone();
+                adopted.relay_owner = claim.relay_owner;
+                let _ = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+                    provider.as_str(),
+                    &record.tmux_session_name,
+                    adopted,
+                );
+                tracing::info!(
+                    provider = %record.provider,
+                    channel_id = record.channel_id,
+                    tmux_session_name = %record.tmux_session_name,
+                    anchor_message_id = record.anchor_message_id,
+                    prior_relay_owner = lease.relay_owner.as_str(),
+                    adopted_relay_owner = claim.relay_owner.as_str(),
+                    "tui_direct_pending_start: deferred claim adopted watcher relay_owner into the in-memory lease (bridge tail will stand down)"
+                );
+            }
+
+            // #3154 P1 (BridgeAdapter-GAP fix). The observer stood down for ALL
+            // deferred starts because it could not know the RESOLVED owner before
+            // the claim ran. Now that the claim has resolved it, the worker is the
+            // single place that knows the owner kind, so it MIRRORS the inline path:
+            // when the claim resolved to the BridgeAdapter (no watcher will relay
+            // this turn), the worker spawns EXACTLY ONE bridge tail here — otherwise
+            // the synthetic turn's output is never relayed (relayer_count == 0). When
+            // the claim resolved to the watcher this predicate is false (the watcher
+            // is the sole relayer; spawning would double-relay). The spawn is on the
+            // detached worker task (unix), exactly like the observer's unix-only tail.
+            #[cfg(unix)]
+            if claim.claimed && deferred_claim_requires_bridge_tail_relayer(claim.relay_owner) {
+                // The lease the bridge tail reads must reflect the resolved owner.
+                // `claim_should_adopt_relay_owner` above is false for the BridgeAdapter
+                // case (the rehydrated lease was already BridgeAdapter), so re-read the
+                // stored lease (or fall back to the rehydrated one) and ensure it carries
+                // the resolved owner before handing it to the self-gating tail.
+                let mut tail_lease =
+                    crate::services::tui_prompt_dedupe::external_input_relay_lease(
+                        provider.as_str(),
+                        &record.tmux_session_name,
+                        record.channel_id,
+                    )
+                    .unwrap_or_else(|| lease.clone());
+                tail_lease.relay_owner = claim.relay_owner;
+                // #3154 P1 (timestamp-anchor output loss): `observed_at` is NO LONGER
+                // used to anchor the tail's start offset for this deferred path — we
+                // pass the claim's post-drain EOF `turn_start_offset` explicitly below
+                // (see `explicit_start_offset`). It remains on the struct only for the
+                // tail's tracing/lease bookkeeping; a `Utc::now()` timestamp scan here
+                // would skip bytes written during the deferred-claim wait window.
+                let observed = ObservedTuiPrompt {
+                    provider: record.provider.clone(),
+                    tmux_session_name: record.tmux_session_name.clone(),
+                    prompt: record.prompt_text.clone(),
+                    observed_at: chrono::Utc::now(),
+                };
+                let spawned = maybe_spawn_claude_idle_response_tail(
+                    shared.clone(),
+                    channel_id,
+                    &observed,
+                    &tail_lease,
+                    Some(record.anchor_message_id),
+                    // Anchor to the claim's post-drain EOF offset (source of truth
+                    // for this synthetic turn's first byte) — NOT a timestamp scan.
+                    Some(claim.turn_start_offset),
+                )
+                .await;
+                tracing::info!(
+                    provider = %record.provider,
+                    channel_id = record.channel_id,
+                    tmux_session_name = %record.tmux_session_name,
+                    anchor_message_id = record.anchor_message_id,
+                    resolved_relay_owner = claim.relay_owner.as_str(),
+                    bridge_tail_spawned = spawned,
+                    "tui_direct_pending_start: deferred claim resolved to BridgeAdapter owner; worker spawned the bridge tail (no relay GAP)"
+                );
+            }
+            claim.claimed
+        })
+    })
+}
+
+fn parse_external_input_relay_owner(value: &str) -> ExternalInputRelayOwner {
+    match value {
+        "bridge_adapter" => ExternalInputRelayOwner::BridgeAdapter,
+        "tui_prompt_relay" => ExternalInputRelayOwner::TuiPromptRelay,
+        "tmux_watcher" => ExternalInputRelayOwner::TmuxWatcher,
+        "session_bound_relay" => ExternalInputRelayOwner::SessionBoundRelay,
+        _ => ExternalInputRelayOwner::Unassigned,
+    }
+}
+
+/// #3154 restart durability: restore durable pending-start records during
+/// provider relay startup. Rehydrates the in-memory presence index (so the
+/// watcher / idle-queue gates hold immediately) and respawns the worker for each
+/// record whose provider matches.
+fn restore_pending_starts(shared: &Arc<SharedData>, provider: &ProviderKind) {
+    for record in super::tui_direct_pending_start::load_all() {
+        if !record.provider.eq_ignore_ascii_case(provider.as_str()) {
+            continue;
+        }
+        // Re-mark present (load_all does not touch the index) so the gates hold
+        // before the worker's first poll.
+        super::tui_direct_pending_start::mark_present_on_restore(
+            &record.provider,
+            record.channel_id,
+        );
+        tracing::info!(
+            provider = %record.provider,
+            channel_id = record.channel_id,
+            tmux_session_name = %record.tmux_session_name,
+            anchor_message_id = record.anchor_message_id,
+            "restored durable TUI-direct pending-start record on relay startup; respawning detached worker (prompt NOT resubmitted)"
+        );
+        super::tui_direct_pending_start::spawn_worker(
+            shared.clone(),
+            record,
+            pending_start_view_fn(),
+            pending_start_claim_fn(),
+        );
     }
 }
 
@@ -1484,6 +2004,18 @@ async fn maybe_spawn_claude_idle_response_tail(
     prompt: &ObservedTuiPrompt,
     lease: &ExternalInputRelayLease,
     current_turn_anchor_id: Option<u64>,
+    // #3154 P1 (timestamp-anchor output loss): when `Some`, anchor the tail's
+    // start to THIS explicit transcript byte offset (the deferred claim's
+    // post-drain EOF `turn_start_offset`) and SKIP the `observed_at` timestamp
+    // scan. The timestamp scan picks the first transcript line at/after
+    // `prompt.observed_at`; for the worker-spawned deferred-BridgeAdapter path
+    // that timestamp is a `Utc::now()` synthesized AFTER the claim wait, so the
+    // scan skips every byte written during the wait window — those bytes belong
+    // to this synthetic turn and would be lost. The post-drain EOF offset is the
+    // exact turn boundary (no skip, no re-relay of prior-turn bytes). `None`
+    // preserves the original timestamp-scan behaviour for the inline /
+    // non-deferred path.
+    explicit_start_offset: Option<u64>,
 ) -> bool {
     if !prompt
         .provider
@@ -1559,8 +2091,9 @@ async fn maybe_spawn_claude_idle_response_tail(
     } else {
         claude_tui_rehydrate_start_offset(&transcript_path)
     };
-    let start_offset = claude_idle_response_start_offset_after_timestamp(
+    let start_offset = resolve_idle_tail_start_offset(
         &transcript_path,
+        explicit_start_offset,
         prompt.observed_at,
         fallback_offset,
     );
@@ -1667,6 +2200,40 @@ where
         if !is_present() {
             return true;
         }
+    }
+}
+
+/// #3154 P1 (timestamp-anchor output loss): single choke point that resolves the
+/// idle-tail start offset.
+///
+/// When `explicit_start_offset` is `Some` (the deferred-BridgeAdapter worker path),
+/// the tail anchors DIRECTLY to that transcript byte offset — the claim's post-drain
+/// EOF `turn_start_offset`, the authoritative byte boundary for this synthetic turn —
+/// and the `observed_at` timestamp scan is BYPASSED. The worker synthesizes
+/// `observed_at = Utc::now()` only AFTER the deferred-claim wait, so every byte
+/// written to the transcript during that wait predates it; a timestamp scan would
+/// find no boundary line and SKIP those bytes (uncapped output loss). The explicit
+/// EOF offset includes every byte of this turn (no skip) and never precedes the
+/// prior bytes (no prior-turn re-relay). `normalize_transcript_fallback_offset`
+/// guards a stale-high offset (past EOF → 0); the committed-offset clamp in
+/// `spawn_claude_idle_response_tail_once` still dedupes against watcher delivery.
+///
+/// When `explicit_start_offset` is `None` (inline / non-deferred path), the original
+/// `observed_at` timestamp-scan anchoring is preserved unchanged.
+#[cfg(unix)]
+fn resolve_idle_tail_start_offset(
+    transcript_path: &Path,
+    explicit_start_offset: Option<u64>,
+    observed_at: chrono::DateTime<chrono::Utc>,
+    fallback_offset: u64,
+) -> u64 {
+    match explicit_start_offset {
+        Some(offset) => normalize_transcript_fallback_offset(transcript_path, offset),
+        None => claude_idle_response_start_offset_after_timestamp(
+            transcript_path,
+            observed_at,
+            fallback_offset,
+        ),
     }
 }
 
@@ -3879,6 +4446,59 @@ pub(super) fn should_complete_tui_direct_anchor_lifecycle(
         && (lifecycle_stage_paused || !inflight_present)
 }
 
+/// #3174: outcome of the relay's deferred ⏳-completion drain decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DeferredAnchorCompletionDrain {
+    /// No matching marker for this turn — common path, do nothing.
+    NoMarker,
+    /// A matching marker was present AND command_http is available: the marker
+    /// was CONSUMED and the caller must deliver the ⏳ → ✅ swap.
+    Complete,
+    /// A matching marker was present but command_http is unavailable: the marker
+    /// was LEFT INTACT (fail-open) so a later attempt can still reconcile it.
+    LeftIntactHttpUnavailable,
+}
+
+/// #3174 codex P1+P2: decide (and, where safe, perform) the deferred
+/// ⏳-completion drain for THIS turn, then tell the caller what to do.
+///
+/// Turn identity (P1): only a marker stamped with `turn_lease_generation` — the
+/// generation of the lease THIS relay invocation recorded — is considered; a
+/// marker for a different (newer or older) same-(provider,tmux) turn is ignored.
+///
+/// HTTP fail-open (P2): the marker is PEEKED first. It is only consumed
+/// (`take_...`) when `command_http_available` is `true`, i.e. when the caller can
+/// actually deliver the ⏳ → ✅ swap. When HTTP is unavailable the marker is left
+/// in place rather than silently dropped (mirrors the #3164 ⏳-add fail-open).
+///
+/// This decision runs against the real shared dedupe state, so an
+/// integration-style test that records a matching marker and calls this function
+/// observes the production consume/fail-open behaviour directly.
+pub(super) fn decide_deferred_anchor_completion_drain(
+    provider: &str,
+    tmux_session_name: &str,
+    turn_lease_generation: u64,
+    command_http_available: bool,
+) -> DeferredAnchorCompletionDrain {
+    if !crate::services::tui_prompt_dedupe::deferred_anchor_completion_present_for_turn(
+        provider,
+        tmux_session_name,
+        turn_lease_generation,
+    ) {
+        return DeferredAnchorCompletionDrain::NoMarker;
+    }
+    if !command_http_available {
+        return DeferredAnchorCompletionDrain::LeftIntactHttpUnavailable;
+    }
+    // HTTP available — consume the marker; the caller delivers the swap.
+    crate::services::tui_prompt_dedupe::take_deferred_anchor_completion(
+        provider,
+        tmux_session_name,
+        turn_lease_generation,
+    );
+    DeferredAnchorCompletionDrain::Complete
+}
+
 pub(super) async fn complete_tui_direct_prompt_anchor_lifecycle_if_present(
     http: &serenity::Http,
     provider: &str,
@@ -4523,6 +5143,208 @@ use super::tui_task_card::{strip_terminal_controls, truncate_chars_ascii as trun
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ====================================================================
+    // #3154 P2-2 (c) — the KEY residual risk: prove there is NO relay GAP
+    // (not merely no duplicate) on the deferred synthetic-start path.
+    //
+    // The relay of a turn's output must come from EXACTLY ONE owner. The
+    // deferred path has two participants:
+    //   * the OBSERVER's BridgeAdapter idle-response tail, and
+    //   * the deferred worker's claimed (watcher) owner.
+    // If the observer skips but the worker never adopts the watcher owner, the
+    // output is dropped (a GAP). If both run, it relays twice (a DUPLICATE).
+    // These tests pin BOTH production decisions against the REAL lease store.
+    // ====================================================================
+
+    /// Deferred ⇒ the observer must STAND DOWN (skip its bridge tail). RED if
+    /// `observer_should_spawn_bridge_tail` stops honoring `deferred`.
+    #[test]
+    fn deferred_observer_skips_bridge_tail() {
+        // Lease still reads as BridgeAdapter (pre-claim) — the dangerous case:
+        // without the deferred guard the observer WOULD spawn a second relay.
+        assert!(
+            !observer_should_spawn_bridge_tail(true, ExternalInputRelayOwner::BridgeAdapter),
+            "deferred path: the observer must NOT spawn its own bridge tail \
+             (the worker owns the relay handoff) — else DUPLICATE relay"
+        );
+        // Non-deferred + BridgeAdapter owner ⇒ observer relays (the normal path).
+        assert!(observer_should_spawn_bridge_tail(
+            false,
+            ExternalInputRelayOwner::BridgeAdapter
+        ));
+        // Non-deferred but a watcher already owns it ⇒ observer stands down.
+        assert!(!observer_should_spawn_bridge_tail(
+            false,
+            ExternalInputRelayOwner::TmuxWatcher
+        ));
+    }
+
+    /// The no-GAP invariant end-to-end against the REAL lease store. When the
+    /// synthetic start is deferred and the worker's claim resolves to the tmux
+    /// WATCHER, the adoption re-records the lease as watcher-owned. We then prove
+    /// EXACTLY ONE relayer remains:
+    ///   (1) the observer stands down (deferred), AND
+    ///   (2) a watcher relayer exists (the persisted lease is watcher-owned, so
+    ///       the bridge-tail guard reads it and the watcher is the relay owner).
+    /// Together: not zero (no GAP) and not two (no duplicate).
+    #[test]
+    fn deferred_claim_adopts_watcher_owner_exactly_one_relayer_no_gap() {
+        let provider = "claude";
+        let tmux = "tmux-3154-p2-2-c";
+        let channel_id: u64 = 770_000_000_000_001;
+
+        // Worker rehydrates the lease as BridgeAdapter (the persisted pre-claim
+        // owner), records it, then the claim resolves to the WATCHER.
+        let mut lease = ExternalInputRelayLease::unassigned(Some(channel_id));
+        lease.relay_owner = ExternalInputRelayOwner::BridgeAdapter;
+        let lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+            provider, tmux, lease,
+        );
+
+        let claimed_owner = ExternalInputRelayOwner::TmuxWatcher;
+        let claimed = true;
+
+        // PRODUCTION decision: should we adopt the claimed owner? (Mirrors the
+        // real inline + deferred adoption call sites.)
+        assert!(
+            claim_should_adopt_relay_owner(claimed, lease.relay_owner, claimed_owner),
+            "a successful claim that flips the owner MUST adopt — RED if adoption \
+             is skipped, which would leave a stale BridgeAdapter lease and the \
+             observer/bridge tail would relay a SECOND copy"
+        );
+
+        // Perform the adoption exactly as the deferred worker does: re-record the
+        // lease with the claimed owner into the REAL store.
+        let mut adopted = lease.clone();
+        adopted.relay_owner = claimed_owner;
+        crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+            provider, tmux, adopted,
+        );
+
+        // (2) The persisted lease now reads as watcher-owned: a relayer EXISTS.
+        let stored = crate::services::tui_prompt_dedupe::external_input_relay_lease(
+            provider, tmux, channel_id,
+        )
+        .expect("lease present after adoption");
+        assert_eq!(
+            stored.relay_owner,
+            ExternalInputRelayOwner::TmuxWatcher,
+            "after adoption the watcher owns the relay — a relayer EXISTS (no GAP)"
+        );
+
+        // (1) With the watcher owning the lease, the observer stands down whether
+        // or not we re-check the deferred flag — so the watcher is the SOLE
+        // relayer. Count relayers explicitly: observer(0) + watcher(1) == 1.
+        let observer_relays = observer_should_spawn_bridge_tail(true, stored.relay_owner);
+        let watcher_relays = matches!(stored.relay_owner, ExternalInputRelayOwner::TmuxWatcher);
+        let relayer_count = u8::from(observer_relays) + u8::from(watcher_relays);
+        assert_eq!(
+            relayer_count, 1,
+            "EXACTLY ONE relayer on the deferred path: not zero (no GAP) and not \
+             two (no duplicate). RED if adoption is dropped (relayer_count==0, GAP) \
+             or if the observer ignores `deferred` (relayer_count==2, duplicate)."
+        );
+
+        // Hygiene: clear the test lease.
+        let _ = crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
+            provider, tmux, channel_id,
+        );
+    }
+
+    /// #3154 P1 (BridgeAdapter-GAP) — the PARALLEL no-GAP invariant for the OTHER
+    /// resolved owner. When the deferred claim resolves to the BridgeAdapter (NO
+    /// watcher will relay this turn), there must STILL be exactly one relayer: the
+    /// worker spawns the bridge tail. We count relayers explicitly:
+    ///   * observer(0) — stood down on the deferred path, AND
+    ///   * watcher(0) — the resolved owner is the BridgeAdapter, not the watcher, SO
+    ///   * worker bridge tail(1) — `deferred_claim_requires_bridge_tail_relayer` fires.
+    ///
+    /// RED before this fix: the worker never spawned a bridge tail for the
+    /// BridgeAdapter owner, so observer(0) + watcher(0) + worker(0) == 0 == GAP.
+    /// Neutralizing the new branch the OTHER direction (forcing the worker to spawn
+    /// for the WATCHER owner) is covered by the watcher test below staying at 1.
+    #[test]
+    fn deferred_claim_resolves_bridge_owner_exactly_one_relayer_no_gap() {
+        // Deferred ⇒ the observer stands down regardless of owner (it cannot know
+        // the resolved owner pre-claim and hands the decision to the worker).
+        let observer_relays =
+            observer_should_spawn_bridge_tail(true, ExternalInputRelayOwner::BridgeAdapter);
+        assert!(
+            !observer_relays,
+            "deferred path: the observer always stands down (the worker owns the \
+             post-claim bridge-tail decision)"
+        );
+
+        // The claim resolved to the BridgeAdapter: the watcher will NOT relay.
+        let resolved_owner = ExternalInputRelayOwner::BridgeAdapter;
+        let watcher_relays = matches!(resolved_owner, ExternalInputRelayOwner::TmuxWatcher);
+        assert!(!watcher_relays, "BridgeAdapter owner ⇒ no watcher relayer");
+
+        // PRODUCTION decision: the worker MUST spawn its bridge tail for the
+        // BridgeAdapter owner — this is the GAP fix.
+        let worker_bridge_tail = deferred_claim_requires_bridge_tail_relayer(resolved_owner);
+        assert!(
+            worker_bridge_tail,
+            "BridgeAdapter-owned deferred claim MUST get a worker bridge tail — \
+             RED before this fix (worker spawned nothing ⇒ relayer_count == 0 == GAP)"
+        );
+
+        let relayer_count =
+            u8::from(observer_relays) + u8::from(watcher_relays) + u8::from(worker_bridge_tail);
+        assert_eq!(
+            relayer_count, 1,
+            "EXACTLY ONE relayer on the deferred BridgeAdapter path: not zero (no \
+             GAP) and not two (no duplicate). RED if the worker bridge tail is \
+             dropped (count == 0, GAP) or if the observer also relays (count == 2)."
+        );
+    }
+
+    /// #3154 P1 (BridgeAdapter-GAP) — the symmetric guard: when the deferred claim
+    /// resolves to the WATCHER, the worker must NOT spawn a bridge tail (the watcher
+    /// is the sole relayer). This pins the owner-kind-awareness in the OTHER
+    /// direction: neutralizing the branch so the worker spawns unconditionally would
+    /// push the watcher path to relayer_count == 2 (DUPLICATE) and turn this RED.
+    #[test]
+    fn deferred_claim_resolves_watcher_owner_worker_bridge_tail_stands_down() {
+        let resolved_owner = ExternalInputRelayOwner::TmuxWatcher;
+        let observer_relays = observer_should_spawn_bridge_tail(true, resolved_owner);
+        let watcher_relays = matches!(resolved_owner, ExternalInputRelayOwner::TmuxWatcher);
+        let worker_bridge_tail = deferred_claim_requires_bridge_tail_relayer(resolved_owner);
+        assert!(
+            !worker_bridge_tail,
+            "watcher-owned deferred claim MUST NOT get a worker bridge tail — else \
+             DUPLICATE relay (the watcher already relays)"
+        );
+        let relayer_count =
+            u8::from(observer_relays) + u8::from(watcher_relays) + u8::from(worker_bridge_tail);
+        assert_eq!(
+            relayer_count, 1,
+            "EXACTLY ONE relayer on the deferred watcher path (the watcher); RED if \
+             the worker also spawns a bridge tail (count == 2, DUPLICATE)."
+        );
+    }
+
+    /// Adoption must NOT fire when the claim FAILED — a false claim leaves the
+    /// owner untouched (the worker retries; nothing relays yet, by design).
+    #[test]
+    fn failed_claim_does_not_adopt_owner() {
+        assert!(
+            !claim_should_adopt_relay_owner(
+                false,
+                ExternalInputRelayOwner::BridgeAdapter,
+                ExternalInputRelayOwner::TmuxWatcher,
+            ),
+            "a failed claim must not re-record a watcher owner (the turn was not \
+             actually claimed) — RED if adoption ignores the `claimed` flag"
+        );
+        // No-op when the owner did not change.
+        assert!(!claim_should_adopt_relay_owner(
+            true,
+            ExternalInputRelayOwner::TmuxWatcher,
+            ExternalInputRelayOwner::TmuxWatcher,
+        ));
+    }
 
     // #3018: the tmux_watchers registry is the SINGLE authority for
     // tmux-session→channel resolution. When the registry has a mapping it wins
@@ -5888,6 +6710,7 @@ mod tests {
                 &prompt,
                 &lease,
                 None,
+                None,
             )
             .await;
             if spawned {
@@ -6488,6 +7311,106 @@ mod tests {
         assert_eq!(offset, 0);
     }
 
+    // #3154 P1 (timestamp-anchor output loss): the worker-spawned BridgeAdapter
+    // tail must anchor to the claim's post-drain EOF `turn_start_offset`, NOT a
+    // `Utc::now()` timestamp scan. This proves the divergence on a transcript that
+    // models the deferred-claim wait window: prior-turn bytes occupy `[0, X)`;
+    // X is the post-drain EOF (the claim's `turn_start_offset`); THIS synthetic
+    // turn then writes its response bytes at `[X, EOF)` DURING the wait, all with
+    // timestamps that predate the worker's `Utc::now()` spawn (the worker spawns
+    // the tail only AFTER the deferred claim resolves).
+    //
+    // RED (old `Utc::now()` timestamp anchoring): the scan looks for the first
+    // line at/after `Utc::now()`. Every byte written during the wait predates it,
+    // so the scan returns None and the start offset lands at the fallback (the
+    // prior cursor) or — when the fallback is the stale binding cursor at X but
+    // the scan would have to advance PAST the turn's lines — the turn's bytes in
+    // `[X, EOF)` are skipped: output loss.
+    //
+    // GREEN (explicit `turn_start_offset` anchoring): the start offset is exactly
+    // X. The tail relays `[X, EOF)` — every byte of this turn, no skip — and never
+    // re-reads `[0, X)` (no prior-turn re-relay). The EOF offset is the boundary.
+    #[cfg(unix)]
+    #[test]
+    fn worker_bridge_tail_anchors_to_turn_start_offset_not_utc_now_timestamp_scan() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transcript = dir.path().join("transcript.jsonl");
+
+        // Prior turn's bytes: `[0, X)`. These are NOT part of this synthetic turn.
+        let prior_a = r#"{"timestamp":"2026-05-28T00:00:00Z","type":"assistant"}"#;
+        let prior_b = r#"{"timestamp":"2026-05-28T00:00:01Z","type":"assistant"}"#;
+        let prior = format!("{prior_a}\n{prior_b}\n");
+        let turn_start_offset = prior.len() as u64; // post-drain EOF == X (claim's turn_start_offset)
+
+        // THIS synthetic turn's response bytes, written at `[X, EOF)` DURING the
+        // deferred-claim wait. Their timestamps predate the worker's spawn instant.
+        let turn_a = r#"{"timestamp":"2026-05-28T00:00:05Z","type":"assistant","text":"part-1"}"#;
+        let turn_b = r#"{"timestamp":"2026-05-28T00:00:06Z","type":"assistant","text":"part-2"}"#;
+        let turn = format!("{turn_a}\n{turn_b}\n");
+        std::fs::write(&transcript, format!("{prior}{turn}")).expect("write transcript");
+        let eof = (prior.len() + turn.len()) as u64;
+
+        // The worker synthesizes `observed_at = Utc::now()` only AFTER the claim
+        // wait — strictly after every byte above was written.
+        let worker_spawn_now = chrono::DateTime::parse_from_rfc3339("2026-05-28T00:01:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // The worker's fallback is the STALE binding cursor — a real pre-reseed
+        // value that points PAST this turn (here: EOF). The explicit-anchor path
+        // MUST override it; if the explicit offset were ignored and the timestamp
+        // scan ran with this fallback, the turn's bytes would be skipped. Using a
+        // stale-high fallback (not == X) is what makes the GREEN assertion FAIL if
+        // the fix is reverted (explicit anchor ignored) — i.e. a true RED→GREEN.
+        let fallback_offset = eof;
+
+        // RED — the old `Utc::now()` timestamp anchoring (what the worker did
+        // before this fix): `resolve_idle_tail_start_offset(.., explicit=None, ..)`
+        // runs the timestamp scan. Every byte of this turn predates `worker_spawn_now`,
+        // so the scan finds no boundary line and returns the fallback. The relay
+        // window then starts at the fallback. Demonstrate the skip directly: when
+        // the fallback is the stale-high prior cursor (a real pre-reseed value),
+        // the timestamp path lands PAST this turn and skips ALL of its bytes.
+        let red_offset = resolve_idle_tail_start_offset(
+            &transcript,
+            None, // old worker behaviour: no explicit anchor → Utc::now() scan
+            worker_spawn_now,
+            eof, // stale-high fallback (== EOF) the scan falls back to
+        );
+        assert_eq!(
+            red_offset, eof,
+            "RED: Utc::now() timestamp anchoring finds no boundary line (all bytes predate \
+             the spawn instant) and falls back PAST this turn — the relay window [eof, eof) \
+             skips every byte of this synthetic turn"
+        );
+        assert!(
+            eof - red_offset < turn.len() as u64,
+            "RED: bytes of this turn are skipped (relayed window is smaller than the turn)"
+        );
+
+        // GREEN — explicit anchoring on the claim's post-drain EOF `turn_start_offset`
+        // (what the fixed worker passes: `explicit_start_offset = Some(turn_start_offset)`).
+        // `observed_at`/`fallback` are IGNORED on this path.
+        let green_offset = resolve_idle_tail_start_offset(
+            &transcript,
+            Some(turn_start_offset),
+            worker_spawn_now, // must be ignored
+            fallback_offset,  // must be ignored
+        );
+        assert_eq!(
+            green_offset, turn_start_offset,
+            "GREEN: explicit turn_start_offset anchoring relays from X — NO byte skip"
+        );
+        assert!(
+            green_offset >= prior.len() as u64,
+            "GREEN: the anchor never re-reads prior-turn bytes [0, X) (no re-relay)"
+        );
+        assert_eq!(
+            eof - green_offset,
+            turn.len() as u64,
+            "GREEN: the relayed window [X, EOF) is EXACTLY this synthetic turn's bytes"
+        );
+    }
+
     #[test]
     fn codex_idle_prompt_tails_only_new_ssh_direct_prompt() {
         assert!(codex_idle_prompt_observation_should_tail_response(
@@ -6997,6 +7920,119 @@ mod tests {
             clamp_idle_tail_start_offset_to_committed(800, 300),
             800,
             "a lagging committed offset must not drag the start offset backwards"
+        );
+    }
+
+    // #3174 codex P2 (test-gap a): drive the PRODUCTION relay drain decision
+    // (`decide_deferred_anchor_completion_drain`) — the exact function the relay
+    // calls after `record_prompt_anchor` — against the real shared dedupe state.
+    //
+    // Reproduces the ordering race: the watcher's lease-gated completion fired
+    // BEFORE this turn's anchor and recorded a deferred marker stamped with this
+    // turn's lease generation. When the relay's drain runs (HTTP available) it
+    // MUST report `Complete` AND consume the marker. Neutralizing the production
+    // decision (e.g. making it always return `NoMarker`, or dropping the
+    // `take_...`) makes this test fail (RED) — it is NOT satisfiable by the
+    // record/take helpers alone.
+    #[test]
+    fn relay_drain_decision_completes_and_consumes_matching_turn_marker() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+
+        let provider = "claude";
+        let tmux = "AgentDesk-claude-deferred-drain";
+        let channel = 42_u64;
+        let turn_gen = 4242_u64;
+
+        // Watcher anchor-less completion: records the deferred marker for THIS turn.
+        crate::services::tui_prompt_dedupe::record_deferred_anchor_completion(
+            provider, tmux, channel, turn_gen,
+        );
+
+        // Production relay drain decision, HTTP available → Complete + consume.
+        assert_eq!(
+            decide_deferred_anchor_completion_drain(provider, tmux, turn_gen, true),
+            DeferredAnchorCompletionDrain::Complete,
+            "matching marker with HTTP available must drive the completion"
+        );
+        // The marker was consumed: a second drain finds nothing.
+        assert_eq!(
+            decide_deferred_anchor_completion_drain(provider, tmux, turn_gen, true),
+            DeferredAnchorCompletionDrain::NoMarker,
+            "the marker must be consumed exactly once"
+        );
+    }
+
+    // #3174 codex P2 (HTTP fail-open): when command_http is unavailable the drain
+    // decision must NOT consume the marker — it returns
+    // `LeftIntactHttpUnavailable` and a later attempt (HTTP back) still completes.
+    // Proves the swap is not silently lost.
+    #[test]
+    fn relay_drain_decision_fails_open_when_http_unavailable() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+
+        let provider = "claude";
+        let tmux = "AgentDesk-claude-deferred-failopen";
+        let channel = 42_u64;
+        let turn_gen = 9001_u64;
+
+        crate::services::tui_prompt_dedupe::record_deferred_anchor_completion(
+            provider, tmux, channel, turn_gen,
+        );
+
+        // HTTP unavailable → marker LEFT INTACT (not consumed).
+        assert_eq!(
+            decide_deferred_anchor_completion_drain(provider, tmux, turn_gen, false),
+            DeferredAnchorCompletionDrain::LeftIntactHttpUnavailable,
+            "no HTTP must leave the marker claimable, not drop it"
+        );
+        // HTTP now available → the surviving marker still completes (not lost).
+        assert_eq!(
+            decide_deferred_anchor_completion_drain(provider, tmux, turn_gen, true),
+            DeferredAnchorCompletionDrain::Complete,
+            "the fail-open marker must remain drainable by a later HTTP-available attempt"
+        );
+    }
+
+    // #3174 codex P1 (test-gap b): same-key / different-turn isolation through the
+    // PRODUCTION relay drain decision. A marker stamped with turn A's generation
+    // must NOT be cross-consumed when turn B (same provider/tmux, different
+    // generation) drives the drain.
+    #[test]
+    fn relay_drain_decision_does_not_cross_consume_other_turn_marker() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+
+        let provider = "claude";
+        let tmux = "AgentDesk-claude-deferred-isolation";
+        let channel = 42_u64;
+        let turn_a_gen = 100_u64;
+        let turn_b_gen = 101_u64;
+
+        // Turn A's watcher completion records a marker stamped with A's generation.
+        crate::services::tui_prompt_dedupe::record_deferred_anchor_completion(
+            provider, tmux, channel, turn_a_gen,
+        );
+
+        // Turn B (same key, newer generation) drives its drain → must NOT consume A.
+        assert_eq!(
+            decide_deferred_anchor_completion_drain(provider, tmux, turn_b_gen, true),
+            DeferredAnchorCompletionDrain::NoMarker,
+            "a different turn's drain must not cross-consume the marker"
+        );
+
+        // Turn A's own drain still completes its OWN marker.
+        assert_eq!(
+            decide_deferred_anchor_completion_drain(provider, tmux, turn_a_gen, true),
+            DeferredAnchorCompletionDrain::Complete,
+            "the owning turn's drain must still complete its own marker"
         );
     }
 }

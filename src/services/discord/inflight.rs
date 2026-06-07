@@ -1819,6 +1819,75 @@ pub(super) fn clear_inflight_state_if_matches_in_root(
     }
 }
 
+/// #3161 (codex P1): zero-id epilogue/guard cleanup that is STILL identity-safe.
+///
+/// A zero-id turn (recovery / external-input / cluster-relay synthesized;
+/// zero-normalized at [`optional_message_id`]) cannot be authenticated against a
+/// non-zero `expected_user_msg_id`, so [`clear_inflight_state_if_matches`]
+/// deliberately refuses (`expected_user_msg_id == 0` → `UserMsgMismatch`) to
+/// avoid blind-deleting a row it cannot prove ownership of. But a zero-id turn
+/// still legitimately owns *its own* row (whose on-disk `user_msg_id` is also 0)
+/// and must clean it up — recovery cleanup depends on this.
+///
+/// This helper closes that gap: it clears ONLY when the on-disk row's
+/// `user_msg_id` is itself 0 (a genuine zero-id-owned row). If a NEWER real
+/// (non-zero) identity turn has since written its row, the on-disk
+/// `user_msg_id != 0` and we return `UserMsgMismatch` — preserving the newer
+/// owner so its status panel can still complete. Planned-restart markers and
+/// rebind origins are preserved exactly like the non-zero guarded clear.
+pub(crate) fn clear_inflight_state_if_matches_zero_owned(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> GuardedClearOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedClearOutcome::Missing;
+    };
+    clear_inflight_state_if_matches_zero_owned_in_root(&root, provider, channel_id)
+}
+
+/// Root-explicit variant of [`clear_inflight_state_if_matches_zero_owned`] for
+/// unit tests.
+pub(super) fn clear_inflight_state_if_matches_zero_owned_in_root(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> GuardedClearOutcome {
+    let path = inflight_state_path(root, provider, channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return GuardedClearOutcome::IoError;
+    };
+    let Ok(data) = fs::read_to_string(&path) else {
+        return GuardedClearOutcome::Missing;
+    };
+    let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
+        return GuardedClearOutcome::Missing;
+    };
+    if state.restart_mode.is_some() {
+        return GuardedClearOutcome::PlannedRestartSkipped;
+    }
+    if state.rebind_origin {
+        return GuardedClearOutcome::RebindOriginSkipped;
+    }
+    // The only thing a zero-id turn may clear is a zero-id-owned row. A newer
+    // non-zero owner has `user_msg_id != 0` → preserve it.
+    if state.user_msg_id != 0 {
+        return GuardedClearOutcome::UserMsgMismatch;
+    }
+    match fs::remove_file(&path) {
+        Ok(()) => GuardedClearOutcome::Cleared,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id,
+                error = %error,
+                "inflight zero-owned guarded-clear remove_file failed; treating as IoError so sweeper retries"
+            );
+            GuardedClearOutcome::IoError
+        }
+    }
+}
+
 fn clear_inflight_state_if_matches_identity_in_root(
     root: &std::path::Path,
     provider: &ProviderKind,
@@ -2586,9 +2655,9 @@ mod stall_recovery_tests {
         bind_status_panel_in_root, clear_inflight_state_if_matches_identity_after_delivery_in_root,
         clear_inflight_state_if_matches_identity_in_root, clear_inflight_state_if_matches_in_root,
         clear_inflight_state_if_matches_tmux_response_in_root,
-        clear_status_panel_if_current_in_root, inflight_state_allows_idle_tmux_repair_state,
-        inflight_state_is_stale, inflight_state_path, load_inflight_states_from_root,
-        lock_inflight_state_path, normalize_response_sent_offset,
+        clear_inflight_state_if_matches_zero_owned_in_root, clear_status_panel_if_current_in_root,
+        inflight_state_allows_idle_tmux_repair_state, inflight_state_is_stale, inflight_state_path,
+        load_inflight_states_from_root, lock_inflight_state_path, normalize_response_sent_offset,
         refresh_inflight_last_offset_if_matches_identity_in_root,
         save_inflight_state_if_matches_identity_in_root, save_inflight_state_in_root,
         validate_inflight_state_for_save,
@@ -4120,6 +4189,46 @@ mod stall_recovery_tests {
             load_inflight_states_from_root(temp.path(), &ProviderKind::Qwen).len(),
             1
         );
+    }
+
+    /// #3161 (codex P1): the zero-owned guarded clear removes a genuine
+    /// zero-id-owned row (recovery / external-input turn whose on-disk
+    /// `user_msg_id` is 0). Recovery cleanup must keep working.
+    #[test]
+    fn clear_inflight_state_if_matches_zero_owned_clears_zero_id_row() {
+        let temp = TempDir::new().unwrap();
+        let mut state = build_inflight_for_guard_tests(ProviderKind::Claude, 9, 0);
+        state.user_msg_id = 0;
+        save_inflight_state_in_root(temp.path(), &state).unwrap();
+
+        let outcome = clear_inflight_state_if_matches_zero_owned_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            9,
+        );
+        assert_eq!(outcome, GuardedClearOutcome::Cleared);
+        assert!(load_inflight_states_from_root(temp.path(), &ProviderKind::Claude).is_empty());
+    }
+
+    /// #3161 (codex P1): the zero-owned guarded clear must NOT delete a NEWER
+    /// real (non-zero) owner's row. A zero-id turn finalizing after a non-zero
+    /// owner wrote its row yields `UserMsgMismatch` and the row survives.
+    #[test]
+    fn clear_inflight_state_if_matches_zero_owned_preserves_nonzero_owner() {
+        let temp = TempDir::new().unwrap();
+        let mut state = build_inflight_for_guard_tests(ProviderKind::Claude, 9, 4242);
+        state.user_msg_id = 4242;
+        save_inflight_state_in_root(temp.path(), &state).unwrap();
+
+        let outcome = clear_inflight_state_if_matches_zero_owned_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            9,
+        );
+        assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch);
+        let still_there = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(still_there.len(), 1);
+        assert_eq!(still_there[0].user_msg_id, 4242);
     }
 
     /// No on-disk row → `Missing`. Idempotency safety net.

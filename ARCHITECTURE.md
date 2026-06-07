@@ -531,6 +531,7 @@ src/
 │   │   ├── tmux_restart_handoff.rs
 │   │   ├── tmux_session_files.rs
 │   │   ├── tmux_watcher.rs
+│   │   ├── tui_direct_pending_start.rs
 │   │   ├── tui_prompt_relay.rs
 │   │   ├── tui_task_card.rs
 │   │   ├── turn_finalizer.rs
@@ -649,6 +650,7 @@ src/
 │   ├── mcp_config.rs
 │   ├── message_outbox.rs
 │   ├── mod.rs
+│   ├── monitoring_store.rs
 │   ├── opencode.rs
 │   ├── operator_connectors.rs
 │   ├── pipeline_override.rs

@@ -5996,6 +5996,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 active_stream_inflight_reacquire_logged = true;
             }
         }
+        // #3154: a deferred synthetic turn-start pending for this channel means
+        // the per-channel worker has not yet saved the matching inflight; keep
+        // the bytes buffered (do NOT suppress / advance confirmed offset) so the
+        // wakeup turn's response batch survives the wait window.
+        let pending_synthetic_start_present = post_terminal_inflight_missing
+            && crate::services::discord::tui_direct_pending_start::pending_synthetic_start_present(
+                watcher_provider.as_str(),
+                channel_id.get(),
+            );
         let post_terminal_no_inflight_should_suppress =
             should_suppress_post_terminal_output_without_inflight(
                 turn_result_relayed,
@@ -6004,6 +6013,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 external_input_lease_present,
                 watcher_batch_contains_assistant_event(&data),
                 post_terminal_pane_actively_streaming,
+                pending_synthetic_start_present,
             ) && !post_terminal_payload_allows_external_relay;
         if post_terminal_payload_allows_external_relay {
             tracing::info!(
@@ -10967,7 +10977,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             lifecycle_stage_paused,
             inflight_state.is_some(),
         ) {
-            let _ = crate::services::discord::tui_prompt_relay::complete_tui_direct_prompt_anchor_lifecycle_if_present(
+            let completed = crate::services::discord::tui_prompt_relay::complete_tui_direct_prompt_anchor_lifecycle_if_present(
                 &http,
                 watcher_provider.as_str(),
                 &tmux_session_name,
@@ -10979,6 +10989,55 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 },
             )
             .await;
+            // #3174: turn-identity guard on the ⏳ lifecycle vs the lease-gated
+            // completion. The gate above can fire on the external-input LEASE
+            // alone (`tui_direct_anchor_or_lease_present_for_lifecycle` is seeded
+            // from `prompt_anchor_present_before_relay || external_input_lease_before_relay`).
+            // If the provider committed terminal output inside the sub-second
+            // `notify-post + ⏳-add` Discord I/O window, the lease is present but
+            // THIS turn's `record_prompt_anchor` has not landed yet — so the
+            // completion above found no anchor and was a no-op (`None`). The lease
+            // is cleared after this delivery, so no later pass reconciles it and
+            // the ⏳ would be stranded. Record a deferred-completion marker keyed
+            // to this `(provider, tmux, channel)`; the SAME turn's
+            // `record_prompt_anchor` (in the relay) drains it and finishes the
+            // ⏳ → ✅ swap against the just-recorded anchor. Only record when the
+            // anchor is genuinely still absent (an anchor-less completion) — a
+            // `None` from a Discord `create_reaction` error keeps the anchor
+            // findable, and that path retries via the existing anchor lookup,
+            // so we must not also queue a deferred completion for it.
+            //
+            // #3174 codex P1: stamp the marker with the TURN IDENTITY — the
+            // `generation` of the lease this completion gated on
+            // (`external_input_lease_generation_before_relay`). The relay drains
+            // it ONLY when the generation matches THIS turn's recorded lease, so
+            // a NEWER same-(provider,tmux) turn inside the marker TTL can never
+            // complete the wrong turn's ⏳. Require the gating lease's generation
+            // to be known (`Some`): if the gate fired on the anchor alone there
+            // is no lease turn-identity to stamp, and the anchor-based path
+            // already owns the completion.
+            if completed.is_none()
+                && let Some(turn_lease_generation) = external_input_lease_generation_before_relay
+                && crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
+                    watcher_provider.as_str(),
+                    &tmux_session_name,
+                    channel_id.get(),
+                )
+                .is_none()
+            {
+                crate::services::tui_prompt_dedupe::record_deferred_anchor_completion(
+                    watcher_provider.as_str(),
+                    &tmux_session_name,
+                    channel_id.get(),
+                    turn_lease_generation,
+                );
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ⏳ #3174 watcher: lease-gated completion ran before anchor recorded (channel {}, tmux={}, turn_lease_generation={turn_lease_generation}) — deferred ⏳ completion to record_prompt_anchor",
+                    channel_id.get(),
+                    tmux_session_name
+                );
+            }
         } else if terminal_output_committed
             && !lifecycle_stage_paused
             && !anchor_cleanup_is_stale_for_newer_turn
