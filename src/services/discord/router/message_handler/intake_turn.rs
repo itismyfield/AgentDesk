@@ -752,20 +752,46 @@ pub(in crate::services::discord) async fn handle_text_message(
                                     "conflict"
                                 };
                                 let ch = ch_name.as_deref().unwrap_or("unknown");
-                                match create_git_worktree(&canonical, ch, provider.as_str()) {
-                                    Ok((wt_path, branch)) => {
-                                        let ts = chrono::Local::now().format("%H:%M:%S");
-                                        tracing::info!(
-                                            "  [{ts}] 🌿 Auto-start worktree ({reason}): {ch} → {}",
-                                            wt_path
-                                        );
-                                        Some(WorktreeInfo {
-                                            original_path: canonical.clone(),
-                                            worktree_path: wt_path,
-                                            branch_name: branch,
-                                        })
+                                // #3207 (part 2): reuse this channel's EXISTING managed
+                                // worktree when one is persisted, instead of rotating a new
+                                // timestamped worktree every cold start. A rotated worktree
+                                // moves the cwd's claude project dir, so the prior session's
+                                // transcript is gone and `--resume` is structurally impossible
+                                // → fresh session + lost conversation. Reusing the worktree
+                                // keeps the sid's jsonl discoverable so the launch genuinely
+                                // resumes. Same persisted mapping + safety filters as the
+                                // #3011 thread-bootstrap reuse.
+                                let reused = resolve_reusable_worktree(
+                                    shared.pg_pool.as_ref(),
+                                    &shared.token_hash,
+                                    &provider,
+                                    ch,
+                                    &canonical,
+                                );
+                                if let Some(wt) = reused {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    tracing::info!(
+                                        "  [{ts}] ↻ Auto-start worktree reused ({reason}): {ch} → {} (branch: {})",
+                                        wt.worktree_path,
+                                        wt.branch_name
+                                    );
+                                    Some(wt)
+                                } else {
+                                    match create_git_worktree(&canonical, ch, provider.as_str()) {
+                                        Ok((wt_path, branch)) => {
+                                            let ts = chrono::Local::now().format("%H:%M:%S");
+                                            tracing::info!(
+                                                "  [{ts}] 🌿 Auto-start worktree ({reason}): {ch} → {}",
+                                                wt_path
+                                            );
+                                            Some(WorktreeInfo {
+                                                original_path: canonical.clone(),
+                                                worktree_path: wt_path,
+                                                branch_name: branch,
+                                            })
+                                        }
+                                        Err(_) => None,
                                     }
-                                    Err(_) => None,
                                 }
                             } else {
                                 None

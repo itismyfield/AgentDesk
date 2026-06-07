@@ -115,6 +115,56 @@ fn provider_turn_interrupt_plan(provider: &ProviderKind) -> Option<ProviderTurnI
     }
 }
 
+/// #3207 (part 1): how claude's TURN is cancelled without killing the session.
+/// claude has no SIGINT-safe interrupt — a direct SIGINT to the CLI exits it,
+/// the pane collapses, and the watcher tears the whole tmux session down
+/// ("dead session after turn"). The session-preserving cancel depends on how
+/// claude is hosted in the pane:
+///   * `TuiEscape` — claude runs as the interactive TUI in the pane foreground
+///     (the default `TuiHosting` driver since #2110). `tmux send-keys Escape`
+///     reaches the TUI and cancels the active generation exactly like a user
+///     pressing ESC, leaving the session alive for the next turn.
+///   * `StreamJsonControlRequest` — claude runs as a child of
+///     `agentdesk tmux-wrapper` in `--print --input-format stream-json
+///     --output-format stream-json` mode. A `control_request{subtype:interrupt}`
+///     line written to the wrapper's input FIFO is forwarded verbatim to claude
+///     stdin; the CLI acks it (`control_response{success}`), aborts the turn
+///     (`terminal_reason=aborted_streaming`), and keeps the session open for the
+///     next `user` envelope. Empirically verified against claude CLI 2.1.168.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClaudeTurnInterruptDelivery {
+    TuiEscape,
+    StreamJsonControlRequest,
+}
+
+/// #3207 (part 1): select the session-preserving claude interrupt mechanism from
+/// whether the tmux pane foreground is the `agentdesk tmux-wrapper` (stream-json
+/// host) or the bare claude TUI. When the pane command cannot be classified we
+/// default to `TuiEscape`: ESC is the live `TuiHosting` path, and an ESC keystroke
+/// delivered to a wrapper PTY is an inert partial-line that cannot kill anything
+/// (the wrapper only acts on complete newline-terminated JSON envelopes).
+pub(crate) fn claude_turn_interrupt_delivery(
+    pane_foreground_is_wrapper: bool,
+) -> ClaudeTurnInterruptDelivery {
+    if pane_foreground_is_wrapper {
+        ClaudeTurnInterruptDelivery::StreamJsonControlRequest
+    } else {
+        ClaudeTurnInterruptDelivery::TuiEscape
+    }
+}
+
+/// #3207 (part 1): build the stream-json interrupt control envelope the Agent
+/// SDK `interrupt()` uses. Written as a single newline-terminated line to the
+/// wrapper input FIFO, which forwards it verbatim to claude stdin.
+pub(crate) fn build_claude_interrupt_control_line(request_id: &str) -> String {
+    serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": { "subtype": "interrupt" }
+    })
+    .to_string()
+}
+
 fn fallback_sigint_pid_for_provider(
     provider: &ProviderKind,
     ready_for_input: bool,
@@ -256,6 +306,21 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
             sigint_target_missing: false,
         };
     };
+
+    // #3207 (part 1): claude's legacy interrupt was a direct SIGINT to the CLI,
+    // which exits it, collapses the pane to bash, and makes the watcher tear the
+    // whole tmux session down ("dead session after turn") — destroying the
+    // reusable session + context on a mere turn-stop. Replace it with a
+    // session-preserving turn cancel: ESC to the interactive TUI, or a
+    // stream-json `control_request{interrupt}` to the wrapper FIFO. SIGINT /
+    // session teardown stays exclusively in `cancel_active_token` for the
+    // `CleanupSession` policy (genuine "terminate the session" intent), so a
+    // `PreserveSession` user stop (`!stop` / ⏳ removal / watchdog) cancels only
+    // the turn and the next message warm-resumes instead of cold-starting.
+    if matches!(provider, ProviderKind::Claude) {
+        let _ = plan; // claude takes the dedicated session-preserving path below
+        return interrupt_claude_turn_session_preserving(tmux_session, reason).await;
+    }
 
     // #1260: an empty key list means "no keys to send; go straight to the
     // SIGINT fallback". Used by claude, where C-c on the pane targets the
@@ -523,6 +588,110 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
         fallback_sigint_pid,
         missing_tmux_session: false,
         sigint_target_missing,
+    }
+}
+
+/// #3207 (part 1): cancel claude's active TURN while keeping the tmux session
+/// alive. Never sends SIGINT (that exits the CLI and collapses the session);
+/// teardown for `CleanupSession` stays in `cancel_active_token`. Delivery is
+/// chosen per host (`claude_turn_interrupt_delivery`): ESC for the interactive
+/// TUI, or a stream-json `control_request{interrupt}` for the wrapper FIFO.
+async fn interrupt_claude_turn_session_preserving(
+    tmux_session: Option<String>,
+    reason: &str,
+) -> ProviderTurnInterruptOutcome {
+    // #3169: an anonymous internal PreserveSession teardown
+    // (`turn_bridge_cancelled`, no user `cancel_source`) must NOT cancel the
+    // live claude turn — leave it running for the watcher to reconcile, exactly
+    // as the prior SIGINT-suppression did, just without the session-kill risk.
+    if reason == ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON {
+        return ProviderTurnInterruptOutcome {
+            tmux_session,
+            sent_keys: false,
+            fallback_sigint_pid: None,
+            missing_tmux_session: false,
+            sigint_target_missing: false,
+        };
+    }
+
+    let Some(session_name) = tmux_session.clone() else {
+        return ProviderTurnInterruptOutcome {
+            tmux_session,
+            sent_keys: false,
+            fallback_sigint_pid: None,
+            missing_tmux_session: true,
+            sigint_target_missing: false,
+        };
+    };
+
+    let session_for_task = session_name.clone();
+    let request_id = format!("agentdesk-interrupt-{}", uuid::Uuid::new_v4());
+    let delivery_result = tokio::task::spawn_blocking(move || {
+        let is_wrapper = pane_foreground_is_provider_wrapper(&session_for_task);
+        let delivery = claude_turn_interrupt_delivery(is_wrapper);
+        let outcome = match delivery {
+            ClaudeTurnInterruptDelivery::TuiEscape => {
+                match crate::services::platform::tmux::send_keys(&session_for_task, &["Escape"]) {
+                    Ok(output) if output.status.success() => Ok(()),
+                    Ok(output) => Err(format!(
+                        "tmux send-keys Escape failed: status={}",
+                        output.status
+                    )),
+                    Err(error) => Err(format!("tmux send-keys Escape error: {error}")),
+                }
+            }
+            ClaudeTurnInterruptDelivery::StreamJsonControlRequest => {
+                let (_jsonl, input_fifo) = tmux_runtime_paths(&session_for_task);
+                let line = build_claude_interrupt_control_line(&request_id);
+                write_line_to_wrapper_fifo(&input_fifo, &line)
+            }
+        };
+        (delivery, outcome)
+    })
+    .await;
+
+    let (delivery, delivered) = match delivery_result {
+        Ok((delivery, Ok(()))) => {
+            tracing::info!(
+                "claude turn interrupt delivered (session preserved): session={} reason={} mechanism={:?}",
+                session_name,
+                reason,
+                delivery
+            );
+            (Some(delivery), true)
+        }
+        Ok((delivery, Err(error))) => {
+            // Deliberately NO SIGINT fallback: a failed turn-cancel must not
+            // escalate to a session-kill. The cooperative cancel flag still
+            // flips in `cancel_active_token`, and the watcher reconciles the
+            // turn on its next pass.
+            tracing::warn!(
+                "claude turn interrupt delivery failed (session left intact, no SIGINT escalation): session={} reason={} mechanism={:?} error={}",
+                session_name,
+                reason,
+                delivery,
+                error
+            );
+            (Some(delivery), false)
+        }
+        Err(error) => {
+            tracing::warn!(
+                "claude turn interrupt join error: session={} reason={} error={}",
+                session_name,
+                reason,
+                error
+            );
+            (None, false)
+        }
+    };
+    let _ = delivery;
+
+    ProviderTurnInterruptOutcome {
+        tmux_session,
+        sent_keys: delivered,
+        fallback_sigint_pid: None,
+        missing_tmux_session: false,
+        sigint_target_missing: false,
     }
 }
 
@@ -905,6 +1074,58 @@ fn provider_cli_pid_in_tmux(
     let pane_pid = crate::services::platform::tmux::pane_pid(tmux_session_name)?;
     let rows = process_table();
     select_provider_pid_in_pane(pane_pid, &rows, provider, tracked_child_pid)
+}
+
+/// #3207 (part 1): is the tmux pane foreground the `agentdesk tmux-wrapper`
+/// (stream-json host) rather than the bare claude TUI? Drives
+/// [`claude_turn_interrupt_delivery`]. Returns `false` when the pane / process
+/// table cannot be read, defaulting the caller to the live `TuiEscape` path.
+#[cfg(unix)]
+fn pane_foreground_is_provider_wrapper(tmux_session_name: &str) -> bool {
+    let Some(pane_pid) = crate::services::platform::tmux::pane_pid(tmux_session_name) else {
+        return false;
+    };
+    let rows = process_table();
+    rows.iter()
+        .find(|row| row.pid == pane_pid)
+        .map(|row| command_is_agentdesk_provider_wrapper(&row.command))
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn pane_foreground_is_provider_wrapper(_tmux_session_name: &str) -> bool {
+    false
+}
+
+/// #3207 (part 1): write a pre-formatted (newline-terminated) line to the
+/// wrapper input FIFO without blocking. The wrapper holds the FIFO open
+/// `O_RDWR`, so a writer never blocks while it is alive; if the wrapper is gone
+/// the non-blocking open fails with `ENXIO` and we report the miss instead of
+/// hanging a blocking-pool thread forever.
+#[cfg(unix)]
+fn write_line_to_wrapper_fifo(input_fifo_path: &str, line: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(input_fifo_path)
+        .map_err(|error| format!("open input fifo {input_fifo_path}: {error}"))?;
+    file.write_all(line.as_bytes())
+        .and_then(|()| {
+            if line.ends_with('\n') {
+                Ok(())
+            } else {
+                file.write_all(b"\n")
+            }
+        })
+        .and_then(|()| file.flush())
+        .map_err(|error| format!("write input fifo {input_fifo_path}: {error}"))
+}
+
+#[cfg(not(unix))]
+fn write_line_to_wrapper_fifo(_input_fifo_path: &str, _line: &str) -> Result<(), String> {
+    Err("wrapper FIFO interrupt is only supported on Unix".to_string())
 }
 
 // TUI mode regression: when the provider CLI itself is the tmux pane
@@ -1470,6 +1691,50 @@ mod sigint_target_missing_tests {
             false,
             None
         ));
+    }
+}
+
+// #3207 (part 1): the claude session-preserving interrupt selection + envelope
+// builder are pure and run under the default `cargo test` invocation (the main
+// suite is gated behind `legacy-sqlite-tests`, which CI does not enable).
+#[cfg(test)]
+mod claude_session_preserving_interrupt_tests {
+    use super::{
+        ClaudeTurnInterruptDelivery, build_claude_interrupt_control_line,
+        claude_turn_interrupt_delivery,
+    };
+
+    #[test]
+    fn tui_pane_uses_escape_keystroke() {
+        // The live `TuiHosting` driver: claude is the interactive pane fg, so ESC
+        // cancels the turn without killing the session.
+        assert_eq!(
+            claude_turn_interrupt_delivery(false),
+            ClaudeTurnInterruptDelivery::TuiEscape
+        );
+    }
+
+    #[test]
+    fn wrapper_pane_uses_stream_json_control_request() {
+        // Legacy wrapper host: claude reads stdin from a pipe, so the turn is
+        // cancelled via a stream-json control_request forwarded through the FIFO.
+        assert_eq!(
+            claude_turn_interrupt_delivery(true),
+            ClaudeTurnInterruptDelivery::StreamJsonControlRequest
+        );
+    }
+
+    #[test]
+    fn control_request_envelope_matches_agent_sdk_interrupt_shape() {
+        // Empirically verified against claude CLI 2.1.168: this exact envelope
+        // yields control_response{success} + terminal_reason=aborted_streaming
+        // and the session survives for the next user turn.
+        let line = build_claude_interrupt_control_line("req-123");
+        let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid json line");
+        assert_eq!(parsed["type"], "control_request");
+        assert_eq!(parsed["request_id"], "req-123");
+        assert_eq!(parsed["request"]["subtype"], "interrupt");
+        assert!(!line.contains('\n'), "envelope is a single line");
     }
 }
 

@@ -83,7 +83,19 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
     };
     report.pg_available = true;
 
-    let active_cwds = fetch_active_cwds(&pool).await.unwrap_or_default();
+    let mut active_cwds = fetch_active_cwds(&pool).await.unwrap_or_default();
+    // #3207 (part 2): a reused worktree owned by a live/resumable channel session
+    // must survive BETWEEN turns and across restarts so `--resume` can find the
+    // sid's transcript. Between turns there is no `pending`/`dispatched` dispatch,
+    // so the active-dispatch keep-set alone would let the hourly sweep delete the
+    // very worktree the next message will resume into — re-creating the original
+    // "worktree rotation → resume impossible" loss. Also protect cwds of recent
+    // resumable sessions (a recorded provider session id + a fresh heartbeat).
+    // The recency bound keeps genuinely-abandoned worktrees collectable, and the
+    // #3207 reuse path means a channel reuses ONE worktree rather than growing a
+    // new one per turn, so this does not reintroduce unbounded growth.
+    let resumable_cwds = fetch_resumable_cwds(&pool).await.unwrap_or_default();
+    active_cwds.extend(resumable_cwds);
     report.active_cwd_count = active_cwds.len() as u64;
 
     let Ok(entries) = std::fs::read_dir(&config.worktrees_root) else {
@@ -150,6 +162,29 @@ async fn fetch_active_cwds(pool: &PgPool) -> Result<HashSet<String>> {
         .collect())
 }
 
+/// #3207 (part 2): cwds of recent resumable sessions — those carrying a recorded
+/// provider session id (`claude_session_id` / `raw_provider_session_id`) with a
+/// fresh-or-unknown heartbeat. These worktrees are reused by the next turn's
+/// `--resume`, so they must not be swept while idle between turns. The 7-day
+/// recency bound (NULL heartbeat treated as "keep", since legacy/in-flight rows
+/// may not stamp it) keeps long-abandoned worktrees collectable.
+async fn fetch_resumable_cwds(pool: &PgPool) -> Result<HashSet<String>> {
+    let rows: Vec<(Option<String>,)> = sqlx::query_as(
+        "SELECT DISTINCT cwd
+         FROM sessions
+         WHERE cwd IS NOT NULL
+           AND (claude_session_id IS NOT NULL OR raw_provider_session_id IS NOT NULL)
+           AND (last_heartbeat IS NULL OR last_heartbeat >= NOW() - INTERVAL '7 days')",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|(cwd,)| cwd.filter(|s| !s.is_empty()))
+        .collect())
+}
+
 /// A worktree dir is "active" if ANY session cwd equals it or is nested under
 /// it (subshell cwds sometimes land inside `src/...` relative to the worktree
 /// root).
@@ -206,4 +241,45 @@ fn infer_repo_root_from_worktree(path: &Path) -> Option<PathBuf> {
     // Walk up from `.git/worktrees/<name>` to the repo root.
     let repo_dot_git = gitdir.parent()?.parent()?;
     repo_dot_git.parent().map(|p| p.to_path_buf())
+}
+
+#[cfg(test)]
+mod resumable_keep_set_tests {
+    use super::is_dir_active;
+    use std::collections::HashSet;
+    use std::path::Path;
+
+    /// #3207 (part 2): a worktree whose path is in the keep-set (the union of
+    /// active-dispatch cwds AND recent resumable-session cwds) must be treated as
+    /// active and therefore NOT swept while idle between turns.
+    #[test]
+    fn resumable_cwd_protects_its_worktree_dir() {
+        let dir = "/home/u/.adk/release/worktrees/claude-chan-20260101-000000";
+        let mut keep: HashSet<String> = HashSet::new();
+        keep.insert(dir.to_string());
+        assert!(
+            is_dir_active(Path::new(dir), &keep),
+            "a resumable session's worktree must survive the sweep between turns"
+        );
+    }
+
+    /// A nested subshell cwd inside the resumable worktree still protects the
+    /// worktree root (mirrors the active-dispatch nesting rule).
+    #[test]
+    fn nested_resumable_cwd_protects_worktree_root() {
+        let dir = "/home/u/.adk/release/worktrees/claude-chan-20260101-000000";
+        let nested = format!("{dir}/src/services");
+        let mut keep: HashSet<String> = HashSet::new();
+        keep.insert(nested);
+        assert!(is_dir_active(Path::new(dir), &keep));
+    }
+
+    /// A worktree NOT referenced by any keep-set cwd remains an orphan candidate.
+    #[test]
+    fn unreferenced_worktree_is_not_protected() {
+        let dir = "/home/u/.adk/release/worktrees/claude-chan-stale";
+        let mut keep: HashSet<String> = HashSet::new();
+        keep.insert("/home/u/.adk/release/worktrees/other".to_string());
+        assert!(!is_dir_active(Path::new(dir), &keep));
+    }
 }

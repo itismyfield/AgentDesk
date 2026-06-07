@@ -1008,6 +1008,34 @@ fn restored_worktree_info(parent_path: &str, worktree_path: &str) -> Option<Work
     })
 }
 
+/// #3207 (part 2): resolve the channel's EXISTING managed worktree for reuse on
+/// the cold-start / resume path, instead of rotating a brand-new
+/// `%Y%m%d-%H%M%S` worktree every turn. claude sessions are scoped to the cwd's
+/// project dir (`~/.claude/projects/<cwd-mangled>/<sid>.jsonl`), so a rotated
+/// worktree makes `--resume` structurally impossible and forces a fresh session
+/// even when the DB still holds a provider session id — the conversation is lost
+/// while the status panel reports "기존 세션 복원". Reusing the prior worktree
+/// keeps the sid's transcript discoverable so the launch genuinely resumes.
+///
+/// This is the SAME persisted mapping the #3011 thread-bootstrap reuse relies on
+/// (`sessions.cwd` keyed by the channel's session-key candidates), with the same
+/// safety filters: the path must be an AgentDesk-managed linked worktree on disk
+/// that belongs to the requested parent repo, with a recoverable branch.
+/// Returns `None` when there is no reusable worktree (genuine fresh start).
+pub(super) fn resolve_reusable_worktree(
+    pg_pool: Option<&sqlx::PgPool>,
+    token_hash: &str,
+    provider: &ProviderKind,
+    channel_name: &str,
+    parent_path: &str,
+) -> Option<WorktreeInfo> {
+    let restored =
+        restore_thread_worktree_path_from_db(pg_pool, token_hash, provider, channel_name)
+            .filter(|path| is_managed_worktree_path(path))
+            .filter(|path| restored_worktree_belongs_to_parent(parent_path, path))?;
+    restored_worktree_info(parent_path, &restored)
+}
+
 /// Reconstruct and attach [`WorktreeInfo`] to a restored session when its
 /// `path` is an AgentDesk-managed linked git worktree and the session does not
 /// already carry worktree metadata. No-op otherwise (already populated, a
