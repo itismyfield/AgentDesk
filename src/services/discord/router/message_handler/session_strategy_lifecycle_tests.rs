@@ -459,7 +459,10 @@ fn claude_busy_preflight_uses_idle_transcript_wait_when_transcript_exists() {
         &ProviderKind::Claude,
         cwd.path().to_str(),
         Some(session_id),
+        None,
         Some(claude_home.path()),
+        None,
+        Some(std::time::SystemTime::UNIX_EPOCH),
     );
 
     assert_eq!(
@@ -479,7 +482,10 @@ fn claude_busy_preflight_falls_back_when_transcript_is_unavailable() {
             &ProviderKind::Claude,
             cwd.path().to_str(),
             None,
+            None,
             Some(claude_home.path()),
+            None,
+            Some(std::time::SystemTime::UNIX_EPOCH),
         ),
         HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
     );
@@ -488,7 +494,10 @@ fn claude_busy_preflight_falls_back_when_transcript_is_unavailable() {
             &ProviderKind::Claude,
             cwd.path().to_str(),
             Some("not-a-uuid"),
+            None,
             Some(claude_home.path()),
+            None,
+            Some(std::time::SystemTime::UNIX_EPOCH),
         ),
         HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
     );
@@ -497,7 +506,10 @@ fn claude_busy_preflight_falls_back_when_transcript_is_unavailable() {
             &ProviderKind::Claude,
             cwd.path().to_str(),
             Some("01234567-89ab-cdef-0123-456789abcdef"),
+            None,
             Some(claude_home.path()),
+            None,
+            Some(std::time::SystemTime::UNIX_EPOCH),
         ),
         HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
     );
@@ -512,6 +524,9 @@ fn codex_busy_preflight_keeps_codex_readiness_wait() {
         &ProviderKind::Codex,
         cwd.path().to_str(),
         Some("01234567-89ab-cdef-0123-456789abcdef"),
+        None,
+        None,
+        None,
         None,
     );
 
@@ -886,4 +901,536 @@ fn provider_worktree_isolation_policy_bypasses_review_e2e_and_consultation_dispa
             "{dispatch_type} dispatches should bypass provider-channel isolation"
         );
     }
+}
+
+// #3208 — helper: write a Claude JSONL transcript for `<cwd>` under a temp
+// claude_home, returning the resolved transcript path. The transcript ends with
+// a `system/turn_duration` terminator → `observe_*` classifies it as `Idle`.
+#[cfg(unix)]
+fn write_idle_claude_transcript(
+    claude_home: &std::path::Path,
+    cwd: &std::path::Path,
+    session_id: &str,
+) -> std::path::PathBuf {
+    let path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        cwd,
+        session_id,
+        Some(claude_home),
+    )
+    .expect("resolve transcript path");
+    std::fs::create_dir_all(path.parent().expect("transcript parent"))
+        .expect("create transcript parent");
+    std::fs::write(
+        &path,
+        concat!(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]},"timestamp":"2026-06-07T07:29:12Z"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"turn_duration","durationMs":142231,"pendingBackgroundAgentCount":5,"timestamp":"2026-06-07T07:29:13Z"}"#,
+            "\n",
+        ),
+    )
+    .expect("write transcript");
+    path
+}
+
+// #3208 (B): a genuinely-idle TUI whose live session runs in a *rotating
+// worktree* (pane_cwd) — distinct from the channel's configured workspace
+// (current_path) — and whose Claude session_id is NOT carried into intake (the
+// common `runtime_cached_provider_session` resume case). The preflight readiness
+// resolver MUST find the worktree transcript via the pane cwd and engage the
+// idle-JSONL fallback (ClaudePromptMarkerOrIdleTranscript) instead of falling
+// back to the prompt-marker-only wait that times out at 45s while the screen
+// shows "Waiting for N background agents to finish".
+#[cfg(unix)]
+#[test]
+fn claude_busy_preflight_resolves_worktree_transcript_when_session_id_missing() {
+    let claude_home = tempfile::tempdir().expect("create temp claude home");
+    let workspace = tempfile::tempdir().expect("create temp workspace cwd");
+    let worktree = tempfile::tempdir().expect("create temp worktree cwd");
+    // The running session writes its transcript under the WORKTREE project dir.
+    let worktree_transcript = write_idle_claude_transcript(
+        claude_home.path(),
+        worktree.path(),
+        "6a053a02-fd2d-4329-b421-9f49eb7d5683",
+    );
+
+    // Resolver must locate the worktree transcript even with session_id=None and
+    // current_path pointing at the (empty) configured workspace.
+    let resolved = resolve_claude_followup_transcript_path(
+        workspace.path().to_str(),
+        None,
+        Some(worktree.path()),
+        Some(claude_home.path()),
+    );
+    assert_eq!(
+        resolved.as_deref(),
+        Some(worktree_transcript.as_path()),
+        "resolver must adopt the worktree transcript via pane cwd"
+    );
+
+    // And the preflight wait must therefore allow the idle-transcript fallback.
+    let wait_strategy = hosted_tui_busy_preflight_readiness_wait_with_claude_home(
+        &ProviderKind::Claude,
+        workspace.path().to_str(),
+        None,
+        Some(worktree.path()),
+        Some(claude_home.path()),
+        None,
+        Some(std::time::SystemTime::UNIX_EPOCH),
+    );
+    assert_eq!(
+        wait_strategy,
+        HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOrIdleTranscript(
+            worktree_transcript
+        ),
+        "idle worktree transcript must engage the JSONL fallback, not prompt-marker-only"
+    );
+}
+
+// #3208 (B): the resolved worktree transcript (turn ended; background agents
+// still running) must observe as Idle — a genuinely-idle TUI must never be
+// classified busy. This is the false-busy that produced the 45s timeout.
+#[cfg(unix)]
+#[test]
+fn claude_idle_worktree_transcript_observes_idle_not_busy() {
+    let claude_home = tempfile::tempdir().expect("create temp claude home");
+    let worktree = tempfile::tempdir().expect("create temp worktree cwd");
+    let transcript = write_idle_claude_transcript(
+        claude_home.path(),
+        worktree.path(),
+        "6a053a02-fd2d-4329-b421-9f49eb7d5683",
+    );
+
+    let provider = ProviderKind::Claude;
+    let probe = crate::services::tui_turn_state::JsonlTurnStateProbe::new(&provider, &transcript);
+    let state = crate::services::tui_turn_state::TuiTurnStateProbe::observe(&probe);
+    assert_eq!(
+        state,
+        crate::services::tui_turn_state::TuiTurnState::Idle,
+        "turn_duration terminator with pending background agents is Idle, not busy"
+    );
+    assert!(!state.is_busy());
+}
+
+// #3208 (A): when the prior turn is genuinely in-flight (authoritative JSONL
+// Streaming/UserSubmitted), the follow-up classifier flags a busy diagnostic
+// with `previous_tui_turn_still_running=true`. The intake layer routes this to
+// the queue-defer path WITHOUT entering the 45s readiness poll (gated on
+// `transcript_turn_state.is_busy()`), so no readiness-timeout error surfaces.
+#[cfg(unix)]
+#[test]
+fn claude_busy_followup_defers_to_queue_without_readiness_poll() {
+    for busy in [
+        crate::services::tui_turn_state::TuiTurnState::Streaming,
+        crate::services::tui_turn_state::TuiTurnState::UserSubmitted,
+    ] {
+        assert!(
+            busy.is_busy(),
+            "{busy:?} must be the gate that skips the 45s readiness poll"
+        );
+        let snapshot = HostedTuiPromptReadinessSnapshot::jsonl_authoritative(true);
+        let diagnostic = classify_claude_tui_followup_submission(
+            &snapshot,
+            "attached",
+            None,
+            "missing",
+            busy,
+            "AgentDesk-claude-adk-cc",
+        )
+        .expect("busy turn must yield a defer diagnostic");
+        assert!(
+            diagnostic.previous_tui_turn_still_running,
+            "genuine busy turn must mark previous_tui_turn_still_running"
+        );
+        assert_eq!(diagnostic.transcript_turn_state, busy);
+    }
+}
+
+// #3212 — helper: write a BUSY Claude JSONL transcript (last meaningful
+// envelope is `assistant` with no terminator) → `observe_*` classifies it as
+// `Streaming` (busy). Used to model a concurrent still-running session.
+#[cfg(unix)]
+fn write_busy_claude_transcript(
+    claude_home: &std::path::Path,
+    cwd: &std::path::Path,
+    session_id: &str,
+) -> std::path::PathBuf {
+    let path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        cwd,
+        session_id,
+        Some(claude_home),
+    )
+    .expect("resolve transcript path");
+    std::fs::create_dir_all(path.parent().expect("transcript parent"))
+        .expect("create transcript parent");
+    std::fs::write(
+        &path,
+        concat!(
+            r#"{"type":"user","message":{"content":[{"type":"text","text":"go"}]},"timestamp":"2026-06-07T07:30:00Z"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]},"timestamp":"2026-06-07T07:30:01Z"}"#,
+            "\n",
+        ),
+    )
+    .expect("write busy transcript");
+    path
+}
+
+#[cfg(unix)]
+fn pin_mtime(path: &std::path::Path, mtime: std::time::SystemTime) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .expect("open transcript for mtime pin")
+        .set_modified(mtime)
+        .expect("set transcript mtime");
+}
+
+#[cfg(unix)]
+fn claude_runtime_binding(
+    output_path: &std::path::Path,
+) -> crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+    crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+        runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+        output_path: output_path.display().to_string(),
+        relay_output_path: None,
+        input_fifo_path: None,
+        session_id: None,
+        last_offset: 0,
+        relay_last_offset: None,
+    }
+}
+
+// #3212 (codex P1) RED→GREEN: two distinct-UUID Claude transcripts live in the
+// SAME cwd (two concurrent same-cwd sessions). With no per-session identity the
+// old resolver returned the newest-mtime transcript — the OTHER session's. The
+// runtime binding pins this session's transcript, so the resolver MUST return
+// the bound one even though it is the OLDER of the two.
+#[cfg(unix)]
+#[test]
+fn resolver_runtime_binding_beats_newer_same_cwd_other_session() {
+    let claude_home = tempfile::tempdir().expect("claude home");
+    let cwd = tempfile::tempdir().expect("cwd");
+
+    // THIS session's transcript (bound) — older mtime.
+    let mine = write_busy_claude_transcript(
+        claude_home.path(),
+        cwd.path(),
+        "11111111-1111-1111-1111-111111111111",
+    );
+    // OTHER concurrent session in the same cwd — NEWER mtime, and Idle (finished).
+    let other = write_idle_claude_transcript(
+        claude_home.path(),
+        cwd.path(),
+        "22222222-2222-2222-2222-222222222222",
+    );
+    let base = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    pin_mtime(&mine, base);
+    pin_mtime(&other, base + std::time::Duration::from_secs(60));
+
+    let binding = claude_runtime_binding(&mine);
+    let resolved = resolve_claude_followup_transcript_path_with_identity(
+        cwd.path().to_str(),
+        None,
+        Some(cwd.path()),
+        Some(claude_home.path()),
+        Some(&binding),
+        Some(std::time::SystemTime::UNIX_EPOCH),
+        &std::collections::HashSet::new(),
+    );
+    assert_eq!(
+        resolved.as_deref(),
+        Some(mine.as_path()),
+        "runtime binding identity must win over the newer other-session transcript"
+    );
+
+    // And the resolved (this-session) transcript observes BUSY — so a follow-up
+    // is correctly deferred, NOT injected because the other session went idle.
+    let provider = ProviderKind::Claude;
+    let probe = crate::services::tui_turn_state::JsonlTurnStateProbe::new(
+        &provider,
+        resolved.as_ref().unwrap(),
+    );
+    let state = crate::services::tui_turn_state::TuiTurnStateProbe::observe(&probe);
+    assert!(
+        state.is_busy(),
+        "this session is still busy; resolving the idle other-session transcript would false-ready"
+    );
+}
+
+// #3212 RED→GREEN: a NEWER stale/other-session transcript whose mtime predates
+// this session's launch must be rejected by the launch-mtime cutoff. With no
+// runtime binding and only a stale candidate, the resolver returns None rather
+// than adopting the prior session's transcript.
+#[cfg(unix)]
+#[test]
+fn resolver_rejects_pre_launch_stale_transcript_via_cutoff() {
+    let claude_home = tempfile::tempdir().expect("claude home");
+    let cwd = tempfile::tempdir().expect("cwd");
+
+    let stale = write_idle_claude_transcript(
+        claude_home.path(),
+        cwd.path(),
+        "33333333-3333-3333-3333-333333333333",
+    );
+    let base = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    pin_mtime(&stale, base);
+    // Session launched AFTER the stale transcript was last written.
+    let launch_cutoff = base + std::time::Duration::from_secs(300);
+
+    let resolved = resolve_claude_followup_transcript_path_with_identity(
+        cwd.path().to_str(),
+        None,
+        Some(cwd.path()),
+        Some(claude_home.path()),
+        None,
+        Some(launch_cutoff),
+        &std::collections::HashSet::new(),
+    );
+    assert_eq!(
+        resolved, None,
+        "a transcript older than this session's launch belongs to a prior session and must not be adopted"
+    );
+
+    // Sanity: WITHOUT the cutoff (UNIX_EPOCH), the single candidate is adopted —
+    // proving the None above is the cutoff guard, not a missing project dir.
+    let resolved_no_cutoff = resolve_claude_followup_transcript_path_with_identity(
+        cwd.path().to_str(),
+        None,
+        Some(cwd.path()),
+        Some(claude_home.path()),
+        None,
+        Some(std::time::SystemTime::UNIX_EPOCH),
+        &std::collections::HashSet::new(),
+    );
+    assert_eq!(resolved_no_cutoff.as_deref(), Some(stale.as_path()));
+}
+
+// #3212 RED→GREEN: an EXISTING stale transcript at the exact
+// (current_path, session_id) path must NOT short-circuit the happy path when a
+// runtime binding points at the real (different) live transcript. The binding's
+// per-session identity is authoritative and must beat the stale exact-match.
+#[cfg(unix)]
+#[test]
+fn resolver_runtime_binding_beats_stale_exact_session_id_match() {
+    let claude_home = tempfile::tempdir().expect("claude home");
+    let cwd = tempfile::tempdir().expect("cwd");
+    let session_id = "44444444-4444-4444-4444-444444444444";
+
+    // Stale transcript at the exact (cwd, session_id) location (a prior run that
+    // reused this session_id, now finished/idle).
+    let stale_exact = write_idle_claude_transcript(claude_home.path(), cwd.path(), session_id);
+    // The actual live transcript the watcher is bound to (different UUID, busy).
+    let live = write_busy_claude_transcript(
+        claude_home.path(),
+        cwd.path(),
+        "55555555-5555-5555-5555-555555555555",
+    );
+    let base = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    // Make the stale exact-match the NEWER file to stress that mtime alone is wrong.
+    pin_mtime(&live, base);
+    pin_mtime(&stale_exact, base + std::time::Duration::from_secs(60));
+
+    let binding = claude_runtime_binding(&live);
+    let resolved = resolve_claude_followup_transcript_path_with_identity(
+        cwd.path().to_str(),
+        Some(session_id),
+        Some(cwd.path()),
+        Some(claude_home.path()),
+        Some(&binding),
+        Some(std::time::SystemTime::UNIX_EPOCH),
+        &std::collections::HashSet::new(),
+    );
+    assert_eq!(
+        resolved.as_deref(),
+        Some(live.as_path()),
+        "runtime binding must beat the stale exact (current_path, session_id) match"
+    );
+}
+
+// #3212 RED→GREEN: two concurrent same-cwd transcripts, NO runtime binding and
+// NO usable session_id (the production resume case). The resolver must refuse to
+// guess (ambiguity guard → None) rather than pick the newest mtime, which could
+// be a finished other-session (false-ready) or another busy turn (wrong queue).
+#[cfg(unix)]
+#[test]
+fn resolver_ambiguous_multi_uuid_same_cwd_refuses_to_guess() {
+    let claude_home = tempfile::tempdir().expect("claude home");
+    let cwd = tempfile::tempdir().expect("cwd");
+
+    let a = write_busy_claude_transcript(
+        claude_home.path(),
+        cwd.path(),
+        "66666666-6666-6666-6666-666666666666",
+    );
+    let b = write_idle_claude_transcript(
+        claude_home.path(),
+        cwd.path(),
+        "77777777-7777-7777-7777-777777777777",
+    );
+    let base = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    pin_mtime(&a, base);
+    pin_mtime(&b, base + std::time::Duration::from_secs(60));
+
+    let resolved = resolve_claude_followup_transcript_path_with_identity(
+        cwd.path().to_str(),
+        None,
+        Some(cwd.path()),
+        Some(claude_home.path()),
+        None,
+        Some(std::time::SystemTime::UNIX_EPOCH),
+        &std::collections::HashSet::new(),
+    );
+    assert_eq!(
+        resolved, None,
+        "two same-cwd candidates with no identity is ambiguous; guessing newest is the P1 bug"
+    );
+
+    // Excluding the other session's claimed transcript collapses to a single
+    // unambiguous candidate → the resolver may then safely adopt it.
+    let exclude: std::collections::HashSet<std::path::PathBuf> = [b.clone()].into_iter().collect();
+    let resolved_excluded = resolve_claude_followup_transcript_path_with_identity(
+        cwd.path().to_str(),
+        None,
+        Some(cwd.path()),
+        Some(claude_home.path()),
+        None,
+        Some(std::time::SystemTime::UNIX_EPOCH),
+        &exclude,
+    );
+    assert_eq!(
+        resolved_excluded.as_deref(),
+        Some(a.as_path()),
+        "excluding the other live session's transcript disambiguates the cwd fallback"
+    );
+}
+
+// #3212 (codex P1-2) RED→GREEN: the pane_cwd holds TWO qualifying transcripts
+// (ambiguous concurrent sessions) while a DIFFERENT current_path holds a single
+// candidate. The old per-cwd `continue` fell through past the ambiguous pane_cwd
+// and adopted the lone current_path transcript. The hard ambiguity guard must
+// instead collect candidates across BOTH cwds and return None — never guess.
+#[cfg(unix)]
+#[test]
+fn resolver_pane_cwd_ambiguous_must_not_fall_through_to_current_path() {
+    let claude_home = tempfile::tempdir().expect("claude home");
+    let pane = tempfile::tempdir().expect("pane cwd");
+    let workspace = tempfile::tempdir().expect("workspace cwd");
+
+    // Two concurrent same-cwd transcripts under the pane cwd → ambiguous.
+    let pane_a = write_busy_claude_transcript(
+        claude_home.path(),
+        pane.path(),
+        "88888888-8888-8888-8888-888888888888",
+    );
+    let pane_b = write_idle_claude_transcript(
+        claude_home.path(),
+        pane.path(),
+        "99999999-9999-9999-9999-999999999999",
+    );
+    // A single (lone) candidate under the configured workspace cwd.
+    let ws_only = write_idle_claude_transcript(
+        claude_home.path(),
+        workspace.path(),
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    );
+    let base = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    pin_mtime(&pane_a, base);
+    pin_mtime(&pane_b, base + std::time::Duration::from_secs(60));
+    pin_mtime(&ws_only, base + std::time::Duration::from_secs(120));
+
+    let resolved = resolve_claude_followup_transcript_path_with_identity(
+        workspace.path().to_str(),
+        None,
+        Some(pane.path()),
+        Some(claude_home.path()),
+        None,
+        Some(std::time::SystemTime::UNIX_EPOCH),
+        &std::collections::HashSet::new(),
+    );
+    assert_eq!(
+        resolved, None,
+        "ambiguous pane_cwd must hard-stop, not fall through and adopt the lone current_path candidate"
+    );
+}
+
+// #3212 (codex P1-1) GREEN: a SINGLE post-launch candidate (newer than the
+// launch cutoff) with no binding/UUID IS adopted — the legitimate JSONL benefit
+// is retained for the common single-session resume case.
+#[cfg(unix)]
+#[test]
+fn resolver_adopts_single_post_launch_candidate() {
+    let claude_home = tempfile::tempdir().expect("claude home");
+    let cwd = tempfile::tempdir().expect("cwd");
+
+    let live = write_idle_claude_transcript(
+        claude_home.path(),
+        cwd.path(),
+        "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    );
+    let base = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    // Session launched BEFORE the transcript was last written → qualifies.
+    let launch_cutoff = base - std::time::Duration::from_secs(60);
+    pin_mtime(&live, base);
+
+    let resolved = resolve_claude_followup_transcript_path_with_identity(
+        cwd.path().to_str(),
+        None,
+        Some(cwd.path()),
+        Some(claude_home.path()),
+        None,
+        Some(launch_cutoff),
+        &std::collections::HashSet::new(),
+    );
+    assert_eq!(
+        resolved.as_deref(),
+        Some(live.as_path()),
+        "a single candidate newer than this session's launch is unambiguous and must be adopted"
+    );
+}
+
+// #3212 (codex P1-1) RED→GREEN: when the launch cutoff CANNOT be obtained
+// (`None`), the cwd-mtime fallback is disabled entirely — an unverified single
+// candidate must NOT be adopted (accept false-busy over false-ready). Stronger
+// identities are absent here, so the resolver returns None.
+#[cfg(unix)]
+#[test]
+fn resolver_conservative_none_when_launch_cutoff_unavailable() {
+    let claude_home = tempfile::tempdir().expect("claude home");
+    let cwd = tempfile::tempdir().expect("cwd");
+
+    let candidate = write_idle_claude_transcript(
+        claude_home.path(),
+        cwd.path(),
+        "cccccccc-cccc-cccc-cccc-cccccccccccc",
+    );
+    let base = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    pin_mtime(&candidate, base);
+
+    let resolved = resolve_claude_followup_transcript_path_with_identity(
+        cwd.path().to_str(),
+        None,
+        Some(cwd.path()),
+        Some(claude_home.path()),
+        None,
+        None,
+        &std::collections::HashSet::new(),
+    );
+    assert_eq!(
+        resolved, None,
+        "no reliable launch time → must not adopt an unverified cwd candidate (false-ready guard)"
+    );
+
+    // Sanity: WITH a permissive cutoff the same single candidate IS adopted —
+    // proving the None above is the conservative-cutoff guard, not a missing dir.
+    let resolved_with_cutoff = resolve_claude_followup_transcript_path_with_identity(
+        cwd.path().to_str(),
+        None,
+        Some(cwd.path()),
+        Some(claude_home.path()),
+        None,
+        Some(std::time::SystemTime::UNIX_EPOCH),
+        &std::collections::HashSet::new(),
+    );
+    assert_eq!(resolved_with_cutoff.as_deref(), Some(candidate.as_path()));
 }
