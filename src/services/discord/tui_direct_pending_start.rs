@@ -689,6 +689,12 @@ mod tests {
     ///   - A claims ONLY after turn1's inflight clears, and the EOF offset the
     ///     claim reads at THAT moment is recorded (asserting the claim is seeded
     ///     post-drain, never from the stale prior cursor).
+    // SAFETY (await_holding_lock): `worker_test_lock()` serializes tests that
+    // mutate the process-wide PRESENT index / durable store root; the guard is
+    // held across `tokio::time::advance` awaits that drive `run_worker`.
+    // Releasing before the awaits would let concurrent tests stomp the statics.
+    // Test-only.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(start_paused = true)]
     async fn channel_a_defers_until_prior_clears_while_channel_b_does_not_starve() {
         use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -854,6 +860,12 @@ mod tests {
     /// across the WHOLE escalation budget. The worker must NEVER claim (no
     /// overwrite) and, after the budget, ABORT safely WITHOUT resubmitting —
     /// proven by the claim closure never running.
+    // SAFETY (await_holding_lock): `worker_test_lock()` serializes tests that
+    // mutate the process-wide PRESENT index / durable store root; the guard is
+    // held across `tokio::time::advance` awaits that drive `run_worker`.
+    // Releasing before the awaits would let concurrent tests stomp the statics.
+    // Test-only.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(start_paused = true)]
     async fn backstop_foreign_inflight_live_aborts_without_claim() {
         use std::sync::atomic::{AtomicU32, Ordering};
@@ -918,6 +930,12 @@ mod tests {
     /// owns the mailbox). The worker MUST retain the durable record (never lose a
     /// Discord-submitted prompt) and retry; once the claim later succeeds it
     /// deletes. Proves the record is RETAINED across the false returns.
+    // SAFETY (await_holding_lock): `worker_test_lock()` serializes tests that
+    // mutate the process-wide PRESENT index / durable store root; the guard is
+    // held across `tokio::time::advance` awaits that drive `run_worker`.
+    // Releasing before the awaits would let concurrent tests stomp the statics.
+    // Test-only.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(start_paused = true)]
     async fn claim_false_retains_record_and_retries() {
         use std::sync::atomic::{AtomicU32, Ordering};
@@ -977,6 +995,12 @@ mod tests {
     /// P2-2 (b'): the claim returns `false` ACROSS THE WHOLE retry budget. The
     /// worker exhausts attempts but STILL must NOT delete the record (it is left
     /// for a restart re-attempt — never silently lose the prompt).
+    // SAFETY (await_holding_lock): `worker_test_lock()` serializes tests that
+    // mutate the process-wide PRESENT index / durable store root; the guard is
+    // held across `tokio::time::advance` awaits that drive `run_worker`.
+    // Releasing before the awaits would let concurrent tests stomp the statics.
+    // Test-only.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(start_paused = true)]
     async fn claim_false_exhausted_still_retains_record() {
         use std::sync::atomic::{AtomicU32, Ordering};

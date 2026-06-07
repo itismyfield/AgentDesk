@@ -19,6 +19,12 @@ path = "src/main.rs"
 dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"
+# #3034: hold-lock-across-await is a race/deadlock primitive behind much of the
+# turn-lifecycle backlog. Denied crate-wide so new occurrences fail CI; existing
+# benign sites carry a narrow `#[allow(clippy::await_holding_lock)]` + `// SAFETY:`.
+# The allow count is ratcheted (monotonic decrease) by
+# scripts/check_await_holding_lock_ratchet.py.
+await_holding_lock = "deny"
 
 [dependencies]
 # HTTP server

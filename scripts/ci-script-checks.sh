@@ -23,6 +23,9 @@ python3 scripts/check_postgres_migration_checksums.py
 echo "=== State/lint hardening guard ==="
 python3 scripts/audit_state_lint_hardening.py
 
+echo "=== await_holding_lock ratchet guard ==="
+python3 scripts/check_await_holding_lock_ratchet.py
+
 echo "=== CI runner hardening guard ==="
 ./scripts/check-ci-runner-hardening.sh
 
