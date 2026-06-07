@@ -130,7 +130,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (9524 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (9549 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -359,6 +359,28 @@
     `completion_signal_state` (range-independence is documented: the turn-END
     scan is offset-independent and turn-correctness comes from the pinned-id +
     stale-skip). New test `fresh_idle_clear_gate_skips_when_late_reread_is_newer_turn`.
+    +25 from #3016 S3 FINAL fix (residual TOCTOU on the Done-arm clear): the
+    gate-fix iteration above still split the clear across TWO locks (late re-read +
+    `committed_completion_is_stale_for_newer_turn` check under one lock, then the
+    UNCONDITIONAL `clear_inflight_state` under another) — on a multi-threaded tokio
+    runtime a follow-up turn could save a NEW inflight between the re-read and the
+    clear, so the unconditional delete wiped it (check-then-act not atomic). The
+    Done arm now performs the on-disk clear with the EXISTING atomic
+    compare-and-clear helper `clear_inflight_state_if_matches_identity`
+    (inflight.rs: read+validate+unlink under a SINGLE sidecar lock), keyed on the
+    PINNED turn's `InflightTurnIdentity::from_state` (the same snapshot the decision
+    helper derived `user_msg_id` from). It deletes ONLY if the on-disk identity is
+    STILL the pinned turn; a follow-up's different identity → `UserMsgMismatch`
+    no-op → its inflight survives. The window is closed atomically (no separate
+    re-read). The finalize-skip stays a SEPARATE pinned-snapshot decision in
+    `watcher_fresh_idle_finalize_decision`; only the destructive CLEAR moved to the
+    atomic helper. The CANONICAL normal-completion clear (tmux_watcher.rs ~11251)
+    still uses the weaker non-atomic re-read+clear pattern — left UNCHANGED (out of
+    scope; the S3 arm is now strictly safer). Test
+    `fresh_idle_clear_gate_skips_when_late_reread_is_newer_turn` rewritten to drive
+    the REAL atomic helper against REAL on-disk inflight: a follow-up's inflight on
+    disk → atomic clear is a no-op (follow-up preserved); the pinned turn on disk →
+    atomic clear removes it (happy path).
   - `src/services/discord/tui_prompt_relay.rs` (4522 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3167: the self-paced TUI loop relay

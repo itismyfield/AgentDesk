@@ -7800,59 +7800,84 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         // late re-read), so the ledger match is the CURRENT turn's
                         // real, non-zero id.
                         //
-                        // #3016 S3 (Concern 2): the destructive on-disk clear has
-                        // a TOCTOU the decision helper's pinned-snapshot stale gate
-                        // does NOT close: the helper checked staleness against the
-                        // PRE-cleanup snapshot, but `clear_inflight_state` deletes
-                        // whatever is on disk NOW — and a follow-up turn may have
-                        // saved its inflight during the cleanup `.await`s between
-                        // the snapshot and here. Mirror EXACTLY the canonical
-                        // normal-completion clear (tmux.rs ~11251): re-read the
-                        // on-disk inflight NOW and gate the clear with
-                        // `committed_completion_is_stale_for_newer_turn`, passing
-                        // BOTH the pinned snapshot AND the late re-read (the same
-                        // two-snapshot shape the canonical site uses). When the
-                        // late re-read is a NEWER turn (started AT/AFTER this
-                        // committed range) the clear is SKIPPED so the follow-up's
-                        // inflight survives. The finalize below still runs on the
-                        // PINNED id — identity-matched and idempotent — so the
-                        // current turn is finalized without wiping the follow-up.
-                        let late_reread_inflight =
-                            crate::services::discord::inflight::load_inflight_state(
-                                &watcher_provider,
-                                channel_id.get(),
-                            );
-                        let clear_is_stale_for_newer_turn =
-                            committed_completion_is_stale_for_newer_turn(
-                                pinned_pre_cleanup_inflight.as_ref(),
-                                late_reread_inflight.as_ref(),
-                                &tmux_session_name,
-                                current_offset,
-                            );
-                        if !clear_is_stale_for_newer_turn {
-                            crate::services::discord::inflight::clear_inflight_state(
-                                &watcher_provider,
-                                channel_id.get(),
-                            );
-                            crate::services::observability::emit_inflight_lifecycle_event(
-                                watcher_provider.as_str(),
-                                channel_id.get(),
-                                None,
-                                None,
-                                None,
-                                "cleared_by_watcher_fresh_idle",
-                                serde_json::json!({
-                                    "owed_finalize": owed,
-                                    "finish_mailbox_on_completion": finish_mailbox_on_completion,
-                                    "completion_signal": "Done",
-                                    "tmux_session": tmux_session_name.as_str(),
-                                    "offset": current_offset,
-                                }),
-                            );
+                        // #3016 S3 (Concern 2 — residual TOCTOU): the destructive
+                        // on-disk clear must not wipe a FOLLOW-UP turn's inflight.
+                        // The earlier fix re-read on-disk inflight, ran
+                        // `committed_completion_is_stale_for_newer_turn`, and then
+                        // called the UNCONDITIONAL `clear_inflight_state` under a
+                        // SEPARATE lock — a check-then-act split across two locks.
+                        // On a multi-threaded tokio runtime a follow-up turn could
+                        // save a new inflight on another worker thread AFTER the
+                        // re-read but BEFORE the clear, so the unconditional delete
+                        // wiped the follow-up's inflight (the window was not
+                        // atomic). Replace that sequence with the EXISTING atomic
+                        // compare-and-clear helper
+                        // `clear_inflight_state_if_matches_identity` (inflight.rs
+                        // ~1666 / ~1822): it reads + validates + unlinks under a
+                        // SINGLE sidecar lock and deletes ONLY if the on-disk
+                        // identity (`user_msg_id` + `started_at` +
+                        // `tmux_session_name`) still equals the PINNED turn's. A
+                        // follow-up turn carries a different identity, so the helper
+                        // is a guaranteed no-op for it (`UserMsgMismatch`) — the
+                        // window is closed atomically, no re-read/recheck needed.
+                        //
+                        // The pinned identity comes from `pinned_pre_cleanup_inflight`
+                        // — the same snapshot the decision helper used to derive
+                        // `user_msg_id` above (when `Finalize` is reached, that id is
+                        // exactly `pinned_pre_cleanup_inflight.user_msg_id`, because
+                        // `pinned_finalize_user_msg_id` selected it). The
+                        // finalize-skip (a NEWER turn in the pinned snapshot) is a
+                        // SEPARATE decision already handled in
+                        // `watcher_fresh_idle_finalize_decision`; here we only swap
+                        // the destructive CLEAR — the one carrying the TOCTOU — to
+                        // the atomic identity-matched helper. Finalize below still
+                        // runs on the PINNED id (idempotent) regardless of the clear
+                        // outcome.
+                        let pinned_clear_identity = pinned_pre_cleanup_inflight.as_ref().map(
+                            crate::services::discord::inflight::InflightTurnIdentity::from_state,
+                        );
+                        if let Some(pinned_clear_identity) = pinned_clear_identity.as_ref() {
+                            let clear_outcome =
+                                crate::services::discord::inflight::clear_inflight_state_if_matches_identity(
+                                    &watcher_provider,
+                                    channel_id.get(),
+                                    pinned_clear_identity,
+                                );
+                            match clear_outcome {
+                                crate::services::discord::inflight::GuardedClearOutcome::Cleared => {
+                                    crate::services::observability::emit_inflight_lifecycle_event(
+                                        watcher_provider.as_str(),
+                                        channel_id.get(),
+                                        None,
+                                        None,
+                                        None,
+                                        "cleared_by_watcher_fresh_idle",
+                                        serde_json::json!({
+                                            "owed_finalize": owed,
+                                            "finish_mailbox_on_completion": finish_mailbox_on_completion,
+                                            "completion_signal": "Done",
+                                            "tmux_session": tmux_session_name.as_str(),
+                                            "offset": current_offset,
+                                        }),
+                                    );
+                                }
+                                other => {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    tracing::info!(
+                                        "  [{ts}] 👁 watcher fresh ready-for-input idle for {tmux_session_name}: atomic identity-matched clear was a no-op (outcome={other:?}) at offset {current_offset} — on-disk inflight is no longer the pinned turn (follow-up preserved); finalizing the pinned current turn only"
+                                    );
+                                }
+                            }
                         } else {
+                            // No pinned snapshot identity available — there is
+                            // nothing safe to clear by identity. Skip the clear and
+                            // finalize on the pinned id only. (Unreachable on the
+                            // `Finalize` arm, since `pinned_finalize_user_msg_id`
+                            // requires a non-zero pinned snapshot to return a
+                            // finalizable id; kept defensive.)
                             let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::info!(
-                                "  [{ts}] 👁 watcher fresh ready-for-input idle for {tmux_session_name}: a follow-up turn saved inflight during cleanup (late re-read stale for offset {current_offset}); skipping the on-disk clear and finalizing the pinned current turn only"
+                            tracing::warn!(
+                                "  [{ts}] 👁 watcher fresh ready-for-input idle for {tmux_session_name}: no pinned snapshot identity for the atomic clear at offset {current_offset}; skipping the on-disk clear and finalizing the pinned current turn only"
                             );
                         }
                         finish_restored_watcher_active_turn(
@@ -13019,17 +13044,34 @@ mod tests {
         );
     }
 
-    // #3016 S3 (Concern 2): the destructive on-disk `clear_inflight_state` in the
-    // Done/Finalize arm is gated EXACTLY like the canonical normal-completion
-    // clear (tmux.rs ~11251): `committed_completion_is_stale_for_newer_turn` is
-    // passed BOTH the pre-cleanup PINNED snapshot AND a LATE on-disk re-read.
-    // This proves the TOCTOU is closed: even when the pinned snapshot is the
-    // CURRENT turn (so the decision helper returned Finalize, not SkipStale), a
-    // follow-up turn that saved inflight DURING the cleanup awaits is caught by
-    // the late-re-read arm → the clear is skipped and the follow-up's inflight
-    // survives.
+    // #3016 S3 (Concern 2 — residual TOCTOU CLOSED): the Done/Finalize arm now
+    // performs the on-disk clear with the ATOMIC compare-and-clear helper
+    // `clear_inflight_state_if_matches_identity` (read+validate+unlink under a
+    // SINGLE sidecar lock), keyed on the PINNED turn's identity. This test
+    // exercises the REAL atomic helper against REAL on-disk inflight (no separate
+    // re-read + recheck window) and proves the two distinct failure modes:
+    //
+    //   1. Follow-up preserved: if a follow-up turn saved its inflight DURING the
+    //      cleanup awaits (a DIFFERENT identity than the pinned turn is on disk at
+    //      clear time), the atomic clear is a guaranteed no-op (`UserMsgMismatch`)
+    //      — the follow-up's inflight survives byte-for-byte. There is no window
+    //      between the identity check and the unlink because they share one lock.
+    //   2. Current turn cleared: if the on-disk inflight is STILL the pinned turn
+    //      (no follow-up), the atomic clear removes it (`Cleared`), exactly like
+    //      the old unconditional clear did for the happy path.
+    //
+    // The finalize decision is a SEPARATE concern, still derived from the pinned
+    // snapshot by `watcher_fresh_idle_finalize_decision` (asserted Finalize here);
+    // only the destructive CLEAR — the one that carried the TOCTOU — was swapped to
+    // the atomic identity-matched helper.
     #[test]
     fn fresh_idle_clear_gate_skips_when_late_reread_is_newer_turn() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
         let provider = ProviderKind::Claude;
         let session = "AgentDesk-claude-adk-cc-9873200";
         let channel_id = 987_3200u64;
@@ -13037,13 +13079,9 @@ mod tests {
 
         // Pinned pre-cleanup snapshot: the CURRENT turn (start 10 < 50). On this
         // snapshot alone the decision helper returns Finalize (NOT stale), so the
-        // Done arm is entered and the clear is reached.
+        // Done arm is entered and the (now atomic) clear is reached. The pinned id
+        // 9001 is exactly the id the finalize runs on.
         let pinned_current = fresh_idle_inflight(provider.clone(), channel_id, session, 9001, 10);
-        // Late on-disk re-read AFTER the cleanup awaits: a follow-up turn that
-        // started AT/AFTER the committed range (start 50 >= 50) saved its inflight.
-        let late_followup = fresh_idle_inflight(provider.clone(), channel_id, session, 9002, 50);
-
-        // The decision helper (pinned-only) does NOT see the follow-up → Finalize.
         assert_eq!(
             watcher_fresh_idle_finalize_decision(
                 crate::services::discord::turn_finalizer::CompletionSignal::Done,
@@ -13056,29 +13094,62 @@ mod tests {
             FreshIdleFinalizeDecision::Finalize { user_msg_id: 9001 },
             "pinned snapshot alone is the current turn → Finalize (clear arm entered)"
         );
+        // The identity the Done arm builds from the pinned snapshot for the atomic
+        // clear (same `InflightTurnIdentity::from_state` the production code uses).
+        let pinned_identity =
+            crate::services::discord::inflight::InflightTurnIdentity::from_state(&pinned_current);
 
-        // The clear gate (the EXACT call the Done arm makes before clearing): the
-        // two-snapshot check catches the follow-up via the late-re-read arm.
-        assert!(
-            super::committed_completion_is_stale_for_newer_turn(
-                Some(&pinned_current),
-                Some(&late_followup),
-                session,
-                current_offset,
-            ),
-            "a follow-up saved during cleanup is caught by the late-re-read arm → clear SKIPPED"
+        // ── (1) Follow-up preserved ──────────────────────────────────────────
+        // Simulate a follow-up turn that saved a DIFFERENT inflight (id 9002,
+        // start 50 >= current_offset) on another worker thread DURING the cleanup
+        // awaits — i.e. it is what is on disk at clear time, NOT the pinned turn.
+        let late_followup = fresh_idle_inflight(provider.clone(), channel_id, session, 9002, 50);
+        crate::services::discord::inflight::save_inflight_state(&late_followup)
+            .expect("save follow-up inflight");
+
+        // The atomic clear keyed on the PINNED identity is a no-op: the on-disk
+        // identity (id 9002) does NOT match the pinned id 9001 → UserMsgMismatch,
+        // and crucially the read-and-delete happen under ONE lock so there is no
+        // re-read window a follow-up could slip through.
+        let outcome = crate::services::discord::inflight::clear_inflight_state_if_matches_identity(
+            &provider,
+            channel_id,
+            &pinned_identity,
+        );
+        assert_eq!(
+            outcome,
+            crate::services::discord::inflight::GuardedClearOutcome::UserMsgMismatch,
+            "atomic clear keyed on the pinned turn is a no-op when a follow-up's inflight is on disk"
+        );
+        // The follow-up's inflight survives intact (NOT wiped).
+        let survived =
+            crate::services::discord::inflight::load_inflight_state(&provider, channel_id)
+                .expect("follow-up inflight must still be on disk");
+        assert_eq!(
+            survived.user_msg_id, 9002,
+            "the follow-up turn's inflight is preserved — the TOCTOU clear cannot wipe it"
         );
 
-        // Sanity: when the late re-read is ALSO the current turn (no follow-up),
-        // the gate is FALSE → the clear runs, exactly as before.
+        // ── (2) Current turn cleared ─────────────────────────────────────────
+        // No follow-up: the pinned turn itself is on disk at clear time. The atomic
+        // clear removes it, exactly like the old happy path.
+        crate::services::discord::inflight::clear_inflight_state(&provider, channel_id);
+        crate::services::discord::inflight::save_inflight_state(&pinned_current)
+            .expect("save pinned inflight");
+        let outcome = crate::services::discord::inflight::clear_inflight_state_if_matches_identity(
+            &provider,
+            channel_id,
+            &pinned_identity,
+        );
+        assert_eq!(
+            outcome,
+            crate::services::discord::inflight::GuardedClearOutcome::Cleared,
+            "atomic clear removes the inflight when it is STILL the pinned turn (happy path)"
+        );
         assert!(
-            !super::committed_completion_is_stale_for_newer_turn(
-                Some(&pinned_current),
-                Some(&pinned_current),
-                session,
-                current_offset,
-            ),
-            "no follow-up → clear runs"
+            crate::services::discord::inflight::load_inflight_state(&provider, channel_id)
+                .is_none(),
+            "pinned turn's inflight is gone after the atomic clear"
         );
     }
 
