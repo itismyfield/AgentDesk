@@ -4534,20 +4534,44 @@ pub(super) fn spawn_turn_bridge(
         // Guard: ensure inflight state file is cleaned up even if the task
         // panics or exits early.  On the normal path we defuse the guard
         // after the explicit clear_inflight_state() call.
+        //
+        // #3161 (codex P2): the Drop runs on ANY abnormal exit (panic / early
+        // return after the mailbox release but before the explicit defuse). A
+        // plain unconditional `clear_inflight_state` here is identity-blind and
+        // can delete a row this turn does NOT own — e.g. a NEWER turn already
+        // re-wrote the channel's inflight after this turn released the mailbox.
+        // The guard now carries THIS turn's `user_msg_id` and routes the
+        // abnormal-path clear through the identity-aware guarded clears, so it
+        // only removes the row when the on-disk identity still matches THIS
+        // turn (non-zero) or is a genuine zero-id-owned row (zero). A newer
+        // owner yields `UserMsgMismatch` and is preserved.
         struct InflightCleanupGuard {
             provider: Option<ProviderKind>,
             channel_id: u64,
+            user_msg_id: u64,
         }
         impl Drop for InflightCleanupGuard {
             fn drop(&mut self) {
                 if let Some(ref provider) = self.provider {
-                    clear_inflight_state(provider, self.channel_id);
+                    if self.user_msg_id != 0 {
+                        super::inflight::clear_inflight_state_if_matches(
+                            provider,
+                            self.channel_id,
+                            self.user_msg_id,
+                        );
+                    } else {
+                        super::inflight::clear_inflight_state_if_matches_zero_owned(
+                            provider,
+                            self.channel_id,
+                        );
+                    }
                 }
             }
         }
         let mut inflight_guard = InflightCleanupGuard {
             provider: Some(provider.clone()),
             channel_id: channel_id.get(),
+            user_msg_id: user_msg_id.map(|id| id.get()).unwrap_or(0),
         };
 
         let mut inflight_state = bridge.inflight_state.clone();
@@ -9439,7 +9463,39 @@ pub(super) fn spawn_turn_bridge(
                     }
                 }
             } else {
-                clear_inflight_state(&provider, channel_id.get());
+                // #3161 (codex P1): a zero-id turn (recovery / external-input /
+                // cluster-relay synthesized) cannot be identity-guarded against a
+                // non-zero id, but it MUST NOT blind-clear a row a NEWER real
+                // (non-zero) owner has since written — that wipes the newer
+                // owner's inflight and leaves its status panel permanently
+                // non-complete (the same bug for zero-id callers). The
+                // zero-owned guarded clear removes the row ONLY when the on-disk
+                // `user_msg_id` is itself 0 (this zero-id turn's own row), and
+                // returns `UserMsgMismatch` when a newer non-zero owner is on
+                // disk — so recovery cleanup still works while a newer owner is
+                // preserved.
+                use super::inflight::GuardedClearOutcome;
+                match super::inflight::clear_inflight_state_if_matches_zero_owned(
+                    &provider,
+                    channel_id.get(),
+                ) {
+                    GuardedClearOutcome::Cleared | GuardedClearOutcome::Missing => {}
+                    GuardedClearOutcome::UserMsgMismatch => {
+                        tracing::debug!(
+                            "[turn_bridge] preserving inflight row in channel {}: a newer non-zero turn now owns it (this turn is zero-id)",
+                            channel_id
+                        );
+                    }
+                    GuardedClearOutcome::PlannedRestartSkipped
+                    | GuardedClearOutcome::RebindOriginSkipped => {}
+                    GuardedClearOutcome::IoError => {
+                        tracing::warn!(
+                            provider = %provider.as_str(),
+                            channel = channel_id.get(),
+                            "turn bridge epilogue zero-owned inflight guarded-clear hit IoError; sweeper will retry"
+                        );
+                    }
+                }
             }
             // Defuse the guard — cleanup already done above.
             inflight_guard.provider.take();
@@ -9716,7 +9772,7 @@ mod status_panel_v2_rework_tests {
     use crate::services::discord::gateway::TurnGateway;
     use crate::services::discord::inflight::{
         GuardedClearOutcome, clear_inflight_state, clear_inflight_state_if_matches,
-        load_inflight_state, save_inflight_state,
+        clear_inflight_state_if_matches_zero_owned, load_inflight_state, save_inflight_state,
     };
     use std::future::Future;
     use std::pin::Pin;
@@ -10376,6 +10432,185 @@ mod status_panel_v2_rework_tests {
             load_inflight_state(&provider, channel_id).is_none(),
             "the row is gone once the newer (owning) turn completes"
         );
+    }
+
+    // #3161 (codex P1, id==0 carve-out): the zero-id epilogue race. An OLD
+    // zero-id turn (recovery / external-input / cluster-relay synthesized;
+    // `user_msg_id == 0`) finalizes AFTER a NEWER real (non-zero) identity turn
+    // wrote its inflight row. The pre-fix carve-out ran the UNCONDITIONAL
+    // `clear_inflight_state`, blind-deleting the newer owner's row -> the newer
+    // turn's status panel was left permanently non-complete (the same bug, now
+    // for zero-id callers).
+    //
+    // RED->GREEN: this drives the REAL on-disk inflight layer and mirrors the
+    // exact production fork at the zero-id epilogue site
+    // (`bridge_epilogue_identity_guards_inflight_clear(0) == false` ->
+    // `clear_inflight_state_if_matches_zero_owned`). With the old unconditional
+    // `clear_inflight_state(...)` the final `load_inflight_state` assertion
+    // would fail because the newer owner's row would be gone.
+    #[test]
+    fn zero_id_old_turn_does_not_remove_newer_owners_inflight_row() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+            }
+        }
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        let provider = ProviderKind::Claude;
+        let channel_id = 3_161_950u64;
+        let panel = MessageId::new(1_510_319_194_921_504_999);
+        let newer_turn_user_msg_id = 7_001_999u64;
+
+        // A NEWER real (non-zero) follow-up turn now owns the on-disk row.
+        save_inflight_state(&inflight_row_owned_by(
+            &provider,
+            channel_id,
+            newer_turn_user_msg_id,
+            panel.get(),
+        ))
+        .unwrap();
+
+        // The OLD turn is zero-id -> the epilogue takes the id==0 carve-out
+        // branch (NOT the non-zero identity-guard branch).
+        let old_turn_user_msg_id = 0u64;
+        assert!(
+            !bridge_epilogue_identity_guards_inflight_clear(old_turn_user_msg_id),
+            "a zero-id this-turn must NOT take the non-zero identity-guard branch"
+        );
+
+        // Production step: the OLD zero-id turn's epilogue cleanup. This mirrors
+        // the exact production fork's `else` arm.
+        let outcome = clear_inflight_state_if_matches_zero_owned(&provider, channel_id);
+        assert_eq!(
+            outcome,
+            GuardedClearOutcome::UserMsgMismatch,
+            "the zero-id turn must NOT clear a row that now belongs to a newer non-zero turn"
+        );
+
+        // The newer owner's row must survive the OLD zero-id turn's epilogue.
+        // (Pre-fix unconditional clear deleted it here -> RED.)
+        let survived = load_inflight_state(&provider, channel_id)
+            .expect("newer owner's inflight row must survive the OLD zero-id turn's epilogue");
+        assert_eq!(
+            survived.user_msg_id, newer_turn_user_msg_id,
+            "the surviving row must still belong to the newer turn"
+        );
+    }
+
+    // #3161 (codex P1, no-recovery-regression): a zero-id turn must STILL clear
+    // its OWN zero-id row. The on-disk `user_msg_id` is 0 (a genuine
+    // zero-id-owned recovery/external-input row), so the zero-owned guarded
+    // clear removes it. This is the regression guard that the P1 fix did not
+    // over-correct into refusing all zero-id cleanup.
+    #[test]
+    fn zero_id_turn_still_clears_its_own_zero_id_row() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+            }
+        }
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        let provider = ProviderKind::Claude;
+        let channel_id = 3_161_970u64;
+
+        // A genuine zero-id-owned row (recovery/external-input turn): on-disk
+        // `user_msg_id == 0`.
+        save_inflight_state(&inflight_row_owned_by(&provider, channel_id, 0, 0)).unwrap();
+
+        let outcome = clear_inflight_state_if_matches_zero_owned(&provider, channel_id);
+        assert_eq!(
+            outcome,
+            GuardedClearOutcome::Cleared,
+            "a zero-id turn must still clear its OWN zero-id row (recovery cleanup)"
+        );
+        assert!(
+            load_inflight_state(&provider, channel_id).is_none(),
+            "the zero-id-owned row is removed by its own zero-id turn"
+        );
+    }
+
+    // #3161 (codex P2): the `InflightCleanupGuard::Drop` is identity-aware. On
+    // an abnormal exit the Drop must only clear THIS turn's row. We assert the
+    // exact routing the Drop performs: a non-zero this-turn id routes through
+    // the identity-guarded clear (preserving a newer owner), while a zero-id
+    // this-turn routes through the zero-owned clear (preserving a newer
+    // non-zero owner). The Drop body itself is a thin dispatch over these two
+    // production helpers, so exercising them with the same inputs proves the
+    // Drop's identity-awareness without spawning the full bridge task.
+    #[test]
+    fn cleanup_guard_drop_routing_is_identity_aware() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+            }
+        }
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        let provider = ProviderKind::Claude;
+
+        // Case A: a non-zero guard whose abnormal drop fires AFTER a newer owner
+        // re-wrote the row must NOT delete the newer owner's row.
+        let channel_a = 3_161_980u64;
+        let newer = 7_002_500u64;
+        save_inflight_state(&inflight_row_owned_by(&provider, channel_a, newer, 111)).unwrap();
+        // The drop carries the OLD turn's (different) non-zero id.
+        let old_non_zero = 7_002_111u64;
+        let outcome_a = clear_inflight_state_if_matches(&provider, channel_a, old_non_zero);
+        assert_eq!(
+            outcome_a,
+            GuardedClearOutcome::UserMsgMismatch,
+            "abnormal-path drop for a non-zero turn must not clear a newer owner's row"
+        );
+        assert_eq!(
+            load_inflight_state(&provider, channel_a)
+                .expect("newer owner survives")
+                .user_msg_id,
+            newer
+        );
+
+        // Case B: a zero-id guard whose abnormal drop fires AFTER a newer
+        // non-zero owner re-wrote the row must NOT delete it either.
+        let channel_b = 3_161_990u64;
+        save_inflight_state(&inflight_row_owned_by(&provider, channel_b, newer, 222)).unwrap();
+        let outcome_b = clear_inflight_state_if_matches_zero_owned(&provider, channel_b);
+        assert_eq!(
+            outcome_b,
+            GuardedClearOutcome::UserMsgMismatch,
+            "abnormal-path drop for a zero-id turn must not clear a newer non-zero owner's row"
+        );
+        assert_eq!(
+            load_inflight_state(&provider, channel_b)
+                .expect("newer owner survives")
+                .user_msg_id,
+            newer
+        );
+
+        // Case C: a guard that genuinely owns its row (matching non-zero id)
+        // still cleans up on its abnormal drop.
+        let channel_c = 3_161_995u64;
+        let owner = 7_003_000u64;
+        save_inflight_state(&inflight_row_owned_by(&provider, channel_c, owner, 333)).unwrap();
+        let outcome_c = clear_inflight_state_if_matches(&provider, channel_c, owner);
+        assert_eq!(
+            outcome_c,
+            GuardedClearOutcome::Cleared,
+            "abnormal-path drop must still clean up the turn's OWN row"
+        );
+        assert!(load_inflight_state(&provider, channel_c).is_none());
     }
 }
 
