@@ -10,8 +10,14 @@
 //!      This is a no-op if the dir isn't actually a registered worktree.
 //!   2. If the directory still exists, `std::fs::remove_dir_all` it.
 //!
-//! Degrades gracefully when Postgres is not wired up: returns `Ok(())` with a
-//! `pg_unavailable = true` log line rather than risking false-positive deletes.
+//! Fail-closed by design — it would rather leak an orphan than risk deleting a
+//! live worktree:
+//!   * when Postgres is not wired up it returns `Ok(())` (no DB keep-set, no
+//!     deletes); and
+//!   * when the tmux query FAILS (#3216 P0-1) it skips ALL deletions for the
+//!     run, because a failed query cannot prove a worktree has no live owner.
+//!     Only a SUCCESSFUL tmux query (even one with zero panes) lets the sweep
+//!     proceed.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -99,6 +105,32 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
     active_cwds.extend(resumable_cwds);
     report.active_cwd_count = active_cwds.len() as u64;
 
+    // #3216 (gap 3): a divorced/phantom per-channel worktree (provisioned by a
+    // restart-time rotation, then abandoned when reconciliation pointed the DB
+    // cwd back to the ORIGINAL worktree) has no kept session cwd and no live
+    // owner — it must be swept. But the live tmux that actually owns the
+    // original worktree is the SOURCE OF TRUTH: a managed worktree whose path is
+    // the `#{pane_current_path}` of a live AgentDesk tmux pane must NEVER be
+    // deleted, even if the DB keep-set transiently disagrees (e.g. before
+    // reconciliation backfills `channel_id`). We add this live-tmux guard as an
+    // independent safety net layered on top of the DB keep-set.
+    //
+    // #3216 P0-1 (fail-closed): a FAILED tmux query is indistinguishable, by an
+    // empty path set alone, from "tmux is up with zero AgentDesk panes". If we
+    // treated failure as "no live owners" we would sweep a live AgentDesk
+    // worktree the moment tmux was momentarily unavailable AND its DB cwd was
+    // transiently missing. So when the tmux query FAILS we cannot prove any
+    // worktree is unowned — skip ALL deletions for this run. Only a SUCCESSFUL
+    // query (even one returning zero panes) lets deletion proceed.
+    let Some(live_tmux_paths) = collect_live_tmux_pane_paths() else {
+        tracing::warn!(
+            target: "maintenance",
+            job = "storage.worktree_orphan_sweep",
+            "tmux query failed; cannot prove no live worktree owner — skipping all deletions this run (fail-closed)"
+        );
+        return Ok(report);
+    };
+
     let Ok(entries) = std::fs::read_dir(&config.worktrees_root) else {
         return Ok(report);
     };
@@ -113,7 +145,7 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
         report.scanned_dirs = report.scanned_dirs.saturating_add(1);
 
         let dir_path = entry.path();
-        if is_dir_active(&dir_path, &active_cwds) {
+        if !should_sweep_worktree(&dir_path, &active_cwds, Some(&live_tmux_paths)) {
             continue;
         }
         report.orphan_count = report.orphan_count.saturating_add(1);
@@ -202,26 +234,140 @@ async fn fetch_resumable_cwds(pool: &PgPool) -> Result<HashSet<String>> {
         .collect())
 }
 
+/// True when `candidate` equals `dir` OR is nested directly/transitively under
+/// it (a real path boundary — `dir` followed by `/`). Shared by both the
+/// kept-cwd check ([`is_dir_active`]) and the live-tmux check
+/// ([`has_live_tmux_owner`]) so a pane/cwd sitting in a SUBDIR of a worktree
+/// (e.g. `/worktree/src`) protects the worktree root in both cases.
+pub(crate) fn path_equals_or_nested_under(candidate: &str, dir: &str) -> bool {
+    if candidate == dir {
+        return true;
+    }
+    candidate.starts_with(dir)
+        && candidate
+            .as_bytes()
+            .get(dir.len())
+            .map(|b| *b == b'/')
+            .unwrap_or(false)
+}
+
 /// A worktree dir is "active" if ANY session cwd equals it or is nested under
 /// it (subshell cwds sometimes land inside `src/...` relative to the worktree
 /// root).
 pub(crate) fn is_dir_active(dir: &Path, active_cwds: &HashSet<String>) -> bool {
     let dir_str = dir.to_string_lossy();
-    for cwd in active_cwds {
-        if cwd == dir_str.as_ref() {
-            return true;
-        }
-        if cwd.starts_with(dir_str.as_ref())
-            && cwd
-                .as_bytes()
-                .get(dir_str.len())
-                .map(|b| *b == b'/')
-                .unwrap_or(false)
-        {
-            return true;
-        }
+    active_cwds
+        .iter()
+        .any(|cwd| path_equals_or_nested_under(cwd, dir_str.as_ref()))
+}
+
+/// #3216 (gap 3): the pure sweep decision for a single managed worktree dir.
+///
+/// A worktree is swept ONLY when ALL of the following hold:
+///   * the tmux query SUCCEEDED (`live_tmux_paths` is `Some`). When it FAILED
+///     (`None`, #3216 P0-1) we cannot prove the worktree has no live owner, so
+///     we fail-closed and KEEP everything; AND
+///   * it is not the cwd (nor a parent of the cwd) of any kept session — the DB
+///     keep-set built from active dispatches + recent resumable sessions; AND
+///   * it is not the live `#{pane_current_path}` of any AgentDesk tmux pane
+///     (equal OR a parent of one — #3216 P0-2) — the authoritative live owner.
+///
+/// Factored out as a pure fn (path + kept-cwd set + optional live-tmux-path set)
+/// so the divorced-phantom sweep decision AND the fail-closed tmux-unavailable
+/// behavior are unit-testable without touching Postgres or the real tmux server.
+/// Returning `false` (KEEP) is the conservative default: if tmux is unavailable
+/// OR either source claims the worktree, it survives.
+pub(crate) fn should_sweep_worktree(
+    dir: &Path,
+    kept_cwds: &HashSet<String>,
+    live_tmux_paths: Option<&HashSet<String>>,
+) -> bool {
+    // Fail-closed: a failed tmux query proves nothing about live ownership.
+    let Some(live_tmux_paths) = live_tmux_paths else {
+        return false;
+    };
+    if is_dir_active(dir, kept_cwds) {
+        return false;
     }
-    false
+    if has_live_tmux_owner(dir, live_tmux_paths) {
+        return false;
+    }
+    true
+}
+
+/// True when `dir` is the live `pane_current_path` of some AgentDesk tmux
+/// session — OR a parent of one (a live pane often sits in a SUBDIR of the
+/// worktree, e.g. pane cwd `/worktree/src` while the scanned dir is
+/// `/worktree`). Mirrors [`is_dir_active`]'s nested-path rule via the shared
+/// [`path_equals_or_nested_under`] predicate so a worktree with a live pane in a
+/// subdir is never swept. Compares both the raw `dir` string and its
+/// canonicalized form so a symlinked / non-normalized `read_dir` path still
+/// matches the canonical path tmux reports (and vice-versa).
+pub(crate) fn has_live_tmux_owner(dir: &Path, live_tmux_paths: &HashSet<String>) -> bool {
+    if live_tmux_paths.is_empty() {
+        return false;
+    }
+    let dir_str = dir.to_string_lossy().to_string();
+    let canonical = dir
+        .canonicalize()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| dir_str.clone());
+    live_tmux_paths.iter().any(|pane| {
+        path_equals_or_nested_under(pane, &dir_str) || path_equals_or_nested_under(pane, &canonical)
+    })
+}
+
+/// Gather the `#{pane_current_path}` of every AgentDesk-owned tmux session, both
+/// raw and canonicalized, so [`has_live_tmux_owner`] can protect a worktree that
+/// is the live cwd of a running pane.
+///
+/// Returns `None` when the tmux query FAILS — which is fundamentally different
+/// from "tmux is up but has zero AgentDesk panes" (`Some(empty set)`). A FAILURE
+/// means we cannot prove a worktree has no live owner, so the caller MUST
+/// fail-closed and skip all deletions for this run (#3216 P0-1: a live pane
+/// whose DB cwd is momentarily missing must not be swept merely because tmux was
+/// temporarily unavailable). Only a SUCCESSFUL query (even an empty one) lets the
+/// sweep proceed.
+fn collect_live_tmux_pane_paths() -> Option<HashSet<String>> {
+    let sessions = crate::services::platform::tmux::list_session_names().ok()?;
+    fold_pane_paths(sessions, |session| {
+        crate::services::platform::tmux::pane_current_path(session)
+    })
+}
+
+/// Pure core of [`collect_live_tmux_pane_paths`], parameterised on the pane-path
+/// query so it can be unit-tested without a live tmux server.
+///
+/// Fail-closed (returns `None`) the moment an AgentDesk-owned session's pane path
+/// cannot be determined — either the query FAILS (`None`) or returns an empty
+/// string. A per-session failure means the live-owner set would be INCOMPLETE,
+/// and an incomplete set could let the caller sweep a worktree whose live pane we
+/// simply failed to read (#3216 P0). Non-AgentDesk sessions are skipped BEFORE the
+/// query, so an unrelated operator session failing has no effect.
+fn fold_pane_paths(
+    sessions: Vec<String>,
+    query: impl Fn(&str) -> Option<String>,
+) -> Option<HashSet<String>> {
+    let mut paths = HashSet::new();
+    for session in sessions {
+        // Only AgentDesk-managed panes are relevant; operator-created sessions
+        // must not influence the sweep.
+        if !session.starts_with("AgentDesk-") {
+            continue;
+        }
+        // A live AgentDesk session must report a non-empty pane cwd. If we cannot
+        // read it, fail-closed for the whole run rather than proceed with a
+        // partial set (which would risk deleting a live worktree).
+        let path = query(&session)?;
+        if path.is_empty() {
+            return None;
+        }
+        if let Ok(canonical) = std::path::Path::new(&path).canonicalize() {
+            paths.insert(canonical.to_string_lossy().to_string());
+        }
+        paths.insert(path);
+    }
+    Some(paths)
 }
 
 async fn remove_orphan_worktree(path: &Path) -> Result<()> {
@@ -298,6 +444,185 @@ mod resumable_keep_set_tests {
         let mut keep: HashSet<String> = HashSet::new();
         keep.insert("/home/u/.adk/release/worktrees/other".to_string());
         assert!(!is_dir_active(Path::new(dir), &keep));
+    }
+}
+
+#[cfg(test)]
+mod phantom_sweep_decision_tests {
+    //! #3216 (gap 3): unit-test the pure `should_sweep_worktree` decision for the
+    //! divorced/phantom per-channel worktree scenario. After gap1+gap2
+    //! reconciliation points the DB cwd back to the ORIGINAL worktree, the
+    //! phantom (a full checkout with its own branch, no transcript, no live
+    //! owner) is a genuine orphan and must be swept — while the worktree that is
+    //! a kept session's cwd OR the live tmux pane's cwd must survive.
+    use super::{fold_pane_paths, has_live_tmux_owner, should_sweep_worktree};
+    use std::collections::HashSet;
+    use std::path::Path;
+
+    const ORIGINAL: &str = "/home/u/.adk/release/worktrees/claude-adk-cc-20260607-113822";
+    const PHANTOM: &str = "/home/u/.adk/release/worktrees/claude-adk-cc-20260607-212437";
+
+    /// A divorced managed worktree with no live owner and not matching any kept
+    /// session cwd IS selected for sweep (tmux query SUCCEEDED).
+    #[test]
+    fn divorced_phantom_with_no_owner_is_swept() {
+        // The kept-set points at the ORIGINAL worktree (post-reconciliation),
+        // and the live tmux pane is the ORIGINAL too — the phantom is divorced.
+        let mut kept: HashSet<String> = HashSet::new();
+        kept.insert(ORIGINAL.to_string());
+        let mut live: HashSet<String> = HashSet::new();
+        live.insert(ORIGINAL.to_string());
+
+        assert!(
+            should_sweep_worktree(Path::new(PHANTOM), &kept, Some(&live)),
+            "a phantom worktree that is neither a kept cwd nor a live tmux pane must be swept"
+        );
+    }
+
+    /// A worktree that IS a kept session's cwd is NOT swept.
+    #[test]
+    fn kept_session_cwd_is_not_swept() {
+        let mut kept: HashSet<String> = HashSet::new();
+        kept.insert(ORIGINAL.to_string());
+        let live: HashSet<String> = HashSet::new(); // tmux up, zero panes
+
+        assert!(
+            !should_sweep_worktree(Path::new(ORIGINAL), &kept, Some(&live)),
+            "a worktree recorded as a kept session's cwd must never be swept"
+        );
+    }
+
+    /// A worktree with a live tmux owner is NOT swept — even if the DB keep-set
+    /// transiently disagrees (e.g. before channel_id backfill), the live pane is
+    /// the source of truth.
+    #[test]
+    fn live_tmux_owner_is_not_swept_even_if_not_in_keep_set() {
+        let kept: HashSet<String> = HashSet::new(); // keep-set has NOTHING for it
+        let mut live: HashSet<String> = HashSet::new();
+        live.insert(ORIGINAL.to_string());
+
+        assert!(
+            !should_sweep_worktree(Path::new(ORIGINAL), &kept, Some(&live)),
+            "a worktree that is a live tmux pane's cwd must survive regardless of the keep-set"
+        );
+    }
+
+    /// (b) tmux AVAILABLE with ZERO panes (`Some(empty)`): a phantom with no
+    /// kept cwd and no live pane IS swept — a successful query proved no owner.
+    #[test]
+    fn phantom_is_swept_when_tmux_available_with_zero_panes() {
+        let kept: HashSet<String> = HashSet::new();
+        let live: HashSet<String> = HashSet::new(); // tmux up, but no AgentDesk panes
+        assert!(should_sweep_worktree(
+            Path::new(PHANTOM),
+            &kept,
+            Some(&live)
+        ));
+    }
+
+    /// (a) tmux UNAVAILABLE (`None`, the query FAILED): NOTHING is swept — not
+    /// even a phantom that has no kept cwd and no live pane — because a failed
+    /// query cannot prove the absence of a live owner (#3216 P0-1 fail-closed).
+    #[test]
+    fn nothing_is_swept_when_tmux_unavailable() {
+        let kept: HashSet<String> = HashSet::new();
+        // Even the most clearly-orphaned phantom must survive a failed tmux query.
+        assert!(
+            !should_sweep_worktree(Path::new(PHANTOM), &kept, None),
+            "tmux-unavailable (failed query) must suppress ALL deletions, even of phantoms"
+        );
+    }
+
+    /// (c) A live pane sitting in a SUBDIR of a worktree (e.g. `/worktree/src`)
+    /// protects the worktree root — it must be KEPT (#3216 P0-2 nested match).
+    #[test]
+    fn live_pane_in_subdir_keeps_worktree() {
+        let kept: HashSet<String> = HashSet::new();
+        let mut live: HashSet<String> = HashSet::new();
+        live.insert(format!("{ORIGINAL}/src/services"));
+
+        assert!(
+            has_live_tmux_owner(Path::new(ORIGINAL), &live),
+            "a live pane nested under the worktree must be recognized as an owner"
+        );
+        assert!(
+            !should_sweep_worktree(Path::new(ORIGINAL), &kept, Some(&live)),
+            "a worktree whose live pane sits in a subdir must never be swept"
+        );
+    }
+
+    /// A pane path that merely shares a STRING PREFIX (no `/` boundary) with the
+    /// worktree must NOT be treated as an owner — guards the nested-match logic.
+    #[test]
+    fn sibling_prefix_pane_does_not_keep_worktree() {
+        let kept: HashSet<String> = HashSet::new();
+        let mut live: HashSet<String> = HashSet::new();
+        // `ORIGINAL` + suffix without a path separator — a different directory.
+        live.insert(format!("{ORIGINAL}-sibling"));
+
+        assert!(!has_live_tmux_owner(Path::new(ORIGINAL), &live));
+        assert!(should_sweep_worktree(
+            Path::new(ORIGINAL),
+            &kept,
+            Some(&live)
+        ));
+    }
+
+    /// `has_live_tmux_owner` returns false against an empty live set and true on
+    /// an exact path match.
+    #[test]
+    fn has_live_tmux_owner_basic() {
+        let empty: HashSet<String> = HashSet::new();
+        assert!(!has_live_tmux_owner(Path::new(ORIGINAL), &empty));
+
+        let mut live: HashSet<String> = HashSet::new();
+        live.insert(ORIGINAL.to_string());
+        assert!(has_live_tmux_owner(Path::new(ORIGINAL), &live));
+        assert!(!has_live_tmux_owner(Path::new(PHANTOM), &live));
+    }
+
+    /// #3216 P0: a successful, complete query yields `Some(set)` containing every
+    /// AgentDesk pane path; non-AgentDesk sessions are excluded.
+    #[test]
+    fn fold_pane_paths_collects_agentdesk_panes_only() {
+        let sessions = vec![
+            "AgentDesk-claude-adk-cc".to_string(),
+            "operator-shell".to_string(),
+        ];
+        let result = fold_pane_paths(sessions, |s| match s {
+            "AgentDesk-claude-adk-cc" => Some(ORIGINAL.to_string()),
+            _ => None, // non-AgentDesk failing must NOT abort the collection
+        })
+        .expect("complete agentdesk query yields Some");
+        assert!(result.contains(ORIGINAL));
+        assert_eq!(result.len(), 1);
+    }
+
+    /// #3216 P0 (fail-closed): if ANY AgentDesk session's pane path cannot be read
+    /// (`None`), the whole collection fails-closed (`None`) so the caller skips
+    /// deletion — a partial set must never drive a sweep.
+    #[test]
+    fn fold_pane_paths_fails_closed_on_agentdesk_query_failure() {
+        let sessions = vec![
+            "AgentDesk-claude-adk-cc".to_string(),
+            "AgentDesk-flaky".to_string(),
+        ];
+        let result = fold_pane_paths(sessions, |s| match s {
+            "AgentDesk-claude-adk-cc" => Some(ORIGINAL.to_string()),
+            _ => None, // a live AgentDesk session whose pane path query failed
+        });
+        assert!(
+            result.is_none(),
+            "partial AgentDesk failure must fail-closed"
+        );
+    }
+
+    /// #3216 P0 (fail-closed): an empty pane path is also indeterminate.
+    #[test]
+    fn fold_pane_paths_fails_closed_on_empty_pane_path() {
+        let sessions = vec!["AgentDesk-claude-adk-cc".to_string()];
+        let result = fold_pane_paths(sessions, |_| Some(String::new()));
+        assert!(result.is_none(), "empty pane path must fail-closed");
     }
 }
 
