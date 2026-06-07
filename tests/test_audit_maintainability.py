@@ -47,6 +47,7 @@ from audit_maintainability.checks import (  # noqa: E402
     source_of_truth_alias,
 )
 from audit_maintainability.checks import giant_files  # noqa: E402
+from audit_maintainability.checks import giant_file_ratchet  # noqa: E402
 
 
 def _write(root: Path, rel: str, body: str) -> None:
@@ -157,6 +158,75 @@ class GiantFilesCheck(unittest.TestCase):
             )
             hits = list(giant_files.CHECK.runner(set()))
         self.assertEqual(_files(hits), {"src/other_giant.rs"})
+
+
+class GiantFileRatchetCheck(unittest.TestCase):
+    _BASELINE = "scripts/audit_maintainability_giant_baseline.toml"
+
+    def test_flags_file_grown_past_frozen_baseline(self) -> None:
+        over = "fn x() {}\n" * (giant_files.THRESHOLD + 50)  # 1050 prod LoC
+        with _FakeSrcTree(
+            {
+                "src/services/discord/tmux_watcher.rs": over,
+                "src/other_giant.rs": over,  # no baseline entry -> not ratcheted
+            }
+        ) as root:
+            _write(
+                root,
+                self._BASELINE,
+                """
+                [giant_file_ratchet]
+                "src/services/discord/tmux_watcher.rs" = 1000
+                """,
+            )
+            hits = list(giant_file_ratchet.CHECK.runner(set()))
+        self.assertEqual(_files(hits), {"src/services/discord/tmux_watcher.rs"})
+
+    def test_at_or_under_baseline_passes(self) -> None:
+        content = "fn x() {}\n" * (giant_files.THRESHOLD + 5)  # 1005 prod LoC
+        with _FakeSrcTree({"src/services/discord/tmux_watcher.rs": content}) as root:
+            _write(
+                root,
+                self._BASELINE,
+                """
+                [giant_file_ratchet]
+                "src/services/discord/tmux_watcher.rs" = 2000
+                """,
+            )
+            hits = list(giant_file_ratchet.CHECK.runner(set()))
+        self.assertEqual(hits, [])
+
+    def test_file_dropped_below_threshold_is_not_a_regression(self) -> None:
+        small = "fn y() {}\n" * 10  # below giant threshold -> not in giant map
+        with _FakeSrcTree({"src/services/discord/tmux_watcher.rs": small}) as root:
+            _write(
+                root,
+                self._BASELINE,
+                """
+                [giant_file_ratchet]
+                "src/services/discord/tmux_watcher.rs" = 1000
+                """,
+            )
+            hits = list(giant_file_ratchet.CHECK.runner(set()))
+        self.assertEqual(hits, [])
+
+    def test_allowlist_suppresses(self) -> None:
+        over = "fn x() {}\n" * (giant_files.THRESHOLD + 50)
+        with _FakeSrcTree({"src/services/discord/tmux_watcher.rs": over}) as root:
+            _write(
+                root,
+                self._BASELINE,
+                """
+                [giant_file_ratchet]
+                "src/services/discord/tmux_watcher.rs" = 1000
+                """,
+            )
+            hits = list(
+                giant_file_ratchet.CHECK.runner(
+                    {"src/services/discord/tmux_watcher.rs"}
+                )
+            )
+        self.assertEqual(hits, [])
 
 
 class NamespaceSizeCapsCheck(unittest.TestCase):
@@ -562,7 +632,7 @@ class SourceOfTruthAliasCheck(unittest.TestCase):
 
 
 class HarnessCli(unittest.TestCase):
-    def test_runs_all_ten_checks_and_emits_yaml_keys(self) -> None:
+    def test_runs_all_eleven_checks_and_emits_yaml_keys(self) -> None:
         with _FakeSrcTree({"src/main.rs": "fn main() {}\n"}):
             specs = HARNESS.load_check_specs()
             findings = HARNESS.run_all(specs, {})
@@ -571,6 +641,7 @@ class HarnessCli(unittest.TestCase):
             md_text = HARNESS.render_markdown(specs, findings)
         for key in (
             "giant_files",
+            "giant_file_ratchet",
             "namespace_size_caps",
             "route_srp_violations",
             "service_server_backflow",
@@ -612,6 +683,7 @@ class HarnessCli(unittest.TestCase):
             hard_gated,
             {
                 "giant_files",
+                "giant_file_ratchet",
                 "namespace_size_caps",
                 "direct_discord_sends",
                 "manual_json_row_mapping",
@@ -638,10 +710,10 @@ class HarnessCli(unittest.TestCase):
             yaml_text = HARNESS.render_yaml(specs, findings)
             json_payload = json.loads(HARNESS.render_json(specs, findings))
         self.assertIn("hard_gate_enabled: true", yaml_text)
-        self.assertIn("hard_gate_count: 7", yaml_text)
+        self.assertIn("hard_gate_count: 8", yaml_text)
         self.assertIn("baseline_gate_count: 2", yaml_text)
         self.assertIs(json_payload["hard_gate_enabled"], True)
-        self.assertEqual(json_payload["hard_gate_count"], 7)
+        self.assertEqual(json_payload["hard_gate_count"], 8)
         self.assertEqual(json_payload["baseline_gate_count"], 2)
 
     def test_check_mode_returns_zero_with_no_findings(self) -> None:

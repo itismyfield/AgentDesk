@@ -11,12 +11,13 @@ Stdlib only; Python 3.11+.
 
 Hard and baseline gates
 -----------------------
-Seven checks are blocking in ``--check`` mode: direct Discord send regressions,
+Eight checks are blocking in ``--check`` mode: direct Discord send regressions,
 direct git subprocess regressions, runtime SQLite/legacy DB references,
 source-of-truth alias writes, manual JSON row mapping, giant files missing from
-``docs/agent-maintenance/change-surfaces.md``, and configured namespace size cap
-regressions. Existing findings from the enablement commit are captured in
-``scripts/audit_allowlist.toml``.
+``docs/agent-maintenance/change-surfaces.md``, configured namespace size cap
+regressions, and giant-file re-inflation past a frozen production-LoC baseline
+(``scripts/audit_maintainability_giant_baseline.toml``, #3028). Existing findings
+from the enablement commit are captured in ``scripts/audit_allowlist.toml``.
 
 Some warning-only checks also define no-regression baseline gates. These keep
 existing findings visible in reports while failing ``--check`` only when the
@@ -44,6 +45,7 @@ from audit_maintainability.common import REPO_ROOT, Finding  # noqa: E402
 
 CHECK_MODULES = (
     "audit_maintainability.checks.giant_files",
+    "audit_maintainability.checks.giant_file_ratchet",
     "audit_maintainability.checks.namespace_size_caps",
     "audit_maintainability.checks.route_srp",
     "audit_maintainability.checks.service_server_backflow",
