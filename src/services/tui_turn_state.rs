@@ -215,7 +215,7 @@ pub(crate) fn jsonl_ready_for_input(
 ///     metadata, not a turn spin-up. (The watcher's completion gate has its
 ///     own `full_response`-non-empty guard, so this skip cannot tear down a
 ///     spinning-up turn — see #2712.)
-fn jsonl_strict_terminator_idle(provider: &ProviderKind, path: &Path) -> bool {
+pub(crate) fn jsonl_strict_terminator_idle(provider: &ProviderKind, path: &Path) -> bool {
     // First pass over the default 64KB tail window.
     let Ok(window) = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES) else {
         // A read error cannot prove the turn has ended → conservative Busy.
