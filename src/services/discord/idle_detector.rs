@@ -42,8 +42,8 @@ use poise::serenity_prelude::ChannelId;
 use super::SharedData;
 use super::monitoring_status;
 use super::settings::{self, ResolvedMemorySettings, RoleBinding};
-use crate::server::routes::state::global_monitoring_store;
 use crate::services::memory::{ReflectRequest, SessionEndReason};
+use crate::services::monitoring_store::global_monitoring_store;
 use crate::services::provider::ProviderKind;
 
 /// Freshness threshold. Active turns whose freshness anchor (the later of

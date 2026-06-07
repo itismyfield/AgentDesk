@@ -107,8 +107,34 @@ pub fn latest_claude_transcript_for_cwd(
     claude_home: Option<&Path>,
     exclude: &std::collections::HashSet<PathBuf>,
 ) -> Option<PathBuf> {
-    let project_dirs = claude_project_dir_candidates_for_cwd(cwd, claude_home).ok()?;
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    claude_transcripts_for_cwd_since(cwd, modified_since, claude_home, exclude)
+        .into_iter()
+        .next()
+}
+
+/// #3212 (codex P1): like [`latest_claude_transcript_for_cwd`] but returns ALL
+/// qualifying `<uuid>.jsonl` transcripts under the cwd's Claude project dir(s),
+/// newest mtime first, instead of only the single newest. The follow-up
+/// readiness resolver needs the full candidate set so it can apply an
+/// *ambiguity guard*: when more than one same-cwd transcript qualifies (two
+/// concurrent same-cwd sessions) and there is no stronger per-session identity,
+/// picking the newest mtime is exactly the false-ready / false-busy bug — the
+/// caller refuses to guess. A single candidate is unambiguous and safe to adopt.
+///
+/// `modified_since` floors the result to transcripts at/after this session's
+/// launch (pass `UNIX_EPOCH` to disable); `exclude` drops transcripts already
+/// claimed by OTHER live sessions' bindings.
+pub fn claude_transcripts_for_cwd_since(
+    cwd: &Path,
+    modified_since: std::time::SystemTime,
+    claude_home: Option<&Path>,
+    exclude: &std::collections::HashSet<PathBuf>,
+) -> Vec<PathBuf> {
+    let Ok(project_dirs) = claude_project_dir_candidates_for_cwd(cwd, claude_home) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for project_dir in project_dirs {
         let Ok(entries) = std::fs::read_dir(&project_dir) else {
             continue;
@@ -141,15 +167,18 @@ pub fn latest_claude_transcript_for_cwd(
             if modified < modified_since {
                 continue;
             }
-            if best
-                .as_ref()
-                .is_none_or(|(best_modified, _)| modified > *best_modified)
-            {
-                best = Some((modified, path));
+            // Canonical project-dir candidates can overlap (canonicalized vs
+            // raw cwd encode to the same dir); de-dup identical paths so a
+            // single physical transcript never inflates the candidate count and
+            // trips the ambiguity guard.
+            if !seen.insert(path.clone()) {
+                continue;
             }
+            found.push((modified, path));
         }
     }
-    best.map(|(_, path)| path)
+    found.sort_by(|(a, _), (b, _)| b.cmp(a));
+    found.into_iter().map(|(_, path)| path).collect()
 }
 
 pub fn replay_transcript_file(

@@ -650,6 +650,7 @@ src/
 │   ├── mcp_config.rs
 │   ├── message_outbox.rs
 │   ├── mod.rs
+│   ├── monitoring_store.rs
 │   ├── opencode.rs
 │   ├── operator_connectors.rs
 │   ├── pipeline_override.rs

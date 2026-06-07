@@ -130,7 +130,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (9559 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (9608 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -381,7 +381,7 @@
     the REAL atomic helper against REAL on-disk inflight: a follow-up's inflight on
     disk → atomic clear is a no-op (follow-up preserved); the pinned turn on disk →
     atomic clear removes it (happy path).
-  - `src/services/discord/tui_prompt_relay.rs` (4881 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (4997 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3167: the self-paced TUI loop relay
     starts its synthetic turn with `ActiveTurnKind::Background` so a queued user
@@ -498,7 +498,7 @@
   - `src/services/codex_tmux_wrapper.rs` (1222 lines; Codex tmux wrapper JSON
     event parser and relay bridge for native Codex session events — bugfix only
     outside an extraction plan).
-  - `src/services/tui_prompt_dedupe.rs` (1152 lines; shared TUI prompt
+  - `src/services/tui_prompt_dedupe.rs` (1294 lines; shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
     outside an extraction plan; +88 from #3041 P1-4 codex: a per-record
     `generation: u64` nonce on `ExternalInputRelayLease` (process-global
@@ -537,7 +537,7 @@
     from #3126 stall-watchdog completed-idle false-positive guard tests; +88
     from #3169 stall-watchdog jsonl-mtime liveness guard + tests, closing the
     Death #1 force-clean false-positive on loop mid-write sessions).
-  - `src/services/discord/router/message_handler/intake_turn.rs` (3719 lines;
+  - `src/services/discord/router/message_handler/intake_turn.rs` (3744 lines;
     Discord message intake turn orchestration split from the router message
     handler; bugfix only outside a further extraction plan; +9 from #3082
     queued-only answer-flush gate (`is_queued_notice` on the two

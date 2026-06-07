@@ -162,7 +162,7 @@ fn format_bytes_gib(bytes: u64) -> String {
 }
 
 /// Banner key under which the disk-space entry is tracked in
-/// [`crate::server::routes::state::MonitoringStore`]. Stable so upsert/remove can
+/// [`crate::services::monitoring_store::MonitoringStore`]. Stable so upsert/remove can
 /// find the same row across ticks.
 pub const MONITORING_BANNER_KEY: &str = "disk_space";
 
@@ -186,7 +186,7 @@ pub fn spawn_disk_monitor_tick(probe_path: PathBuf) {
         // Skip the first immediate tick — the probe right at boot has no
         // useful baseline yet and would race startup recovery.
         iv.tick().await;
-        let store: Arc<_> = crate::server::routes::state::global_monitoring_store();
+        let store: Arc<_> = crate::services::monitoring_store::global_monitoring_store();
         loop {
             iv.tick().await;
             run_disk_monitor_tick_once(&probe_path, &store).await;
@@ -198,7 +198,9 @@ pub fn spawn_disk_monitor_tick(probe_path: PathBuf) {
 /// operators wiring a custom interval.
 pub async fn run_disk_monitor_tick_once(
     probe_path: &Path,
-    monitoring: &std::sync::Arc<tokio::sync::Mutex<crate::server::routes::state::MonitoringStore>>,
+    monitoring: &std::sync::Arc<
+        tokio::sync::Mutex<crate::services::monitoring_store::MonitoringStore>,
+    >,
 ) {
     let snapshot = probe(probe_path);
     let banner = banner_text(snapshot);

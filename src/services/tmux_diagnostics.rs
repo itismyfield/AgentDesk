@@ -18,6 +18,14 @@ pub fn tmux_session_has_live_pane(tmux_session_name: &str) -> bool {
     crate::services::platform::tmux::has_live_pane(tmux_session_name)
 }
 
+/// #3208: the current working directory of the live pane for a tmux session.
+/// Used by the follow-up readiness path to resolve the running Claude session's
+/// JSONL transcript when it lives in a rotating worktree that differs from the
+/// channel's configured workspace cwd.
+pub fn tmux_session_pane_cwd(tmux_session_name: &str) -> Option<String> {
+    crate::services::platform::tmux::pane_current_path(tmux_session_name)
+}
+
 pub fn clear_tmux_exit_reason(tmux_session_name: &str) {
     let _ = std::fs::remove_file(tmux_exit_reason_path(tmux_session_name));
 }
