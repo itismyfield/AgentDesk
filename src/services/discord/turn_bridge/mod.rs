@@ -2167,6 +2167,23 @@ fn status_panel_completion_edit_aliases_newer_turn(
         && on_disk_status_message_id == Some(panel_id.get())
 }
 
+/// #3161 (codex P1): pure seam deciding whether THIS turn's epilogue must
+/// identity-guard the inflight-row removal instead of clearing it
+/// unconditionally. A real (non-zero) this-turn identity MUST be guarded so an
+/// OLD turn whose status-panel completion edit was alias-skipped (because a
+/// NEWER turn re-adopted its panel — see
+/// [`status_panel_completion_edit_aliases_newer_turn`]) does NOT also delete the
+/// NEWER owner's on-disk inflight row. The guarded clear only removes the row
+/// when the on-disk `user_msg_id` still matches THIS turn, so a newer owner is
+/// preserved and can still complete its own panel.
+///
+/// An id==0 this-turn (TUI-direct / external-input bridge turn) cannot be
+/// proven against the on-disk identity, so it keeps the unconditional clear —
+/// the same over-suppression carve-out the alias predicate uses for the EDIT.
+fn bridge_epilogue_identity_guards_inflight_clear(this_turn_user_msg_id: u64) -> bool {
+    this_turn_user_msg_id != 0
+}
+
 fn persist_status_panel_completion_fallback_message_id(
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -9375,7 +9392,55 @@ pub(super) fn spawn_turn_bridge(
                     Some("inflight cleared with undelivered full_response"),
                 );
             }
-            clear_inflight_state(&provider, channel_id.get());
+            // #3161 (codex P1): identity-guard the epilogue inflight-row
+            // removal. The status-panel completion EDIT above is alias-skipped
+            // (`panel_edit_aliases_newer_turn`) when a NEWER turn now owns this
+            // turn's captured panel, but THIS removal was unconditional — so an
+            // OLD turn that correctly skipped its edit would still delete the
+            // on-disk inflight row, which by then belongs to the NEWER owner.
+            // That wipes the newer turn's inflight and leaves its status panel
+            // permanently non-complete. We now route a real (non-zero) this-turn
+            // identity through the guarded clear, which removes the row only when
+            // the on-disk `user_msg_id` still matches THIS turn (atomically under
+            // the inflight sidecar lock — no read-then-clear TOCTOU); a newer
+            // owner yields `UserMsgMismatch` and the row is preserved.
+            //
+            // The id==0 case (TUI-direct / external-input bridge turns that
+            // cannot be identity-guarded) keeps the unconditional clear — the
+            // same over-suppression carve-out the alias predicate uses, so those
+            // turns still clean up their own row. `bridge_epilogue_identity_guards_inflight_clear`
+            // is the pure seam shared with the unit test so the production fork
+            // and the test stay in lockstep.
+            let this_turn_user_msg_id = user_msg_id.map(|id| id.get()).unwrap_or(0);
+            if bridge_epilogue_identity_guards_inflight_clear(this_turn_user_msg_id) {
+                use super::inflight::GuardedClearOutcome;
+                match super::inflight::clear_inflight_state_if_matches(
+                    &provider,
+                    channel_id.get(),
+                    this_turn_user_msg_id,
+                ) {
+                    GuardedClearOutcome::Cleared | GuardedClearOutcome::Missing => {}
+                    GuardedClearOutcome::UserMsgMismatch => {
+                        tracing::debug!(
+                            "[turn_bridge] preserving inflight row in channel {}: a newer turn now owns it (this turn user_msg_id {})",
+                            channel_id,
+                            this_turn_user_msg_id
+                        );
+                    }
+                    GuardedClearOutcome::PlannedRestartSkipped
+                    | GuardedClearOutcome::RebindOriginSkipped => {}
+                    GuardedClearOutcome::IoError => {
+                        tracing::warn!(
+                            provider = %provider.as_str(),
+                            channel = channel_id.get(),
+                            this_turn_user_msg_id,
+                            "turn bridge epilogue inflight guarded-clear hit IoError; sweeper will retry"
+                        );
+                    }
+                }
+            } else {
+                clear_inflight_state(&provider, channel_id.get());
+            }
             // Defuse the guard — cleanup already done above.
             inflight_guard.provider.take();
             crate::services::observability::emit_inflight_lifecycle_event(
@@ -9642,12 +9707,17 @@ mod task_notification_kind_lifecycle_tests {
 mod status_panel_v2_rework_tests {
     use super::{
         ChannelId, InflightTurnState, MessageId, ProviderKind, StatusPanelCompletionAction,
-        complete_status_panel_v2, should_open_long_running_placeholder_controller,
-        status_panel_completion_action, status_panel_completion_edit_aliases_newer_turn,
+        bridge_epilogue_identity_guards_inflight_clear, complete_status_panel_v2,
+        should_open_long_running_placeholder_controller, status_panel_completion_action,
+        status_panel_completion_edit_aliases_newer_turn,
         status_panel_completion_ready_after_terminal_body, status_panel_message_id_for_turn,
     };
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     use crate::services::discord::gateway::TurnGateway;
+    use crate::services::discord::inflight::{
+        GuardedClearOutcome, clear_inflight_state, clear_inflight_state_if_matches,
+        load_inflight_state, save_inflight_state,
+    };
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
@@ -10178,6 +10248,134 @@ mod status_panel_v2_rework_tests {
         assert_eq!(sent_messages.len(), 1);
         assert!(sent_messages[0].contains("응답 완료"));
         assert_eq!(last_status_panel_text, sent_messages[0]);
+    }
+
+    fn inflight_row_owned_by(
+        provider: &ProviderKind,
+        channel_id: u64,
+        user_msg_id: u64,
+        status_panel_msg_id: u64,
+    ) -> InflightTurnState {
+        let mut state = InflightTurnState::new(
+            provider.clone(),
+            channel_id,
+            Some("alias-epilogue-test".to_string()),
+            42,
+            user_msg_id,
+            user_msg_id + 1,
+            "turn".to_string(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        state.status_message_id = Some(status_panel_msg_id);
+        state
+    }
+
+    // #3161 (codex P1): the production skip-branch -> epilogue-cleanup
+    // interaction. An OLD bridge turn whose status-panel completion EDIT is
+    // correctly alias-skipped (a NEWER turn re-adopted its panel between turn
+    // start and completion) MUST NOT remove the NEWER owner's on-disk inflight
+    // row in its epilogue. Before the identity guard the removal at the
+    // `clear_inflight_state` site was unconditional, so the OLD turn deleted the
+    // NEWER owner's row -> the newer turn's status panel was left permanently
+    // non-complete.
+    //
+    // RED->GREEN: this test drives the REAL on-disk inflight layer and the REAL
+    // production decision seam (`bridge_epilogue_identity_guards_inflight_clear`
+    // + `clear_inflight_state_if_matches`). Without the guard the epilogue would
+    // run the unconditional `clear_inflight_state` (asserted as the regression
+    // vector below) and the newer owner's row would be gone -> the final
+    // `load_inflight_state` assertion fails.
+    #[test]
+    fn alias_skipped_old_turn_does_not_remove_newer_owners_inflight_row() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+            }
+        }
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        let provider = ProviderKind::Claude;
+        let channel_id = 3_161_900u64;
+        let panel = MessageId::new(1_510_319_194_921_504_931);
+        let old_turn_user_msg_id = 7_000_001u64;
+        let newer_turn_user_msg_id = 7_000_999u64;
+
+        // A NEWER follow-up turn now owns the on-disk row AND has re-adopted the
+        // SAME status panel the OLD turn captured at its start.
+        save_inflight_state(&inflight_row_owned_by(
+            &provider,
+            channel_id,
+            newer_turn_user_msg_id,
+            panel.get(),
+        ))
+        .unwrap();
+
+        // Production step 1: the OLD turn re-reads the current on-disk row at
+        // completion and decides whether to EDIT the panel. The newer owner of
+        // THIS panel must alias-skip the edit.
+        let on_disk = load_inflight_state(&provider, channel_id).expect("newer row on disk");
+        assert!(
+            status_panel_completion_edit_aliases_newer_turn(
+                old_turn_user_msg_id,
+                Some(panel),
+                on_disk.user_msg_id,
+                on_disk.status_message_id,
+            ),
+            "precondition: the OLD turn's panel edit must be alias-skipped"
+        );
+
+        // Sanity / regression-vector: the OLD pre-fix behavior (unconditional
+        // clear) WOULD have removed the newer owner's row. We assert the guard
+        // routes AWAY from that path for a real this-turn identity.
+        assert!(
+            bridge_epilogue_identity_guards_inflight_clear(old_turn_user_msg_id),
+            "a real (non-zero) this-turn identity must be identity-guarded in the epilogue"
+        );
+
+        // Production step 2: the OLD turn's epilogue cleanup. This mirrors the
+        // exact production fork at the `clear_inflight_state` site.
+        if bridge_epilogue_identity_guards_inflight_clear(old_turn_user_msg_id) {
+            let outcome =
+                clear_inflight_state_if_matches(&provider, channel_id, old_turn_user_msg_id);
+            assert_eq!(
+                outcome,
+                GuardedClearOutcome::UserMsgMismatch,
+                "the OLD turn must NOT clear a row that now belongs to the newer turn"
+            );
+        } else {
+            clear_inflight_state(&provider, channel_id);
+        }
+
+        // The newer owner's row must survive the OLD turn's epilogue. (Pre-fix
+        // unconditional clear deleted it here -> RED.)
+        let survived = load_inflight_state(&provider, channel_id)
+            .expect("newer owner's inflight row must survive the OLD turn's epilogue");
+        assert_eq!(
+            survived.user_msg_id, newer_turn_user_msg_id,
+            "the surviving row must still belong to the newer turn"
+        );
+
+        // And the NEWER turn can still complete normally: its own epilogue (same
+        // turn owns the row) clears it.
+        let cleared =
+            clear_inflight_state_if_matches(&provider, channel_id, newer_turn_user_msg_id);
+        assert_eq!(
+            cleared,
+            GuardedClearOutcome::Cleared,
+            "the newer turn must still be able to clear its own row at completion"
+        );
+        assert!(
+            load_inflight_state(&provider, channel_id).is_none(),
+            "the row is gone once the newer (owning) turn completes"
+        );
     }
 }
 
