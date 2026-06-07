@@ -2000,7 +2000,11 @@ mod worktree_reuse_channel_isolation_tests {
                 .fetch_one(&pool)
                 .await
                 .expect("fetch reconciled row");
-        assert_eq!(cwd.as_deref(), Some(live), "DB cwd must be corrected to live tmux cwd");
+        assert_eq!(
+            cwd.as_deref(),
+            Some(live),
+            "DB cwd must be corrected to live tmux cwd"
+        );
         assert_eq!(
             stamped.as_deref(),
             Some(channel_id.to_string().as_str()),
