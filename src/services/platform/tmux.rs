@@ -781,6 +781,67 @@ pub fn read_process_args(pid: u32) -> Option<String> {
     }
 }
 
+/// #3212 (codex P1): the wall-clock start time of a process, as a
+/// [`std::time::SystemTime`]. The follow-up readiness resolver uses this as the
+/// launch-mtime cutoff for the cwd-mtime transcript fallback: only transcripts
+/// modified at/after the live Claude session's launch may be adopted, so a
+/// finished prior session's stale same-cwd transcript can never be mistaken for
+/// the live one (false-ready).
+///
+/// Derived from elapsed-since-start (`ps -o etime=`) rather than the absolute
+/// `lstart` to dodge locale/timezone parsing of the human date. `etime` format
+/// is `[[DD-]HH:]MM:SS`. Returns `None` when the PID is zero/missing or the OS
+/// call fails — callers MUST treat `None` conservatively (no fallback adoption).
+#[cfg(unix)]
+pub fn process_start_time(pid: u32) -> Option<std::time::SystemTime> {
+    if pid == 0 {
+        return None;
+    }
+    let out = std::process::Command::new("ps")
+        .args(["-o", "etime=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let elapsed = parse_ps_etime(String::from_utf8_lossy(&out.stdout).trim())?;
+    std::time::SystemTime::now().checked_sub(elapsed)
+}
+
+/// Return the start time of a process. No implementation on non-unix hosts.
+#[cfg(not(unix))]
+pub fn process_start_time(_pid: u32) -> Option<std::time::SystemTime> {
+    None
+}
+
+/// Parse a `ps -o etime=` field (`[[DD-]HH:]MM:SS`) into an elapsed
+/// [`std::time::Duration`]. Returns `None` for empty/malformed input so the
+/// caller falls back to the conservative no-cutoff path.
+#[cfg(unix)]
+fn parse_ps_etime(raw: &str) -> Option<std::time::Duration> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let (days, hms) = match raw.split_once('-') {
+        Some((d, rest)) => (d.parse::<u64>().ok()?, rest),
+        None => (0, raw),
+    };
+    let parts: Vec<&str> = hms.split(':').collect();
+    let (hours, minutes, seconds) = match parts.as_slice() {
+        [h, m, s] => (
+            h.parse::<u64>().ok()?,
+            m.parse::<u64>().ok()?,
+            s.parse::<u64>().ok()?,
+        ),
+        [m, s] => (0, m.parse::<u64>().ok()?, s.parse::<u64>().ok()?),
+        _ => return None,
+    };
+    Some(std::time::Duration::from_secs(
+        days * 86_400 + hours * 3_600 + minutes * 60 + seconds,
+    ))
+}
+
 /// Check if a session has any live (non-dead) panes.
 pub fn has_live_pane(session_name: &str) -> bool {
     if !has_session(session_name) {
@@ -990,6 +1051,29 @@ mod session_server_tests {
                 },
             ]
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod etime_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn parse_ps_etime_handles_all_field_widths() {
+        assert_eq!(parse_ps_etime("00:05"), Some(Duration::from_secs(5)));
+        assert_eq!(parse_ps_etime("01:02"), Some(Duration::from_secs(62)));
+        assert_eq!(
+            parse_ps_etime("01:02:03"),
+            Some(Duration::from_secs(3_600 + 120 + 3))
+        );
+        assert_eq!(
+            parse_ps_etime("2-03:04:05"),
+            Some(Duration::from_secs(2 * 86_400 + 3 * 3_600 + 4 * 60 + 5))
+        );
+        assert_eq!(parse_ps_etime(""), None);
+        assert_eq!(parse_ps_etime("garbage"), None);
+        assert_eq!(parse_ps_etime("1:2:3:4"), None);
     }
 }
 

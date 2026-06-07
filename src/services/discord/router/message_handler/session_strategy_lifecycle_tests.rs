@@ -462,6 +462,7 @@ fn claude_busy_preflight_uses_idle_transcript_wait_when_transcript_exists() {
         None,
         Some(claude_home.path()),
         None,
+        Some(std::time::SystemTime::UNIX_EPOCH),
     );
 
     assert_eq!(
@@ -484,6 +485,7 @@ fn claude_busy_preflight_falls_back_when_transcript_is_unavailable() {
             None,
             Some(claude_home.path()),
             None,
+            Some(std::time::SystemTime::UNIX_EPOCH),
         ),
         HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
     );
@@ -495,6 +497,7 @@ fn claude_busy_preflight_falls_back_when_transcript_is_unavailable() {
             None,
             Some(claude_home.path()),
             None,
+            Some(std::time::SystemTime::UNIX_EPOCH),
         ),
         HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
     );
@@ -506,6 +509,7 @@ fn claude_busy_preflight_falls_back_when_transcript_is_unavailable() {
             None,
             Some(claude_home.path()),
             None,
+            Some(std::time::SystemTime::UNIX_EPOCH),
         ),
         HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
     );
@@ -520,6 +524,7 @@ fn codex_busy_preflight_keeps_codex_readiness_wait() {
         &ProviderKind::Codex,
         cwd.path().to_str(),
         Some("01234567-89ab-cdef-0123-456789abcdef"),
+        None,
         None,
         None,
         None,
@@ -971,6 +976,7 @@ fn claude_busy_preflight_resolves_worktree_transcript_when_session_id_missing() 
         Some(worktree.path()),
         Some(claude_home.path()),
         None,
+        Some(std::time::SystemTime::UNIX_EPOCH),
     );
     assert_eq!(
         wait_strategy,
@@ -1129,7 +1135,7 @@ fn resolver_runtime_binding_beats_newer_same_cwd_other_session() {
         Some(cwd.path()),
         Some(claude_home.path()),
         Some(&binding),
-        std::time::SystemTime::UNIX_EPOCH,
+        Some(std::time::SystemTime::UNIX_EPOCH),
         &std::collections::HashSet::new(),
     );
     assert_eq!(
@@ -1178,7 +1184,7 @@ fn resolver_rejects_pre_launch_stale_transcript_via_cutoff() {
         Some(cwd.path()),
         Some(claude_home.path()),
         None,
-        launch_cutoff,
+        Some(launch_cutoff),
         &std::collections::HashSet::new(),
     );
     assert_eq!(
@@ -1194,7 +1200,7 @@ fn resolver_rejects_pre_launch_stale_transcript_via_cutoff() {
         Some(cwd.path()),
         Some(claude_home.path()),
         None,
-        std::time::SystemTime::UNIX_EPOCH,
+        Some(std::time::SystemTime::UNIX_EPOCH),
         &std::collections::HashSet::new(),
     );
     assert_eq!(resolved_no_cutoff.as_deref(), Some(stale.as_path()));
@@ -1232,7 +1238,7 @@ fn resolver_runtime_binding_beats_stale_exact_session_id_match() {
         Some(cwd.path()),
         Some(claude_home.path()),
         Some(&binding),
-        std::time::SystemTime::UNIX_EPOCH,
+        Some(std::time::SystemTime::UNIX_EPOCH),
         &std::collections::HashSet::new(),
     );
     assert_eq!(
@@ -1272,7 +1278,7 @@ fn resolver_ambiguous_multi_uuid_same_cwd_refuses_to_guess() {
         Some(cwd.path()),
         Some(claude_home.path()),
         None,
-        std::time::SystemTime::UNIX_EPOCH,
+        Some(std::time::SystemTime::UNIX_EPOCH),
         &std::collections::HashSet::new(),
     );
     assert_eq!(
@@ -1289,7 +1295,7 @@ fn resolver_ambiguous_multi_uuid_same_cwd_refuses_to_guess() {
         Some(cwd.path()),
         Some(claude_home.path()),
         None,
-        std::time::SystemTime::UNIX_EPOCH,
+        Some(std::time::SystemTime::UNIX_EPOCH),
         &exclude,
     );
     assert_eq!(
@@ -1297,4 +1303,134 @@ fn resolver_ambiguous_multi_uuid_same_cwd_refuses_to_guess() {
         Some(a.as_path()),
         "excluding the other live session's transcript disambiguates the cwd fallback"
     );
+}
+
+// #3212 (codex P1-2) RED→GREEN: the pane_cwd holds TWO qualifying transcripts
+// (ambiguous concurrent sessions) while a DIFFERENT current_path holds a single
+// candidate. The old per-cwd `continue` fell through past the ambiguous pane_cwd
+// and adopted the lone current_path transcript. The hard ambiguity guard must
+// instead collect candidates across BOTH cwds and return None — never guess.
+#[cfg(unix)]
+#[test]
+fn resolver_pane_cwd_ambiguous_must_not_fall_through_to_current_path() {
+    let claude_home = tempfile::tempdir().expect("claude home");
+    let pane = tempfile::tempdir().expect("pane cwd");
+    let workspace = tempfile::tempdir().expect("workspace cwd");
+
+    // Two concurrent same-cwd transcripts under the pane cwd → ambiguous.
+    let pane_a = write_busy_claude_transcript(
+        claude_home.path(),
+        pane.path(),
+        "88888888-8888-8888-8888-888888888888",
+    );
+    let pane_b = write_idle_claude_transcript(
+        claude_home.path(),
+        pane.path(),
+        "99999999-9999-9999-9999-999999999999",
+    );
+    // A single (lone) candidate under the configured workspace cwd.
+    let ws_only = write_idle_claude_transcript(
+        claude_home.path(),
+        workspace.path(),
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    );
+    let base = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    pin_mtime(&pane_a, base);
+    pin_mtime(&pane_b, base + std::time::Duration::from_secs(60));
+    pin_mtime(&ws_only, base + std::time::Duration::from_secs(120));
+
+    let resolved = resolve_claude_followup_transcript_path_with_identity(
+        workspace.path().to_str(),
+        None,
+        Some(pane.path()),
+        Some(claude_home.path()),
+        None,
+        Some(std::time::SystemTime::UNIX_EPOCH),
+        &std::collections::HashSet::new(),
+    );
+    assert_eq!(
+        resolved, None,
+        "ambiguous pane_cwd must hard-stop, not fall through and adopt the lone current_path candidate"
+    );
+}
+
+// #3212 (codex P1-1) GREEN: a SINGLE post-launch candidate (newer than the
+// launch cutoff) with no binding/UUID IS adopted — the legitimate JSONL benefit
+// is retained for the common single-session resume case.
+#[cfg(unix)]
+#[test]
+fn resolver_adopts_single_post_launch_candidate() {
+    let claude_home = tempfile::tempdir().expect("claude home");
+    let cwd = tempfile::tempdir().expect("cwd");
+
+    let live = write_idle_claude_transcript(
+        claude_home.path(),
+        cwd.path(),
+        "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    );
+    let base = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    // Session launched BEFORE the transcript was last written → qualifies.
+    let launch_cutoff = base - std::time::Duration::from_secs(60);
+    pin_mtime(&live, base);
+
+    let resolved = resolve_claude_followup_transcript_path_with_identity(
+        cwd.path().to_str(),
+        None,
+        Some(cwd.path()),
+        Some(claude_home.path()),
+        None,
+        Some(launch_cutoff),
+        &std::collections::HashSet::new(),
+    );
+    assert_eq!(
+        resolved.as_deref(),
+        Some(live.as_path()),
+        "a single candidate newer than this session's launch is unambiguous and must be adopted"
+    );
+}
+
+// #3212 (codex P1-1) RED→GREEN: when the launch cutoff CANNOT be obtained
+// (`None`), the cwd-mtime fallback is disabled entirely — an unverified single
+// candidate must NOT be adopted (accept false-busy over false-ready). Stronger
+// identities are absent here, so the resolver returns None.
+#[cfg(unix)]
+#[test]
+fn resolver_conservative_none_when_launch_cutoff_unavailable() {
+    let claude_home = tempfile::tempdir().expect("claude home");
+    let cwd = tempfile::tempdir().expect("cwd");
+
+    let candidate = write_idle_claude_transcript(
+        claude_home.path(),
+        cwd.path(),
+        "cccccccc-cccc-cccc-cccc-cccccccccccc",
+    );
+    let base = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    pin_mtime(&candidate, base);
+
+    let resolved = resolve_claude_followup_transcript_path_with_identity(
+        cwd.path().to_str(),
+        None,
+        Some(cwd.path()),
+        Some(claude_home.path()),
+        None,
+        None,
+        &std::collections::HashSet::new(),
+    );
+    assert_eq!(
+        resolved, None,
+        "no reliable launch time → must not adopt an unverified cwd candidate (false-ready guard)"
+    );
+
+    // Sanity: WITH a permissive cutoff the same single candidate IS adopted —
+    // proving the None above is the conservative-cutoff guard, not a missing dir.
+    let resolved_with_cutoff = resolve_claude_followup_transcript_path_with_identity(
+        cwd.path().to_str(),
+        None,
+        Some(cwd.path()),
+        Some(claude_home.path()),
+        None,
+        Some(std::time::SystemTime::UNIX_EPOCH),
+        &std::collections::HashSet::new(),
+    );
+    assert_eq!(resolved_with_cutoff.as_deref(), Some(candidate.as_path()));
 }
