@@ -38,6 +38,7 @@ pub mod maintenance;
 pub mod mcp_config;
 pub mod memory;
 pub mod message_outbox;
+pub mod monitoring_store;
 pub mod observability;
 pub mod onboarding;
 pub mod opencode;
