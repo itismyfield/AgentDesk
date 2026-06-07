@@ -531,6 +531,7 @@ src/
 │   │   ├── tmux_restart_handoff.rs
 │   │   ├── tmux_session_files.rs
 │   │   ├── tmux_watcher.rs
+│   │   ├── tui_direct_pending_start.rs
 │   │   ├── tui_prompt_relay.rs
 │   │   ├── tui_task_card.rs
 │   │   ├── turn_finalizer.rs

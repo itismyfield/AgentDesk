@@ -416,6 +416,11 @@ pub(super) fn spawn_tui_prompt_relay(shared: Arc<SharedData>, provider: Provider
         spawn_claude_idle_transcript_relay(shared.clone());
     }
 
+    // #3154 restart durability: restore any durable pending synthetic
+    // turn-starts for this provider before the observer loop runs, so a dcserver
+    // restart mid-wait neither loses the wakeup turn nor resubmits its prompt.
+    restore_pending_starts(&shared, &provider);
+
     let provider_name = provider.as_str().to_string();
     let observer_span = tracing::info_span!(
         "tui_prompt_relay_observer",
@@ -798,27 +803,66 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             "system-continuation injections must not reach active-turn handling",
         );
         if let Some(provider) = ProviderKind::from_str(&prompt.provider) {
-            let claim = claim_tui_direct_synthetic_turn(
+            // #3154 — TEMPORAL fix for turn-interleaving. If the PRIOR turn on
+            // this channel has not finalized (its relay tail is still draining),
+            // claiming the synthetic turn-start INLINE here (on the shared
+            // per-provider observer loop) seeds `turn_start_offset` from the
+            // prior relay cursor while that tail is undrained → the
+            // `response_sent_offset_monotonic` collision / duplicate relay this
+            // issue tracks. AND any inline wait here starves OTHER channels'
+            // relays (single observer loop). So: when the prior turn is not
+            // finalized, persist a DURABLE pending-start record and hand the
+            // claim to a DETACHED per-channel worker, then return to the loop.
+            // The worker waits for the prior turn to finalize, then claims with
+            // a FRESH EOF `turn_start_offset`. The common no-interleave case
+            // (prior turn already finalized) stays on the inline fast path.
+            let prior = synthetic_start_prior_turn_view(
                 shared,
                 &provider,
                 channel_id,
                 &prompt.tmux_session_name,
-                &prompt.prompt,
-                anchor_message.id,
-                &lease,
+                anchor_message.id.get(),
             )
             .await;
-            if claim.claimed && lease.relay_owner != claim.relay_owner {
-                lease.relay_owner = claim.relay_owner;
-                // Re-record overwrites the lease with a FRESH generation; adopt it
-                // back into `lease` so the bridge-tail guard below captures the
-                // exact stored identity (otherwise the guard would hold the stale
-                // generation and its Drop would clear nothing / the wrong lease).
-                lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
-                    provider.as_str(),
-                    &prompt.tmux_session_name,
-                    lease,
+            if super::tui_direct_pending_start::should_defer_synthetic_turn_start(prior) {
+                defer_synthetic_turn_start(
+                    shared,
+                    &provider,
+                    channel_id,
+                    &prompt,
+                    anchor_message.id,
+                    &lease,
                 );
+                tracing::info!(
+                    provider = %prompt.provider,
+                    channel_id = channel_id.get(),
+                    tmux_session_name = %prompt.tmux_session_name,
+                    anchor_message_id = anchor_message.id.get(),
+                    "deferred TUI-direct synthetic turn-start off the observer loop; prior turn not yet finalized (durable record persisted, detached per-channel worker spawned)"
+                );
+            } else {
+                let claim = claim_tui_direct_synthetic_turn(
+                    shared,
+                    &provider,
+                    channel_id,
+                    &prompt.tmux_session_name,
+                    &prompt.prompt,
+                    anchor_message.id,
+                    &lease,
+                )
+                .await;
+                if claim.claimed && lease.relay_owner != claim.relay_owner {
+                    lease.relay_owner = claim.relay_owner;
+                    // Re-record overwrites the lease with a FRESH generation; adopt it
+                    // back into `lease` so the bridge-tail guard below captures the
+                    // exact stored identity (otherwise the guard would hold the stale
+                    // generation and its Drop would clear nothing / the wrong lease).
+                    lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+                        provider.as_str(),
+                        &prompt.tmux_session_name,
+                        lease,
+                    );
+                }
             }
         }
         tracing::info!(
@@ -1338,6 +1382,217 @@ async fn claim_tui_direct_synthetic_turn(
     TuiDirectSyntheticTurnClaim {
         relay_owner,
         claimed: true,
+    }
+}
+
+// ===========================================================================
+// #3154 — deferred synthetic turn-start (off the observer loop)
+// ===========================================================================
+
+/// Build the [`PriorTurnView`](super::tui_direct_pending_start::PriorTurnView)
+/// for the synthetic-start deferral decision: read inflight, mailbox, and the
+/// fresh runtime binding for this provider/channel/session.
+async fn synthetic_start_prior_turn_view(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    own_anchor_id: u64,
+) -> super::tui_direct_pending_start::PriorTurnView {
+    let inflight = super::inflight::load_inflight_state(provider, channel_id.get());
+    let inflight_present = inflight.is_some();
+    let inflight_is_own_anchor = inflight
+        .as_ref()
+        .map(|state| {
+            state.turn_source == TurnSource::ExternalInput
+                && state.tmux_session_name.as_deref() == Some(tmux_session_name)
+                && state.user_msg_id == own_anchor_id
+        })
+        .unwrap_or(false);
+
+    let snapshot = super::mailbox_snapshot(shared, channel_id).await;
+    // A BACKGROUND turn (monitor relay / self-paced loop) does not block — only a
+    // real (non-background) active turn is a blocking prior turn (mirrors the
+    // idle-queue kickoff gate at mod.rs `idle_queue_snapshot_has_kickable_backlog`).
+    let mailbox_blocking_turn_present =
+        snapshot.cancel_token.is_some() && !snapshot.active_turn_kind.is_background();
+    let mailbox_turn_is_own_anchor =
+        snapshot.active_user_message_id == Some(MessageId::new(own_anchor_id));
+
+    let runtime_binding_present =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name)
+            .is_some();
+
+    super::tui_direct_pending_start::PriorTurnView {
+        inflight_present,
+        inflight_is_own_anchor,
+        mailbox_blocking_turn_present,
+        mailbox_turn_is_own_anchor,
+        runtime_binding_present,
+    }
+}
+
+/// Persist a durable pending-start record and spawn the detached per-channel
+/// worker. Returns immediately (non-blocking for the observer loop).
+fn defer_synthetic_turn_start(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    prompt: &ObservedTuiPrompt,
+    anchor_message_id: MessageId,
+    lease: &ExternalInputRelayLease,
+) {
+    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let record = super::tui_direct_pending_start::TuiDirectPendingStart {
+        provider: provider.as_str().to_string(),
+        channel_id: channel_id.get(),
+        tmux_session_name: prompt.tmux_session_name.clone(),
+        prompt_text: prompt.prompt.clone(),
+        anchor_message_id: anchor_message_id.get(),
+        lease_relay_owner: lease.relay_owner.as_str().to_string(),
+        lease_runtime_kind: lease.runtime_kind.map(|k| k.as_str().to_string()),
+        lease_turn_id: lease.turn_id.clone(),
+        lease_session_key: lease.session_key.clone(),
+        generation: shared.current_generation,
+        created_at_ms: now_ms,
+        observed_at_ms: prompt.observed_at.timestamp_millis().max(0) as u64,
+        state: super::tui_direct_pending_start::PendingStartState::Waiting,
+        attempt_count: 0,
+    };
+    if let Err(error) = super::tui_direct_pending_start::persist(&record) {
+        tracing::warn!(
+            provider = %record.provider,
+            channel_id = record.channel_id,
+            anchor_message_id = record.anchor_message_id,
+            error = %error,
+            "failed to persist durable TUI-direct pending-start record; spawning worker anyway off the in-memory presence index"
+        );
+    }
+    super::tui_direct_pending_start::spawn_worker(
+        shared.clone(),
+        record,
+        pending_start_view_fn(),
+        pending_start_claim_fn(),
+    );
+}
+
+/// The worker's per-poll view builder (see [`synthetic_start_prior_turn_view`]).
+fn pending_start_view_fn() -> super::tui_direct_pending_start::ViewFn {
+    Box::new(|shared, record| {
+        Box::pin(async move {
+            let provider = ProviderKind::from_str(&record.provider)?;
+            let channel_id = ChannelId::new(record.channel_id);
+            Some(
+                synthetic_start_prior_turn_view(
+                    shared,
+                    &provider,
+                    channel_id,
+                    &record.tmux_session_name,
+                    record.anchor_message_id,
+                )
+                .await,
+            )
+        })
+    })
+}
+
+/// The worker's claim action: rehydrate the lease (in case a restart dropped the
+/// in-memory map), then run the normal [`claim_tui_direct_synthetic_turn`] which
+/// reads the runtime binding FRESH and seeds `turn_start_offset = relay_last_offset()`
+/// (post-drain == EOF) with `response_sent_offset = 0`.
+fn pending_start_claim_fn() -> super::tui_direct_pending_start::ClaimFn {
+    Box::new(|shared, record| {
+        Box::pin(async move {
+            let Some(provider) = ProviderKind::from_str(&record.provider) else {
+                return false;
+            };
+            let channel_id = ChannelId::new(record.channel_id);
+            let anchor_message_id = MessageId::new(record.anchor_message_id);
+
+            // Rehydrate the external-input lease from the durable record's
+            // fields (a restart clears the in-memory lease map). NEVER resubmit
+            // the provider prompt — only the relay lease is restored.
+            let mut lease = ExternalInputRelayLease::unassigned(Some(record.channel_id));
+            lease.turn_id = record.lease_turn_id.clone();
+            lease.session_key = record.lease_session_key.clone();
+            lease.relay_owner = parse_external_input_relay_owner(&record.lease_relay_owner);
+            lease.runtime_kind = record
+                .lease_runtime_kind
+                .as_deref()
+                .and_then(RuntimeHandoffKind::from_str);
+            let lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+                provider.as_str(),
+                &record.tmux_session_name,
+                lease,
+            );
+
+            // #3154 design point 6: register the turn with the single-authority
+            // finalizer BEFORE the claim saves the inflight + (implicitly, via
+            // the lease/inflight) releases the watcher gate — mirrors the bridge
+            // register-before-unpause at turn_bridge/mod.rs.
+            shared.turn_finalizer.register_start(
+                super::turn_finalizer::TurnKey::new(
+                    channel_id,
+                    record.anchor_message_id,
+                    shared.current_generation,
+                ),
+                provider.clone(),
+                super::inflight::RelayOwnerKind::Watcher,
+            );
+
+            let claim = claim_tui_direct_synthetic_turn(
+                shared,
+                &provider,
+                channel_id,
+                &record.tmux_session_name,
+                &record.prompt_text,
+                anchor_message_id,
+                &lease,
+            )
+            .await;
+            claim.claimed
+        })
+    })
+}
+
+fn parse_external_input_relay_owner(value: &str) -> ExternalInputRelayOwner {
+    match value {
+        "bridge_adapter" => ExternalInputRelayOwner::BridgeAdapter,
+        "tui_prompt_relay" => ExternalInputRelayOwner::TuiPromptRelay,
+        "tmux_watcher" => ExternalInputRelayOwner::TmuxWatcher,
+        "session_bound_relay" => ExternalInputRelayOwner::SessionBoundRelay,
+        _ => ExternalInputRelayOwner::Unassigned,
+    }
+}
+
+/// #3154 restart durability: restore durable pending-start records during
+/// provider relay startup. Rehydrates the in-memory presence index (so the
+/// watcher / idle-queue gates hold immediately) and respawns the worker for each
+/// record whose provider matches.
+fn restore_pending_starts(shared: &Arc<SharedData>, provider: &ProviderKind) {
+    for record in super::tui_direct_pending_start::load_all() {
+        if !record.provider.eq_ignore_ascii_case(provider.as_str()) {
+            continue;
+        }
+        // Re-mark present (load_all does not touch the index) so the gates hold
+        // before the worker's first poll.
+        super::tui_direct_pending_start::mark_present_on_restore(
+            &record.provider,
+            record.channel_id,
+        );
+        tracing::info!(
+            provider = %record.provider,
+            channel_id = record.channel_id,
+            tmux_session_name = %record.tmux_session_name,
+            anchor_message_id = record.anchor_message_id,
+            "restored durable TUI-direct pending-start record on relay startup; respawning detached worker (prompt NOT resubmitted)"
+        );
+        super::tui_direct_pending_start::spawn_worker(
+            shared.clone(),
+            record,
+            pending_start_view_fn(),
+            pending_start_claim_fn(),
+        );
     }
 }
 

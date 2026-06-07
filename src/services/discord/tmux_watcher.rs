@@ -5996,6 +5996,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 active_stream_inflight_reacquire_logged = true;
             }
         }
+        // #3154: a deferred synthetic turn-start pending for this channel means
+        // the per-channel worker has not yet saved the matching inflight; keep
+        // the bytes buffered (do NOT suppress / advance confirmed offset) so the
+        // wakeup turn's response batch survives the wait window.
+        let pending_synthetic_start_present = post_terminal_inflight_missing
+            && crate::services::discord::tui_direct_pending_start::pending_synthetic_start_present(
+                watcher_provider.as_str(),
+                channel_id.get(),
+            );
         let post_terminal_no_inflight_should_suppress =
             should_suppress_post_terminal_output_without_inflight(
                 turn_result_relayed,
@@ -6004,6 +6013,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 external_input_lease_present,
                 watcher_batch_contains_assistant_event(&data),
                 post_terminal_pane_actively_streaming,
+                pending_synthetic_start_present,
             ) && !post_terminal_payload_allows_external_relay;
         if post_terminal_payload_allows_external_relay {
             tracing::info!(

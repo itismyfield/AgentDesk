@@ -1616,6 +1616,7 @@ pub(super) fn should_skip_streaming_placeholder_without_inflight(
     inflight_missing && !pane_actively_streaming
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn should_suppress_post_terminal_output_without_inflight(
     terminal_success_seen: bool,
     inflight_missing: bool,
@@ -1623,6 +1624,7 @@ pub(super) fn should_suppress_post_terminal_output_without_inflight(
     external_input_lease_present: bool,
     assistant_continuation_present: bool,
     pane_actively_streaming: bool,
+    pending_synthetic_start_present: bool,
 ) -> bool {
     // SSH-direct prompts never create an inflight (they bypass the Discord
     // message path), so the (terminal + no-inflight) shape alone is not enough
@@ -1634,12 +1636,18 @@ pub(super) fn should_suppress_post_terminal_output_without_inflight(
     // #3107: and if the pane is still actively producing assistant output, the
     // turn is live and merely lost its inflight — relay (and re-acquire) rather
     // than suppress.
+    // #3154: while a deferred synthetic turn-start is pending for this channel,
+    // the worker has not yet saved the matching inflight. Suppressing here (or
+    // advancing the confirmed offset) would EAT the wait window and drop the
+    // wakeup turn's response batch. Keep the bytes buffered until the worker
+    // claims (its inflight save then takes over the relay).
     terminal_success_seen
         && inflight_missing
         && !ssh_direct_prompt_pending
         && !external_input_lease_present
         && !assistant_continuation_present
         && !pane_actively_streaming
+        && !pending_synthetic_start_present
 }
 
 #[cfg(test)]
@@ -1652,35 +1660,35 @@ mod post_terminal_output_tests {
     #[test]
     fn post_terminal_output_without_inflight_is_suppressed() {
         assert!(should_suppress_post_terminal_output_without_inflight(
-            true, true, false, false, false, false
+            true, true, false, false, false, false, false
         ));
         assert!(
             !should_suppress_post_terminal_output_without_inflight(
-                false, true, false, false, false, false
+                false, true, false, false, false, false, false
             ),
             "pre-terminal output still belongs to the active watcher turn"
         );
         assert!(
             !should_suppress_post_terminal_output_without_inflight(
-                true, false, false, false, false, false
+                true, false, false, false, false, false, false
             ),
             "a newly active inflight owns subsequent output"
         );
         assert!(
             !should_suppress_post_terminal_output_without_inflight(
-                true, true, true, false, false, false
+                true, true, true, false, false, false, false
             ),
             "SSH-direct prompt anchor present: output is a real direct-input response"
         );
         assert!(
             !should_suppress_post_terminal_output_without_inflight(
-                true, true, false, true, false, false
+                true, true, false, true, false, false, false
             ),
             "ExternalInput lease present: notification failure must not suppress response output"
         );
         assert!(
             !should_suppress_post_terminal_output_without_inflight(
-                true, true, false, false, true, false
+                true, true, false, false, true, false, false
             ),
             "assistant continuation after early terminal relay still belongs to the provider turn"
         );
@@ -1690,25 +1698,25 @@ mod post_terminal_output_tests {
     fn post_terminal_hard_result_after_committed_turn_requires_direct_input_evidence() {
         assert!(
             should_suppress_post_terminal_output_without_inflight(
-                true, true, false, false, false, false
+                true, true, false, false, false, false, false
             ),
             "a late hard_result envelope after a committed Discord turn must not relay again"
         );
         assert!(
             !should_suppress_post_terminal_output_without_inflight(
-                true, true, true, false, false, false
+                true, true, true, false, false, false, false
             ),
             "a pending SSH-direct prompt is explicit evidence of a fresh direct-input turn"
         );
         assert!(
             !should_suppress_post_terminal_output_without_inflight(
-                true, true, false, true, false, false
+                true, true, false, true, false, false, false
             ),
             "an ExternalInput lease is explicit evidence of a fresh direct-input turn"
         );
         assert!(
             should_suppress_post_terminal_output_without_inflight(
-                true, true, false, false, false, false
+                true, true, false, false, false, false, false
             ),
             "a result-only duplicate without assistant continuation stays suppressed"
         );
@@ -1721,7 +1729,7 @@ mod post_terminal_output_tests {
         // the turn is live and merely lost its inflight.
         assert!(
             !should_suppress_post_terminal_output_without_inflight(
-                true, true, false, false, false, true
+                true, true, false, false, false, true, false
             ),
             "an actively-streaming pane means the turn is live: relay, do not suppress"
         );
@@ -1729,9 +1737,31 @@ mod post_terminal_output_tests {
         // post-finish ghost noise and stays suppressed.
         assert!(
             should_suppress_post_terminal_output_without_inflight(
-                true, true, false, false, false, false
+                true, true, false, false, false, false, false
             ),
             "a finished pane with missing inflight is real ghost noise: still suppressed"
+        );
+    }
+
+    #[test]
+    fn post_terminal_output_with_pending_synthetic_start_is_not_suppressed() {
+        // #3154: while a deferred synthetic turn-start is pending for this
+        // channel (the per-channel worker has not yet saved the matching
+        // inflight), the (terminal + no-inflight) shape that would otherwise be
+        // suppressed must keep its bytes buffered — suppressing here would EAT
+        // the wait window and drop the wakeup turn's response batch.
+        assert!(
+            !should_suppress_post_terminal_output_without_inflight(
+                true, true, false, false, false, false, true
+            ),
+            "a pending synthetic turn-start must keep post-terminal bytes buffered, not suppress"
+        );
+        // Without the pending start the same shape is genuine ghost noise.
+        assert!(
+            should_suppress_post_terminal_output_without_inflight(
+                true, true, false, false, false, false, false
+            ),
+            "no pending synthetic start: real ghost noise stays suppressed"
         );
     }
 
