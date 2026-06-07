@@ -981,22 +981,32 @@ fn validate_inflight_state_for_save(
         return;
     };
 
-    let monotonic_offset = state.response_sent_offset >= existing.response_sent_offset;
+    // #3154 — OBSERVE-ONLY on the bridge/watcher save path. A legit fresh-turn
+    // reset (different user_msg_id or turn_start_offset) resets
+    // response_sent_offset to 0 on purpose (see InflightTurnState::new), so the
+    // check is gated by SAME turn identity; only a backward move within the same
+    // turn is a violation. We do not skip the write here (that would drop a
+    // legit fresh turn); this mirrors the last_offset_monotonic precedent below.
+    let same_turn_identity = existing.user_msg_id == state.user_msg_id
+        && existing.turn_start_offset == state.turn_start_offset;
+    let monotonic_offset =
+        !same_turn_identity || state.response_sent_offset >= existing.response_sent_offset;
     record_inflight_invariant(
         monotonic_offset,
         state,
         "response_sent_offset_monotonic",
         code_location,
-        "inflight response_sent_offset must not move backwards",
+        "inflight response_sent_offset must not move backwards for the same turn identity",
         serde_json::json!({
             "previous": existing.response_sent_offset,
             "next": state.response_sent_offset,
+            "same_turn_identity": same_turn_identity,
             "path": path.display().to_string(),
         }),
     );
     debug_assert!(
         monotonic_offset,
-        "inflight response_sent_offset must not move backwards"
+        "inflight response_sent_offset must not move backwards for the same turn identity"
     );
 
     // I6 (last_offset_monotonic) — OBSERVE-ONLY on the bridge/watcher save
@@ -1005,8 +1015,6 @@ fn validate_inflight_state_for_save(
     // by SAME turn identity; only a backward move within the same turn is a
     // violation. We do not skip the write here (that would drop a legit fresh
     // turn); the enforcing variant lives in the standby/refresh path.
-    let same_turn_identity = existing.user_msg_id == state.user_msg_id
-        && existing.turn_start_offset == state.turn_start_offset;
     let last_offset_monotonic = !same_turn_identity || state.last_offset >= existing.last_offset;
     record_inflight_invariant(
         last_offset_monotonic,
@@ -3869,6 +3877,120 @@ mod stall_recovery_tests {
             temp.path(),
             &path,
             &fresh,
+            "src/services/discord/inflight.rs:test",
+        );
+    }
+
+    #[test]
+    fn validate_save_records_backward_response_sent_offset_violation_same_identity() {
+        // #3154 OBSERVE-ONLY on the save path: a backward response_sent_offset
+        // for the SAME turn identity records a `response_sent_offset_monotonic`
+        // violation (and trips the debug_assert) but does NOT skip the write —
+        // mirrors the last_offset_monotonic precedent.
+        let temp = TempDir::new().unwrap();
+        let mut existing = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
+        existing.full_response = "hello world".to_string();
+        existing.response_sent_offset = 8;
+        save_inflight_state_in_root(temp.path(), &existing).unwrap();
+
+        let provider = ProviderKind::Claude;
+        let path = inflight_state_path(temp.path(), &provider, 321);
+
+        // Same identity (user_msg_id + turn_start_offset) but a backward
+        // response_sent_offset → records a violation. The debug_assert fires in
+        // debug builds; catch the panic so we can assert observability fired.
+        let mut backward = existing.clone();
+        backward.response_sent_offset = 3;
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            validate_inflight_state_for_save(
+                temp.path(),
+                &path,
+                &backward,
+                "src/services/discord/inflight.rs:test",
+            );
+        }));
+        // In debug builds the debug_assert fires; in release it returns.
+        // Either way the invariant record was emitted before the assert.
+        assert!(result.is_err() || cfg!(not(debug_assertions)));
+    }
+
+    #[test]
+    fn validate_save_allows_response_sent_offset_reset_for_fresh_turn() {
+        // #3154: a DIFFERENT turn identity resetting response_sent_offset to 0
+        // (as InflightTurnState::new does) is exempt — the save path must not
+        // flag a legit new-turn reset as a backward regression.
+        let temp = TempDir::new().unwrap();
+        let mut existing = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
+        existing.full_response = "prior turn output".to_string();
+        existing.response_sent_offset = 12; // prior turn had N > 0
+        save_inflight_state_in_root(temp.path(), &existing).unwrap();
+
+        let provider = ProviderKind::Claude;
+        let path = inflight_state_path(temp.path(), &provider, 321);
+
+        // A fresh turn: new user_msg_id AND a new turn_start_offset, with
+        // response_sent_offset reset to 0 (the InflightTurnState::new default).
+        let mut fresh = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 101);
+        fresh.user_msg_id = 101;
+        fresh.turn_start_offset = Some(99);
+        assert_eq!(fresh.response_sent_offset, 0);
+
+        // No panic — different identity is exempt from the monotonic clamp.
+        validate_inflight_state_for_save(
+            temp.path(),
+            &path,
+            &fresh,
+            "src/services/discord/inflight.rs:test",
+        );
+    }
+
+    #[test]
+    fn validate_save_allows_synthetic_overwrite_after_user_turn_3154() {
+        // #3154 replay: a prior USER turn persisted response_sent_offset > 0,
+        // then a wakeup/background (TUI-direct synthetic) turn resets inflight
+        // via InflightTurnState::new (new identity, response_sent_offset 0).
+        // This is a LEGITIMATE new-turn transition and must NOT be flagged as a
+        // response_sent_offset_monotonic regression.
+        let temp = TempDir::new().unwrap();
+
+        // Prior USER turn with response_sent_offset > 0.
+        let mut user_turn = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 555);
+        user_turn.user_msg_id = 555;
+        user_turn.turn_start_offset = Some(0);
+        user_turn.full_response = "user turn response body".to_string();
+        user_turn.response_sent_offset = 15;
+        save_inflight_state_in_root(temp.path(), &user_turn).unwrap();
+
+        let provider = ProviderKind::Claude;
+        let path = inflight_state_path(temp.path(), &provider, 321);
+
+        // Synthetic turn freshly constructed via InflightTurnState::new — a new
+        // identity (different user_msg_id / turn_start_offset) and
+        // response_sent_offset 0.
+        let synthetic = InflightTurnState::new(
+            ProviderKind::Claude,
+            321,
+            Some("adk".to_string()),
+            42,
+            0, // synthetic user_msg_id
+            0,
+            "synthetic wakeup".to_string(),
+            None,
+            Some("AgentDesk-claude-adk".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            900, // new last_offset → new turn_start_offset
+        );
+        assert_eq!(synthetic.response_sent_offset, 0);
+        assert_ne!(synthetic.turn_start_offset, user_turn.turn_start_offset);
+
+        // No panic — the fresh synthetic identity is exempt from the monotonic
+        // clamp, so no response_sent_offset_monotonic violation is recorded.
+        validate_inflight_state_for_save(
+            temp.path(),
+            &path,
+            &synthetic,
             "src/services/discord/inflight.rs:test",
         );
     }
