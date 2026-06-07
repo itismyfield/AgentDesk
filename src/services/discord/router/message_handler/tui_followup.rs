@@ -172,13 +172,31 @@ pub(super) fn hosted_tui_draft_should_enter_provider_recovery(
 ///     idle (background-agents-running) turn as busy → the 45s readiness
 ///     timeout in #3208.
 ///
-/// Resolution order:
-///   1. `claude_transcript_path(current_path, session_id)` when it both has a
+/// #3212 (codex P1): the bare newest-in-cwd fallback (`latest_claude_transcript_for_cwd`
+/// with `UNIX_EPOCH` and an empty exclude) trusts newest mtime under the pane
+/// cwd with NO per-session identity. When two same-cwd sessions run
+/// concurrently it can adopt the WRONG transcript:
+///   - a finished OTHER session's Idle transcript → false-ready → injects a
+///     follow-up into a still-busy TUI, or
+///   - another still-Busy transcript → wrong queue / requeue loop.
+/// The fix establishes a strong per-session identity BEFORE the cwd-mtime
+/// fallback, and hardens the fallback itself.
+///
+/// Resolution order (strongest identity first):
+///   1. The live runtime binding's `output_path` for this tmux session — this
+///      is the watcher's output transcript for the *actual* session and is the
+///      only per-session identity we carry. Trusted when the file exists.
+///   2. `claude_transcript_path(current_path, session_id)` when it both has a
 ///      valid UUID and the file exists (the happy path).
-///   2. newest UUID transcript under the live tmux pane's *actual* cwd
-///      (`pane_cwd`) — this is the worktree the running session writes to.
-///   3. newest UUID transcript under `current_path` (workspace) as a last
-///      resort.
+///   3. newest UUID transcript under the live tmux pane's *actual* cwd
+///      (`pane_cwd`), then `current_path`, BUT only with:
+///        - a `launch_mtime_cutoff` floor (reject transcripts older than this
+///          session's launch — they belong to a prior session), and
+///        - the already-claimed transcripts (`exclude`) of OTHER live sessions
+///          filtered out, and
+///        - an ambiguity guard: when MORE THAN ONE qualifying transcript exists
+///          in a cwd and we have no stronger identity, we refuse to guess
+///          (return `None`) rather than risk false-ready / false-busy.
 #[cfg(unix)]
 pub(super) fn resolve_claude_followup_transcript_path(
     current_path: Option<&str>,
@@ -186,8 +204,48 @@ pub(super) fn resolve_claude_followup_transcript_path(
     pane_cwd: Option<&std::path::Path>,
     claude_home: Option<&std::path::Path>,
 ) -> Option<std::path::PathBuf> {
-    use std::collections::HashSet;
+    resolve_claude_followup_transcript_path_with_identity(
+        current_path,
+        session_id,
+        pane_cwd,
+        claude_home,
+        None,
+        std::time::SystemTime::UNIX_EPOCH,
+        &std::collections::HashSet::new(),
+    )
+}
 
+/// #3212: identity-aware resolver. `runtime_binding` is the strongest per-session
+/// identity (the live watcher output transcript path); `launch_mtime_cutoff`
+/// floors the cwd-mtime fallback so a finished prior session's transcript is
+/// never adopted; `exclude` drops transcripts already claimed by OTHER live
+/// sessions. Production wrappers supply these from the tmux runtime binding
+/// table; tests drive them directly. The bare 4-arg wrapper above keeps the
+/// previous call sites compiling (with the legacy permissive behaviour) but is
+/// no longer used on the production follow-up path.
+#[cfg(unix)]
+pub(super) fn resolve_claude_followup_transcript_path_with_identity(
+    current_path: Option<&str>,
+    session_id: Option<&str>,
+    pane_cwd: Option<&std::path::Path>,
+    claude_home: Option<&std::path::Path>,
+    runtime_binding: Option<&crate::services::tui_prompt_dedupe::TuiRuntimeBinding>,
+    launch_mtime_cutoff: std::time::SystemTime,
+    exclude: &std::collections::HashSet<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    // 1. Strongest identity: the live runtime binding's output transcript for
+    //    THIS tmux session. This is the only path we carry that is bound to the
+    //    actual session, so it disambiguates concurrent same-cwd sessions.
+    if let Some(binding) = runtime_binding.filter(|binding| {
+        binding.runtime_kind == crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
+    }) {
+        let bound_path = std::path::PathBuf::from(binding.output_path.trim());
+        if !binding.output_path.trim().is_empty() && bound_path.exists() {
+            return Some(bound_path);
+        }
+    }
+
+    // 2. Happy path: exact (current_path, session_id) UUID transcript.
     if let (Some(current_path), Some(session_id)) = (current_path, session_id)
         && let Ok(path) = crate::services::claude_tui::transcript_tail::claude_transcript_path(
             std::path::Path::new(current_path),
@@ -199,7 +257,11 @@ pub(super) fn resolve_claude_followup_transcript_path(
         return Some(path);
     }
 
-    let exclude: HashSet<std::path::PathBuf> = HashSet::new();
+    // 3. cwd-mtime fallback, but guarded. We refuse to adopt a transcript when
+    //    the cwd holds more than one qualifying candidate (ambiguous concurrent
+    //    sessions) — picking newest mtime there is exactly the false-ready /
+    //    false-busy bug. We only adopt when there is a single unambiguous
+    //    candidate at/after the launch cutoff.
     let mut candidate_cwds: Vec<std::path::PathBuf> = Vec::new();
     if let Some(pane_cwd) = pane_cwd {
         candidate_cwds.push(pane_cwd.to_path_buf());
@@ -211,15 +273,20 @@ pub(super) fn resolve_claude_followup_transcript_path(
         }
     }
     for cwd in candidate_cwds {
-        if let Some(path) =
-            crate::services::claude_tui::transcript_tail::latest_claude_transcript_for_cwd(
+        let candidates =
+            crate::services::claude_tui::transcript_tail::claude_transcripts_for_cwd_since(
                 &cwd,
-                std::time::SystemTime::UNIX_EPOCH,
+                launch_mtime_cutoff,
                 claude_home,
-                &exclude,
-            )
-        {
-            return Some(path);
+                exclude,
+            );
+        match candidates.len() {
+            0 => continue,
+            1 => return Some(candidates.into_iter().next().expect("len == 1")),
+            // Ambiguous: >1 same-cwd transcript at/after launch with no stronger
+            // identity. Do NOT guess — falling through to the next cwd (or None)
+            // is safer than injecting into the wrong session.
+            _ => continue,
         }
     }
     None
@@ -234,11 +301,16 @@ pub(super) fn observe_claude_tui_transcript_state_for_session(
     let pane_cwd = tmux_session_name
         .and_then(crate::services::tmux_diagnostics::tmux_session_pane_cwd)
         .map(std::path::PathBuf::from);
-    let Some(transcript_path) = resolve_claude_followup_transcript_path(
+    let runtime_binding = tmux_session_name
+        .and_then(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session);
+    let Some(transcript_path) = resolve_claude_followup_transcript_path_with_identity(
         current_path,
         session_id,
         pane_cwd.as_deref(),
         None,
+        runtime_binding.as_ref(),
+        std::time::SystemTime::UNIX_EPOCH,
+        &std::collections::HashSet::new(),
     ) else {
         return crate::services::tui_turn_state::TuiTurnState::Unknown;
     };
@@ -266,12 +338,15 @@ pub(super) fn hosted_tui_busy_preflight_readiness_wait(
     let pane_cwd = tmux_session_name
         .and_then(crate::services::tmux_diagnostics::tmux_session_pane_cwd)
         .map(std::path::PathBuf::from);
+    let runtime_binding = tmux_session_name
+        .and_then(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session);
     hosted_tui_busy_preflight_readiness_wait_with_claude_home(
         provider,
         current_path,
         session_id,
         pane_cwd.as_deref(),
         None,
+        runtime_binding.as_ref(),
     )
 }
 
@@ -282,6 +357,7 @@ pub(super) fn hosted_tui_busy_preflight_readiness_wait_with_claude_home(
     session_id: Option<&str>,
     pane_cwd: Option<&std::path::Path>,
     claude_home: Option<&std::path::Path>,
+    runtime_binding: Option<&crate::services::tui_prompt_dedupe::TuiRuntimeBinding>,
 ) -> HostedTuiBusyPreflightReadinessWait {
     if matches!(provider, ProviderKind::Codex) {
         return HostedTuiBusyPreflightReadinessWait::Codex;
@@ -289,9 +365,17 @@ pub(super) fn hosted_tui_busy_preflight_readiness_wait_with_claude_home(
     // #3208: resolve the *running* session's transcript (worktree-aware), not
     // just `claude_transcript_path(current_path, session_id)`, so the idle
     // JSONL fallback engages for sessions running in a rotating worktree.
-    let Some(transcript_path) =
-        resolve_claude_followup_transcript_path(current_path, session_id, pane_cwd, claude_home)
-    else {
+    // #3212: prefer the runtime binding's per-session output transcript over the
+    // ambiguous newest-in-cwd guess so we never wait on the wrong session.
+    let Some(transcript_path) = resolve_claude_followup_transcript_path_with_identity(
+        current_path,
+        session_id,
+        pane_cwd,
+        claude_home,
+        runtime_binding,
+        std::time::SystemTime::UNIX_EPOCH,
+        &std::collections::HashSet::new(),
+    ) else {
         return HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly;
     };
     // Missing Claude JSONL files currently observe as Idle. Only pass a
