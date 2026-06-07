@@ -18,6 +18,21 @@
 ALTER TABLE sessions
   ADD COLUMN IF NOT EXISTS channel_id TEXT;
 
+-- Lock note (#3213 P2): this `CREATE INDEX` is intentionally NON-concurrent.
+-- The runner is sqlx's `Migrator` (`sqlx::migrate!("./migrations/postgres")`),
+-- which wraps each migration file in its own transaction unless the file opts
+-- out with a `-- no-transaction` directive. None of the migrations here use that
+-- directive, so `CREATE INDEX CONCURRENTLY` is forbidden (CONCURRENTLY cannot
+-- run inside a transaction block) and would error at apply time.
+--
+-- The non-concurrent build is nonetheless effectively free: the partial-index
+-- predicate is `WHERE channel_id IS NOT NULL`, and the `channel_id` column was
+-- just added in the statement above, so EVERY existing row has channel_id = NULL
+-- at migration time. The index therefore qualifies ZERO rows, the ACCESS
+-- EXCLUSIVE lock on `sessions` is held only momentarily, and there is no
+-- meaningful write-lock window. This mirrors the established pattern in
+-- 0055_sessions_idle_recap_state.sql (add column + partial index on the
+-- just-added column).
 CREATE INDEX IF NOT EXISTS sessions_channel_id_idx
   ON sessions (channel_id)
   WHERE channel_id IS NOT NULL;

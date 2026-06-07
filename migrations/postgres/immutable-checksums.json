@@ -368,7 +368,7 @@
     },
     {
       "path": "migrations/postgres/0071_sessions_channel_id.sql",
-      "sha256": "905ce219bee23ff0857e39c7de0797fb1b96ba85f88593a40b3bd4ec0716f856",
+      "sha256": "41d2fe1d89c2d9007b1dcef72ee174b1b61cda0159ea86d0a8ab108fbad1098a",
       "version": 71
     }
   ],
