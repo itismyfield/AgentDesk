@@ -785,6 +785,33 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             channel_id.get(),
             anchor_message.id.get(),
         );
+        // #3174: turn-identity guard on the ⏳ lifecycle vs the watcher's
+        // lease-gated completion. If the provider committed terminal output
+        // inside the sub-second `notify-post + ⏳-add` window above, the watcher's
+        // lease-gated completion already fired BEFORE this `record_prompt_anchor`
+        // landed — it found no anchor, was a no-op, and recorded a deferred-
+        // completion marker (the lease it gated on is cleared after that
+        // delivery, so no later watcher pass would reconcile the ⏳). Now that
+        // THIS turn's anchor exists, drain that marker and finish the
+        // ⏳ → ✅ swap against the just-recorded anchor. Turn-identity safe: the
+        // marker is keyed to `(provider, tmux, channel)` and could only have been
+        // set by a completion gated on this same relay invocation's lease, so a
+        // newer same-key turn never drains it (it records its own lease/anchor).
+        // No-op on the common path (no terminal output yet → no marker).
+        if crate::services::tui_prompt_dedupe::take_deferred_anchor_completion(
+            &prompt.provider,
+            &prompt.tmux_session_name,
+        ) && let Some(command_http) = command_http.as_ref()
+        {
+            let _ = complete_tui_direct_prompt_anchor_lifecycle_if_present(
+                command_http,
+                &prompt.provider,
+                &prompt.tmux_session_name,
+                channel_id,
+                "relay_record_prompt_anchor_drains_deferred_lease_gated_completion",
+            )
+            .await;
+        }
         // #3099: a `<task-notification>` auto-turn is still a real provider turn
         // that earns the same synthetic ownership as human direct input — the
         // difference is purely that its `⏳` completion cleanup must be anchored on

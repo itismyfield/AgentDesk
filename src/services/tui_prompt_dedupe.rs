@@ -17,6 +17,13 @@ const PROMPT_ANCHOR_TTL: Duration = Duration::from_secs(30 * 60);
 // the marker is also cleared explicitly when an anchor is consumed.
 const SSH_DIRECT_OBSERVATION_TTL: Duration = Duration::from_secs(60);
 const EXTERNAL_INPUT_RELAY_LEASE_TTL: Duration = Duration::from_secs(10 * 60);
+// #3174: a deferred ⏳-completion marker only has to survive the gap between the
+// watcher's lease-gated completion firing (anchor not yet recorded) and THIS
+// turn's `record_prompt_anchor` landing — the `notify-post + ⏳-add` Discord I/O
+// window. Bounding it to the SSH-direct observation TTL keeps a stranded marker
+// from a turn that never records an anchor (e.g. notify-post failure) from
+// leaking onto a much-later same-key turn.
+const DEFERRED_ANCHOR_COMPLETION_TTL: Duration = Duration::from_secs(60);
 const OBSERVED_PROMPT_BUFFER: usize = 128;
 
 static STATE: LazyLock<Mutex<TuiPromptDedupeState>> =
@@ -159,6 +166,17 @@ struct TuiPromptDedupeState {
     // failures; watchers use it to keep post-terminal suppression from eating
     // the response.
     external_input_relay_lease_by_tmux: HashMap<PromptKey, TimedValue<ExternalInputRelayLease>>,
+    // #3174: deferred ⏳-completion markers. When the watcher's lease-gated
+    // completion fires BEFORE this turn's `record_prompt_anchor` has landed (the
+    // provider committed terminal output inside the sub-second `notify-post +
+    // ⏳-add` window), the anchor lookup returns None and the completion would be
+    // a no-op — stranding the ⏳. Instead the watcher records a marker here; the
+    // SAME turn's `record_prompt_anchor` then drains it and the relay finishes
+    // the ⏳ → ✅ swap against the just-recorded anchor. Turn-identity safe: the
+    // lease that gated the completion and the anchor that drains the marker are
+    // recorded by the SAME relay invocation, so a newer same-key turn (which
+    // records its own lease/anchor) can never consume this marker.
+    deferred_anchor_completion_by_tmux: HashMap<PromptKey, TimedValue<()>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -401,6 +419,60 @@ pub(crate) fn clear_prompt_anchor_for_response(
         clear_ssh_direct_observation_pending(&provider, tmux_session_name);
     }
     removed
+}
+
+/// #3174: record a deferred ⏳-completion marker for `(provider, tmux, channel)`.
+///
+/// Called by the watcher's lease-gated completion path when the gate fired (the
+/// external-input lease for THIS turn was present before relay) but the prompt
+/// anchor for this turn has not been recorded yet — the provider committed
+/// terminal output inside the sub-second `notify-post + ⏳-add` window. Without
+/// this marker the anchor-less completion is a silent no-op and the ⏳ is
+/// stranded (the lease is cleared after this delivery, so no later pass
+/// reconciles it). The SAME turn's [`record_prompt_anchor`] drains this marker
+/// and the relay finishes the ⏳ → ✅ swap against the just-recorded anchor.
+pub(crate) fn record_deferred_anchor_completion(
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+) {
+    let provider = normalize_provider(provider);
+    let tmux_session_name = tmux_session_name.trim();
+    if provider.is_empty() || tmux_session_name.is_empty() || channel_id == 0 {
+        return;
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    state.deferred_anchor_completion_by_tmux.insert(
+        PromptKey::new(&provider, tmux_session_name),
+        TimedValue {
+            value: (),
+            recorded_at: Instant::now(),
+        },
+    );
+}
+
+/// #3174: drain (read-and-clear) a deferred ⏳-completion marker for
+/// `(provider, tmux)`. Returns `true` iff a non-expired marker was present.
+///
+/// Called by [`record_prompt_anchor`]'s site in the relay immediately after the
+/// anchor is recorded (and ⏳ added). Turn-identity safe: the marker can only
+/// have been set by a watcher completion gated on THIS turn's external-input
+/// lease, and that lease + this anchor are recorded by the SAME relay
+/// invocation, so a newer same-key turn never drains another turn's marker.
+pub(crate) fn take_deferred_anchor_completion(provider: &str, tmux_session_name: &str) -> bool {
+    let provider = normalize_provider(provider);
+    let tmux_session_name = tmux_session_name.trim();
+    if provider.is_empty() || tmux_session_name.is_empty() {
+        return false;
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    let key = PromptKey::new(&provider, tmux_session_name);
+    state
+        .deferred_anchor_completion_by_tmux
+        .remove(&key)
+        .is_some()
 }
 
 pub(crate) fn runtime_binding_for_tmux_session(
@@ -1147,6 +1219,9 @@ impl TuiPromptDedupeState {
         self.external_input_relay_lease_by_tmux.retain(|_, entry| {
             now.duration_since(entry.recorded_at) <= EXTERNAL_INPUT_RELAY_LEASE_TTL
         });
+        self.deferred_anchor_completion_by_tmux.retain(|_, entry| {
+            now.duration_since(entry.recorded_at) <= DEFERRED_ANCHOR_COMPLETION_TTL
+        });
     }
 }
 
@@ -1508,6 +1583,91 @@ mod tests {
             take_prompt_anchor_for_response("claude", "tmux-anchor", 42),
             None
         );
+    }
+
+    // #3174: the narrow ordering race — the watcher's lease-gated completion
+    // fires BEFORE this turn's `record_prompt_anchor` lands (the provider
+    // committed terminal output inside the `notify-post + ⏳-add` window). The
+    // anchor-less completion must NOT silently drop the ⏳; it records a deferred
+    // marker that the SAME turn's late anchor record drains.
+    //
+    // This reproduces the EXACT ordering: completion-before-anchor. Before the
+    // fix `take_deferred_anchor_completion` did not exist and the anchor-less
+    // completion had nowhere to defer to — the ⏳ was stranded (no later pass,
+    // because the lease that gated the completion is cleared after delivery).
+    #[test]
+    fn deferred_anchor_completion_reconciles_when_anchor_recorded_after_completion() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        // 1) Watcher's lease-gated completion runs; the anchor for THIS turn is
+        //    not recorded yet (notify-post + ⏳-add still in flight), so the
+        //    anchor lookup the completion does returns None.
+        assert_eq!(
+            prompt_anchor_for_response("claude", "tmux-anchor", 42),
+            None,
+            "anchor must not exist yet at completion time (the race window)"
+        );
+        // The anchor-less completion records a deferred marker instead of
+        // dropping the ⏳.
+        record_deferred_anchor_completion("Claude", "tmux-anchor", 42);
+
+        // 2) The late `record_prompt_anchor` lands for the SAME turn. Its site
+        //    drains the deferred marker → the relay finishes the ⏳ → ✅ swap.
+        record_prompt_anchor("Claude", "tmux-anchor", 42, 9001);
+        assert!(
+            take_deferred_anchor_completion("claude", "tmux-anchor"),
+            "late anchor record must drain the deferred completion marker"
+        );
+        // The anchor is present so the relay's completion can act on it.
+        assert_eq!(
+            prompt_anchor_for_response("claude", "tmux-anchor", 42),
+            Some(TuiPromptAnchor {
+                channel_id: 42,
+                message_id: 9001,
+            }),
+        );
+        // The marker is single-shot: a second drain is a no-op.
+        assert!(
+            !take_deferred_anchor_completion("claude", "tmux-anchor"),
+            "deferred marker must be consumed exactly once"
+        );
+    }
+
+    // #3174: the common (non-racing) path records no deferred marker, so the
+    // late anchor record drains nothing — the relay's reconcile is a no-op and
+    // the normal watcher completion owns the ⏳ → ✅ swap. Guards against the
+    // fix double-completing on every turn.
+    #[test]
+    fn no_deferred_completion_when_completion_did_not_race_the_anchor() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        // No anchor-less completion happened (provider took the usual seconds),
+        // so no marker was recorded.
+        record_prompt_anchor("Claude", "tmux-anchor", 42, 9001);
+        assert!(
+            !take_deferred_anchor_completion("claude", "tmux-anchor"),
+            "no deferred completion must be drained on the common non-racing path"
+        );
+    }
+
+    // #3174 turn-identity safety: a deferred marker is keyed to
+    // `(provider, tmux)` and must not be drained by a DIFFERENT provider's or a
+    // different tmux session's anchor record.
+    #[test]
+    fn deferred_anchor_completion_is_isolated_by_provider_and_session() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        record_deferred_anchor_completion("claude", "tmux-a", 42);
+
+        // Wrong provider: codex must not drain claude's marker.
+        assert!(!take_deferred_anchor_completion("codex", "tmux-a"));
+        // Wrong session: a different tmux must not drain it.
+        assert!(!take_deferred_anchor_completion("claude", "tmux-b"));
+        // The exact key still drains it.
+        assert!(take_deferred_anchor_completion("claude", "tmux-a"));
     }
 
     #[test]
