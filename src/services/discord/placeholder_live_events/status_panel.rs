@@ -199,14 +199,12 @@ impl StatusPanelState {
                 };
                 let slot = target.map(|index| &mut self.subagents[index]);
                 if let Some(slot) = slot {
-                    // A `run_in_background` subagent's immediate Task
-                    // `tool_result` arrives as an ack-only end while the
-                    // subagent keeps running (often outliving the launching
-                    // turn). Finalizing it here would render a premature ✓. Skip
-                    // the finalize for background slots on an ack-only end; a
-                    // genuine completion (summary-bearing end or terminal
-                    // task_notification, both `ack_only == false`) still closes
-                    // it. Foreground subagents finalize on the ack as before.
+                    // A background subagent's ack-only end is just a launch ack
+                    // (it keeps running, often past the launching turn), so
+                    // finalizing here would render a premature ✓. Skip it for
+                    // background slots on ack-only ends; a genuine completion
+                    // (`ack_only == false`) still closes it. Foreground finalizes
+                    // on the ack as before.
                     let finalize = !(ack_only && slot.background);
                     if finalize {
                         slot.finished = Some(success);
