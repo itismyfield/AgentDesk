@@ -99,6 +99,17 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
     active_cwds.extend(resumable_cwds);
     report.active_cwd_count = active_cwds.len() as u64;
 
+    // #3216 (gap 3): a divorced/phantom per-channel worktree (provisioned by a
+    // restart-time rotation, then abandoned when reconciliation pointed the DB
+    // cwd back to the ORIGINAL worktree) has no kept session cwd and no live
+    // owner — it must be swept. But the live tmux that actually owns the
+    // original worktree is the SOURCE OF TRUTH: a managed worktree whose path is
+    // the `#{pane_current_path}` of a live AgentDesk tmux pane must NEVER be
+    // deleted, even if the DB keep-set transiently disagrees (e.g. before
+    // reconciliation backfills `channel_id`). We add this live-tmux guard as an
+    // independent safety net layered on top of the DB keep-set.
+    let live_tmux_paths = collect_live_tmux_pane_paths();
+
     let Ok(entries) = std::fs::read_dir(&config.worktrees_root) else {
         return Ok(report);
     };
@@ -113,7 +124,7 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
         report.scanned_dirs = report.scanned_dirs.saturating_add(1);
 
         let dir_path = entry.path();
-        if is_dir_active(&dir_path, &active_cwds) {
+        if !should_sweep_worktree(&dir_path, &active_cwds, &live_tmux_paths) {
             continue;
         }
         report.orphan_count = report.orphan_count.saturating_add(1);
@@ -224,6 +235,80 @@ pub(crate) fn is_dir_active(dir: &Path, active_cwds: &HashSet<String>) -> bool {
     false
 }
 
+/// #3216 (gap 3): the pure sweep decision for a single managed worktree dir.
+///
+/// A worktree is swept ONLY when it is BOTH:
+///   * not the cwd (nor a parent of the cwd) of any kept session — the DB
+///     keep-set built from active dispatches + recent resumable sessions; AND
+///   * not the live `#{pane_current_path}` of any AgentDesk tmux pane — the
+///     authoritative live owner.
+///
+/// Factored out as a pure fn (path + kept-cwd set + live-tmux-path set) so the
+/// divorced-phantom sweep decision is unit-testable without touching Postgres or
+/// the real tmux server. Returning `false` (KEEP) is the conservative default:
+/// if EITHER source claims the worktree, it survives.
+pub(crate) fn should_sweep_worktree(
+    dir: &Path,
+    kept_cwds: &HashSet<String>,
+    live_tmux_paths: &HashSet<String>,
+) -> bool {
+    if is_dir_active(dir, kept_cwds) {
+        return false;
+    }
+    if has_live_tmux_owner(dir, live_tmux_paths) {
+        return false;
+    }
+    true
+}
+
+/// True when `dir` is the live `pane_current_path` of some AgentDesk tmux
+/// session. Compares both the raw path string and the canonicalized form so a
+/// symlinked / non-normalized `read_dir` path still matches the canonical path
+/// tmux reports (and vice-versa).
+pub(crate) fn has_live_tmux_owner(dir: &Path, live_tmux_paths: &HashSet<String>) -> bool {
+    if live_tmux_paths.is_empty() {
+        return false;
+    }
+    let dir_str = dir.to_string_lossy().to_string();
+    if live_tmux_paths.contains(&dir_str) {
+        return true;
+    }
+    let canonical = dir
+        .canonicalize()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or(dir_str);
+    live_tmux_paths.contains(&canonical)
+}
+
+/// Gather the `#{pane_current_path}` of every AgentDesk-owned tmux session, both
+/// raw and canonicalized, so [`has_live_tmux_owner`] can protect a worktree that
+/// is the live cwd of a running pane. Degrades to an empty set (no extra
+/// protection, DB keep-set still applies) when tmux is unavailable — it never
+/// causes a delete, only suppresses one.
+fn collect_live_tmux_pane_paths() -> HashSet<String> {
+    let mut paths = HashSet::new();
+    let Ok(sessions) = crate::services::platform::tmux::list_session_names() else {
+        return paths;
+    };
+    for session in sessions {
+        // Only AgentDesk-managed panes are relevant; operator-created sessions
+        // must not influence the sweep.
+        if !session.starts_with("AgentDesk-") {
+            continue;
+        }
+        if let Some(path) = crate::services::platform::tmux::pane_current_path(&session) {
+            if path.is_empty() {
+                continue;
+            }
+            if let Ok(canonical) = std::path::Path::new(&path).canonicalize() {
+                paths.insert(canonical.to_string_lossy().to_string());
+            }
+            paths.insert(path);
+        }
+    }
+    paths
+}
+
 async fn remove_orphan_worktree(path: &Path) -> Result<()> {
     // Try `git worktree remove --force <path>` first. This requires running
     // from the parent repo, which we infer by reading the .git file inside
@@ -298,6 +383,89 @@ mod resumable_keep_set_tests {
         let mut keep: HashSet<String> = HashSet::new();
         keep.insert("/home/u/.adk/release/worktrees/other".to_string());
         assert!(!is_dir_active(Path::new(dir), &keep));
+    }
+}
+
+#[cfg(test)]
+mod phantom_sweep_decision_tests {
+    //! #3216 (gap 3): unit-test the pure `should_sweep_worktree` decision for the
+    //! divorced/phantom per-channel worktree scenario. After gap1+gap2
+    //! reconciliation points the DB cwd back to the ORIGINAL worktree, the
+    //! phantom (a full checkout with its own branch, no transcript, no live
+    //! owner) is a genuine orphan and must be swept — while the worktree that is
+    //! a kept session's cwd OR the live tmux pane's cwd must survive.
+    use super::{has_live_tmux_owner, should_sweep_worktree};
+    use std::collections::HashSet;
+    use std::path::Path;
+
+    const ORIGINAL: &str = "/home/u/.adk/release/worktrees/claude-adk-cc-20260607-113822";
+    const PHANTOM: &str = "/home/u/.adk/release/worktrees/claude-adk-cc-20260607-212437";
+
+    /// (a) A divorced managed worktree with no live owner and not matching any
+    /// kept session cwd IS selected for sweep.
+    #[test]
+    fn divorced_phantom_with_no_owner_is_swept() {
+        // The kept-set points at the ORIGINAL worktree (post-reconciliation),
+        // and the live tmux pane is the ORIGINAL too — the phantom is divorced.
+        let mut kept: HashSet<String> = HashSet::new();
+        kept.insert(ORIGINAL.to_string());
+        let mut live: HashSet<String> = HashSet::new();
+        live.insert(ORIGINAL.to_string());
+
+        assert!(
+            should_sweep_worktree(Path::new(PHANTOM), &kept, &live),
+            "a phantom worktree that is neither a kept cwd nor a live tmux pane must be swept"
+        );
+    }
+
+    /// (b) A worktree that IS a kept session's cwd is NOT swept.
+    #[test]
+    fn kept_session_cwd_is_not_swept() {
+        let mut kept: HashSet<String> = HashSet::new();
+        kept.insert(ORIGINAL.to_string());
+        let live: HashSet<String> = HashSet::new(); // tmux down / no live owner
+
+        assert!(
+            !should_sweep_worktree(Path::new(ORIGINAL), &kept, &live),
+            "a worktree recorded as a kept session's cwd must never be swept"
+        );
+    }
+
+    /// (c) A worktree with a live tmux owner is NOT swept — even if the DB
+    /// keep-set transiently disagrees (e.g. before channel_id backfill), the
+    /// live pane is the source of truth.
+    #[test]
+    fn live_tmux_owner_is_not_swept_even_if_not_in_keep_set() {
+        let kept: HashSet<String> = HashSet::new(); // keep-set has NOTHING for it
+        let mut live: HashSet<String> = HashSet::new();
+        live.insert(ORIGINAL.to_string());
+
+        assert!(
+            !should_sweep_worktree(Path::new(ORIGINAL), &kept, &live),
+            "a worktree that is a live tmux pane's cwd must survive regardless of the keep-set"
+        );
+    }
+
+    /// The phantom must still be swept when tmux is entirely unavailable (empty
+    /// live set) — the divorced worktree has no protection at all.
+    #[test]
+    fn phantom_is_swept_when_tmux_unavailable() {
+        let kept: HashSet<String> = HashSet::new();
+        let live: HashSet<String> = HashSet::new();
+        assert!(should_sweep_worktree(Path::new(PHANTOM), &kept, &live));
+    }
+
+    /// `has_live_tmux_owner` returns false against an empty live set and true on
+    /// an exact path match.
+    #[test]
+    fn has_live_tmux_owner_basic() {
+        let empty: HashSet<String> = HashSet::new();
+        assert!(!has_live_tmux_owner(Path::new(ORIGINAL), &empty));
+
+        let mut live: HashSet<String> = HashSet::new();
+        live.insert(ORIGINAL.to_string());
+        assert!(has_live_tmux_owner(Path::new(ORIGINAL), &live));
+        assert!(!has_live_tmux_owner(Path::new(PHANTOM), &live));
     }
 }
 
