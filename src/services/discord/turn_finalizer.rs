@@ -362,7 +362,7 @@ pub(in crate::services::discord) enum FinalizeOutcome {
 ///   state (LegacyTmuxWrapper / ProcessBackend / ClaudeEAdapter, or a non-JSONL
 ///   provider), so the transcript probe cannot speak to completion.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[allow(dead_code)] // #3016 S1: wired in S3/S4
+// #3016 S3: wired into the watcher fresh-idle finalize decision.
 pub(in crate::services::discord) enum CompletionSignal {
     Done,
     PausedLive,
@@ -657,8 +657,9 @@ impl TurnFinalizer {
     ///   - else `jsonl_strict_terminator_idle == Idle` → `Done`,
     ///   - else (Busy/Inconclusive) → `PausedLive`.
     ///
-    /// Dead until S3/S4 (#3016).
-    #[allow(dead_code)] // #3016 S1: wired in S3/S4
+    /// #3016 S3: wired into the watcher fresh-idle finalize decision
+    /// (`tmux_watcher.rs` `watcher_fresh_idle_finalize_decision`) — Done →
+    /// finalize, PausedLive → defer, Unknown → legacy flag-gated.
     pub(in crate::services::discord) fn completion_signal_state(
         &self,
         provider: &ProviderKind,

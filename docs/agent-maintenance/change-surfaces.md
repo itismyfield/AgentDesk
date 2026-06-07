@@ -130,7 +130,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (9215 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (9488 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -318,6 +318,34 @@
     so a late completion can never commit the WRONG newer loop turn; the
     `user_msg_id != 0` path is byte-for-byte unchanged. New test
     `watcher_terminal_delivery_commit_marks_loop_turn_with_zero_user_msg_id`.
+    +273 from #3016 S3 (the A2 / phase-5 enabler): REWRITE the watcher fresh-idle
+    finalize decision to consult the S1 STRUCTURAL completion signal
+    (`TurnFinalizer::completion_signal_state` → `CompletionSignal{Done,PausedLive,
+    Unknown}`) instead of the in-memory `mailbox_finalize_owed` flag as the sole
+    finalize signal. A new pure helper `watcher_fresh_idle_finalize_decision`
+    (→ `FreshIdleFinalizeDecision{DeferPausedLive,AbortFollowupTookOver,SkipStale,
+    Finalize,LegacyFlagGated}`) fuses the signal with the #3197 A2 wrong-turn-race
+    defenses (pinned pre-cleanup `pinned_finalize_user_msg_id` + stale-skip via
+    `committed_completion_is_stale_for_newer_turn` + the pause/epoch guard, all
+    evaluated BEFORE the destructive clear because this branch `continue`s before
+    the canonical guard at tmux.rs runs). Done (structural terminator proven, even
+    when the response is EMPTY) → finalize via
+    `finish_restored_watcher_active_turn(.., normal_completion=true, ..)` with the
+    pinned current-turn id; PausedLive (no terminator — paused at selector /
+    permission prompt / subagent running / long silent tool) → DEFER, never
+    finalize; Unknown (non-JSONL runtime: LegacyTmuxWrapper/ProcessBackend/
+    ClaudeEAdapter) → KEEP the legacy `mailbox_finalize_owed` flag path VERBATIM.
+    The DEFER decision now keys on the STRUCTURAL TERMINATOR (not on response
+    emptiness), which is the fix for the contradiction that killed the first A2
+    attempt (deferring `delegated && empty` made the empty-but-done completion's
+    finalize unreachable). The flag is NOT deleted (stage 5); it stays read for the
+    Unknown arm and is still `swap(false)`'d to keep its revoke lifecycle. New tests
+    `fresh_idle_paused_live_defers_via_completion_signal`,
+    `fresh_idle_done_finalizes_and_unknown_falls_through_to_legacy`,
+    `fresh_idle_done_wrong_turn_race_does_not_finalize_followup`, and the
+    end-to-end `fresh_idle_empty_terminated_completion_finalizes_via_completion_signal_flag_false`
+    (drives the REAL completion signal over a real JSONL transcript + the REAL
+    finalizer actor, NOT a re-implementation).
   - `src/services/discord/tui_prompt_relay.rs` (4522 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3167: the self-paced TUI loop relay
