@@ -44,6 +44,28 @@ pub(super) fn select_restored_session_path(
     yaml_path: Option<String>,
     remote_profile_name: Option<&str>,
 ) -> Option<String> {
+    // #3219: a channel-scoped DB cwd that points to an existing, AgentDesk-managed
+    // worktree must win over the configured *base* workspace. Otherwise
+    // provider-channel worktree isolation re-derives a FRESH worktree from the
+    // base on recovery, abandoning the session's existing worktree and its
+    // provider transcript — so `--resume` falls back to a fresh session-id.
+    // While the tmux pane survives this is masked by the live-TUI-binding recovery
+    // path; once the pane dies (crash/kill/restart) there is no fallback and
+    // resume breaks (root cause of the 2026-06-07 resume failure: recovery read
+    // the correct worktree from the DB, logged "Ignoring restored DB cwd", then
+    // built a fresh worktree + session-id).
+    //
+    // Reconfiguration safety is preserved: a moved/renamed base relocates
+    // `worktrees_root()`, so a stale worktree no longer matches
+    // `is_managed_worktree_path` and falls through to the configured path below.
+    // A configured workspace that merely *is* a linked worktree lives outside
+    // `worktrees_root()` and is likewise unaffected.
+    if let Some(worktree) = db_cwd.as_ref().filter(|path| {
+        is_managed_worktree_path(path) && session_path_is_usable(path, remote_profile_name)
+    }) {
+        return Some(worktree.clone());
+    }
+
     configured_path
         .filter(|path| session_path_is_usable(path, remote_profile_name))
         .or_else(|| db_cwd.filter(|path| session_path_is_usable(path, remote_profile_name)))
@@ -1657,6 +1679,97 @@ pub(super) async fn resolve_thread_parent(
             Some((parent_id, parent_name))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod select_restored_session_path_tests {
+    //! #3219: `select_restored_session_path` must prefer an existing managed
+    //! worktree (the channel-scoped DB cwd) over the configured *base* workspace,
+    //! or crash/kill recovery re-derives a fresh worktree and `--resume` breaks.
+    use super::select_restored_session_path;
+
+    struct EnvGuard(Option<std::ffi::OsString>);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
+    fn with_root<T>(root: &std::path::Path, f: impl FnOnce() -> T) -> T {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = EnvGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root) };
+        f()
+    }
+
+    #[test]
+    fn prefers_existing_managed_worktree_over_configured_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let base = root.join("workspaces").join("agentdesk");
+        let worktree = root.join("worktrees").join("claude-adk-cc-20260607-113822");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let selected = with_root(root, || {
+            select_restored_session_path(
+                Some(base.to_string_lossy().into_owned()),
+                Some(worktree.to_string_lossy().into_owned()),
+                None,
+                None,
+            )
+        });
+        assert_eq!(selected.as_deref(), worktree.to_str());
+    }
+
+    #[test]
+    fn falls_back_to_configured_when_managed_worktree_missing() {
+        // A stale/phantom worktree (not on disk) must not be selected; recovery
+        // falls through to the configured base workspace.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let base = root.join("workspaces").join("agentdesk");
+        let worktree = root.join("worktrees").join("claude-adk-cc-deleted");
+        std::fs::create_dir_all(&base).unwrap();
+        // worktree intentionally NOT created on disk
+
+        let selected = with_root(root, || {
+            select_restored_session_path(
+                Some(base.to_string_lossy().into_owned()),
+                Some(worktree.to_string_lossy().into_owned()),
+                None,
+                None,
+            )
+        });
+        assert_eq!(selected.as_deref(), base.to_str());
+    }
+
+    #[test]
+    fn db_cwd_outside_worktrees_root_does_not_override_configured() {
+        // A DB cwd that is NOT under `worktrees_root()` (e.g. a relocated base
+        // after reconfiguration) must keep configured-path priority.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let base = root.join("workspaces").join("agentdesk");
+        let other = root.join("somewhere").join("else");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+
+        let selected = with_root(root, || {
+            select_restored_session_path(
+                Some(base.to_string_lossy().into_owned()),
+                Some(other.to_string_lossy().into_owned()),
+                None,
+                None,
+            )
+        });
+        assert_eq!(selected.as_deref(), base.to_str());
     }
 }
 
