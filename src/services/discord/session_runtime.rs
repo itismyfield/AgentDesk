@@ -836,7 +836,7 @@ pub(super) async fn auto_restore_session_force(
                     db_cwd.as_deref(),
                     reconciled
                 );
-                correct_session_cwd_to_tmux(
+                let claimed_rows = correct_session_cwd_to_tmux(
                     shared.pg_pool.as_ref(),
                     &shared.token_hash,
                     &provider,
@@ -845,10 +845,14 @@ pub(super) async fn auto_restore_session_force(
                     &reconciled,
                 );
                 db_cwd = Some(reconciled);
-                // The reconciled cwd is THIS channel's live tmux pane and
-                // `correct_session_cwd_to_tmux` just stamped channel_id, so it is
-                // channel-owned and eligible for elevation (#3219).
-                db_cwd_channel_scoped = true;
+                // #3219: only treat the reconciled cwd as channel-owned (and thus
+                // eligible to outrank the configured base) when the scoped UPDATE
+                // actually claimed a row (`channel_id = $2 OR channel_id IS NULL`).
+                // A name-collision channel that shares the tmux session name but
+                // not the row (it carries a different non-null channel_id) updates
+                // 0 rows here, so it is NOT elevated into the other channel's
+                // worktree — it falls through to the configured base.
+                db_cwd_channel_scoped = claimed_rows > 0;
             }
         }
         let persisted_path = load_last_session_path(
@@ -1101,6 +1105,13 @@ fn restore_session_cwd_from_db(
 /// row (the #3207 cross-channel guard). A legacy NULL-channel_id row is matched
 /// too — only the row whose id equals THIS channel OR is NULL is updated — so the
 /// row both adopts the correct cwd and gets self-healed onto this channel.
+///
+/// Returns the number of rows updated. #3219: the caller uses this to decide
+/// whether the reconciled cwd is channel-OWNED (≥1 row matched `channel_id = $2
+/// OR channel_id IS NULL`) before letting it outrank the configured base. A
+/// name-collision channel sharing the tmux session name but NOT the row (the row
+/// carries a different non-null channel_id) updates 0 rows and is thus never
+/// elevated into another channel's worktree.
 fn correct_session_cwd_to_tmux(
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
@@ -1108,9 +1119,9 @@ fn correct_session_cwd_to_tmux(
     channel_name: &str,
     channel_id: u64,
     tmux_cwd: &str,
-) {
+) -> u64 {
     let Some(pool) = pg_pool else {
-        return;
+        return 0;
     };
     let tmux_name = provider.build_tmux_session_name(channel_name);
     let session_keys = build_session_key_candidates(token_hash, provider, &tmux_name);
@@ -1141,17 +1152,23 @@ fn correct_session_cwd_to_tmux(
         |error| error,
     );
     match result {
-        Ok(updated) if updated > 0 => tracing::info!(
-            "  ↻ #3216 reconciled DB cwd to live tmux pane for channel {} ({} row(s))",
-            channel_id,
+        Ok(updated) if updated > 0 => {
+            tracing::info!(
+                "  ↻ #3216 reconciled DB cwd to live tmux pane for channel {} ({} row(s))",
+                channel_id,
+                updated
+            );
             updated
-        ),
-        Ok(_) => {}
-        Err(err) => tracing::warn!(
-            "  ⚠ #3216 failed to reconcile DB cwd to live tmux for channel {}: {}",
-            channel_id,
-            err
-        ),
+        }
+        Ok(_) => 0,
+        Err(err) => {
+            tracing::warn!(
+                "  ⚠ #3216 failed to reconcile DB cwd to live tmux for channel {}: {}",
+                channel_id,
+                err
+            );
+            0
+        }
     }
 }
 
