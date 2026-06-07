@@ -172,11 +172,17 @@ struct TuiPromptDedupeState {
     // ⏳-add` window), the anchor lookup returns None and the completion would be
     // a no-op — stranding the ⏳. Instead the watcher records a marker here; the
     // SAME turn's `record_prompt_anchor` then drains it and the relay finishes
-    // the ⏳ → ✅ swap against the just-recorded anchor. Turn-identity safe: the
-    // lease that gated the completion and the anchor that drains the marker are
-    // recorded by the SAME relay invocation, so a newer same-key turn (which
-    // records its own lease/anchor) can never consume this marker.
-    deferred_anchor_completion_by_tmux: HashMap<PromptKey, TimedValue<()>>,
+    // the ⏳ → ✅ swap against the just-recorded anchor.
+    //
+    // #3174 codex P1: the marker carries the TURN IDENTITY — the
+    // `generation` of the external-input lease the completion was gated on (a
+    // unique monotonic per-record nonce; see [`ExternalInputRelayLease`]). The
+    // `(provider, tmux)` key alone is NOT turn-unique: within the marker TTL a
+    // NEWER turn on the same provider/tmux could otherwise drain the PREVIOUS
+    // turn's marker and complete the wrong turn's ⏳ → ✅. The relay only drains a
+    // marker whose stored generation MATCHES the lease generation THIS relay
+    // invocation recorded; a marker for a different turn is left untouched.
+    deferred_anchor_completion_by_tmux: HashMap<PromptKey, TimedValue<u64>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -421,7 +427,8 @@ pub(crate) fn clear_prompt_anchor_for_response(
     removed
 }
 
-/// #3174: record a deferred ⏳-completion marker for `(provider, tmux, channel)`.
+/// #3174: record a deferred ⏳-completion marker for `(provider, tmux, channel)`,
+/// stamped with the TURN IDENTITY `turn_lease_generation`.
 ///
 /// Called by the watcher's lease-gated completion path when the gate fired (the
 /// external-input lease for THIS turn was present before relay) but the prompt
@@ -430,15 +437,29 @@ pub(crate) fn clear_prompt_anchor_for_response(
 /// this marker the anchor-less completion is a silent no-op and the ⏳ is
 /// stranded (the lease is cleared after this delivery, so no later pass
 /// reconciles it). The SAME turn's [`record_prompt_anchor`] drains this marker
-/// and the relay finishes the ⏳ → ✅ swap against the just-recorded anchor.
+/// (via [`take_deferred_anchor_completion`]) and the relay finishes the ⏳ → ✅
+/// swap against the just-recorded anchor.
+///
+/// `turn_lease_generation` is the `generation` of the external-input lease the
+/// completion was gated on (see [`ExternalInputRelayLease::generation`]) — a
+/// unique monotonic per-record nonce that identifies the turn. The drain only
+/// consumes a marker whose generation MATCHES the draining turn's, so within the
+/// marker TTL a NEWER same-(provider,tmux) turn can never complete the previous
+/// turn's ⏳. A marker stamped with the `UNRECORDED` sentinel (0) is never
+/// recorded — it carries no turn identity, so it cannot be safely drained.
 pub(crate) fn record_deferred_anchor_completion(
     provider: &str,
     tmux_session_name: &str,
     channel_id: u64,
+    turn_lease_generation: u64,
 ) {
     let provider = normalize_provider(provider);
     let tmux_session_name = tmux_session_name.trim();
-    if provider.is_empty() || tmux_session_name.is_empty() || channel_id == 0 {
+    if provider.is_empty()
+        || tmux_session_name.is_empty()
+        || channel_id == 0
+        || turn_lease_generation == EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED
+    {
         return;
     }
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
@@ -446,33 +467,79 @@ pub(crate) fn record_deferred_anchor_completion(
     state.deferred_anchor_completion_by_tmux.insert(
         PromptKey::new(&provider, tmux_session_name),
         TimedValue {
-            value: (),
+            value: turn_lease_generation,
             recorded_at: Instant::now(),
         },
     );
 }
 
-/// #3174: drain (read-and-clear) a deferred ⏳-completion marker for
-/// `(provider, tmux)`. Returns `true` iff a non-expired marker was present.
+/// #3174: peek (read, do NOT clear) whether a deferred ⏳-completion marker for
+/// `(provider, tmux)` matching `turn_lease_generation` is present. Returns `true`
+/// iff a non-expired marker stamped with EXACTLY this turn's generation exists.
 ///
-/// Called by [`record_prompt_anchor`]'s site in the relay immediately after the
-/// anchor is recorded (and ⏳ added). Turn-identity safe: the marker can only
-/// have been set by a watcher completion gated on THIS turn's external-input
-/// lease, and that lease + this anchor are recorded by the SAME relay
-/// invocation, so a newer same-key turn never drains another turn's marker.
-pub(crate) fn take_deferred_anchor_completion(provider: &str, tmux_session_name: &str) -> bool {
+/// #3174 codex P2 (HTTP fail-open): the relay peeks BEFORE attempting the
+/// ⏳ → ✅ delivery, so it can decide whether a swap is owed WITHOUT consuming the
+/// marker. The marker is only removed via [`take_deferred_anchor_completion`]
+/// once the swap can actually be delivered; if command_http is unavailable the
+/// marker is left in place (mirrors the #3164 ⏳-add fail-open: never strand
+/// worse than before).
+pub(crate) fn deferred_anchor_completion_present_for_turn(
+    provider: &str,
+    tmux_session_name: &str,
+    turn_lease_generation: u64,
+) -> bool {
     let provider = normalize_provider(provider);
     let tmux_session_name = tmux_session_name.trim();
-    if provider.is_empty() || tmux_session_name.is_empty() {
+    if provider.is_empty()
+        || tmux_session_name.is_empty()
+        || turn_lease_generation == EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED
+    {
+        return false;
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    state
+        .deferred_anchor_completion_by_tmux
+        .get(&PromptKey::new(&provider, tmux_session_name))
+        .is_some_and(|entry| entry.value == turn_lease_generation)
+}
+
+/// #3174: drain (read-and-clear) a deferred ⏳-completion marker for
+/// `(provider, tmux)` IFF it is stamped with THIS turn's
+/// `turn_lease_generation`. Returns `true` iff such a marker was present and was
+/// removed.
+///
+/// Called by [`record_prompt_anchor`]'s site in the relay immediately after the
+/// anchor is recorded (and ⏳ added). Turn-identity safe by construction: the
+/// marker stores the `generation` of the lease the watcher completion was gated
+/// on, and the relay passes the `generation` of the lease THIS same invocation
+/// recorded. A marker set by a DIFFERENT turn (older or newer) on the same
+/// `(provider, tmux)` carries a different generation and is left untouched — it
+/// can never cross-complete the wrong turn's ⏳.
+pub(crate) fn take_deferred_anchor_completion(
+    provider: &str,
+    tmux_session_name: &str,
+    turn_lease_generation: u64,
+) -> bool {
+    let provider = normalize_provider(provider);
+    let tmux_session_name = tmux_session_name.trim();
+    if provider.is_empty()
+        || tmux_session_name.is_empty()
+        || turn_lease_generation == EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED
+    {
         return false;
     }
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
     let key = PromptKey::new(&provider, tmux_session_name);
-    state
+    let matches = state
         .deferred_anchor_completion_by_tmux
-        .remove(&key)
-        .is_some()
+        .get(&key)
+        .is_some_and(|entry| entry.value == turn_lease_generation);
+    if matches {
+        state.deferred_anchor_completion_by_tmux.remove(&key);
+    }
+    matches
 }
 
 pub(crate) fn runtime_binding_for_tmux_session(
@@ -1608,15 +1675,16 @@ mod tests {
             None,
             "anchor must not exist yet at completion time (the race window)"
         );
-        // The anchor-less completion records a deferred marker instead of
-        // dropping the ⏳.
-        record_deferred_anchor_completion("Claude", "tmux-anchor", 42);
+        // The anchor-less completion records a deferred marker (stamped with
+        // THIS turn's lease generation) instead of dropping the ⏳.
+        let turn_gen = 7_u64;
+        record_deferred_anchor_completion("Claude", "tmux-anchor", 42, turn_gen);
 
         // 2) The late `record_prompt_anchor` lands for the SAME turn. Its site
         //    drains the deferred marker → the relay finishes the ⏳ → ✅ swap.
         record_prompt_anchor("Claude", "tmux-anchor", 42, 9001);
         assert!(
-            take_deferred_anchor_completion("claude", "tmux-anchor"),
+            take_deferred_anchor_completion("claude", "tmux-anchor", turn_gen),
             "late anchor record must drain the deferred completion marker"
         );
         // The anchor is present so the relay's completion can act on it.
@@ -1629,7 +1697,7 @@ mod tests {
         );
         // The marker is single-shot: a second drain is a no-op.
         assert!(
-            !take_deferred_anchor_completion("claude", "tmux-anchor"),
+            !take_deferred_anchor_completion("claude", "tmux-anchor", turn_gen),
             "deferred marker must be consumed exactly once"
         );
     }
@@ -1647,7 +1715,7 @@ mod tests {
         // so no marker was recorded.
         record_prompt_anchor("Claude", "tmux-anchor", 42, 9001);
         assert!(
-            !take_deferred_anchor_completion("claude", "tmux-anchor"),
+            !take_deferred_anchor_completion("claude", "tmux-anchor", 7),
             "no deferred completion must be drained on the common non-racing path"
         );
     }
@@ -1660,14 +1728,90 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap();
         reset_state();
 
-        record_deferred_anchor_completion("claude", "tmux-a", 42);
+        let turn_gen = 11_u64;
+        record_deferred_anchor_completion("claude", "tmux-a", 42, turn_gen);
 
         // Wrong provider: codex must not drain claude's marker.
-        assert!(!take_deferred_anchor_completion("codex", "tmux-a"));
+        assert!(!take_deferred_anchor_completion(
+            "codex", "tmux-a", turn_gen
+        ));
         // Wrong session: a different tmux must not drain it.
-        assert!(!take_deferred_anchor_completion("claude", "tmux-b"));
+        assert!(!take_deferred_anchor_completion(
+            "claude", "tmux-b", turn_gen
+        ));
         // The exact key still drains it.
-        assert!(take_deferred_anchor_completion("claude", "tmux-a"));
+        assert!(take_deferred_anchor_completion(
+            "claude", "tmux-a", turn_gen
+        ));
+    }
+
+    // #3174 codex P1 (turn-identity isolation): a deferred marker stamped with
+    // one turn's lease generation must NOT be drained by a DIFFERENT turn on the
+    // SAME provider/tmux. Without the generation stamp the `(provider, tmux)` key
+    // alone would let a newer turn within the marker TTL cross-consume the
+    // previous turn's marker and complete the wrong turn's ⏳ → ✅.
+    #[test]
+    fn deferred_anchor_completion_is_not_cross_consumed_by_a_different_turn_same_key() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        // Turn A's anchor-less completion records a marker stamped gen=100.
+        let turn_a_gen = 100_u64;
+        record_deferred_anchor_completion("claude", "tmux-shared", 42, turn_a_gen);
+
+        // A NEWER turn B on the SAME provider/tmux records its own lease (a
+        // different, higher generation) and lands its anchor first. Its drain
+        // must NOT consume turn A's marker — generations differ.
+        let turn_b_gen = 101_u64;
+        assert!(
+            !take_deferred_anchor_completion("claude", "tmux-shared", turn_b_gen),
+            "a newer turn must not cross-consume the previous turn's deferred marker"
+        );
+        // peek also reports it as not-present for turn B's identity.
+        assert!(
+            !deferred_anchor_completion_present_for_turn("claude", "tmux-shared", turn_b_gen),
+            "peek must not match a different turn's generation"
+        );
+
+        // Turn A's own late anchor record (its matching generation) DOES drain it.
+        assert!(
+            deferred_anchor_completion_present_for_turn("claude", "tmux-shared", turn_a_gen),
+            "peek must match the owning turn's generation"
+        );
+        assert!(
+            take_deferred_anchor_completion("claude", "tmux-shared", turn_a_gen),
+            "the owning turn's anchor record must drain its own marker"
+        );
+    }
+
+    // #3174 codex P2 (HTTP fail-open): the relay PEEKS before consuming, so it
+    // can leave the marker intact when command_http is unavailable. Prove peek is
+    // non-destructive: a peek leaves the marker drainable by a later attempt.
+    #[test]
+    fn deferred_anchor_completion_peek_is_non_destructive() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        let turn_gen = 55_u64;
+        record_deferred_anchor_completion("claude", "tmux-peek", 42, turn_gen);
+
+        // Simulate the HTTP-unavailable relay path: it peeks (marker is owed) but
+        // does NOT take, because there is no command_http to deliver the swap.
+        assert!(
+            deferred_anchor_completion_present_for_turn("claude", "tmux-peek", turn_gen),
+            "peek must report the owed marker"
+        );
+        assert!(
+            deferred_anchor_completion_present_for_turn("claude", "tmux-peek", turn_gen),
+            "a second peek must still report it (peek does not consume)"
+        );
+
+        // A later attempt (HTTP now available) can still drain it — it was not
+        // silently lost by the fail-open path.
+        assert!(
+            take_deferred_anchor_completion("claude", "tmux-peek", turn_gen),
+            "the marker survives a peek and remains drainable"
+        );
     }
 
     #[test]

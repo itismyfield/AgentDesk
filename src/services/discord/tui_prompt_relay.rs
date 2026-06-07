@@ -793,24 +793,60 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         // completion marker (the lease it gated on is cleared after that
         // delivery, so no later watcher pass would reconcile the ⏳). Now that
         // THIS turn's anchor exists, drain that marker and finish the
-        // ⏳ → ✅ swap against the just-recorded anchor. Turn-identity safe: the
-        // marker is keyed to `(provider, tmux, channel)` and could only have been
-        // set by a completion gated on this same relay invocation's lease, so a
-        // newer same-key turn never drains it (it records its own lease/anchor).
-        // No-op on the common path (no terminal output yet → no marker).
-        if crate::services::tui_prompt_dedupe::take_deferred_anchor_completion(
+        // ⏳ → ✅ swap against the just-recorded anchor.
+        //
+        // #3174 codex P1 (turn identity): the marker is stamped with the
+        // `generation` of the lease the watcher completion gated on; drain ONLY
+        // the marker matching THIS relay invocation's lease generation
+        // (`lease.generation`), so a NEWER same-(provider,tmux) turn's marker is
+        // never cross-consumed and the wrong turn's ⏳ is never completed.
+        //
+        // #3174 codex P2 (HTTP fail-open): PEEK the marker first, then only
+        // consume (`take_...`) once we have a `command_http` to actually deliver
+        // the ⏳ → ✅ swap. If command_http is unavailable we leave the marker in
+        // place rather than silently dropping it — mirrors the #3164 ⏳-add
+        // fail-open (skip rather than strand worse than before); a later anchor
+        // record / watcher pass can still reconcile it within the marker TTL.
+        // No-op on the common path (no terminal output yet → no marker). The
+        // peek + consume/fail-open DECISION is in
+        // [`decide_deferred_anchor_completion_drain`] (pure, against the real
+        // dedupe state) so it is integration-testable: a test that records a
+        // matching marker and drives this block must see the marker consumed and
+        // the completion delivered; neutralizing the decision (or the consume)
+        // makes that test fail.
+        match decide_deferred_anchor_completion_drain(
             &prompt.provider,
             &prompt.tmux_session_name,
-        ) && let Some(command_http) = command_http.as_ref()
-        {
-            let _ = complete_tui_direct_prompt_anchor_lifecycle_if_present(
-                command_http,
-                &prompt.provider,
-                &prompt.tmux_session_name,
-                channel_id,
-                "relay_record_prompt_anchor_drains_deferred_lease_gated_completion",
-            )
-            .await;
+            lease.generation,
+            command_http.is_some(),
+        ) {
+            DeferredAnchorCompletionDrain::Complete => {
+                // command_http is available (decision required it) — deliver.
+                let command_http = command_http
+                    .as_ref()
+                    .expect("decision returns Complete only when command_http is_some");
+                let _ = complete_tui_direct_prompt_anchor_lifecycle_if_present(
+                    command_http,
+                    &prompt.provider,
+                    &prompt.tmux_session_name,
+                    channel_id,
+                    "relay_record_prompt_anchor_drains_deferred_lease_gated_completion",
+                )
+                .await;
+            }
+            DeferredAnchorCompletionDrain::LeftIntactHttpUnavailable => {
+                // #3174 codex P2: command_http unavailable — the decision LEFT the
+                // marker set (did not consume it), so the deferred completion stays
+                // claimable (within its TTL) instead of losing the ⏳ → ✅ swap.
+                tracing::warn!(
+                    provider = %prompt.provider,
+                    channel_id = channel_id.get(),
+                    tmux_session_name = %prompt.tmux_session_name,
+                    turn_lease_generation = lease.generation,
+                    "#3174: deferred lease-gated completion owed but command_http unavailable; left marker intact (fail-open) rather than dropping the ⏳ swap"
+                );
+            }
+            DeferredAnchorCompletionDrain::NoMarker => {}
         }
         // #3099: a `<task-notification>` auto-turn is still a real provider turn
         // that earns the same synthetic ownership as human direct input — the
@@ -3904,6 +3940,59 @@ pub(super) fn should_complete_tui_direct_anchor_lifecycle(
         && terminal_body_visible
         && anchor_or_lease_present
         && (lifecycle_stage_paused || !inflight_present)
+}
+
+/// #3174: outcome of the relay's deferred ⏳-completion drain decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DeferredAnchorCompletionDrain {
+    /// No matching marker for this turn — common path, do nothing.
+    NoMarker,
+    /// A matching marker was present AND command_http is available: the marker
+    /// was CONSUMED and the caller must deliver the ⏳ → ✅ swap.
+    Complete,
+    /// A matching marker was present but command_http is unavailable: the marker
+    /// was LEFT INTACT (fail-open) so a later attempt can still reconcile it.
+    LeftIntactHttpUnavailable,
+}
+
+/// #3174 codex P1+P2: decide (and, where safe, perform) the deferred
+/// ⏳-completion drain for THIS turn, then tell the caller what to do.
+///
+/// Turn identity (P1): only a marker stamped with `turn_lease_generation` — the
+/// generation of the lease THIS relay invocation recorded — is considered; a
+/// marker for a different (newer or older) same-(provider,tmux) turn is ignored.
+///
+/// HTTP fail-open (P2): the marker is PEEKED first. It is only consumed
+/// (`take_...`) when `command_http_available` is `true`, i.e. when the caller can
+/// actually deliver the ⏳ → ✅ swap. When HTTP is unavailable the marker is left
+/// in place rather than silently dropped (mirrors the #3164 ⏳-add fail-open).
+///
+/// This decision runs against the real shared dedupe state, so an
+/// integration-style test that records a matching marker and calls this function
+/// observes the production consume/fail-open behaviour directly.
+pub(super) fn decide_deferred_anchor_completion_drain(
+    provider: &str,
+    tmux_session_name: &str,
+    turn_lease_generation: u64,
+    command_http_available: bool,
+) -> DeferredAnchorCompletionDrain {
+    if !crate::services::tui_prompt_dedupe::deferred_anchor_completion_present_for_turn(
+        provider,
+        tmux_session_name,
+        turn_lease_generation,
+    ) {
+        return DeferredAnchorCompletionDrain::NoMarker;
+    }
+    if !command_http_available {
+        return DeferredAnchorCompletionDrain::LeftIntactHttpUnavailable;
+    }
+    // HTTP available — consume the marker; the caller delivers the swap.
+    crate::services::tui_prompt_dedupe::take_deferred_anchor_completion(
+        provider,
+        tmux_session_name,
+        turn_lease_generation,
+    );
+    DeferredAnchorCompletionDrain::Complete
 }
 
 pub(super) async fn complete_tui_direct_prompt_anchor_lifecycle_if_present(
@@ -7024,6 +7113,119 @@ mod tests {
             clamp_idle_tail_start_offset_to_committed(800, 300),
             800,
             "a lagging committed offset must not drag the start offset backwards"
+        );
+    }
+
+    // #3174 codex P2 (test-gap a): drive the PRODUCTION relay drain decision
+    // (`decide_deferred_anchor_completion_drain`) — the exact function the relay
+    // calls after `record_prompt_anchor` — against the real shared dedupe state.
+    //
+    // Reproduces the ordering race: the watcher's lease-gated completion fired
+    // BEFORE this turn's anchor and recorded a deferred marker stamped with this
+    // turn's lease generation. When the relay's drain runs (HTTP available) it
+    // MUST report `Complete` AND consume the marker. Neutralizing the production
+    // decision (e.g. making it always return `NoMarker`, or dropping the
+    // `take_...`) makes this test fail (RED) — it is NOT satisfiable by the
+    // record/take helpers alone.
+    #[test]
+    fn relay_drain_decision_completes_and_consumes_matching_turn_marker() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+
+        let provider = "claude";
+        let tmux = "AgentDesk-claude-deferred-drain";
+        let channel = 42_u64;
+        let turn_gen = 4242_u64;
+
+        // Watcher anchor-less completion: records the deferred marker for THIS turn.
+        crate::services::tui_prompt_dedupe::record_deferred_anchor_completion(
+            provider, tmux, channel, turn_gen,
+        );
+
+        // Production relay drain decision, HTTP available → Complete + consume.
+        assert_eq!(
+            decide_deferred_anchor_completion_drain(provider, tmux, turn_gen, true),
+            DeferredAnchorCompletionDrain::Complete,
+            "matching marker with HTTP available must drive the completion"
+        );
+        // The marker was consumed: a second drain finds nothing.
+        assert_eq!(
+            decide_deferred_anchor_completion_drain(provider, tmux, turn_gen, true),
+            DeferredAnchorCompletionDrain::NoMarker,
+            "the marker must be consumed exactly once"
+        );
+    }
+
+    // #3174 codex P2 (HTTP fail-open): when command_http is unavailable the drain
+    // decision must NOT consume the marker — it returns
+    // `LeftIntactHttpUnavailable` and a later attempt (HTTP back) still completes.
+    // Proves the swap is not silently lost.
+    #[test]
+    fn relay_drain_decision_fails_open_when_http_unavailable() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+
+        let provider = "claude";
+        let tmux = "AgentDesk-claude-deferred-failopen";
+        let channel = 42_u64;
+        let turn_gen = 9001_u64;
+
+        crate::services::tui_prompt_dedupe::record_deferred_anchor_completion(
+            provider, tmux, channel, turn_gen,
+        );
+
+        // HTTP unavailable → marker LEFT INTACT (not consumed).
+        assert_eq!(
+            decide_deferred_anchor_completion_drain(provider, tmux, turn_gen, false),
+            DeferredAnchorCompletionDrain::LeftIntactHttpUnavailable,
+            "no HTTP must leave the marker claimable, not drop it"
+        );
+        // HTTP now available → the surviving marker still completes (not lost).
+        assert_eq!(
+            decide_deferred_anchor_completion_drain(provider, tmux, turn_gen, true),
+            DeferredAnchorCompletionDrain::Complete,
+            "the fail-open marker must remain drainable by a later HTTP-available attempt"
+        );
+    }
+
+    // #3174 codex P1 (test-gap b): same-key / different-turn isolation through the
+    // PRODUCTION relay drain decision. A marker stamped with turn A's generation
+    // must NOT be cross-consumed when turn B (same provider/tmux, different
+    // generation) drives the drain.
+    #[test]
+    fn relay_drain_decision_does_not_cross_consume_other_turn_marker() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+
+        let provider = "claude";
+        let tmux = "AgentDesk-claude-deferred-isolation";
+        let channel = 42_u64;
+        let turn_a_gen = 100_u64;
+        let turn_b_gen = 101_u64;
+
+        // Turn A's watcher completion records a marker stamped with A's generation.
+        crate::services::tui_prompt_dedupe::record_deferred_anchor_completion(
+            provider, tmux, channel, turn_a_gen,
+        );
+
+        // Turn B (same key, newer generation) drives its drain → must NOT consume A.
+        assert_eq!(
+            decide_deferred_anchor_completion_drain(provider, tmux, turn_b_gen, true),
+            DeferredAnchorCompletionDrain::NoMarker,
+            "a different turn's drain must not cross-consume the marker"
+        );
+
+        // Turn A's own drain still completes its OWN marker.
+        assert_eq!(
+            decide_deferred_anchor_completion_drain(provider, tmux, turn_a_gen, true),
+            DeferredAnchorCompletionDrain::Complete,
+            "the owning turn's drain must still complete its own marker"
         );
     }
 }

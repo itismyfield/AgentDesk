@@ -10996,7 +10996,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // `None` from a Discord `create_reaction` error keeps the anchor
             // findable, and that path retries via the existing anchor lookup,
             // so we must not also queue a deferred completion for it.
+            //
+            // #3174 codex P1: stamp the marker with the TURN IDENTITY — the
+            // `generation` of the lease this completion gated on
+            // (`external_input_lease_generation_before_relay`). The relay drains
+            // it ONLY when the generation matches THIS turn's recorded lease, so
+            // a NEWER same-(provider,tmux) turn inside the marker TTL can never
+            // complete the wrong turn's ⏳. Require the gating lease's generation
+            // to be known (`Some`): if the gate fired on the anchor alone there
+            // is no lease turn-identity to stamp, and the anchor-based path
+            // already owns the completion.
             if completed.is_none()
+                && let Some(turn_lease_generation) = external_input_lease_generation_before_relay
                 && crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
                     watcher_provider.as_str(),
                     &tmux_session_name,
@@ -11008,10 +11019,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     watcher_provider.as_str(),
                     &tmux_session_name,
                     channel_id.get(),
+                    turn_lease_generation,
                 );
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
-                    "  [{ts}] ⏳ #3174 watcher: lease-gated completion ran before anchor recorded (channel {}, tmux={}) — deferred ⏳ completion to record_prompt_anchor",
+                    "  [{ts}] ⏳ #3174 watcher: lease-gated completion ran before anchor recorded (channel {}, tmux={}, turn_lease_generation={turn_lease_generation}) — deferred ⏳ completion to record_prompt_anchor",
                     channel_id.get(),
                     tmux_session_name
                 );
