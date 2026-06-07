@@ -1002,7 +1002,14 @@ async fn resolve_cwd_for_session_key(
     session_key: &str,
     channel_id: &str,
 ) -> Result<Option<RestoredCwd>, String> {
-    // 1. Channel-scoped match (the #3207 cross-channel guard).
+    // 1. Channel-scoped match (the #3207 cross-channel guard). `fetch_optional`
+    //    returns the OUTER Option: `Some(_)` iff an exact channel-owned row
+    //    exists, independent of whether its `cwd` is currently populated. #3219:
+    //    ownership is reported (`channel_scoped: true`) from row EXISTENCE — a
+    //    NULL/empty cwd must NOT erase ownership, or an owned channel whose row
+    //    has a stale/missing cwd could not elevate the valid worktree the tmux
+    //    reconcile later supplies. The caller filters the (possibly empty) path
+    //    for usability separately.
     let scoped = sqlx::query_scalar::<_, Option<String>>(
         "SELECT cwd FROM sessions \
          WHERE session_key = $1 AND channel_id = $2 LIMIT 1",
@@ -1011,11 +1018,10 @@ async fn resolve_cwd_for_session_key(
     .bind(channel_id)
     .fetch_optional(pool)
     .await
-    .map_err(|error| format!("load session cwd {session_key}: {error}"))?
-    .flatten();
-    if let Some(path) = scoped.filter(|p| !p.is_empty()) {
+    .map_err(|error| format!("load session cwd {session_key}: {error}"))?;
+    if let Some(cwd) = scoped {
         return Ok(Some(RestoredCwd {
-            path,
+            path: cwd.unwrap_or_default(),
             channel_scoped: true,
         }));
     }
@@ -1208,8 +1214,12 @@ fn restore_thread_worktree_path_from_db(
                     resolve_cwd_for_session_key(&pool, &session_key, &channel_id).await?
                 {
                     // The worktree-reuse path applies its own managed/belongs-to
-                    // -parent guards downstream; it only needs the path here.
-                    return Ok(Some(restored.path));
+                    // -parent guards downstream; it only needs the path here. Skip
+                    // an owned row whose cwd is empty/NULL (#3219) — it carries no
+                    // reusable worktree, so continue scanning the remaining keys.
+                    if !restored.path.is_empty() {
+                        return Ok(Some(restored.path));
+                    }
                 }
             }
             Ok(None)
@@ -2099,6 +2109,57 @@ mod worktree_reuse_channel_isolation_tests {
             !resolved.as_ref().map(|r| r.channel_scoped).unwrap_or(true),
             "a NULL-channel_id legacy fallback must NOT be channel_scoped, so it \
              is never elevated over the configured base (#3219)"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    // #3219: an EXACT channel-owned row whose `cwd` is NULL must still report
+    // ownership (channel_scoped=true) with an empty path, so an owned channel
+    // whose persisted cwd went stale/missing can still elevate the valid worktree
+    // the tmux reconcile later supplies. Ownership comes from row EXISTENCE, not
+    // the cwd value.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exact_owned_row_with_null_cwd_is_channel_scoped_empty_path() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let provider = ProviderKind::Claude;
+        let token_hash = "tok-3219-null-cwd";
+        let channel_name = "null-cwd-owner";
+        let tmux_name = provider.build_tmux_session_name(channel_name);
+        let session_key = build_namespaced_session_key(token_hash, &provider, &tmux_name);
+        let channel_id: u64 = 777_777_777_777_777_777;
+
+        // Seed an exact channel-owned row with a NULL cwd.
+        sqlx::query(
+            "INSERT INTO sessions (session_key, provider, status, cwd, channel_id, last_heartbeat)
+             VALUES ($1, 'claude', 'idle', NULL, $2, NOW())",
+        )
+        .bind(&session_key)
+        .bind(channel_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("seed NULL-cwd owned row");
+
+        let resolved = restore_session_cwd_from_db(
+            Some(&pool),
+            token_hash,
+            &provider,
+            channel_name,
+            channel_id,
+        );
+        assert!(
+            resolved.as_ref().map(|r| r.channel_scoped).unwrap_or(false),
+            "an exact channel-owned row must be channel_scoped even when its cwd \
+             is NULL (#3219 ownership from row existence)"
+        );
+        assert_eq!(
+            resolved.as_ref().map(|r| r.path.as_str()),
+            Some(""),
+            "a NULL cwd resolves to an empty path; the caller's usability filter \
+             then drops it from db_cwd while preserving ownership"
         );
 
         pool.close().await;
