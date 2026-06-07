@@ -459,6 +459,7 @@ fn claude_busy_preflight_uses_idle_transcript_wait_when_transcript_exists() {
         &ProviderKind::Claude,
         cwd.path().to_str(),
         Some(session_id),
+        None,
         Some(claude_home.path()),
     );
 
@@ -479,6 +480,7 @@ fn claude_busy_preflight_falls_back_when_transcript_is_unavailable() {
             &ProviderKind::Claude,
             cwd.path().to_str(),
             None,
+            None,
             Some(claude_home.path()),
         ),
         HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
@@ -488,6 +490,7 @@ fn claude_busy_preflight_falls_back_when_transcript_is_unavailable() {
             &ProviderKind::Claude,
             cwd.path().to_str(),
             Some("not-a-uuid"),
+            None,
             Some(claude_home.path()),
         ),
         HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
@@ -497,6 +500,7 @@ fn claude_busy_preflight_falls_back_when_transcript_is_unavailable() {
             &ProviderKind::Claude,
             cwd.path().to_str(),
             Some("01234567-89ab-cdef-0123-456789abcdef"),
+            None,
             Some(claude_home.path()),
         ),
         HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
@@ -512,6 +516,7 @@ fn codex_busy_preflight_keeps_codex_readiness_wait() {
         &ProviderKind::Codex,
         cwd.path().to_str(),
         Some("01234567-89ab-cdef-0123-456789abcdef"),
+        None,
         None,
     );
 
@@ -885,5 +890,146 @@ fn provider_worktree_isolation_policy_bypasses_review_e2e_and_consultation_dispa
             !should_force_provider_worktree_isolation(true, None, Some(dispatch_type)),
             "{dispatch_type} dispatches should bypass provider-channel isolation"
         );
+    }
+}
+
+// #3208 — helper: write a Claude JSONL transcript for `<cwd>` under a temp
+// claude_home, returning the resolved transcript path. The transcript ends with
+// a `system/turn_duration` terminator → `observe_*` classifies it as `Idle`.
+#[cfg(unix)]
+fn write_idle_claude_transcript(
+    claude_home: &std::path::Path,
+    cwd: &std::path::Path,
+    session_id: &str,
+) -> std::path::PathBuf {
+    let path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        cwd,
+        session_id,
+        Some(claude_home),
+    )
+    .expect("resolve transcript path");
+    std::fs::create_dir_all(path.parent().expect("transcript parent"))
+        .expect("create transcript parent");
+    std::fs::write(
+        &path,
+        concat!(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]},"timestamp":"2026-06-07T07:29:12Z"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"turn_duration","durationMs":142231,"pendingBackgroundAgentCount":5,"timestamp":"2026-06-07T07:29:13Z"}"#,
+            "\n",
+        ),
+    )
+    .expect("write transcript");
+    path
+}
+
+// #3208 (B): a genuinely-idle TUI whose live session runs in a *rotating
+// worktree* (pane_cwd) — distinct from the channel's configured workspace
+// (current_path) — and whose Claude session_id is NOT carried into intake (the
+// common `runtime_cached_provider_session` resume case). The preflight readiness
+// resolver MUST find the worktree transcript via the pane cwd and engage the
+// idle-JSONL fallback (ClaudePromptMarkerOrIdleTranscript) instead of falling
+// back to the prompt-marker-only wait that times out at 45s while the screen
+// shows "Waiting for N background agents to finish".
+#[cfg(unix)]
+#[test]
+fn claude_busy_preflight_resolves_worktree_transcript_when_session_id_missing() {
+    let claude_home = tempfile::tempdir().expect("create temp claude home");
+    let workspace = tempfile::tempdir().expect("create temp workspace cwd");
+    let worktree = tempfile::tempdir().expect("create temp worktree cwd");
+    // The running session writes its transcript under the WORKTREE project dir.
+    let worktree_transcript = write_idle_claude_transcript(
+        claude_home.path(),
+        worktree.path(),
+        "6a053a02-fd2d-4329-b421-9f49eb7d5683",
+    );
+
+    // Resolver must locate the worktree transcript even with session_id=None and
+    // current_path pointing at the (empty) configured workspace.
+    let resolved = resolve_claude_followup_transcript_path(
+        workspace.path().to_str(),
+        None,
+        Some(worktree.path()),
+        Some(claude_home.path()),
+    );
+    assert_eq!(
+        resolved.as_deref(),
+        Some(worktree_transcript.as_path()),
+        "resolver must adopt the worktree transcript via pane cwd"
+    );
+
+    // And the preflight wait must therefore allow the idle-transcript fallback.
+    let wait_strategy = hosted_tui_busy_preflight_readiness_wait_with_claude_home(
+        &ProviderKind::Claude,
+        workspace.path().to_str(),
+        None,
+        Some(worktree.path()),
+        Some(claude_home.path()),
+    );
+    assert_eq!(
+        wait_strategy,
+        HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOrIdleTranscript(
+            worktree_transcript
+        ),
+        "idle worktree transcript must engage the JSONL fallback, not prompt-marker-only"
+    );
+}
+
+// #3208 (B): the resolved worktree transcript (turn ended; background agents
+// still running) must observe as Idle — a genuinely-idle TUI must never be
+// classified busy. This is the false-busy that produced the 45s timeout.
+#[cfg(unix)]
+#[test]
+fn claude_idle_worktree_transcript_observes_idle_not_busy() {
+    let claude_home = tempfile::tempdir().expect("create temp claude home");
+    let worktree = tempfile::tempdir().expect("create temp worktree cwd");
+    let transcript = write_idle_claude_transcript(
+        claude_home.path(),
+        worktree.path(),
+        "6a053a02-fd2d-4329-b421-9f49eb7d5683",
+    );
+
+    let provider = ProviderKind::Claude;
+    let probe = crate::services::tui_turn_state::JsonlTurnStateProbe::new(&provider, &transcript);
+    let state = crate::services::tui_turn_state::TuiTurnStateProbe::observe(&probe);
+    assert_eq!(
+        state,
+        crate::services::tui_turn_state::TuiTurnState::Idle,
+        "turn_duration terminator with pending background agents is Idle, not busy"
+    );
+    assert!(!state.is_busy());
+}
+
+// #3208 (A): when the prior turn is genuinely in-flight (authoritative JSONL
+// Streaming/UserSubmitted), the follow-up classifier flags a busy diagnostic
+// with `previous_tui_turn_still_running=true`. The intake layer routes this to
+// the queue-defer path WITHOUT entering the 45s readiness poll (gated on
+// `transcript_turn_state.is_busy()`), so no readiness-timeout error surfaces.
+#[cfg(unix)]
+#[test]
+fn claude_busy_followup_defers_to_queue_without_readiness_poll() {
+    for busy in [
+        crate::services::tui_turn_state::TuiTurnState::Streaming,
+        crate::services::tui_turn_state::TuiTurnState::UserSubmitted,
+    ] {
+        assert!(
+            busy.is_busy(),
+            "{busy:?} must be the gate that skips the 45s readiness poll"
+        );
+        let snapshot = HostedTuiPromptReadinessSnapshot::jsonl_authoritative(true);
+        let diagnostic = classify_claude_tui_followup_submission(
+            &snapshot,
+            "attached",
+            None,
+            "missing",
+            busy,
+            "AgentDesk-claude-adk-cc",
+        )
+        .expect("busy turn must yield a defer diagnostic");
+        assert!(
+            diagnostic.previous_tui_turn_still_running,
+            "genuine busy turn must mark previous_tui_turn_still_running"
+        );
+        assert_eq!(diagnostic.transcript_turn_state, busy);
     }
 }

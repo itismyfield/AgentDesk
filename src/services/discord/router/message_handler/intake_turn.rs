@@ -2988,44 +2988,65 @@ pub(in crate::services::discord) async fn handle_text_message(
             session_id.as_deref(),
         );
         if let Some(initial_diagnostic) = initial {
-            let wait_session_name = initial_diagnostic.tmux_session_name.clone();
-            let wait_cancel_token = cancel_token.clone();
-            let wait_provider = provider.clone();
-            let wait_readiness = hosted_tui_busy_preflight_readiness_wait(
-                &wait_provider,
-                Some(&current_path),
-                session_id.as_deref(),
-            );
-            match &wait_readiness {
-                HostedTuiBusyPreflightReadinessWait::Codex => {
-                    tracing::debug!(
-                        channel_id = channel_id.get(),
-                        user_msg_id = user_msg_id.get(),
-                        tmux_session_name = %wait_session_name,
-                        "hosted tui busy preflight will wait for codex composer readiness"
-                    );
+            // #3208 (A): when the authoritative JSONL turn-state says the prior
+            // turn is genuinely in-flight (Streaming/UserSubmitted), do NOT
+            // enter the up-to-45s readiness poll — it would always time out
+            // (the prompt marker is suppressed for the whole agentic turn) and
+            // surface a misleading error after the response already landed.
+            // Route straight to the queue-defer path: the busy diagnostic is
+            // already correct, and the watcher idle signal delivers the queued
+            // input cleanly once the turn reaches Idle.
+            if initial_diagnostic.transcript_turn_state.is_busy() {
+                tracing::info!(
+                    channel_id = channel_id.get(),
+                    user_msg_id = user_msg_id.get(),
+                    tmux_session_name = %initial_diagnostic.tmux_session_name,
+                    transcript_turn_state = initial_diagnostic.transcript_turn_state.as_str(),
+                    "tui follow-up: prior turn genuinely busy per JSONL; deferring to queue without readiness poll"
+                );
+                Some(initial_diagnostic)
+            } else {
+                let wait_session_name = initial_diagnostic.tmux_session_name.clone();
+                let wait_cancel_token = cancel_token.clone();
+                let wait_provider = provider.clone();
+                let wait_readiness = hosted_tui_busy_preflight_readiness_wait(
+                    &wait_provider,
+                    Some(&current_path),
+                    session_id.as_deref(),
+                    tmux_session_name.as_deref(),
+                );
+                match &wait_readiness {
+                    HostedTuiBusyPreflightReadinessWait::Codex => {
+                        tracing::debug!(
+                            channel_id = channel_id.get(),
+                            user_msg_id = user_msg_id.get(),
+                            tmux_session_name = %wait_session_name,
+                            "hosted tui busy preflight will wait for codex composer readiness"
+                        );
+                    }
+                    HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOrIdleTranscript(
+                        transcript_path,
+                    ) => {
+                        tracing::debug!(
+                            channel_id = channel_id.get(),
+                            user_msg_id = user_msg_id.get(),
+                            tmux_session_name = %wait_session_name,
+                            transcript_path = %transcript_path.display(),
+                            "hosted tui busy preflight will allow claude idle transcript readiness"
+                        );
+                    }
+                    HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly => {
+                        tracing::debug!(
+                            channel_id = channel_id.get(),
+                            user_msg_id = user_msg_id.get(),
+                            tmux_session_name = %wait_session_name,
+                            "hosted tui busy preflight will require claude prompt marker readiness"
+                        );
+                    }
                 }
-                HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOrIdleTranscript(
-                    transcript_path,
-                ) => {
-                    tracing::debug!(
-                        channel_id = channel_id.get(),
-                        user_msg_id = user_msg_id.get(),
-                        tmux_session_name = %wait_session_name,
-                        transcript_path = %transcript_path.display(),
-                        "hosted tui busy preflight will allow claude idle transcript readiness"
-                    );
-                }
-                HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly => {
-                    tracing::debug!(
-                        channel_id = channel_id.get(),
-                        user_msg_id = user_msg_id.get(),
-                        tmux_session_name = %wait_session_name,
-                        "hosted tui busy preflight will require claude prompt marker readiness"
-                    );
-                }
-            }
-            let wait_result = tokio::task::spawn_blocking(move || match wait_readiness {
+                let wait_result =
+                    tokio::task::spawn_blocking(move || {
+                        match wait_readiness {
                 HostedTuiBusyPreflightReadinessWait::Codex => {
                     crate::services::codex_tui::input::wait_until_codex_tui_input_ready(
                         &wait_session_name,
@@ -3048,77 +3069,81 @@ pub(in crate::services::discord) async fn handle_text_message(
                         Some(wait_cancel_token.as_ref()),
                     )
                 }
-            })
-            .await
-            .unwrap_or_else(|join_err| {
-                Err(format!("wait_for_prompt_ready join error: {join_err}"))
-            });
-            let post_wait_diagnostic = tui_busy_followup_diagnostic(
-                shared,
-                &provider,
-                channel_id,
-                tmux_session_name.as_deref(),
-                remote_profile.is_some(),
-                Some(&current_path),
-                session_id.as_deref(),
-            );
-            // #2416: cancellation may have flipped during the up-to-45s wait
-            // (user stop reaction, watchdog, etc.). If it did, do NOT continue
-            // to inject the prompt — fall into the busy-notice / cleanup branch
-            // below by surfacing the initial diagnostic. Closes a Codex-flagged
-            // HIGH on the Discord path mirroring the same fix in claude.rs.
-            let cancel_observed_after_wait = cancel_token
-                .cancelled
-                .load(std::sync::atomic::Ordering::Relaxed);
-            match (
-                wait_result,
-                post_wait_diagnostic,
-                cancel_observed_after_wait,
-            ) {
-                (_, _, true) => {
-                    tracing::warn!(
-                        channel_id = channel_id.get(),
-                        user_msg_id = user_msg_id.get(),
-                        tmux_session_name = %initial_diagnostic.tmux_session_name,
-                        "claude_tui follow-up: cancellation observed after busy wait; aborting injection"
-                    );
-                    Some(initial_diagnostic)
-                }
-                (Ok(()), None, _) => {
-                    recapture_offset_after_busy_wait = true;
-                    tracing::info!(
-                        channel_id = channel_id.get(),
-                        user_msg_id = user_msg_id.get(),
-                        tmux_session_name = %initial_diagnostic.tmux_session_name,
-                        "claude_tui follow-up: busy at first check, became ready after wait_for_prompt_ready"
-                    );
-                    None
-                }
-                (Ok(()), Some(diag), _) => {
-                    tracing::warn!(
-                        channel_id = channel_id.get(),
-                        user_msg_id = user_msg_id.get(),
-                        "claude_tui follow-up: wait_for_prompt_ready returned Ok but post-wait diagnostic still busy"
-                    );
-                    Some(diag)
-                }
-                (Err(err), diag_opt, _) => {
-                    let timed_out = match &provider {
-                        ProviderKind::Codex => {
-                            crate::services::codex_tui::input::is_prompt_ready_timeout_error(&err)
-                        }
-                        _ => {
-                            crate::services::claude_tui::input::is_prompt_ready_timeout_error(&err)
-                        }
-                    };
-                    tracing::warn!(
-                        channel_id = channel_id.get(),
-                        user_msg_id = user_msg_id.get(),
-                        timed_out,
-                        error = %err,
-                        "claude_tui follow-up: wait_for_prompt_ready failed; emitting busy notice"
-                    );
-                    Some(diag_opt.unwrap_or(initial_diagnostic))
+            }
+                    })
+                    .await
+                    .unwrap_or_else(|join_err| {
+                        Err(format!("wait_for_prompt_ready join error: {join_err}"))
+                    });
+                let post_wait_diagnostic = tui_busy_followup_diagnostic(
+                    shared,
+                    &provider,
+                    channel_id,
+                    tmux_session_name.as_deref(),
+                    remote_profile.is_some(),
+                    Some(&current_path),
+                    session_id.as_deref(),
+                );
+                // #2416: cancellation may have flipped during the up-to-45s wait
+                // (user stop reaction, watchdog, etc.). If it did, do NOT continue
+                // to inject the prompt — fall into the busy-notice / cleanup branch
+                // below by surfacing the initial diagnostic. Closes a Codex-flagged
+                // HIGH on the Discord path mirroring the same fix in claude.rs.
+                let cancel_observed_after_wait = cancel_token
+                    .cancelled
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                match (
+                    wait_result,
+                    post_wait_diagnostic,
+                    cancel_observed_after_wait,
+                ) {
+                    (_, _, true) => {
+                        tracing::warn!(
+                            channel_id = channel_id.get(),
+                            user_msg_id = user_msg_id.get(),
+                            tmux_session_name = %initial_diagnostic.tmux_session_name,
+                            "claude_tui follow-up: cancellation observed after busy wait; aborting injection"
+                        );
+                        Some(initial_diagnostic)
+                    }
+                    (Ok(()), None, _) => {
+                        recapture_offset_after_busy_wait = true;
+                        tracing::info!(
+                            channel_id = channel_id.get(),
+                            user_msg_id = user_msg_id.get(),
+                            tmux_session_name = %initial_diagnostic.tmux_session_name,
+                            "claude_tui follow-up: busy at first check, became ready after wait_for_prompt_ready"
+                        );
+                        None
+                    }
+                    (Ok(()), Some(diag), _) => {
+                        tracing::warn!(
+                            channel_id = channel_id.get(),
+                            user_msg_id = user_msg_id.get(),
+                            "claude_tui follow-up: wait_for_prompt_ready returned Ok but post-wait diagnostic still busy"
+                        );
+                        Some(diag)
+                    }
+                    (Err(err), diag_opt, _) => {
+                        let timed_out = match &provider {
+                            ProviderKind::Codex => {
+                                crate::services::codex_tui::input::is_prompt_ready_timeout_error(
+                                    &err,
+                                )
+                            }
+                            _ => crate::services::claude_tui::input::is_prompt_ready_timeout_error(
+                                &err,
+                            ),
+                        };
+                        tracing::warn!(
+                            channel_id = channel_id.get(),
+                            user_msg_id = user_msg_id.get(),
+                            timed_out,
+                            error = %err,
+                            "claude_tui follow-up: wait_for_prompt_ready failed; emitting busy notice"
+                        );
+                        Some(diag_opt.unwrap_or(initial_diagnostic))
+                    }
                 }
             }
         } else {

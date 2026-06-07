@@ -156,17 +156,88 @@ pub(super) fn hosted_tui_draft_should_enter_provider_recovery(
         && snapshot.prompt_draft_detected
 }
 
+/// #3208: resolve the JSONL transcript for the Claude TUI session that is
+/// *actually* serving this channel's tmux session.
+///
+/// The naive resolution `claude_transcript_path(current_path, session_id)` is
+/// brittle in production:
+///   - `session_id` is frequently `None` / a non-UUID fingerprint on the
+///     Discord follow-up path (sessions resume via `runtime_cached_provider_session`
+///     and the real Claude session_id UUID is never carried into intake).
+///   - `current_path` is the channel's *configured* workspace, but the live TUI
+///     often runs in a rotating worktree (`worktrees/claude-adk-cc-<ts>`) — the
+///     DB-restored worktree cwd is ignored at turn start. The workspace project
+///     dir then holds only stale transcripts, so the probe reads `Unknown` (or a
+///     stale `Idle`), and the screen-marker fallback false-flags a genuinely
+///     idle (background-agents-running) turn as busy → the 45s readiness
+///     timeout in #3208.
+///
+/// Resolution order:
+///   1. `claude_transcript_path(current_path, session_id)` when it both has a
+///      valid UUID and the file exists (the happy path).
+///   2. newest UUID transcript under the live tmux pane's *actual* cwd
+///      (`pane_cwd`) — this is the worktree the running session writes to.
+///   3. newest UUID transcript under `current_path` (workspace) as a last
+///      resort.
+#[cfg(unix)]
+pub(super) fn resolve_claude_followup_transcript_path(
+    current_path: Option<&str>,
+    session_id: Option<&str>,
+    pane_cwd: Option<&std::path::Path>,
+    claude_home: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    use std::collections::HashSet;
+
+    if let (Some(current_path), Some(session_id)) = (current_path, session_id)
+        && let Ok(path) = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            std::path::Path::new(current_path),
+            session_id,
+            claude_home,
+        )
+        && path.exists()
+    {
+        return Some(path);
+    }
+
+    let exclude: HashSet<std::path::PathBuf> = HashSet::new();
+    let mut candidate_cwds: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(pane_cwd) = pane_cwd {
+        candidate_cwds.push(pane_cwd.to_path_buf());
+    }
+    if let Some(current_path) = current_path {
+        let workspace = std::path::PathBuf::from(current_path);
+        if !candidate_cwds.contains(&workspace) {
+            candidate_cwds.push(workspace);
+        }
+    }
+    for cwd in candidate_cwds {
+        if let Some(path) =
+            crate::services::claude_tui::transcript_tail::latest_claude_transcript_for_cwd(
+                &cwd,
+                std::time::SystemTime::UNIX_EPOCH,
+                claude_home,
+                &exclude,
+            )
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
 #[cfg(unix)]
 pub(super) fn observe_claude_tui_transcript_state_for_session(
     current_path: Option<&str>,
     session_id: Option<&str>,
+    tmux_session_name: Option<&str>,
 ) -> crate::services::tui_turn_state::TuiTurnState {
-    let (Some(current_path), Some(session_id)) = (current_path, session_id) else {
-        return crate::services::tui_turn_state::TuiTurnState::Unknown;
-    };
-    let Ok(transcript_path) = crate::services::claude_tui::transcript_tail::claude_transcript_path(
-        std::path::Path::new(current_path),
+    let pane_cwd = tmux_session_name
+        .and_then(crate::services::tmux_diagnostics::tmux_session_pane_cwd)
+        .map(std::path::PathBuf::from);
+    let Some(transcript_path) = resolve_claude_followup_transcript_path(
+        current_path,
         session_id,
+        pane_cwd.as_deref(),
         None,
     ) else {
         return crate::services::tui_turn_state::TuiTurnState::Unknown;
@@ -190,11 +261,16 @@ pub(super) fn hosted_tui_busy_preflight_readiness_wait(
     provider: &ProviderKind,
     current_path: Option<&str>,
     session_id: Option<&str>,
+    tmux_session_name: Option<&str>,
 ) -> HostedTuiBusyPreflightReadinessWait {
+    let pane_cwd = tmux_session_name
+        .and_then(crate::services::tmux_diagnostics::tmux_session_pane_cwd)
+        .map(std::path::PathBuf::from);
     hosted_tui_busy_preflight_readiness_wait_with_claude_home(
         provider,
         current_path,
         session_id,
+        pane_cwd.as_deref(),
         None,
     )
 }
@@ -204,19 +280,18 @@ pub(super) fn hosted_tui_busy_preflight_readiness_wait_with_claude_home(
     provider: &ProviderKind,
     current_path: Option<&str>,
     session_id: Option<&str>,
+    pane_cwd: Option<&std::path::Path>,
     claude_home: Option<&std::path::Path>,
 ) -> HostedTuiBusyPreflightReadinessWait {
     if matches!(provider, ProviderKind::Codex) {
         return HostedTuiBusyPreflightReadinessWait::Codex;
     }
-    let (Some(current_path), Some(session_id)) = (current_path, session_id) else {
-        return HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly;
-    };
-    let Ok(transcript_path) = crate::services::claude_tui::transcript_tail::claude_transcript_path(
-        std::path::Path::new(current_path),
-        session_id,
-        claude_home,
-    ) else {
+    // #3208: resolve the *running* session's transcript (worktree-aware), not
+    // just `claude_transcript_path(current_path, session_id)`, so the idle
+    // JSONL fallback engages for sessions running in a rotating worktree.
+    let Some(transcript_path) =
+        resolve_claude_followup_transcript_path(current_path, session_id, pane_cwd, claude_home)
+    else {
         return HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly;
     };
     // Missing Claude JSONL files currently observe as Idle. Only pass a
@@ -362,9 +437,11 @@ pub(super) fn tui_busy_followup_diagnostic(
         super::super::super::inflight::load_inflight_state(provider, channel_id.get());
     let inflight_state = classify_inflight_diagnostic_state(previous_inflight.as_ref());
     let transcript_turn_state = match provider {
-        ProviderKind::Claude => {
-            observe_claude_tui_transcript_state_for_session(current_path, session_id)
-        }
+        ProviderKind::Claude => observe_claude_tui_transcript_state_for_session(
+            current_path,
+            session_id,
+            Some(tmux_session_name),
+        ),
         ProviderKind::Codex => observe_codex_tui_rollout_state_for_cwd(
             current_path,
             Some(tmux_session_name),

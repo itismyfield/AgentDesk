@@ -504,6 +504,39 @@ pub fn pane_pid(_session_name: &str) -> Option<u32> {
     None
 }
 
+/// Return the current working directory of the active pane for a tmux session
+/// (`#{pane_current_path}`).
+///
+/// #3208: a Discord-hosted Claude TUI may run in a rotating worktree
+/// (`~/.adk/release/worktrees/claude-adk-cc-<ts>`) whose cwd differs from the
+/// channel's configured workspace (the DB-restored cwd is sometimes ignored at
+/// turn start). The follow-up readiness path needs the *actual* running cwd to
+/// resolve the live JSONL transcript; the configured workspace path resolves to
+/// a stale/empty Claude project dir, so the structured turn-state probe reports
+/// `Unknown` and the screen-marker fallback then false-flags a genuinely-idle
+/// (background-agents-running) turn as busy. Returns `None` when the session has
+/// no live pane or tmux is unavailable.
+pub fn pane_current_path(session_name: &str) -> Option<String> {
+    if is_blank_session_name(session_name) {
+        return None;
+    }
+    let output = tmux_command()
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            &exact_target(session_name),
+            "#{pane_current_path}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() { None } else { Some(path) }
+}
+
 /// Capture pane content from a tmux session.
 ///
 /// `scroll_back` is the number of lines to capture (negative = from bottom).
