@@ -2637,10 +2637,16 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
 
             // Restore current_path: DB cwd (worktree-aware) > last_sessions (yaml, main workspace)
             if session.current_path.is_none() {
+                // #3219: prefer the channel's own reusable managed worktree over
+                // the configured base; only log "ignoring" when it is NOT reused.
+                let reusable_worktree = super::super::session_runtime::db_cwd_is_reusable_worktree(
+                    configured_path.as_deref(),
+                    db_cwd.as_deref(),
+                );
                 if let (Some(configured), Some(restored)) =
                     (configured_path.as_ref(), db_cwd.as_ref())
                 {
-                    if configured != restored {
+                    if configured != restored && !reusable_worktree {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::info!(
                             "  [{ts}] ⚠ Ignoring restored DB cwd for channel {}: {} (configured workspace: {})",
@@ -2655,6 +2661,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                     db_cwd,
                     persisted_path,
                     remote_profile.as_deref(),
+                    reusable_worktree,
                 );
                 if let Some(path) = effective_path {
                     session.current_path = Some(path);

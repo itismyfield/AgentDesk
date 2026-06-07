@@ -43,26 +43,29 @@ pub(super) fn select_restored_session_path(
     db_cwd: Option<String>,
     yaml_path: Option<String>,
     remote_profile_name: Option<&str>,
+    db_cwd_is_reusable_worktree: bool,
 ) -> Option<String> {
-    // #3219: a channel-scoped DB cwd that points to an existing, AgentDesk-managed
-    // worktree must win over the configured *base* workspace. Otherwise
-    // provider-channel worktree isolation re-derives a FRESH worktree from the
-    // base on recovery, abandoning the session's existing worktree and its
-    // provider transcript — so `--resume` falls back to a fresh session-id.
-    // While the tmux pane survives this is masked by the live-TUI-binding recovery
-    // path; once the pane dies (crash/kill/restart) there is no fallback and
-    // resume breaks (root cause of the 2026-06-07 resume failure: recovery read
-    // the correct worktree from the DB, logged "Ignoring restored DB cwd", then
-    // built a fresh worktree + session-id).
+    // #3219: when the channel-scoped DB cwd is the channel's OWN existing managed
+    // worktree (caller-validated by `db_cwd_is_reusable_worktree`: under
+    // `worktrees_root`, a linked worktree, and sharing the configured parent
+    // repo's git common dir), prefer it over the configured *base* workspace.
+    // Otherwise crash/kill recovery installs the base as cwd, provider-channel
+    // worktree isolation re-derives a FRESH worktree + provider session-id, and
+    // `--resume` breaks — abandoning the session's transcript. The live-TUI
+    // -binding recovery path masks this only while the tmux pane survives; once
+    // the pane dies there is no fallback (root cause of the 2026-06-07 resume
+    // failure: recovery read the correct worktree from the DB, logged "Ignoring
+    // restored DB cwd", then built a fresh worktree + session-id).
     //
-    // Reconfiguration safety is preserved: a moved/renamed base relocates
-    // `worktrees_root()`, so a stale worktree no longer matches
-    // `is_managed_worktree_path` and falls through to the configured path below.
-    // A configured workspace that merely *is* a linked worktree lives outside
-    // `worktrees_root()` and is likewise unaffected.
-    if let Some(worktree) = db_cwd.as_ref().filter(|path| {
-        is_managed_worktree_path(path) && session_path_is_usable(path, remote_profile_name)
-    }) {
+    // The predicate uses the SAME guard set as `resolve_reusable_worktree`, so a
+    // stale/foreign/relocated worktree — including a workspace repointed to a
+    // different repo under the same `worktrees_root` — is NOT elevated and falls
+    // through to the configured path below.
+    if db_cwd_is_reusable_worktree
+        && let Some(worktree) = db_cwd
+            .as_ref()
+            .filter(|path| session_path_is_usable(path, remote_profile_name))
+    {
         return Some(worktree.clone());
     }
 
@@ -70,6 +73,27 @@ pub(super) fn select_restored_session_path(
         .filter(|path| session_path_is_usable(path, remote_profile_name))
         .or_else(|| db_cwd.filter(|path| session_path_is_usable(path, remote_profile_name)))
         .or_else(|| yaml_path.filter(|path| session_path_is_usable(path, remote_profile_name)))
+}
+
+/// #3219: true when the recovered DB cwd is the channel's own reusable managed
+/// worktree and must therefore outrank the configured base workspace in
+/// [`select_restored_session_path`]. Mirrors the exact guard set used by
+/// [`resolve_reusable_worktree`]: the cwd must be an AgentDesk-managed
+/// (`is_managed_worktree_path`) linked worktree that shares the configured
+/// parent repo's git common dir (`restored_worktree_belongs_to_parent`, which
+/// also rejects non-existent and remote-only paths). Returns `false` when there
+/// is no configured parent (then `select_restored_session_path`'s existing
+/// configured→db_cwd→yaml fallback already does the right thing).
+pub(super) fn db_cwd_is_reusable_worktree(
+    configured_path: Option<&str>,
+    db_cwd: Option<&str>,
+) -> bool {
+    match (configured_path, db_cwd) {
+        (Some(parent), Some(cwd)) => {
+            is_managed_worktree_path(cwd) && restored_worktree_belongs_to_parent(parent, cwd)
+        }
+        _ => false,
+    }
 }
 
 /// #3216 GAP 2: decide whether a live tmux pane's cwd should override the
@@ -818,8 +842,14 @@ pub(super) async fn auto_restore_session_force(
             channel_id.get(),
         );
 
+        // #3219: validate whether the restored DB cwd is the channel's own
+        // reusable managed worktree BEFORE selecting, so the log below reflects
+        // the actual decision (we only "ignore" it when it is NOT reused).
+        let reusable_worktree =
+            db_cwd_is_reusable_worktree(configured_path.as_deref(), db_cwd.as_deref());
         if let (Some(configured), Some(restored)) = (configured_path.as_ref(), db_cwd.as_ref())
             && configured != restored
+            && !reusable_worktree
         {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -835,6 +865,7 @@ pub(super) async fn auto_restore_session_force(
             db_cwd,
             persisted_path,
             saved_remote.as_deref(),
+            reusable_worktree,
         );
 
         (last_path, saved_remote, provider)
@@ -1684,92 +1715,76 @@ pub(super) async fn resolve_thread_parent(
 
 #[cfg(test)]
 mod select_restored_session_path_tests {
-    //! #3219: `select_restored_session_path` must prefer an existing managed
-    //! worktree (the channel-scoped DB cwd) over the configured *base* workspace,
-    //! or crash/kill recovery re-derives a fresh worktree and `--resume` breaks.
-    use super::select_restored_session_path;
+    //! #3219: `select_restored_session_path` must prefer the channel's own
+    //! reusable managed worktree (the channel-scoped DB cwd) over the configured
+    //! *base* workspace, or crash/kill recovery re-derives a fresh worktree and
+    //! `--resume` breaks. The reusable-worktree decision is made by the caller
+    //! (`db_cwd_is_reusable_worktree`, git-validated against the configured parent
+    //! repo); here we verify the selector honors that decision and otherwise
+    //! preserves the configured→db_cwd→yaml fallback order unchanged.
+    use super::{db_cwd_is_reusable_worktree, select_restored_session_path};
 
-    struct EnvGuard(Option<std::ffi::OsString>);
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-            }
-        }
-    }
+    const BASE: &str = "/repo/workspaces/agentdesk";
+    const WT: &str = "/repo/worktrees/claude-adk-cc-113822";
 
-    fn with_root<T>(root: &std::path::Path, f: impl FnOnce() -> T) -> T {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let _guard = EnvGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root) };
-        f()
+    #[test]
+    fn reusable_worktree_outranks_configured_base() {
+        let selected = select_restored_session_path(
+            Some(BASE.into()),
+            Some(WT.into()),
+            None,
+            // remote profile set → session_path_is_usable short-circuits true so
+            // the assertion does not depend on these paths existing on disk.
+            Some("remote"),
+            true,
+        );
+        assert_eq!(selected.as_deref(), Some(WT));
     }
 
     #[test]
-    fn prefers_existing_managed_worktree_over_configured_base() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        let base = root.join("workspaces").join("agentdesk");
-        let worktree = root.join("worktrees").join("claude-adk-cc-20260607-113822");
-        std::fs::create_dir_all(&base).unwrap();
-        std::fs::create_dir_all(&worktree).unwrap();
-
-        let selected = with_root(root, || {
-            select_restored_session_path(
-                Some(base.to_string_lossy().into_owned()),
-                Some(worktree.to_string_lossy().into_owned()),
-                None,
-                None,
-            )
-        });
-        assert_eq!(selected.as_deref(), worktree.to_str());
+    fn non_reusable_db_cwd_keeps_configured_priority() {
+        // When the caller's git validation says the worktree is NOT reusable
+        // (stale/foreign/relocated/remote), configured base wins as before.
+        let selected = select_restored_session_path(
+            Some(BASE.into()),
+            Some(WT.into()),
+            None,
+            Some("remote"),
+            false,
+        );
+        assert_eq!(selected.as_deref(), Some(BASE));
     }
 
     #[test]
-    fn falls_back_to_configured_when_managed_worktree_missing() {
-        // A stale/phantom worktree (not on disk) must not be selected; recovery
-        // falls through to the configured base workspace.
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        let base = root.join("workspaces").join("agentdesk");
-        let worktree = root.join("worktrees").join("claude-adk-cc-deleted");
-        std::fs::create_dir_all(&base).unwrap();
-        // worktree intentionally NOT created on disk
+    fn falls_back_to_db_cwd_then_yaml_when_no_configured() {
+        // No configured path: existing fallback order is unchanged regardless of
+        // the reusable flag.
+        let selected = select_restored_session_path(
+            None,
+            Some(WT.into()),
+            Some("/yaml/path".into()),
+            Some("remote"),
+            false,
+        );
+        assert_eq!(selected.as_deref(), Some(WT));
 
-        let selected = with_root(root, || {
-            select_restored_session_path(
-                Some(base.to_string_lossy().into_owned()),
-                Some(worktree.to_string_lossy().into_owned()),
-                None,
-                None,
-            )
-        });
-        assert_eq!(selected.as_deref(), base.to_str());
+        let selected = select_restored_session_path(
+            None,
+            None,
+            Some("/yaml/path".into()),
+            Some("remote"),
+            true,
+        );
+        assert_eq!(selected.as_deref(), Some("/yaml/path"));
     }
 
     #[test]
-    fn db_cwd_outside_worktrees_root_does_not_override_configured() {
-        // A DB cwd that is NOT under `worktrees_root()` (e.g. a relocated base
-        // after reconfiguration) must keep configured-path priority.
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        let base = root.join("workspaces").join("agentdesk");
-        let other = root.join("somewhere").join("else");
-        std::fs::create_dir_all(&base).unwrap();
-        std::fs::create_dir_all(&other).unwrap();
-
-        let selected = with_root(root, || {
-            select_restored_session_path(
-                Some(base.to_string_lossy().into_owned()),
-                Some(other.to_string_lossy().into_owned()),
-                None,
-                None,
-            )
-        });
-        assert_eq!(selected.as_deref(), base.to_str());
+    fn reusable_predicate_requires_configured_and_db_cwd() {
+        // No git work here: a missing configured parent or missing db_cwd can
+        // never be "reusable" (the full git validation only runs when both exist).
+        assert!(!db_cwd_is_reusable_worktree(None, Some(WT)));
+        assert!(!db_cwd_is_reusable_worktree(Some(BASE), None));
+        assert!(!db_cwd_is_reusable_worktree(None, None));
     }
 }
 
