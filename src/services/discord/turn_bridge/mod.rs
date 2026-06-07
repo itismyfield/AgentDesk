@@ -2118,6 +2118,55 @@ pub(in crate::services::discord) fn normalize_status_panel_message_id(
     status_panel_msg_id.filter(|id| !is_synthetic_headless_message_id(*id))
 }
 
+/// #3161 (follow-up to #3142): bridge-path sibling of the watcher
+/// committed-output status-panel staleness gate. The bridge captures
+/// `status_panel_msg_id` from THIS turn's pinned inflight snapshot at turn start
+/// and EDITs it at completion (the `complete_status_panel_v2` Edit arm). Between
+/// those two points a NEWER follow-up turn on the SAME channel can re-bind the
+/// on-disk `status_message_id` onto the SAME panel message (status-panel reuse),
+/// so by completion time that Discord message is the newer turn's LIVE panel. If
+/// the older bridge turn still EDITs it with its own `응답 완료` text it aliases
+/// the newer turn's panel (the newer turn then re-overwrites it — cosmetic-
+/// transient, matching the issue's severity).
+///
+/// The bridge is turn-pinned by IDENTITY (it owns `this_turn_user_msg_id`), not
+/// by a committed offset range like the watcher, so the gate is identity-based:
+/// return TRUE (skip the panel EDIT) iff the CURRENT on-disk row is concrete
+/// evidence of a DIFFERENT, real turn that now OWNS this turn's panel —
+/// `this_turn_user_msg_id != 0` AND `on_disk_user_msg_id != 0` AND
+/// `on_disk_user_msg_id != this_turn_user_msg_id` AND the on-disk row's
+/// `status_message_id` equals THIS turn's `status_panel_msg_id`.
+///
+/// Over-suppression guard (the issue's explicit requirement): an in-range
+/// id==0 bridge/watcher-direct turn (`this_turn_user_msg_id == 0`, e.g.
+/// TUI-direct / external-input) is NEVER flagged — the leading
+/// `this_turn_user_msg_id != 0` short-circuit keeps it completing its panel
+/// even when a different real on-disk owner is present, because a 0-id turn
+/// cannot be proven stale by identity. We additionally require a real on-disk
+/// owner AND that the on-disk row OWNS our exact panel id, so a turn whose
+/// panel was never re-adopted still completes normally. Absent inflight row, no
+/// panel id, a same-turn row, or a row pointing at a different panel all return
+/// FALSE → the EDIT fires exactly as today.
+fn status_panel_completion_edit_aliases_newer_turn(
+    this_turn_user_msg_id: u64,
+    status_panel_msg_id: Option<MessageId>,
+    on_disk_user_msg_id: u64,
+    on_disk_status_message_id: Option<u64>,
+) -> bool {
+    let Some(panel_id) = normalize_status_panel_message_id(status_panel_msg_id) else {
+        return false;
+    };
+    // `this_turn_user_msg_id != 0`: an in-range id==0 watcher-direct / external-
+    // input bridge turn cannot be proven stale by identity, so it MUST still
+    // complete its panel (the issue's over-suppression guard). Only a real
+    // (non-zero) this-turn identity that a DIFFERENT real on-disk owner has
+    // superseded on the SAME panel is treated as aliasing.
+    this_turn_user_msg_id != 0
+        && on_disk_user_msg_id != 0
+        && on_disk_user_msg_id != this_turn_user_msg_id
+        && on_disk_status_message_id == Some(panel_id.get())
+}
+
 fn persist_status_panel_completion_fallback_message_id(
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -8638,23 +8687,58 @@ pub(super) fn spawn_turn_bridge(
                     );
                 }
             }
-            // #2161 (Codex H1): the bridge-owned delivery path runs the
-            // gate ABOVE so it can also block dispatch completion on
-            // TimedOut. Here we just reuse the outcome and skip the
-            // visible `응답 완료` if the pane was still busy.
-            status_panel_completion_committed = complete_status_panel_v2(
-                shared_owned.as_ref(),
-                gateway.as_ref(),
-                channel_id,
-                status_panel_msg_id,
-                &provider,
-                status_panel_started_at,
-                &mut last_status_panel_text,
-                false,
-                "turn_terminal_delivery",
-                user_msg_id.map(|id| id.get()).unwrap_or(0),
-            )
-            .await;
+            // #3161 (follow-up to #3142): re-read the CURRENT on-disk inflight
+            // and skip the panel EDIT when a NEWER turn now owns this turn's
+            // captured `status_panel_msg_id`. The bridge captured the panel id
+            // from this turn's pinned snapshot at turn start; a follow-up turn on
+            // the same channel can re-adopt that panel between start and
+            // completion, so editing it with our `응답 완료` text would alias the
+            // newer turn's live panel (the sibling of the watcher committed-output
+            // status-panel gate). Identity-based here because the bridge is
+            // turn-pinned by `user_msg_id`, not by a committed offset range. The
+            // gate keys off concrete newer-owner evidence and leaves the in-range
+            // id==0 case completing normally — see the predicate doc.
+            let this_turn_user_msg_id = user_msg_id.map(|id| id.get()).unwrap_or(0);
+            let panel_edit_aliases_newer_turn =
+                match super::inflight::load_inflight_state(&provider, channel_id.get()) {
+                    Some(on_disk) => status_panel_completion_edit_aliases_newer_turn(
+                        this_turn_user_msg_id,
+                        status_panel_msg_id,
+                        on_disk.user_msg_id,
+                        on_disk.status_message_id,
+                    ),
+                    None => false,
+                };
+            if panel_edit_aliases_newer_turn {
+                tracing::debug!(
+                    "[turn_bridge] skipping status-panel-v2 completion edit of msg {:?} in channel {}: a newer turn now owns the panel (this turn user_msg_id {})",
+                    status_panel_msg_id,
+                    channel_id,
+                    this_turn_user_msg_id
+                );
+                // The newer turn owns the panel; this turn's panel-completion
+                // step is a no-op success (its response was already delivered),
+                // so downstream session-status posting still proceeds.
+                status_panel_completion_committed = true;
+            } else {
+                // #2161 (Codex H1): the bridge-owned delivery path runs the
+                // gate ABOVE so it can also block dispatch completion on
+                // TimedOut. Here we just reuse the outcome and skip the
+                // visible `응답 완료` if the pane was still busy.
+                status_panel_completion_committed = complete_status_panel_v2(
+                    shared_owned.as_ref(),
+                    gateway.as_ref(),
+                    channel_id,
+                    status_panel_msg_id,
+                    &provider,
+                    status_panel_started_at,
+                    &mut last_status_panel_text,
+                    false,
+                    "turn_terminal_delivery",
+                    this_turn_user_msg_id,
+                )
+                .await;
+            }
         }
 
         if status_panel_terminal_committed
@@ -9559,8 +9643,8 @@ mod status_panel_v2_rework_tests {
     use super::{
         ChannelId, InflightTurnState, MessageId, ProviderKind, StatusPanelCompletionAction,
         complete_status_panel_v2, should_open_long_running_placeholder_controller,
-        status_panel_completion_action, status_panel_completion_ready_after_terminal_body,
-        status_panel_message_id_for_turn,
+        status_panel_completion_action, status_panel_completion_edit_aliases_newer_turn,
+        status_panel_completion_ready_after_terminal_body, status_panel_message_id_for_turn,
     };
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     use crate::services::discord::gateway::TurnGateway;
@@ -9791,6 +9875,126 @@ mod status_panel_v2_rework_tests {
         let action = status_panel_completion_action(Some(message_id), "", "응답 완료");
 
         assert_eq!(action, StatusPanelCompletionAction::Edit(message_id));
+    }
+
+    // #3161: the bridge-path status-panel turn-aliasing gate. A NEWER follow-up
+    // turn re-adopted THIS turn's captured panel between turn start and
+    // completion (the on-disk row now carries a different, real `user_msg_id`
+    // pointing at the SAME `status_message_id`), so the older bridge turn must
+    // NOT edit it — that would alias the newer turn's live panel.
+    #[test]
+    fn completion_edit_skips_when_newer_turn_owns_this_panel() {
+        let panel = MessageId::new(1510319194921504931);
+
+        assert!(
+            status_panel_completion_edit_aliases_newer_turn(
+                7_000_001,
+                Some(panel),
+                7_000_999,
+                Some(panel.get()),
+            ),
+            "a different real on-disk turn owning THIS panel must suppress the edit"
+        );
+    }
+
+    // The common, non-aliased case: the on-disk row is still THIS turn → edit
+    // proceeds. This is the GREEN companion to the aliasing case above.
+    #[test]
+    fn completion_edit_proceeds_when_same_turn_still_owns_panel() {
+        let panel = MessageId::new(1510319194921504931);
+
+        assert!(
+            !status_panel_completion_edit_aliases_newer_turn(
+                7_000_001,
+                Some(panel),
+                7_000_001,
+                Some(panel.get()),
+            ),
+            "the SAME turn still owning the panel must complete normally"
+        );
+    }
+
+    // Over-suppression guard (issue requirement): an in-range id==0
+    // bridge/watcher-direct turn (TUI-direct / external-input) must STILL
+    // complete its panel even though the on-disk id differs — a 0-id this-turn
+    // can never be proven stale this way, and the panel was never re-adopted.
+    #[test]
+    fn completion_edit_proceeds_for_in_range_id_zero_turn() {
+        let panel = MessageId::new(1510319194921504931);
+
+        assert!(
+            !status_panel_completion_edit_aliases_newer_turn(
+                0,
+                Some(panel),
+                7_000_999,
+                Some(panel.get()),
+            ),
+            "an id==0 watcher-direct/bridge turn must not be suppressed"
+        );
+    }
+
+    // A different on-disk turn that does NOT own this turn's panel (e.g. it
+    // adopted a different panel, or none) is not evidence of aliasing → edit
+    // proceeds. Guards against over-suppression from a stale unrelated row.
+    #[test]
+    fn completion_edit_proceeds_when_newer_turn_owns_different_panel() {
+        let panel = MessageId::new(1510319194921504931);
+        let other_panel = 1510319194921599999u64;
+
+        assert!(
+            !status_panel_completion_edit_aliases_newer_turn(
+                7_000_001,
+                Some(panel),
+                7_000_999,
+                Some(other_panel),
+            ),
+            "a newer turn owning a DIFFERENT panel does not alias this one"
+        );
+        assert!(
+            !status_panel_completion_edit_aliases_newer_turn(
+                7_000_001,
+                Some(panel),
+                7_000_999,
+                None
+            ),
+            "a newer turn with no panel does not alias this one"
+        );
+    }
+
+    // No captured panel id (or a synthetic-headless one) → nothing to alias →
+    // edit proceeds (routes to the fallback path as today).
+    #[test]
+    fn completion_edit_proceeds_when_no_real_panel_captured() {
+        assert!(
+            !status_panel_completion_edit_aliases_newer_turn(7_000_001, None, 7_000_999, Some(123)),
+            "no captured panel id cannot alias"
+        );
+        assert!(
+            !status_panel_completion_edit_aliases_newer_turn(
+                7_000_001,
+                Some(MessageId::new(9_100_000_000_000_000_123)),
+                7_000_999,
+                Some(9_100_000_000_000_000_123),
+            ),
+            "a synthetic-headless captured panel id cannot alias"
+        );
+    }
+
+    // An absent on-disk identity (on_disk_user_msg_id == 0, the inflight row's
+    // default / cleared identity) is not a newer-owner proof → edit proceeds.
+    #[test]
+    fn completion_edit_proceeds_when_on_disk_identity_absent() {
+        let panel = MessageId::new(1510319194921504931);
+
+        assert!(
+            !status_panel_completion_edit_aliases_newer_turn(
+                7_000_001,
+                Some(panel),
+                0,
+                Some(panel.get()),
+            ),
+            "an id==0 on-disk row is not proof of a newer owner"
+        );
     }
 
     #[test]
