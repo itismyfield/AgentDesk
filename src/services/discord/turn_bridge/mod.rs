@@ -4201,6 +4201,8 @@ fn handle_watcher_runtime_handoff(
                 ),
                 provider.clone(),
                 super::inflight::RelayOwnerKind::Watcher,
+                // #3016 phase-5a: prime the reconcile cache at register time.
+                shared_owned,
             );
             watcher
                 .paused
@@ -6132,6 +6134,9 @@ pub(super) fn spawn_turn_bridge(
                                         ),
                                         provider.clone(),
                                         super::inflight::RelayOwnerKind::Watcher,
+                                        // #3016 phase-5a: prime the reconcile cache
+                                        // at register time.
+                                        &shared_owned,
                                     );
                                     // #1452 (Codex iter 3 P1): unpause must
                                     // use Release ordering so a watcher

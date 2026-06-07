@@ -1130,7 +1130,12 @@ fn next_monitor_auto_turn_ledger_generation() -> u64 {
 }
 
 async fn start_monitor_auto_turn_when_available(
-    shared: &SharedData,
+    // #3016 phase-5a: `&Arc<SharedData>` (not `&SharedData`) so `register_start`
+    // can downgrade a `Weak` into the `Start` message and prime the finalizer's
+    // reconcile cache at register time — the watcher callers already pass
+    // `&shared` (an `Arc`), so the `&SharedData` deref-coercion is simply
+    // dropped here; no caller change is needed.
+    shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     data_start_offset: u64,
@@ -1181,6 +1186,10 @@ async fn start_monitor_auto_turn_when_available(
                 ),
                 provider.clone(),
                 crate::services::discord::inflight::RelayOwnerKind::Watcher,
+                // #3016 phase-5a: prime the reconcile cache at register time so
+                // the watcher far-backstop fires even for a fresh actor whose
+                // first watcher turn never submits its own terminal.
+                shared,
             );
             return MonitorAutoTurnStart {
                 acquired: true,

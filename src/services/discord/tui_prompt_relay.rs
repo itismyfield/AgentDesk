@@ -1715,6 +1715,8 @@ fn pending_start_claim_fn() -> super::tui_direct_pending_start::ClaimFn {
                 ),
                 provider.clone(),
                 super::inflight::RelayOwnerKind::Watcher,
+                // #3016 phase-5a: prime the reconcile cache at register time.
+                shared,
             );
 
             let claim = claim_tui_direct_synthetic_turn(

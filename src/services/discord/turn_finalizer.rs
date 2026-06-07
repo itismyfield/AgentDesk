@@ -425,10 +425,20 @@ enum FinalizeMsg {
     /// before the watcher can submit a terminal, so the ledger knows the turn
     /// exists and message arrival order replaces the deleted Release/AcqRel
     /// `mailbox_finalize_owed.store` ordering.
+    ///
+    /// #3016 phase-5a: carries a `Weak<SharedData>` (NOT `Arc`, to avoid the
+    /// SharedData → finalizer → actor → SharedData cycle) so the actor can prime
+    /// its `cached_shared` from the very FIRST `Start`. Without this the
+    /// reconcile tick only ran after the first `Terminal` ever processed by the
+    /// actor populated the cache, so a FRESH actor whose first watcher-owned
+    /// turn gets stuck (no terminal ever submitted) had `cached_shared == None`
+    /// and the watcher far-backstop NEVER fired — the non-deterministic gap this
+    /// field closes.
     Start {
         key: TurnKey,
         provider: ProviderKind,
         relay_owner: RelayOwnerKind,
+        shared: std::sync::Weak<SharedData>,
     },
     Terminal {
         key: TurnKey,
@@ -532,11 +542,18 @@ impl TurnFinalizer {
     /// #3018 — register a turn so the ledger knows it exists before any
     /// terminal can arrive. Idempotent: a second `Start` for a key already in
     /// the ledger only refreshes the relay owner.
+    ///
+    /// #3016 phase-5a: `shared` is downgraded to a `Weak` and carried on the
+    /// `Start` so the actor primes its `cached_shared` from the first register
+    /// (not just the first terminal). This is what guarantees the watcher
+    /// far-backstop reconcile tick runs for a FRESH actor whose first
+    /// watcher-owned turn never submits its own terminal.
     pub(in crate::services::discord) fn register_start(
         &self,
         key: TurnKey,
         provider: ProviderKind,
         relay_owner: RelayOwnerKind,
+        shared: &Arc<SharedData>,
     ) {
         // UnboundedSender::send only fails if the actor task is gone (process
         // teardown); dropping the Start there is harmless because no terminal
@@ -545,6 +562,7 @@ impl TurnFinalizer {
             key,
             provider,
             relay_owner,
+            shared: Arc::downgrade(shared),
         });
     }
 
@@ -762,20 +780,33 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         key,
                         provider,
                         relay_owner,
+                        shared,
                     } => {
+                        // #3016 phase-5a: prime the reconcile cache from the very
+                        // FIRST register so a FRESH actor whose first watcher-owned
+                        // turn never submits its own terminal still gets the
+                        // far-backstop reconcile tick. Previously `cached_shared` was
+                        // populated ONLY by the first `Terminal` the actor processed,
+                        // so the backstop fired non-deterministically — only once some
+                        // UNRELATED terminal happened to prime it. `is_none()` guard:
+                        // the `Terminal` arm stays authoritative (it always overwrites
+                        // with the live Arc); this only fills a `None`. A `Start` whose
+                        // Arc already dropped carries a dead `Weak`; `Weak::upgrade` in
+                        // the reconcile tick then yields `None`, harmlessly skipping
+                        // until a live submission re-primes it.
+                        if cached_shared.is_none() {
+                            cached_shared = Some(shared);
+                        }
                         // #3016 phase-5a: a watcher-owned handoff arms the FAR
                         // backstop so a never-terminated turn still becomes visible
                         // to the reconciler. `get_or_insert`: set ONCE — never push
                         // an armed deadline forward on a repeat `Start` (the EPIC's
                         // never-finalizing bug, mirrored from the gate-timeout arm).
                         // The reconcile that consumes this deadline runs off the
-                        // actor's cached `Weak<SharedData>`, which is populated by
-                        // the first `Terminal` the finalizer ever processes; a live
-                        // runtime finalizes turns continuously, so the cache is set
-                        // long before any `WATCHER_REGISTER_BACKSTOP` horizon
-                        // elapses (a `Start` carries no `SharedData` to cache here,
-                        // and the rows the backstop catches never submit a terminal
-                        // of their own).
+                        // actor's cached `Weak<SharedData>`, now primed at the FIRST
+                        // `Start` above (no longer dependent on a prior `Terminal`),
+                        // so the backstop is GUARANTEED for the rows it catches —
+                        // which never submit a terminal of their own.
                         let arm_watcher_backstop = relay_owner == RelayOwnerKind::Watcher;
                         // A `Start` always carries the real `user_msg_id`, so it
                         // registers under the exact full-identity key.
@@ -1564,7 +1595,7 @@ mod tests {
             shared.global_active.store(1, Ordering::Relaxed);
             let fin = TurnFinalizer::spawn();
             let k = key(101);
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
 
             let first = fin
                 .submit_terminal(
@@ -1605,7 +1636,12 @@ mod tests {
             let ch = ChannelId::new(606);
             let registered = TurnKey::new(ch, 99_999, 0);
             let channel_only = TurnKey::new(ch, 0, 0);
-            fin.register_start(registered, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(
+                registered,
+                ProviderKind::Claude,
+                RelayOwnerKind::Watcher,
+                &shared,
+            );
 
             // Channel-only (id 0) terminal finalizes the registered turn.
             let first = fin
@@ -1648,7 +1684,12 @@ mod tests {
             let turn1 = TurnKey::new(ch, 1001, 0);
             let turn2 = TurnKey::new(ch, 1002, 0);
 
-            fin.register_start(turn1, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(
+                turn1,
+                ProviderKind::Claude,
+                RelayOwnerKind::Watcher,
+                &shared,
+            );
             let f1 = fin
                 .submit_terminal(
                     turn1,
@@ -1662,7 +1703,12 @@ mod tests {
 
             // turn-2 starts immediately (well within the 60s Finalized TTL) and
             // must finalize on its own, not be swallowed by turn-1's entry.
-            fin.register_start(turn2, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(
+                turn2,
+                ProviderKind::Claude,
+                RelayOwnerKind::Watcher,
+                &shared,
+            );
             let f2 = fin
                 .submit_terminal(
                     turn2,
@@ -1695,7 +1741,12 @@ mod tests {
             let turn2 = TurnKey::new(ch, 2002, 0);
             let channel_only = TurnKey::new(ch, 0, 0);
 
-            fin.register_start(turn1, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(
+                turn1,
+                ProviderKind::Claude,
+                RelayOwnerKind::Watcher,
+                &shared,
+            );
             let _ = fin
                 .submit_terminal(
                     turn1,
@@ -1707,7 +1758,12 @@ mod tests {
                 .await;
 
             // turn-2 registers (queued follow-up now live).
-            fin.register_start(turn2, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(
+                turn2,
+                ProviderKind::Claude,
+                RelayOwnerKind::Watcher,
+                &shared,
+            );
 
             // A STALE id-0 terminal (from turn-1's watcher) arrives. Because a
             // Finalized entry exists AND a different live entry (turn-2) exists,
@@ -1791,7 +1847,7 @@ mod tests {
             let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
             let fin = TurnFinalizer::spawn();
             let k = key(303);
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
 
             let deferred = fin
                 .submit_terminal(
@@ -1840,7 +1896,7 @@ mod tests {
             let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
             let fin = TurnFinalizer::spawn();
             let k = key(313);
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
 
             // Re-submit gate-timeouts at ~1/3 of the backstop apart, three times,
             // staying UNDER the single backstop window in total. Each is Deferred;
@@ -1893,7 +1949,7 @@ mod tests {
             let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
             let fin = TurnFinalizer::spawn();
             let k = key(404);
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
 
             let outcome = fin
                 .submit_terminal(
@@ -1919,7 +1975,7 @@ mod tests {
             let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
             let fin = TurnFinalizer::spawn();
             let k = key(505);
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
 
             let cancelled = fin
                 .submit_terminal(
@@ -1959,7 +2015,7 @@ mod tests {
             shared.global_active.store(0, Ordering::Relaxed);
             let fin = TurnFinalizer::spawn();
             let k = key(707);
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
 
             let watcher = fin
                 .submit_terminal(
@@ -2007,7 +2063,7 @@ mod tests {
             let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
             let fin = TurnFinalizer::spawn();
             let k = key(808);
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
 
             let deferred = fin
                 .submit_terminal(
@@ -2424,6 +2480,7 @@ mod tests {
             TurnKey::new(ch, registered_id, 0),
             ProviderKind::Claude,
             RelayOwnerKind::Watcher,
+            &shared,
         );
 
         // id-0 terminal → resolves to the registered entry → finalize_key uses
@@ -2513,7 +2570,7 @@ mod tests {
             let token = seed_active_turn(&shared, ch, tid).await;
             let fin = TurnFinalizer::spawn();
             let k = TurnKey::new(ch, tid, 0);
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
 
             let first = fin
                 .submit_terminal(
@@ -2581,7 +2638,7 @@ mod tests {
             let token = seed_active_turn(&shared, ch, tid).await;
             let fin = TurnFinalizer::spawn();
             let k = TurnKey::new(ch, tid, 0);
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
 
             let first = fin
                 .submit_terminal(
@@ -2705,7 +2762,7 @@ mod tests {
             let token = seed_active_turn(&shared, ch, tid).await;
             let fin = TurnFinalizer::spawn();
             let k = TurnKey::new(ch, tid, 0);
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
 
             let cancelled = fin
                 .submit_terminal(
@@ -2777,7 +2834,7 @@ mod tests {
             let k = TurnKey::new(ch, tid, 0);
             // A live relay owner is what makes `GateTimeout{Some(false)}` defer
             // (arming the backstop) rather than finalize immediately.
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
 
             let deferred = fin
                 .submit_terminal(
@@ -2867,7 +2924,7 @@ mod tests {
             let k = TurnKey::new(ch, tid, 0);
             // Register with a live owner so we PROVE None does not defer the way
             // Some(false) would with an owner present.
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
 
             let outcome = fin
                 .submit_terminal(
@@ -2922,7 +2979,7 @@ mod tests {
             let token = seed_active_turn(&shared, ch, tid).await;
             let fin = TurnFinalizer::spawn();
             let k = TurnKey::new(ch, tid, 0);
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
 
             let outcome = fin
                 .submit_terminal(
@@ -3067,7 +3124,7 @@ mod tests {
             let token = seed_active_turn(&shared, ch, tid).await;
             let fin = TurnFinalizer::spawn();
             let k = TurnKey::new(ch, tid, 0);
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
 
             let watcher = fin
                 .submit_terminal(
@@ -3119,7 +3176,7 @@ mod tests {
             let token = seed_active_turn(&shared, ch, tid).await;
             let fin = TurnFinalizer::spawn();
             let k = TurnKey::new(ch, tid, 0);
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
 
             let first = fin
                 .submit_terminal(
@@ -3497,12 +3554,17 @@ mod tests {
     // has_live_watcher_pending: true for a watcher-owned non-finalized entry.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn watcher_pending_true_for_live_watcher_entry() {
+        // #3016 phase-5a: `register_start` now takes `&Arc<SharedData>` (to prime
+        // the reconcile cache). This test only registers + probes the ledger (no
+        // terminal, no reconcile), so an inert shared suffices.
+        let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
         let fin = TurnFinalizer::spawn();
         let ch = ChannelId::new(7001);
         fin.register_start(
             TurnKey::new(ch, 1, 5),
             ProviderKind::Claude,
             RelayOwnerKind::Watcher,
+            &shared,
         );
         // Let the actor drain the Start before querying.
         tokio::task::yield_now().await;
@@ -3517,6 +3579,9 @@ mod tests {
     // not the watcher).
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn watcher_pending_false_for_bridge_owned_entry() {
+        // #3016 phase-5a: inert shared for the `register_start` Arc param (this
+        // test only registers + probes; no terminal, no reconcile).
+        let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
         let fin = TurnFinalizer::spawn();
         let ch = ChannelId::new(7101);
         // `RelayOwnerKind::SessionBoundRelay` is a bridge-owned (non-watcher)
@@ -3525,6 +3590,7 @@ mod tests {
             TurnKey::new(ch, 1, 0),
             ProviderKind::Claude,
             RelayOwnerKind::SessionBoundRelay,
+            &shared,
         );
         tokio::task::yield_now().await;
         assert!(!fin.has_live_watcher_pending(ch, 0).await);
@@ -3538,7 +3604,7 @@ mod tests {
             let fin = TurnFinalizer::spawn();
             let ch = ChannelId::new(7201);
             let k = TurnKey::new(ch, 42, 0);
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
             tokio::task::yield_now().await;
             assert!(fin.has_live_watcher_pending(ch, 0).await);
 
@@ -4399,7 +4465,7 @@ mod tests {
             // Watcher handoff registered the turn; NO terminal is ever submitted
             // for it (the stuck row).
             let k = TurnKey::new(ch, 70, 0);
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
 
             tokio::time::sleep(WATCHER_REGISTER_BACKSTOP + RECONCILE_INTERVAL * 3).await;
             tokio::task::yield_now().await;
@@ -4408,6 +4474,65 @@ mod tests {
                 shared.global_active.load(Ordering::Relaxed),
                 0,
                 "the far-backstop must finalize the stuck watcher turn and release its token"
+            );
+            let late = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(
+                matches!(late, FinalizeOutcome::AlreadyFinalized),
+                "a late terminal must lose the exactly-once gate after the backstop finalized"
+            );
+        })
+        .await;
+    }
+
+    /// #3016 phase-5a regression (codex HIGH): a FRESH actor — `cached_shared`
+    /// starts `None`, NO prior terminal of ANY turn was ever processed — whose
+    /// VERY FIRST watcher-owned `register_start` gets stuck (its own terminal is
+    /// never submitted) must STILL be finalized by the far-backstop at the
+    /// deadline. The reconcile cache is now primed by the `Start` itself, so the
+    /// tick fires WITHOUT any unrelated terminal priming `cached_shared` first.
+    ///
+    /// This is the same scenario as
+    /// `watcher_register_start_backstop_finalizes_unterminated_turn` but it
+    /// deliberately does NOT call `prime_reconcile_shared`: before the fix the
+    /// reconcile tick short-circuited on `cached_shared == None` and the token
+    /// stayed stuck forever, so this test FAILS on the pre-fix code and PASSES
+    /// once `Start` primes the cache.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn fresh_actor_watcher_backstop_finalizes_without_prior_terminal() {
+        use serenity::model::id::{MessageId, UserId};
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            shared.global_active.store(1, Ordering::Relaxed);
+            let ch = ChannelId::new(5111);
+            let active_token = Arc::new(CancelToken::new());
+            shared
+                .mailbox(ch)
+                .restore_active_turn(active_token, UserId::new(7), MessageId::new(71))
+                .await;
+
+            // FRESH actor: nothing ever submitted a terminal, so `cached_shared`
+            // is `None` until the `register_start` below primes it. NO
+            // `prime_reconcile_shared` — that is the whole point of this test.
+            let fin = TurnFinalizer::spawn();
+            let k = TurnKey::new(ch, 71, 0);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
+
+            tokio::time::sleep(WATCHER_REGISTER_BACKSTOP + RECONCILE_INTERVAL * 3).await;
+            tokio::task::yield_now().await;
+
+            assert_eq!(
+                shared.global_active.load(Ordering::Relaxed),
+                0,
+                "a fresh actor's first stuck watcher turn must be finalized by the \
+                 far-backstop even though no prior terminal ever primed cached_shared"
             );
             let late = fin
                 .submit_terminal(
@@ -4462,7 +4587,7 @@ mod tests {
             let fin = TurnFinalizer::spawn();
             prime_reconcile_shared(&fin, &shared).await;
             let k = TurnKey::new(ch, 80, 0);
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
 
             tokio::time::sleep(WATCHER_REGISTER_BACKSTOP + RECONCILE_INTERVAL * 3).await;
             tokio::task::yield_now().await;
@@ -4512,7 +4637,7 @@ mod tests {
 
             let fin = TurnFinalizer::spawn();
             let k = TurnKey::new(ch, 90, 0);
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
 
             // No sleep — the real terminal must win immediately despite the armed
             // 1800s backstop.
@@ -4560,7 +4685,7 @@ mod tests {
 
             let fin = TurnFinalizer::spawn();
             let k = TurnKey::new(ch, 100, 0);
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
             let first = fin
                 .submit_terminal(
                     k,

@@ -417,4 +417,10 @@
   existing `tmux_watchers` registry and `tui_turn_state`/`provider` probes. It
   acquires no lease, touches no durable queue, and changes no leader/standby
   ownership — finalize remains the same per-process exactly-once unit. No new
-  multinode ownership/singleton/lease assumption is introduced.
+  multinode ownership/singleton/lease assumption is introduced. (codex HIGH
+  follow-up: the reconcile cache `Weak<SharedData>` is now primed at the FIRST
+  `register_start` — the `Start` message carries a `Weak` downgraded from the
+  caller's `Arc<SharedData>` — instead of only at the first `Terminal`, so the
+  far-backstop is deterministic for a fresh worker-local actor whose first
+  watcher turn never submits its own terminal. Still worker-local `Weak`, no
+  cross-node reference.)
