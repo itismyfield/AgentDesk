@@ -781,7 +781,7 @@ pub(super) async fn auto_restore_session_force(
         // Use the effective tmux channel name here so restart recovery keeps
         // looking up the same session key for thread sessions that intentionally
         // use a synthetic "{parent}-t{thread_id}" channel name.
-        let mut db_cwd: Option<String> = restore_ch_name.as_ref().and_then(|ch| {
+        let restored_cwd = restore_ch_name.as_ref().and_then(|ch| {
             // #3207 (part 2) P0-a: the DB cwd resolve is channel-scoped (see
             // `restore_session_cwd_from_db`); only a usable path is honored for
             // install into `session.current_path`.
@@ -792,8 +792,19 @@ pub(super) async fn auto_restore_session_force(
                 ch,
                 channel_id.get(),
             )
-            .filter(|p| !p.is_empty() && session_path_is_usable(p, saved_remote.as_deref()))
+            .filter(|r| {
+                !r.path.is_empty() && session_path_is_usable(&r.path, saved_remote.as_deref())
+            })
         });
+        let mut db_cwd: Option<String> = restored_cwd.as_ref().map(|r| r.path.clone());
+        // #3219: only a channel-scoped cwd (exact channel-id match) — or the
+        // tmux-reconciled cwd below, which is THIS channel's live pane — may
+        // outrank the configured base. A NULL-channel_id legacy fallback is not
+        // proven to be this channel's worktree.
+        let mut db_cwd_channel_scoped = restored_cwd
+            .as_ref()
+            .map(|r| r.channel_scoped)
+            .unwrap_or(false);
 
         // #3216 GAP 2: reconcile the DB cwd against the live tmux pane. The live
         // pane is the source of truth for where the session actually runs; if the
@@ -834,6 +845,10 @@ pub(super) async fn auto_restore_session_force(
                     &reconciled,
                 );
                 db_cwd = Some(reconciled);
+                // The reconciled cwd is THIS channel's live tmux pane and
+                // `correct_session_cwd_to_tmux` just stamped channel_id, so it is
+                // channel-owned and eligible for elevation (#3219).
+                db_cwd_channel_scoped = true;
             }
         }
         let persisted_path = load_last_session_path(
@@ -844,9 +859,10 @@ pub(super) async fn auto_restore_session_force(
 
         // #3219: validate whether the restored DB cwd is the channel's own
         // reusable managed worktree BEFORE selecting, so the log below reflects
-        // the actual decision (we only "ignore" it when it is NOT reused).
-        let reusable_worktree =
-            db_cwd_is_reusable_worktree(configured_path.as_deref(), db_cwd.as_deref());
+        // the actual decision (we only "ignore" it when it is NOT reused). Only a
+        // channel-scoped cwd is eligible — never a NULL-fallback cwd.
+        let reusable_worktree = db_cwd_channel_scoped
+            && db_cwd_is_reusable_worktree(configured_path.as_deref(), db_cwd.as_deref());
         if let (Some(configured), Some(restored)) = (configured_path.as_ref(), db_cwd.as_ref())
             && configured != restored
             && !reusable_worktree
@@ -974,7 +990,7 @@ async fn resolve_cwd_for_session_key(
     pool: &sqlx::PgPool,
     session_key: &str,
     channel_id: &str,
-) -> Result<Option<String>, String> {
+) -> Result<Option<RestoredCwd>, String> {
     // 1. Channel-scoped match (the #3207 cross-channel guard).
     let scoped = sqlx::query_scalar::<_, Option<String>>(
         "SELECT cwd FROM sessions \
@@ -987,7 +1003,10 @@ async fn resolve_cwd_for_session_key(
     .map_err(|error| format!("load session cwd {session_key}: {error}"))?
     .flatten();
     if let Some(path) = scoped.filter(|p| !p.is_empty()) {
-        return Ok(Some(path));
+        return Ok(Some(RestoredCwd {
+            path,
+            channel_scoped: true,
+        }));
     }
 
     // 2. #3216 GAP 1 safe legacy fallback: inspect ALL rows for this
@@ -1012,7 +1031,14 @@ async fn resolve_cwd_for_session_key(
                 session_key,
                 channel_id
             );
-            return Ok(Some(path));
+            // #3219: a NULL-channel_id row is NOT proven to belong to THIS
+            // channel (a name-collision channel resolves the same globally-unique
+            // session_key). Mark it non-channel-scoped so it never gets elevated
+            // over the safe configured base in `select_restored_session_path`.
+            return Ok(Some(RestoredCwd {
+                path,
+                channel_scoped: false,
+            }));
         }
     }
     Ok(None)
@@ -1028,13 +1054,25 @@ async fn resolve_cwd_for_session_key(
 ///
 /// The on-disk usability filter (`session_path_is_usable`) is applied by the
 /// caller so this helper stays a pure DB resolve.
+/// A persisted `sessions.cwd` resolved during restart recovery, tagged with
+/// whether it came from an exact channel-id match (`channel_scoped = true`) or
+/// the #3216 legacy NULL-channel_id fallback (`false`). Only a channel-scoped
+/// cwd is eligible to outrank the configured base in
+/// [`select_restored_session_path`] (#3219) — a NULL-fallback cwd is not proven
+/// to belong to this channel.
+#[derive(Debug, Clone)]
+struct RestoredCwd {
+    path: String,
+    channel_scoped: bool,
+}
+
 fn restore_session_cwd_from_db(
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     provider: &ProviderKind,
     channel_name: &str,
     channel_id: u64,
-) -> Option<String> {
+) -> Option<RestoredCwd> {
     let tmux_name = provider.build_tmux_session_name(channel_name);
     let session_keys = build_session_key_candidates(token_hash, provider, &tmux_name);
     let channel_id = channel_id.to_string();
@@ -1043,10 +1081,10 @@ fn restore_session_cwd_from_db(
         pg_pool,
         move |pool| async move {
             for session_key in session_keys {
-                if let Some(path) =
+                if let Some(restored) =
                     resolve_cwd_for_session_key(&pool, &session_key, &channel_id).await?
                 {
-                    return Ok(Some(path));
+                    return Ok(Some(restored));
                 }
             }
             Ok(None)
@@ -1154,10 +1192,12 @@ fn restore_thread_worktree_path_from_db(
         pg_pool,
         move |pool| async move {
             for session_key in session_keys {
-                if let Some(path) =
+                if let Some(restored) =
                     resolve_cwd_for_session_key(&pool, &session_key, &channel_id).await?
                 {
-                    return Ok(Some(path));
+                    // The worktree-reuse path applies its own managed/belongs-to
+                    // -parent guards downstream; it only needs the path here.
+                    return Ok(Some(restored.path));
                 }
             }
             Ok(None)
@@ -1985,9 +2025,13 @@ mod worktree_reuse_channel_isolation_tests {
             channel_a,
         );
         assert_eq!(
-            owner.as_deref(),
+            owner.as_ref().map(|r| r.path.as_str()),
             Some(owner_cwd),
             "the owning channel must resolve its own restart-restore cwd"
+        );
+        assert!(
+            owner.as_ref().map(|r| r.channel_scoped).unwrap_or(false),
+            "an exact channel-id match must be marked channel_scoped (#3219)"
         );
 
         // The colliding (different-id) channel must NOT install channel A's cwd
@@ -1999,8 +2043,8 @@ mod worktree_reuse_channel_isolation_tests {
             collide_name,
             channel_b,
         );
-        assert_eq!(
-            cross, None,
+        assert!(
+            cross.is_none(),
             "a different channel sharing the same session_key must NOT resolve \
              another channel's restart-restore cwd"
         );
@@ -2034,10 +2078,15 @@ mod worktree_reuse_channel_isolation_tests {
             channel_id,
         );
         assert_eq!(
-            resolved.as_deref(),
+            resolved.as_ref().map(|r| r.path.as_str()),
             Some(cwd),
             "a single legacy NULL-channel_id row must be reused for restart \
              restore via the #3216 safe fallback"
+        );
+        assert!(
+            !resolved.as_ref().map(|r| r.channel_scoped).unwrap_or(true),
+            "a NULL-channel_id legacy fallback must NOT be channel_scoped, so it \
+             is never elevated over the configured base (#3219)"
         );
 
         pool.close().await;
