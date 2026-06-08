@@ -590,9 +590,9 @@
     routing the recovery terminal through the single-authority finalizer
     (`submit_terminal` + `FinalizeContext::monitor`) instead of inline
     `mailbox_finish_turn`).
-  - `src/services/discord/health.rs` (2369 lines after #1879 snapshot/mailbox
-    extraction; +3 from #3082 answer-flush-barrier field in the test SharedData
-    constructor).
+  - `src/services/discord/health.rs` (2293 lines after #3038 send-to-agent
+    dispatch extraction to `outbound/send_to_agent.rs`; previously 2369 after
+    #1879 snapshot/mailbox extraction and #3082 answer-flush-barrier field).
   - `src/services/discord/health/recovery.rs` (2655 lines; health recovery
     extraction surface, split further before adding non-bugfix behavior; +70
     from #3126 stall-watchdog completed-idle false-positive guard tests; +88

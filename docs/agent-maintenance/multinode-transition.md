@@ -401,6 +401,16 @@
   tmux session ownership marker, turn lock, and termination-audit side effects are
   all **process-local / per-session**; no new multinode ownership, singleton, or
   lease assumption is introduced.
+- #3038 (`health.rs` send-to-agent dispatch decomposition): the agent-to-agent
+  relay entry point (`handle_send_to_agent` + `parse_send_to_agent_body` +
+  `ParsedSendToAgentRequest`) was moved by a **pure, behavior-preserving
+  extraction** from `services::discord::health` into the new
+  `services::discord::outbound::send_to_agent` module. The new module is a
+  **stateless** request parser/router: it owns no global state, no durable queue,
+  and no lease, and it still delivers through the unchanged
+  `health::send_message_with_backends`. Call sites (`route_request_generate.rs`,
+  `health_api.rs`) were re-pointed to the new path with identical arguments. No
+  new multinode ownership, singleton, or lease assumption is introduced.
 - #3142 (committed-output turn-aliasing safety): `tmux_watcher.rs` changed by
   adding one **pure** decision helper
   (`committed_anchor_cleanup_is_stale_for_newer_turn`, the id==0-inclusive sibling
