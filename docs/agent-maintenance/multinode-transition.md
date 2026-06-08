@@ -556,3 +556,16 @@
   Discord-API probe, and clear/reuse decision is unchanged. No new multinode
   ownership, singleton, or lease assumption is introduced; this is a layering/move
   fix only.
+- #3248 (deploy-survivable relay, gap-1): `recovery_engine.rs` changed by adding
+  `reseed_watcher_owned_finalizer_ledger` and calling it from the two success
+  paths of `reregister_active_turn_from_inflight` (the pane-alive reattach run by
+  recovery after a mid-turn dcserver restart). The new call re-seeds the
+  **in-process** single-authority finalizer ledger (`turn_finalizer` actor) with
+  the watcher-owned `register_start` that the in-memory ledger lost on restart, so
+  the watcher's gate-timeout arms its backstop instead of finalizing-as-orphan.
+  The finalizer ledger is **worker-local** (a per-process in-memory map owned by
+  the watcher/recovery on the SAME node that holds the live tmux pane) — it owns
+  no leader-only side effect, no durable queue, and no PG lease — so re-seeding it
+  introduces no new multinode ownership/singleton/lease assumption. The register
+  is idempotent vs. a later bridge handoff and only ever seeds a full-identity
+  Watcher entry (id-0 guarded); the normal non-restart path is unaffected.

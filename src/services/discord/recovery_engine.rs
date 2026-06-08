@@ -1265,6 +1265,45 @@ async fn finish_recovered_turn_mailbox(
     let _ = stop_source;
 }
 
+/// #3248 gap-1 — re-seed the single-authority finalizer ledger for a
+/// watcher-owned turn re-attached by recovery after a mid-turn dcserver restart
+/// (e.g. `SKIP_TURN_DRAIN=1` deploy). The in-memory ledger is empty post-restart,
+/// so without this the watcher's channel-only (id-0) GateTimeout creates a
+/// `RelayOwnerKind::None` entry that finalizes-as-orphan (the 8s gate-backstop
+/// arms only for `relay_owner != None`; the far-backstop reconcile collects only
+/// `relay_owner == Watcher` rows) — the live pane never auto-reconciles until a
+/// NEW user turn. Registering with the Watcher owner reproduces the bridge
+/// handoff (`turn_bridge/mod.rs` `register_start(.., Watcher, ..)`) so the
+/// gate-timeout DEFERS (arms the backstop) and the reconcile can collect the row.
+///
+/// IDEMPOTENT: the actor's `Start` handler is `entry().and_modify().or_insert()`
+/// — never resurrects a `Finalized` turn, `get_or_insert`s the deadline (never
+/// pushes it forward) — so a later bridge handoff `register_start` of the SAME
+/// `TurnKey` is a no-op refresh (the normal, non-restart path is unaffected).
+fn reseed_watcher_owned_finalizer_ledger(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    user_msg_id: MessageId,
+    provider: &ProviderKind,
+) {
+    // id-0 would key the channel-only orphan slot; the sole caller already
+    // returns early on id-0, but guard here so this path only ever seeds a
+    // full-identity Watcher entry.
+    if user_msg_id.get() == 0 {
+        return;
+    }
+    shared.turn_finalizer.register_start(
+        super::turn_finalizer::TurnKey::new(
+            channel_id,
+            user_msg_id.get(),
+            shared.current_generation,
+        ),
+        provider.clone(),
+        super::inflight::RelayOwnerKind::Watcher,
+        shared, // #3016 phase-5a: prime the reconcile cache at register time.
+    );
+}
+
 pub(super) async fn reregister_active_turn_from_inflight(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
@@ -1312,7 +1351,13 @@ pub(super) async fn reregister_active_turn_from_inflight(
                 "inflight reregister existing active turn",
             );
         }
-        return snapshot.active_user_message_id == Some(user_msg_id);
+        let restored = snapshot.active_user_message_id == Some(user_msg_id);
+        if restored {
+            // #3248 gap-1: existing-active-turn rebind — re-seed the empty
+            // post-restart ledger so the watcher gate-timeout arms its backstop.
+            reseed_watcher_owned_finalizer_ledger(shared, channel_id, user_msg_id, &provider);
+        }
+        return restored;
     }
 
     let cancel_token = Arc::new(CancelToken::new());
@@ -1323,14 +1368,21 @@ pub(super) async fn reregister_active_turn_from_inflight(
         "inflight reregister active turn",
     );
 
-    super::mailbox_try_start_turn(
+    let started = super::mailbox_try_start_turn(
         shared,
         channel_id,
         cancel_token,
         UserId::new(state.request_owner_user_id),
         user_msg_id,
     )
-    .await
+    .await;
+    if started {
+        // #3248 gap-1: freshly re-attached active turn — seed the empty
+        // post-restart ledger with the Watcher owner (idempotent vs. a later
+        // bridge handoff) so the live pane auto-reconciles without a new user turn.
+        reseed_watcher_owned_finalizer_ledger(shared, channel_id, user_msg_id, &provider);
+    }
+    started
 }
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4528,5 +4580,130 @@ mod post_work_evidence_tests {
         state.any_tool_used = false;
         state.last_tool_summary = Some("Bash completed".to_string());
         assert!(recovery_has_post_work_ready_evidence(&state));
+    }
+}
+
+// #3248 gap-1 — the pane-alive reattach path (`reregister_active_turn_from_inflight`)
+// must re-seed the single-authority finalizer ledger with a Watcher-owned entry
+// after a mid-turn dcserver restart clears the in-memory ledger. Without it the
+// live pane never auto-reconciles (the watcher's id-0 gate-timeout creates a
+// `relay_owner=None` orphan that finalizes immediately instead of arming the 8s
+// backstop, and the far-backstop reconcile — which collects only
+// `relay_owner==Watcher` rows — never catches it), so a NEW user turn is required.
+#[cfg(test)]
+mod reregister_ledger_reseed_tests {
+    use super::inflight::InflightTurnState;
+    use crate::services::provider::ProviderKind;
+    use serenity::model::id::ChannelId;
+
+    fn active_turn_state(channel_id: u64, user_msg_id: u64) -> InflightTurnState {
+        // A live (not-yet-committed) ordinary turn whose ids are all non-zero, so
+        // it passes the `reregister_active_turn_from_inflight` early guard and is
+        // NOT short-circuited by `recovery_terminal_delivery_already_committed`.
+        InflightTurnState::new(
+            ProviderKind::Claude,
+            channel_id,
+            Some("adk-cc".to_string()),
+            7, // request_owner_user_id
+            user_msg_id,
+            user_msg_id + 1, // current_msg_id
+            "live prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/claude-transcript.jsonl".to_string()),
+            None,
+            0,
+        )
+    }
+
+    // Gap-1: a fresh reattach (empty mailbox → mailbox turn started) re-seeds the
+    // ledger so the turn is a LIVE Watcher-pending entry. This is precisely the
+    // state that makes the watcher's gate-timeout arm its backstop instead of
+    // finalizing-as-orphan, and makes the far-backstop reconcile able to collect
+    // the row — so the live pane auto-reconciles WITHOUT a new user turn.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reattach_reseeds_watcher_owned_ledger_entry() {
+        let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+        let ch = ChannelId::new(52_481);
+        let state = active_turn_state(ch.get(), 9001);
+
+        // Pre-condition: post-restart the in-memory ledger is empty — no
+        // watcher-pending entry exists for this turn yet.
+        assert!(
+            !shared
+                .turn_finalizer
+                .has_live_watcher_pending(ch, shared.current_generation)
+                .await,
+            "ledger must start empty (simulating a post-restart in-memory ledger)"
+        );
+
+        let restored = super::reregister_active_turn_from_inflight(&shared, &state).await;
+        assert!(
+            restored,
+            "an empty mailbox must let the reattach start the active turn"
+        );
+
+        // Post-condition: the ledger now has a LIVE Watcher-owned entry under the
+        // turn's full identity + the current (restart) generation.
+        assert!(
+            shared
+                .turn_finalizer
+                .has_live_watcher_pending(ch, shared.current_generation)
+                .await,
+            "#3248 gap-1: reattach must register_start the turn as Watcher-owned"
+        );
+    }
+
+    // Idempotency: a second reattach of the SAME turn (or a later bridge handoff
+    // register_start) must NOT error or duplicate/over-finalize — the actor's
+    // `Start` handler is entry().and_modify().or_insert() and never resurrects a
+    // finalized turn. The turn stays a single live Watcher-pending entry.
+    #[tokio::test(flavor = "current_thread")]
+    async fn repeated_reattach_is_idempotent_single_watcher_entry() {
+        let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+        let ch = ChannelId::new(52_482);
+        let state = active_turn_state(ch.get(), 9101);
+
+        assert!(super::reregister_active_turn_from_inflight(&shared, &state).await);
+        // Second call: the mailbox already holds the active turn, so this takes
+        // the "existing active turn" rebind branch and re-seeds again.
+        let restored_again = super::reregister_active_turn_from_inflight(&shared, &state).await;
+        assert!(
+            restored_again,
+            "re-attaching an already-active turn re-binds (returns true) without panic"
+        );
+
+        // Still exactly one live Watcher-pending entry (idempotent re-register).
+        assert!(
+            shared
+                .turn_finalizer
+                .has_live_watcher_pending(ch, shared.current_generation)
+                .await,
+            "repeated reattach keeps a single live Watcher-pending entry"
+        );
+    }
+
+    // Safety: a recovery turn WITHOUT a real user_msg_id (== 0) must be skipped by
+    // the early guard — it must NOT register a channel-only (id-0) orphan ledger
+    // entry that could collide with the watcher's id-0 submissions.
+    #[tokio::test(flavor = "current_thread")]
+    async fn zero_user_msg_id_is_not_registered() {
+        let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+        let ch = ChannelId::new(52_483);
+        // user_msg_id == 0 (and thus the early guard returns false before any
+        // register_start).
+        let mut state = active_turn_state(ch.get(), 0);
+        state.user_msg_id = 0;
+        state.current_msg_id = 0;
+
+        let restored = super::reregister_active_turn_from_inflight(&shared, &state).await;
+        assert!(!restored, "a zero-id recovery turn is not re-attached");
+        assert!(
+            !shared
+                .turn_finalizer
+                .has_live_watcher_pending(ch, shared.current_generation)
+                .await,
+            "a zero user_msg_id turn must NOT seed an orphan ledger entry"
+        );
     }
 }
