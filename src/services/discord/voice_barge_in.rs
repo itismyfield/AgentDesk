@@ -2,7 +2,7 @@ use std::collections::HashMap;
 #[cfg(test)]
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -42,6 +42,7 @@ use super::voice_background_driver::{
     select_voice_background_driver, voice_announce_delivery_id,
 };
 use super::voice_config_cache::ConfigSnapshotCache;
+use super::voice_id_sequences::VoiceIdSequences;
 pub(in crate::services::discord) const INTERNAL_VOICE_MESSAGE_ID_START: u64 =
     9_000_000_000_000_000_000;
 
@@ -57,9 +58,6 @@ pub(in crate::services::discord) fn is_synthetic_voice_message_id(
 ) -> bool {
     msg_id.get() >= INTERNAL_VOICE_MESSAGE_ID_START
 }
-// F4 (#2046): progress/ack 재생 owner id 시작점. spoken_result owner 공간(1..)과
-// 분리하기 위해 high range 사용.
-const PROGRESS_PLAYBACK_OWNER_START: u64 = 1u64 << 63;
 const STT_TRANSCRIPT_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 const STT_TRANSCRIPT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const PROCESSING_CHIME_FILE_NAME: &str = "agentdesk-voice-processing-chime.wav";
@@ -1171,56 +1169,6 @@ impl SensitivityState {
             .try_read()
             .map(|state| state.sensitivity())
             .unwrap_or_else(|_| BargeInSensitivity::from_u8(self.atom.load(Ordering::Relaxed)))
-    }
-}
-
-/// Cohesive sub-concern of [`VoiceBargeInRuntime`]: monotonic ID allocators
-/// (#3038 god-object split, id-sequence slice).
-///
-/// Bundles the three independent `AtomicU64` counters that previously lived
-/// directly on `VoiceBargeInRuntime`. Each `next_*` accessor preserves the
-/// original `fetch_add` semantics — including the exact memory `Ordering` and
-/// the per-counter seed value — so issued IDs are byte-for-byte identical to
-/// the pre-extraction layout:
-/// - spoken-result playbacks seed at `1` (`SeqCst`),
-/// - progress playbacks seed at `PROGRESS_PLAYBACK_OWNER_START` (`SeqCst`),
-/// - internal voice messages seed at `INTERNAL_VOICE_MESSAGE_ID_START`
-///   (`Relaxed`).
-struct VoiceIdSequences {
-    next_spoken_result_playback_id: AtomicU64,
-    // F4 (#2046): progress/ack 재생 owner id 발급용. 30s 만료 타이머가 owner 일치
-    // 시에만 playback entry 를 정리하도록 한다.
-    next_progress_playback_id: AtomicU64,
-    next_internal_message_id: AtomicU64,
-}
-
-impl VoiceIdSequences {
-    fn new() -> Self {
-        Self {
-            next_spoken_result_playback_id: AtomicU64::new(1),
-            next_progress_playback_id: AtomicU64::new(PROGRESS_PLAYBACK_OWNER_START),
-            next_internal_message_id: AtomicU64::new(INTERNAL_VOICE_MESSAGE_ID_START),
-        }
-    }
-
-    /// Allocate the next spoken-result playback id (`SeqCst`, seeded at `1`).
-    fn next_spoken_result_playback_id(&self) -> u64 {
-        self.next_spoken_result_playback_id
-            .fetch_add(1, Ordering::SeqCst)
-    }
-
-    /// Allocate the next progress/ack playback owner id (`SeqCst`, seeded at
-    /// `PROGRESS_PLAYBACK_OWNER_START`).
-    fn next_progress_playback_id(&self) -> u64 {
-        self.next_progress_playback_id
-            .fetch_add(1, Ordering::SeqCst)
-    }
-
-    /// Allocate the next internal voice message id (`Relaxed`, seeded at
-    /// `INTERNAL_VOICE_MESSAGE_ID_START`).
-    fn next_internal_message_id(&self) -> u64 {
-        self.next_internal_message_id
-            .fetch_add(1, Ordering::Relaxed)
     }
 }
 

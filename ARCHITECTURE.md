@@ -541,6 +541,7 @@ src/
 │   │   ├── voice_background_driver.rs
 │   │   ├── voice_barge_in.rs
 │   │   ├── voice_config_cache.rs
+│   │   ├── voice_id_sequences.rs
 │   │   ├── voice_routing.rs
 │   │   └── watcher_panel_parity.rs
 │   ├── dispatches/
