@@ -2271,17 +2271,54 @@ fn execute_streaming_local_tui_tmux(
         session_id: resolved_session_id.clone(),
         raw_session_id: Some(resolved_session_id.clone()),
     });
+    run_claude_tui_fresh_turn_and_finalize(
+        &transcript_path,
+        &transcript_path_string,
+        sender,
+        cancel_token,
+        tmux_session_name,
+        &resolved_session_id,
+        report_channel_id,
+        prompt,
+        &owner_path,
+    )
+}
+
+/// Dispatch a fresh Claude TUI turn and resolve its terminal outcome.
+///
+/// Verbatim extraction of the orchestrator's fresh-turn dispatch + completion
+/// gate: skip-stale-bytes offset capture, the ready-retry fresh-turn run, and
+/// the three terminal outcomes — fresh-turn start failure, `SessionDied` before
+/// completion, and successful delivery (watcher handoff + producer-exit log).
+/// Every original `return Ok/Err` is preserved as this fn's return value, and
+/// the two failure paths perform the identical audit + exit-reason + kill +
+/// owner-marker cleanup before returning `Err`. `owner_path` is the owner-marker
+/// path returned by `prepare_and_create_claude_tui_session`, removed on either
+/// failure path exactly as the inline block did.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn run_claude_tui_fresh_turn_and_finalize(
+    transcript_path: &std::path::Path,
+    transcript_path_string: &str,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<std::sync::Arc<CancelToken>>,
+    tmux_session_name: &str,
+    resolved_session_id: &str,
+    report_channel_id: Option<u64>,
+    prompt: &str,
+    owner_path: &str,
+) -> Result<(), String> {
     // Skip any transcript bytes that predate this launch. Resume and fresh
     // turns both need this guard because a reused/colliding session_id can
     // leave stale JSONL on disk even when the launch is intentionally fresh.
-    let fresh_turn_start_offset = claude_tui_fresh_turn_start_offset(&transcript_path);
+    let fresh_turn_start_offset = claude_tui_fresh_turn_start_offset(transcript_path);
     let fresh_turn_result = run_claude_tui_fresh_turn_with_ready_retry(
-        &transcript_path_string,
+        transcript_path_string,
         fresh_turn_start_offset,
         sender.clone(),
         cancel_token,
         tmux_session_name,
-        &resolved_session_id,
+        resolved_session_id,
         prompt,
     );
     let read_result = match fresh_turn_result {
@@ -2303,7 +2340,7 @@ fn execute_streaming_local_tui_tmux(
                 tmux_session_name,
                 &format!("claude tui fresh turn failed: {}", error),
             );
-            let _ = std::fs::remove_file(&owner_path);
+            let _ = std::fs::remove_file(owner_path);
             return Err(error);
         }
     };
@@ -2324,18 +2361,18 @@ fn execute_streaming_local_tui_tmux(
             tmux_session_name,
             "claude tui session died before turn completion",
         );
-        let _ = std::fs::remove_file(&owner_path);
+        let _ = std::fs::remove_file(owner_path);
         return Err("claude tui session died before turn completion".to_string());
     }
     emit_claude_tui_watcher_handoff(
         &sender,
-        &transcript_path_string,
+        transcript_path_string,
         tmux_session_name,
-        &transcript_path,
+        transcript_path,
     );
     log_producer_exit(
         "tui_turn_delivered",
-        Some(&resolved_session_id),
+        Some(resolved_session_id),
         report_channel_id,
         0,
         serde_json::json!({

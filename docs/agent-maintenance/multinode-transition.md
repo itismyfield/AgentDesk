@@ -389,6 +389,18 @@
   internally and is invoked at the identical position in `run_bot`. No new
   multinode ownership, singleton, or lease assumption is introduced; the
   leader-only vs worker-local classification of every spawned task is preserved.
+- #3038 (`execute_streaming_local_tui_tmux` god-function decomposition, follow-up
+  slice to #3196): `claude.rs` changed by a **pure, behavior-preserving
+  extraction** of the orchestrator's inline fresh-turn dispatch + completion gate
+  into one `run_claude_tui_fresh_turn_and_finalize` free helper (skip-stale-bytes
+  offset, ready-retry fresh-turn run, and the three terminal outcomes:
+  start-failure, `SessionDied`, and delivery with watcher handoff + producer-exit
+  log). Every original `return Ok/Err` and the audit + exit-reason + kill +
+  owner-marker cleanup ordering are **unchanged** — the helper is invoked at the
+  identical position as a tail call and returns the same `Result` directly. The
+  tmux session ownership marker, turn lock, and termination-audit side effects are
+  all **process-local / per-session**; no new multinode ownership, singleton, or
+  lease assumption is introduced.
 - #3142 (committed-output turn-aliasing safety): `tmux_watcher.rs` changed by
   adding one **pure** decision helper
   (`committed_anchor_cleanup_is_stale_for_newer_turn`, the id==0-inclusive sibling
