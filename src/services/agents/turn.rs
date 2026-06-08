@@ -6,8 +6,8 @@ use sqlx::Row;
 use std::sync::OnceLock;
 
 use crate::server::dto::agents::transcript_json;
-use crate::server::routes::session_activity::SessionActivityResolver;
 use crate::services::agents::query::agent_exists_pg;
+use crate::services::session_activity::SessionActivityResolver;
 use crate::utils::api::clamp_api_limit;
 
 const TURN_CAPTURE_SCROLLBACK_LINES: i32 = -80;

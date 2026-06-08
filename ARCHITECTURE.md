@@ -669,6 +669,7 @@ src/
 │   ├── retrospectives.rs
 │   ├── review_decision.rs
 │   ├── service_error.rs
+│   ├── session_activity.rs
 │   ├── session_backend.rs
 │   ├── session_forwarding.rs
 │   ├── settings.rs

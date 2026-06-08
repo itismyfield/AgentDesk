@@ -63,6 +63,7 @@ pub mod retrospectives;
 pub mod review_decision;
 pub mod routines;
 pub mod service_error;
+pub mod session_activity;
 pub mod session_backend;
 pub mod session_forwarding;
 pub mod settings;

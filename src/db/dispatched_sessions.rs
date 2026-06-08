@@ -5,7 +5,7 @@ use crate::db::agents::resolve_agent_channel_for_provider_pg;
 use crate::db::session_agent_resolution::{
     normalize_thread_channel_id, parse_thread_channel_id_from_session_key,
 };
-use crate::server::routes::session_activity::SessionActivityResolver;
+use crate::services::session_activity::SessionActivityResolver;
 
 pub(crate) async fn load_dispatch_thread_id_pg(pool: &PgPool, dispatch_id: &str) -> Option<String> {
     let thread_id = sqlx::query_scalar::<_, Option<String>>(
