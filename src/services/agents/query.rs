@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use sqlx::{Row, postgres::PgRow};
 
-use crate::server::dto::agents::{
+use crate::services::agents::serialization::{
     agent_office_json, agent_skill_json, build_channel_deeplinks, dedup_dispatched_sessions,
     dispatched_session_json, timeline_event_json,
 };

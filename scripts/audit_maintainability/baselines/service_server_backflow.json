@@ -3,14 +3,8 @@
   "rule": "service_server_backflow",
   "description": "No-regression baseline for src/services references to crate::server or super::server server-layer modules.",
   "captured_at": "2026-06-08",
-  "total_count": 33,
+  "total_count": 31,
   "files": {
-    "src/services/agents/query.rs": {
-      "count": 1
-    },
-    "src/services/agents/turn.rs": {
-      "count": 1
-    },
     "src/services/auto_queue/control_routes.rs": {
       "count": 1
     },

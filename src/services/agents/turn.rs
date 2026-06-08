@@ -5,8 +5,8 @@ use serde_json::json;
 use sqlx::Row;
 use std::sync::OnceLock;
 
-use crate::server::dto::agents::transcript_json;
 use crate::services::agents::query::agent_exists_pg;
+use crate::services::agents::serialization::transcript_json;
 use crate::services::session_activity::SessionActivityResolver;
 use crate::utils::api::clamp_api_limit;
 

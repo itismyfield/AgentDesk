@@ -271,6 +271,7 @@ src/
 │   ├── agents/
 │   │   ├── mod.rs
 │   │   ├── query.rs
+│   │   ├── serialization.rs
 │   │   └── turn.rs
 │   ├── analytics/
 │   │   ├── api_usage.rs
