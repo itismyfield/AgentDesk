@@ -478,3 +478,18 @@
   removed flag was a per-handle in-process atomic, and the surviving authority (the
   per-process actor-owned ledger) is unchanged. No new multinode
   ownership/singleton/lease assumption.
+- #3078 (status-panel controller — faithful watcher CREATE/ADOPT shadow-parity):
+  completes the create/adopt sub-step PR-4 deferred. `status_panel_controller.rs`
+  gains a **pure** `watcher_create_parity_decision` (a `WatcherCreateDecision`
+  re-derived from the SAME raw inputs the legacy
+  `watcher_should_create_external_input_status_panel` branch reads — no actor
+  round-trip, no ledger read, no IO); `watcher_panel_parity.rs` gains the
+  `assert_watcher_create_parity` shadow check (independent legacy derivation +
+  `debug_assert`/bounded-warn, legacy still executes the real create/adopt IO);
+  `tmux_watcher.rs` adds a single net-zero hook at the deferred-comment seam
+  (production LoC held at the 9598 freeze, generated docs unchanged). The
+  controller stays a **per-process** in-memory actor on `SharedData` (peer of
+  `TurnFinalizer`); the parity decision reads only the watcher's process-local
+  raw inputs and the still-dormant ledger, performs no Discord IO, acquires no
+  lease, and changes no leader/standby ownership. Behaviour-preserving (shadow
+  only). No new multinode ownership/singleton/lease assumption.

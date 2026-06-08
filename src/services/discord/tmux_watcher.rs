@@ -7444,12 +7444,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 }
                             }
                         }
+                        // EPIC #3078: faithful create/adopt shadow-parity. `panel_present`
+                        // is `false` here (the enclosing gate requires `status_panel_msg_id
+                        // .is_none()`), so the controller re-derives the SAME decision from
+                        // the raw inputs the legacy branch above read. Legacy still executes.
+                        crate::services::discord::watcher_panel_parity::assert_watcher_create_parity(&shared, channel_id, shared.status_panel_v2_enabled, false, panel_eligible_turn, persisted_panel_msg_id);
                     }
-                    // EPIC #3078: create/adopt parity is DEFERRED to the controller
-                    // execute-cutover PR. A faithful check must replicate
-                    // watcher_should_create_external_input_status_panel from raw
-                    // inputs (comparing the resolved id to itself is tautological).
-                    // PR-4 ships only the faithful RECLAIM shadow-parity below.
 
                     loop {
                         let current_portion =

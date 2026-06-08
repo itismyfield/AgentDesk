@@ -8,15 +8,21 @@
 //! watcher decision, while the legacy path keeps executing the real Discord IO.
 //! The executing cutover lands in a later PR.
 //!
-//! Scope note: CREATE/ADOPT and COMPLETION parity are DEFERRED to that
-//! controller execute-cutover PR. A faithful create/complete check must
-//! replicate `watcher_should_create_external_input_status_panel` and the
-//! SendFallback-aware completion id from RAW inputs (the controller's read-only
-//! `orphan_parity_target` collapse would only echo the already-resolved output
-//! back — a tautological, non-meaningful comparison). The RECLAIM path is
-//! genuinely faithful: it reuses `sweeper_reclaim_parity_id`, the same read-only
-//! collapse codex validated for PR-3, against the panel id the legacy reclaim is
-//! about to delete.
+//! Scope note: CREATE/ADOPT parity is now FAITHFUL — the controller re-derives
+//! the create/adopt DECISION from the SAME RAW inputs the legacy
+//! `watcher_should_create_external_input_status_panel` branch reads
+//! (`WatcherCreateDecision`), so the shadow check validates the controller would
+//! make the same publish/adopt choice, NOT the tautology of echoing the already-
+//! resolved id back (the codex P2 finding that scoped PR-4 to RECLAIM-only). The
+//! create id is not known until the send returns, so the comparison is on the
+//! decision (adopt-which-id / create / none), not on a post-send message id.
+//!
+//! COMPLETION parity is still DEFERRED to the controller execute-cutover PR: a
+//! faithful completion check needs the SendFallback-aware terminal id from the
+//! legacy completion path, which is only known after the bridge/watcher send
+//! resolves. The RECLAIM path is faithful via `sweeper_reclaim_parity_id` (the
+//! read-only collapse codex validated for PR-3) against the panel id the legacy
+//! reclaim is about to delete.
 //!
 //! The parity LOGIC lives here (not inline in the grandfathered, LoC-frozen
 //! `tmux_watcher.rs`): the watcher reclaim site adds only a single `.await` hook
@@ -34,6 +40,7 @@ use serenity::model::id::{ChannelId, MessageId};
 
 use super::SharedData;
 use super::shadow_parity_warn::ParityWarnOnce;
+use super::status_panel_controller::WatcherCreateDecision;
 use super::turn_finalizer::TurnKey;
 use crate::services::provider::ProviderKind;
 use std::sync::Arc;
@@ -124,6 +131,103 @@ pub(in crate::services::discord) async fn assert_watcher_reclaim_parity(
     );
 }
 
+/// EPIC #3078 — the legacy watcher CREATE/ADOPT decision, re-derived from the
+/// SAME RAW inputs the `tmux_watcher.rs` ~7213 branch reads, as the parity
+/// reference. Mirrors that branch order exactly: a persisted (restart-safe) id
+/// adopts, else `watcher_should_create_external_input_status_panel`
+/// (v2 on, no live panel, external-input/panel-eligible turn) creates, else
+/// nothing. Kept here (not calling the private `tmux_watcher` helper) so the
+/// reference and the controller's [`WatcherCreateDecision::watcher_create_parity_decision`]
+/// are two INDEPENDENT derivations of the same truth table — that independence is
+/// what makes the shadow check meaningful rather than tautological.
+fn legacy_watcher_create_decision(
+    status_panel_v2_enabled: bool,
+    panel_present: bool,
+    inflight_represents_external_input: bool,
+    persisted_panel_id: Option<MessageId>,
+) -> WatcherCreateDecision {
+    if let Some(persisted) = persisted_panel_id {
+        return WatcherCreateDecision::AdoptPersisted(persisted);
+    }
+    if status_panel_v2_enabled && !panel_present && inflight_represents_external_input {
+        return WatcherCreateDecision::Create;
+    }
+    WatcherCreateDecision::None
+}
+
+/// A create/adopt decision rendered to a stable `(adopt_id, create, none)` shape
+/// for the bounded one-shot warn (a `WatcherCreateDecision` is not directly a
+/// warn-key, and an `AdoptPersisted` id must distinguish from `Create`/`None`).
+fn decision_shape(decision: WatcherCreateDecision) -> (Option<u64>, bool, bool) {
+    match decision {
+        WatcherCreateDecision::AdoptPersisted(id) => (Some(id.get()), false, false),
+        WatcherCreateDecision::Create => (None, true, false),
+        WatcherCreateDecision::None => (None, false, true),
+    }
+}
+
+/// One-shot bound for the CREATE/ADOPT decision parity warn, keyed by
+/// `(channel, controller_shape, legacy_shape)` so each distinct divergence logs
+/// at most once on a hot watcher loop. Separate from `WATCHER_PARITY_WARNED`
+/// (which keys on message-id parity) because the decision shape carries a
+/// create/none discriminant a bare id cannot.
+type WatcherCreateShape = (u64, (Option<u64>, bool, bool), (Option<u64>, bool, bool));
+static WATCHER_CREATE_WARNED: ParityWarnOnce<WatcherCreateShape> = ParityWarnOnce::new();
+
+/// CREATE/ADOPT site: assert the controller's INDEPENDENT create/adopt decision
+/// (re-derived from raw inputs) equals the legacy watcher decision. v2-off →
+/// inert (the legacy decision is `None` and the controller agrees; no controller
+/// actor read is needed — the decision is pure). Never panics in release
+/// (`debug_assert` + bounded log-once `warn!`); the legacy path keeps executing
+/// the real create/adopt IO.
+pub(in crate::services::discord) fn assert_watcher_create_parity(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    status_panel_v2_enabled: bool,
+    panel_present: bool,
+    inflight_represents_external_input: bool,
+    persisted_panel_id: Option<MessageId>,
+) {
+    let controller = shared
+        .status_panel_controller
+        .watcher_create_parity_decision(
+            status_panel_v2_enabled,
+            panel_present,
+            inflight_represents_external_input,
+            persisted_panel_id,
+        );
+    let legacy = legacy_watcher_create_decision(
+        status_panel_v2_enabled,
+        panel_present,
+        inflight_represents_external_input,
+        persisted_panel_id,
+    );
+    if controller == legacy {
+        return;
+    }
+    debug_assert_eq!(
+        controller,
+        legacy,
+        "#3078 watcher status-panel create/adopt parity mismatch (channel {}): controller chose {controller:?}, legacy chose {legacy:?}",
+        channel_id.get()
+    );
+    let shape = (
+        channel_id.get(),
+        decision_shape(controller),
+        decision_shape(legacy),
+    );
+    if !WATCHER_CREATE_WARNED.should_warn(shape) {
+        return;
+    }
+    tracing::warn!(
+        channel = channel_id.get(),
+        site = "create",
+        controller_decision = ?controller,
+        legacy_decision = ?legacy,
+        "#3078 watcher status-panel create/adopt parity mismatch — StatusPanelController would make a different create/adopt decision than the legacy watcher; legacy path executed (no behaviour change), divergence logged once for the later controller-executes cutover"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     //! EPIC #3078 PR-4: confirm the controller's chosen RECLAIM id equals the
@@ -176,5 +280,51 @@ mod tests {
         let shape: WatcherShape = (4999, "reclaim", Some(1), Some(2));
         assert!(super::WATCHER_PARITY_WARNED.should_warn(shape));
         assert!(!super::WATCHER_PARITY_WARNED.should_warn(shape));
+    }
+
+    /// EPIC #3078 CREATE/ADOPT: the controller's independent decision agrees with
+    /// the legacy reference across the full truth table — persisted adopt,
+    /// create (v2 on / no panel / external-input), and each `None` branch —
+    /// driven through the SharedData-backed `assert_watcher_create_parity` so the
+    /// real wiring (no panic, no spurious warn) is exercised.
+    #[tokio::test(flavor = "current_thread")]
+    async fn create_parity_agrees_across_truth_table() {
+        let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+        let channel = ChannelId::new(5001);
+        let persisted = MessageId::new(6001);
+
+        // Persisted id → adopt (matching on both sides → no warn/panic).
+        assert_watcher_create_parity(&shared, channel, true, false, true, Some(persisted));
+        // Eligible external-input turn, no panel, v2 on → create.
+        assert_watcher_create_parity(&shared, channel, true, false, true, None);
+        // v2 off / panel present / not-external → none (each agrees).
+        assert_watcher_create_parity(&shared, channel, false, false, true, None);
+        assert_watcher_create_parity(&shared, channel, true, true, true, None);
+        assert_watcher_create_parity(&shared, channel, true, false, false, None);
+
+        // The two independent derivations agree element-for-element.
+        for &(v2, present, ext, id) in &[
+            (true, false, true, Some(persisted)),
+            (true, false, true, None),
+            (false, false, true, None),
+            (true, true, true, None),
+            (true, false, false, None),
+        ] {
+            assert_eq!(
+                shared
+                    .status_panel_controller
+                    .watcher_create_parity_decision(v2, present, ext, id),
+                legacy_watcher_create_decision(v2, present, ext, id),
+            );
+        }
+    }
+
+    /// The CREATE/ADOPT decision warn is bounded once per distinct
+    /// `(channel, controller_shape, legacy_shape)` divergence.
+    #[test]
+    fn create_warn_is_bounded_once_per_shape() {
+        let shape: WatcherCreateShape = (5099, (None, true, false), (None, false, true));
+        assert!(super::WATCHER_CREATE_WARNED.should_warn(shape));
+        assert!(!super::WATCHER_CREATE_WARNED.should_warn(shape));
     }
 }

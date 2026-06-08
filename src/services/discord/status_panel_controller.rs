@@ -109,6 +109,33 @@ pub(in crate::services::discord) enum PanelCommitOutcome {
     NoPanel,
 }
 
+/// EPIC #3078 — the controller's independent decision for the watcher's
+/// status-panel CREATE/ADOPT site (`tmux_watcher.rs` ~7213): given a TUI-direct /
+/// external-input turn that has reached the panel-publish gate, does the panel
+/// already exist (adopt it), should a fresh panel be created, or is there nothing
+/// to do?
+///
+/// This is the create/adopt analogue of the RECLAIM parity (`sweeper_reclaim_*`):
+/// instead of echoing the already-resolved legacy id back (the tautology that
+/// scoped PR-4 down — see the deferred-site note below), the controller
+/// independently re-derives the decision from the SAME RAW inputs the legacy
+/// `watcher_should_create_external_input_status_panel` branch reads, so the
+/// shadow parity check is meaningful. The create id is not known until the send
+/// returns, so the faithful comparison is on the DECISION (adopt-which-id /
+/// create / none), not on a post-send message id.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::services::discord) enum WatcherCreateDecision {
+    /// A panel already persisted on this turn's inflight row (restart-safe
+    /// adoption): adopt the existing id, do NOT publish a duplicate.
+    AdoptPersisted(MessageId),
+    /// No panel exists yet for an eligible external-input turn: the watcher must
+    /// publish (create) the panel itself.
+    Create,
+    /// Nothing to do at this site: v2 off, a (non-persisted) panel already
+    /// exists, or the turn is not an external-input/panel-eligible turn.
+    None,
+}
+
 /// What a panel should render and how to publish it. The actual Discord
 /// create/edit/delete IO is abstracted behind [`PanelSink`] so the ledger +
 /// durable-mirror logic is the single authority and is unit-testable without a
@@ -448,12 +475,43 @@ impl StatusPanelController {
         self.orphan_parity_target(key, panel_msg_id).await
     }
 
-    // EPIC #3078: watcher CREATE/ADOPT and COMPLETION parity query methods were
-    // deferred to the controller execute-cutover PR. A faithful check must
-    // replicate `watcher_should_create_external_input_status_panel` and the
-    // SendFallback-aware completion id from RAW inputs (not the resolved output,
-    // which `orphan_parity_target` would echo back tautologically). PR-4 ships
-    // only the faithful RECLAIM parity via `sweeper_reclaim_parity_id`.
+    /// EPIC #3078 — the controller's INDEPENDENT decision for the watcher's
+    /// status-panel CREATE/ADOPT site, re-derived from RAW inputs (not the
+    /// already-resolved legacy id, which `orphan_parity_target` would echo back
+    /// tautologically — the codex P2 finding that scoped PR-4 down). Faithful to
+    /// the legacy branch order at `tmux_watcher.rs` ~7213:
+    ///
+    /// 1. a persisted (restart-safe) panel id on this turn's inflight row →
+    ///    [`WatcherCreateDecision::AdoptPersisted`] (adopt, never duplicate);
+    /// 2. else if `watcher_should_create_external_input_status_panel`
+    ///    (v2 on, no panel yet, external-input/panel-eligible turn) →
+    ///    [`WatcherCreateDecision::Create`];
+    /// 3. else [`WatcherCreateDecision::None`].
+    ///
+    /// Pure (no actor round-trip, no ledger read, no IO): the create/adopt
+    /// decision is a function of the raw inputs ALONE, so this stays faithfully
+    /// shadow-only. The legacy `!watcher_external_input_turn_abandoned` guard is a
+    /// separate suppression LAYERED AFTER this decision (it reads turn-tombstone
+    /// files); a faithful create/adopt parity compares the publish DECISION before
+    /// that suppression, so the abandoned guard is intentionally NOT modeled here.
+    /// COMPLETION parity remains deferred to the controller execute-cutover PR:
+    /// it needs the SendFallback-aware terminal id from the legacy completion
+    /// path, which is only known after the bridge/watcher send resolves.
+    pub(in crate::services::discord) fn watcher_create_parity_decision(
+        &self,
+        status_panel_v2_enabled: bool,
+        panel_present: bool,
+        inflight_represents_external_input: bool,
+        persisted_panel_id: Option<MessageId>,
+    ) -> WatcherCreateDecision {
+        if let Some(persisted) = persisted_panel_id {
+            return WatcherCreateDecision::AdoptPersisted(persisted);
+        }
+        if status_panel_v2_enabled && !panel_present && inflight_represents_external_input {
+            return WatcherCreateDecision::Create;
+        }
+        WatcherCreateDecision::None
+    }
 
     /// EPIC #3078 PR-3 — the controller's view of "does the live turn still own
     /// THIS EXACT panel?", the gate the orphan-store drain uses to defer a delete
@@ -1224,6 +1282,53 @@ mod tests {
         let shared2 = super::super::make_shared_data_for_tests_with_storage(None, None);
         let again = ctl.finalize(key, None, shared2).await;
         assert_eq!(again, PanelCommitOutcome::AlreadyTerminal);
+    }
+
+    /// EPIC #3078: the watcher CREATE/ADOPT decision is re-derived from RAW
+    /// inputs and is faithful to the legacy branch order — persisted id wins
+    /// (adopt), else an eligible external-input turn with no panel creates, else
+    /// nothing. Mirrors `watcher_should_create_external_input_status_panel`'s
+    /// truth table plus the persisted-adopt branch above it.
+    #[test]
+    fn watcher_create_decision_is_faithful_to_legacy_branch_order() {
+        let ctl = StatusPanelController::spawn(false);
+        let persisted = MessageId::new(1234);
+
+        // 1. A persisted (restart-safe) id wins regardless of the other inputs:
+        //    adopt it, never create a duplicate.
+        assert_eq!(
+            ctl.watcher_create_parity_decision(true, false, true, Some(persisted)),
+            WatcherCreateDecision::AdoptPersisted(persisted)
+        );
+        // Persisted still wins even when v2 is off / not external-input (the
+        // legacy branch order checks `persisted_panel_msg_id` first).
+        assert_eq!(
+            ctl.watcher_create_parity_decision(false, true, false, Some(persisted)),
+            WatcherCreateDecision::AdoptPersisted(persisted)
+        );
+
+        // 2. No persisted id, v2 on, no live panel, external-input turn → Create.
+        assert_eq!(
+            ctl.watcher_create_parity_decision(true, false, true, None),
+            WatcherCreateDecision::Create
+        );
+
+        // 3a. v2 off → None (the `status_panel_v2_enabled` gate).
+        assert_eq!(
+            ctl.watcher_create_parity_decision(false, false, true, None),
+            WatcherCreateDecision::None
+        );
+        // 3b. A panel already exists → None (no duplicate).
+        assert_eq!(
+            ctl.watcher_create_parity_decision(true, true, true, None),
+            WatcherCreateDecision::None
+        );
+        // 3c. Not an external-input/panel-eligible turn → None (the Discord
+        //     intake path owns the panel for those turns).
+        assert_eq!(
+            ctl.watcher_create_parity_decision(true, false, false, None),
+            WatcherCreateDecision::None
+        );
     }
 
     /// A channel-only (`user_msg_id == 0`) finalize collapses onto the single
