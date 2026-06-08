@@ -445,3 +445,24 @@
   ownership change — finalize remains the same per-process exactly-once unit. No
   new multinode ownership/singleton/lease assumption. (The flag field/producers
   remain until phase-5b2.)
+- #3016 phase-5b2 (delete the `mailbox_finalize_owed` flag entirely): pure
+  dead-write elimination, behaviour-identical. Phase-5b1 had already replaced
+  every finalize-decision CONSUMER, leaving the flag write-only. 5b2 removes: the
+  `TmuxWatcherHandle.mailbox_finalize_owed` field (`mod.rs`); both producers — the
+  `turn_bridge/mod.rs` runtime-handoff `store(true)` and the legacy `TmuxReady`
+  `store(true)`, keeping the adjacent `register_start(RelayOwnerKind::Watcher)`
+  ledger authority that already drives the gate-timeout defer; the
+  `tui_prompt_relay.rs` dead `publish_tui_direct_watcher_finalize_debt` producer;
+  all revoke sites (`tmux.rs` watcher-finalize `store(false)`, the
+  `turn_bridge/mod.rs` non-delegation CAS plus its `bridge_published_finalize_owed_for_this_turn`
+  tracking var, and the `turn_finalizer.rs` backstop `store(false)`); the residual
+  `swap(false)` observability reads in `tmux_watcher.rs` (the `owed_finalize`
+  event field is dropped); the now-unreachable `LegacyFlagGated`
+  `FreshIdleFinalizeDecision` variant; and the `delegated_finalize_owed` parameter
+  of `finish_restored_watcher_active_turn` (redundant under `normal_completion =
+  true` at both production call sites). The stale-skip kickoff suppression the
+  flag-derived term used to provide is already covered by the live-`has_active_turn`
+  gate, so the finalize path is identical. Nothing here is worker-non-local: the
+  removed flag was a per-handle in-process atomic, and the surviving authority (the
+  per-process actor-owned ledger) is unchanged. No new multinode
+  ownership/singleton/lease assumption.

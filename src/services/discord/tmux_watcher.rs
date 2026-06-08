@@ -202,12 +202,6 @@ enum FreshIdleFinalizeDecision {
     /// (non-JSONL runtime at proven pane-idle) AND no follow-up took over —
     /// finalize via the single-authority path with the PINNED current-turn id.
     Finalize { user_msg_id: u64 },
-    /// #3016 phase-5b1: defunct. `Unknown` used to fall through to the legacy
-    /// `mailbox_finalize_owed`-flag path here; it now routes to `Finalize` on the
-    /// proven pane-idle proxy (flag-independent). The variant is retained as a
-    /// defensive no-op (the flag itself is removed in phase-5b2) and is never
-    /// produced by the decision helper.
-    LegacyFlagGated,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5434,7 +5428,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher(
     pause_epoch: Arc<std::sync::atomic::AtomicU64>,
     turn_delivered: Arc<std::sync::atomic::AtomicBool>,
     last_heartbeat_ts_ms: Arc<std::sync::atomic::AtomicI64>,
-    mailbox_finalize_owed: Arc<std::sync::atomic::AtomicBool>,
 ) {
     tmux_output_watcher_with_restore(
         channel_id,
@@ -5449,7 +5442,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher(
         pause_epoch,
         turn_delivered,
         last_heartbeat_ts_ms,
-        mailbox_finalize_owed,
         None,
     )
     .await;
@@ -5470,7 +5462,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     pause_epoch: Arc<std::sync::atomic::AtomicU64>,
     turn_delivered: Arc<std::sync::atomic::AtomicBool>,
     last_heartbeat_ts_ms: Arc<std::sync::atomic::AtomicI64>,
-    mailbox_finalize_owed: Arc<std::sync::atomic::AtomicBool>,
     restored_turn: Option<RestoredWatcherTurn>,
 ) {
     use std::io::{Read, Seek, SeekFrom};
@@ -7771,13 +7762,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 if !panel_cleanup_committed {
                     continue;
                 }
-                // #3016 phase-5b1: the finalize DECISION below no longer DEPENDS on
-                // this flag — both `Done` and `Unknown` route to the structural /
-                // pane-idle `Finalize` arm with `normal_completion = true`. We still
-                // `swap(false)` here to keep the revoke lifecycle intact (the flag
-                // field is removed in phase-5b2, not here); the read result is now
-                // used only for the observability event payload.
-                let owed = mailbox_finalize_owed.swap(false, std::sync::atomic::Ordering::AcqRel);
+                // #3016 phase-5b2: the legacy `mailbox_finalize_owed` flag is
+                // removed. The finalize DECISION never depended on it — both `Done`
+                // and `Unknown` route to the structural / pane-idle `Finalize` arm
+                // with `normal_completion = true`; the residual `swap(false)` (whose
+                // value fed only the observability payload) is gone with the field.
                 // #3016 S3 / phase-5b1 (codex HIGH fix): the finalize DECISION,
                 // computed by the same pure helper the unit tests drive. The defer
                 // gate above already deferred `PausedLive` and EMPTY `Unknown`, so
@@ -7922,7 +7911,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                         None,
                                         "cleared_by_watcher_fresh_idle",
                                         serde_json::json!({
-                                            "owed_finalize": owed,
                                             "finish_mailbox_on_completion": finish_mailbox_on_completion,
                                             // #3016 phase-5b1: Done (structural) OR
                                             // Unknown (pane-idle proxy) both reach here.
@@ -7957,30 +7945,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             channel_id,
                             user_msg_id,
                             finish_mailbox_on_completion,
-                            owed,
                             // #3016 S3 / phase-5b1: Done = confirmed structural
                             // completion; Unknown = non-JSONL runtime at proven
                             // pane-idle. Both drive the finalizer on the
                             // normal-completion authority, independent of the legacy
-                            // flags (the decoupling phase-5 depends on).
+                            // flag (removed in #3016 phase-5b2).
                             true,
                             true,
                             "watcher fresh ready-for-input idle (structural/pane-idle completion)",
                         )
                         .await;
-                    }
-                    FreshIdleFinalizeDecision::LegacyFlagGated => {
-                        // #3016 phase-5b1: defunct. `Unknown` no longer routes here —
-                        // it finalizes via the `Finalize` arm on the proven pane-idle
-                        // proxy (flag-independent). The decision helper never produces
-                        // this variant now; treated defensively as a preserve-inflight
-                        // no-op (mirroring the `DeferPausedLive` defensive arm). The
-                        // variant + `mailbox_finalize_owed` flag are removed in
-                        // phase-5b2.
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::warn!(
-                            "  [{ts}] 👁 watcher fresh ready-for-input idle for {tmux_session_name}: LegacyFlagGated reached the finalize gate unexpectedly (phase-5b1 defunct path); preserving inflight"
-                        );
                     }
                 }
                 all_data.clear();
@@ -11372,15 +11346,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             //     terminal-stop decision) remains gated on `dispatch_ok` further
             //     below.
             //
-            // The `mailbox_finalize_owed.swap(false, AcqRel)` ordering still
-            // matters:
-            //   * Acquire — observes the bridge's prior `Release` store of
-            //     `true` (and any inflight writes that preceded it) before
-            //     we call `mailbox_finish_turn`.
-            //   * Release — publishes our reset back to `false`, so a watcher
-            //     that survives into the next turn will not accidentally clear
-            //     that turn's freshly registered cancel_token.
-            let owed = mailbox_finalize_owed.swap(false, std::sync::atomic::Ordering::AcqRel);
+            // #3016 phase-5b2: the legacy `mailbox_finalize_owed` flag is removed,
+            // so the `swap(false, AcqRel)` that read it here (whose value fed only
+            // the observability payload and the `watcher_handled_mailbox_finish`
+            // bookkeeping below) is gone. Exactly-once is the ledger's job; the
+            // cross-turn safety the Release reset provided is subsumed by the
+            // ledger phase gate.
             // #3016 (codex R3): do NOT delete the on-disk inflight when it
             // belongs to a NEWER follow-up turn (same session, started AT/AFTER
             // this committed range). The same offset decision that makes
@@ -11413,7 +11384,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     watcher_turn_id.as_deref(),
                     "cleared_by_watcher",
                     serde_json::json!({
-                        "owed_finalize": owed,
                         "dispatch_ok": dispatch_ok,
                         "has_assistant_response": has_assistant_response,
                         "full_response_len": full_response.len(),
@@ -11496,16 +11466,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // construction (see the R3 cross-ref comment above).
             //
             // Skip-path bookkeeping: the watcher did NOT drive the finalize, so
-            // `watcher_drove_finalize = false`. The `owed = mailbox_finalize_owed
-            // .swap(false, AcqRel)` at L~8165 already ran UNCONDITIONALLY (pre-
-            // existing option-A ordering), so this skip does not change the atomic's
-            // lifecycle — and dropping the LOCAL `owed` here drops no legitimate
-            // work: with option A's decoupling the newer live turn no longer depends
-            // on the `owed` flag to finalize (it finalizes via its own
-            // `normal_completion = true` path with its real id). `delegated_finalize_owed
-            // = owed` below still feeds `watcher_handled_mailbox_finish` so queue-
-            // kickoff suppression / terminal-stop accounting keep the legacy flag
-            // intent intact on the skip path.
+            // `watcher_drove_finalize = false`. #3016 phase-5b2: the legacy
+            // `mailbox_finalize_owed` flag is removed — the newer live turn no
+            // longer depends on it to finalize (it finalizes via its own
+            // `normal_completion = true` path with its real id), and the
+            // `watcher_handled_mailbox_finish` accounting below no longer folds the
+            // flag in (the stale-skip path is already kickoff-suppressed by
+            // `has_active_turn`, the newer live turn).
             let watcher_drove_finalize = if !completion_is_stale_for_newer_turn {
                 finish_restored_watcher_active_turn(
                     &shared,
@@ -11513,15 +11480,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     channel_id,
                     restored_user_msg_id,
                     finish_mailbox_on_completion,
-                    owed,
                     // #3016 option A: terminal output was committed above
                     // (`terminal_output_committed && !lifecycle_stage_paused`), the
                     // canonical *normal completion* point. Finalize unconditionally —
-                    // independent of `owed` / `finish_mailbox_on_completion` — so the
-                    // normal live bridge→watcher delegation turn no longer depends on
-                    // the legacy `mailbox_finalize_owed` flag. The finalizer is
-                    // idempotent (bridge winner → AlreadyFinalized here), so this
-                    // cannot over-finalize.
+                    // independent of `finish_mailbox_on_completion` — so the normal
+                    // live bridge→watcher delegation turn no longer depends on the
+                    // legacy `mailbox_finalize_owed` flag (removed in #3016
+                    // phase-5b2). The finalizer is idempotent (bridge winner →
+                    // AlreadyFinalized here), so this cannot over-finalize.
                     true,
                     dispatch_ok,
                     "restored watcher completed with queued backlog",
@@ -11545,19 +11511,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     )
                     .await;
             }
-            let delegated_finalize_owed = owed;
             let mailbox = shared.mailbox(channel_id);
             let has_active_turn = mailbox.has_active_turn().await;
-            // #3016 (codex R1): couple the post-finalize lifecycle to the ACTUAL
-            // finalize, not just the legacy flag intent. `watcher_drove_finalize`
-            // is true whenever the helper ran the finalizer (here always, via
-            // `normal_completion = true`) — so queue-kickoff suppression and the
-            // terminal-stop-candidate path below correctly account for the newly
-            // decoupled normal-completion finalize even when both legacy flags are
-            // false. (Folding the flags in too keeps behavior identical on the
-            // flag-driven paths.)
+            // #3016 (codex R1) / phase-5b2: couple the post-finalize lifecycle to
+            // the ACTUAL finalize. `watcher_drove_finalize` is true whenever the
+            // helper ran the finalizer (here always, via `normal_completion =
+            // true`) — so queue-kickoff suppression and the terminal-stop-candidate
+            // path below correctly account for the decoupled normal-completion
+            // finalize. The legacy `mailbox_finalize_owed`-derived
+            // `delegated_finalize_owed` term has been dropped from this OR: on the
+            // only path where `watcher_drove_finalize` is false (stale-newer-turn
+            // skip) a newer turn is live, so `has_active_turn` already suppresses
+            // the kickoff below — behaviour is identical.
             let watcher_handled_mailbox_finish =
-                watcher_drove_finalize || finish_mailbox_on_completion || delegated_finalize_owed;
+                watcher_drove_finalize || finish_mailbox_on_completion;
             let should_kickoff_queue = if watcher_handled_mailbox_finish
                 || monitor_auto_turn_finished
                 || has_active_turn
@@ -12614,8 +12581,7 @@ mod tests {
             channel_id,
             state.user_msg_id,
             true,  // finish_mailbox_on_completion (restore semantics)
-            false, // delegated_finalize_owed
-            false, // normal_completion (#3016: this path is flag-gated, not the decoupled normal-completion arm)
+            false, // normal_completion (#3016: this path is restore-gated, not the decoupled normal-completion arm)
             false, // kickoff_queue
             "terminal_delivery_timeout_cleanup_test",
         )
@@ -12635,14 +12601,11 @@ mod tests {
         assert_eq!(next.as_deref(), Some("queued follow-up"));
     }
 
-    // #3016 test helper: a real, non-stale watcher handle so the
-    // `mailbox_finalize_owed` precondition is NON-vacuous and the helper's
-    // `swap(false)` revoke path actually has a slot to act on. Mirrors the
-    // `live_watcher_handle` builder in mod.rs's registry tests.
-    fn test_watcher_handle(
-        tmux_session_name: &str,
-        mailbox_finalize_owed: bool,
-    ) -> crate::services::discord::TmuxWatcherHandle {
+    // #3016 test helper: a real, non-stale watcher handle so the registry slot
+    // exists for the finalize. Mirrors the `live_watcher_handle` builder in
+    // mod.rs's registry tests. (#3016 phase-5b2: the `mailbox_finalize_owed`
+    // field has been removed, so the helper no longer carries that flag.)
+    fn test_watcher_handle(tmux_session_name: &str) -> crate::services::discord::TmuxWatcherHandle {
         crate::services::discord::TmuxWatcherHandle {
             tmux_session_name: tmux_session_name.to_string(),
             output_path: format!("/tmp/{tmux_session_name}.jsonl"),
@@ -12654,30 +12617,24 @@ mod tests {
             last_heartbeat_ts_ms: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(
                 crate::services::discord::tmux_watcher_now_ms(),
             )),
-            mailbox_finalize_owed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-                mailbox_finalize_owed,
-            )),
         }
     }
 
     // #3016 option A (watcher normal-completion finalize decouple).
     //
     // Proves the decoupling directly: a *normal completion* drives the
-    // single-authority finalizer even when BOTH legacy flags are false —
-    // `finish_mailbox_on_completion = false` (fresh live watcher, see
-    // tmux.rs:`tmux_output_watcher` default) AND `delegated_finalize_owed =
-    // false` (`mailbox_finalize_owed` never set / already revoked). This is the
-    // exact gate that `mailbox_finalize_owed` USED to be the sole driver of on
-    // the normal live bridge→watcher delegation turn; after this change the
-    // finalize fires from the confirmed-completion signal instead, so the flag
-    // is now redundant for this path (flag_now_redundant). The finalizer's
+    // single-authority finalizer with `finish_mailbox_on_completion = false`
+    // (fresh live watcher, see tmux.rs:`tmux_output_watcher` default). Under the
+    // OLD flag-only gate the watcher's normal live bridge→watcher delegation turn
+    // would only finalize when the now-removed `mailbox_finalize_owed` flag was
+    // set; after option A the finalize fires from the confirmed-completion signal
+    // instead, so the flag was redundant for this path. The finalizer's
     // idempotence (proven by the #3140 matrix) keeps this from over-finalizing
     // when the bridge already finalized first.
     //
-    // codex R1 hardening: registers a REAL watcher handle (so the
-    // `mailbox_finalize_owed` precondition is non-vacuous and the helper's
-    // `swap(false)` revoke path is exercised), asserts the finalize drove via
-    // the return value, and keeps the idempotence assertion.
+    // #3016 phase-5b2: with the flag removed, `finish_mailbox_on_completion =
+    // false` is now the only legacy gate, and `normal_completion = true` is the
+    // sole finalize driver.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn normal_completion_finalizes_with_both_legacy_flags_false() {
@@ -12692,12 +12649,11 @@ mod tests {
         let channel_id = ChannelId::new(987_3016);
         let tmux_session_name = "AgentDesk-claude-adk-cc-9873016";
 
-        // Register a REAL watcher handle. The `mailbox_finalize_owed` flag is
-        // false here, so the precondition below is observed on an ACTUAL slot
+        // Register a REAL watcher handle so the finalize acts on an ACTUAL slot
         // (not the vacuous "no handle exists" case the original test had).
         shared
             .tmux_watchers
-            .insert(channel_id, test_watcher_handle(tmux_session_name, false));
+            .insert(channel_id, test_watcher_handle(tmux_session_name));
 
         // Seed a live active mailbox turn (cancel token registered) so we can
         // observe the finalize releasing it.
@@ -12712,23 +12668,6 @@ mod tests {
             .await
         );
 
-        // Pre-condition (NON-vacuous: real handle present): the legacy debt flag
-        // is NOT set for this channel's watcher. Combined with
-        // `finish_mailbox_on_completion = false` below, BOTH legacy gates are
-        // off — the only thing that can drive the finalize is the new
-        // `normal_completion` signal.
-        let watcher = shared
-            .tmux_watchers
-            .get(&channel_id)
-            .expect("real watcher handle must be registered for a non-vacuous precondition");
-        assert!(
-            !watcher
-                .mailbox_finalize_owed
-                .load(std::sync::atomic::Ordering::Acquire),
-            "precondition: mailbox_finalize_owed must be false for the decouple proof"
-        );
-        drop(watcher);
-
         crate::services::discord::inflight::clear_inflight_state(&provider, channel_id.get());
         let drove = super::finish_restored_watcher_active_turn(
             &shared,
@@ -12736,7 +12675,6 @@ mod tests {
             channel_id,
             3001,  // real user_msg_id (exact ledger match)
             false, // finish_mailbox_on_completion — fresh live watcher
-            false, // delegated_finalize_owed — flag never set
             true,  // normal_completion — confirmed terminal-output-committed point
             false, // kickoff_queue
             "normal_completion_decouple_test",
@@ -12748,13 +12686,13 @@ mod tests {
         );
 
         // The finalize fired purely on `normal_completion`: the active mailbox
-        // turn's cancel token is released even though both legacy flags were
+        // turn's cancel token is released even with `finish_mailbox_on_completion`
         // false. Under the OLD flag-only gate this call would have early-returned
         // and left the token in place.
         let snapshot = mailbox_snapshot(&shared, channel_id).await;
         assert!(
             snapshot.cancel_token.is_none(),
-            "normal completion must finalize and release the mailbox token even with both legacy flags false"
+            "normal completion must finalize and release the mailbox token with the legacy gate off"
         );
 
         // Idempotent: a second normal-completion submit for the same turn is a
@@ -12764,7 +12702,6 @@ mod tests {
             &provider,
             channel_id,
             3001,
-            false,
             false,
             true,
             false,
@@ -12805,12 +12742,10 @@ mod tests {
         let channel_id = ChannelId::new(987_3017);
         let tmux_session_name = "AgentDesk-claude-adk-cc-9873017";
 
-        // Real watcher handle with the legacy debt flag PRE-SET so we can also
-        // assert the helper's `swap(false)` revoke path runs on the matching
-        // (correct-turn) finalize.
+        // Real watcher handle so the finalize acts on an actual registry slot.
         shared
             .tmux_watchers
-            .insert(channel_id, test_watcher_handle(tmux_session_name, true));
+            .insert(channel_id, test_watcher_handle(tmux_session_name));
 
         // Turn A is the live active turn (id 3001).
         assert!(
@@ -12825,15 +12760,13 @@ mod tests {
         );
 
         crate::services::discord::inflight::clear_inflight_state(&provider, channel_id.get());
-        // Finalize turn A with its OWN id — releases turn A and revokes the
-        // legacy flag.
+        // Finalize turn A with its OWN id — releases turn A.
         let drove_a = super::finish_restored_watcher_active_turn(
             &shared,
             &provider,
             channel_id,
             3001,
             false,
-            true, // delegated_finalize_owed (real flag-driven correct-turn finalize)
             true,
             false,
             "stale_guard_turn_a",
@@ -12847,18 +12780,6 @@ mod tests {
                 .is_none(),
             "turn A must be released by its matching finalize"
         );
-        // The matching finalize consumed the debt: legacy flag revoked.
-        let watcher = shared
-            .tmux_watchers
-            .get(&channel_id)
-            .expect("handle present");
-        assert!(
-            !watcher
-                .mailbox_finalize_owed
-                .load(std::sync::atomic::Ordering::Acquire),
-            "matching finalize must revoke mailbox_finalize_owed (swap(false) path)"
-        );
-        drop(watcher);
 
         // A NEWER turn B (id 4002) becomes the live active turn.
         let token_b = std::sync::Arc::new(CancelToken::new());
@@ -12882,7 +12803,6 @@ mod tests {
             channel_id,
             3001, // STALE id (turn A), while turn B (4002) is live
             false,
-            false,
             true, // normal_completion fires unconditionally
             false,
             "stale_guard_stale_id",
@@ -12904,7 +12824,6 @@ mod tests {
             &provider,
             channel_id,
             4002,
-            false,
             false,
             true,
             false,
@@ -13433,7 +13352,6 @@ mod tests {
             channel_id,
             finalize_id,
             false, // finish_mailbox_on_completion — fresh live watcher
-            false, // delegated_finalize_owed — flag FALSE
             true,  // normal_completion — S3: structural-signal-driven, flag-independent
             true,
             "watcher fresh ready-for-input idle (structural completion terminator)",
@@ -13457,7 +13375,6 @@ mod tests {
             &provider,
             channel_id,
             finalize_id,
-            false,
             false,
             true,
             true,

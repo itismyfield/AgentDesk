@@ -1399,10 +1399,10 @@ fn watcher_backstop_turn_is_terminal(
 
 /// Run the deadline-elapsed backstop finalize for ONE entry: flip
 /// `Pending → Finalizing` (skip if a concurrent terminal already advanced it),
-/// run `do_finalize` on the backstop context, revoke the legacy
-/// `mailbox_finalize_owed` debt (still present until phase-5b), then flip
-/// `Finalized`. Shared by the gate-timeout deadline arm and the phase-5a
-/// watcher far-backstop arm so exactly-once is decided in one place.
+/// run `do_finalize` on the backstop context, then flip `Finalized`. Shared by
+/// the gate-timeout deadline arm and the phase-5a watcher far-backstop arm so
+/// exactly-once is decided in one place. (#3016 phase-5b2: the legacy
+/// `mailbox_finalize_owed` revoke that used to run here is gone with the flag.)
 async fn run_backstop_finalize(
     ledger: &mut HashMap<LedgerKey, LedgerEntry>,
     ledger_key: LedgerKey,
@@ -1428,16 +1428,12 @@ async fn run_backstop_finalize(
         shared,
     )
     .await;
-    // Codex P1 — the watcher skipped its cleanup block (lifecycle paused), so
-    // its legacy `mailbox_finalize_owed` flag is still `true`. The backstop just
-    // released the mailbox/inflight, so revoke that debt now; otherwise the
-    // watcher could later `swap(true)` and run stale cleanup against the NEXT
-    // active turn. (Flag removed wholesale in phase-5b.)
-    if let Some(watcher) = shared.tmux_watchers.get(&turn_key.channel_id) {
-        watcher
-            .mailbox_finalize_owed
-            .store(false, std::sync::atomic::Ordering::Release);
-    }
+    // #3016 phase-5b2: the legacy `mailbox_finalize_owed` flag that was revoked
+    // here (the watcher skipped its cleanup block while lifecycle-paused, leaving
+    // the flag set; the backstop revoked it so a later watcher swap could not run
+    // stale cleanup against the NEXT active turn) has been removed. The ledger's
+    // exactly-once phase gate is now the sole arbiter, so there is no stale flag a
+    // surviving watcher could swap.
     if let Some(entry) = ledger.get_mut(&ledger_key) {
         entry.phase = Phase::Finalized;
         entry.finalized_at = Some(now);
@@ -4418,7 +4414,6 @@ mod tests {
             last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
                 crate::services::discord::tmux_watcher_now_ms(),
             )),
-            mailbox_finalize_owed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 

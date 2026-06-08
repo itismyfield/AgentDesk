@@ -2495,8 +2495,6 @@ pub(super) async fn restore_inflight_turns(
                         let last_heartbeat_ts_ms = std::sync::Arc::new(
                             std::sync::atomic::AtomicI64::new(super::tmux_watcher_now_ms()),
                         );
-                        let mailbox_finalize_owed =
-                            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let handle = TmuxWatcherHandle {
                             tmux_session_name: tmux_session_name.clone(),
                             output_path: output_path.clone(),
@@ -2506,7 +2504,6 @@ pub(super) async fn restore_inflight_turns(
                             pause_epoch: pause_epoch.clone(),
                             turn_delivered: turn_delivered.clone(),
                             last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
-                            mailbox_finalize_owed: mailbox_finalize_owed.clone(),
                         };
                         let watcher_claimed = {
                             #[cfg(unix)]
@@ -2568,7 +2565,6 @@ pub(super) async fn restore_inflight_turns(
                                         pause_epoch,
                                         turn_delivered,
                                         last_heartbeat_ts_ms,
-                                        mailbox_finalize_owed,
                                         restored_turn,
                                     ),
                                 );
@@ -3633,8 +3629,6 @@ pub(super) async fn restore_inflight_turns(
                 let last_heartbeat_ts_ms = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(
                     super::tmux_watcher_now_ms(),
                 ));
-                let mailbox_finalize_owed =
-                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let handle = TmuxWatcherHandle {
                     tmux_session_name: tmux_session_name.clone(),
                     output_path: output_path.clone(),
@@ -3644,7 +3638,6 @@ pub(super) async fn restore_inflight_turns(
                     pause_epoch: pause_epoch.clone(),
                     turn_delivered: turn_delivered.clone(),
                     last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
-                    mailbox_finalize_owed: mailbox_finalize_owed.clone(),
                 };
                 let watcher_claimed = {
                     #[cfg(unix)]
@@ -3705,7 +3698,6 @@ pub(super) async fn restore_inflight_turns(
                                 pause_epoch,
                                 turn_delivered,
                                 last_heartbeat_ts_ms,
-                                mailbox_finalize_owed,
                                 restored_turn,
                             ),
                         );
@@ -4389,8 +4381,6 @@ pub(crate) async fn rebind_inflight_for_channel(
             let last_heartbeat_ts_ms = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(
                 super::tmux_watcher_now_ms(),
             ));
-            let mailbox_finalize_owed =
-                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let handle = TmuxWatcherHandle {
                 tmux_session_name: tmux_session_name.clone(),
                 output_path: output_path.clone(),
@@ -4400,7 +4390,6 @@ pub(crate) async fn rebind_inflight_for_channel(
                 pause_epoch: pause_epoch.clone(),
                 turn_delivered: turn_delivered.clone(),
                 last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
-                mailbox_finalize_owed: mailbox_finalize_owed.clone(),
             };
             // `claim_or_reuse_watcher` reuses a live watcher for the same
             // tmux session and only spawns when it claimed or replaced a
@@ -4432,7 +4421,6 @@ pub(crate) async fn rebind_inflight_for_channel(
                         pause_epoch,
                         turn_delivered,
                         last_heartbeat_ts_ms,
-                        mailbox_finalize_owed,
                     ),
                 );
             }
