@@ -650,6 +650,7 @@ src/
 │   ├── dispatched_sessions.rs
 │   ├── dispatches_followup.rs
 │   ├── envelope_dedup.rs
+│   ├── escalation_settings.rs
 │   ├── gemini.rs
 │   ├── issue_announcements.rs
 │   ├── kanban.rs

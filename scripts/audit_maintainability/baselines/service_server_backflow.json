@@ -3,7 +3,7 @@
   "rule": "service_server_backflow",
   "description": "No-regression baseline for src/services references to crate::server or super::server server-layer modules.",
   "captured_at": "2026-06-08",
-  "total_count": 15,
+  "total_count": 14,
   "files": {
     "src/services/auto_queue/phase_gate_violations.rs": {
       "count": 1
@@ -16,9 +16,6 @@
     },
     "src/services/dispatched_sessions.rs": {
       "count": 8
-    },
-    "src/services/dispatches/discord_delivery/orchestration.rs": {
-      "count": 1
     },
     "src/services/onboarding/channel.rs": {
       "count": 1

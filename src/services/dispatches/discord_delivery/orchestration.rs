@@ -39,7 +39,9 @@ fn resolve_dispatch_thread_owner_user_id(
     pg_pool: Option<&PgPool>,
 ) -> Option<u64> {
     let config = crate::config::load_graceful();
-    crate::server::routes::escalation::effective_owner_user_id_with_backends(db, pg_pool, &config)
+    crate::services::escalation_settings::effective_owner_user_id_with_backends(
+        db, pg_pool, &config,
+    )
 }
 
 fn context_slot_index(dispatch_context: Option<&serde_json::Value>) -> Option<i64> {

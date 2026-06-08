@@ -94,7 +94,7 @@
   - `src/dispatch/dispatch_status.rs` (1517 lines).
   - `src/services/dispatches/outbox_route.rs` (1118 lines; route extraction
     orchestration surface from #1722, split before adding non-bugfix behavior).
-  - `src/services/dispatches/discord_delivery/orchestration.rs` (1652 lines;
+  - `src/services/dispatches/discord_delivery/orchestration.rs` (1654 lines;
     delivery orchestration surface extracted from the route layer in #1760,
     split before adding non-bugfix behavior).
 - active_callsite_coverage: n/a.
@@ -738,7 +738,7 @@
     `resolve_requesting_agent_id_with_pg` auth/identity helpers to
     `crate::services::kanban`).
   - `src/server/routes/docs.rs` (5880 lines).
-  - `src/server/routes/escalation.rs` (1456 lines).
+  - `src/server/routes/escalation.rs` (1376 lines).
   - `src/server/routes/meetings.rs` (1686 lines).
   - `src/server/routes/review_verdict/decision_route.rs` (4377 lines).
   - `src/server/routes/{agents,agents_crud,agents_setup,v1,resume}.rs` (all

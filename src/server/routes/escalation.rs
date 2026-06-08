@@ -5,15 +5,17 @@ use serde::Deserialize;
 use serde_json::json;
 use sqlx::Row as SqlxRow;
 
-use crate::config::{
-    Config, DEFAULT_ESCALATION_PM_HOURS, DEFAULT_ESCALATION_TIMEZONE, EscalationMode,
-    EscalationScheduleSettings, EscalationSettings, EscalationSettingsResponse,
-};
+use crate::config::{Config, EscalationMode, EscalationSettings, EscalationSettingsResponse};
 use crate::db::agents::load_agent_channel_bindings_pg;
 use crate::server::routes::AppState;
 use crate::services::discord::health::active_request_owner_for_channel;
+// Escalation-settings read path now lives in the service layer (#3037); the
+// route handlers re-import the resolver helpers as the single source of truth.
+use crate::services::escalation_settings::{
+    ESCALATION_SETTINGS_OVERRIDE_KEY, escalation_defaults, load_override_pg_async,
+    merged_settings_pg, normalize_optional_string,
+};
 
-const ESCALATION_SETTINGS_OVERRIDE_KEY: &str = "escalation-settings-override";
 const ESCALATION_THREAD_KEY_PREFIX: &str = "escalation_thread:";
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const DISCORD_MESSAGE_CHAR_LIMIT: usize = 2000;
@@ -69,94 +71,12 @@ struct OwnerRoutingTarget {
     source: &'static str,
 }
 
-fn normalize_optional_string(value: Option<String>) -> Option<String> {
-    value
-        .map(|raw| raw.trim().to_string())
-        .filter(|raw| !raw.is_empty())
-}
-
 fn parse_channel_reference(channel: &str) -> Option<u64> {
     channel
         .trim()
         .parse::<u64>()
         .ok()
         .or_else(|| crate::server::routes::dispatches::resolve_channel_alias_pub(channel))
-}
-
-fn escalation_defaults(config: &Config) -> EscalationSettings {
-    EscalationSettings {
-        mode: config.escalation.mode.clone(),
-        owner_user_id: config.escalation.owner_user_id.or(config.discord.owner_id),
-        pm_channel_id: normalize_optional_string(
-            config
-                .escalation
-                .pm_channel_id
-                .clone()
-                .or_else(|| config.kanban.human_alert_channel_id.clone()),
-        ),
-        schedule: EscalationScheduleSettings {
-            pm_hours: config
-                .escalation
-                .schedule
-                .pm_hours
-                .clone()
-                .unwrap_or_else(|| DEFAULT_ESCALATION_PM_HOURS.to_string()),
-            timezone: config
-                .escalation
-                .schedule
-                .timezone
-                .clone()
-                .unwrap_or_else(|| DEFAULT_ESCALATION_TIMEZONE.to_string()),
-        },
-    }
-}
-
-async fn load_override_pg_async(pool: &sqlx::PgPool) -> Result<Option<EscalationSettings>, String> {
-    let raw = sqlx::query_scalar::<_, String>(
-        "SELECT value
-         FROM kv_meta
-         WHERE key = $1
-         LIMIT 1",
-    )
-    .bind(ESCALATION_SETTINGS_OVERRIDE_KEY)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| {
-        format!(
-            "load postgres escalation settings override {ESCALATION_SETTINGS_OVERRIDE_KEY}: {error}"
-        )
-    })?;
-    Ok(raw.and_then(|value| serde_json::from_str::<EscalationSettings>(&value).ok()))
-}
-
-fn merged_settings_pg(pool: &sqlx::PgPool, config: &Config) -> Result<EscalationSettings, String> {
-    let defaults = escalation_defaults(config);
-    crate::utils::async_bridge::block_on_pg_result(
-        pool,
-        move |bridge_pool| async move {
-            Ok(load_override_pg_async(&bridge_pool)
-                .await?
-                .unwrap_or(defaults))
-        },
-        |error| error,
-    )
-}
-
-pub(crate) fn effective_owner_user_id_with_backends(
-    _db: Option<&crate::db::Db>,
-    pg_pool: Option<&sqlx::PgPool>,
-    config: &Config,
-) -> Option<u64> {
-    if let Some(pool) = pg_pool {
-        match merged_settings_pg(pool, config) {
-            Ok(settings) => return settings.owner_user_id,
-            Err(error) => {
-                tracing::warn!(%error, "[escalation] failed to load postgres escalation settings override");
-            }
-        }
-    }
-
-    escalation_defaults(config).owner_user_id
 }
 
 fn store_override_pg(pool: &sqlx::PgPool, settings: &EscalationSettings) -> Result<(), String> {
