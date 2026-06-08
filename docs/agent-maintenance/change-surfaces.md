@@ -576,7 +576,7 @@
     atomic read, closing the present/generation TOCTOU) plus its dedicated accessor unit
     test; the watcher-snapshot no-clobber regression test is retained, rewritten to take
     its G1/G2 snapshots from `external_input_relay_lease(...).map(|l| l.generation)`).
-  - `src/services/discord/recovery_engine.rs` (4034 lines; #3016 phase-5b2
+  - `src/services/discord/recovery_engine.rs` (4094 lines; #3016 phase-5b2
     dropped the `mailbox_finalize_owed` construction from the three recovery
     watcher-spawn handles; +9 from #3166
     fetching real context thresholds for the recovered-turn status panel; +36 from #3099
@@ -589,7 +589,10 @@
     still executes the Discord IO, so behaviour is unchanged); +4 from #3017
     routing the recovery terminal through the single-authority finalizer
     (`submit_terminal` + `FinalizeContext::monitor`) instead of inline
-    `mailbox_finish_turn`).
+    `mailbox_finish_turn`; +60 from #3248 gap-1 adding
+    `reseed_watcher_owned_finalizer_ledger` + two guarded reattach call-sites that
+    re-register the watcher-owned turn in the post-restart finalizer ledger so a
+    mid-turn deploy's live pane auto-reconciles without a new user turn).
   - `src/services/discord/health.rs` (2293 lines after #3038 send-to-agent
     dispatch extraction to `outbound/send_to_agent.rs`; previously 2369 after
     #1879 snapshot/mailbox extraction and #3082 answer-flush-barrier field).
