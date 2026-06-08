@@ -3,13 +3,6 @@
   "rule": "service_server_backflow",
   "description": "No-regression baseline for src/services references to crate::server or super::server server-layer modules.",
   "captured_at": "2026-06-09",
-  "total_count": 3,
-  "files": {
-    "src/services/discord/internal_api.rs": {
-      "count": 1
-    },
-    "src/services/dispatched_sessions.rs": {
-      "count": 2
-    }
-  }
+  "total_count": 0,
+  "files": {}
 }

@@ -191,9 +191,9 @@ fn spawn_auto_queue_activate_for_agent(state: AppState, agent_id: String) {
     tokio::spawn(async move {
         // Let the session/dispatch cleanup commit before queue activation probes.
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-        let _ = crate::server::routes::auto_queue::activate(
+        let _ = crate::services::auto_queue::route::activate(
             State(state),
-            Json(crate::server::routes::auto_queue::ActivateBody {
+            Json(crate::services::auto_queue::route::ActivateBody {
                 run_id: None,
                 repo: None,
                 agent_id: Some(agent_id),

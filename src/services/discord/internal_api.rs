@@ -7,7 +7,6 @@ use serde::Serialize;
 use serde_json::Value;
 use sqlx::Row;
 
-use crate::server::routes;
 use crate::services::dispatches::LinkDispatchThreadBody;
 
 #[derive(Clone)]
@@ -150,7 +149,7 @@ pub(super) async fn lookup_pending_dispatch_for_thread(thread_id: u64) -> Result
 }
 
 pub(super) async fn hook_session(
-    body: routes::dispatched_sessions::HookSessionBody,
+    body: crate::services::dispatched_sessions::HookSessionBody,
 ) -> Result<Value, String> {
     request_body(Method::POST, "/api/dispatched-sessions/webhook", &body).await
 }
@@ -195,7 +194,7 @@ pub(super) async fn delete_session(session_key: &str) -> Result<Value, String> {
     request_query(
         Method::DELETE,
         "/api/dispatched-sessions/webhook",
-        &routes::dispatched_sessions::DeleteSessionQuery {
+        &crate::services::dispatched_sessions::DeleteSessionQuery {
             session_key: session_key.to_string(),
             provider: None,
         },
@@ -228,7 +227,7 @@ pub(super) async fn get_provider_session_id(
     request_query(
         Method::GET,
         "/api/dispatched-sessions/claude-session-id",
-        &routes::dispatched_sessions::DeleteSessionQuery {
+        &crate::services::dispatched_sessions::DeleteSessionQuery {
             session_key: session_key.to_string(),
             provider: provider.map(str::to_string),
         },
