@@ -113,10 +113,11 @@
   parsing), `src/services/discord/inflight.rs` (state file contract).
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/services/discord/watchers/lifecycle.rs` (2336 lines — canonical
+  - `src/services/discord/watchers/lifecycle.rs` (2333 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
-    lifecycle behavior).
-  - `src/services/discord/tmux.rs` (2260 lines after #2558 dead-code sweep;
+    lifecycle behavior; #3016 phase-5b2 dropped the `mailbox_finalize_owed`
+    construction from the watcher-spawn handle).
+  - `src/services/discord/tmux.rs` (2241 lines after #2558 dead-code sweep;
     +4 from #3167: the monitor-auto-turn start passes `ActiveTurnKind::Background`
     so a queued user message can supersede the low-priority monitor/loop turn;
     failover guard; #3087 `session_panel_instance_key`/`write_spawn_nonce`
@@ -130,8 +131,10 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (9631 lines after #2558
-    dead-code sweep; #1520 watcher loop extraction + #2427 D/A
+  - `src/services/discord/tmux_watcher.rs` (9598 lines after #2558
+    dead-code sweep; #3016 phase-5b2 removed the `mailbox_finalize_owed`
+    swap reads, the watcher-fn flag params, and the `LegacyFlagGated`
+    decision variant; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
     provider-selector fallback to the in-memory cache on resume turns
@@ -407,7 +410,9 @@
     flag-independent; EMPTY `Unknown` DEFERS — the codex HIGH regression case that the
     prior 5b1 build finalized prematurely) +
     `fresh_idle_unknown_keeps_wrong_turn_race_guards`.
-  - `src/services/discord/tui_prompt_relay.rs` (5144 lines; SSH-direct TUI
+  - `src/services/discord/tui_prompt_relay.rs` (5120 lines; #3016 phase-5b2
+    removed the dead `publish_tui_direct_watcher_finalize_debt` producer;
+    SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
     outside an extraction plan; +4 from #3167: the self-paced TUI loop relay
     starts its synthetic turn with `ActiveTurnKind::Background` so a queued user
@@ -571,7 +576,9 @@
     atomic read, closing the present/generation TOCTOU) plus its dedicated accessor unit
     test; the watcher-snapshot no-clobber regression test is retained, rewritten to take
     its G1/G2 snapshots from `external_input_relay_lease(...).map(|l| l.generation)`).
-  - `src/services/discord/recovery_engine.rs` (4046 lines; +9 from #3166
+  - `src/services/discord/recovery_engine.rs` (4034 lines; #3016 phase-5b2
+    dropped the `mailbox_finalize_owed` construction from the three recovery
+    watcher-spawn handles; +9 from #3166
     fetching real context thresholds for the recovered-turn status panel; +36 from #3099
     task-notification anchor `⏳` cleanup for `user_msg_id == 0` recovery; +4
     from the #3099 re-review pinned-injected-message-id cleanup target; +55 from

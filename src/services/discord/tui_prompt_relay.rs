@@ -1496,12 +1496,6 @@ async fn claim_tui_direct_synthetic_turn(
                 .turn_start_times
                 .insert(channel_id, std::time::Instant::now());
         }
-        publish_tui_direct_watcher_finalize_debt(
-            shared,
-            channel_id,
-            tmux_session_name,
-            relay_owner,
-        );
         return TuiDirectSyntheticTurnClaim {
             relay_owner,
             claimed: true,
@@ -1545,7 +1539,6 @@ async fn claim_tui_direct_synthetic_turn(
             .turn_start_times
             .insert(channel_id, std::time::Instant::now());
     }
-    publish_tui_direct_watcher_finalize_debt(shared, channel_id, tmux_session_name, relay_owner);
     tracing::info!(
         provider = %provider.as_str(),
         channel_id = channel_id.get(),
@@ -1863,29 +1856,12 @@ fn restore_pending_starts(shared: &Arc<SharedData>, provider: &ProviderKind) {
     }
 }
 
-fn publish_tui_direct_watcher_finalize_debt(
-    shared: &Arc<SharedData>,
-    channel_id: ChannelId,
-    tmux_session_name: &str,
-    relay_owner: ExternalInputRelayOwner,
-) {
-    if !matches!(relay_owner, ExternalInputRelayOwner::TmuxWatcher) {
-        return;
-    }
-    let owner_channel = shared
-        .tmux_watchers
-        .owner_channel_for_tmux_session(tmux_session_name)
-        .unwrap_or(channel_id);
-    let Some(watcher) = shared.tmux_watchers.get(&owner_channel) else {
-        return;
-    };
-    if watcher.tmux_session_name != tmux_session_name {
-        return;
-    }
-    watcher
-        .mailbox_finalize_owed
-        .store(true, std::sync::atomic::Ordering::Release);
-}
+// #3016 phase-5b2: `publish_tui_direct_watcher_finalize_debt` was removed. It
+// stored the per-handle `mailbox_finalize_owed` flag (#1452) for TUI-direct
+// synthetic turns, but that flag has no remaining finalize-decision readers —
+// the watcher finalizes on the confirmed-completion / structural signal
+// (`normal_completion = true`) and the ledger's `register_start` is the
+// authority — so the producer was a dead write and is gone.
 
 fn tui_direct_watcher_can_own_output(
     watchers: &super::TmuxWatcherRegistry,
@@ -6327,7 +6303,6 @@ mod tests {
             last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
                 super::super::tmux_watcher_now_ms(),
             )),
-            mailbox_finalize_owed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 

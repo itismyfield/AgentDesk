@@ -3214,7 +3214,6 @@ mod bridge_owner_channel_resolution_tests {
             pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-            mailbox_finalize_owed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -3923,7 +3922,6 @@ fn handle_watcher_runtime_handoff(
     watcher_handoff_claim_outcome: &mut WatcherHandoffClaimOutcome,
     tmux_handed_off: &mut bool,
     watcher_owns_assistant_relay: &mut bool,
-    bridge_published_finalize_owed_for_this_turn: &mut bool,
     state_dirty: &mut bool,
     done: bool,
     terminal_control_drain_until: &mut Option<std::time::Instant>,
@@ -3970,7 +3968,6 @@ fn handle_watcher_runtime_handoff(
     let last_heartbeat_ts_ms = Arc::new(std::sync::atomic::AtomicI64::new(
         super::tmux_watcher_now_ms(),
     ));
-    let mailbox_finalize_owed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let handle = TmuxWatcherHandle {
         tmux_session_name: tmux_session_name.clone(),
         output_path: output_path.clone(),
@@ -3980,7 +3977,6 @@ fn handle_watcher_runtime_handoff(
         pause_epoch: pause_epoch.clone(),
         turn_delivered: turn_delivered.clone(),
         last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
-        mailbox_finalize_owed: mailbox_finalize_owed.clone(),
     };
     #[cfg(unix)]
     let (watcher_claimed, watcher_claim_replaced_existing) = {
@@ -4144,7 +4140,6 @@ fn handle_watcher_runtime_handoff(
                         pause_epoch,
                         turn_delivered,
                         last_heartbeat_ts_ms,
-                        mailbox_finalize_owed,
                         restored_turn,
                     ),
                 );
@@ -4180,19 +4175,14 @@ fn handle_watcher_runtime_handoff(
             watcher
                 .turn_delivered
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            watcher
-                .mailbox_finalize_owed
-                .store(true, std::sync::atomic::Ordering::Release);
-            *bridge_published_finalize_owed_for_this_turn = true;
             // #3016 phase 2: register the turn with the single-authority
             // finalizer BEFORE unpausing the watcher. Message arrival order in
             // the actor replaces the deleted Release/AcqRel ordering: the
             // ledger now knows the turn exists (with the watcher as relay
-            // owner) before the watcher can submit its terminal. The legacy
-            // `mailbox_finalize_owed` store stays for the incremental window
-            // (the watcher still consumes it until phase 3 / removed in phase
-            // 5); the ledger is the authority that supersedes the CAS revoke
-            // deleted from the bridge finalize branches below.
+            // owner) before the watcher can submit its terminal. The ledger is
+            // the authority that superseded the legacy `mailbox_finalize_owed`
+            // flag (removed in #3016 phase-5b2) and the CAS revoke deleted from
+            // the bridge finalize branches below.
             shared_owned.turn_finalizer.register_start(
                 super::turn_finalizer::TurnKey::new(
                     channel_id,
@@ -4360,16 +4350,6 @@ pub(super) fn spawn_turn_bridge(
                 | super::inflight::RelayOwnerKind::SessionBoundRelay
                 | super::inflight::RelayOwnerKind::Unknown
         );
-        // #1452 (Codex iter 3 P1): track whether THIS turn published a
-        // mailbox-finalization debt onto the watcher handle. Without this
-        // flag, the bridge's non-delegation `compare_exchange(true, false, ...)`
-        // cannot tell apart "watcher consumed our debt" (skip finalize) from
-        // "we never set debt at all" (must finalize). The flag flips to
-        // true at the watcher-unpause site below; the non-delegation
-        // finalization branch consults it to decide whether the
-        // compare_exchange Err arm means "watcher beat us" or "no debt at
-        // all".
-        let mut bridge_published_finalize_owed_for_this_turn = false;
         // #1255 live-turn long-running tool placeholder card.
         //
         // `last_assistant_text_line` captures the last non-empty single-line
@@ -5842,8 +5822,6 @@ pub(super) fn spawn_turn_bridge(
                                 Arc::new(std::sync::atomic::AtomicI64::new(
                                     super::tmux_watcher_now_ms(),
                                 ));
-                            let mailbox_finalize_owed =
-                                Arc::new(std::sync::atomic::AtomicBool::new(false));
                             let handle = TmuxWatcherHandle {
                                 tmux_session_name: tmux_session_name.clone(),
                                 output_path: output_path.clone(),
@@ -5853,7 +5831,6 @@ pub(super) fn spawn_turn_bridge(
                                 pause_epoch: pause_epoch.clone(),
                                 turn_delivered: turn_delivered.clone(),
                                 last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
-                                mailbox_finalize_owed: mailbox_finalize_owed.clone(),
                             };
                             #[cfg(unix)]
                             let (watcher_claimed, watcher_claim_replaced_existing) = {
@@ -6049,7 +6026,6 @@ pub(super) fn spawn_turn_bridge(
                                             pause_epoch,
                                             turn_delivered,
                                             last_heartbeat_ts_ms,
-                                            mailbox_finalize_owed,
                                             restored_turn,
                                             ),
                                         );
@@ -6100,18 +6076,12 @@ pub(super) fn spawn_turn_bridge(
                                     // permanently set OR is consumed by a future
                                     // watcher event for the WRONG turn.
                                     //
-                                    // We treat "watcher is now responsible for relay"
-                                    // as a superset of "bridge will delegate
-                                    // finalization": the store is unconditional here,
-                                    // and the bridge's later non-delegation paths
-                                    // (cancelled/prompt_too_long/transport_error/
-                                    // recovery_retry) revoke the debt with a
-                                    // `store(false, Release)` before running their
-                                    // own `mailbox_finish_turn`.
-                                    watcher
-                                        .mailbox_finalize_owed
-                                        .store(true, Ordering::Release);
-                                    bridge_published_finalize_owed_for_this_turn = true;
+                                    // #3016 phase-5b2: the legacy
+                                    // `mailbox_finalize_owed` store that used to
+                                    // publish "bridge will delegate finalization"
+                                    // here is removed; the `register_start` below
+                                    // (RelayOwnerKind::Watcher) is the ledger
+                                    // authority that replaced it.
                                     // #3016 phase 3: register the turn with the
                                     // single-authority finalizer BEFORE
                                     // unpausing the watcher — same as the
@@ -6138,18 +6108,17 @@ pub(super) fn spawn_turn_bridge(
                                         // at register time.
                                         &shared_owned,
                                     );
-                                    // #1452 (Codex iter 3 P1): unpause must
-                                    // use Release ordering so a watcher
-                                    // observing `paused = false` is
-                                    // guaranteed to also observe the
-                                    // `mailbox_finalize_owed = true` store
-                                    // above. With Relaxed ordering on a
-                                    // weakly-ordered platform the two
-                                    // stores can be reordered, letting the
-                                    // watcher unpause, race to its terminal
-                                    // swap, observe `false`, and skip
-                                    // `mailbox_finish_turn` — recreating
-                                    // the leak this change is meant to fix.
+                                    // #1452 (Codex iter 3 P1) / #3016 phase-5b2:
+                                    // unpause uses Release ordering so a watcher
+                                    // observing `paused = false` is guaranteed to
+                                    // also observe the prior writes — the
+                                    // `register_start` (RelayOwnerKind::Watcher)
+                                    // ledger entry that now drives the
+                                    // gate-timeout defer. With Relaxed ordering on
+                                    // a weakly-ordered platform the writes could
+                                    // be reordered, letting the watcher unpause
+                                    // and submit a terminal before the ledger
+                                    // knows the turn exists.
                                     watcher.paused.store(false, Ordering::Release);
                                 }
                             }
@@ -6184,7 +6153,6 @@ pub(super) fn spawn_turn_bridge(
                                     &mut watcher_handoff_claim_outcome,
                                     &mut tmux_handed_off,
                                     &mut watcher_owns_assistant_relay,
-                                    &mut bridge_published_finalize_owed_for_this_turn,
                                     &mut state_dirty,
                                     done,
                                     &mut terminal_control_drain_until,
@@ -6212,7 +6180,6 @@ pub(super) fn spawn_turn_bridge(
                                     &mut watcher_handoff_claim_outcome,
                                     &mut tmux_handed_off,
                                     &mut watcher_owns_assistant_relay,
-                                    &mut bridge_published_finalize_owed_for_this_turn,
                                     &mut state_dirty,
                                     done,
                                     &mut terminal_control_drain_until,
@@ -6244,7 +6211,6 @@ pub(super) fn spawn_turn_bridge(
                                     &mut watcher_handoff_claim_outcome,
                                     &mut tmux_handed_off,
                                     &mut watcher_owns_assistant_relay,
-                                    &mut bridge_published_finalize_owed_for_this_turn,
                                     &mut state_dirty,
                                     done,
                                     &mut terminal_control_drain_until,
@@ -7199,37 +7165,21 @@ pub(super) fn spawn_turn_bridge(
                 has_pending_after_voice
             }
         } else {
-            // #1452 non-delegation path. The watcher-unpause site
-            // optimistically publishes `mailbox_finalize_owed = true`, but
-            // we are now finalizing on the bridge side instead (cancelled /
-            // prompt_too_long / transport_error / recovery_retry, or the
-            // watcher never ended up owning relay).
+            // #1452 non-delegation path: we are finalizing on the bridge side
+            // (cancelled / prompt_too_long / transport_error / recovery_retry,
+            // or the watcher never ended up owning relay).
             //
             // #3016 phase 2/3: the single-authority finalizer's per-turn
-            // ledger phase gate now ARBITRATES exactly-once — whoever submits
+            // ledger phase gate ARBITRATES exactly-once — whoever submits
             // the terminal first finalizes; the loser receives
-            // `AlreadyFinalized` and does nothing. The CAS no longer decides
-            // who finalizes.
+            // `AlreadyFinalized` and does nothing.
             //
-            // BUT we still REVOKE the legacy `mailbox_finalize_owed` flag here
-            // until it is fully removed (phase 5). The watcher consumes that
-            // flag via `swap(false)` and, when set, routes a terminal into the
-            // finalizer. If the bridge finalizes this turn and leaves the flag
-            // set, a watcher that survives into the NEXT turn would swap the
-            // stale `true` and submit a channel-only terminal that collapses
-            // onto — and prematurely finalizes — the next turn's live ledger
-            // entry. Clearing it here (only when THIS turn published it) closes
-            // that cross-turn hazard.
-            if bridge_published_finalize_owed_for_this_turn
-                && let Some(watcher) = shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
-            {
-                let _ = watcher.mailbox_finalize_owed.compare_exchange(
-                    true,
-                    false,
-                    std::sync::atomic::Ordering::AcqRel,
-                    std::sync::atomic::Ordering::Acquire,
-                );
-            }
+            // #3016 phase-5b2: the legacy `mailbox_finalize_owed` flag has been
+            // removed entirely, so the CAS true→false revoke that used to run
+            // here (gated on `bridge_published_finalize_owed_for_this_turn`) is
+            // gone. The ledger's exactly-once gate already guards the
+            // cross-turn hazard the CAS protected against — a watcher surviving
+            // into the NEXT turn no longer has a flag to swap.
             if bridge_early_gate_timed_out {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(

@@ -2357,33 +2357,32 @@ async fn finish_restored_watcher_active_turn(
     // channel-only terminal cannot finalize a queued follow-up turn.
     user_msg_id: u64,
     finish_mailbox_on_completion: bool,
-    delegated_finalize_owed: bool,
     // #3016 option A: the caller observed a *normal completion* (terminal output
     // committed / pane confirmed idle past the relay) and wants the single-
-    // authority finalizer driven regardless of the legacy flags. The finalizer
+    // authority finalizer driven regardless of the restore flag. The finalizer
     // is idempotent — a turn already finalized by the bridge resolves to
     // `AlreadyFinalized` — so an unconditional submit at the confirmed-completion
-    // point cannot over-finalize. This decouples the watcher's normal-completion
-    // finalize from `mailbox_finalize_owed` / `finish_mailbox_on_completion` so
-    // phase 5 can delete the flag. Restore/recovery callers that have NOT
-    // confirmed a normal completion pass `false` and keep the flag-gated path.
+    // point cannot over-finalize. This decoupled the watcher's normal-completion
+    // finalize from `mailbox_finalize_owed` (removed in #3016 phase-5b2) /
+    // `finish_mailbox_on_completion`. Restore/recovery callers that have NOT
+    // confirmed a normal completion pass `false` and keep the restore-gated path.
     normal_completion: bool,
     kickoff_queue: bool,
     stop_source: &'static str,
 ) -> bool {
-    // Either flag implies the watcher must clear the channel mailbox now:
+    // The mailbox is cleared now when EITHER gate holds:
+    //   * `normal_completion` → confirmed terminal output committed / pane idle
+    //     (#3016 option A). The canonical post-phase-5b1 finalize trigger.
     //   * `finish_mailbox_on_completion` → inflight-restore semantics (a
     //     restored/recovered watcher inherits its turn from the bridge, so
     //     it owns the cancel_token when the turn ends). Pre-existing.
-    //   * `delegated_finalize_owed` → bridge handed finalization debt to the
-    //     watcher because it skipped `mailbox_finish_turn` to avoid racing
-    //     the in-flight watcher relay. New for #1452.
     //
-    // The two flags can coincide (e.g., a recovered watcher whose first
-    // post-recovery turn also went through stream-lost handoff). Calling
-    // `mailbox_finish_turn` once per turn is idempotent for our purposes —
-    // the second call would just observe an empty active slot — but we
-    // gate on the OR to keep the call site to a single place.
+    // #3016 phase-5b2: the third gate — `delegated_finalize_owed`, sourced from
+    // the per-handle `mailbox_finalize_owed` flag (#1452) — has been removed.
+    // At both production call sites the watcher already passes
+    // `normal_completion = true`, so the flag was redundant in this OR and only
+    // fed an observability log/event; the ledger's exactly-once phase gate makes
+    // a double `mailbox_finish_turn` idempotent.
     //
     // `kickoff_queue` is the dispatch-lifecycle gate (codex #1670 P2): the
     // mailbox/inflight cleanup above is required for orphan prevention even
@@ -2391,29 +2390,15 @@ async fn finish_restored_watcher_active_turn(
     // queued turn must NOT happen on a failed dispatch — that decision is
     // left to the operator/user. Callers pass `dispatch_ok` (or an
     // equivalent gate) here.
-    // #3016 option A: a confirmed normal completion always drives the finalizer.
-    // The two legacy flags remain as *additional* triggers for the restore /
-    // delegated-debt paths, but they are no longer the only way the watcher's
-    // normal-completion finalize fires — that's the decoupling. (The finalizer's
-    // idempotence guarantees no double finalize when the bridge already won.)
     //
     // #3016 (codex R1): the return value reports whether this helper actually
     // DROVE the finalize (i.e. did NOT early-return). The caller folds it into
     // `watcher_handled_mailbox_finish` so the post-finalize lifecycle (queue
     // kickoff suppression + terminal-stop-candidate path) reflects the real
-    // finalize, not just the legacy flag intent — otherwise the newly decoupled
-    // `normal_completion`-only finalize would leave that signal false and
-    // double-schedule kickoff / skip terminal-stop handling.
-    if !normal_completion && !finish_mailbox_on_completion && !delegated_finalize_owed {
+    // finalize — otherwise the decoupled `normal_completion`-only finalize would
+    // leave that signal false and double-schedule kickoff / skip terminal-stop.
+    if !normal_completion && !finish_mailbox_on_completion {
         return false;
-    }
-
-    if delegated_finalize_owed {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] watcher_finalized_delegated_turn: clearing channel {} mailbox after bridge→watcher handoff (#1452)",
-            channel_id.get()
-        );
     }
 
     // #3016 phase 3: route the watcher terminal through the single-authority
@@ -2449,15 +2434,11 @@ async fn finish_restored_watcher_active_turn(
             mailbox_online,
             ..
         } => {
-            // #3016 (codex P1): this watcher finalize consumed the delegated
-            // debt. Revoke the legacy `mailbox_finalize_owed` flag so a later
-            // watcher swap can't run stale cleanup against the NEXT active turn.
-            // (Removed wholesale in phase 5; revoked here in the meantime.)
-            if let Some(watcher) = shared.tmux_watchers.get(&channel_id) {
-                watcher
-                    .mailbox_finalize_owed
-                    .store(false, std::sync::atomic::Ordering::Release);
-            }
+            // #3016 phase-5b2: the legacy `mailbox_finalize_owed` flag that was
+            // revoked here (so a later watcher swap could not run stale cleanup
+            // against the NEXT active turn) has been removed entirely. The
+            // ledger's exactly-once phase gate is now the sole arbiter, so there
+            // is no stale flag a surviving watcher could swap.
             (mailbox_online, has_pending)
         }
         super::turn_finalizer::FinalizeOutcome::AlreadyFinalized
