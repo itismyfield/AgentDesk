@@ -128,13 +128,6 @@ fn watcher_fallback_edit_failure_can_delete_original_placeholder(
     false
 }
 
-fn watcher_should_defer_delegated_fresh_idle(
-    delegated_finalize_owed: bool,
-    full_response: &str,
-) -> bool {
-    delegated_finalize_owed && full_response.trim().is_empty()
-}
-
 /// #3016 S3 (the A2 / phase-5 enabler): the fresh-idle finalize DECISION,
 /// factored out of the production watcher loop so the EXACT production routing is
 /// unit-testable end-to-end (the enclosing `tmux_output_watcher_with_restore` is
@@ -152,8 +145,17 @@ fn watcher_should_defer_delegated_fresh_idle(
 ///                         or a long silent tool call. NEVER finalize → defer.
 ///        * `Unknown`    — non-JSONL runtime (LegacyTmuxWrapper / ProcessBackend /
 ///                         ClaudeEAdapter, or a non-JSONL provider): the transcript
-///                         probe cannot speak, so KEEP today's legacy
-///                         `mailbox_finalize_owed`-flag behaviour VERBATIM.
+///                         probe cannot speak, so the pane-idle proxy is the sole
+///                         terminal authority. #3016 phase-5b1 routes `Unknown` to
+///                         the SAME finalize path as `Done` (flag-independent): the
+///                         fresh-idle gate already PROVES pane idle (it only fires
+///                         after `watcher_session_ready_for_input` — the SAME
+///                         `pane_ready_fallback_allowed && tmux_session_ready_for_input`
+///                         predicate the 5a far-backstop uses for `Unknown` — held
+///                         over the idle timeout), so finalizing promptly here is
+///                         behaviour-equivalent to the old `mailbox_finalize_owed`
+///                         flag (owed was ~always true at this arm), without the
+///                         1800s far-backstop latency.
 ///
 ///   2. The A2-banked wrong-turn-race defenses (only relevant once the signal
 ///      says we *would* finalize): a follow-up turn can claim the same session
@@ -187,11 +189,15 @@ enum FreshIdleFinalizeDecision {
     /// The pinned pre-cleanup snapshot is a NEWER turn (started AT/AFTER this
     /// committed range) — skip the finalize so the follow-up is not released.
     SkipStale { pinned_user_msg_id: u64 },
-    /// `Done` (terminator proven) AND no follow-up took over — finalize via the
-    /// single-authority path with the PINNED current-turn id.
+    /// `Done` (terminator proven) OR `Unknown` (non-JSONL runtime at proven
+    /// pane-idle) AND no follow-up took over — finalize via the single-authority
+    /// path with the PINNED current-turn id.
     Finalize { user_msg_id: u64 },
-    /// `Unknown` runtime — fall through to the VERBATIM legacy flag-gated path
-    /// (`should_finish_mailbox = finish_mailbox_on_completion || owed`).
+    /// #3016 phase-5b1: defunct. `Unknown` used to fall through to the legacy
+    /// `mailbox_finalize_owed`-flag path here; it now routes to `Finalize` on the
+    /// proven pane-idle proxy (flag-independent). The variant is retained as a
+    /// defensive no-op (the flag itself is removed in phase-5b2) and is never
+    /// produced by the decision helper.
     LegacyFlagGated,
 }
 
@@ -206,15 +212,23 @@ fn watcher_fresh_idle_finalize_decision(
 ) -> FreshIdleFinalizeDecision {
     use crate::services::discord::turn_finalizer::CompletionSignal;
     match completion_signal {
-        // Non-JSONL runtime: the structural probe cannot speak. Hand back to the
-        // legacy flag-gated path so legacy runtimes are byte-for-byte unchanged.
-        CompletionSignal::Unknown => FreshIdleFinalizeDecision::LegacyFlagGated,
         // No structural terminator: paused at a selector / permission prompt /
         // subagent running / long silent tool call. NEVER finalize.
         CompletionSignal::PausedLive => FreshIdleFinalizeDecision::DeferPausedLive,
-        // Structural terminator proven → genuine completion (even if empty). Now
-        // apply the A2 wrong-turn-race defenses before releasing the turn.
-        CompletionSignal::Done => {
+        // `Done`  — a structural JSONL terminator is proven on disk → genuine
+        //           completion (even if empty).
+        // `Unknown` — non-JSONL runtime (#3016 phase-5b1): the structural probe
+        //           cannot speak, so the pane-idle proxy is the sole terminal
+        //           authority. Reaching this arm already PROVES pane idle: the
+        //           fresh-idle gate only fires after `watcher_session_ready_for_input`
+        //           (the SAME `pane_ready_fallback_allowed && tmux_session_ready_for_input`
+        //           predicate the 5a far-backstop uses for `Unknown`) held over the
+        //           idle timeout. So `Unknown` finalizes promptly here exactly as the
+        //           old `mailbox_finalize_owed` flag effectively did (owed was ~always
+        //           true at this arm) — flag-independent, NOT a new premature finalize.
+        // Both share the identical A2 wrong-turn-race defenses before releasing the
+        // turn (paused/epoch abort, then the stale-for-newer-turn skip).
+        CompletionSignal::Done | CompletionSignal::Unknown => {
             if paused_now || epoch_changed {
                 return FreshIdleFinalizeDecision::AbortFollowupTookOver;
             }
@@ -7593,8 +7607,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
 
             if fresh_ready_for_input_idle {
-                let delegated_finalize_owed_pending =
-                    mailbox_finalize_owed.load(std::sync::atomic::Ordering::Acquire);
                 // #3016 S3: the STRUCTURAL completion signal — the authority that
                 // finally distinguishes "turn done" from "paused-live" (which the
                 // old flag-only path could not). Resolve the runtime kind exactly
@@ -7628,25 +7640,24 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         &watcher_provider,
                         channel_id.get(),
                     );
-                // #3016 S3: the DEFER decision now keys on the STRUCTURAL
-                // TERMINATOR, not on response emptiness — defeating the
-                // contradiction that killed the first A2 attempt (deferring
-                // `delegated && empty` made the empty-completion finalize
-                // unreachable). PausedLive (no terminator) → defer regardless of
-                // the flag or emptiness. Unknown (non-JSONL runtime) → preserve
-                // the legacy `mailbox_finalize_owed`-flag defer VERBATIM. Done
-                // (terminator proven) → never defer here; fall through to the
-                // cleanup + finalize below (even when the response is empty).
-                let defer_fresh_idle = match fresh_idle_completion_signal {
-                    crate::services::discord::turn_finalizer::CompletionSignal::PausedLive => true,
-                    crate::services::discord::turn_finalizer::CompletionSignal::Done => false,
-                    crate::services::discord::turn_finalizer::CompletionSignal::Unknown => {
-                        watcher_should_defer_delegated_fresh_idle(
-                            delegated_finalize_owed_pending,
-                            &full_response,
-                        )
-                    }
-                };
+                // #3016 S3 / phase-5b1: the DEFER decision keys on the STRUCTURAL
+                // TERMINATOR (and, for non-JSONL runtimes, the proven pane-idle
+                // proxy) — NOT on response emptiness or the `mailbox_finalize_owed`
+                // flag. This defeats the contradiction that killed the first A2
+                // attempt (deferring `delegated && empty` made the empty-completion
+                // finalize unreachable). PausedLive (no terminator) → defer. Done
+                // (terminator proven) → never defer; fall through to cleanup +
+                // finalize below (even when the response is empty). Unknown
+                // (non-JSONL runtime) → never defer here either: reaching this arm
+                // already PROVES pane idle (the fresh-idle gate only fires after
+                // `watcher_session_ready_for_input` held over the idle timeout), and
+                // the wrong-turn-race guards in `watcher_fresh_idle_finalize_decision`
+                // (paused/epoch abort, stale-skip) handle the follow-up-took-over
+                // cases — so the flag-gated defer is gone (phase-5b1).
+                let defer_fresh_idle = matches!(
+                    fresh_idle_completion_signal,
+                    crate::services::discord::turn_finalizer::CompletionSignal::PausedLive
+                );
                 if defer_fresh_idle {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
@@ -7731,16 +7742,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 if !panel_cleanup_committed {
                     continue;
                 }
-                // We still `swap(false)` the legacy flag unconditionally to keep
-                // its revoke lifecycle intact (the flag is NOT deleted in S3 —
-                // that's stage 5). It only stays load-bearing for the `Unknown`
-                // (non-JSONL runtime) arm below; the `Done` arm finalizes on the
-                // structural signal, flag-independent.
+                // #3016 phase-5b1: the finalize DECISION below no longer DEPENDS on
+                // this flag — both `Done` and `Unknown` route to the structural /
+                // pane-idle `Finalize` arm with `normal_completion = true`. We still
+                // `swap(false)` here to keep the revoke lifecycle intact (the flag
+                // field is removed in phase-5b2, not here); the read result is now
+                // used only for the observability event payload.
                 let owed = mailbox_finalize_owed.swap(false, std::sync::atomic::Ordering::AcqRel);
-                // #3016 S3: the finalize DECISION, computed by the same pure helper
-                // the unit tests drive. The completion signal already gated the
-                // defer above (PausedLive deferred, Unknown deferred via the legacy
-                // flag), so here the signal is Done or Unknown.
+                // #3016 S3 / phase-5b1: the finalize DECISION, computed by the same
+                // pure helper the unit tests drive. The completion signal already
+                // gated the defer above (only PausedLive defers), so here the signal
+                // is Done or Unknown — both route to the `Finalize` arm.
                 let fresh_idle_decision = watcher_fresh_idle_finalize_decision(
                     fresh_idle_completion_signal,
                     paused.load(Ordering::Relaxed),
@@ -7865,7 +7877,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                         serde_json::json!({
                                             "owed_finalize": owed,
                                             "finish_mailbox_on_completion": finish_mailbox_on_completion,
-                                            "completion_signal": "Done",
+                                            // #3016 phase-5b1: Done (structural) OR
+                                            // Unknown (pane-idle proxy) both reach here.
+                                            "completion_signal": format!("{fresh_idle_completion_signal:?}"),
                                             "tmux_session": tmux_session_name.as_str(),
                                             "offset": current_offset,
                                         }),
@@ -7897,67 +7911,29 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             user_msg_id,
                             finish_mailbox_on_completion,
                             owed,
-                            // #3016 S3: Done = confirmed structural completion, so
-                            // drive the finalizer on the normal-completion authority
-                            // independent of the legacy flags (the decoupling phase-5
-                            // depends on).
+                            // #3016 S3 / phase-5b1: Done = confirmed structural
+                            // completion; Unknown = non-JSONL runtime at proven
+                            // pane-idle. Both drive the finalizer on the
+                            // normal-completion authority, independent of the legacy
+                            // flags (the decoupling phase-5 depends on).
                             true,
                             true,
-                            "watcher fresh ready-for-input idle (structural completion terminator)",
+                            "watcher fresh ready-for-input idle (structural/pane-idle completion)",
                         )
                         .await;
                     }
                     FreshIdleFinalizeDecision::LegacyFlagGated => {
-                        // #3016 S3: Unknown (non-JSONL runtime) — KEEP today's
-                        // `mailbox_finalize_owed`-based behaviour VERBATIM so legacy
-                        // runtimes (LegacyTmuxWrapper / ProcessBackend /
-                        // ClaudeEAdapter) are byte-for-byte unchanged.
-                        let should_finish_mailbox = finish_mailbox_on_completion || owed;
-                        if should_finish_mailbox {
-                            // #3016: capture the turn's real id BEFORE clearing
-                            // inflight, so the finalizer ledger match is exact (id-0
-                            // would risk a stale terminal finalizing a follow-up).
-                            let fresh_idle_user_msg_id =
-                                crate::services::discord::inflight::load_inflight_state(
-                                    &watcher_provider,
-                                    channel_id.get(),
-                                )
-                                .map(|s| s.user_msg_id)
-                                .unwrap_or(0);
-                            crate::services::discord::inflight::clear_inflight_state(
-                                &watcher_provider,
-                                channel_id.get(),
-                            );
-                            crate::services::observability::emit_inflight_lifecycle_event(
-                                watcher_provider.as_str(),
-                                channel_id.get(),
-                                None,
-                                None,
-                                None,
-                                "cleared_by_watcher_fresh_idle",
-                                serde_json::json!({
-                                    "owed_finalize": owed,
-                                    "finish_mailbox_on_completion": finish_mailbox_on_completion,
-                                    "completion_signal": "Unknown",
-                                    "tmux_session": tmux_session_name.as_str(),
-                                    "offset": current_offset,
-                                }),
-                            );
-                            finish_restored_watcher_active_turn(
-                                &shared,
-                                &watcher_provider,
-                                channel_id,
-                                fresh_idle_user_msg_id,
-                                finish_mailbox_on_completion,
-                                owed,
-                                // Legacy arm: keep `normal_completion = false`
-                                // (flag-gated), exactly as before S3.
-                                false,
-                                true,
-                                "watcher fresh ready-for-input idle with queued backlog",
-                            )
-                            .await;
-                        }
+                        // #3016 phase-5b1: defunct. `Unknown` no longer routes here —
+                        // it finalizes via the `Finalize` arm on the proven pane-idle
+                        // proxy (flag-independent). The decision helper never produces
+                        // this variant now; treated defensively as a preserve-inflight
+                        // no-op (mirroring the `DeferPausedLive` defensive arm). The
+                        // variant + `mailbox_finalize_owed` flag are removed in
+                        // phase-5b2.
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::warn!(
+                            "  [{ts}] 👁 watcher fresh ready-for-input idle for {tmux_session_name}: LegacyFlagGated reached the finalize gate unexpectedly (phase-5b1 defunct path); preserving inflight"
+                        );
                     }
                 }
                 all_data.clear();
@@ -12054,7 +12030,7 @@ mod tests {
         watcher_fresh_idle_finalize_decision, watcher_inflight_absence_is_abandonment,
         watcher_inflight_represents_external_input, watcher_jsonl_turn_state_ready_for_input,
         watcher_output_progressed_recently, watcher_should_clear_stale_terminal_message_ids,
-        watcher_should_defer_delegated_fresh_idle, watcher_should_delete_suppressed_placeholder,
+        watcher_should_delete_suppressed_placeholder,
         watcher_should_suppress_streaming_after_bridge_delivery,
         watcher_terminal_commit_side_effects_for_test, watcher_terminal_edit_consumes_placeholder,
         watcher_terminal_token_update_status,
@@ -12965,11 +12941,20 @@ mod tests {
 
     // #3016 S3 — (a/c) Done (structural terminator proven) for a genuine
     // current-turn empty/suppressed completion → Finalize with the turn's REAL
-    // pinned id, EVEN when the response is empty (the whole point of S3). And (f)
-    // Unknown (non-JSONL runtime) → LegacyFlagGated so legacy runtimes are
-    // unchanged.
+    // pinned id, EVEN when the response is empty (the whole point of S3).
+    //
+    // #3016 phase-5b1 — (f) Unknown (non-JSONL runtime) now ALSO routes to
+    // Finalize (flag-independent), NOT LegacyFlagGated. Reaching this helper for
+    // an `Unknown` signal already PROVES pane idle (the fresh-idle gate fires only
+    // after `watcher_session_ready_for_input` — the SAME pane-idle proxy the 5a
+    // far-backstop uses — held over the idle timeout), so the decision finalizes
+    // PROMPTLY on the proven pane-idle proxy, behaviour-equivalent to the old
+    // `mailbox_finalize_owed` flag (owed ~always true here) but WITHOUT the 1800s
+    // far-backstop latency. This is the regression-prevention case: an empty
+    // `Unknown` completion at genuine pane-idle finalizes on this pass, not at the
+    // backstop deadline. No flag is consulted.
     #[test]
-    fn fresh_idle_done_finalizes_and_unknown_falls_through_to_legacy() {
+    fn fresh_idle_done_and_unknown_finalize_promptly_flag_independent() {
         use crate::services::discord::turn_finalizer::CompletionSignal;
         let provider = ProviderKind::Claude;
         let session = "AgentDesk-claude-adk-cc-9873101";
@@ -12994,8 +12979,11 @@ mod tests {
             "terminator proven for the current turn → finalize once with its real id"
         );
 
-        // (f) Unknown (non-JSONL runtime) → fall through to the legacy flag-gated
-        // path VERBATIM, regardless of the snapshot / pause / epoch.
+        // (f) #3016 phase-5b1: Unknown (non-JSONL runtime) at proven pane-idle →
+        // Finalize PROMPTLY with the turn's REAL id, flag-independent. An empty
+        // completion does NOT wait for the 1800s far-backstop. The `current_turn`
+        // snapshot here carries no response text yet still finalizes — this is the
+        // "no flag" regression-prevention semantics.
         assert_eq!(
             watcher_fresh_idle_finalize_decision(
                 CompletionSignal::Unknown,
@@ -13005,22 +12993,68 @@ mod tests {
                 session,
                 current_offset,
             ),
-            FreshIdleFinalizeDecision::LegacyFlagGated,
-            "non-JSONL runtime → legacy mailbox_finalize_owed behaviour, unchanged"
+            FreshIdleFinalizeDecision::Finalize { user_msg_id: 9001 },
+            "non-JSONL runtime at proven pane-idle → prompt flag-independent finalize"
         );
-        // Unknown ignores the A2 guards too (they only apply once the signal says
-        // finalize): even paused / epoch-changed routes to LegacyFlagGated.
+    }
+
+    // #3016 phase-5b1 — Unknown (non-JSONL runtime) keeps the SAME wrong-turn-race
+    // guards as Done, so prompt finalize never releases a follow-up turn:
+    //   * paused_now / epoch_changed → AbortFollowupTookOver (no premature finalize);
+    //   * a NEWER follow-up in the pinned snapshot → SkipStale (no stale finalize
+    //     of a superseded turn).
+    #[test]
+    fn fresh_idle_unknown_keeps_wrong_turn_race_guards() {
+        use crate::services::discord::turn_finalizer::CompletionSignal;
+        let provider = ProviderKind::Claude;
+        let session = "AgentDesk-claude-adk-cc-9873108";
+        let channel_id = 987_3108u64;
+        let current_offset = 50u64;
+        let current_turn = fresh_idle_inflight(provider.clone(), channel_id, session, 9001, 10);
+
+        // paused_now → abort regardless of the snapshot (a Discord turn took over).
         assert_eq!(
             watcher_fresh_idle_finalize_decision(
                 CompletionSignal::Unknown,
                 true,
+                false,
+                Some(&current_turn),
+                session,
+                current_offset,
+            ),
+            FreshIdleFinalizeDecision::AbortFollowupTookOver,
+            "Unknown + paused_now → abort before finalize (follow-up took over)"
+        );
+        // epoch_changed → abort.
+        assert_eq!(
+            watcher_fresh_idle_finalize_decision(
+                CompletionSignal::Unknown,
+                false,
                 true,
                 Some(&current_turn),
                 session,
                 current_offset,
             ),
-            FreshIdleFinalizeDecision::LegacyFlagGated,
-            "Unknown is unconditionally legacy-gated"
+            FreshIdleFinalizeDecision::AbortFollowupTookOver,
+            "Unknown + epoch_changed → abort before finalize"
+        );
+        // The pinned snapshot is a NEWER follow-up turn that begins AT/AFTER the
+        // committed range → SkipStale (pinned id 0), so the newer turn is NOT
+        // released by this older idle.
+        let newer = fresh_idle_inflight(provider, channel_id, session, 9002, 50);
+        assert_eq!(
+            watcher_fresh_idle_finalize_decision(
+                CompletionSignal::Unknown,
+                false,
+                false,
+                Some(&newer),
+                session,
+                current_offset,
+            ),
+            FreshIdleFinalizeDecision::SkipStale {
+                pinned_user_msg_id: 0
+            },
+            "Unknown + newer follow-up snapshot → SkipStale, follow-up NOT finalized"
         );
     }
 
@@ -13396,16 +13430,6 @@ mod tests {
         assert_eq!(all_data_start_offset, 42);
         assert!(all_data_fully_mirrored_to_session_relay);
         assert!(all_data_session_bound_relay_ack.is_none());
-    }
-
-    #[test]
-    fn delegated_fresh_idle_without_response_is_not_terminal_commit() {
-        assert!(watcher_should_defer_delegated_fresh_idle(true, ""));
-        assert!(!watcher_should_defer_delegated_fresh_idle(false, "   "));
-        assert!(!watcher_should_defer_delegated_fresh_idle(
-            true,
-            "assistant text"
-        ));
     }
 
     #[test]

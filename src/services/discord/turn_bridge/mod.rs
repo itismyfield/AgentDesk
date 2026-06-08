@@ -7077,20 +7077,26 @@ pub(super) fn spawn_turn_bridge(
             // decision and leave stale debt that would clear the next turn's
             // cancel_token.
             //
-            // Here we only verify the invariant: a live watcher handle still
-            // exists and its `mailbox_finalize_owed` is true. If either
-            // condition fails, the watcher will not finalize and the channel
-            // mailbox would leak its cancel_token; we surface the violation
-            // via `record_turn_bridge_invariant`.
+            // Here we only verify the invariant: the single-authority finalizer
+            // ledger still holds a live (non-`Finalized`) watcher-owned Pending
+            // entry for this turn's channel/generation. If it does not, the
+            // watcher will not finalize and the channel mailbox would leak its
+            // cancel_token; we surface the violation via
+            // `record_turn_bridge_invariant`.
+            //
+            // #3016 phase-5b1: this replaces the legacy
+            // `mailbox_finalize_owed.load()` consumer with the ledger query. The
+            // two are equivalent because `owed = true` is set atomically with the
+            // `register_start(.., RelayOwnerKind::Watcher)` at the watcher-unpause
+            // sites (~4196, ~6129) keyed by `TurnKey::new(channel_id, _,
+            // current_generation)` — i.e. `owed ⟺ a live watcher Pending entry`.
+            // The query keys on the SAME `channel_id` + `current_generation`
+            // `register_start` used (the flag field/producers are removed in
+            // phase-5b2).
             let handoff_recorded = shared_owned
-                .tmux_watchers
-                .get(&watcher_owner_channel_id)
-                .map(|watcher| {
-                    watcher
-                        .mailbox_finalize_owed
-                        .load(std::sync::atomic::Ordering::Acquire)
-                })
-                .unwrap_or(false);
+                .turn_finalizer
+                .has_live_watcher_pending(channel_id, shared_owned.current_generation)
+                .await;
             record_turn_bridge_invariant(
                 handoff_recorded,
                 &provider,

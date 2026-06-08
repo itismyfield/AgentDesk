@@ -168,8 +168,8 @@ fn resolve_ledger_key(ledger: &HashMap<LedgerKey, LedgerEntry>, key: TurnKey) ->
 /// #3016 S1 (read-only): does the channel's `generation` have a live
 /// (non-`Finalized`) ledger entry whose relay owner is the watcher? Pure read;
 /// the actor's `QueryWatcherPending` arm calls this without mutating the ledger.
-/// Dead until S3/S4.
-#[allow(dead_code)] // #3016 S1: wired in S3/S4
+/// #3016 phase-5b1: reachable in production via `has_live_watcher_pending`
+/// (wired into the `bridge_handoff_finds_watcher_handle` invariant).
 fn ledger_has_live_watcher_pending(
     ledger: &HashMap<LedgerKey, LedgerEntry>,
     channel_id: ChannelId,
@@ -503,8 +503,8 @@ enum FinalizeMsg {
     },
     /// #3016 S1 (A2-banked, read-only): ask the ledger whether the channel's
     /// `generation` has a live (non-`Finalized`) entry that the watcher owns.
-    /// Pure read of the actor-owned ledger; mutates nothing. Dead until S3/S4.
-    #[allow(dead_code)] // #3016 S1: wired in S3/S4
+    /// Pure read of the actor-owned ledger; mutates nothing. #3016 phase-5b1:
+    /// wired into production via `has_live_watcher_pending`.
     QueryWatcherPending {
         channel_id: ChannelId,
         generation: u64,
@@ -733,8 +733,9 @@ impl TurnFinalizer {
     /// live (non-`Finalized`) ledger entry owned by the watcher. Routes a
     /// read-only `QueryWatcherPending` through the actor (the ledger is owned by
     /// the actor task) and awaits the answer; it mutates nothing. If the actor
-    /// task is gone (teardown) it returns `false`. Dead until S3/S4 (#3016).
-    #[allow(dead_code)] // #3016 S1: wired in S3/S4
+    /// task is gone (teardown) it returns `false`. #3016 phase-5b1: wired into
+    /// the `bridge_handoff_finds_watcher_handle` invariant (`turn_bridge/mod.rs`)
+    /// in place of the legacy `mailbox_finalize_owed.load()` consumer.
     pub(in crate::services::discord) async fn has_live_watcher_pending(
         &self,
         channel_id: ChannelId,
