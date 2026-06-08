@@ -120,7 +120,26 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
     };
     report.pg_available = true;
 
-    let mut active_cwds = fetch_active_cwds(&pool).await.unwrap_or_default();
+    // #3231 (codex #2, fail-closed): EVERY DB keep-set query is load-bearing — a
+    // worktree absent from the keep-set is a deletion candidate. If any keep-set
+    // query FAILS (PG down, schema drift, query error) `unwrap_or_default()` would
+    // silently substitute an EMPTY set and we would then delete live resumable /
+    // active-dispatch worktrees. That is exactly the failure the tmux-probe path
+    // already guards against by returning early. So we mirror that semantics here:
+    // a keep-set query error means we cannot prove a worktree is unowned — warn and
+    // skip ALL deletions for this run.
+    let mut active_cwds = match fetch_active_cwds(&pool).await {
+        Ok(set) => set,
+        Err(error) => {
+            tracing::warn!(
+                target: "maintenance",
+                job = "storage.worktree_orphan_sweep",
+                error = %error,
+                "active-dispatch keep-set query failed; cannot prove no live owner — skipping all deletions this run (fail-closed)"
+            );
+            return Ok(report);
+        }
+    };
     // #3207 (part 2): a reused worktree owned by a live/resumable channel session
     // must survive BETWEEN turns and across restarts so `--resume` can find the
     // sid's transcript. Between turns there is no `pending`/`dispatched` dispatch,
@@ -132,8 +151,40 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
     // PER CHANNEL is protected (see `fetch_resumable_cwds`) — so abandoned /
     // never-heartbeated sessions can no longer pin a worktree forever, while a
     // live channel still keeps its single in-flight reuse worktree.
-    let resumable_cwds = fetch_resumable_cwds(&pool).await.unwrap_or_default();
+    let resumable_cwds = match fetch_resumable_cwds(&pool).await {
+        Ok(set) => set,
+        Err(error) => {
+            tracing::warn!(
+                target: "maintenance",
+                job = "storage.worktree_orphan_sweep",
+                error = %error,
+                "resumable-session keep-set query failed; cannot prove no live owner — skipping all deletions this run (fail-closed)"
+            );
+            return Ok(report);
+        }
+    };
     active_cwds.extend(resumable_cwds);
+    // #3231 (codex #1): an active managed dispatch records its worktree under
+    // `task_dispatches.context.worktree_path` (and `result.completed_worktree_path`)
+    // at CREATE time — BEFORE the dispatched agent's `sessions.cwd` / live tmux pane
+    // exist. So a freshly-provisioned managed worktree for a `pending`/`dispatched`
+    // dispatch is owned by NO session cwd and NO tmux pane yet, and the managed
+    // recursion below would delete it out from under the dispatch. Reuse the same
+    // active-worktree-ref signal that terminal cleanup relies on (pending/dispatched
+    // dispatch JSON + `pr_tracking.worktree_path`) as an additional keep-set source.
+    let active_dispatch_worktrees = match fetch_active_dispatch_worktree_paths(&pool).await {
+        Ok(set) => set,
+        Err(error) => {
+            tracing::warn!(
+                target: "maintenance",
+                job = "storage.worktree_orphan_sweep",
+                error = %error,
+                "active-dispatch worktree-path keep-set query failed; cannot prove no live owner — skipping all deletions this run (fail-closed)"
+            );
+            return Ok(report);
+        }
+    };
+    active_cwds.extend(active_dispatch_worktrees);
     report.active_cwd_count = active_cwds.len() as u64;
 
     // #3216 (gap 3): a divorced/phantom per-channel worktree (provisioned by a
@@ -249,6 +300,12 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
 /// `--force` path) so dirty/unmerged work is preserved. A far age backstop
 /// (`MANAGED_CANCEL_LEAK_BACKSTOP`) lets a long-abandoned managed worktree be
 /// reconsidered even if it would otherwise be skipped — see [`is_old_enough`].
+///
+/// #3231 (codex #3): when the worktree's `.git` pointer cannot be resolved the
+/// managed pass NEVER force-removes. A present-but-unreadable `.git` (a registered
+/// worktree we merely failed to read) is SKIPPED; only a genuinely `.git`-less
+/// leftover directory is eligible for a plain `remove_dir_all`, and only once
+/// age-backstopped. The flat-root `--force` remover is never reachable from here.
 async fn sweep_managed_root(
     repo_root_dir: &Path,
     active_cwds: &HashSet<String>,
@@ -282,22 +339,44 @@ async fn sweep_managed_root(
         // `cleanup_managed_worktree` can run its dirty/unmerged guards + the
         // managed-path check against the real repo.
         let Some(repo_root) = infer_repo_root_from_worktree(&wt_path) else {
-            // Not a registered worktree (or unreadable `.git`) — fall back to a
-            // plain directory delete only when it is age-backstopped, so a
-            // freshly-created managed dir whose `.git` we momentarily cannot read
-            // is never blown away.
-            if is_old_enough(&wt_path, MANAGED_CANCEL_LEAK_BACKSTOP) {
-                match remove_orphan_worktree(&wt_path).await {
-                    Ok(()) => report.managed_removed = report.managed_removed.saturating_add(1),
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "maintenance",
-                            path = %wt_path.display(),
-                            error = %error,
-                            "worktree_orphan_sweep: failed to remove age-backstopped managed orphan"
-                        );
-                        report.errors = report.errors.saturating_add(1);
+            // #3231 (codex #3): the `.git` pointer could not be resolved. We MUST
+            // NOT fall back to the force/plain-delete path (`remove_orphan_worktree`)
+            // here — that bypasses `cleanup_managed_worktree`'s dirty/unmerged
+            // guards, so a registered worktree whose `.git` we merely failed to read
+            // (transient FS error) — possibly holding uncommitted work — could be
+            // blown away. Distinguish the two cases by the `.git` entry itself:
+            //   * `.git` EXISTS but is unreadable/malformed → a registered worktree
+            //     with an unresolvable pointer → SKIP (never delete; preserve any
+            //     dirty/unmerged work for human review);
+            //   * `.git` is genuinely ABSENT → not a git worktree, just a leftover
+            //     directory with no tracked/uncommitted git state to lose → eligible
+            //     for a plain `remove_dir_all` ONLY when age-backstopped (a
+            //     cancel-leak), so a freshly-provisioned dir is never touched.
+            match git_pointer_state(&wt_path) {
+                GitPointerState::Missing => {
+                    if is_old_enough(&wt_path, MANAGED_CANCEL_LEAK_BACKSTOP) {
+                        match remove_dir_all_plain(&wt_path) {
+                            Ok(()) => {
+                                report.managed_removed = report.managed_removed.saturating_add(1)
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    target: "maintenance",
+                                    path = %wt_path.display(),
+                                    error = %error,
+                                    "worktree_orphan_sweep: failed to remove age-backstopped managed leftover (no .git)"
+                                );
+                                report.errors = report.errors.saturating_add(1);
+                            }
+                        }
                     }
+                }
+                GitPointerState::PresentUnreadable => {
+                    tracing::warn!(
+                        target: "maintenance",
+                        path = %wt_path.display(),
+                        "worktree_orphan_sweep: managed worktree has an unreadable/unresolvable .git pointer — skipping (fail-closed; never force-removed)"
+                    );
                 }
             }
             continue;
@@ -401,6 +480,76 @@ async fn fetch_resumable_cwds(pool: &PgPool) -> Result<HashSet<String>> {
         .into_iter()
         .filter_map(|(cwd,)| cwd.filter(|s| !s.is_empty()))
         .collect())
+}
+
+/// #3231 (codex #1): JSON keys under which a dispatch records the worktree it
+/// owns — mirrors `WORKTREE_PATH_REFERENCE_KEYS` in
+/// `crate::kanban::terminal_cleanup`, the active-ref signal terminal cleanup uses
+/// to refuse removing a worktree still claimed by another live dispatch.
+const DISPATCH_WORKTREE_PATH_KEYS: &[&str] = &["worktree_path", "completed_worktree_path"];
+
+/// #3231 (codex #1): worktree paths claimed by an ACTIVE (`pending`/`dispatched`,
+/// i.e. not-yet-terminal) managed dispatch, plus live `pr_tracking` worktrees.
+///
+/// A managed dispatch's `worktree_path` is injected into `task_dispatches.context`
+/// at CREATE time, BEFORE the dispatched agent produces a `sessions.cwd` or a live
+/// tmux pane. Between create and first turn the freshly-provisioned worktree is
+/// therefore owned by NOTHING the other keep-set sources can see, so the managed
+/// recursion would delete it. This reuses the exact active-reference signal that
+/// `crate::kanban::terminal_cleanup::active_worktree_refs_pg` relies on (the same
+/// status filter, the same JSON keys, the same `pr_tracking` source) so the sweep
+/// never removes a worktree terminal cleanup itself would refuse to remove.
+async fn fetch_active_dispatch_worktree_paths(pool: &PgPool) -> Result<HashSet<String>> {
+    let mut paths = HashSet::new();
+
+    // Cast JSON-ish TEXT columns to TEXT explicitly so the decode is uniform
+    // regardless of whether the column is stored as TEXT or JSON/JSONB.
+    let rows: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT context::TEXT, result::TEXT
+         FROM task_dispatches
+         WHERE status IN ('pending', 'dispatched')",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for (context_raw, result_raw) in rows {
+        for raw in [context_raw, result_raw].into_iter().flatten() {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue;
+            };
+            for key in DISPATCH_WORKTREE_PATH_KEYS {
+                if let Some(path) = value
+                    .get(*key)
+                    .and_then(|field| field.as_str())
+                    .map(str::trim)
+                    .filter(|field| !field.is_empty())
+                {
+                    paths.insert(path.to_string());
+                }
+            }
+        }
+    }
+
+    // `pr_tracking.worktree_path` pins a worktree that a PR still tracks — same
+    // source terminal cleanup consults before removing a managed worktree.
+    let pr_rows: Vec<(Option<String>,)> = sqlx::query_as(
+        "SELECT worktree_path
+         FROM pr_tracking
+         WHERE NULLIF(BTRIM(worktree_path), '') IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+    for (path,) in pr_rows {
+        if let Some(path) = path.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+            paths.insert(path);
+        }
+    }
+
+    Ok(paths)
 }
 
 /// True when `candidate` equals `dir` OR is nested directly/transitively under
@@ -624,6 +773,45 @@ async fn remove_orphan_worktree(path: &Path) -> Result<()> {
         .await;
     }
 
+    if path.exists() {
+        std::fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
+
+/// #3231 (codex #3): classification of a managed worktree's `.git` entry for the
+/// fallback in [`sweep_managed_root`] when [`infer_repo_root_from_worktree`]
+/// could not resolve the parent repo. Only [`GitPointerState::Missing`] (truly no
+/// `.git`) is eligible for the plain age-backstopped delete; a present-but-
+/// unreadable `.git` belongs to a registered worktree whose pointer we merely
+/// failed to read and must be left untouched.
+enum GitPointerState {
+    /// No `.git` entry at all — not a registered worktree, just a leftover dir.
+    Missing,
+    /// A `.git` entry EXISTS but could not be read / did not yield a gitdir — a
+    /// registered worktree with an unresolvable pointer; never deleted here.
+    PresentUnreadable,
+}
+
+/// #3231 (codex #3): inspect the worktree's `.git` entry WITHOUT force-deleting
+/// anything. `try_exists` distinguishes "definitively absent" from "exists but
+/// unreadable" (a permission/IO error is treated conservatively as present, since
+/// we could not prove absence).
+fn git_pointer_state(path: &Path) -> GitPointerState {
+    match path.join(".git").try_exists() {
+        Ok(false) => GitPointerState::Missing,
+        // Exists, OR we could not even determine existence — conservatively treat
+        // as a registered worktree we must not blow away.
+        Ok(true) | Err(_) => GitPointerState::PresentUnreadable,
+    }
+}
+
+/// #3231 (codex #3): plain recursive directory delete for an age-backstopped
+/// managed leftover that has NO `.git` pointer (so there is no git-tracked or
+/// uncommitted state to preserve). Deliberately does NOT invoke
+/// `git worktree remove --force` — the force path is reserved for the flat-root
+/// pass and must never run in the managed fallback.
+fn remove_dir_all_plain(path: &Path) -> std::io::Result<()> {
     if path.exists() {
         std::fs::remove_dir_all(path)?;
     }
@@ -1063,6 +1251,131 @@ mod resumable_keep_set_query_tests {
 }
 
 #[cfg(test)]
+mod active_dispatch_worktree_keep_set_tests {
+    //! #3231 (codex #1): an active managed dispatch records its worktree under
+    //! `task_dispatches.context.worktree_path` at CREATE time — before any
+    //! `sessions.cwd` or live tmux pane exists. `fetch_active_dispatch_worktree_paths`
+    //! must surface those paths (from context AND result, for `pending`/`dispatched`
+    //! dispatches) plus `pr_tracking.worktree_path`, so a just-provisioned worktree
+    //! is not deleted out from under the dispatch.
+    use super::fetch_active_dispatch_worktree_paths;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+
+    async fn seed_dispatch(
+        pool: &sqlx::PgPool,
+        id: &str,
+        status: &str,
+        context: Option<&str>,
+        result: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, to_agent_id, status, context, result) \
+             VALUES ($1, 'agent-1', $2, $3, $4)",
+        )
+        .bind(id)
+        .bind(status)
+        .bind(context)
+        .bind(result)
+        .execute(pool)
+        .await
+        .expect("seed task_dispatches row");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn active_dispatch_worktree_paths_are_collected() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        // (1) pending dispatch with context.worktree_path → KEPT.
+        seed_dispatch(
+            &pool,
+            "d-pending",
+            "pending",
+            Some(r#"{"worktree_path":"/wt/managed-pending"}"#),
+            None,
+        )
+        .await;
+        // (2) dispatched dispatch with result.completed_worktree_path → KEPT.
+        seed_dispatch(
+            &pool,
+            "d-dispatched",
+            "dispatched",
+            None,
+            Some(r#"{"completed_worktree_path":"/wt/managed-completed"}"#),
+        )
+        .await;
+        // (3) terminal (completed) dispatch → its worktree is NOT kept by this set
+        //     (terminal cleanup owns it; absence from the active set is correct).
+        seed_dispatch(
+            &pool,
+            "d-completed",
+            "completed",
+            Some(r#"{"worktree_path":"/wt/managed-terminal"}"#),
+            None,
+        )
+        .await;
+        // (4) pending dispatch with no worktree_path → contributes nothing.
+        seed_dispatch(
+            &pool,
+            "d-no-wt",
+            "pending",
+            Some(r#"{"auto_queue":true}"#),
+            None,
+        )
+        .await;
+
+        let kept = fetch_active_dispatch_worktree_paths(&pool)
+            .await
+            .expect("query active-dispatch worktree paths");
+
+        assert!(
+            kept.contains("/wt/managed-pending"),
+            "a pending dispatch's context.worktree_path must be kept"
+        );
+        assert!(
+            kept.contains("/wt/managed-completed"),
+            "a dispatched dispatch's result.completed_worktree_path must be kept"
+        );
+        assert!(
+            !kept.contains("/wt/managed-terminal"),
+            "a terminal dispatch's worktree must NOT be in the active keep-set"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pr_tracking_worktree_path_is_collected() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        // pr_tracking.card_id FKs kanban_cards(id); seed the card first.
+        sqlx::query("INSERT INTO kanban_cards (id, title) VALUES ('card-1', 't')")
+            .execute(&pool)
+            .await
+            .expect("seed kanban card");
+        sqlx::query(
+            "INSERT INTO pr_tracking (card_id, worktree_path) VALUES ('card-1', '/wt/pr-tracked')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed pr_tracking row");
+
+        let kept = fetch_active_dispatch_worktree_paths(&pool)
+            .await
+            .expect("query active-dispatch worktree paths");
+        assert!(
+            kept.contains("/wt/pr-tracked"),
+            "a live pr_tracking.worktree_path must be kept"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+}
+
+#[cfg(test)]
 mod managed_root_recursion_tests {
     //! #3231 (B): the managed dispatch/automation worktrees live one level deeper
     //! under `worktrees/<repo_name>/` — the flat 1-depth scan never reached them.
@@ -1229,5 +1542,109 @@ mod managed_root_recursion_tests {
         let _keep: HashSet<String> = HashSet::new();
         let manual = Path::new("/home/u/.adk/release/worktrees/worker-1");
         assert!(!is_runtime_named_worktree(manual));
+    }
+}
+
+#[cfg(test)]
+mod git_pointer_fallback_tests {
+    //! #3231 (codex #3): the managed fallback (used when the `.git` gitdir pointer
+    //! cannot be resolved) must NEVER force-remove. A present-but-unreadable `.git`
+    //! belongs to a registered worktree (possibly dirty/unmerged) and must be
+    //! SKIPPED; only a genuinely `.git`-less leftover dir is eligible for a plain
+    //! delete, and only when age-backstopped.
+    use super::{GitPointerState, git_pointer_state, remove_dir_all_plain};
+
+    #[test]
+    fn missing_git_is_classified_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("leftover");
+        std::fs::create_dir_all(&dir).unwrap();
+        // No `.git` entry at all → eligible for the plain age-backstopped delete.
+        assert!(matches!(git_pointer_state(&dir), GitPointerState::Missing));
+    }
+
+    #[test]
+    fn present_git_file_is_classified_present_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("registered");
+        std::fs::create_dir_all(&dir).unwrap();
+        // A `.git` FILE that does NOT yield a resolvable gitdir pointer — this is a
+        // registered worktree whose pointer we could not resolve. It must be
+        // classified PresentUnreadable so the fallback SKIPS it (never deletes).
+        std::fs::write(dir.join(".git"), b"garbage-not-a-gitdir-pointer").unwrap();
+        assert!(matches!(
+            git_pointer_state(&dir),
+            GitPointerState::PresentUnreadable
+        ));
+        // The dir must still exist — classification never deletes.
+        assert!(dir.exists());
+    }
+
+    #[test]
+    fn present_git_dir_is_classified_present_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("with-git-dir");
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        // A `.git` DIRECTORY (not a worktree pointer file) also counts as present —
+        // we conservatively never force-delete it via the managed fallback.
+        assert!(matches!(
+            git_pointer_state(&dir),
+            GitPointerState::PresentUnreadable
+        ));
+    }
+
+    #[test]
+    fn remove_dir_all_plain_removes_only_existing_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("leftover");
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        std::fs::write(dir.join("file"), b"x").unwrap();
+        remove_dir_all_plain(&dir).expect("plain remove succeeds");
+        assert!(!dir.exists());
+        // Idempotent: removing a non-existent path is a no-op (no error).
+        remove_dir_all_plain(&dir).expect("plain remove of missing dir is a no-op");
+    }
+}
+
+#[cfg(test)]
+mod keep_set_query_failure_fail_closed_tests {
+    //! #3231 (codex #2): a FAILED keep-set query must suppress ALL deletions for
+    //! the run (fail-closed), exactly like a failed tmux probe. A closed pool makes
+    //! every keep-set query error, so the sweep must delete nothing even though a
+    //! runtime-named orphan sits in the flat root with no owner.
+    use super::{Config, run_inner};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closed_pool_keep_set_query_error_skips_all_deletions() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        // Closing the pool makes the keep-set queries return Err — simulating a
+        // PG/schema/query failure mid-run.
+        pool.close().await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let worktrees_root = tmp.path().join("worktrees");
+        // A runtime-named flat-root dir with NO owner — normally a prime orphan.
+        let orphan = worktrees_root.join("claude-adk-cc-20260607-000000");
+        std::fs::create_dir_all(&orphan).unwrap();
+
+        let config = Config {
+            worktrees_root,
+            dry_run: false,
+        };
+        let report = run_inner(&config, Some(pool)).await.unwrap();
+
+        assert!(report.pg_available, "pool was present (just failing)");
+        assert_eq!(
+            report.removed_dirs, 0,
+            "a keep-set query failure must suppress ALL flat-root deletions"
+        );
+        assert_eq!(report.managed_removed, 0);
+        assert!(
+            orphan.exists(),
+            "the orphan must survive a keep-set query failure (fail-closed)"
+        );
+
+        pg_db.drop().await;
     }
 }
