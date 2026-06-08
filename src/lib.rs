@@ -104,6 +104,9 @@ mod engine;
 // Error-code helpers are kept for API response boundaries that only some
 // routes currently surface.
 mod error;
+// In-process broadcast event bus shared by the WS server layer and background
+// services; lives at crate root to avoid a service→server backflow (#3037).
+mod eventbus;
 mod github;
 pub(crate) mod kanban;
 mod launch;

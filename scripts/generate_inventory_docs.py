@@ -109,6 +109,7 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "dispatch/": "Dispatch context construction, review metadata, and worktree targeting.",
     "engine/": "QuickJS policy runtime, hook wiring, transition logic, and Rust-JS bridge ops.",
     "error.rs": "Shared HTTP and policy error type with typed codes and JSON response helpers.",
+    "eventbus.rs": "In-process broadcast event bus (history/replay/batching) shared by the WS server layer and background services without a service→server backflow.",
     "github/": "GitHub sync, issue triage, and Definition-of-Done mirroring.",
     "high_risk_recovery.rs": "PG-only high-risk recovery tests for boot reconciliation and review refire paths.",
     "kanban/": "High-level kanban orchestration, state machine facade, and shared test support.",
