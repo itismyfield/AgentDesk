@@ -34,6 +34,7 @@ use crate::voice::tts::{
 use crate::voice::{CompletedUtterance, VoiceConfig, VoiceReceiveHook};
 
 use super::SharedData;
+use super::voice_acknowledgement::AcknowledgementConfig;
 #[cfg(test)]
 use super::voice_background_driver::{VoiceBackgroundDriverKind, VoiceBackgroundStartOutcome};
 use super::voice_background_driver::{
@@ -1333,8 +1334,7 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     // #3038: sensitivity 관심사를 sub-struct 로 격리. default_sensitivity /
     // atomic mirror / RwLock 상태를 하나로 묶어 락 순서와 폴백 동작을 보존.
     sensitivity: SensitivityState,
-    acknowledgement_enabled: bool,
-    acknowledgement_text: String,
+    acknowledgement: AcknowledgementConfig,
     transcript_dirs: Vec<PathBuf>,
     voice_config_state: RwLock<VoiceConfig>,
     spoken_result_language: RwLock<String>,
@@ -1395,8 +1395,7 @@ impl VoiceBargeInRuntime {
             enabled: config.enabled,
             barge_in_enabled: config.enabled && config.barge_in.enabled,
             sensitivity: SensitivityState::new(default_sensitivity, conservative_ttl),
-            acknowledgement_enabled: config.barge_in.acknowledgement_enabled,
-            acknowledgement_text: config.barge_in.acknowledgement_text.clone(),
+            acknowledgement: AcknowledgementConfig::from_voice_config(config),
             transcript_dirs: transcript_dirs_from_config(config),
             voice_config_state: RwLock::new(config.clone()),
             spoken_result_language: RwLock::new(config.stt.language.clone()),
@@ -1426,8 +1425,7 @@ impl VoiceBargeInRuntime {
             enabled: false,
             barge_in_enabled: false,
             sensitivity: SensitivityState::disabled(),
-            acknowledgement_enabled: false,
-            acknowledgement_text: String::new(),
+            acknowledgement: AcknowledgementConfig::disabled(),
             transcript_dirs: Vec::new(),
             voice_config_state: RwLock::new(VoiceConfig::default()),
             spoken_result_language: RwLock::new(DEFAULT_STT_LANGUAGE.to_string()),
@@ -4143,8 +4141,9 @@ impl VoiceBargeInRuntime {
             .get(&channel_id.get())
             .map(|entry| entry.value().clone())?;
         let mut buffer = buffer.lock().await;
+        let ack = &self.acknowledgement;
         let acknowledgement = buffer
-            .acknowledgement_before_drain(self.acknowledgement_enabled, &self.acknowledgement_text)
+            .acknowledgement_before_drain(ack.enabled(), ack.text())
             .map(ToOwned::to_owned);
         let prompt = buffer.drain_prompt()?;
         Some(DeferredBargeInDrain {

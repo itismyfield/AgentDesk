@@ -30,9 +30,6 @@ mod placeholder_cleanup;
 mod placeholder_controller;
 mod placeholder_live_events;
 mod placeholder_sweeper;
-// Phase 5.3 of intake-node-routing (issue #2011): standalone JSONL → Discord
-// relay loop spawned by the bridge on cluster-standby nodes (where the tmux
-// watcher's relay path does not fire). Leader keeps using tmux_watcher.
 mod prompt_builder;
 mod queue_io;
 mod queued_placeholders_store;
@@ -41,6 +38,8 @@ mod relay_recovery;
 pub(crate) mod response_sanitizer;
 #[cfg(unix)]
 mod session_relay_sink;
+// #2011 Phase 5.3: standalone JSONL → Discord relay loop spawned by the bridge
+// on cluster-standby nodes (leader keeps using tmux_watcher's relay path).
 #[cfg(unix)]
 mod standby_relay;
 // #1074: landing zone for the future recovery-engine module split
@@ -90,6 +89,7 @@ mod tui_prompt_relay;
 mod tui_task_card;
 mod turn_bridge;
 mod turn_finalizer;
+mod voice_acknowledgement;
 mod voice_background_driver;
 mod voice_barge_in;
 mod voice_routing;
