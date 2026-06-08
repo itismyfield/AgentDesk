@@ -424,3 +424,24 @@
   far-backstop is deterministic for a fresh worker-local actor whose first
   watcher turn never submits its own terminal. Still worker-local `Weak`, no
   cross-node reference.)
+- #3016 phase-5b1 (make `mailbox_finalize_owed` write-only by replacing its
+  CONSUMERS, not removing it): two consumer rewrites, both behaviour-equivalent
+  to today. (1) `tmux_watcher.rs` — the fresh-idle `Unknown` (non-JSONL runtime)
+  arm no longer reads the flag to gate finalize; it routes to the SAME pane-idle
+  `Finalize` path as `Done` (`watcher_session_ready_for_input` — the SAME
+  `pane_ready_fallback_allowed && tmux_session_ready_for_input` predicate the 5a
+  far-backstop uses for `Unknown` — is already proven at this arm), so an empty
+  `Unknown` completion finalizes promptly instead of at the 1800s far-backstop;
+  the paused-live/paused/epoch/stale-for-newer-turn race guards are kept. (2)
+  `turn_bridge/mod.rs` — the `bridge_handoff_finds_watcher_handle` invariant now
+  queries the ledger via `turn_finalizer.has_live_watcher_pending(channel_id,
+  current_generation)` instead of loading `mailbox_finalize_owed`; the two are
+  equivalent because `owed` is set atomically with the
+  `register_start(.., RelayOwnerKind::Watcher)` keyed by the same channel/
+  generation. Both consumers stay **worker-local**: the watcher reads only the
+  local tmux pane/transcript, and `has_live_watcher_pending` is a read-only query
+  of THIS process's actor-owned ledger (the `TurnFinalizer` is one actor per
+  in-process `SharedData`). No lease, no durable queue, no leader/standby
+  ownership change — finalize remains the same per-process exactly-once unit. No
+  new multinode ownership/singleton/lease assumption. (The flag field/producers
+  remain until phase-5b2.)

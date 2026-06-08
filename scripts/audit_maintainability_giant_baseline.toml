@@ -17,9 +17,9 @@
 # documentation gate; extend this table to ratchet them too.
 
 [giant_file_ratchet]
-"src/services/discord/tmux_watcher.rs" = 9608
+"src/services/discord/tmux_watcher.rs" = 9631
 "src/services/discord/mod.rs" = 5221
-"src/services/discord/tui_prompt_relay.rs" = 5142
+"src/services/discord/tui_prompt_relay.rs" = 5144
 "src/services/discord/voice_barge_in.rs" = 4835
 "src/services/discord/recovery_engine.rs" = 4046
 "src/services/discord/router/message_handler/intake_turn.rs" = 3771
@@ -33,14 +33,14 @@
 "src/services/discord/health.rs" = 2369
 "src/services/discord/watchers/lifecycle.rs" = 2336
 "src/services/discord/idle_recap.rs" = 2303
-"src/services/discord/tmux.rs" = 2251
+"src/services/discord/tmux.rs" = 2260
 "src/services/discord/turn_bridge/completion_guard.rs" = 1849
 "src/services/discord/session_runtime.rs" = 1781
 "src/services/discord/session_relay_sink.rs" = 1730
 "src/services/discord/turn_bridge/tmux_runtime.rs" = 1545
 "src/services/discord/commands/text_commands.rs" = 1493
 "src/services/discord/turn_bridge/terminal_delivery.rs" = 1341
-"src/services/discord/turn_finalizer.rs" = 1327
+"src/services/discord/turn_finalizer.rs" = 1530
 "src/services/discord/router/message_handler/headless_turn.rs" = 1316
 "src/services/discord/commands/config.rs" = 1054
 "src/services/discord/commands/diagnostics.rs" = 1026
