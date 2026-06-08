@@ -83,6 +83,11 @@ pub struct SweepReport {
     /// #3231 (A): flat-root dirs that had no owner but were SKIPPED because their
     /// name did not match the runtime naming whitelist (manual dev worktrees).
     pub protected_unmatched: u64,
+    /// #3231 (codex re-review, TOCTOU): managed worktrees that had no owner but
+    /// were SKIPPED because they were created too recently (within
+    /// [`MANAGED_FRESH_PROVISION_MIN_AGE`]) — i.e. possibly still inside the
+    /// dispatch-create create→insert race window before their owning row landed.
+    pub protected_fresh: u64,
 }
 
 pub async fn run(config: Config, pg_pool: Option<PgPool>) -> Result<()> {
@@ -100,6 +105,7 @@ pub async fn run(config: Config, pg_pool: Option<PgPool>) -> Result<()> {
         managed_scanned = report.managed_scanned,
         managed_removed = report.managed_removed,
         protected_unmatched = report.protected_unmatched,
+        protected_fresh = report.protected_fresh,
         dry_run = config.dry_run,
         "worktree_orphan_sweep completed"
     );
@@ -329,6 +335,23 @@ async fn sweep_managed_root(
         if !should_sweep_worktree(&wt_path, active_cwds, Some(live_tmux_paths)) {
             continue;
         }
+
+        // #3231 (codex re-review, TOCTOU): the keep-set snapshot was built once at
+        // the start of `run_inner`, but dispatch creation provisions a managed
+        // worktree BEFORE it commits the owning `task_dispatches` row (see
+        // `crate::dispatch::dispatch_create`). If the snapshot was taken inside that
+        // create→insert window, a just-provisioned clean/merged worktree is in no
+        // keep-set source and has no live tmux owner yet — so the checks above
+        // would (wrongly) select it for deletion. A creation-age floor closes the
+        // window: a worktree younger than `MANAGED_FRESH_PROVISION_MIN_AGE` is
+        // protected regardless of owner, because its row may simply not have landed
+        // yet. The far cancel-leak backstop below still applies to genuinely old
+        // leftovers. Fail-closed toward KEEP. See [`is_freshly_provisioned`].
+        if is_freshly_provisioned(&wt_path, MANAGED_FRESH_PROVISION_MIN_AGE) {
+            report.protected_fresh = report.protected_fresh.saturating_add(1);
+            continue;
+        }
+
         report.orphan_count = report.orphan_count.saturating_add(1);
 
         if config.dry_run {
@@ -579,6 +602,25 @@ pub(crate) fn path_equals_or_nested_under(candidate: &str, dir: &str) -> bool {
 const MANAGED_CANCEL_LEAK_BACKSTOP: std::time::Duration =
     std::time::Duration::from_secs(60 * 60 * 24); // 24h
 
+/// #3231 (codex re-review, TOCTOU): minimum age a managed worktree must reach
+/// before the recursive managed-root pass may delete it. Closes the create→insert
+/// race in dispatch creation: [`crate::dispatch::dispatch_create`] provisions the
+/// worktree FIRST (`ensure_card_worktree`) and only commits the owning
+/// `task_dispatches` row a moment LATER. If the hourly sweep's keep-set snapshot is
+/// taken inside that window, the just-provisioned clean/merged worktree is in NO
+/// keep-set source and has NO live tmux owner yet, so the managed pass would delete
+/// it out from under the in-flight dispatch. The row lands within seconds of
+/// creation, so a generous 30-minute floor guarantees the window has closed before
+/// any managed worktree becomes a delete candidate — fail-closed toward KEEP.
+///
+/// This is a CREATION-age floor, deliberately NOT an idle gate: a fresh managed
+/// worktree may be actively building (heavy `target/` churn) and then fall idle
+/// the instant the build finishes — possibly still before the row lands — so an
+/// idle/mtime-quiescence signal could mis-classify it as collectable. "Created
+/// recently" is the only signal that reliably protects the whole window.
+const MANAGED_FRESH_PROVISION_MIN_AGE: std::time::Duration =
+    std::time::Duration::from_secs(60 * 30); // 30m
+
 /// #3231 (A): true when the worktree dir name matches the runtime per-channel
 /// naming the AgentDesk runtime actually creates — `{provider}-…` flat-root dirs
 /// (`create_git_worktree`: `claude-…` / `codex-…`, branch `wt/<provider>-…`).
@@ -636,6 +678,40 @@ fn is_old_enough(dir: &Path, min_age: std::time::Duration) -> bool {
         .elapsed()
         .map(|elapsed| elapsed >= min_age)
         .unwrap_or(false)
+}
+
+/// #3231 (codex re-review, TOCTOU): true when `dir` was created too recently to be
+/// a safe delete candidate — i.e. it may still be inside the dispatch-create
+/// create→insert window (see [`MANAGED_FRESH_PROVISION_MIN_AGE`]). Used by the
+/// managed-root pass to PROTECT a just-provisioned worktree whose owning
+/// `task_dispatches` row has not yet been committed to (or become visible in) the
+/// keep-set snapshot.
+///
+/// Age is read from the directory's CREATION time (`created()`), falling back to
+/// its modification time when the platform/FS does not expose a birth time. Unlike
+/// [`is_old_enough`] (which fails toward "do not delete" by returning `false` on an
+/// unreadable timestamp), this gate is biased toward PROTECTION: if the age cannot
+/// be determined at all, the worktree is treated AS IF freshly provisioned
+/// (`true`) so an indeterminate timestamp never licenses a delete inside the race
+/// window. "Doubtful → KEEP."
+fn is_freshly_provisioned(dir: &Path, min_age: std::time::Duration) -> bool {
+    let Ok(metadata) = dir.metadata() else {
+        // Cannot stat the dir at all → assume fresh and protect it.
+        return true;
+    };
+    // Prefer the birth time; fall back to mtime where `created()` is unsupported.
+    let created = metadata.created().or_else(|_| metadata.modified());
+    let Ok(created) = created else {
+        return true;
+    };
+    match created.elapsed() {
+        // Younger than the floor (or a future-dated clock skew gave a tiny/zero
+        // elapsed) → still inside the window → protect.
+        Ok(elapsed) => elapsed < min_age,
+        // `elapsed()` errors when the timestamp is in the FUTURE (clock skew) →
+        // by definition not old enough → protect.
+        Err(_) => true,
+    }
 }
 
 /// A worktree dir is "active" if ANY session cwd equals it or is nested under
@@ -1646,5 +1722,110 @@ mod keep_set_query_failure_fail_closed_tests {
         );
 
         pg_db.drop().await;
+    }
+}
+
+#[cfg(test)]
+mod fresh_provision_toctou_tests {
+    //! #3231 (codex re-review, TOCTOU): the keep-set snapshot is built once at the
+    //! start of the run, but dispatch creation provisions a managed worktree BEFORE
+    //! it commits the owning `task_dispatches` row. A snapshot taken inside that
+    //! create→insert window sees a just-provisioned clean/merged worktree with NO
+    //! keep-set owner and NO live tmux pane — the managed pass would delete it out
+    //! from under the in-flight dispatch.
+    //!
+    //! The fix is a creation-age floor (`MANAGED_FRESH_PROVISION_MIN_AGE`): a
+    //! managed worktree younger than the floor is PROTECTED regardless of owner.
+    //! These tests prove (a) a too-young managed worktree is SKIPPED even with no
+    //! owner and a successful (zero-pane) tmux query, and exercise the pure age
+    //! predicate at the boundaries. The "sufficiently old terminal managed worktree
+    //! is still removed" guarantee is covered by
+    //! `managed_root_recursion_tests::terminal_managed_worktree_is_swept_via_recursion`
+    //! plus the `min_age == ZERO` boundary case below (a real dir clears a zero
+    //! floor, so the gate does not block deletion of old-enough worktrees).
+    use super::{
+        Config, MANAGED_FRESH_PROVISION_MIN_AGE, SweepReport, is_freshly_provisioned,
+        sweep_managed_root,
+    };
+    use std::collections::HashSet;
+
+    #[test]
+    fn just_created_dir_is_protected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("fresh");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Created microseconds ago → well under the 30m floor → protected.
+        assert!(
+            is_freshly_provisioned(&dir, MANAGED_FRESH_PROVISION_MIN_AGE),
+            "a just-created worktree must be treated as freshly provisioned"
+        );
+    }
+
+    #[test]
+    fn zero_floor_never_protects_an_existing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("any");
+        std::fs::create_dir_all(&dir).unwrap();
+        // With a ZERO floor a real (non-future) dir is always "old enough" → NOT
+        // protected → the gate does not block deletion of sufficiently-aged trees.
+        assert!(
+            !is_freshly_provisioned(&dir, std::time::Duration::ZERO),
+            "a zero min-age floor must never protect an existing dir"
+        );
+    }
+
+    #[test]
+    fn unstatable_path_is_protected() {
+        // A path we cannot stat at all (does not exist) must fail-closed toward
+        // protection — an indeterminate age must never license a delete.
+        let missing = std::path::Path::new("/nonexistent/worktree/path/xyz");
+        assert!(
+            is_freshly_provisioned(missing, MANAGED_FRESH_PROVISION_MIN_AGE),
+            "an unstatable path must be treated as freshly provisioned (KEEP)"
+        );
+    }
+
+    /// (a) End-to-end: a freshly-created managed worktree with NO owner and a
+    /// successful (zero-pane) tmux query is SKIPPED by the managed recursion —
+    /// `protected_fresh` is incremented and nothing is removed. This is the exact
+    /// TOCTOU scenario: the worktree exists on disk but its owning dispatch row has
+    /// not yet landed in the keep-set snapshot (here: empty keep-sets).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fresh_managed_worktree_with_no_owner_is_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        // managed root = worktrees/<repo>/ ; create a child dir that looks like a
+        // just-provisioned managed worktree (created now → inside the floor).
+        let managed_root = tmp.path().join("worktrees").join("agentdesk");
+        let wt = managed_root.join("issue-9999-fresh");
+        std::fs::create_dir_all(&wt).unwrap();
+
+        // Empty keep-sets (the row has not landed) + a SUCCESSFUL tmux query with
+        // zero panes — so the owner gate alone would select the worktree for sweep.
+        let kept: HashSet<String> = HashSet::new();
+        let live: HashSet<String> = HashSet::new();
+        let config = Config {
+            worktrees_root: tmp.path().join("worktrees"),
+            dry_run: false,
+        };
+        let mut report = SweepReport::default();
+
+        sweep_managed_root(&managed_root, &kept, &live, &config, &mut report).await;
+
+        assert_eq!(
+            report.protected_fresh, 1,
+            "a too-young managed worktree must be protected by the age floor"
+        );
+        assert_eq!(
+            report.managed_removed, 0,
+            "a freshly-provisioned managed worktree must never be removed"
+        );
+        assert_eq!(
+            report.orphan_count, 0,
+            "a protected-fresh worktree must not even be counted as an orphan"
+        );
+        assert!(
+            wt.exists(),
+            "the freshly-provisioned worktree dir must survive the sweep (TOCTOU)"
+        );
     }
 }
