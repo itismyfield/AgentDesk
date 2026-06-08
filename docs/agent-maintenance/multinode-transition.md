@@ -517,3 +517,13 @@
   each host only provisions worktrees under its own root, so the sweep never sees
   another node's directories. If worktree roots ever become shared storage, the
   live-owner check would need to fan out cross-node.)
+- #3037 (backflow hotfile re-point): `tmux_watcher.rs` changed by a **pure import
+  path correction** — the single `global_monitoring_store()` call in the
+  suppressed-placeholder monitor-entry-key snapshot now resolves the function via
+  its canonical service home (`crate::services::monitoring_store::*`) instead of
+  the `crate::server::routes::state::*` compatibility facade (which re-exports the
+  same symbol). The resolved function, the per-node in-memory `MonitoringStore`,
+  and every call argument are **byte-identical**; the store remains
+  **process-local** (one in-memory `Arc<Mutex<MonitoringStore>>` per node, no PG
+  lease, no durable queue, no leader-only side effect). No behavior, ownership,
+  singleton, or lease assumption changes — this is a layering/import fix only.

@@ -10302,7 +10302,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 task_notification_kind,
                 Some(TaskNotificationKind::MonitorAutoTurn)
             ) {
-                let store_arc = crate::server::routes::state::global_monitoring_store();
+                let store_arc = crate::services::monitoring_store::global_monitoring_store();
                 let store = store_arc.lock().await;
                 store
                     .list(channel_id.get())
