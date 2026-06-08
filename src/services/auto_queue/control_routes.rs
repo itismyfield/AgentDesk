@@ -467,9 +467,8 @@ pub async fn repair_phase_gates(
         return pg_unavailable_response();
     };
 
-    caller.verify(
-        crate::server::routes::kanban::resolve_requesting_agent_id_with_pg(pool, &headers).await,
-    );
+    caller
+        .verify(crate::services::kanban::resolve_requesting_agent_id_with_pg(pool, &headers).await);
 
     // #2257 concern 5: Stripe-style idempotency-key handling. When the
     // caller passes an `Idempotency-Key` header we claim the slot and

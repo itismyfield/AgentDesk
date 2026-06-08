@@ -6,7 +6,6 @@ use axum::{
 
 use super::AppState;
 
-pub use crate::db::dispatched_sessions::gc_stale_fixed_working_sessions_db_pg;
 pub(crate) use crate::services::dispatched_sessions::force_kill_session_impl_with_reason;
 pub use crate::services::dispatched_sessions::{
     DeleteSessionQuery, ForceKillOptions, HookSessionBody, KillTmuxOptions,

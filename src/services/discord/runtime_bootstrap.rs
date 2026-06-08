@@ -2855,9 +2855,7 @@ async fn gc_stale_fixed_working_sessions(shared: &Arc<SharedData>) {
     let Some(pool) = shared.pg_pool.as_ref() else {
         return;
     };
-    let cleared =
-        crate::server::routes::dispatched_sessions::gc_stale_fixed_working_sessions_db_pg(pool)
-            .await;
+    let cleared = crate::db::dispatched_sessions::gc_stale_fixed_working_sessions_db_pg(pool).await;
 
     if cleared > 0 {
         let ts = chrono::Local::now().format("%H:%M:%S");

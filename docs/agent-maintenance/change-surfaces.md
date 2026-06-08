@@ -649,10 +649,13 @@
     `finalize_stale_streaming_footer` / `text_ends_with_streaming_footer` shared
     terminal-idle reconciliation helpers + their unit tests).
   - `src/services/discord/prompt_builder/` (directory, refactored).
-  - `src/services/discord/runtime_bootstrap.rs` (2800 lines after #2558
+  - `src/services/discord/runtime_bootstrap.rs` (2798 lines after #2558
     thread-session GC loopback shim cleanup; +3 from #3082 answer-flush-barrier
     field in the SharedData constructor; +1 from #3037 cluster backflow path
-    rewrite wrapping a longer `services::cluster::node_registry::*` call; +3 from
+    rewrite wrapping a longer `services::cluster::node_registry::*` call; -2 from
+    #3037 backflow batch rewriting the stale-facade
+    `crate::db::dispatched_sessions::gc_stale_fixed_working_sessions_db_pg` call
+    on one line; +3 from
     #3078 PR-1 spawning the dormant `StatusPanelController` next to the finalizer
     in the SharedData constructor; +194 from #3038 behavior-preserving
     decomposition of the `run_bot` god-function — `run_bot`'s own body dropped
@@ -730,7 +733,10 @@
 - legacy_modules: none, but several routes still call `legacy_db()` against
   the SQLite compat handle (see `known-legacy.md`).
 - do_not_edit_without_migration_plan (giant-file routes):
-  - `src/server/routes/kanban.rs` (2752 lines).
+  - `src/server/routes/kanban.rs` (2676 lines after #3037 backflow batch
+    relocated the `require_explicit_bearer_token` /
+    `resolve_requesting_agent_id_with_pg` auth/identity helpers to
+    `crate::services::kanban`).
   - `src/server/routes/docs.rs` (5880 lines).
   - `src/server/routes/escalation.rs` (1456 lines).
   - `src/server/routes/meetings.rs` (1708 lines).

@@ -3,22 +3,13 @@
   "rule": "service_server_backflow",
   "description": "No-regression baseline for src/services references to crate::server or super::server server-layer modules.",
   "captured_at": "2026-06-08",
-  "total_count": 31,
+  "total_count": 25,
   "files": {
-    "src/services/auto_queue/control_routes.rs": {
-      "count": 1
-    },
-    "src/services/auto_queue/order_routes.rs": {
-      "count": 2
-    },
     "src/services/auto_queue/phase_gate_violations.rs": {
       "count": 1
     },
     "src/services/auto_queue/route.rs": {
       "count": 1
-    },
-    "src/services/discord/adk_session.rs": {
-      "count": 2
     },
     "src/services/discord/internal_api.rs": {
       "count": 1
@@ -30,7 +21,7 @@
       "count": 1
     },
     "src/services/discord/runtime_bootstrap.rs": {
-      "count": 2
+      "count": 1
     },
     "src/services/discord/tmux_watcher.rs": {
       "count": 1
