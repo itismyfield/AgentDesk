@@ -284,13 +284,70 @@ def split_raw_string_start(text: str, index: int) -> tuple[int, int] | None:
     return None
 
 
+def char_literal_length(text: str, index: int) -> int | None:
+    """Return the length of a Rust char literal starting at ``index``.
+
+    ``text[index]`` is assumed to be ``'``. Returns the number of characters
+    that make up a genuine char literal (e.g. ``'a'`` -> 3, ``'\\n'`` -> 4,
+    ``'\\u{1F600}'`` -> the full escape) or ``None`` when the ``'`` actually
+    begins a lifetime (``'a``, ``'static``, ``'_``) rather than a char literal.
+
+    Distinguishing the two matters because a lifetime is *not* terminated by a
+    closing quote; treating it as a char literal makes the scanner swallow
+    everything up to the next stray ``'`` and corrupts brace balancing (#3028).
+    """
+
+    end = len(text)
+    if index >= end or text[index] != "'":
+        return None
+    body = index + 1
+    if body >= end:
+        return None
+    if text[body] == "\\":
+        # Escaped char literal (``'\n'``, ``'\\'``, ``'\''``, ``'\x41'``,
+        # ``'\u{1F600}'`` ...). First fully consume the escape sequence that
+        # follows the backslash, *then* require the closing quote. Consuming
+        # the escape is what makes ``'\''`` (escaped quote) and ``'\\'``
+        # (escaped backslash) parse correctly: the first char after ``\`` is
+        # part of the escape and must never be mistaken for the terminator.
+        cursor = body + 1  # first char of the escape sequence
+        if cursor >= end:
+            return None
+        esc = text[cursor]
+        if esc == "\n":
+            return None
+        if esc == "x":
+            # ``\xNN`` -- two hex digits.
+            cursor += 1 + 2
+        elif esc == "u":
+            # ``\u{...}`` -- braced hex escape.
+            cursor += 1
+            if cursor >= end or text[cursor] != "{":
+                return None
+            close = text.find("}", cursor)
+            if close == -1:
+                return None
+            cursor = close + 1
+        else:
+            # Simple single-char escape: ``\n \t \r \\ \' \" \0`` etc.
+            cursor += 1
+        # The closing quote must immediately follow the escape sequence.
+        if cursor < end and text[cursor] == "'":
+            return cursor - index + 1
+        return None
+    # Non-escaped: a char literal holds exactly one char then a closing quote.
+    if body + 1 < end and text[body + 1] == "'":
+        return 3
+    # Otherwise this is a lifetime (``'a``, ``'static`` ...), not a char.
+    return None
+
+
 def scan_balanced(text: str, open_index: int, open_char: str = "(", close_char: str = ")") -> tuple[str, int]:
     if text[open_index] != open_char:
         raise ParseError(f"expected {open_char!r} at offset {open_index}")
     depth = 0
     index = open_index
     in_string = False
-    in_char = False
     escape = False
     raw_hashes: int | None = None
     line_comment = False
@@ -339,25 +396,27 @@ def scan_balanced(text: str, open_index: int, open_char: str = "(", close_char: 
             index += 1
             continue
 
-        if in_char:
-            if escape:
-                escape = False
-                index += 1
-                continue
-            if ch == "\\":
-                escape = True
-                index += 1
-                continue
-            if ch == "'":
-                in_char = False
-            index += 1
-            continue
-
         raw_start = split_raw_string_start(text, index)
         if raw_start is not None:
             index, raw_hashes = raw_start
             in_string = True
             continue
+        # Byte-string / raw-byte-string / byte-char literals: b"..", br#".."#, b'x'.
+        if ch == "b" and index + 1 < len(text):
+            byte_raw = split_raw_string_start(text, index + 1)
+            if byte_raw is not None:
+                index, raw_hashes = byte_raw
+                in_string = True
+                continue
+            if text[index + 1] == '"':
+                in_string = True
+                index += 2
+                continue
+            if text[index + 1] == "'":
+                byte_len = char_literal_length(text, index + 1)
+                if byte_len is not None:
+                    index += 1 + byte_len
+                    continue
         if text.startswith("//", index):
             line_comment = True
             index += 2
@@ -371,7 +430,11 @@ def scan_balanced(text: str, open_index: int, open_char: str = "(", close_char: 
             index += 1
             continue
         if ch == "'":
-            in_char = True
+            char_len = char_literal_length(text, index)
+            if char_len is not None:
+                index += char_len
+                continue
+            # Lifetime (``'a``, ``'static`` ...): skip only the quote.
             index += 1
             continue
         if ch == open_char:
@@ -392,7 +455,6 @@ def split_top_level(text: str, delimiter: str = ",", maxsplit: int = 1) -> list[
     depth_bracket = 0
     index = 0
     in_string = False
-    in_char = False
     escape = False
     raw_hashes: int | None = None
     line_comment = False
@@ -442,25 +504,27 @@ def split_top_level(text: str, delimiter: str = ",", maxsplit: int = 1) -> list[
             index += 1
             continue
 
-        if in_char:
-            if escape:
-                escape = False
-                index += 1
-                continue
-            if ch == "\\":
-                escape = True
-                index += 1
-                continue
-            if ch == "'":
-                in_char = False
-            index += 1
-            continue
-
         raw_start = split_raw_string_start(text, index)
         if raw_start is not None:
             index, raw_hashes = raw_start
             in_string = True
             continue
+        # Byte-string / raw-byte-string / byte-char literals: b"..", br#".."#, b'x'.
+        if ch == "b" and index + 1 < len(text):
+            byte_raw = split_raw_string_start(text, index + 1)
+            if byte_raw is not None:
+                index, raw_hashes = byte_raw
+                in_string = True
+                continue
+            if text[index + 1] == '"':
+                in_string = True
+                index += 2
+                continue
+            if text[index + 1] == "'":
+                byte_len = char_literal_length(text, index + 1)
+                if byte_len is not None:
+                    index += 1 + byte_len
+                    continue
         if text.startswith("//", index):
             line_comment = True
             index += 2
@@ -474,7 +538,11 @@ def split_top_level(text: str, delimiter: str = ",", maxsplit: int = 1) -> list[
             index += 1
             continue
         if ch == "'":
-            in_char = True
+            char_len = char_literal_length(text, index)
+            if char_len is not None:
+                index += char_len
+                continue
+            # Lifetime (``'a``, ``'static`` ...): skip only the quote.
             index += 1
             continue
         if ch == "(":
