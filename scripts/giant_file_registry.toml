@@ -160,7 +160,6 @@ grandfathered = [
   "src/server/routes/agents.rs",
   "src/server/routes/agents_crud.rs",
   "src/server/routes/agents_setup.rs",
-  "src/server/routes/dispatches/thread_reuse.rs",
   "src/server/routes/docs.rs",
   "src/server/routes/escalation.rs",
   "src/server/routes/health_api.rs",

@@ -741,8 +741,10 @@
   - `src/server/routes/escalation.rs` (1456 lines).
   - `src/server/routes/meetings.rs` (1708 lines).
   - `src/server/routes/review_verdict/decision_route.rs` (4404 lines).
-  - `src/server/routes/{agents,agents_crud,agents_setup,v1,resume,
-    dispatches/thread_reuse}.rs` (all 1000+ production lines).
+  - `src/server/routes/{agents,agents_crud,agents_setup,v1,resume}.rs` (all
+    1000+ production lines). (`dispatches/thread_reuse.rs` dropped below the
+    giant threshold in #3037 after its Postgres/Discord-API thread-map helpers
+    were relocated to `services/dispatches/discord_delivery/thread_reuse.rs`.)
 - active_callsite_coverage: legacy_db helper coverage tracked separately —
   see `known-legacy.md` row `legacy_db_helper`.
 - invariants:

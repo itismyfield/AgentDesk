@@ -399,7 +399,7 @@ pub(in crate::services::discord) async fn collect_live_queue_message_ids(
 fn spawn_startup_thread_map_validation(pg_pool: Option<sqlx::PgPool>, token: String) {
     tokio::spawn(async move {
         let (checked, cleared) =
-            crate::server::routes::dispatches::validate_channel_thread_maps_on_startup_with_backends(
+            crate::services::dispatches::discord_delivery::validate_channel_thread_maps_on_startup_with_backends(
                 None,
                 pg_pool.as_ref(),
                 &token,

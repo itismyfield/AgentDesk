@@ -537,3 +537,22 @@
   **process-local** (one in-memory `Arc<Mutex<MonitoringStore>>` per node, no PG
   lease, no durable queue, no leader-only side effect). No behavior, ownership,
   singleton, or lease assumption changes — this is a layering/import fix only.
+- #3037 (thread_reuse backflow relocation): the Postgres/Discord-API thread-map
+  helpers (`get_thread_for_channel_pg`, `get_mapped_thread_for_channel_pg`,
+  `set_thread_for_channel_pg`, `set_thread_for_channel_map_only_pg`,
+  `clear_thread_for_channel_pg`, `try_reuse_thread`, and
+  `validate_channel_thread_maps_on_startup_with_backends`) were moved by a
+  **pure, behavior-preserving relocation** from
+  `server/routes/dispatches/thread_reuse.rs` into the new
+  `services/dispatches/discord_delivery/thread_reuse.rs`; the axum route handlers
+  (`get_card_thread`, `link_dispatch_thread`, `get_pending_dispatch_for_thread`)
+  stay in the route layer and now consume the relocated helpers. `runtime_bootstrap.rs`
+  changed only by re-pointing its startup thread-map validation call from the
+  `crate::server::routes::dispatches::*` facade to the relocated
+  `crate::services::dispatches::discord_delivery::*` home with **byte-identical**
+  arguments. The thread-map state these helpers read/write is the per-card
+  `kanban_cards.channel_thread_map`/`active_thread_id` columns in **shared
+  Postgres** — already authoritative and node-agnostic — and every SQL statement,
+  Discord-API probe, and clear/reuse decision is unchanged. No new multinode
+  ownership, singleton, or lease assumption is introduced; this is a layering/move
+  fix only.

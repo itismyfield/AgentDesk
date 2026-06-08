@@ -1,3 +1,7 @@
+use super::thread_reuse::{
+    clear_thread_for_channel_pg, get_thread_for_channel_pg, set_thread_for_channel_map_only_pg,
+    set_thread_for_channel_pg, try_reuse_thread,
+};
 use super::{
     DispatchNotifyDeliveryResult, DispatchTransport, ReviewFollowupKind,
     archive_duplicate_slot_threads, maybe_add_owner_to_dispatch_thread,
@@ -6,10 +10,6 @@ use super::{
 };
 use crate::db::dispatches::{
     CardIssueInfo, DispatchDeliveryMetadata, SlotThreadBinding, dispatch_context_value,
-};
-use crate::server::routes::dispatches::thread_reuse::{
-    clear_thread_for_channel_pg, get_thread_for_channel_pg, set_thread_for_channel_map_only_pg,
-    set_thread_for_channel_pg, try_reuse_thread,
 };
 use crate::services::dispatches::outbox_route::resolve_channel_alias;
 use crate::services::dispatches::outbox_route::{
