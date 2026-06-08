@@ -36,7 +36,7 @@
 "src/services/discord/runtime_bootstrap.rs" = 2800
 "src/services/discord/health/recovery.rs" = 2655
 "src/services/discord/inflight.rs" = 2466
-"src/services/discord/health.rs" = 2369
+"src/services/discord/health.rs" = 2293
 "src/services/discord/watchers/lifecycle.rs" = 2333
 "src/services/discord/idle_recap.rs" = 1319
 "src/services/discord/tmux.rs" = 2241

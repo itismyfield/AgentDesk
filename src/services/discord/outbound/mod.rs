@@ -12,6 +12,7 @@ pub(crate) mod delivery;
 pub(crate) mod message;
 pub(crate) mod policy;
 pub(crate) mod result;
+pub(crate) mod send_to_agent;
 mod transport;
 
 pub(crate) use decision::{

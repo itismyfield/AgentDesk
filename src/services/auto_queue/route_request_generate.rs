@@ -93,13 +93,14 @@ pub async fn request_generate(
         "mode": "announce",
     })
     .to_string();
-    let (status_str, response_body) = crate::services::discord::health::handle_send_to_agent(
-        registry,
-        None,
-        state.pg_pool_ref(),
-        &send_body,
-    )
-    .await;
+    let (status_str, response_body) =
+        crate::services::discord::outbound::send_to_agent::handle_send_to_agent(
+            registry,
+            None,
+            state.pg_pool_ref(),
+            &send_body,
+        )
+        .await;
 
     let send_json: serde_json::Value = serde_json::from_str(&response_body)
         .unwrap_or_else(|_| json!({"ok": false, "error": "internal"}));

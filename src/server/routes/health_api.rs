@@ -1409,7 +1409,13 @@ pub async fn send_to_agent_handler(
 
     let body_str = String::from_utf8_lossy(&body);
     let (status_str, response_body) =
-        health::handle_send_to_agent(registry, None, state.pg_pool_ref(), &body_str).await;
+        crate::services::discord::outbound::send_to_agent::handle_send_to_agent(
+            registry,
+            None,
+            state.pg_pool_ref(),
+            &body_str,
+        )
+        .await;
     let status = parse_status_code(status_str);
     let json: serde_json::Value =
         serde_json::from_str(&response_body).unwrap_or(serde_json::json!({"error": "internal"}));
