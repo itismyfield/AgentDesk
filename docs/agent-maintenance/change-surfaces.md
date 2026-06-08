@@ -130,7 +130,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (9584 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (9631 lines after #2558
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
     refresh + #3087 session-instance-key panel reset + #3095 durable
@@ -382,21 +382,30 @@
     disk → atomic clear is a no-op (follow-up preserved); the pinned turn on disk →
     atomic clear removes it (happy path).
     -24 from #3016 phase-5b1: REPLACE the watcher fresh-idle `Unknown` (non-JSONL
-    runtime) `mailbox_finalize_owed`-flag CONSUMER with a flag-independent prompt
-    finalize. `watcher_fresh_idle_finalize_decision` now routes `Unknown` to the
-    SAME `Finalize` arm as `Done` (the fresh-idle gate already PROVES pane idle via
+    runtime) `mailbox_finalize_owed`-flag CONSUMER with a flag-independent decision.
+    +47 from #3016 phase-5b1 codex HIGH fix: re-key the `Unknown` routing on response
+    EMPTINESS (NOT the flag, NOT unconditionally), restoring the OLD (pre-5b1) defer
+    behaviour flag-independently. `watcher_fresh_idle_finalize_decision` now routes a
+    NON-empty `Unknown` to the `Finalize` arm (prompt, flag-independent — the intended
+    5b1 improvement: the fresh-idle gate already PROVES pane idle via
     `watcher_session_ready_for_input` — the SAME `pane_ready_fallback_allowed &&
     tmux_session_ready_for_input` predicate the 5a far-backstop uses for `Unknown`),
-    so an empty `Unknown` completion finalizes PROMPTLY on this pass instead of
-    waiting for the 1800s far-backstop — behaviour-equivalent to the old flag (owed
-    ~always true here) minus the latency, with the paused-live + paused/epoch +
-    stale-for-newer-turn race guards kept exactly. The defer gate now defers ONLY
-    `PausedLive`; the `delegated_finalize_owed` load and the
-    `watcher_should_defer_delegated_fresh_idle` helper (+ its test) are removed, and
-    the now-unreachable `LegacyFlagGated` exec arm is a defensive preserve-inflight
-    no-op (the `mailbox_finalize_owed` field/producers are removed in phase-5b2).
-    New tests `fresh_idle_done_and_unknown_finalize_promptly_flag_independent`
-    (regression: empty `Unknown` finalizes promptly, no flag) +
+    but an EMPTY `Unknown` → new `DeferEmptyUnknown` (preserve inflight). Rationale:
+    non-JSONL runtimes (Gemini / OpenCode / Qwen / LegacyTmuxWrapper) have NO
+    structured `PausedLive` signal, so a turn awaiting a selector / permission /
+    interactive prompt can look pane-idle with empty output; finalizing it here would
+    kill the turn mid-work. Deferring on emptiness reconstructs the OLD
+    `delegated_finalize_owed && empty → defer` gate without the flag (`owed` was
+    ~always true for a delegated `Unknown`), and the 5a 1800s far-backstop remains its
+    finalizer. The defer gate (tmux_watcher.rs ~7657) likewise defers `PausedLive` and
+    EMPTY `Unknown`; `Done` (JSONL terminator) finalizes even when empty; the
+    paused/epoch abort + stale-for-newer-turn skip race guards are kept exactly on
+    both finalize arms. The now-unreachable `LegacyFlagGated` exec arm is a defensive
+    preserve-inflight no-op (the `mailbox_finalize_owed` field/producers are removed in
+    phase-5b2). Tests `fresh_idle_done_finalizes_and_unknown_routes_by_emptiness`
+    (Done finalizes even when empty; non-empty `Unknown` finalizes promptly,
+    flag-independent; EMPTY `Unknown` DEFERS — the codex HIGH regression case that the
+    prior 5b1 build finalized prematurely) +
     `fresh_idle_unknown_keeps_wrong_turn_race_guards`.
   - `src/services/discord/tui_prompt_relay.rs` (5144 lines; SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
