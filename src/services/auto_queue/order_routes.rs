@@ -86,7 +86,7 @@ pub(super) async fn submit_order_with_pg(
     pool: &sqlx::PgPool,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let caller_agent_id =
-        crate::server::routes::kanban::resolve_requesting_agent_id_with_pg(pool, headers).await;
+        crate::services::kanban::resolve_requesting_agent_id_with_pg(pool, headers).await;
     let run_row = match sqlx::query(
         "SELECT status, repo
          FROM auto_queue_runs
@@ -259,7 +259,7 @@ pub async fn submit_order(
     Json(body): Json<OrderBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if let Err(response) =
-        crate::server::routes::kanban::require_explicit_bearer_token(&headers, "submit_order")
+        crate::services::kanban::require_explicit_bearer_token(&headers, "submit_order")
     {
         return response;
     }

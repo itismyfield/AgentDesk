@@ -1775,87 +1775,11 @@ pub async fn pm_decision(
 }
 
 // ── Administrative review recovery helpers ───────────────────────
-
-// reason: legacy-sqlite parity wrapper keeping
-// `kanban_db::find_active_review_dispatch_id_on_conn` reachable from the test
-// backend; PG paths call the `_pg` variant directly. See #3034.
-
-fn trimmed_header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
-pub(crate) fn require_explicit_bearer_token(
-    headers: &HeaderMap,
-    operation: &str,
-) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    let config = crate::config::load_graceful();
-    if let Some(expected_token) = config.server.auth_token.as_deref() {
-        if !expected_token.is_empty() {
-            let provided = trimmed_header_value(headers, "authorization")
-                .and_then(|value| value.strip_prefix("Bearer "))
-                .map(str::trim);
-            if !provided
-                .map(|token| crate::utils::auth::constant_time_token_eq(expected_token, token))
-                .unwrap_or(false)
-            {
-                return Err((
-                    StatusCode::UNAUTHORIZED,
-                    Json(json!({"error": format!("{operation} requires explicit Bearer token")})),
-                ));
-            }
-        }
-    }
-
-    if let Some(expected_channel_id) = config
-        .kanban
-        .manager_channel_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        let provided_channel_id = trimmed_header_value(headers, "x-channel-id");
-        if provided_channel_id != Some(expected_channel_id) {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": format!("{operation} requires PMD channel authorization")})),
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-// reason: legacy-sqlite parity wrappers keeping
-// `kanban_db::resolve_agent_id_from_channel_id_on_conn` /
-// `resolve_existing_agent_id_on_conn` reachable from the test backend; PG paths
-// use the `_with_pg` variants below. See #3034.
-
-async fn resolve_agent_id_from_channel_id_with_pg(
-    pool: &sqlx::PgPool,
-    channel_id: &str,
-) -> Option<String> {
-    kanban_db::resolve_agent_id_from_channel_id_with_pg(pool, channel_id).await
-}
-
-pub(crate) async fn resolve_requesting_agent_id_with_pg(
-    pool: &sqlx::PgPool,
-    headers: &HeaderMap,
-) -> Option<String> {
-    if let Some(agent_id) = trimmed_header_value(headers, "x-agent-id") {
-        return kanban_db::resolve_existing_agent_id_with_pg(pool, agent_id)
-            .await
-            .or_else(|| Some(agent_id.to_string()));
-    }
-
-    match trimmed_header_value(headers, "x-channel-id") {
-        Some(channel_id) => resolve_agent_id_from_channel_id_with_pg(pool, channel_id).await,
-        None => None,
-    }
-}
+//
+// `require_explicit_bearer_token` / `resolve_requesting_agent_id_with_pg` were
+// relocated to `crate::services::kanban` (#3037 service→server backflow). Routes
+// below call them through the services facade.
+use crate::services::kanban::{require_explicit_bearer_token, resolve_requesting_agent_id_with_pg};
 
 /// POST /api/kanban-cards/:id/rereview
 ///

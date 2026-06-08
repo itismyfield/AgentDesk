@@ -159,3 +159,86 @@ impl KanbanService {
         })
     }
 }
+
+// ── Request auth / identity helpers ─────────────────────────────
+//
+// Relocated from `server/routes/kanban.rs` (#3037 service→server backflow).
+// These resolve the requesting agent and gate mutations behind the explicit
+// Bearer token. They depend only on config + db (lower layers), so they belong
+// in the services layer; server routes call them via `crate::services::kanban`.
+
+use axum::Json;
+use axum::http::{HeaderMap, StatusCode};
+use serde_json::json;
+
+fn trimmed_header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+pub(crate) fn require_explicit_bearer_token(
+    headers: &HeaderMap,
+    operation: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let config = crate::config::load_graceful();
+    if let Some(expected_token) = config.server.auth_token.as_deref() {
+        if !expected_token.is_empty() {
+            let provided = trimmed_header_value(headers, "authorization")
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .map(str::trim);
+            if !provided
+                .map(|token| crate::utils::auth::constant_time_token_eq(expected_token, token))
+                .unwrap_or(false)
+            {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": format!("{operation} requires explicit Bearer token")})),
+                ));
+            }
+        }
+    }
+
+    if let Some(expected_channel_id) = config
+        .kanban
+        .manager_channel_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let provided_channel_id = trimmed_header_value(headers, "x-channel-id");
+        if provided_channel_id != Some(expected_channel_id) {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": format!("{operation} requires PMD channel authorization")})),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+async fn resolve_agent_id_from_channel_id_with_pg(
+    pool: &PgPool,
+    channel_id: &str,
+) -> Option<String> {
+    crate::db::kanban_cards::resolve_agent_id_from_channel_id_with_pg(pool, channel_id).await
+}
+
+pub(crate) async fn resolve_requesting_agent_id_with_pg(
+    pool: &PgPool,
+    headers: &HeaderMap,
+) -> Option<String> {
+    if let Some(agent_id) = trimmed_header_value(headers, "x-agent-id") {
+        return crate::db::kanban_cards::resolve_existing_agent_id_with_pg(pool, agent_id)
+            .await
+            .or_else(|| Some(agent_id.to_string()));
+    }
+
+    match trimmed_header_value(headers, "x-channel-id") {
+        Some(channel_id) => resolve_agent_id_from_channel_id_with_pg(pool, channel_id).await,
+        None => None,
+    }
+}

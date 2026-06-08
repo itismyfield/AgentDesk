@@ -187,7 +187,7 @@ pub(super) async fn post_adk_session_status(
     };
     let status = crate::db::session_status::normalize_incoming_session_status(Some(status));
 
-    let body = crate::server::routes::dispatched_sessions::HookSessionBody {
+    let body = crate::services::dispatched_sessions::HookSessionBody {
         session_key: session_key.to_string(),
         instance_id: None,
         agent_id: agent_id.map(str::to_string),
@@ -252,7 +252,7 @@ pub(super) async fn save_provider_session_id(
     channel_id: serenity::ChannelId,
     _api_port: u16,
 ) {
-    let body = crate::server::routes::dispatched_sessions::HookSessionBody {
+    let body = crate::services::dispatched_sessions::HookSessionBody {
         session_key: session_key.to_string(),
         instance_id: None,
         agent_id: None,
