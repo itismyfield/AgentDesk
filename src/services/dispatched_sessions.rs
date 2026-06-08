@@ -130,13 +130,13 @@ async fn hook_session_pg(
             {
                 Ok(Some(payload)) => {
                     if is_new_session {
-                        crate::server::ws::emit_event(
+                        crate::eventbus::emit_event(
                             &state.broadcast_tx,
                             "dispatched_session_new",
                             payload,
                         );
                     } else {
-                        crate::server::ws::emit_batched_event(
+                        crate::eventbus::emit_batched_event(
                             &state.batch_buffer,
                             "dispatched_session_update",
                             &body.session_key,
@@ -161,7 +161,7 @@ async fn hook_session_pg(
                 .await
                 {
                     Ok(Some(agent)) => {
-                        crate::server::ws::emit_batched_event(
+                        crate::eventbus::emit_batched_event(
                             &state.batch_buffer,
                             "agent_status",
                             aid,
@@ -375,7 +375,7 @@ pub async fn delete_session(
         {
             Ok(result) => {
                 if let Some(session_id) = result.session_id {
-                    crate::server::ws::emit_event(
+                    crate::eventbus::emit_event(
                         &state.broadcast_tx,
                         "dispatched_session_disconnect",
                         json!({"id": session_id.to_string()}),
@@ -556,7 +556,7 @@ pub async fn update_dispatched_session(
             Ok(_) => {
                 match dispatched_sessions_db::load_session_update_payload_pg(pool, id).await {
                     Ok(Some(session)) => {
-                        crate::server::ws::emit_batched_event(
+                        crate::eventbus::emit_batched_event(
                             &state.batch_buffer,
                             "dispatched_session_update",
                             &id.to_string(),
