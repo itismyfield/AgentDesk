@@ -103,6 +103,7 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "bootstrap.rs": "Builds config, database, policy engine, and shared app state before launch.",
     "cli/": "Operator-facing CLI commands, direct API shims, migrations, and Discord send helpers.",
     "compat/": "Centralised home for compatibility/legacy/fallback shims (#1076). Each public item carries a `REMOVE_WHEN` comment so retirement is grep-driven.",
+    "app_state.rs": "Shared HTTP route-handler state (`AppState`); lives at crate root below server+services so service-layer handlers reference it without a service→server backflow.",
     "config.rs": "`agentdesk.yaml` parsing, configuration defaults, and shared test env helpers.",
     "credential.rs": "Reads runtime credential files such as Discord bot tokens from the AgentDesk root.",
     "db/": "SQLite access layer and schema authority (`src/db/schema.rs`).",

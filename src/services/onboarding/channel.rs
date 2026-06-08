@@ -9,7 +9,7 @@ use axum::{Json, http::StatusCode};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::server::routes::AppState;
+use crate::app_state::AppState;
 
 use super::{load_onboarding_config, pg_kv_value};
 

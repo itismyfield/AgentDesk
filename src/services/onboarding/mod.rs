@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::server::routes::AppState;
+use crate::app_state::AppState;
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const ONBOARDING_DRAFT_VERSION: u8 = 1;

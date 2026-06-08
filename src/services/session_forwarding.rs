@@ -8,7 +8,7 @@ use reqwest::header::HeaderValue;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
-use crate::server::routes::AppState;
+use crate::app_state::AppState;
 
 const FORWARDED_BY_HEADER: &str = "x-agentdesk-forwarded-by";
 const SESSION_OWNER_HEADER: &str = "x-agentdesk-session-owner";

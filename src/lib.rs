@@ -108,6 +108,9 @@ mod error;
 // services; lives at crate root to avoid a service→server backflow (#3037).
 mod eventbus;
 mod github;
+// Shared HTTP route handler state; lives at crate root (below server+services)
+// so service-layer handlers reference it without a service→server backflow (#3037).
+mod app_state;
 pub(crate) mod kanban;
 mod launch;
 mod logging;
