@@ -65,38 +65,11 @@ use crate::services::discord::health::HealthRegistry;
 
 /// Shared application state passed to all route handlers.
 ///
-#[derive(Clone)]
-pub struct AppState {
-    pub pg_pool: Option<sqlx::PgPool>,
-    pub engine: PolicyEngine,
-    pub config: Arc<crate::config::Config>,
-    pub broadcast_tx: crate::server::ws::BroadcastTx,
-    pub batch_buffer: crate::server::ws::BatchBuffer,
-    pub health_registry: Option<Arc<HealthRegistry>>,
-    pub cluster_instance_id: Option<String>,
-}
-
-impl AppState {
-    pub fn pg_pool_ref(&self) -> Option<&sqlx::PgPool> {
-        self.pg_pool.as_ref()
-    }
-
-    pub fn dispatch_service(&self) -> crate::services::dispatches::DispatchService {
-        crate::services::dispatches::DispatchService::new(self.engine.clone())
-    }
-
-    pub fn auto_queue_service(&self) -> crate::services::auto_queue::AutoQueueService {
-        crate::services::auto_queue::AutoQueueService::new(self.engine.clone())
-    }
-
-    pub fn queue_service(&self) -> crate::services::queue::QueueService {
-        crate::services::queue::QueueService::new(self.pg_pool.clone())
-    }
-
-    pub fn settings_service(&self) -> crate::services::settings::SettingsService {
-        crate::services::settings::SettingsService::new(self.pg_pool.clone(), self.config.clone())
-    }
-}
+/// Defined in `crate::app_state` (a crate-root module below both `server` and
+/// `services`) and re-exported here so existing `crate::server::routes::AppState`
+/// call sites resolve unchanged while service-layer handlers reference it without
+/// a service→server backflow (#3037).
+pub use crate::app_state::AppState;
 
 pub(crate) type ApiRouter = Router<AppState>;
 

@@ -22,7 +22,7 @@ use serde::Serialize;
 use serde_json::json;
 use sqlx::{PgPool, Row as SqlxRow};
 
-use crate::server::routes::AppState;
+use crate::app_state::AppState;
 
 /// A single observed ordering violation.
 #[derive(Debug, Clone, Serialize)]

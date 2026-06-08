@@ -10,7 +10,7 @@ use sqlx::{Postgres, QueryBuilder, Row as SqlxRow};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
-use crate::server::routes::AppState;
+use crate::app_state::AppState;
 use crate::services::{auto_queue::AutoQueueLogContext, provider::ProviderKind};
 
 #[path = "activate_bridge.rs"]

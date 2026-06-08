@@ -1,3 +1,4 @@
+use crate::app_state::AppState;
 use crate::db::dispatched_sessions as dispatched_sessions_db;
 use crate::db::session_agent_resolution::{
     normalize_thread_channel_id, parse_thread_channel_id_from_session_key,
@@ -6,7 +7,6 @@ use crate::db::session_agent_resolution::{
 use crate::db::session_status::{
     is_live_status, is_user_wait_status, normalize_incoming_session_status,
 };
-use crate::server::routes::AppState;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
 use axum::{
