@@ -311,7 +311,7 @@ pub(super) async fn submit_review_verdict(
 }
 
 pub(super) async fn upsert_meeting(
-    body: routes::meetings::UpsertMeetingBody,
+    body: crate::services::discord::meeting_artifact_store::UpsertMeetingBody,
 ) -> Result<Value, String> {
     request_body(Method::POST, "/api/round-table-meetings", &body).await
 }

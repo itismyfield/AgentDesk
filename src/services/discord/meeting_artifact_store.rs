@@ -15,6 +15,48 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+// ─── Round-table persistence request DTOs ──────────────────────────────────
+//
+// `MeetingEntryBody` / `UpsertMeetingBody` were previously defined in
+// `crate::server::routes::meetings`, which forced the service-layer producers
+// (`meeting_orchestrator`, `internal_api`) to reach back into the server layer
+// for the request shape they themselves construct (#3037 service→server
+// backflow). They are pure serde payloads with no axum / `AppState` coupling,
+// so they now live beside the meeting service layer; the server route module
+// and the service-layer producers `use` them from here.
+
+/// Single round-table meeting entry posted back from the Discord runtime as
+/// part of an [`UpsertMeetingBody`].
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct MeetingEntryBody {
+    pub seq: Option<i64>,
+    pub round: Option<i64>,
+    pub speaker_role_id: Option<String>,
+    pub speaker_name: Option<String>,
+    pub content: Option<String>,
+    pub is_summary: Option<bool>,
+}
+
+/// Completed/cancelled meeting payload persisted via
+/// `POST /api/round-table-meetings`.
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct UpsertMeetingBody {
+    pub id: String,
+    pub channel_id: Option<String>,
+    pub agenda: Option<String>,
+    pub summary: Option<String>,
+    pub selection_reason: Option<String>,
+    pub status: Option<String>,
+    pub primary_provider: Option<String>,
+    pub reviewer_provider: Option<String>,
+    pub participant_names: Option<Vec<String>>,
+    pub total_rounds: Option<i64>,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub thread_id: Option<String>,
+    pub entries: Option<Vec<MeetingEntryBody>>,
+}
+
 /// Artifact category. Kept as a string slug (rather than an enum with a fixed
 /// set) so future kinds (action-items, decisions, follow-up tasks) can be
 /// added without a cross-module change.

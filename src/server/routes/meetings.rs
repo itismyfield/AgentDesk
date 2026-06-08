@@ -4,12 +4,13 @@ use axum::{
     http::StatusCode,
 };
 use poise::serenity_prelude::ChannelId;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use sqlx::{PgPool, Row};
 use std::collections::{HashMap, HashSet};
 
 use super::AppState;
+use crate::services::discord::meeting_artifact_store::UpsertMeetingBody;
 use crate::services::discord::{health, meeting, settings};
 use crate::services::provider::ProviderKind;
 
@@ -29,33 +30,10 @@ pub struct StartMeetingBody {
     pub fixed_participants: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct MeetingEntryBody {
-    pub seq: Option<i64>,
-    pub round: Option<i64>,
-    pub speaker_role_id: Option<String>,
-    pub speaker_name: Option<String>,
-    pub content: Option<String>,
-    pub is_summary: Option<bool>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct UpsertMeetingBody {
-    pub id: String,
-    pub channel_id: Option<String>,
-    pub agenda: Option<String>,
-    pub summary: Option<String>,
-    pub selection_reason: Option<String>,
-    pub status: Option<String>,
-    pub primary_provider: Option<String>,
-    pub reviewer_provider: Option<String>,
-    pub participant_names: Option<Vec<String>>,
-    pub total_rounds: Option<i64>,
-    pub started_at: Option<i64>,
-    pub completed_at: Option<i64>,
-    pub thread_id: Option<String>,
-    pub entries: Option<Vec<MeetingEntryBody>>,
-}
+// `MeetingEntryBody` and `UpsertMeetingBody` now live beside their
+// service-layer producers in `crate::services::discord::meeting_artifact_store`
+// so those callers can depend on the request shape they build without a
+// server-layer backflow (#3037). `UpsertMeetingBody` is re-`use`d above.
 
 fn normalize_selection_reason(value: &str) -> Option<String> {
     let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");

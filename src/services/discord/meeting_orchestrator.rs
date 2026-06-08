@@ -3029,7 +3029,7 @@ fn build_meeting_status_payload(m: &Meeting) -> Option<serde_json::Value> {
 async fn persist_meeting_status(
     payload: serde_json::Value,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let body: crate::server::routes::meetings::UpsertMeetingBody = serde_json::from_value(payload)?;
+    let body: super::meeting_artifact_store::UpsertMeetingBody = serde_json::from_value(payload)?;
     super::internal_api::upsert_meeting(body)
         .await
         .map(|_| ())
