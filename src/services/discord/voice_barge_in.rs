@@ -41,6 +41,7 @@ use super::voice_background_driver::{
     VoiceBackgroundStartRequest, VoiceBackgroundTurnDriver, default_voice_announce_generation,
     select_voice_background_driver, voice_announce_delivery_id,
 };
+use super::voice_config_cache::ConfigSnapshotCache;
 pub(in crate::services::discord) const INTERNAL_VOICE_MESSAGE_ID_START: u64 =
     9_000_000_000_000_000_000;
 
@@ -59,8 +60,6 @@ pub(in crate::services::discord) fn is_synthetic_voice_message_id(
 // F4 (#2046): progress/ack 재생 owner id 시작점. spoken_result owner 공간(1..)과
 // 분리하기 위해 high range 사용.
 const PROGRESS_PLAYBACK_OWNER_START: u64 = 1u64 << 63;
-// F6 (#2046): voice config 핫캐시 TTL. 5초 안 utterance 는 캐시 재사용.
-const VOICE_CONFIG_CACHE_TTL: Duration = Duration::from_secs(5);
 const STT_TRANSCRIPT_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 const STT_TRANSCRIPT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const PROCESSING_CHIME_FILE_NAME: &str = "agentdesk-voice-processing-chime.wav";
@@ -1272,59 +1271,6 @@ impl StreamingSttSessions {
     fn clear(&self) {
         self.sessions.clear();
         self.feed_tasks.clear();
-    }
-}
-
-/// Cohesive sub-concern of [`VoiceBargeInRuntime`]: the F6 (#2046) `Config`
-/// snapshot hot-cache (#3038 god-object split, config-cache slice).
-///
-/// Wraps the single `Mutex<Option<(Instant, Arc<Config>)>>` slot that used to
-/// live directly on `VoiceBargeInRuntime`. The accessors below preserve the
-/// original lock discipline and TTL fallback exactly:
-/// - `lookup_within_ttl` returns the cached `Arc<Config>` only while the entry
-///   is younger than `VOICE_CONFIG_CACHE_TTL`, silently treating a poisoned /
-///   contended lock as a miss (`Ok` guard required, never blocking-on-panic),
-/// - `store` overwrites the slot with a freshly stamped entry, also ignoring a
-///   failed lock,
-/// - the spawn_blocking reload itself stays on the runtime so the async control
-///   flow and side-effect ordering are byte-for-byte unchanged.
-struct ConfigSnapshotCache {
-    slot: std::sync::Mutex<Option<(Instant, Arc<crate::config::Config>)>>,
-}
-
-impl ConfigSnapshotCache {
-    fn new() -> Self {
-        Self {
-            slot: std::sync::Mutex::new(None),
-        }
-    }
-
-    /// Return the cached snapshot iff it is still within the TTL window as of
-    /// `now`. A poisoned or contended lock is treated as a cache miss, matching
-    /// the original `if let Ok(guard) = ... .lock()` fallback.
-    fn lookup_within_ttl(&self, now: Instant) -> Option<Arc<crate::config::Config>> {
-        if let Ok(guard) = self.slot.lock()
-            && let Some((loaded_at, cached)) = guard.as_ref()
-            && now.duration_since(*loaded_at) < VOICE_CONFIG_CACHE_TTL
-        {
-            return Some(cached.clone());
-        }
-        None
-    }
-
-    /// Stamp and store a freshly loaded snapshot. A failed lock is ignored,
-    /// matching the original `if let Ok(mut guard) = ... .lock()` write.
-    fn store(&self, loaded_at: Instant, config: Arc<crate::config::Config>) {
-        if let Ok(mut guard) = self.slot.lock() {
-            *guard = Some((loaded_at, config));
-        }
-    }
-
-    /// Test-only seed of the cache slot (mirrors the previous direct
-    /// `*runtime.config_cache.lock().unwrap() = Some(...)` writes).
-    #[cfg(test)]
-    fn seed(&self, loaded_at: Instant, config: Arc<crate::config::Config>) {
-        *self.slot.lock().unwrap() = Some((loaded_at, config));
     }
 }
 

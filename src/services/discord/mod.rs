@@ -92,6 +92,7 @@ mod turn_finalizer;
 mod voice_acknowledgement;
 mod voice_background_driver;
 mod voice_barge_in;
+mod voice_config_cache;
 mod voice_routing;
 #[path = "watchers/lifecycle_decision.rs"]
 mod watcher_lifecycle_decision;

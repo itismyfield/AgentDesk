@@ -24,9 +24,9 @@
 # turn-lifecycle surface were mislabeled test. This is the actual #3028 guard;
 # decompose lands separately after #3016 settles.
 "src/services/discord/turn_bridge/mod.rs" = 8417
-"src/services/discord/mod.rs" = 5185
+"src/services/discord/mod.rs" = 5186
 "src/services/discord/tui_prompt_relay.rs" = 5120
-"src/services/discord/voice_barge_in.rs" = 4834
+"src/services/discord/voice_barge_in.rs" = 4780
 "src/services/discord/recovery_engine.rs" = 4034
 "src/services/discord/router/message_handler/intake_turn.rs" = 3771
 "src/services/discord/meeting_orchestrator.rs" = 3227
