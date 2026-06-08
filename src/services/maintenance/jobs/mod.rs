@@ -11,10 +11,15 @@
 //!     the main workspace `target/` dir if disk usage exceeds 50 GB OR the 30d
 //!     cadence has elapsed. Reports removed-file counts via `tracing::info!`.
 //!   * `storage.worktree_orphan_sweep` — hourly. Scans
-//!     `~/.adk/release/worktrees/` and cross-checks each dir against active
-//!     PG dispatches (`status IN ('pending','dispatched')`). Orphaned dirs
-//!     (no matching active dispatch) are removed via `git worktree remove`
-//!     + directory delete.
+//!     `~/.adk/release/worktrees/` and cross-checks each dir against the PG
+//!     keep-set (active dispatches `status IN ('pending','dispatched')` +
+//!     resumable sessions carrying a non-null resume GUID, #3231) and the live
+//!     `AgentDesk-*` tmux panes. Pass A (flat-root per-channel worktrees) only
+//!     discards dirs matching the runtime naming whitelist (`wt/<provider>-…` /
+//!     `claude-adk-cc…` / `codex-adk-cdx…`) so manual dev worktrees are never
+//!     swept (#3231); pass B recurses one level into the managed root
+//!     (`worktrees/<repo_name>/`) and removes terminal dispatch/automation
+//!     worktrees via `cleanup_managed_worktree` (dirty/unmerged skip).
 //!   * `storage.hang_dump_cleanup` — weekly. Deletes `adk-hang-*.txt` files
 //!     older than 14 days from the `logs/` directory.
 //!   * `storage.db_retention` — weekly. Applies retention policies to

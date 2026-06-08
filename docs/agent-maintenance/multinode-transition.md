@@ -493,3 +493,27 @@
   raw inputs and the still-dormant ledger, performs no Discord IO, acquires no
   lease, and changes no leader/standby ownership. Behaviour-preserving (shadow
   only). No new multinode ownership/singleton/lease assumption.
+- #3231 (worktree GC 강화 — `storage.worktree_orphan_sweep`): extends the hourly
+  orphan sweep with (A) a GUID-primary resumable keep-set + a runtime naming
+  whitelist that protects manual dev worktrees, and (B) a one-level recursion into
+  the managed root (`worktrees/<repo_name>/`) that the flat 1-depth scan missed,
+  removing terminal dispatch/automation worktrees via the existing
+  `cleanup_managed_worktree` guards (dirty/unmerged skip). **Multinode class:
+  WORKER-LOCAL maintenance job.** It is one of the `services::maintenance::jobs`
+  registered on the dynamic (non-leader) maintenance scheduler (peer of
+  `storage.target_sweep` / `reconcile.zombie_resources`), NOT the leader-only
+  `worker_registry::MaintenanceScheduler` that owns persistent PG-lease state
+  (`voice.turn_link_gc` / `storage.cancel_tombstone_prune`). The sweep reads PG
+  read-only (the active-dispatch + resumable-GUID keep-set), probes the
+  **process-local** tmux server for live AgentDesk panes (fail-closed on query
+  failure), and deletes only directories on the local filesystem under this host's
+  `~/.adk/release/worktrees`. It acquires no lease, owns no durable queue, and
+  asserts no singleton — each node sweeps its OWN worktree root. The keep/discard
+  predicates derive solely from PG rows + this host's tmux + local disk, so the
+  job stays worker-local and introduces no new multinode
+  ownership/singleton/lease assumption. (Caveat for multinode: the keep-set is
+  global PG state but the live-tmux owner check is host-local — a worktree owned by
+  a pane on ANOTHER node would not be protected by THIS node's tmux probe; today
+  each host only provisions worktrees under its own root, so the sweep never sees
+  another node's directories. If worktree roots ever become shared storage, the
+  live-owner check would need to fan out cross-node.)
