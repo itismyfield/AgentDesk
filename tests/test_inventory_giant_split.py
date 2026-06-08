@@ -142,6 +142,165 @@ class ProdTestSplitTest(unittest.TestCase):
         self.assertGreaterEqual(test, 1)
 
 
+class BraceScannerTokenTest(unittest.TestCase):
+    """Regression coverage for #3028.
+
+    The brace scanner that bounds each ``#[cfg(test)] mod`` block must skip
+    Rust tokens that contain stray ``{``/``}`` or quotes so the test block does
+    not over-extend into the production code that follows it. Each case puts the
+    problematic token *inside* an early test mod and then asserts production
+    code after the block is still counted as production (i.e. the test block
+    closed at its real brace).
+    """
+
+    def _split(self, body: str) -> tuple[int, int]:
+        return GEN.split_prod_test_lines(_src(body))
+
+    def test_lifetime_not_treated_as_char_literal(self) -> None:
+        # `&'a self` and `impl<'a>` must not open a char literal that swallows
+        # the closing brace (the original #3028 break inside turn_bridge/mod.rs).
+        body = """
+        #[cfg(test)]
+        mod tests {
+            struct W;
+            impl<'a> Trait<'a> for W {
+                fn make(&'a self) -> u32 {
+                    0
+                }
+            }
+        }
+
+        pub fn production_after() -> u32 {
+            1
+        }
+        """
+        prod, test = self._split(body)
+        self.assertEqual(test, 9)  # cfg(test) line through the mod's closing }
+        self.assertEqual(prod, GEN.line_count(_src(body)) - 9)
+
+    def _assert_block_does_not_overrun(self, body: str, block_lines: int) -> None:
+        # The cfg(test) mod occupies exactly ``block_lines`` lines; the blank
+        # line and ``production_after`` below it must stay production. If the
+        # brace scanner over-ran, ``test`` would exceed ``block_lines``.
+        text = _src(body)
+        prod, test = self._split(body)
+        self.assertEqual(test, block_lines)
+        self.assertEqual(prod, GEN.line_count(text) - block_lines)
+
+    def test_static_lifetime_not_treated_as_char(self) -> None:
+        body = """
+        #[cfg(test)]
+        mod tests {
+            const S: &'static str = "x";
+            fn t() {}
+        }
+
+        pub fn production_after() {}
+        """
+        self._assert_block_does_not_overrun(body, 5)
+
+    def test_char_literal_brace_ignored(self) -> None:
+        # `'{'` / `'}'` char literals must not change brace depth.
+        body = """
+        #[cfg(test)]
+        mod tests {
+            fn t() {
+                let open = '{';
+                let close = '}';
+                assert_ne!(open, close);
+            }
+        }
+
+        pub fn production_after() {}
+        """
+        self._assert_block_does_not_overrun(body, 8)
+
+    def test_escaped_char_literal_quote_ignored(self) -> None:
+        # `'\''` (escaped single quote) must close correctly.
+        body = """
+        #[cfg(test)]
+        mod tests {
+            fn t() {
+                let q = '\\'';
+                let nl = '\\n';
+                let _ = (q, nl);
+            }
+        }
+
+        pub fn production_after() {}
+        """
+        self._assert_block_does_not_overrun(body, 8)
+
+    def test_line_comment_brace_ignored(self) -> None:
+        body = """
+        #[cfg(test)]
+        mod tests {
+            fn t() {
+                // a stray } in a comment must not close the block {
+            }
+        }
+
+        pub fn production_after() {}
+        """
+        self._assert_block_does_not_overrun(body, 6)
+
+    def test_raw_string_brace_ignored(self) -> None:
+        body = """
+        #[cfg(test)]
+        mod tests {
+            fn t() {
+                let sql = r#"SELECT json_object('k', '}}}') WHERE x = '{'"#;
+                let _ = sql;
+            }
+        }
+
+        pub fn production_after() {}
+        """
+        self._assert_block_does_not_overrun(body, 7)
+
+    def test_byte_literals_ignored(self) -> None:
+        body = """
+        #[cfg(test)]
+        mod tests {
+            fn t() {
+                let b = b'}';
+                let s = b"unbalanced { brace";
+                let _ = (b, s);
+            }
+        }
+
+        pub fn production_after() {}
+        """
+        self._assert_block_does_not_overrun(body, 8)
+
+    def test_interleaved_test_and_production_blocks(self) -> None:
+        # A test mod with a lifetime, followed by production, followed by a
+        # second test mod: the first block must not absorb the production code
+        # nor the second test block.
+        body = """
+        #[cfg(test)]
+        mod first {
+            fn helper<'a>(x: &'a str) -> &'a str { x }
+        }
+
+        pub fn middle_production() -> u32 { 42 }
+
+        #[cfg(test)]
+        mod second {
+            #[test]
+            fn t() { assert_eq!(super::middle_production(), 42); }
+        }
+        """
+        text = _src(body)
+        prod, test = self._split(body)
+        # First block = 4 lines (cfg..closing }), second block = 5 lines: 9
+        # test lines total. middle_production and the surrounding blanks stay
+        # production (the first block must close at its real brace).
+        self.assertEqual(test, 9)
+        self.assertEqual(prod, GEN.line_count(text) - 9)
+        self.assertGreaterEqual(prod, 1)
+
+
 class TestOnlySubtreeTest(unittest.TestCase):
     def _with_src(self, files: dict[str, str]):
         from contextlib import contextmanager

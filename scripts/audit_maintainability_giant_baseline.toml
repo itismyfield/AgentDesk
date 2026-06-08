@@ -18,28 +18,36 @@
 
 [giant_file_ratchet]
 "src/services/discord/tmux_watcher.rs" = 9598
+# Frozen at its true production LoC once #3028 fixed the prod/test splitter
+# (lifetime/char-literal brace miscount): the first inline `#[cfg(test)] mod`
+# block was over-extended to EOF, so `spawn_turn_bridge` and ~9000 lines of the
+# turn-lifecycle surface were mislabeled test. This is the actual #3028 guard;
+# decompose lands separately after #3016 settles.
+"src/services/discord/turn_bridge/mod.rs" = 8417
 "src/services/discord/mod.rs" = 5185
 "src/services/discord/tui_prompt_relay.rs" = 5120
 "src/services/discord/voice_barge_in.rs" = 4835
 "src/services/discord/recovery_engine.rs" = 4034
 "src/services/discord/router/message_handler/intake_turn.rs" = 3771
 "src/services/discord/meeting_orchestrator.rs" = 3227
-"src/services/turn_orchestrator.rs" = 3089
-"src/services/discord/router/intake_gate.rs" = 2953
+"src/services/turn_orchestrator.rs" = 3090
+"src/services/discord/router/intake_gate.rs" = 2957
 "src/services/discord/formatting.rs" = 2802
 "src/services/discord/runtime_bootstrap.rs" = 2800
 "src/services/discord/health/recovery.rs" = 2655
 "src/services/discord/inflight.rs" = 2466
 "src/services/discord/health.rs" = 2369
 "src/services/discord/watchers/lifecycle.rs" = 2333
-"src/services/discord/idle_recap.rs" = 2303
+"src/services/discord/idle_recap.rs" = 1319
 "src/services/discord/tmux.rs" = 2241
 "src/services/discord/turn_bridge/completion_guard.rs" = 1849
 "src/services/discord/session_runtime.rs" = 1781
 "src/services/discord/session_relay_sink.rs" = 1730
 "src/services/discord/turn_bridge/tmux_runtime.rs" = 1545
 "src/services/discord/commands/text_commands.rs" = 1493
-"src/services/discord/turn_bridge/terminal_delivery.rs" = 1341
+# terminal_delivery.rs dropped to 504 prod LoC after the #3028 splitter fix
+# (its inline test mod was previously miscounted as production), so it is no
+# longer a giant and its ratchet/registry entries were removed.
 "src/services/discord/turn_finalizer.rs" = 1526
 "src/services/discord/router/message_handler/headless_turn.rs" = 1316
 "src/services/discord/commands/config.rs" = 1054

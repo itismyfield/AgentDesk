@@ -615,15 +615,22 @@
     stop-token/tmux binding runtime + PID-exit observation helper (#2426),
     split before adding non-bugfix behavior. #3169: added the
     claude-anonymous-teardown SIGINT suppression guard (death #3)).
+  - `src/services/discord/turn_bridge/mod.rs` (8417 prod lines; the BRIDGE
+    spawn/turn-lifecycle surface — `spawn_turn_bridge` and the per-channel
+    turn loop. Registered giant-file (#3016 decompose target — see
+    `giant-file-registry.md`, owner `discord-relay`, deadline 2026-08-31).
+    It surfaced as a giant only after #3028 fixed the prod/test splitter: an
+    unterminated char-literal scan on a Rust lifetime (`&'a self`) inside the
+    first inline `#[cfg(test)] mod` block over-extended the block to EOF, so
+    most of the production code was mislabeled test and the file reported only
+    626 prod LoC. Hotfile — bugfix only outside the #3016/#3028 decompose plan).
   - `src/services/discord/turn_bridge/completion_guard.rs` (1849 lines).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (1545 lines).
-  - `src/services/discord/turn_bridge/terminal_delivery.rs` (1341 prod lines;
-    registered giant-file (#3036) — bugfix only outside an extraction plan.
-    Crossed 1000 prod LoC with #3041 P1-2: the `BridgeDeliveryLease`
-    acquire/commit_and_advance/heartbeat helper that routes the bridge's terminal
-    delivery through the shared delivery-lease, the watcher-owner-channel
-    resolution, and the skip-epilogue/identity-guarded-save decision seams. Split
-    the lease wiring vs the delivery helpers before adding behavior).
+  - `src/services/discord/turn_bridge/terminal_delivery.rs` (504 prod lines;
+    no longer a giant-file after the #3028 splitter fix corrected its inline
+    `#[cfg(test)] mod` accounting (previously miscounted as 1341 prod). Its
+    giant-file-registry [[entry]] was removed. Split the lease wiring vs the
+    delivery helpers before adding behavior).
   - `src/services/discord/turn_finalizer.rs` (1306 prod lines; single-authority
     turn-finalize state machine — ledger/actor-loop/reconciler. Crossed the
     giant-file threshold when #3041 P1-0 added the dormant `DeliveryLeaseCell`
@@ -725,7 +732,7 @@
 - do_not_edit_without_migration_plan (giant-file routes):
   - `src/server/routes/kanban.rs` (2752 lines).
   - `src/server/routes/docs.rs` (5880 lines).
-  - `src/server/routes/escalation.rs` (1733 lines).
+  - `src/server/routes/escalation.rs` (1492 lines).
   - `src/server/routes/meetings.rs` (1708 lines).
   - `src/server/routes/review_verdict/decision_route.rs` (4404 lines).
   - `src/server/routes/{agents,agents_crud,agents_setup,v1,resume,
@@ -779,7 +786,7 @@
   - `src/config.rs` (2213 lines).
   - `src/server/mod.rs` (2239 lines).
   - `src/receipt.rs` (1842 lines).
-  - `src/github/sync.rs` (1894 lines).
+  - `src/github/sync.rs` (1488 lines).
   - `src/reconcile.rs` (1809 lines; periodic reconcile loop covering stale
     inflights, orphan uploads, dispatched-session drift, and queue-review
     drift — split before adding non-bugfix behavior).
@@ -856,7 +863,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   behavior.
 - `src/services/claude.rs` (3949), `src/services/gemini.rs` (1416),
   `src/services/qwen.rs` (2200), `src/services/codex.rs` (3083),
-  `src/services/opencode.rs` (1881), `src/services/provider.rs` (1738) —
+  `src/services/opencode.rs` (1881), `src/services/provider.rs` (1739) —
   provider adapters.
 - `src/services/codex_tui/rollout_tail.rs` (1738) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
@@ -895,8 +902,8 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `restore_owner_channel_for_tmux_session`/`clear_restored_owner_for_tmux_session`
   so a live thread-suffixed TUI session with no live watcher slot can be
   re-registered authoritatively instead of dropped forever),
-  `src/services/discord_config_audit.rs` (1459).
-- `src/services/turn_orchestrator.rs` (3089).
+  `src/services/discord_config_audit.rs` (1318).
+- `src/services/turn_orchestrator.rs` (3090).
 
 Decomposed below the giant-file threshold (no longer frozen; bugfix-scoped but
 normal test growth is allowed): `src/services/analytics.rs`,

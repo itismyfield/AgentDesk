@@ -213,7 +213,9 @@ grandfathered = [
   "src/services/qwen.rs",
   "src/services/routines/agent_executor.rs",
   "src/services/routines/discord_log.rs",
-  "src/services/routines/migrated.rs",
+  # migrated.rs dropped to 883 prod LoC after the #3028 splitter fix (its inline
+  # test mod was previously miscounted as production); no longer a prod-giant, so
+  # it is removed from `grandfathered` (kept in the frozen baseline above).
   "src/services/routines/store.rs",
   "src/services/settings.rs",
   "src/services/tui_prompt_dedupe.rs",
@@ -286,16 +288,21 @@ owner = "discord-recap"
 deadline = "2026-08-31"
 decompose_issue = "#3036"
 
+# NOTE: src/services/discord/turn_bridge/terminal_delivery.rs previously had an
+# [[entry]] here; the #3028 splitter fix dropped its production LoC to 504 (its
+# inline test mod was being miscounted as production), so it is no longer a
+# prod-giant and its entry was removed to avoid a ghost registration.
+
 [[entry]]
-# Crossed the 1000-prod-LoC threshold when #3041 P1-2 added the
-# `BridgeDeliveryLease` acquire/heartbeat/commit-advance/release guard that
-# routes the bridge's terminal delivery through the shared per-channel
-# delivery-lease (watcher<->bridge serialization; B6 "no advance outside a lease
-# commit"). The bridge terminal-delivery helpers (chunked/replace senders,
-# replace-outcome commit classification, the lease guard) are cohesive but
-# sizable; decompose the lease guard vs the chunk/replace senders into submodules
-# under #3036.
-file = "src/services/discord/turn_bridge/terminal_delivery.rs"
+# Surfaced as an 8417-prod-LoC giant only after #3028 fixed the prod/test
+# splitter: the first inline `#[cfg(test)] mod` block (an unterminated char
+# literal from a Rust lifetime `&'a self`) over-extended to EOF, so
+# `spawn_turn_bridge` and ~9000 lines of the turn-lifecycle surface were
+# mislabeled as test (the file reported only 626 prod). This entry is the
+# accounting correction; the production LoC is also frozen in
+# scripts/audit_maintainability_giant_baseline.toml (#3028 ratchet). Decompose
+# the turn-bridge spawn/lifecycle surface once #3016 settles.
+file = "src/services/discord/turn_bridge/mod.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
-decompose_issue = "#3036"
+decompose_issue = "#3016"
