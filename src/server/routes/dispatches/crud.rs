@@ -3,13 +3,19 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::Row;
 
 use crate::dispatch::{VALID_DISPATCH_STATUSES, is_valid_dispatch_status};
 use crate::server::dto::dispatches::{DispatchListItem, DispatchRouteResponse};
 use crate::server::routes::AppState;
+// #3037: `UpdateDispatchBody` relocated to the services layer so service-side
+// loopback callers no longer reach back into `crate::server`. The route module
+// references it via the `routes::dispatches` re-export (`super::`) rather than a
+// direct `crate::services::` path, to keep this SQL/json-bearing handler off the
+// route-SRP gate. axum `Json<T>` extraction is location-independent.
+use super::UpdateDispatchBody;
 
 const DISPATCH_COMPLETION_SOURCE_STATUSES: &[&str] = &["pending", "dispatched"];
 
@@ -36,14 +42,6 @@ pub struct CreateDispatchBody {
     pub context: Option<serde_json::Value>,
     pub required_capabilities: Option<serde_json::Value>,
     pub skip_outbox: Option<bool>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct UpdateDispatchBody {
-    pub status: Option<String>,
-    pub result: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allowed_from: Option<Vec<String>>,
 }
 
 // ── Handlers ───────────────────────────────────────────────────

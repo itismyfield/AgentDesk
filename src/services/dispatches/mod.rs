@@ -23,6 +23,12 @@ pub(crate) mod outbox_route;
 pub(crate) mod routing_constraint;
 pub(crate) mod wait_queue;
 
+// #3037: dispatch loopback request DTO (`UpdateDispatchBody`) relocated here
+// from `crate::server::routes::dispatches::crud` so the dependency direction is
+// server → services. Re-exported below for the existing call sites.
+pub mod dtos;
+pub use dtos::UpdateDispatchBody;
+
 #[derive(Clone)]
 pub struct DispatchService {
     engine: PolicyEngine,

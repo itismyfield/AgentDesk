@@ -184,7 +184,7 @@ async fn submit_review_decision_fallback(
         .flatten();
     let out_of_scope = extract_review_decision_out_of_scope(full_response, decision);
     crate::services::discord::internal_api::submit_review_decision(
-        crate::server::routes::review_verdict::ReviewDecisionBody {
+        crate::services::review_decision::ReviewDecisionBody {
             card_id: card_id.to_string(),
             dispatch_id: Some(dispatch_id.to_string()),
             decision: decision.to_string(),
@@ -258,7 +258,7 @@ async fn submit_phase_gate_completion_fallback(
     pass_verdict: &str,
     full_response: &str,
 ) -> Result<(), String> {
-    let payload = crate::server::routes::dispatches::UpdateDispatchBody {
+    let payload = crate::services::dispatches::UpdateDispatchBody {
         status: Some("completed".to_string()),
         result: Some(serde_json::json!({
             "verdict": pass_verdict,
@@ -336,7 +336,7 @@ async fn submit_review_verdict_fallback(
     provider: &str,
 ) -> Result<(), String> {
     crate::services::discord::internal_api::submit_review_verdict(
-        crate::server::routes::review_verdict::SubmitVerdictBody {
+        crate::services::review_decision::SubmitVerdictBody {
             dispatch_id: dispatch_id.to_string(),
             overall: verdict.to_string(),
             items: None,
@@ -1458,7 +1458,7 @@ async fn fail_dispatch_with_policy(
     };
     let dispatch_span = crate::logging::dispatch_span(span_name, Some(dispatch_id), None, None);
     let _guard = dispatch_span.enter();
-    let payload = crate::server::routes::dispatches::UpdateDispatchBody {
+    let payload = crate::services::dispatches::UpdateDispatchBody {
         status: Some("failed".to_string()),
         result: Some(dispatch_failure_result(error_msg, error_code)),
         allowed_from: allowed_from.map(|statuses| {
@@ -1768,7 +1768,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
                 },
             )
         };
-        let payload = crate::server::routes::dispatches::UpdateDispatchBody {
+        let payload = crate::services::dispatches::UpdateDispatchBody {
             status: Some("completed".to_string()),
             result: Some(update_result),
             allowed_from: None,

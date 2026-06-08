@@ -339,7 +339,7 @@ pub(crate) async fn cmd_review_verdict(
     commit: Option<&str>,
 ) -> Result<(), String> {
     run_command(false, true, |state| async move {
-        let body = crate::server::routes::review_verdict::SubmitVerdictBody {
+        let body = crate::services::review_decision::SubmitVerdictBody {
             dispatch_id: dispatch_id.to_string(),
             overall: verdict.to_string(),
             items: None,
@@ -411,7 +411,7 @@ pub(crate) async fn cmd_review_decision(
                 decision,
                 dispatch_id,
             } => {
-                let body = crate::server::routes::review_verdict::ReviewDecisionBody {
+                let body = crate::services::review_decision::ReviewDecisionBody {
                     card_id: card_id.to_string(),
                     decision,
                     comment: comment.map(str::to_string),

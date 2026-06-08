@@ -2272,7 +2272,7 @@ pub(super) async fn restore_inflight_turns(
                         }
                     } else {
                         // Db/Engine not available — fall back to direct dispatch update with retry
-                        let payload = crate::server::routes::dispatches::UpdateDispatchBody {
+                        let payload = crate::services::dispatches::UpdateDispatchBody {
                                 status: Some("completed".to_string()),
                                 result: Some(completion_context.clone().map(|mut result| {
                                     if let Some(obj) = result.as_object_mut() {

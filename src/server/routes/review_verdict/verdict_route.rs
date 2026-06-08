@@ -1,9 +1,13 @@
 use axum::{Json, extract::State, http::StatusCode};
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::super::AppState;
 use crate::services::provider::ProviderKind;
+// #3037: `SubmitVerdictBody` / `VerdictItem` relocated to the services layer so
+// service-side loopback callers no longer reach back into `crate::server`. axum
+// `Json<T>` extraction is location-independent; the handler references the
+// services path.
+use crate::services::review_decision::SubmitVerdictBody;
 
 /// Write a review-passed marker file for the reviewed commit.
 /// `deploy-release.sh` checks this before allowing release deploy.
@@ -197,27 +201,6 @@ async fn emit_card_updated(state: &AppState, card_id: &str) {
             }
         }
     }
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct VerdictItem {
-    pub category: Option<String>,
-    pub summary: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct SubmitVerdictBody {
-    pub dispatch_id: String,
-    pub overall: String,
-    pub items: Option<Vec<VerdictItem>>,
-    pub notes: Option<String>,
-    pub feedback: Option<String>,
-    /// The commit SHA that was actually reviewed. When provided, the
-    /// review-passed marker stamps this commit instead of the current HEAD.
-    pub commit: Option<String>,
-    /// Provider identifier (e.g. "claude", "codex", "gemini", "opencode") of the verdict submitter.
-    /// Used for cross-provider validation in counter-model reviews.
-    pub provider: Option<String>,
 }
 
 /// POST /api/reviews/verdict

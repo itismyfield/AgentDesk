@@ -1,10 +1,14 @@
 use axum::{Json, extract::State, http::StatusCode};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 
 use super::super::AppState;
+// #3037: `ReviewDecisionBody` relocated to the services layer so service-side
+// loopback callers no longer reach back into `crate::server`. axum `Json<T>`
+// extraction is location-independent; the handler references the services path.
 use super::review_state_repo::update_card_review_state;
 use super::tuning_aggregate::{record_decision_tuning, spawn_aggregate_if_needed_with_pg};
+use crate::services::review_decision::ReviewDecisionBody;
 
 /// PG-only wrapper for kanban transitions after #1384.
 async fn transition_status_pg_first(
@@ -2098,37 +2102,6 @@ async fn dismiss_review_cleanup_pg_first(state: &AppState, card_id: &str) -> Res
         return Err("postgres pool unavailable for dismiss cleanup".to_string());
     };
     crate::services::review_decision::dismiss_review_cleanup(pool, card_id).await
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[allow(dead_code)]
-pub struct ReviewDecisionBody {
-    pub card_id: String,
-    pub decision: String, // "accept", "dispute", "dismiss"
-    pub comment: Option<String>,
-    /// Optional current implementation commit. When accept is submitted after
-    /// the agent has already committed fixes during review-decision, this takes
-    /// precedence over worktree inference for #246 skip_rework detection.
-    pub commit_sha: Option<String>,
-    /// #109: dispatch-scoped targeting — when provided, the server validates
-    /// that this dispatch_id matches the pending review-decision dispatch for
-    /// the card. Prevents replayed/stale decisions from consuming the wrong
-    /// dispatch.
-    pub dispatch_id: Option<String>,
-    /// #2341 / #2200 sub-3: when the agent disputes a review because the
-    /// finding lies outside the current card's scope (e.g. a stacked-branch
-    /// leftover), set this to true. The server closes the pending
-    /// review-decision dispatch with outcome `scope_mismatch_closed` and
-    /// routes the card to terminal state instead of requiring an in-issue
-    /// re-review target. Only meaningful when `decision == "dispute"`.
-    ///
-    /// The close path binds to the latest **completed** review dispatch
-    /// (which is what is available at decision time in production flow), and
-    /// fail-closes on Unknown scope verification (transient PG/git failure)
-    /// or a card lifecycle generation mismatch (card re-opened since the
-    /// review completed).
-    #[serde(default)]
-    pub out_of_scope: Option<bool>,
 }
 
 /// Shared response shape for the `submit_review_decision` handler and its

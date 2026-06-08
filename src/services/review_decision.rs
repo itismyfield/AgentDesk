@@ -13,6 +13,7 @@
 //! emission, so transaction boundaries, statement ordering, and behavior are
 //! preserved 1:1.
 
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 /// Open a card's review-decision dispute review-entry: flip review status to
@@ -137,4 +138,70 @@ pub async fn dismiss_review_cleanup(pool: &PgPool, card_id: &str) -> Result<(), 
         .await
         .map_err(|error| format!("commit dismiss cleanup tx for {card_id}: {error}"))?;
     Ok(())
+}
+
+// ── Review loopback request DTOs ───────────────────────────────
+//
+// #3037: `ReviewDecisionBody` (POST /api/reviews/decision) and
+// `SubmitVerdictBody` / `VerdictItem` (POST /api/reviews/verdict) are the JSON
+// request bodies for the review endpoints. They are consumed both by the axum
+// route handlers (`crate::server::routes::review_verdict::{submit_review_decision,
+// submit_verdict}`) and by service-layer callers driving the same endpoints over
+// the internal-HTTP loopback (`turn_bridge::completion_guard`,
+// `discord::internal_api`, `cli::direct`). They were relocated here from
+// `crate::server::routes::review_verdict::{decision_route, verdict_route}` so the
+// dependency direction is server → services. axum `Json<T>` extraction is
+// location-independent, so the route handlers now reference these services paths.
+// serde attributes / fields / derives are byte-identical to the originals.
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[allow(dead_code)]
+pub struct ReviewDecisionBody {
+    pub card_id: String,
+    pub decision: String, // "accept", "dispute", "dismiss"
+    pub comment: Option<String>,
+    /// Optional current implementation commit. When accept is submitted after
+    /// the agent has already committed fixes during review-decision, this takes
+    /// precedence over worktree inference for #246 skip_rework detection.
+    pub commit_sha: Option<String>,
+    /// #109: dispatch-scoped targeting — when provided, the server validates
+    /// that this dispatch_id matches the pending review-decision dispatch for
+    /// the card. Prevents replayed/stale decisions from consuming the wrong
+    /// dispatch.
+    pub dispatch_id: Option<String>,
+    /// #2341 / #2200 sub-3: when the agent disputes a review because the
+    /// finding lies outside the current card's scope (e.g. a stacked-branch
+    /// leftover), set this to true. The server closes the pending
+    /// review-decision dispatch with outcome `scope_mismatch_closed` and
+    /// routes the card to terminal state instead of requiring an in-issue
+    /// re-review target. Only meaningful when `decision == "dispute"`.
+    ///
+    /// The close path binds to the latest **completed** review dispatch
+    /// (which is what is available at decision time in production flow), and
+    /// fail-closes on Unknown scope verification (transient PG/git failure)
+    /// or a card lifecycle generation mismatch (card re-opened since the
+    /// review completed).
+    #[serde(default)]
+    pub out_of_scope: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct VerdictItem {
+    pub category: Option<String>,
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SubmitVerdictBody {
+    pub dispatch_id: String,
+    pub overall: String,
+    pub items: Option<Vec<VerdictItem>>,
+    pub notes: Option<String>,
+    pub feedback: Option<String>,
+    /// The commit SHA that was actually reviewed. When provided, the
+    /// review-passed marker stamps this commit instead of the current HEAD.
+    pub commit: Option<String>,
+    /// Provider identifier (e.g. "claude", "codex", "gemini", "opencode") of the verdict submitter.
+    /// Used for cross-provider validation in counter-model reviews.
+    pub provider: Option<String>,
 }

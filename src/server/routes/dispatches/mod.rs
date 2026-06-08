@@ -7,9 +7,15 @@ pub(crate) use crate::services::dispatches::outbox_route::parse_channel_id;
 
 // ── Re-exports: CRUD routes ──────────────────────────────────
 pub use crud::{
-    UpdateDispatchBody, create_dispatch, get_dispatch, get_dispatch_delivery_events,
+    create_dispatch, get_dispatch, get_dispatch_delivery_events,
     get_dispatch_delivery_reconcile_stats, list_dispatches, update_dispatch,
 };
+// #3037: `UpdateDispatchBody` was relocated to `crate::services::dispatches`.
+// Re-export it here so the `crud` route handler can reference it via `super::`
+// (keeping the `crate::services::` import out of the SQL/json-bearing route
+// module, which the route-SRP gate flags). The dependency direction is still
+// server → services.
+pub use crate::services::dispatches::UpdateDispatchBody;
 
 // ── Re-exports: Outbox ───────────────────────────────────────
 pub(crate) use outbox::dispatch_outbox_loop;
