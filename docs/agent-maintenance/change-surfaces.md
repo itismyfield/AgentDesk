@@ -547,7 +547,7 @@
     so the relayed window is exactly `[turn_start_offset, EOF)` — no byte skip,
     no prior-turn re-relay (RED→GREEN test: stale-high fallback skips the turn
     under the old scan, explicit anchor relays it whole).
-  - `src/services/discord/idle_recap.rs` (1881 prod lines; idle-recap card
+  - `src/services/discord/idle_recap.rs` (1319 prod lines; idle-recap card
     compose/post/clear surface, registered giant-file (#3036) — bugfix only
     outside an extraction plan. Crossed 1000 prod LoC with #3146 Part 1: the
     shared capture-at-claim + CAS clear helpers, the `channel_has_active_turn`
@@ -631,7 +631,7 @@
     `#[cfg(test)] mod` accounting (previously miscounted as 1341 prod). Its
     giant-file-registry [[entry]] was removed. Split the lease wiring vs the
     delivery helpers before adding behavior).
-  - `src/services/discord/turn_finalizer.rs` (1306 prod lines; single-authority
+  - `src/services/discord/turn_finalizer.rs` (1526 prod lines; single-authority
     turn-finalize state machine — ledger/actor-loop/reconciler. Crossed the
     giant-file threshold when #3041 P1-0 added the dormant `DeliveryLeaseCell`
     finalizer messages/handlers on top of #3143's `FinalizeContext::monitor()` +

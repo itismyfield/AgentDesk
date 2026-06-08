@@ -142,6 +142,67 @@ class ProdTestSplitTest(unittest.TestCase):
         self.assertGreaterEqual(test, 1)
 
 
+class CharLiteralLengthTest(unittest.TestCase):
+    """Regression coverage for #3028 escape handling (PR #3234 review).
+
+    ``char_literal_length`` must recognise *every* Rust char-literal escape
+    form and return the full literal length, while still returning ``None``
+    for lifetimes. The earlier implementation failed two escapes:
+      * ``'\\''`` (escaped single quote) was reported as length 3, because the
+        first char after ``\\`` was mistaken for the closing quote;
+      * ``'\\\\'`` (escaped backslash) returned ``None``, because the escape
+        consumed two chars and overran the closing quote.
+    Both must now parse as length 4.
+    """
+
+    def test_simple_escapes(self) -> None:
+        for literal in ("'\\n'", "'\\t'", "'\\r'", "'\\0'", "'\\\"'"):
+            self.assertEqual(
+                GEN.char_literal_length(literal, 0), 4, repr(literal)
+            )
+
+    def test_escaped_single_quote(self) -> None:
+        # '\'' -- the bug: previously returned 3.
+        self.assertEqual(GEN.char_literal_length("'\\''", 0), 4)
+
+    def test_escaped_backslash(self) -> None:
+        # '\\' -- the bug: previously returned None.
+        self.assertEqual(GEN.char_literal_length("'\\\\'", 0), 4)
+
+    def test_hex_escape(self) -> None:
+        # '\x41' -> 6 chars.
+        self.assertEqual(GEN.char_literal_length("'\\x41'", 0), 6)
+
+    def test_unicode_escape(self) -> None:
+        # '\u{1F600}' -> 11 chars.
+        self.assertEqual(GEN.char_literal_length("'\\u{1F600}'", 0), 11)
+
+    def test_plain_char(self) -> None:
+        self.assertEqual(GEN.char_literal_length("'a'", 0), 3)
+
+    def test_lifetimes_are_not_chars(self) -> None:
+        # The original #3234 fix: lifetimes must not be parsed as char literals.
+        for lifetime in ("'a", "'static", "'_", "'a,", "'a>"):
+            self.assertIsNone(
+                GEN.char_literal_length(lifetime, 0), repr(lifetime)
+            )
+
+    def test_escape_fix_does_not_break_lifetime_detection(self) -> None:
+        # Escapes and lifetimes interleaved in one snippet: the char literals
+        # must measure correctly and the lifetimes must still read as None.
+        text = "let q = '\\''; fn f<'a>(x: &'a u8) { let b = '\\\\'; }"
+        # Locate each interesting quote and assert the classification.
+        q1 = text.index("'\\''")
+        self.assertEqual(GEN.char_literal_length(text, q1), 4)  # '\''
+        b1 = text.index("'\\\\'")
+        self.assertEqual(GEN.char_literal_length(text, b1), 4)  # '\\'
+        # The lifetimes <'a> and &'a must read as None.
+        lt1 = text.index("<'a>") + 1
+        self.assertIsNone(GEN.char_literal_length(text, lt1))
+        lt2 = text.index("&'a") + 1
+        self.assertIsNone(GEN.char_literal_length(text, lt2))
+
+
 class BraceScannerTokenTest(unittest.TestCase):
     """Regression coverage for #3028.
 
@@ -230,6 +291,29 @@ class BraceScannerTokenTest(unittest.TestCase):
         pub fn production_after() {}
         """
         self._assert_block_does_not_overrun(body, 8)
+
+    def test_all_escape_forms_and_lifetimes_mixed(self) -> None:
+        # Every escape form (escaped quote, escaped backslash, hex, unicode,
+        # newline) interleaved with lifetimes inside one test mod. If any
+        # escape were mis-measured the brace scanner would over-run into
+        # ``production_after`` and ``test`` would exceed the block length.
+        body = """
+        #[cfg(test)]
+        mod tests {
+            fn t<'a>(x: &'a str) -> &'a str {
+                let q = '\\'';
+                let bs = '\\\\';
+                let hx = '\\x41';
+                let em = '\\u{1F600}';
+                let nl = '\\n';
+                let _ = (q, bs, hx, em, nl, x);
+                x
+            }
+        }
+
+        pub fn production_after() {}
+        """
+        self._assert_block_does_not_overrun(body, 12)
 
     def test_line_comment_brace_ignored(self) -> None:
         body = """

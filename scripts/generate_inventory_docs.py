@@ -304,17 +304,36 @@ def char_literal_length(text: str, index: int) -> int | None:
     if body >= end:
         return None
     if text[body] == "\\":
-        # Escaped char literal: scan to the closing quote, honouring escapes.
-        cursor = body + 1
-        while cursor < end:
-            if text[cursor] == "\\":
-                cursor += 2
-                continue
-            if text[cursor] == "'":
-                return cursor - index + 1
-            if text[cursor] == "\n":
-                return None
+        # Escaped char literal (``'\n'``, ``'\\'``, ``'\''``, ``'\x41'``,
+        # ``'\u{1F600}'`` ...). First fully consume the escape sequence that
+        # follows the backslash, *then* require the closing quote. Consuming
+        # the escape is what makes ``'\''`` (escaped quote) and ``'\\'``
+        # (escaped backslash) parse correctly: the first char after ``\`` is
+        # part of the escape and must never be mistaken for the terminator.
+        cursor = body + 1  # first char of the escape sequence
+        if cursor >= end:
+            return None
+        esc = text[cursor]
+        if esc == "\n":
+            return None
+        if esc == "x":
+            # ``\xNN`` -- two hex digits.
+            cursor += 1 + 2
+        elif esc == "u":
+            # ``\u{...}`` -- braced hex escape.
             cursor += 1
+            if cursor >= end or text[cursor] != "{":
+                return None
+            close = text.find("}", cursor)
+            if close == -1:
+                return None
+            cursor = close + 1
+        else:
+            # Simple single-char escape: ``\n \t \r \\ \' \" \0`` etc.
+            cursor += 1
+        # The closing quote must immediately follow the escape sequence.
+        if cursor < end and text[cursor] == "'":
+            return cursor - index + 1
         return None
     # Non-escaped: a char literal holds exactly one char then a closing quote.
     if body + 1 < end and text[body + 1] == "'":
