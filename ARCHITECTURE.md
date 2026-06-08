@@ -543,6 +543,7 @@ src/
 │   │   ├── voice_config_cache.rs
 │   │   ├── voice_id_sequences.rs
 │   │   ├── voice_routing.rs
+│   │   ├── voice_sensitivity.rs
 │   │   └── watcher_panel_parity.rs
 │   ├── dispatches/
 │   │   ├── discord_delivery/

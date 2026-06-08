@@ -24,9 +24,11 @@
 # turn-lifecycle surface were mislabeled test. This is the actual #3028 guard;
 # decompose lands separately after #3016 settles.
 "src/services/discord/turn_bridge/mod.rs" = 8417
-"src/services/discord/mod.rs" = 5187
+"src/services/discord/mod.rs" = 5188
 "src/services/discord/tui_prompt_relay.rs" = 5120
-"src/services/discord/voice_barge_in.rs" = 4728
+# #3038: lowered 4728 -> 4657 (-71) as `SensitivityState` (definition + impl)
+# moved to the `voice_sensitivity` sibling module. Locks in the shrink win.
+"src/services/discord/voice_barge_in.rs" = 4657
 # #3248: +60 for the gap-1 deploy-survivable-relay fix —
 # `reseed_watcher_owned_finalizer_ledger` + two guarded reattach call-sites that
 # re-register the watcher-owned turn in the post-restart finalizer ledger (a P1
