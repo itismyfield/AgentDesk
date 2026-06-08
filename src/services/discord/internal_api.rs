@@ -245,7 +245,7 @@ pub(super) async fn get_escalation_settings() -> Result<Value, String> {
 }
 
 pub(super) async fn put_escalation_settings(
-    settings: routes::escalation::EscalationSettings,
+    settings: crate::config::EscalationSettings,
 ) -> Result<Value, String> {
     request_body(Method::PUT, "/api/settings/escalation", &settings).await
 }

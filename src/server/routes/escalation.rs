@@ -1,19 +1,20 @@
 use axum::{Json, extract::State, http::StatusCode};
 use chrono::{DateTime, NaiveTime, Utc};
 use chrono_tz::Tz;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use sqlx::Row as SqlxRow;
 
-use crate::config::{Config, EscalationMode};
+use crate::config::{
+    Config, DEFAULT_ESCALATION_PM_HOURS, DEFAULT_ESCALATION_TIMEZONE, EscalationMode,
+    EscalationScheduleSettings, EscalationSettings, EscalationSettingsResponse,
+};
 use crate::db::agents::load_agent_channel_bindings_pg;
 use crate::server::routes::AppState;
 use crate::services::discord::health::active_request_owner_for_channel;
 
 const ESCALATION_SETTINGS_OVERRIDE_KEY: &str = "escalation-settings-override";
 const ESCALATION_THREAD_KEY_PREFIX: &str = "escalation_thread:";
-const DEFAULT_PM_HOURS: &str = "00:00-08:00";
-const DEFAULT_TIMEZONE: &str = "Asia/Seoul";
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const DISCORD_MESSAGE_CHAR_LIMIT: usize = 2000;
 const ESCALATION_ISSUE_SUMMARY_LINE_LIMIT: usize = 3;
@@ -28,47 +29,10 @@ fn pg_unavailable() -> (StatusCode, Json<serde_json::Value>) {
     )
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct EscalationScheduleSettings {
-    pub pm_hours: String,
-    pub timezone: String,
-}
-
-impl Default for EscalationScheduleSettings {
-    fn default() -> Self {
-        Self {
-            pm_hours: DEFAULT_PM_HOURS.to_string(),
-            timezone: DEFAULT_TIMEZONE.to_string(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct EscalationSettings {
-    pub mode: EscalationMode,
-    pub owner_user_id: Option<u64>,
-    pub pm_channel_id: Option<String>,
-    pub schedule: EscalationScheduleSettings,
-}
-
-impl Default for EscalationSettings {
-    fn default() -> Self {
-        Self {
-            mode: EscalationMode::Pm,
-            owner_user_id: None,
-            pm_channel_id: None,
-            schedule: EscalationScheduleSettings::default(),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct EscalationSettingsResponse {
-    pub current: EscalationSettings,
-    pub defaults: EscalationSettings,
-}
+// `EscalationScheduleSettings`, `EscalationSettings`, and
+// `EscalationSettingsResponse` now live in `crate::config` so service-layer
+// callers can depend on them without a server-layer backflow (#3037). They are
+// re-exported above via `use crate::config::{...}`.
 
 #[derive(Debug, Deserialize)]
 pub struct EmitEscalationBody {
@@ -136,13 +100,13 @@ fn escalation_defaults(config: &Config) -> EscalationSettings {
                 .schedule
                 .pm_hours
                 .clone()
-                .unwrap_or_else(|| DEFAULT_PM_HOURS.to_string()),
+                .unwrap_or_else(|| DEFAULT_ESCALATION_PM_HOURS.to_string()),
             timezone: config
                 .escalation
                 .schedule
                 .timezone
                 .clone()
-                .unwrap_or_else(|| DEFAULT_TIMEZONE.to_string()),
+                .unwrap_or_else(|| DEFAULT_ESCALATION_TIMEZONE.to_string()),
         },
     }
 }

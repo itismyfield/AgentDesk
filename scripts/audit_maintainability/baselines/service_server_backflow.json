@@ -2,8 +2,8 @@
   "schema_version": 1,
   "rule": "service_server_backflow",
   "description": "No-regression baseline for src/services references to crate::server or super::server server-layer modules.",
-  "captured_at": "2026-06-03",
-  "total_count": 43,
+  "captured_at": "2026-06-08",
+  "total_count": 35,
   "files": {
     "src/services/agents/query.rs": {
       "count": 2
@@ -26,19 +26,10 @@
     "src/services/discord/adk_session.rs": {
       "count": 2
     },
-    "src/services/discord/commands/text_commands.rs": {
-      "count": 4
-    },
-    "src/services/discord/idle_detector.rs": {
-      "count": 1
-    },
     "src/services/discord/internal_api.rs": {
       "count": 1
     },
     "src/services/discord/meeting_orchestrator.rs": {
-      "count": 1
-    },
-    "src/services/discord/monitoring_status.rs": {
       "count": 1
     },
     "src/services/discord/recovery_engine.rs": {
@@ -52,9 +43,6 @@
     },
     "src/services/discord/turn_bridge/completion_guard.rs": {
       "count": 5
-    },
-    "src/services/disk_monitor.rs": {
-      "count": 2
     },
     "src/services/dispatched_sessions.rs": {
       "count": 8

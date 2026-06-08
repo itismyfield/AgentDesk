@@ -1442,6 +1442,65 @@ impl EscalationConfig {
     }
 }
 
+/// Default PM-hours window applied when escalation settings leave it unset.
+pub const DEFAULT_ESCALATION_PM_HOURS: &str = "00:00-08:00";
+/// Default timezone applied when escalation settings leave it unset.
+pub const DEFAULT_ESCALATION_TIMEZONE: &str = "Asia/Seoul";
+
+/// Resolved (non-optional) escalation schedule used by the settings API and
+/// Discord text commands. Distinct from [`EscalationScheduleConfig`], which is
+/// the optional on-disk config representation; this is the materialized
+/// wire/runtime shape with defaults applied.
+///
+/// Lives in the config (domain) layer so service-layer callers can depend on it
+/// without reaching back into the server route module that owns the HTTP
+/// handlers (#3037 service→server backflow).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EscalationScheduleSettings {
+    pub pm_hours: String,
+    pub timezone: String,
+}
+
+impl Default for EscalationScheduleSettings {
+    fn default() -> Self {
+        Self {
+            pm_hours: DEFAULT_ESCALATION_PM_HOURS.to_string(),
+            timezone: DEFAULT_ESCALATION_TIMEZONE.to_string(),
+        }
+    }
+}
+
+/// Resolved escalation settings (materialized wire/runtime shape with defaults
+/// applied). See [`EscalationScheduleSettings`] for the layering rationale.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EscalationSettings {
+    pub mode: EscalationMode,
+    pub owner_user_id: Option<u64>,
+    pub pm_channel_id: Option<String>,
+    pub schedule: EscalationScheduleSettings,
+}
+
+impl Default for EscalationSettings {
+    fn default() -> Self {
+        Self {
+            mode: EscalationMode::Pm,
+            owner_user_id: None,
+            pm_channel_id: None,
+            schedule: EscalationScheduleSettings::default(),
+        }
+    }
+}
+
+/// API response body for the escalation settings endpoint: the current
+/// effective settings plus the computed defaults.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct EscalationSettingsResponse {
+    pub current: EscalationSettings,
+    pub defaults: EscalationSettings,
+}
+
 /// Onboarding wizard / agent-factory rules. Externalizes the values that used
 /// to be hardcoded inside the `project-agentfactory` Discord prompt: the
 /// active Discord guild ID, the named category IDs new channels can be

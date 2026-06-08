@@ -732,7 +732,7 @@
 - do_not_edit_without_migration_plan (giant-file routes):
   - `src/server/routes/kanban.rs` (2752 lines).
   - `src/server/routes/docs.rs` (5880 lines).
-  - `src/server/routes/escalation.rs` (1492 lines).
+  - `src/server/routes/escalation.rs` (1456 lines).
   - `src/server/routes/meetings.rs` (1708 lines).
   - `src/server/routes/review_verdict/decision_route.rs` (4404 lines).
   - `src/server/routes/{agents,agents_crud,agents_setup,v1,resume,
@@ -783,7 +783,7 @@
   (supervised-worker registry / leader-only lifecycle).
 - legacy_modules: none — these are shared runtime coordination surfaces.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/config.rs` (2213 lines).
+  - `src/config.rs` (2272 lines).
   - `src/server/mod.rs` (2239 lines).
   - `src/receipt.rs` (1842 lines).
   - `src/github/sync.rs` (1488 lines).

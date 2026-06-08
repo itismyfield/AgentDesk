@@ -81,14 +81,14 @@ fn schedule_text_stop_pending_queue_drain(
 }
 
 async fn fetch_escalation_settings_via_api()
--> Result<crate::server::routes::escalation::EscalationSettingsResponse, String> {
+-> Result<crate::config::EscalationSettingsResponse, String> {
     let body = crate::services::discord::internal_api::get_escalation_settings().await?;
     serde_json::from_value(body).map_err(|err| err.to_string())
 }
 
 async fn save_escalation_settings_via_api(
-    settings: &crate::server::routes::escalation::EscalationSettings,
-) -> Result<crate::server::routes::escalation::EscalationSettingsResponse, String> {
+    settings: &crate::config::EscalationSettings,
+) -> Result<crate::config::EscalationSettingsResponse, String> {
     let body =
         crate::services::discord::internal_api::put_escalation_settings(settings.clone()).await?;
     serde_json::from_value(body).map_err(|err| err.to_string())
@@ -103,9 +103,7 @@ fn parse_discord_user_id(raw: &str) -> Option<u64> {
         .ok()
 }
 
-fn format_escalation_settings_summary(
-    settings: &crate::server::routes::escalation::EscalationSettings,
-) -> String {
+fn format_escalation_settings_summary(settings: &crate::config::EscalationSettings) -> String {
     let mode = match settings.mode {
         crate::config::EscalationMode::Pm => "pm",
         crate::config::EscalationMode::User => "user",
