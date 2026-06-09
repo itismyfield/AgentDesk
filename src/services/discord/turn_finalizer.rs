@@ -1338,23 +1338,19 @@ fn completion_signal_from_transcript(
 /// `register_start` far-backstop deadline. Returns `true` ONLY when the turn is
 /// genuinely terminal, so a legitimately long paused-live turn is NEVER
 /// finalized at the deadline (the over-finalize hazard the EPIC must avoid):
-///   * NO live watcher handle → terminal. Nothing left will drive the pane to
-///     quiescence or submit a terminal, so finalizing is the only way the
-///     mailbox/inflight is ever released (mirrors the no-owner immediate
-///     gate-timeout path in `handle_terminal`).
-///   * `paused` (a Discord turn took the session over during the long wait) →
-///     NOT terminal: defer, exactly like the fresh-idle `AbortFollowupTookOver`
-///     guard, so the backstop never releases a follow-up turn.
-///   * `PausedLive` (JSONL terminator absent — selector / permission prompt /
-///     subagent / long silent tool call) → NOT terminal: defer.
-///   * `Done` (JSONL terminator PROVEN, offset-independent by construction) →
-///     terminal.
-///   * `Unknown` (non-JSONL runtime: legacy tmux wrapper, or a non-JSONL
-///     provider — Gemini / OpenCode / Qwen) → terminal ONLY when the tmux pane
-///     is idle / ready-for-input. With no structured transcript, `deadline +
-///     pane-idle` is the sole terminal criterion available, and the pane-idle
-///     probe is the SAME one the live watcher's `watcher_session_ready_for_input`
-///     fallback uses.
+///   * NO LIVE watcher handle — absent, OR present-but-DEAD (`cancel` set or
+///     `heartbeat_stale()`: the `tmux_session_is_stale` predicate; #3268 — a
+///     hung watcher the sweeper only marked `cancel` and left registered) →
+///     terminal: nothing will drive the pane to quiescence or submit a terminal,
+///     so finalizing is the only way the mailbox/inflight is released (mirrors
+///     the no-owner gate-timeout in `handle_terminal`). Only a genuinely-live
+///     handle keeps the `paused` / transcript deferral below.
+///   * `paused` (a Discord turn took the session over) → NOT terminal: defer,
+///     like the fresh-idle `AbortFollowupTookOver` guard.
+///   * `PausedLive` (JSONL terminator absent: selector / prompt / subagent /
+///     long tool call) → defer. `Done` (terminator PROVEN) → terminal.
+///   * `Unknown` (non-JSONL Gemini / OpenCode / Qwen / legacy wrapper) → terminal
+///     ONLY when the pane is idle (the live watcher's ready-for-input probe).
 fn watcher_backstop_turn_is_terminal(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
@@ -1364,6 +1360,10 @@ fn watcher_backstop_turn_is_terminal(
         let Some(handle) = shared.tmux_watchers.get(&channel_id) else {
             return true;
         };
+        // #3268: a registered-but-DEAD watcher (cancel/stale) has no authority — treat as absent.
+        if handle.cancel.load(std::sync::atomic::Ordering::Relaxed) || handle.heartbeat_stale() {
+            return true;
+        }
         (
             handle.tmux_session_name.clone(),
             handle.output_path.clone(),
@@ -4613,6 +4613,79 @@ mod tests {
             let _ = std::fs::remove_file(&transcript);
         })
         .await;
+    }
+
+    /// #3268 far-backstop dead-watcher gap: a watcher handle that is STILL
+    /// registered but DEAD (cancelled, or heartbeat-stale because the task
+    /// hung/died — the heartbeat sweeper only flips `cancel` and leaves the
+    /// entry indexed) over a still-BUSY (`PausedLive`) transcript must be
+    /// treated as terminal by `watcher_backstop_turn_is_terminal`, exactly like
+    /// an ABSENT handle — otherwise the busy transcript defers the turn forever
+    /// and the mailbox/inflight is never released. A GENUINELY-LIVE handle
+    /// (present, not cancelled, fresh heartbeat) over the SAME busy transcript
+    /// must STILL defer (return false): the live-watcher semantics are
+    /// untouched.
+    #[test]
+    fn dead_watcher_handle_is_terminal_while_live_handle_defers_busy_transcript() {
+        let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+
+        // A busy transcript: content present but NO Claude turn terminator →
+        // `completion_signal_from_transcript` returns `PausedLive`.
+        let session = format!("3268-dead-watcher-{}", std::process::id());
+        let transcript = std::env::temp_dir().join(format!("{session}.jsonl"));
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"working…\"}]}}\n",
+        )
+        .unwrap();
+        let transcript_str = transcript.to_str().unwrap().to_string();
+
+        // 1) GENUINELY-LIVE handle (not cancelled, fresh heartbeat) → the busy
+        //    `PausedLive` transcript defers: NOT terminal.
+        let ch_live = ChannelId::new(5404);
+        shared
+            .tmux_watchers
+            .insert(ch_live, backstop_watcher_handle(&session, &transcript_str));
+        assert!(
+            !watcher_backstop_turn_is_terminal(&shared, ch_live, &ProviderKind::Claude),
+            "a live (present, not cancelled, fresh-heartbeat) watcher over a busy \
+             transcript must DEFER — live-watcher PausedLive semantics are unchanged"
+        );
+
+        // 2) PRESENT but CANCELLED handle (sweeper flipped `cancel`, left the
+        //    entry registered) → terminal, like handle-absence, regardless of the
+        //    busy transcript.
+        let ch_cancelled = ChannelId::new(5405);
+        let cancelled = backstop_watcher_handle(&session, &transcript_str);
+        cancelled
+            .cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        shared.tmux_watchers.insert(ch_cancelled, cancelled);
+        assert!(
+            watcher_backstop_turn_is_terminal(&shared, ch_cancelled, &ProviderKind::Claude),
+            "a present-but-cancelled watcher has no authority to drive the pane to \
+             quiescence — the far-backstop must finalize (terminal), not defer forever"
+        );
+
+        // 3) PRESENT but HEARTBEAT-STALE handle (ancient heartbeat ts) → terminal
+        //    for the same reason, even though it is not cancelled.
+        let ch_stale = ChannelId::new(5406);
+        let stale = backstop_watcher_handle(&session, &transcript_str);
+        // 1ms epoch is far older than TMUX_WATCHER_STALE_HEARTBEAT_MS → stale.
+        stale
+            .last_heartbeat_ts_ms
+            .store(1, std::sync::atomic::Ordering::Release);
+        assert!(
+            stale.heartbeat_stale(),
+            "test precondition: handle is stale"
+        );
+        shared.tmux_watchers.insert(ch_stale, stale);
+        assert!(
+            watcher_backstop_turn_is_terminal(&shared, ch_stale, &ProviderKind::Claude),
+            "a present-but-heartbeat-stale watcher must be treated as terminal too"
+        );
+
+        let _ = std::fs::remove_file(&transcript);
     }
 
     /// With the watcher far-backstop ARMED at `register_start`, a JSONL Done
