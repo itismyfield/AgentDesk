@@ -3974,38 +3974,82 @@ async fn run_claude_idle_response_tail(
         channel_id,
         &lease,
     );
-    let tmux_for_tail = tmux_session_name.clone();
-    let transcript_for_tail = transcript_path.clone();
-    let tail_result = tokio::task::spawn_blocking(move || {
-        collect_claude_idle_response(transcript_for_tail, start_offset, tmux_for_tail)
+
+    // #3256: STREAM the operator's external-input prose THROUGH a single bridge
+    // turn instead of pre-collecting the whole response and posting it as one
+    // batched `[Text{full}, Done]` at turn end. The transcript reader
+    // (`read_output_file_until_result`) already emits each `StreamMessage`
+    // (Text / ToolUse / ToolResult / Done / OutputOffset) in real time; we feed
+    // those frames into the SAME bridge `tx` a normal Discord turn uses, so a
+    // LONG continuous autonomous turn relays prose progressively within ONE
+    // intake card / ONE `spawn_turn_bridge` instead of accumulating until the
+    // next user-message turn boundary.
+    //
+    // The reader runs on a blocking OS thread; it forwards every frame onto an
+    // intermediate channel (`reader_rx`) and reports the final transcript byte
+    // offset over `offset_tx` after it returns (done / idle / dead). We BUFFER
+    // the leading frames until the first content frame arrives so that a turn
+    // that produces NO prose still takes the original empty-response path (no
+    // intake card, just advance the binding offset + finish the synthetic turn)
+    // — preserving today's behavior for the common no-op case.
+    let (reader_tx, reader_rx) = mpsc::channel::<StreamMessage>();
+    let (offset_tx, offset_rx) = tokio::sync::oneshot::channel::<Result<u64, String>>();
+    let transcript_for_reader = transcript_path.clone();
+    let tmux_for_reader = tmux_session_name.clone();
+    std::thread::Builder::new()
+        .name("claude_idle_response_tail_reader".to_string())
+        .spawn(move || {
+            let transcript_string = transcript_for_reader.display().to_string();
+            let read_result = crate::services::session_backend::read_output_file_until_result(
+                &transcript_string,
+                start_offset,
+                reader_tx,
+                None,
+                crate::services::provider::SessionProbe::tmux(
+                    tmux_for_reader,
+                    ProviderKind::Claude,
+                ),
+            );
+            let offset_result = read_result.map(|result| match result {
+                ReadOutputResult::Completed { offset }
+                | ReadOutputResult::Cancelled { offset }
+                | ReadOutputResult::SessionDied { offset } => offset,
+            });
+            let _ = offset_tx.send(offset_result);
+        })
+        .expect("spawn claude idle response tail reader thread");
+
+    // Buffer leading frames on the blocking pool until the first content frame
+    // (or the reader closes). `prefix` carries the frames already pulled,
+    // `has_content` tells us whether the bridge should run, and we hand the live
+    // `reader_rx` back to drain the remainder into the bridge.
+    let buffered = tokio::task::spawn_blocking(move || {
+        let mut prefix: Vec<StreamMessage> = Vec::new();
+        let mut has_content = false;
+        while let Ok(message) = reader_rx.recv() {
+            let is_content = idle_stream_message_is_content(&message);
+            let is_terminal = matches!(message, StreamMessage::Done { .. });
+            prefix.push(message);
+            if is_content {
+                has_content = true;
+                break;
+            }
+            if is_terminal {
+                break;
+            }
+        }
+        (prefix, has_content, reader_rx)
     })
     .await;
 
-    let (response, final_offset) = match tail_result {
-        Ok(Ok(result)) => result,
-        Ok(Err(error)) => {
-            tracing::warn!(
-                tmux_session_name = %tmux_session_name,
-                transcript_path = %transcript_path.display(),
-                error = %error,
-                "Claude idle transcript response tail failed"
-            );
-            finish_tui_direct_synthetic_turn_if_current(
-                &shared,
-                &ProviderKind::Claude,
-                channel_id,
-                &tmux_session_name,
-                "claude_tui_direct_tail_failed",
-            )
-            .await;
-            return;
-        }
+    let (prefix, has_content, reader_rx) = match buffered {
+        Ok(buffered) => buffered,
         Err(error) => {
             tracing::warn!(
                 tmux_session_name = %tmux_session_name,
                 transcript_path = %transcript_path.display(),
                 error = %error,
-                "Claude idle transcript response tail panicked"
+                "Claude idle transcript response tail buffering panicked"
             );
             finish_tui_direct_synthetic_turn_if_current(
                 &shared,
@@ -4019,13 +4063,18 @@ async fn run_claude_idle_response_tail(
         }
     };
 
-    let response = response.trim();
-    if response.is_empty() {
-        advance_claude_tmux_runtime_binding_offset(
-            &tmux_session_name,
-            &transcript_path,
-            final_offset,
-        );
+    if !has_content {
+        // No prose / no terminal body for this turn: keep today's no-card empty
+        // path. Drain any residual frames so the reader thread can finish, then
+        // commit the binding offset.
+        let _ = tokio::task::spawn_blocking(move || while reader_rx.recv().is_ok() {}).await;
+        if let Ok(Ok(final_offset)) = offset_rx.await {
+            advance_claude_tmux_runtime_binding_offset(
+                &tmux_session_name,
+                &transcript_path,
+                final_offset,
+            );
+        }
         finish_tui_direct_synthetic_turn_if_current(
             &shared,
             &ProviderKind::Claude,
@@ -4036,7 +4085,8 @@ async fn run_claude_idle_response_tail(
         .await;
         return;
     }
-    let delivery_result = relay_tui_idle_response_through_bridge(
+
+    let delivery_result = stream_tui_idle_response_through_bridge(
         &shared,
         ProviderKind::Claude,
         channel_id,
@@ -4044,7 +4094,8 @@ async fn run_claude_idle_response_tail(
         &transcript_path,
         start_offset,
         &prompt_text,
-        response,
+        prefix,
+        reader_rx,
         &lease,
     )
     .await;
@@ -4058,7 +4109,16 @@ async fn run_claude_idle_response_tail(
         )
         .await;
     }
-    if tui_idle_tail_should_commit_runtime_binding_offset(response, delivery_result.is_ok()) {
+    // #3041 / #3256: advance the runtime-binding offset on successful delivery so
+    // the watcher / idle paths never double-send this turn's bytes. The reader
+    // reports the authoritative final offset over `offset_rx`.
+    let final_offset = match offset_rx.await {
+        Ok(Ok(offset)) => Some(offset),
+        _ => None,
+    };
+    if let Some(final_offset) = final_offset
+        && tui_idle_tail_stream_should_commit_runtime_binding_offset(delivery_result.is_ok())
+    {
         advance_claude_tmux_runtime_binding_offset(
             &tmux_session_name,
             &transcript_path,
@@ -4067,61 +4127,31 @@ async fn run_claude_idle_response_tail(
     }
 }
 
+/// #3256: a transcript-reader frame counts as "content" for the idle-tail
+/// stream-through when it carries body the operator actually produced — prose
+/// (`Text`), an authoritative terminal body (`Done` with a non-empty result),
+/// or a transport error. A bare terminal `Done` with an empty result (the
+/// synthetic completion frame the reader emits at turn end) or pure control /
+/// offset frames are NOT content; if the whole turn yields only those, the
+/// idle tail takes the no-card empty path (preserving today's behavior).
 #[cfg(unix)]
-fn collect_claude_idle_response(
-    transcript_path: PathBuf,
-    start_offset: u64,
-    tmux_session_name: String,
-) -> Result<(String, u64), String> {
-    let (tx, rx) = mpsc::channel();
-    let transcript_path_string = transcript_path.display().to_string();
-    let read_result = crate::services::session_backend::read_output_file_until_result(
-        &transcript_path_string,
-        start_offset,
-        tx,
-        None,
-        crate::services::provider::SessionProbe::tmux(tmux_session_name, ProviderKind::Claude),
-    )?;
-
-    let offset = match read_result {
-        ReadOutputResult::Completed { offset }
-        | ReadOutputResult::Cancelled { offset }
-        | ReadOutputResult::SessionDied { offset } => offset,
-    };
-    Ok((collect_tui_idle_response_messages(rx), offset))
+fn idle_stream_message_is_content(message: &StreamMessage) -> bool {
+    match message {
+        StreamMessage::Text { content } => !content.trim().is_empty(),
+        StreamMessage::Done { result, .. } => !result.trim().is_empty(),
+        StreamMessage::Error { message, .. } => !message.trim().is_empty(),
+        _ => false,
+    }
 }
 
+/// #3256: the stream-through path commits the runtime-binding offset whenever
+/// the single bridge turn delivered successfully. (The empty-response branch
+/// commits independently before finishing the synthetic turn.)
 #[cfg(unix)]
-fn collect_tui_idle_response_messages(rx: mpsc::Receiver<StreamMessage>) -> String {
-    let mut streamed = String::new();
-    let mut done_result: Option<String> = None;
-    let mut error_result: Option<String> = None;
-    let mut sideband = Vec::new();
-    for message in rx.try_iter() {
-        match message {
-            StreamMessage::Text { content } => streamed.push_str(&content),
-            StreamMessage::Done { result, .. } => done_result = Some(result),
-            StreamMessage::Error {
-                message, stderr, ..
-            } => {
-                let mut combined = message;
-                if !stderr.trim().is_empty() {
-                    combined.push_str("\n");
-                    combined.push_str(stderr.trim());
-                }
-                error_result = Some(combined);
-            }
-            StreamMessage::TaskNotification {
-                status, summary, ..
-            } => {
-                if !summary.trim().is_empty() {
-                    sideband.push(format!("[{status}] {summary}"));
-                }
-            }
-            _ => {}
-        }
-    }
-    compose_tui_idle_response(done_result, error_result, streamed, sideband)
+fn tui_idle_tail_stream_should_commit_runtime_binding_offset(
+    discord_delivery_succeeded: bool,
+) -> bool {
+    discord_delivery_succeeded
 }
 
 #[cfg(unix)]
@@ -4295,6 +4325,270 @@ async fn relay_tui_idle_response_through_bridge(
             provider.as_str()
         )),
     }
+}
+
+/// #3256: STREAM-THROUGH variant of `relay_tui_idle_response_through_bridge`
+/// for the Claude external-input idle path.
+///
+/// Identical bridge setup — EXACTLY ONE intake placeholder card and EXACTLY ONE
+/// `spawn_turn_bridge` per external turn — but instead of pre-collecting the
+/// whole response and feeding the bridge one synthetic `[Text{full}, Done]`,
+/// it forwards the transcript reader's LIVE `StreamMessage`s into the same
+/// bridge `tx` AS THEY ARRIVE (`prefix` = the frames already buffered upstream,
+/// including the first content frame; `reader_rx` = the remaining live stream).
+/// The bridge consumes them exactly as it does for a normal Discord turn:
+/// `Text` chunks edit the one card progressively, the terminal `Done`
+/// finalizes the turn EXACTLY ONCE.
+///
+/// Behavior-preservation: for a SHORT turn the prefix + a quick `Done` arrive
+/// back-to-back, so the bridge still posts one card with the full prose and
+/// finalizes once — observably identical to the old collect-then-send path. The
+/// only change is that a LONG turn now relays prose incrementally within that
+/// one card instead of all-at-once at turn end.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+async fn stream_tui_idle_response_through_bridge(
+    shared: &Arc<SharedData>,
+    provider: ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    output_path: &Path,
+    start_offset: u64,
+    prompt_text: &str,
+    prefix: Vec<StreamMessage>,
+    reader_rx: mpsc::Receiver<StreamMessage>,
+    lease: &ExternalInputRelayLease,
+) -> Result<(), String> {
+    let _lease_guard = TuiDirectExternalInputLeaseGuard::new(
+        provider.clone(),
+        tmux_session_name,
+        channel_id,
+        lease,
+    );
+    let Some(http) = shared.serenity_http_or_token_fallback() else {
+        tracing::warn!(
+            channel_id = channel_id.get(),
+            tmux_session_name = %tmux_session_name,
+            provider = %provider.as_str(),
+            turn_id = lease.turn_id.as_deref().unwrap_or(""),
+            session_key = lease.session_key.as_deref().unwrap_or(""),
+            relay_owner = lease.relay_owner.as_str(),
+            runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
+            "skipping TUI idle response relay; Discord HTTP unavailable"
+        );
+        return Err(format!(
+            "discord http unavailable for provider {}",
+            provider.as_str()
+        ));
+    };
+    // #3097: resolve the provider-specific compact threshold so the status
+    // panel reflects the configured value.
+    let context_compact_percent = super::adk_session::fetch_context_thresholds(shared.api_port)
+        .await
+        .compact_pct_for(&provider);
+    let anchor = prompt_anchor_for_response_after_wait(
+        provider.as_str(),
+        tmux_session_name,
+        channel_id.get(),
+    )
+    .await;
+    let reference = anchor.map(|anchor| {
+        (
+            ChannelId::new(anchor.channel_id),
+            MessageId::new(anchor.message_id),
+        )
+    });
+    // EXACTLY ONE intake placeholder card per external turn.
+    let current_msg_id = super::gateway::send_intake_placeholder(
+        http.clone(),
+        shared.clone(),
+        channel_id,
+        reference,
+        false,
+    )
+    .await?;
+    let user_msg_id = anchor
+        .map(|anchor| MessageId::new(anchor.message_id))
+        .unwrap_or(current_msg_id);
+    let (tx, rx) = mpsc::channel();
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let inflight_state = build_tui_direct_bridge_inflight_state(
+        provider.clone(),
+        channel_id,
+        user_msg_id,
+        current_msg_id,
+        prompt_text,
+        tmux_session_name,
+        output_path,
+        start_offset,
+        lease,
+    );
+    let bridge = TurnBridgeContext {
+        provider: provider.clone(),
+        gateway: Arc::new(TuiDirectBridgeGateway {
+            http,
+            shared: shared.clone(),
+            provider: provider.clone(),
+        }),
+        channel_id,
+        user_msg_id: Some(user_msg_id),
+        user_text_owned: prompt_text.to_string(),
+        request_owner_name: "TUI direct".to_string(),
+        role_binding: None,
+        adk_session_key: lease.session_key.clone(),
+        adk_session_name: Some(tmux_session_name.to_string()),
+        adk_session_info: None,
+        adk_cwd: None,
+        dispatch_id: None,
+        dispatch_kind: None,
+        memory_recall_usage: TokenUsage::default(),
+        context_window_tokens: 0,
+        context_compact_percent,
+        current_msg_id: Some(current_msg_id),
+        response_sent_offset: 0,
+        full_response: String::new(),
+        tmux_last_offset: Some(start_offset),
+        new_session_id: None,
+        defer_watcher_resume: false,
+        reuse_status_panel_message: false,
+        completion_tx: Some(completion_tx),
+        inflight_state,
+    };
+
+    // EXACTLY ONE spawn_turn_bridge per external turn.
+    spawn_turn_bridge(shared.clone(), Arc::new(CancelToken::new()), rx, bridge);
+
+    // Forward the buffered prefix + the live reader stream into the SINGLE
+    // bridge `tx` on a blocking thread (the reader receiver and the bridge
+    // sender are both sync `mpsc`). The bridge finalizes on the first terminal
+    // `Done`; we send a fallback `Done` only if the reader closed without one
+    // so the bridge always finalizes EXACTLY ONCE.
+    let forward_handle =
+        tokio::task::spawn_blocking(move || forward_idle_stream_into_bridge(prefix, reader_rx, tx));
+
+    let completion = tokio::time::timeout(Duration::from_secs(180), completion_rx).await;
+    // The reader-drain thread completes once the reader closes; join it so a
+    // lagging reader cannot outlive the turn.
+    let _ = forward_handle.await;
+
+    match completion {
+        Ok(_) => {
+            if let Some(anchor) = anchor {
+                crate::services::tui_prompt_dedupe::clear_prompt_anchor_for_response(
+                    provider.as_str(),
+                    tmux_session_name,
+                    anchor,
+                );
+            }
+            tracing::info!(
+                channel_id = channel_id.get(),
+                tmux_session_name = %tmux_session_name,
+                provider = %provider.as_str(),
+                turn_id = lease.turn_id.as_deref().unwrap_or(""),
+                session_key = lease.session_key.as_deref().unwrap_or(""),
+                relay_owner = lease.relay_owner.as_str(),
+                runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
+                current_msg_id = current_msg_id.get(),
+                prompt_anchor_message_id = anchor.map(|anchor| anchor.message_id),
+                "TUI-direct bridge adapter completed streamed response relay"
+            );
+            Ok(())
+        }
+        Err(_) => Err(format!(
+            "TUI-direct bridge adapter timed out waiting for completion for provider {}",
+            provider.as_str()
+        )),
+    }
+}
+
+/// #3256: forward the buffered prefix and the live transcript-reader stream into
+/// the bridge sender, preserving message ordering and guaranteeing a terminal
+/// `Done` reaches the bridge exactly once.
+///
+/// - Leading TUI chrome (`No response requested.` / `Continue from where you
+///   left off.`) is stripped from the FIRST non-empty `Text` frame, matching
+///   the old `compose_tui_idle_response` behavior so the streamed card never
+///   flashes that chrome.
+/// - The transcript reader normally emits a terminal `Done` itself; if the
+///   stream closes WITHOUT one (e.g. dead session mid-stream), a synthetic
+///   `Done` is appended so the bridge still finalizes. A `Done` is forwarded at
+///   most once — subsequent frames after a `Done` are dropped, since the bridge
+///   has already claimed the turn outcome ("first wins").
+///
+/// Returns the number of `Text`-content frames forwarded (used by tests to
+/// prove progressive relay: more than one before the terminal `Done`).
+#[cfg(unix)]
+fn forward_idle_stream_into_bridge(
+    prefix: Vec<StreamMessage>,
+    reader_rx: mpsc::Receiver<StreamMessage>,
+    tx: mpsc::Sender<StreamMessage>,
+) -> usize {
+    let mut first_text_seen = false;
+    let mut done_forwarded = false;
+    let mut text_frames_forwarded = 0usize;
+
+    let forward = |message: StreamMessage,
+                   first_text_seen: &mut bool,
+                   done_forwarded: &mut bool,
+                   text_frames_forwarded: &mut usize|
+     -> bool {
+        if *done_forwarded {
+            // Bridge already finalized on the terminal Done; drop trailing
+            // frames (e.g. the reader's synthetic empty Done after the real
+            // result Done) to avoid any double-finalize ambiguity.
+            return true;
+        }
+        let message = match message {
+            StreamMessage::Text { content } if !*first_text_seen && !content.trim().is_empty() => {
+                *first_text_seen = true;
+                let stripped =
+                    super::response_sanitizer::strip_leading_tui_response_chrome(&content);
+                StreamMessage::Text { content: stripped }
+            }
+            other => other,
+        };
+        if matches!(message, StreamMessage::Text { ref content } if !content.trim().is_empty()) {
+            *text_frames_forwarded += 1;
+        }
+        let is_done = matches!(message, StreamMessage::Done { .. });
+        if tx.send(message).is_err() {
+            // Bridge receiver gone; stop forwarding.
+            return false;
+        }
+        if is_done {
+            *done_forwarded = true;
+        }
+        true
+    };
+
+    for message in prefix {
+        if !forward(
+            message,
+            &mut first_text_seen,
+            &mut done_forwarded,
+            &mut text_frames_forwarded,
+        ) {
+            return text_frames_forwarded;
+        }
+    }
+    while let Ok(message) = reader_rx.recv() {
+        if !forward(
+            message,
+            &mut first_text_seen,
+            &mut done_forwarded,
+            &mut text_frames_forwarded,
+        ) {
+            return text_frames_forwarded;
+        }
+    }
+
+    if !done_forwarded {
+        let _ = tx.send(StreamMessage::Done {
+            result: String::new(),
+            session_id: None,
+        });
+    }
+    text_frames_forwarded
 }
 
 #[cfg(unix)]
@@ -6846,6 +7140,225 @@ mod tests {
             &messages[1],
             StreamMessage::Done { result, session_id }
                 if result == "assistant response" && session_id.as_deref() == Some("sess-1")
+        ));
+    }
+
+    // ====================================================================
+    // #3256: stream-through of operator external-input prose. These tests pin
+    // the SINGLE-bridge-turn invariant (one terminal Done = one finalize) and
+    // prove that a LONG/multi-block response relays PROGRESSIVELY (more than one
+    // Text frame forwarded before the terminal Done) while a SHORT response
+    // still yields one finalized card — all WITHIN one bridge turn.
+    //
+    // These tests FAIL on the old code path: `bridge_adapter_stream_messages`
+    // always collapsed the whole response into a single `[Text{full}, Done]`,
+    // so the bridge only ever saw ONE Text frame regardless of how many prose
+    // blocks the turn produced (the bug). The stream-through forwards each
+    // reader frame, so multiple Text frames reach the bridge before Done.
+    // ====================================================================
+
+    #[cfg(unix)]
+    fn drain_forwarded_idle_stream(
+        prefix: Vec<StreamMessage>,
+        rest: Vec<StreamMessage>,
+    ) -> (Vec<StreamMessage>, usize) {
+        let (reader_tx, reader_rx) = mpsc::channel();
+        for message in rest {
+            reader_tx.send(message).unwrap();
+        }
+        drop(reader_tx);
+        let (bridge_tx, bridge_rx) = mpsc::channel();
+        let text_frames = forward_idle_stream_into_bridge(prefix, reader_rx, bridge_tx);
+        let forwarded: Vec<StreamMessage> = bridge_rx.into_iter().collect();
+        (forwarded, text_frames)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_stream_long_response_relays_progressively_within_one_bridge_turn() {
+        // A long autonomous turn produces multiple prose blocks interleaved with
+        // tool use, then a terminal result. The stream-through must forward each
+        // prose block as its own Text frame (progressive relay) and finalize on
+        // EXACTLY ONE Done.
+        let prefix = vec![StreamMessage::Text {
+            content: "first prose block\n".to_string(),
+        }];
+        let rest = vec![
+            StreamMessage::ToolUse {
+                name: "Bash".to_string(),
+                input: "ls".to_string(),
+                tool_use_id: Some("t1".to_string()),
+            },
+            StreamMessage::OutputOffset { offset: 128 },
+            StreamMessage::Text {
+                content: "second prose block\n".to_string(),
+            },
+            StreamMessage::Text {
+                content: "third prose block\n".to_string(),
+            },
+            // Real result line, then the reader's synthetic empty completion.
+            StreamMessage::Done {
+                result: "first prose block\nsecond prose block\nthird prose block".to_string(),
+                session_id: Some("sess-9".to_string()),
+            },
+            StreamMessage::Done {
+                result: String::new(),
+                session_id: Some("sess-9".to_string()),
+            },
+        ];
+        let (forwarded, text_frames) = drain_forwarded_idle_stream(prefix, rest);
+
+        assert!(
+            text_frames > 1,
+            "long response must relay MORE THAN ONE Text frame before turn-done (got {text_frames})"
+        );
+        let done_count = forwarded
+            .iter()
+            .filter(|m| matches!(m, StreamMessage::Done { .. }))
+            .count();
+        assert_eq!(
+            done_count, 1,
+            "exactly one terminal Done must reach the bridge (single finalize)"
+        );
+        // The terminal Done must be the LAST frame and carry the authoritative
+        // result; the trailing synthetic empty Done was dropped.
+        assert!(matches!(
+            forwarded.last(),
+            Some(StreamMessage::Done { result, .. }) if result.contains("third prose block")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_stream_short_response_produces_one_finalized_card() {
+        // A short turn: one prose block then the result. Equivalent to the old
+        // collect-then-send path — one card, one finalize.
+        let prefix = vec![StreamMessage::Text {
+            content: "quick answer".to_string(),
+        }];
+        let rest = vec![
+            StreamMessage::Done {
+                result: "quick answer".to_string(),
+                session_id: Some("sess-1".to_string()),
+            },
+            StreamMessage::Done {
+                result: String::new(),
+                session_id: Some("sess-1".to_string()),
+            },
+        ];
+        let (forwarded, text_frames) = drain_forwarded_idle_stream(prefix, rest);
+
+        assert_eq!(
+            text_frames, 1,
+            "short response forwards exactly one Text frame"
+        );
+        assert_eq!(
+            forwarded
+                .iter()
+                .filter(|m| matches!(m, StreamMessage::Done { .. }))
+                .count(),
+            1,
+            "short response finalizes exactly once"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_stream_finalizes_exactly_once_even_without_reader_done() {
+        // Defensive: if the reader stream closes WITHOUT a terminal Done (e.g.
+        // session died mid-stream), a synthetic Done is appended so the bridge
+        // still finalizes — exactly once, never zero, never twice.
+        let prefix = vec![StreamMessage::Text {
+            content: "partial work".to_string(),
+        }];
+        let (forwarded, _) = drain_forwarded_idle_stream(prefix, Vec::new());
+
+        let done_count = forwarded
+            .iter()
+            .filter(|m| matches!(m, StreamMessage::Done { .. }))
+            .count();
+        assert_eq!(
+            done_count, 1,
+            "missing reader Done must yield exactly one synthetic Done"
+        );
+        assert!(matches!(forwarded.last(), Some(StreamMessage::Done { .. })));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_stream_strips_leading_chrome_from_first_text_only() {
+        // The old compose path stripped leading TUI chrome; the stream-through
+        // must strip it from the FIRST Text frame so the live card never flashes
+        // it, while leaving later prose untouched.
+        let prefix = vec![StreamMessage::Text {
+            content: "No response requested.\nreal prose".to_string(),
+        }];
+        let rest = vec![
+            StreamMessage::Text {
+                content: "\nNo response requested. (literal later)".to_string(),
+            },
+            StreamMessage::Done {
+                result: String::new(),
+                session_id: None,
+            },
+        ];
+        let (forwarded, _) = drain_forwarded_idle_stream(prefix, rest);
+
+        assert!(matches!(
+            &forwarded[0],
+            StreamMessage::Text { content } if content.trim() == "real prose"
+        ));
+        // Later Text frames are NOT chrome-stripped.
+        assert!(matches!(
+            &forwarded[1],
+            StreamMessage::Text { content } if content.contains("(literal later)")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_stream_content_classifier_ignores_pure_control_and_empty_done() {
+        // Empty / control-only frames are NOT content: a turn yielding only
+        // these takes the no-card empty path (preserving today's behavior).
+        assert!(!idle_stream_message_is_content(
+            &StreamMessage::OutputOffset { offset: 10 }
+        ));
+        assert!(!idle_stream_message_is_content(&StreamMessage::Done {
+            result: String::new(),
+            session_id: None,
+        }));
+        assert!(!idle_stream_message_is_content(&StreamMessage::Text {
+            content: "   \n".to_string(),
+        }));
+        // Real prose, an authoritative terminal body, and a transport error all
+        // count as content.
+        assert!(idle_stream_message_is_content(&StreamMessage::Text {
+            content: "prose".to_string(),
+        }));
+        assert!(idle_stream_message_is_content(&StreamMessage::Done {
+            result: "final body".to_string(),
+            session_id: None,
+        }));
+        assert!(idle_stream_message_is_content(&StreamMessage::Error {
+            message: "boom".to_string(),
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_stream_commit_offset_only_on_successful_delivery() {
+        // The stream-through commits the runtime-binding offset only when the
+        // single bridge turn delivered successfully — matching the dedupe
+        // contract vs. committed_relay_offset (the start-offset clamp in
+        // `spawn_claude_idle_response_tail_once` handles the read side).
+        assert!(tui_idle_tail_stream_should_commit_runtime_binding_offset(
+            true
+        ));
+        assert!(!tui_idle_tail_stream_should_commit_runtime_binding_offset(
+            false
         ));
     }
 

@@ -410,7 +410,7 @@
     flag-independent; EMPTY `Unknown` DEFERS — the codex HIGH regression case that the
     prior 5b1 build finalized prematurely) +
     `fresh_idle_unknown_keeps_wrong_turn_race_guards`.
-  - `src/services/discord/tui_prompt_relay.rs` (5120 lines; #3016 phase-5b2
+  - `src/services/discord/tui_prompt_relay.rs` (5414 lines; #3016 phase-5b2
     removed the dead `publish_tui_direct_watcher_finalize_debt` producer;
     SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
@@ -546,7 +546,22 @@
     (`None`). The committed-offset clamp still dedupes against watcher delivery,
     so the relayed window is exactly `[turn_start_offset, EOF)` — no byte skip,
     no prior-turn re-relay (RED→GREEN test: stale-high fallback skips the turn
-    under the old scan, explicit anchor relays it whole).
+    under the old scan, explicit anchor relays it whole); +294 from #3256: the
+    Claude external-input idle path now STREAMS prose THROUGH a single bridge
+    turn instead of pre-collecting the whole response and posting one batched
+    `[Text{full}, Done]` at turn end. `run_claude_idle_response_tail` spawns the
+    transcript reader on a blocking thread, buffers leading frames until the
+    first content frame (empty-turn → original no-card path preserved), then
+    `stream_tui_idle_response_through_bridge` sends EXACTLY ONE intake
+    placeholder + ONE `spawn_turn_bridge` and `forward_idle_stream_into_bridge`
+    forwards each reader `StreamMessage` (Text/ToolUse/OutputOffset/Done) into
+    the same bridge `tx` LIVE so a LONG continuous turn relays prose
+    progressively within that one card; leading TUI chrome is stripped from the
+    FIRST Text frame and a fallback `Done` is appended only if the reader closed
+    without one (bridge finalizes EXACTLY ONCE, "first wins"). The committed
+    runtime-binding offset still advances on successful delivery and the
+    start-offset clamp to `committed_relay_offset` is untouched (no double-send).
+    The Codex idle path (`relay_tui_idle_response_through_bridge`) is unchanged.
   - `src/services/discord/idle_recap.rs` (1319 prod lines; idle-recap card
     compose/post/clear surface, registered giant-file (#3036) — bugfix only
     outside an extraction plan. Crossed 1000 prod LoC with #3146 Part 1: the

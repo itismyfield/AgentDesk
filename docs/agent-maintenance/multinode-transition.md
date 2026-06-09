@@ -569,3 +569,18 @@
   introduces no new multinode ownership/singleton/lease assumption. The register
   is idempotent vs. a later bridge handoff and only ever seeds a full-identity
   Watcher entry (id-0 guarded); the normal non-restart path is unaffected.
+- #3256 (incremental operator-prose relay): `tui_prompt_relay.rs` changed so the
+  Claude external-input idle path STREAMS the operator's prose THROUGH a single
+  bridge turn (`stream_tui_idle_response_through_bridge` +
+  `forward_idle_stream_into_bridge`) instead of pre-collecting the whole response
+  and posting one batched `[Text{full}, Done]` at turn end. The transcript
+  reader, the bridge `(tx, rx)`, the intake placeholder, and `spawn_turn_bridge`
+  are all **worker-local** — they run on the SAME node that holds the live tmux
+  pane, exactly as the prior collect-then-send path did; the change only moves
+  WHEN frames reach the in-process bridge (live vs. batched), not WHO owns the
+  relay. The single-card / single-`spawn_turn_bridge` per-turn invariant and the
+  exactly-once bridge finalize (terminal `Done`, "first wins") are preserved. The
+  `committed_relay_offset` clamp (read-side dedupe) and the runtime-binding
+  offset advance on success (write-side ledger) are unchanged — no new multinode
+  ownership, singleton, or lease assumption is introduced. Classification:
+  **worker-local relay path**.
