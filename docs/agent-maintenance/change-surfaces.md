@@ -131,7 +131,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (9598 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (9582 lines after #2558
     dead-code sweep; #3016 phase-5b2 removed the `mailbox_finalize_owed`
     swap reads, the watcher-fn flag params, and the `LegacyFlagGated`
     decision variant; #1520 watcher loop extraction + #2427 D/A
@@ -410,6 +410,12 @@
     flag-independent; EMPTY `Unknown` DEFERS — the codex HIGH regression case that the
     prior 5b1 build finalized prematurely) +
     `fresh_idle_unknown_keeps_wrong_turn_race_guards`.
+    #3262 (-16): the watcher-completed status-panel context-usage backfill block
+    is extracted into `adk_session::backfill_completed_panel_usage_and_maybe_inject_compact`
+    (a single call now replaces the inline `set_context_panel_usage` block). The
+    helper additionally fires the claude-only AgentDesk-side `/compact` injection
+    when live usage crosses `context_compact_percent_claude` (Claude Code ignores
+    `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`); see `src/services/claude_compact_trigger.rs`.
   - `src/services/discord/tui_prompt_relay.rs` (5438 lines; #3016 phase-5b2
     removed the dead `publish_tui_direct_watcher_finalize_debt` producer;
     SSH-direct TUI

@@ -830,3 +830,61 @@ pub(super) async fn fetch_context_thresholds(_api_port: u16) -> ContextThreshold
         context_window: defaults.context_window,
     }
 }
+
+/// #2849 + #3262: at a watcher-completed turn boundary (pane idle), backfill the
+/// exact final context usage onto the status panel AND — for Claude only — inject
+/// `/compact` if live usage just crossed the configured
+/// `context_compact_percent_claude` threshold.
+///
+/// Extracted from the tmux_watcher completion path so the trigger rides the same
+/// turn-idle signal the panel backfill already uses (exact usage, resolvable
+/// window). Degrades safely: no exact usage, a `0` window, or a non-Claude
+/// provider simply skips. The compact injection itself is once-per-fill-cycle and
+/// pane-ready-gated inside `claude_compact_trigger` / `send_followup_prompt`.
+pub(super) async fn backfill_completed_panel_usage_and_maybe_inject_compact(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    state: &crate::services::session_backend::StreamLineState,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+) {
+    if !shared.status_panel_v2_enabled {
+        return;
+    }
+    let usage = crate::db::turns::TurnTokenUsage {
+        input_tokens: state.accum_input_tokens,
+        cache_create_tokens: state.accum_cache_create_tokens,
+        cache_read_tokens: state.accum_cache_read_tokens,
+        output_tokens: state.accum_output_tokens,
+    };
+    let occupied = usage.context_occupancy_input_tokens();
+    if occupied == 0 {
+        return;
+    }
+    let context_window = provider.resolve_context_window(state.last_model.as_deref());
+    if context_window == 0 {
+        return;
+    }
+    let ctx_cfg = fetch_context_thresholds(shared.api_port).await;
+    let compact_pct = ctx_cfg.compact_pct_for(provider);
+    shared.placeholder_live_events.set_context_panel_usage(
+        channel_id,
+        state.last_session_id.as_deref(),
+        usage.input_tokens,
+        usage.cache_create_tokens,
+        usage.cache_read_tokens,
+        context_window,
+        compact_pct,
+    );
+    // #3262: Claude ignores CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, so enforce the
+    // configured threshold ourselves by injecting `/compact` into the live TUI
+    // (claude-only, once-per-fill-cycle, idle-gated — see claude_compact_trigger).
+    let usage_pct = context_usage_percent(occupied, context_window);
+    crate::services::claude_compact_trigger::maybe_inject_compact(
+        channel_id.get(),
+        tmux_session_name,
+        provider,
+        usage_pct,
+        compact_pct,
+    );
+}
