@@ -211,23 +211,51 @@ pub(crate) fn reset_armed_state_for_test() {
         .clear();
 }
 
+/// Test seam (#3262 issue #4): expose the pure latch transition so a CALL-SITE
+/// integration test (in `adk_session`) can prove a turn-completion observation
+/// with `usage_pct == 0` reaches the re-arm — i.e. that the call site does not
+/// short-circuit zero usage before this latch runs. Returns whether THIS
+/// observation injects (the re-arm itself returns `false`). Side-effecting on the
+/// shared latch, so callers must hold [`state_test_guard`].
+#[cfg(test)]
+pub(crate) fn observe_and_decide_for_test(
+    channel_id: u64,
+    usage_pct: u64,
+    threshold_pct: u64,
+) -> bool {
+    observe_and_decide(channel_id, usage_pct, threshold_pct)
+}
+
+/// The latch lives in a single process-global map and `reset_armed_state_for_test`
+/// clears it wholesale, so stateful tests (in THIS module and in any cross-module
+/// call-site integration test) must not interleave. Serialize every test that
+/// touches the shared map behind this lock.
+#[cfg(test)]
+pub(crate) static STATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire the shared-latch test serialization guard AND reset the latch, so a
+/// stateful test starts from a known-clean armed map. Used by this module's tests
+/// and by the `adk_session` call-site integration test so both serialize against
+/// the same global latch.
+#[cfg(test)]
+pub(crate) fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    let guard = STATE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    reset_armed_state_for_test();
+    guard
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::MutexGuard;
 
-    // The latch lives in a single process-global map and `reset_armed_state_for_test`
-    // clears it wholesale, so stateful tests must not interleave (a reset in one
-    // test would wipe another's in-flight latch). Serialize every test that
-    // touches the shared map behind this lock; pure-predicate tests don't need it.
-    static STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
-
+    // Serialize stateful tests behind the module-level `STATE_TEST_LOCK` (lifted to
+    // `pub(crate)` so the `adk_session` call-site integration test serializes
+    // against the SAME global latch). `state_guard` also resets the latch.
     fn state_guard() -> MutexGuard<'static, ()> {
-        let guard = STATE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        reset_armed_state_for_test();
-        guard
+        state_test_guard()
     }
 
     // A threshold crossing while armed injects.
