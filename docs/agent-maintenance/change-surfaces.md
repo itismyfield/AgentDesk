@@ -659,9 +659,11 @@
     monitor turn-key/ledger-generation logic; tracked decompose target — see
     `giant-file-registry.md` (owner `discord-finalizer`, deadline 2026-08-31,
     issue #3016). Bugfix only outside a finalizer-decomposition plan).
-  - `src/services/discord/formatting.rs` (2808 lines; +8 from #3034 scoped
-    dead-code allow comments on the `MonitorHandoffReason::InlineTimeout` /
-    `MonitorHandoffStatus::Failed` reserved variants; +46 from #3082
+  - `src/services/discord/formatting.rs` (2802 lines; net +0 from #3034 scoped
+    dead-code allows on the `MonitorHandoffReason::InlineTimeout` /
+    `MonitorHandoffStatus::Failed` reserved variants — the two added `#[allow]`
+    lines were offset by collapsing the adjacent reason comments back to inline
+    form, so the file stays at its frozen baseline; +46 from #3082
     answer-flush-barrier guards (+11 around the plain multi-chunk send loops;
     +24 from the #3082 codex follow-up that also guards the edit/replace path
     `replace_long_message_raw_with_outcome` and bumps `note_progress` after each
@@ -693,10 +695,13 @@
     inline — its move-captured locals make a clean extraction risky and is
     deferred).
   - `src/services/discord/session_runtime.rs` (1781 lines).
-  - `src/services/discord/voice_barge_in.rs` (4670 lines; +13 from #3034
-    scoped dead-code allow comments on the test-only runtime API
+  - `src/services/discord/voice_barge_in.rs` (4657 lines; net +0 from #3034
+    scoped dead-code allows on the test-only runtime API
     (`disabled` / `runtime_config_snapshot` / `apply_voice_command` /
-    `reset_after_playback_start` / `clear_playback`); voice STT/TTS,
+    `reset_after_playback_start` / `clear_playback`) — the five added `#[allow]`
+    lines were offset by collapsing their reason comments to inline form and
+    rewrapping adjacent doc comments, so the file stays at its frozen baseline;
+    voice STT/TTS,
     lobby routing, progress mirroring, and barge-in orchestration surface;
     tracked decompose target — see `giant-file-registry.md` (owner
     `voice-runtime`, deadline 2026-08-31, #3036)).

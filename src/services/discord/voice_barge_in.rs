@@ -1104,18 +1104,15 @@ fn progress_feedback_channel_id(channel_id: u64, playback_channel_id: Option<u64
 /// Cohesive sub-concern of [`VoiceBargeInRuntime`]: the streaming-STT per-user
 /// session bookkeeping (#3038 god-object split, streaming-STT slice).
 ///
-/// Bundles the two `DashMap`s that were previously sibling fields on
-/// `VoiceBargeInRuntime`, both keyed by the same `StreamingSttKey`
-/// (channel/user pair):
-/// - `sessions` holds the in-flight `SttSessionHandle` for each speaker, and
-/// - `feed_tasks` holds the per-key bucket of spawned PCM-feed `JoinHandle`s.
+/// Bundles the two `DashMap`s previously sibling fields on `VoiceBargeInRuntime`,
+/// both keyed by the same `StreamingSttKey` (channel/user pair): `sessions` holds
+/// the in-flight `SttSessionHandle` per speaker, and `feed_tasks` holds the
+/// per-key bucket of spawned PCM-feed `JoinHandle`s.
 ///
-/// The accessors below are intentionally thin: `sessions()` / `feed_tasks()`
-/// hand back `&DashMap<...>` so the existing entry / get / remove call sites
-/// keep their exact `DashMap` semantics — including entry guards held across
-/// `await` during session finalization — and `clear()` wipes both maps in the
-/// same order as the original inline `streaming_stt_sessions.clear();
-/// streaming_stt_feed_tasks.clear();` pair. No locking, ordering, or
+/// The accessors are intentionally thin: `sessions()` / `feed_tasks()` hand back
+/// `&DashMap<...>` so existing entry / get / remove call sites keep exact `DashMap`
+/// semantics — including entry guards held across `await` during finalization — and
+/// `clear()` wipes both maps in the original order. No locking, ordering, or
 /// side-effect sequencing changes relative to the pre-extraction layout.
 struct StreamingSttSessions {
     sessions: dashmap::DashMap<StreamingSttKey, SttSessionHandle>,
@@ -1242,9 +1239,7 @@ impl VoiceBargeInRuntime {
         }
     }
 
-    // #3034: test-only runtime constructor (used by make_shared_data_for_tests
-    // and the voice unit tests); no production caller.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // #3034: test-only runtime constructor; no production caller
     pub(in crate::services::discord) fn disabled() -> Self {
         let (progress_tx, _) = broadcast::channel(128);
         Self {
@@ -1358,8 +1353,7 @@ impl VoiceBargeInRuntime {
         self.enabled
     }
 
-    // #3034: test-only mutable-state inspector; no production caller.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // #3034: test-only mutable-state inspector; no production caller
     pub(in crate::services::discord) async fn runtime_config_snapshot(
         &self,
     ) -> VoiceRuntimeConfigSnapshot {
@@ -2141,8 +2135,7 @@ impl VoiceBargeInRuntime {
         self.update_existing_monitor_sensitivity(sensitivity);
     }
 
-    // #3034: test-only voice-command entry point; no production caller.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // #3034: test-only voice-command entry point; no production caller
     pub(in crate::services::discord) async fn apply_voice_command(
         &self,
         transcript: &str,
@@ -2155,9 +2148,7 @@ impl VoiceBargeInRuntime {
         Some(sensitivity)
     }
 
-    // #3034: test-only playback-reset entry point; production resets go
-    // through `reset_after_playback_start_with_owner`.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // #3034: test-only playback-reset; prod uses reset_after_playback_start_with_owner
     pub(in crate::services::discord) fn reset_after_playback_start<P>(
         &self,
         channel_id: ChannelId,
@@ -2201,9 +2192,7 @@ impl VoiceBargeInRuntime {
         );
     }
 
-    // #3034: test-only playback clear; production uses
-    // `clear_playback_if_owner`.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // #3034: test-only playback clear; prod uses clear_playback_if_owner
     pub(in crate::services::discord) fn clear_playback(&self, channel_id: ChannelId) {
         self.playbacks.remove(&channel_id.get());
     }
@@ -2542,13 +2531,12 @@ impl VoiceBargeInRuntime {
 
         // Issue #2335 (c) — Codex round 2: keep the foreground cancel token
         // REGISTERED through every suppressible side effect (synth, play,
-        // background dispatch). Previously the code unregistered right
-        // after `generate_foreground_ack_text` returned, so any cancel
-        // arriving in the window between unregister and the TTS playback /
-        // handoff dispatch could not flip this token — the stale spoken
-        // ack or background handoff would still fire. We use a RAII guard
-        // so the unregister always runs (panics, early returns, etc.) and
-        // re-check the cancel flag at each awaited boundary below.
+        // background dispatch). Previously the code unregistered right after
+        // `generate_foreground_ack_text` returned, so a cancel arriving between
+        // unregister and the TTS playback / handoff dispatch could not flip this
+        // token — the stale ack or handoff would still fire. We use a RAII guard
+        // so unregister always runs (panics, early returns, etc.) and re-check
+        // the cancel flag at each awaited boundary below.
         struct InflightGuard<'a> {
             runtime: &'a VoiceBargeInRuntime,
             channel_id: ChannelId,
@@ -4530,13 +4518,12 @@ impl VoiceReceiveHook for DiscordVoiceBargeInHook {
         // foreground Codex/Claude child kept running to natural exit.
         //
         // Codex review (round 2): perform the foreground-token cancel
-        // SYNCHRONOUSLY here, BEFORE the tokio::spawn that handles the
-        // (async) mailbox cancel. If we deferred it into the spawned task,
-        // a fast foreground call could complete and unregister its token
-        // between the cut detection and the spawn being scheduled, in
-        // which case `cancel_inflight_foreground_calls` would see an
-        // empty registry and the stale reply / ack / handoff would still
-        // proceed after the user explicitly barged in.
+        // SYNCHRONOUSLY here, BEFORE the tokio::spawn that handles the (async)
+        // mailbox cancel. If deferred into the spawned task, a fast foreground
+        // call could complete and unregister its token between cut detection and
+        // the spawn being scheduled, in which case `cancel_inflight_foreground_calls`
+        // would see an empty registry and the stale reply / ack / handoff would
+        // still proceed after the user explicitly barged in.
         let foreground_cancelled = self
             .runtime
             .cancel_inflight_foreground_calls(channel_id, "voice_barge_in_live_cut");

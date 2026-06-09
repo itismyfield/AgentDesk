@@ -2755,19 +2755,15 @@ pub(super) fn humanize_tool_status(tool_line: &str) -> String {
     truncate_for_status_bytes(tool_line, TOOL_STATUS_MAX_BYTES)
 }
 
-/// Reason label shown in the monitor handoff placeholder. Mirrors the issue
-/// #1324 wording so users see what is happening instead of internal mechanism
-/// names such as "async dispatch".
-/// `Queued` (#1332) is paired with `MonitorHandoffStatus::Queued` to render
-/// the mailbox-queued placeholder card (앞선 턴 진행 중).
-/// `InlineTimeout` and `ExplicitCall` are exposed for downstream wiring
-/// (#1113 lifecycle, #1115 sweeper).
+/// Reason label shown in the monitor handoff placeholder. Mirrors #1324 wording
+/// so users see what is happening instead of internal mechanism names such as
+/// "async dispatch". `Queued` (#1332) is paired with `MonitorHandoffStatus::Queued`
+/// to render the mailbox-queued placeholder card (앞선 턴 진행 중). `InlineTimeout`
+/// and `ExplicitCall` are exposed for downstream wiring (#1113, #1115 sweeper).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MonitorHandoffReason {
     AsyncDispatch,
-    // #3034: matched in `label()` but not yet constructed; reserved for the
-    // #1113 inline-timeout handoff wiring.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // #3034: matched in label() but not constructed; reserved for #1113 wiring
     InlineTimeout,
     ExplicitCall,
     Queued,
@@ -2785,19 +2781,17 @@ impl MonitorHandoffReason {
 }
 
 /// Lifecycle status of a monitor handoff placeholder. Drives the leading
-/// emoji/title pair shown to the user. Terminal variants (Completed / Failed
-/// / TimedOut / Aborted) are exposed for downstream wiring (#1115 sweeper,
-/// watcher terminal updates).
-/// `Queued` (#1332) is the pre-active state used while a user message waits
-/// for the mailbox dequeue.
+/// emoji/title pair shown to the user. Terminal variants (Completed / Failed /
+/// TimedOut / Aborted) are exposed for downstream wiring (#1115 sweeper, watcher
+/// terminal updates). `Queued` (#1332) is the pre-active state used while a user
+/// message waits for the mailbox dequeue.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum MonitorHandoffStatus<'a> {
     Queued,
     Active,
     Stalled,
     Completed,
-    // #3034: matched in the header/detail renderers but not yet constructed;
-    // reserved for the #1115 sweeper terminal-status wiring.
+    // #3034: matched in renderers but not constructed; reserved for #1115 sweeper wiring
     #[allow(dead_code)]
     Failed {
         reason: &'a str,
