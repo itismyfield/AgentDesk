@@ -58,6 +58,30 @@ fn claude_tui_session_turn_lock(tmux_session_name: &str) -> ClaudeTuiSessionTurn
         .clone()
 }
 
+/// #3262: run a blocking TUI-submit closure under the SAME per-session turn lock
+/// that `execute_streaming_local_tui_tmux` (the normal follow-up path) holds.
+///
+/// The auto-`/compact` injection drives `tmux send-keys` into the same live pane
+/// as a normal Discord follow-up; without sharing this serialization the two can
+/// interleave their readiness check + key sends and corrupt composer input
+/// ordering. Routing the auto-inject through this gate guarantees `/compact` and
+/// a user follow-up never run concurrently against one pane.
+///
+/// This is a synchronous helper: the lock is a `std::sync::Mutex` and `f` is the
+/// blocking submit body, so the guard is never held across an `.await`. Callers
+/// must invoke it from a blocking context (e.g. `spawn_blocking`), exactly like
+/// the normal path which holds this lock inside the blocking
+/// `execute_streaming_local_tui_tmux`.
+#[cfg(unix)]
+pub(crate) fn with_claude_tui_session_turn_lock<R>(
+    tmux_session_name: &str,
+    f: impl FnOnce() -> R,
+) -> R {
+    let turn_lock = claude_tui_session_turn_lock(tmux_session_name);
+    let _turn_guard = turn_lock.lock().unwrap_or_else(|error| error.into_inner());
+    f()
+}
+
 /// Resolve the path to the claude binary.
 pub fn resolve_claude_path() -> Option<String> {
     crate::services::platform::resolve_provider_binary("claude").resolved_path
@@ -632,6 +656,66 @@ where
                 timeout.as_secs()
             ))
         }
+    }
+}
+
+// #3262: the auto `/compact` injection routes through `with_claude_tui_session_turn_lock`
+// — the SAME per-session turn lock the normal follow-up path holds — so a normal
+// user follow-up and the auto-inject can never interleave their readiness check +
+// tmux send against one live pane.
+#[cfg(all(test, unix))]
+mod claude_tui_turn_lock_3262_tests {
+    use super::{claude_tui_session_turn_lock, with_claude_tui_session_turn_lock};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+
+    // The same tmux session name maps to the SAME Arc<Mutex>, so two callers
+    // (a normal follow-up and the auto-inject) contend on one gate.
+    #[test]
+    fn same_session_shares_one_turn_lock() {
+        let a = claude_tui_session_turn_lock("session-3262-shared");
+        let b = claude_tui_session_turn_lock("session-3262-shared");
+        assert!(Arc::ptr_eq(&a, &b));
+        let c = claude_tui_session_turn_lock("session-3262-other");
+        assert!(!Arc::ptr_eq(&a, &c));
+    }
+
+    // Two threads contending on the same session's gate cannot be inside the
+    // critical section simultaneously: serialization holds, so a `/compact`
+    // inject and a normal follow-up never overlap their pane sends.
+    #[test]
+    fn turn_lock_serializes_concurrent_submits() {
+        let session = "session-3262-serialize";
+        let inside = Arc::new(AtomicUsize::new(0));
+        let max_concurrent = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let inside = Arc::clone(&inside);
+            let max_concurrent = Arc::clone(&max_concurrent);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..50 {
+                    with_claude_tui_session_turn_lock(session, || {
+                        let now = inside.fetch_add(1, Ordering::SeqCst) + 1;
+                        max_concurrent.fetch_max(now, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_micros(50));
+                        inside.fetch_sub(1, Ordering::SeqCst);
+                    });
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(
+            max_concurrent.load(Ordering::SeqCst),
+            1,
+            "turn lock must serialize: at most one submit body inside the gate at a time"
+        );
     }
 }
 

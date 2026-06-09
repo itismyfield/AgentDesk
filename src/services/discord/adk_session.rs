@@ -848,9 +848,12 @@ pub(super) async fn backfill_completed_panel_usage_and_maybe_inject_compact(
     provider: &ProviderKind,
     tmux_session_name: &str,
 ) {
-    if !shared.status_panel_v2_enabled {
-        return;
-    }
+    // #3262: the usage/window/threshold signal is needed by BOTH the v2 panel
+    // backfill AND the Claude `/compact` trigger. Compute it once, unconditionally
+    // — gating it behind `status_panel_v2_enabled` (as the original wire-in did)
+    // silently disabled auto-compact whenever the v2 panel was turned off. The
+    // trigger must run on every turn-completion (pane idle) regardless of the v2
+    // feature flag; only the panel `set_context_panel_usage` write stays v2-gated.
     let usage = crate::db::turns::TurnTokenUsage {
         input_tokens: state.accum_input_tokens,
         cache_create_tokens: state.accum_cache_create_tokens,
@@ -867,18 +870,24 @@ pub(super) async fn backfill_completed_panel_usage_and_maybe_inject_compact(
     }
     let ctx_cfg = fetch_context_thresholds(shared.api_port).await;
     let compact_pct = ctx_cfg.compact_pct_for(provider);
-    shared.placeholder_live_events.set_context_panel_usage(
-        channel_id,
-        state.last_session_id.as_deref(),
-        usage.input_tokens,
-        usage.cache_create_tokens,
-        usage.cache_read_tokens,
-        context_window,
-        compact_pct,
-    );
+    // v2-gated: only the status-panel-v2 Context line backfill depends on the
+    // feature flag. The compact trigger below does not.
+    if shared.status_panel_v2_enabled {
+        shared.placeholder_live_events.set_context_panel_usage(
+            channel_id,
+            state.last_session_id.as_deref(),
+            usage.input_tokens,
+            usage.cache_create_tokens,
+            usage.cache_read_tokens,
+            context_window,
+            compact_pct,
+        );
+    }
     // #3262: Claude ignores CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, so enforce the
     // configured threshold ourselves by injecting `/compact` into the live TUI
     // (claude-only, once-per-fill-cycle, idle-gated — see claude_compact_trigger).
+    // Runs regardless of status_panel_v2_enabled so disabling the v2 panel never
+    // silently disables auto-compact.
     let usage_pct = context_usage_percent(occupied, context_window);
     crate::services::claude_compact_trigger::maybe_inject_compact(
         channel_id.get(),
