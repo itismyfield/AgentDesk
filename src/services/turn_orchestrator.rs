@@ -49,6 +49,11 @@ pub(crate) struct Intervention {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum QueueExitKind {
     Cancelled,
+    // #3177: age-eviction was removed (queued user input must never expire), so
+    // nothing constructs this arm anymore; the display contract in
+    // `discord::queue_exit_feedback_emoji`/`queue_exit_card_body` still handles
+    // it, so it is kept as a stable feedback-surface variant.
+    #[allow(dead_code)]
     Expired,
     Superseded,
 }
@@ -480,23 +485,6 @@ fn cleanup_stale_pending_queue_tmp_files_under_root(
     audits
 }
 
-pub(crate) fn cleanup_stale_pending_queue_tmp_files(
-    provider: &ProviderKind,
-    token_hash: &str,
-) -> Vec<PendingQueueTmpCleanupAudit> {
-    let Some(root) = pending_queue_root() else {
-        return Vec::new();
-    };
-    let dir = root.join(provider.as_str()).join(token_hash);
-    cleanup_stale_pending_queue_tmp_files_in_dir(
-        provider,
-        token_hash,
-        &dir,
-        SystemTime::now(),
-        STALE_PENDING_QUEUE_TMP_AGE,
-    )
-}
-
 pub(crate) fn cleanup_stale_pending_queue_tmp_files_all_tokens() -> Vec<PendingQueueTmpCleanupAudit>
 {
     let Some(root) = pending_queue_root() else {
@@ -817,12 +805,20 @@ pub(crate) struct FinishTurnResult {
     pub(crate) has_pending: bool,
     pub(crate) mailbox_online: bool,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
+    // Carries a real `persist_queue_or_restore` failure on the finish-turn path;
+    // part of the uniform queue-mutation result contract. No caller consumes it
+    // yet, but it is written with genuine error info so it is kept rather than
+    // silently dropped.
+    #[allow(dead_code)]
     pub(crate) persistence_error: Option<String>,
 }
 
 pub(crate) struct ClearChannelResult {
     pub(crate) removed_token: Option<Arc<CancelToken>>,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
+    // Uniform queue-mutation persistence-result surface; written on the
+    // clear-channel path, no consumer yet. See `FinishTurnResult`.
+    #[allow(dead_code)]
     pub(crate) persistence_error: Option<String>,
 }
 
@@ -845,6 +841,9 @@ pub(crate) struct PurgeQueueResult {
 pub(crate) struct HasPendingSoftQueueResult {
     pub(crate) has_pending: bool,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
+    // Uniform queue-mutation persistence-result surface; no consumer yet.
+    // See `FinishTurnResult`.
+    #[allow(dead_code)]
     pub(crate) persistence_error: Option<String>,
 }
 
@@ -917,6 +916,9 @@ pub(crate) struct EnqueueInterventionResult {
 pub(crate) struct CancelQueuedMessageResult {
     pub(crate) removed: Option<Intervention>,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
+    // Uniform queue-mutation persistence-result surface; no consumer yet.
+    // See `FinishTurnResult`.
+    #[allow(dead_code)]
     pub(crate) persistence_error: Option<String>,
 }
 
@@ -930,6 +932,9 @@ pub(crate) struct TakeNextSoftResult {
 
 pub(crate) struct RequeueInterventionResult {
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
+    // Uniform queue-mutation persistence-result surface; no consumer yet.
+    // See `FinishTurnResult`.
+    #[allow(dead_code)]
     pub(crate) persistence_error: Option<String>,
 }
 
@@ -972,17 +977,6 @@ impl ChannelMailboxHandle {
             .await
     }
 
-    pub(crate) async fn cancel_active_turn(&self) -> CancelActiveTurnResult {
-        self.request(
-            |reply| ChannelMailboxMsg::CancelActiveTurn { reply },
-            CancelActiveTurnResult {
-                token: None,
-                already_stopping: false,
-            },
-        )
-        .await
-    }
-
     /// #2374 — atomic "set cancel reason + flip cancelled" performed by
     /// the mailbox actor. PR #2373 (#2335) set `cancel_source` from the
     /// caller task before sending the actor a `CancelActiveTurn`; that
@@ -1014,6 +1008,9 @@ impl ChannelMailboxHandle {
         .await
     }
 
+    // Unguarded `if_current` cancel; production uses the
+    // `_with_reason` variant. Exercised only by `#[cfg(test)]` tests.
+    #[allow(dead_code)]
     pub(crate) async fn cancel_active_turn_if_current(
         &self,
         expected_token: Arc<CancelToken>,
@@ -1146,6 +1143,10 @@ impl ChannelMailboxHandle {
         .await
     }
 
+    // Default-kind restore wrapper; the production restore path lives in the
+    // (currently dormant) `mailbox_restore_active_turn`. Exercised only by
+    // `#[cfg(test)]` tests.
+    #[allow(dead_code)]
     pub(crate) async fn restore_active_turn(
         &self,
         cancel_token: Arc<CancelToken>,
@@ -1165,6 +1166,8 @@ impl ChannelMailboxHandle {
     /// #3167 — kinded variant of [`Self::restore_active_turn`]. Preserves the
     /// background classification across a restore so the dequeue gates stay
     /// background-aware after a re-bind.
+    // Reached only via the dormant restore wrapper / `#[cfg(test)]` tests.
+    #[allow(dead_code)]
     pub(crate) async fn restore_active_turn_kinded(
         &self,
         cancel_token: Arc<CancelToken>,
@@ -1190,6 +1193,10 @@ impl ChannelMailboxHandle {
     /// (no `cancel_token`). Lets the dequeue path detect a background turn
     /// holding the slot so it can cancel-then-redispatch instead of starving
     /// a queued user intervention.
+    // Production gates read `active_turn_kind` off the snapshot
+    // (`snapshot.active_turn_kind`); this async accessor is exercised only by
+    // `#[cfg(test)]` tests.
+    #[allow(dead_code)]
     pub(crate) async fn active_turn_kind(&self) -> Option<ActiveTurnKind> {
         self.request(|reply| ChannelMailboxMsg::ActiveTurnKind { reply }, None)
             .await
@@ -1749,6 +1756,9 @@ impl ChannelMailboxRegistry {
         resolved
     }
 
+    // Global-registry accessor for the latched turn-finished signal; exercised
+    // only by `#[cfg(test)]` late-subscriber tests.
+    #[allow(dead_code)]
     pub(crate) fn global_turn_finished(channel_id: ChannelId) -> Option<Arc<TurnFinishedSignal>> {
         GLOBAL_TURN_FINISHED_SIGNALS
             .get(&channel_id)
@@ -1814,20 +1824,21 @@ enum ChannelMailboxMsg {
         reply: oneshot::Sender<bool>,
     },
     /// #3167 — current active-turn kind, or `None` when the channel is idle.
+    // Constructed only by the test-only `active_turn_kind` accessor.
+    #[allow(dead_code)]
     ActiveTurnKind {
         reply: oneshot::Sender<Option<ActiveTurnKind>>,
     },
     CancelToken {
         reply: oneshot::Sender<Option<Arc<CancelToken>>>,
     },
-    CancelActiveTurn {
-        reply: oneshot::Sender<CancelActiveTurnResult>,
-    },
     /// #2374 — atomic reason-write + cancel flip performed by the actor.
     CancelActiveTurnWithReason {
         reason: String,
         reply: oneshot::Sender<CancelActiveTurnResult>,
     },
+    // Constructed only by the test-only `cancel_active_turn_if_current`.
+    #[allow(dead_code)]
     CancelActiveTurnIfCurrent {
         expected_token: Arc<CancelToken>,
         reply: oneshot::Sender<CancelActiveTurnResult>,
@@ -1867,6 +1878,8 @@ enum ChannelMailboxMsg {
         turn_kind: ActiveTurnKind,
         reply: oneshot::Sender<bool>,
     },
+    // Constructed only via the dormant restore wrapper / `#[cfg(test)]` tests.
+    #[allow(dead_code)]
     RestoreActiveTurn {
         cancel_token: Arc<CancelToken>,
         request_owner: UserId,
@@ -2390,23 +2403,6 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 }
                 ChannelMailboxMsg::CancelToken { reply } => {
                     let _ = reply.send(state.cancel_token.clone());
-                }
-                ChannelMailboxMsg::CancelActiveTurn { reply } => {
-                    let token = state.cancel_token.clone();
-                    let already_stopping = token.as_ref().is_some_and(|token| {
-                        token.cancelled.load(std::sync::atomic::Ordering::Relaxed)
-                    });
-                    if let Some(token) = token.as_ref()
-                        && !already_stopping
-                    {
-                        token
-                            .cancelled
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    let _ = reply.send(CancelActiveTurnResult {
-                        token,
-                        already_stopping,
-                    });
                 }
                 ChannelMailboxMsg::CancelActiveTurnWithReason { reason, reply } => {
                     // #2374 — atomic, actor-serialized "reason then flip"

@@ -60,6 +60,9 @@ impl SensitivityState {
         }
     }
 
+    // #3038 slice constructor mirroring `VoiceBargeInRuntime::disabled()`; that
+    // runtime constructor is currently dormant, so the lib build sees no caller.
+    #[allow(dead_code)]
     pub(in crate::services::discord) fn disabled() -> Self {
         let default_sensitivity = BargeInSensitivity::Normal;
         Self {
@@ -86,6 +89,9 @@ impl SensitivityState {
             .set_sensitivity(sensitivity, Instant::now());
     }
 
+    // #3038 slice delegate behind `VoiceBargeInRuntime::apply_voice_command`,
+    // which is currently dormant, so the lib build sees no live caller.
+    #[allow(dead_code)]
     pub(in crate::services::discord) async fn apply_voice_command(
         &self,
         transcript: &str,

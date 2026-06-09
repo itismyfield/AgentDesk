@@ -15,8 +15,10 @@ pub mod codex_remote_policy;
 #[cfg(unix)]
 pub mod codex_tmux_wrapper;
 pub mod codex_tui;
-// #3034: 113 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during discord dead-code cleanup.
+// #3034: residual dead-code items in not-yet-cleaned discord submodules;
+// scoped here so the lint stays live on clean sibling modules. Cleaned
+// submodules carry their own narrow per-item allows. Remove once the remaining
+// discord submodules are cleaned.
 #[allow(dead_code)]
 pub mod discord;
 pub mod discord_config_audit;
@@ -123,9 +125,6 @@ pub(crate) mod tui_prompt_dedupe;
 pub(crate) mod tui_turn_state;
 pub mod turn_cancel_finalizer;
 pub mod turn_lifecycle;
-// #3034: 10 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during turn_orchestrator dead-code cleanup.
-#[allow(dead_code)]
 pub mod turn_orchestrator;
 
 // Compatibility alias: code referencing services::remote::* uses the stub

@@ -20,8 +20,13 @@ pub(super) struct OrgSchema {
     // compatibility; no in-code reader today.
     #[allow(dead_code)]
     pub version: u32,
+    // #3034: serde wire field deserialized from the org schema for forward
+    // compatibility; no in-code reader today.
     #[allow(dead_code)]
     pub name: Option<String>,
+    // serde-deserialized; consumed by `load_shared_prompt_path` (the shared-prompt
+    // fallback chain whose root caller is currently dormant — see that fn).
+    #[allow(dead_code)]
     pub shared_prompt: Option<String>,
     /// Root directory for prompt files (e.g. "$AGENTDESK_ROOT_DIR/prompts").
     /// When set, agent prompt_file is auto-derived as
