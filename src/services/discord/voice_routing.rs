@@ -72,6 +72,9 @@ impl VoiceChannelPairingStore {
         Ok(())
     }
 
+    // #3034: rollback-safe unpair op (#2046 F13) — API counterpart of `attach`;
+    // no live caller has wired the unpair flow yet. Kept as a coherent surface.
+    #[allow(dead_code)]
     pub(in crate::services::discord) fn detach(
         &self,
         voice_channel_id: ChannelId,

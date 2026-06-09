@@ -313,21 +313,6 @@ pub(in crate::services::discord) fn extract_explicit_work_outcome(
     }
 }
 
-pub(super) fn build_verdict_payload(
-    dispatch_id: &str,
-    verdict: &str,
-    full_response: &str,
-    provider: &str,
-) -> serde_json::Value {
-    let feedback = truncate_str(full_response.trim(), 4000).to_string();
-    serde_json::json!({
-        "dispatch_id": dispatch_id,
-        "overall": verdict,
-        "feedback": feedback,
-        "provider": provider,
-    })
-}
-
 async fn submit_review_verdict_fallback(
     _api_port: u16,
     dispatch_id: &str,

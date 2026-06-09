@@ -57,6 +57,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
     .await
 }
 
+#[allow(dead_code)] // #3034: exported voice entry point, wired-but-dormant (no live dispatch yet).
 pub(in crate::services::discord) async fn start_voice_headless_turn(
     ctx: &serenity::Context,
     channel_id: ChannelId,
@@ -295,7 +296,6 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                     last_active: tokio::time::Instant::now(),
                     worktree: None,
                     born_generation: super::super::super::runtime_store::load_generation(),
-                    assistant_turns: 0,
                 });
             session.current_path = Some(canonical.clone());
             if session.channel_name.is_none() {

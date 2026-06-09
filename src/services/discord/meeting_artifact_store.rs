@@ -62,8 +62,13 @@ pub struct UpsertMeetingBody {
 /// added without a cross-module change.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MeetingArtifactKind {
+    // #3034: typed kinds retained per the doc above (future kinds without a
+    // cross-module change); prod currently constructs `Other(..)` only.
+    #[allow(dead_code)]
     Transcript,
+    #[allow(dead_code)]
     Summary,
+    #[allow(dead_code)]
     ActionItem,
     Other(String),
 }
@@ -99,6 +104,9 @@ pub enum StoreOutcome {
     Existing(MeetingArtifact),
 }
 
+// #3034: StoreOutcome accessors — public repo API not yet read by prod (callers
+// match the variant directly). Retained as a coherent surface.
+#[allow(dead_code)]
 impl StoreOutcome {
     pub fn artifact(&self) -> &MeetingArtifact {
         match self {
@@ -160,6 +168,9 @@ impl MeetingArtifactRepo {
         StoreOutcome::Inserted(artifact)
     }
 
+    // #3034: repo query API (get/list/len/is_empty) — public surface not yet
+    // read by prod (only `store_with_key` is wired). Retained as a coherent repo.
+    #[allow(dead_code)]
     pub fn get(
         &self,
         meeting_id: &str,
@@ -175,6 +186,7 @@ impl MeetingArtifactRepo {
         guard.get(&key).cloned()
     }
 
+    #[allow(dead_code)] // #3034: repo query API, see note above.
     pub fn list_for_meeting(&self, meeting_id: &str) -> Vec<MeetingArtifact> {
         let guard = self.inner.lock().expect("artifact repo mutex poisoned");
         guard
@@ -184,10 +196,12 @@ impl MeetingArtifactRepo {
             .collect()
     }
 
+    #[allow(dead_code)] // #3034: repo query API, see note above.
     pub fn len(&self) -> usize {
         self.inner.lock().map(|g| g.len()).unwrap_or(0)
     }
 
+    #[allow(dead_code)] // #3034: repo query API, see note above.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

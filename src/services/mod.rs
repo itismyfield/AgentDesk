@@ -16,11 +16,6 @@ pub mod codex_remote_policy;
 #[cfg(unix)]
 pub mod codex_tmux_wrapper;
 pub mod codex_tui;
-// #3034: residual dead-code items in not-yet-cleaned discord submodules;
-// scoped here so the lint stays live on clean sibling modules. Cleaned
-// submodules carry their own narrow per-item allows. Remove once the remaining
-// discord submodules are cleaned.
-#[allow(dead_code)]
 pub mod discord;
 pub mod discord_config_audit;
 // #1693: `discord_delivery` moved to `dispatches::discord_delivery`. The

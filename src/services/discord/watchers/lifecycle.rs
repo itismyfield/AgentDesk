@@ -2627,7 +2627,6 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                         worktree: None,
 
                         born_generation: super::super::runtime_store::load_generation(),
-                        assistant_turns: 0,
                     });
 
             if session.session_id.is_none() && persisted_session_id.is_some() {

@@ -39,6 +39,10 @@ fn prune_recent_watcher_reattach_offsets(
     });
 }
 
+// #3034: write side of the watcher-reattach-offset dedup ring. The read side
+// (`matching_recent_watcher_reattach_offset`) is live in the watcher loop; the
+// record wiring is staged (the lookup defensively misses until then).
+#[allow(dead_code)]
 pub(super) fn record_recent_watcher_reattach_offset(
     channel_id: ChannelId,
     tmux_session_name: &str,

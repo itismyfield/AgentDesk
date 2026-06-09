@@ -197,7 +197,10 @@ pub(super) fn hosted_tui_draft_should_enter_provider_recovery(
 ///        - an ambiguity guard: when MORE THAN ONE qualifying transcript exists
 ///          in a cwd and we have no stronger identity, we refuse to guess
 ///          (return `None`) rather than risk false-ready / false-busy.
+// #3034: transcript-path resolver exercised by the session-strategy lifecycle
+// tests; the live followup path resolves transcripts elsewhere. Test contract.
 #[cfg(unix)]
+#[allow(dead_code)]
 pub(super) fn resolve_claude_followup_transcript_path(
     current_path: Option<&str>,
     session_id: Option<&str>,

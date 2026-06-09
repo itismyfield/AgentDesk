@@ -254,6 +254,10 @@ async fn record_recent_turn_stop_with_offset(
     }
 }
 
+// #3034: per-channel recent-turn-stop query — sibling of the live
+// `recent_turn_stop_for_watcher_range`; no live caller yet. Kept as part of the
+// cancel-suppression query surface.
+#[allow(dead_code)]
 pub(in crate::services::discord) fn recent_turn_stop_for_channel(
     channel_id: ChannelId,
 ) -> Option<RecentTurnStop> {
@@ -295,6 +299,10 @@ pub(in crate::services::discord) fn recent_turn_stop_for_channel(
 /// would otherwise be silently swallowed. We allow a small
 /// `CANCEL_TEARDOWN_GRACE_BYTES` to accommodate the wrapper's normal
 /// post-cancel teardown bytes that flush before the session actually dies.
+// #3034: sync cancel-suppression contract (#1277), superseded at live callsites
+// by the PG-aware `cancel_induced_watcher_death_async`. Kept as the documented
+// reference (db::cancel_tombstones points here) and IO-free counterpart.
+#[allow(dead_code)]
 pub(in crate::services::discord) fn cancel_induced_watcher_death(
     channel_id: ChannelId,
     tmux_session_name: &str,

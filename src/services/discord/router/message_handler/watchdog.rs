@@ -15,10 +15,6 @@ const PAUSED_WATCHER_COLD_START_RETRY_DELAY: std::time::Duration =
 const PAUSED_WATCHER_COLD_START_RETRY_DELAY: std::time::Duration =
     std::time::Duration::from_millis(10);
 
-pub(super) fn watchdog_deadlock_prealert_bot_name() -> &'static str {
-    WATCHDOG_DEADLOCK_PREALERT_BOT
-}
-
 pub(super) fn parse_watchdog_alert_channel_id(raw: &str) -> Option<serenity::ChannelId> {
     let trimmed = raw.trim();
     let normalized = trimmed

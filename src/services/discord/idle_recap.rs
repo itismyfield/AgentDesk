@@ -1059,6 +1059,7 @@ pub(crate) async fn lookup_active_recap_for_channel(
 ///
 /// When the lookup returns `None` (no recap card recorded for the channel)
 /// this is a no-op: a still-idle channel keeps its card.
+#[allow(dead_code)] // #3034: test-only seam (prod wrappers removed; see codex R3 P2 note above).
 async fn clear_idle_recap_for_channel_with<Lookup, LookupFut, Delete, DeleteFut, Clear, ClearFut>(
     channel_id: u64,
     lookup: Lookup,

@@ -99,11 +99,15 @@ impl SessionIdentity {
 
     /// Returns the derived provider/channel tuple from the tmux name, if it
     /// can be parsed.
+    // #3034: SessionIdentity accessor surface — no live caller yet; kept as part
+    // of the identity-parsing API.
+    #[allow(dead_code)]
     pub fn provider_and_channel(&self) -> Option<(ProviderKind, String)> {
         parse_provider_and_channel_from_tmux_name(&self.tmux_name)
     }
 
     /// Render back to the legacy `host:tmux` form.
+    #[allow(dead_code)] // #3034: legacy-form compat accessor, see note above.
     pub fn legacy_key(&self) -> String {
         format!("{}:{}", self.host, self.tmux_name)
     }
@@ -115,6 +119,9 @@ impl SessionIdentity {
 /// only need the tmux tail. Previously duplicated across
 /// `services/queue.rs`, `server/routes/agents.rs`, `db/session_agent_resolution.rs`,
 /// and `server/routes/dispatched_sessions.rs`. New code should prefer this.
+// #3034: deliberate consolidation helper ("new code should prefer this"); no
+// live caller has migrated yet. Kept as the canonical session-key tail parser.
+#[allow(dead_code)]
 pub fn tmux_name_from_session_key(session_key: &str) -> Option<String> {
     SessionIdentity::parse(session_key).map(|id| id.tmux_name)
 }

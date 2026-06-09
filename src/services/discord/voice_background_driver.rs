@@ -30,6 +30,11 @@ impl VoiceBackgroundDriverKind {
     }
 }
 
+// #3034: voice-driver capability introspection surface — the `capabilities()`
+// trait method and this struct/const are exercised by the driver unit tests but
+// not yet read by a live capability-gating callsite. Kept as the trait's
+// capability contract.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) struct VoiceBackgroundDriverCapabilities {
     pub start: bool,
@@ -41,6 +46,7 @@ pub(in crate::services::discord) struct VoiceBackgroundDriverCapabilities {
 }
 
 impl VoiceBackgroundDriverCapabilities {
+    #[allow(dead_code)] // #3034: capability preset for the announce-bot driver, see above.
     const ANNOUNCE_BOT_TRANSCRIPT: Self = Self {
         start: true,
         follow_up: true,
@@ -106,6 +112,7 @@ pub(in crate::services::discord) struct VoiceBackgroundStartOutcome {
 
 pub(in crate::services::discord) trait VoiceBackgroundTurnDriver {
     fn kind(&self) -> VoiceBackgroundDriverKind;
+    #[allow(dead_code)] // #3034: capability introspection, test-only so far. See above.
     fn capabilities(&self) -> VoiceBackgroundDriverCapabilities;
 
     fn start<'a>(

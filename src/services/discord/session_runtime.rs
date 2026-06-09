@@ -24,7 +24,6 @@ pub(super) struct DiscordSession {
     /// Restart generation at which this session was created/restored.
     #[allow(dead_code)]
     pub(super) born_generation: u64,
-    pub(super) assistant_turns: usize,
 }
 
 pub(super) fn allows_nonlocal_session_path(remote_profile_name: Option<&str>) -> bool {
@@ -191,31 +190,6 @@ impl DiscordSession {
 
         lines.reverse();
         Some(lines.join("\n"))
-    }
-    pub(super) fn clear_transcript_history(&mut self) {
-        self.history.clear();
-        self.assistant_turns = 0;
-    }
-
-    pub(super) fn will_reach_turn_cap(&self) -> bool {
-        self.assistant_turns.saturating_add(1) >= SESSION_MAX_ASSISTANT_TURNS
-    }
-
-    pub(super) fn record_completed_turn(
-        &mut self,
-        user_text: String,
-        assistant_text: String,
-    ) -> bool {
-        self.history.push(HistoryItem {
-            item_type: HistoryType::User,
-            content: user_text,
-        });
-        self.history.push(HistoryItem {
-            item_type: HistoryType::Assistant,
-            content: assistant_text,
-        });
-        self.assistant_turns = self.assistant_turns.saturating_add(1);
-        self.assistant_turns >= SESSION_MAX_ASSISTANT_TURNS
     }
     /// Validate `current_path` and return it if it exists on disk.
     /// If the path is stale (deleted), clear `current_path` and `worktree`, log, and return `None`.
@@ -949,7 +923,6 @@ pub(super) async fn auto_restore_session_force(
                 last_active: tokio::time::Instant::now(),
                 worktree: None,
                 born_generation: runtime_store::load_generation(),
-                assistant_turns: 0,
             });
         session.channel_id = Some(channel_id.get());
         session.last_active = tokio::time::Instant::now();
@@ -1482,7 +1455,6 @@ pub(super) async fn bootstrap_thread_session(
             last_active: tokio::time::Instant::now(),
             worktree: None,
             born_generation: runtime_store::load_generation(),
-            assistant_turns: 0,
         });
     // Prefer restoring the worktree persisted for this thread session across a
     // dcserver restart. The in-memory `sessions` map is cleared on restart, so

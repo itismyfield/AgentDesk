@@ -82,10 +82,6 @@ fn pending_queue_len(queue: &[Intervention]) -> usize {
     normalized_pending_queue(queue.to_vec()).len()
 }
 
-fn pending_queue_len_at(queue: &[Intervention], now: Instant) -> usize {
-    normalized_pending_queue_at(queue.to_vec(), now).len()
-}
-
 fn normalize_pending_queues(
     queues: std::collections::HashMap<ChannelId, Vec<Intervention>>,
 ) -> std::collections::HashMap<ChannelId, Vec<Intervention>> {

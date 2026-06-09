@@ -275,22 +275,6 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
     })
 }
 
-pub async fn stop_provider_channel_runtime(
-    registry: &HealthRegistry,
-    provider_name: &str,
-    channel_id: ChannelId,
-    reason: &str,
-) -> Option<RuntimeTurnStopResult> {
-    stop_provider_channel_runtime_with_policy(
-        registry,
-        provider_name,
-        channel_id,
-        reason,
-        discord::TmuxCleanupPolicy::PreserveSession,
-    )
-    .await
-}
-
 pub async fn force_kill_provider_channel_runtime(
     registry: &HealthRegistry,
     provider_name: &str,
@@ -335,6 +319,9 @@ pub async fn snapshot_pending_queue_state(
 pub struct PendingQueueSnapshot {
     pub queue_depth: usize,
     pub disk_present: bool,
+    // #3034: populated for diagnostics/observability; not read by the queue
+    // preservation check (which only compares depth + presence).
+    #[allow(dead_code)]
     pub disk_path: Option<std::path::PathBuf>,
 }
 
@@ -429,6 +416,9 @@ pub async fn schedule_pending_queue_drain_after_cancel(
 /// hydration ran.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PostCancelDrainOutcome {
+    // #3034: outcome flag retained for diagnostics; callers consume
+    // `queue_depth_after` as the API source of truth (see doc above).
+    #[allow(dead_code)]
     pub scheduled: bool,
     pub queue_depth_after: usize,
 }

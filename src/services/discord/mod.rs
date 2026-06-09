@@ -1163,6 +1163,9 @@ impl TmuxWatcherRegistry {
         self.by_tmux_session.get(&tmux_session_name)
     }
 
+    // #3034: test-only convenience wrapper (prod code calls `insert_locked`
+    // with an explicit registry guard). Used only by `#[cfg(test)]` setup.
+    #[allow(dead_code)]
     pub(super) fn insert(
         &self,
         channel_id: ChannelId,
@@ -2610,26 +2613,6 @@ impl SharedData {
             .clone()
     }
 
-    /// #1332 round-3 codex review P2 + round-4 P2 + round-5 P2: write-through
-    /// insert for the `queued_placeholders` mapping. The in-memory `DashMap`
-    /// mutation + the on-disk snapshot write are both performed under a
-    /// per-channel async persistence mutex so two concurrent inserts (or an
-    /// insert racing a remove) on the same channel cannot reorder their
-    /// on-disk effect: the snapshot that lands last on disk is always the
-    /// snapshot taken after the latest mutation. The DashMap shard lock is
-    /// released before the file I/O begins, so DashMap reads from the rest
-    /// of the system continue to make progress.
-    pub(super) async fn insert_queued_placeholder(
-        &self,
-        channel_id: ChannelId,
-        user_msg_id: MessageId,
-        placeholder_msg_id: MessageId,
-    ) {
-        let persist_lock = self.queued_placeholders_persist_lock(channel_id);
-        let _persist_guard = persist_lock.lock().await;
-        self.insert_queued_placeholder_locked(channel_id, user_msg_id, placeholder_msg_id);
-    }
-
     /// #1332 round-5 codex review P2: insert variant that assumes the
     /// caller already holds the per-channel persistence mutex. Used by the
     /// race-loss render path so the lock can span ownership recheck +
@@ -3233,6 +3216,10 @@ async fn mailbox_try_start_turn_kinded(
         .await
 }
 
+// #3034: dormant production restore path (wraps `mailbox.restore_active_turn`,
+// itself `#[allow(dead_code)]` in turn_orchestrator). Kept as the wired-but-not-
+// yet-dispatched rehydrate seam; do not delete without removing the method too.
+#[allow(dead_code)]
 async fn mailbox_restore_active_turn(
     shared: &SharedData,
     channel_id: ChannelId,

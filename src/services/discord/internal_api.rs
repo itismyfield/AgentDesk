@@ -262,7 +262,9 @@ pub(super) async fn fetch_dispatch(dispatch_id: &str) -> Result<Value, String> {
 /// result (#2194 regression risk).
 #[derive(Debug)]
 pub(super) enum DispatchUpdateOutcome {
-    Updated(Value),
+    // #3034: parsed success body retained for symmetry/diagnostics; callers
+    // match `Updated(_)` (only the `Conflict` body is read, for the 409 path).
+    Updated(#[allow(dead_code)] Value),
     Conflict { body: Value },
 }
 

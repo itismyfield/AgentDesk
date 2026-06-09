@@ -113,11 +113,11 @@
   parsing), `src/services/discord/inflight.rs` (state file contract).
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/services/discord/watchers/lifecycle.rs` (2333 lines — canonical
+  - `src/services/discord/watchers/lifecycle.rs` (2332 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior; #3016 phase-5b2 dropped the `mailbox_finalize_owed`
     construction from the watcher-spawn handle).
-  - `src/services/discord/tmux.rs` (2241 lines after #2558 dead-code sweep;
+  - `src/services/discord/tmux.rs` (2011 lines after #2558 dead-code sweep;
     +4 from #3167: the monitor-auto-turn start passes `ActiveTurnKind::Background`
     so a queued user message can supersede the low-priority monitor/loop turn;
     failover guard; #3087 `session_panel_instance_key`/`write_spawn_nonce`
@@ -131,7 +131,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (9582 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (9583 lines after #2558
     dead-code sweep; #3016 phase-5b2 removed the `mailbox_finalize_owed`
     swap reads, the watcher-fn flag params, and the `LegacyFlagGated`
     decision variant; #1520 watcher loop extraction + #2427 D/A
@@ -597,7 +597,7 @@
     atomic read, closing the present/generation TOCTOU) plus its dedicated accessor unit
     test; the watcher-snapshot no-clobber regression test is retained, rewritten to take
     its G1/G2 snapshots from `external_input_relay_lease(...).map(|l| l.generation)`).
-  - `src/services/discord/recovery_engine.rs` (4094 lines; #3016 phase-5b2
+  - `src/services/discord/recovery_engine.rs` (4090 lines; #3016 phase-5b2
     dropped the `mailbox_finalize_owed` construction from the three recovery
     watcher-spawn handles; +9 from #3166
     fetching real context thresholds for the recovered-turn status panel; +36 from #3099
@@ -619,12 +619,12 @@
     2292 after #3038 send-to-agent dispatch extraction to
     `outbound/send_to_agent.rs`, #1879 snapshot/mailbox extraction, and #3082
     answer-flush-barrier field).
-  - `src/services/discord/health/recovery.rs` (2655 lines; health recovery
+  - `src/services/discord/health/recovery.rs` (2645 lines; health recovery
     extraction surface, split further before adding non-bugfix behavior; +70
     from #3126 stall-watchdog completed-idle false-positive guard tests; +88
     from #3169 stall-watchdog jsonl-mtime liveness guard + tests, closing the
     Death #1 force-clean false-positive on loop mid-write sessions).
-  - `src/services/discord/router/message_handler/intake_turn.rs` (3771 lines;
+  - `src/services/discord/router/message_handler/intake_turn.rs` (3770 lines;
     Discord message intake turn orchestration split from the router message
     handler; bugfix only outside a further extraction plan; +9 from #3082
     queued-only answer-flush gate (`is_queued_notice` on the two
@@ -651,7 +651,7 @@
     first inline `#[cfg(test)] mod` block over-extended the block to EOF, so
     most of the production code was mislabeled test and the file reported only
     626 prod LoC. Hotfile — bugfix only outside the #3016/#3028 decompose plan).
-  - `src/services/discord/turn_bridge/completion_guard.rs` (1849 lines).
+  - `src/services/discord/turn_bridge/completion_guard.rs` (1834 lines).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (1545 lines).
   - `src/services/discord/turn_bridge/terminal_delivery.rs` (504 prod lines;
     no longer a giant-file after the #3028 splitter fix corrected its inline
@@ -700,7 +700,7 @@
     are net-zero. The poise framework-builder/setup closure (~580 lines) is left
     inline — its move-captured locals make a clean extraction risky and is
     deferred).
-  - `src/services/discord/session_runtime.rs` (1781 lines).
+  - `src/services/discord/session_runtime.rs` (1753 lines).
   - `src/services/discord/voice_barge_in.rs` (4657 lines; net +0 from #3034
     scoped dead-code allows on the test-only runtime API
     (`disabled` / `runtime_config_snapshot` / `apply_voice_command` /

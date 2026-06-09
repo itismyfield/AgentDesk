@@ -12,6 +12,9 @@ pub(super) enum PlaceholderCleanupOperation {
     DeleteNonterminal,
     EditTerminal,
     EditPreserve,
+    // #3034: audit/wire operation kind ("edit_handoff") not yet emitted by a
+    // live cleanup path; kept as a stable audit-string surface.
+    #[allow(dead_code)]
     EditHandoff,
 }
 

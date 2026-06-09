@@ -323,6 +323,9 @@ impl RelayOwnerKind {
 
 impl TurnSource {
     /// Stable wire representation for audit logs / metrics labels.
+    // #3034: wire-contract surface pinned by the unit tests below; not yet read
+    // by a live audit/metrics callsite.
+    #[allow(dead_code)]
     pub(in crate::services::discord) fn as_str(self) -> &'static str {
         match self {
             Self::Managed => "managed",
@@ -1698,24 +1701,6 @@ pub(in crate::services::discord) fn clear_inflight_state_if_matches_identity_aft
     )
 }
 
-pub(in crate::services::discord) fn clear_inflight_state_if_matches_tmux_response(
-    provider: &ProviderKind,
-    channel_id: u64,
-    tmux_session_name: &str,
-    response: &str,
-) -> GuardedClearOutcome {
-    let Some(root) = inflight_runtime_root() else {
-        return GuardedClearOutcome::Missing;
-    };
-    clear_inflight_state_if_matches_tmux_response_in_root(
-        &root,
-        provider,
-        channel_id,
-        tmux_session_name,
-        response,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) fn refresh_inflight_last_offset_if_matches_identity(
     provider: &ProviderKind,
@@ -2013,6 +1998,9 @@ fn clear_inflight_state_if_matches_identity_after_delivery_in_root(
     (outcome, mirrored_delivery)
 }
 
+// #3034: root-parameterized variant exercised directly by the unit tests
+// (the prod wrapper was removed; tests drive a tempdir root). Test-only seam.
+#[allow(dead_code)]
 fn clear_inflight_state_if_matches_tmux_response_in_root(
     root: &std::path::Path,
     provider: &ProviderKind,

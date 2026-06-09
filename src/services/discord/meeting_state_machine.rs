@@ -49,13 +49,6 @@ pub enum MeetingState {
 }
 
 impl MeetingState {
-    pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            MeetingState::Completed | MeetingState::Cancelled | MeetingState::Failed
-        )
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             MeetingState::Pending => "pending",

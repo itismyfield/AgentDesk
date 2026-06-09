@@ -123,13 +123,6 @@ pub(in crate::services::discord) fn reserve_headless_turn() -> HeadlessTurnReser
     }
 }
 
-pub(super) fn resolve_session_id_for_current_turn(
-    session_id: Option<String>,
-    reset_applied: bool,
-) -> Option<String> {
-    if reset_applied { None } else { session_id }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SessionResetReason {
     IdleExpired,

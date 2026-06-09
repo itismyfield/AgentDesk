@@ -48,6 +48,10 @@ pub(super) enum PlaceholderLifecycle {
     Queued,
     Active,
     Completed,
+    // #3034: documented terminal state (NotCreated → … → Completed|TimedOut|
+    // Aborted) matched throughout the sweeper but not yet transitioned INTO by
+    // any live path. Kept for state-machine completeness.
+    #[allow(dead_code)]
     TimedOut,
     Aborted,
 }
@@ -540,15 +544,6 @@ impl PlaceholderController {
                 );
                 PlaceholderControllerOutcome::EditFailed
             }
-        }
-    }
-
-    /// Snapshot the current lifecycle state for a key, mainly used by tests
-    /// and the placeholder_sweeper.
-    pub(super) async fn lifecycle(&self, key: &PlaceholderKey) -> PlaceholderLifecycle {
-        match self.entries.get(key) {
-            Some(arc) => arc.lock().await.state,
-            None => PlaceholderLifecycle::NotCreated,
         }
     }
 

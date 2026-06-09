@@ -41,9 +41,16 @@ use status_panel::{
 
 pub(in crate::services::discord) use recent_events::RecentPlaceholderEvent;
 pub(in crate::services::discord) use status_events::{
-    status_events_from_task_notification, status_events_from_tool_result,
-    status_events_from_tool_result_with_id, status_events_from_tool_use,
+    status_events_from_task_notification, status_events_from_tool_result_with_id,
     status_events_from_tool_use_with_id,
+};
+// #3034: the bare (no-id) variants are consumed only by the `tests` submodule
+// (the prod path uses the `_with_id` variants above); a `#[cfg(test)]` re-export
+// keeps them visible to tests without an `unused_imports` warning in the lib
+// build.
+#[cfg(test)]
+pub(in crate::services::discord) use status_events::{
+    status_events_from_tool_result, status_events_from_tool_use,
 };
 
 pub(in crate::services::discord) use recent_events::events_from_json;

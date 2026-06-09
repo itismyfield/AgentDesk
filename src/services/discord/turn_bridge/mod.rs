@@ -270,6 +270,9 @@ fn json_any_true_flag(value: &serde_json::Value, key: &str) -> bool {
 /// turns. Since voice-background routing was first merged in #2207
 /// (immediate predecessor of this fix), there are no long-running
 /// in-flight turns to migrate. The hard cutover is safe.
+// #3034: handoff-marker predicate pinned by the voice-background unit tests; the
+// live routing path consults the marker store inline. Test contract.
+#[allow(dead_code)]
 fn has_voice_background_handoff_marker(user_msg_id: MessageId, _text: &str) -> bool {
     crate::voice::announce_meta::global_store()
         .get_handoff(user_msg_id)
@@ -1586,28 +1589,6 @@ fn first_request_line(user_text: &str) -> Option<String> {
         .map(str::trim)
         .find(|line| !line.is_empty())
         .map(str::to_string)
-}
-
-fn monitor_handoff_tool_context(
-    last_tool_name: Option<&str>,
-    last_tool_summary: Option<&str>,
-    current_tool_line: Option<&str>,
-) -> (Option<String>, Option<String>) {
-    let tool_summary = last_tool_name
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            current_tool_line
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        });
-    let command_summary = last_tool_summary
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && *value != "…")
-        .map(str::to_string);
-    (tool_summary, command_summary)
 }
 
 async fn child_progress_line(
@@ -3966,35 +3947,6 @@ fn resolve_exact_completion_usage(
     let snapshot = TurnAnalyticsSnapshot::capture(inflight_state, fallback_session_id, accumulated);
     let (_session_id, usage) = resolve_output_analytics_snapshot(&snapshot);
     (usage.context_occupancy_input_tokens() > 0).then_some(usage)
-}
-
-pub(super) fn persist_turn_analytics_row(
-    sqlite: &crate::db::Db,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    user_msg_id: MessageId,
-    role_binding: Option<&RoleBinding>,
-    dispatch_id: Option<&str>,
-    session_key: Option<&str>,
-    session_id: Option<&str>,
-    inflight_state: &InflightTurnState,
-    token_usage: TurnTokenUsage,
-    duration_ms: i64,
-) {
-    persist_turn_analytics_row_with_handles(
-        Some(sqlite),
-        None,
-        provider,
-        channel_id,
-        user_msg_id,
-        role_binding,
-        dispatch_id,
-        session_key,
-        session_id,
-        inflight_state,
-        token_usage,
-        duration_ms,
-    );
 }
 
 pub(super) fn persist_turn_analytics_row_with_handles(
