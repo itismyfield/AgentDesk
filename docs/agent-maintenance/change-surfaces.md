@@ -410,7 +410,7 @@
     flag-independent; EMPTY `Unknown` DEFERS — the codex HIGH regression case that the
     prior 5b1 build finalized prematurely) +
     `fresh_idle_unknown_keeps_wrong_turn_race_guards`.
-  - `src/services/discord/tui_prompt_relay.rs` (5414 lines; #3016 phase-5b2
+  - `src/services/discord/tui_prompt_relay.rs` (5438 lines; #3016 phase-5b2
     removed the dead `publish_tui_direct_watcher_finalize_debt` producer;
     SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only

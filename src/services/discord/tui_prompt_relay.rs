@@ -4137,8 +4137,22 @@ async fn run_claude_idle_response_tail(
 #[cfg(unix)]
 fn idle_stream_message_is_content(message: &StreamMessage) -> bool {
     match message {
-        StreamMessage::Text { content } => !content.trim().is_empty(),
-        StreamMessage::Done { result, .. } => !result.trim().is_empty(),
+        // #3256: a `Text`/`Done` body that is ONLY leading TUI chrome (e.g.
+        // `No response requested.` / `Continue from where you left off.`) is NOT
+        // real content — the old path stripped that chrome with
+        // `strip_leading_tui_response_chrome` and produced an empty response, i.e.
+        // the no-card empty path. Strip BEFORE the emptiness test so a chrome-only
+        // turn keeps spawning no placeholder card (parity with prior behavior).
+        StreamMessage::Text { content } => {
+            !super::response_sanitizer::strip_leading_tui_response_chrome(content)
+                .trim()
+                .is_empty()
+        }
+        StreamMessage::Done { result, .. } => {
+            !super::response_sanitizer::strip_leading_tui_response_chrome(result)
+                .trim()
+                .is_empty()
+        }
         StreamMessage::Error { message, .. } => !message.trim().is_empty(),
         _ => false,
     }
@@ -4466,10 +4480,20 @@ async fn stream_tui_idle_response_through_bridge(
     let forward_handle =
         tokio::task::spawn_blocking(move || forward_idle_stream_into_bridge(prefix, reader_rx, tx));
 
-    let completion = tokio::time::timeout(Duration::from_secs(180), completion_rx).await;
-    // The reader-drain thread completes once the reader closes; join it so a
-    // lagging reader cannot outlive the turn.
+    // #3256: the forward thread runs for the WHOLE turn — it only returns once the
+    // transcript reader closes (turn done / idle / dead), having forwarded every
+    // prose frame plus the terminal `Done` into the bridge. Join it FIRST so the
+    // completion wait does not race the turn's real duration. A long autonomous
+    // turn (many minutes, well past any fixed wall-clock) therefore streams in
+    // full and still reports success — the previous `timeout(180s, completion_rx)`
+    // placed before this join made >180s turns return `Err` despite a normal
+    // delivery, which skipped the runtime-binding offset commit and risked a
+    // duplicate re-relay on the next idle poll.
     let _ = forward_handle.await;
+
+    // Only NOW bound the post-`Done` bridge finalization (Discord edit/flush),
+    // which should land within seconds of the terminal frame being forwarded.
+    let completion = tokio::time::timeout(Duration::from_secs(180), completion_rx).await;
 
     match completion {
         Ok(_) => {
@@ -7344,6 +7368,24 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: None,
+        }));
+        // #3256 parity: a Text/Done body that is ONLY leading TUI chrome must NOT
+        // count as content — otherwise a "No response requested." turn would now
+        // spawn a placeholder card the old path never produced.
+        assert!(!idle_stream_message_is_content(&StreamMessage::Text {
+            content: "No response requested.".to_string(),
+        }));
+        assert!(!idle_stream_message_is_content(&StreamMessage::Text {
+            content: "Continue from where you left off.".to_string(),
+        }));
+        assert!(!idle_stream_message_is_content(&StreamMessage::Done {
+            result: "No response requested.".to_string(),
+            session_id: None,
+        }));
+        // Chrome FOLLOWED by real prose is still content (only leading chrome is
+        // stripped).
+        assert!(idle_stream_message_is_content(&StreamMessage::Text {
+            content: "No response requested.\nactual prose".to_string(),
         }));
     }
 
