@@ -8,6 +8,18 @@ use std::thread::JoinHandle;
 /// Tmux session name prefix — always "AgentDesk".
 pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";
 
+/// #3263: Codex context-window LAST-RESORT fallback (tokens).
+///
+/// Codex is the only provider with a dynamic local context-window source
+/// (`~/.codex/models_cache.json`, keyed by model slug). Resolution order is:
+///   1. exact slug match in the cache (`context_window`),
+///   2. max `context_window` across cached models (cache present, slug drift),
+///   3. this constant (cache absent / empty / unparseable).
+/// It is set to a conservative current-generation Codex window (matching the
+/// current gpt-5.x cache value) so the fallback is not stale; the cache and the
+/// max-of-cache value above are authoritative whenever the cache exists.
+const CODEX_FALLBACK_CONTEXT_WINDOW: u64 = 272_000;
+
 /// Tmux session name suffix (reserved for future isolation use; currently empty).
 pub fn tmux_env_suffix() -> &'static str {
     ""
@@ -113,6 +125,8 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
             runtime_model: None,
             source_label: "Claude provider default",
         },
+        // #3263: Claude exposes no local/CLI context-window source, but AgentDesk
+        // launches it in 1M-context mode, so this hardcoded 1M is accurate.
         default_context_window: 1_000_000,
         managed_tmux_backend: true,
         managed_tmux_wrapper_subcommand: Some("tmux-wrapper"),
@@ -140,7 +154,11 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
             runtime_model: None,
             source_label: "provider default",
         },
-        default_context_window: 200_000,
+        // #3263: Codex resolves its context window cache-first from
+        // ~/.codex/models_cache.json (see resolve_context_window /
+        // codex_model_context_window). This registry value is only the
+        // last-resort fallback when that cache is absent/unusable.
+        default_context_window: CODEX_FALLBACK_CONTEXT_WINDOW,
         managed_tmux_backend: true,
         managed_tmux_wrapper_subcommand: Some("codex-tmux-wrapper"),
         auth: ProviderAuthSpec {
@@ -167,6 +185,8 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
             runtime_model: None,
             source_label: "provider default",
         },
+        // #3263: Gemini exposes no local/CLI context-window source, but AgentDesk
+        // launches it in 1M-context mode, so this hardcoded 1M is accurate.
         default_context_window: 1_000_000,
         managed_tmux_backend: false,
         managed_tmux_wrapper_subcommand: None,
@@ -194,6 +214,8 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
             runtime_model: None,
             source_label: "provider default",
         },
+        // #3263: OpenCode exposes no local/CLI context-window source; this
+        // conservative 128k is a hardcoded default (no dynamic source exists).
         default_context_window: 128_000,
         managed_tmux_backend: false,
         managed_tmux_wrapper_subcommand: None,
@@ -221,6 +243,8 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
             runtime_model: None,
             source_label: "provider default",
         },
+        // #3263: Qwen exposes no local/CLI context-window source; this
+        // conservative 128k is a hardcoded default (no dynamic source exists).
         default_context_window: 128_000,
         managed_tmux_backend: true,
         managed_tmux_wrapper_subcommand: Some("qwen-tmux-wrapper"),
@@ -436,15 +460,33 @@ impl ProviderKind {
             .unwrap_or(200_000)
     }
 
-    /// Resolve the context window for a specific model, falling back to
-    /// the provider default if the model-specific value is unavailable.
+    /// Resolve the context window for a specific model.
+    ///
+    /// #3263: Codex is cache-first REGARDLESS of whether `model` is `Some`/`None`
+    /// — `codex_model_context_window` reads `~/.codex/models_cache.json` (exact
+    /// slug when supplied, else max-of-cache). A provider-default Codex turn
+    /// (`None`) therefore still prefers the cache's max-of-cache window over the
+    /// stale constant. Only when that cache is absent/empty/unparseable do we
+    /// fall back to the provider default (`CODEX_FALLBACK_CONTEXT_WINDOW`). Other
+    /// providers have no local source and always use their registry default.
     pub fn resolve_context_window(&self, model: Option<&str>) -> u64 {
-        if let (Self::Codex, Some(m)) = (self, model) {
-            if let Some(window) = codex_model_context_window(m) {
-                return window;
-            }
-        }
-        self.default_context_window()
+        // `None` (provider-default turn) maps to an empty slug, which never
+        // matches an entry, so `codex_context_window_from_cache` skips the
+        // exact-match branch and yields the cache's max-of-cache window.
+        let cached = if let Self::Codex = self {
+            codex_model_context_window(model.unwrap_or(""))
+        } else {
+            None
+        };
+        self.resolve_context_window_with(cached)
+    }
+
+    /// Pure composition of [`resolve_context_window`]: apply the cache-first →
+    /// provider-default fallback to a pre-resolved cache window. Splitting this
+    /// out keeps the absent-cache → `default_context_window()` fallback testable
+    /// without touching the real `~/.codex/models_cache.json` on disk.
+    fn resolve_context_window_with(&self, cached: Option<u64>) -> u64 {
+        cached.unwrap_or_else(|| self.default_context_window())
     }
 
     /// Returns Codex-specific CLI config overrides for auto-compact.
@@ -2247,17 +2289,187 @@ where
 }
 
 /// Read Codex model context_window from the local CLI cache file.
-/// Returns None if the cache is missing, unreadable, or the model isn't found.
+/// Returns None only when the cache is missing/unreadable; resolution within a
+/// present-but-non-matching cache is handled by `codex_context_window_from_cache`.
 fn codex_model_context_window(model: &str) -> Option<u64> {
     let cache_path = dirs::home_dir()?.join(".codex/models_cache.json");
     let data = std::fs::read_to_string(cache_path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&data).ok()?;
+    codex_context_window_from_cache(&data, model)
+}
+
+/// #3263: Resolve a Codex context window from the raw `models_cache.json` body.
+///
+/// 1. Exact slug match → that entry's `context_window`.
+/// 2. Cache present with models but no slug match (slug drift) → the MAX
+///    `context_window` across cached entries. The cache is authoritative and
+///    far fresher than the hardcoded last-resort, so we prefer it.
+/// 3. Cache empty / unparseable / no usable `context_window` → None, letting the
+///    caller fall back to `CODEX_FALLBACK_CONTEXT_WINDOW`.
+///
+/// Defensive: malformed JSON or unexpected shapes yield None, never a panic.
+fn codex_context_window_from_cache(data: &str, model: &str) -> Option<u64> {
+    let json: serde_json::Value = serde_json::from_str(data).ok()?;
     let models = json.get("models")?.as_array()?;
-    models
-        .iter()
-        .find(|m| m.get("slug").and_then(|s| s.as_str()) == Some(model))
-        .and_then(|m| m.get("context_window"))
-        .and_then(|v| v.as_u64())
+
+    let mut max_window: Option<u64> = None;
+    for entry in models {
+        let Some(window) = entry.get("context_window").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        // Only attempt an exact slug match when a real slug was supplied. An
+        // empty `model` (the `None` provider-default path) must NEVER exact-match
+        // — not even a blank-slug (`"slug": ""`) cache entry — and must always
+        // resolve via max-of-cache (cache present) or None (cache absent).
+        if !model.is_empty() && entry.get("slug").and_then(|s| s.as_str()) == Some(model) {
+            return Some(window);
+        }
+        max_window = Some(max_window.map_or(window, |m| m.max(window)));
+    }
+    max_window
+}
+
+#[cfg(test)]
+mod codex_context_window_tests {
+    use super::{CODEX_FALLBACK_CONTEXT_WINDOW, ProviderKind, codex_context_window_from_cache};
+
+    const CACHE: &str = r#"{
+        "models": [
+            { "slug": "gpt-5.1-codex", "context_window": 200000 },
+            { "slug": "gpt-5.5-codex", "context_window": 272000 }
+        ]
+    }"#;
+
+    // ---- Pure helper: present cache × {exact slug, unknown slug, None-as-""} ----
+
+    #[test]
+    fn exact_slug_match_returns_that_window() {
+        assert_eq!(
+            codex_context_window_from_cache(CACHE, "gpt-5.5-codex"),
+            Some(272_000)
+        );
+        // A non-max exact match still wins over max-of-cache.
+        assert_eq!(
+            codex_context_window_from_cache(CACHE, "gpt-5.1-codex"),
+            Some(200_000)
+        );
+    }
+
+    #[test]
+    fn cache_present_with_unknown_slug_returns_max_of_cache() {
+        // #3263: slug drift — cache exists, requested slug absent → use the MAX
+        // cached context_window, not the stale hardcoded last-resort.
+        assert_eq!(
+            codex_context_window_from_cache(CACHE, "gpt-6-codex-future"),
+            Some(272_000)
+        );
+    }
+
+    #[test]
+    fn cache_present_with_empty_slug_returns_max_of_cache() {
+        // #3263 Issue-1: the `None` (provider-default) path maps to "" and must
+        // never exact-match, so the helper yields the cache's max-of-cache.
+        assert_eq!(codex_context_window_from_cache(CACHE, ""), Some(272_000));
+    }
+
+    #[test]
+    fn blank_slug_entry_never_exact_matches_empty_model() {
+        // #3263 Fix-1: a cache containing a blank-slug (`"slug": ""`) entry must
+        // NOT let an empty `model` (`None` path) exact-match the blank entry's
+        // (smaller) window. The `!model.is_empty()` guard forces max-of-cache.
+        const CACHE_WITH_BLANK_SLUG: &str = r#"{
+            "models": [
+                { "slug": "", "context_window": 8000 },
+                { "slug": "gpt-5.5-codex", "context_window": 272000 }
+            ]
+        }"#;
+        // Empty model → MAX of cache (272000), NOT the blank-slug 8000.
+        assert_eq!(
+            codex_context_window_from_cache(CACHE_WITH_BLANK_SLUG, ""),
+            Some(272_000)
+        );
+        // Unknown slug → also MAX of cache, never the blank-slug small value.
+        assert_eq!(
+            codex_context_window_from_cache(CACHE_WITH_BLANK_SLUG, "gpt-x"),
+            Some(272_000)
+        );
+        // A real slug still exact-matches its own (non-max) window.
+        assert_eq!(
+            codex_context_window_from_cache(CACHE_WITH_BLANK_SLUG, "gpt-5.5-codex"),
+            Some(272_000)
+        );
+    }
+
+    // ---- Pure helper: absent / empty / unparseable cache → None (constant) ----
+
+    #[test]
+    fn empty_or_unparseable_cache_returns_none() {
+        // Absent-equivalent shapes for every lookup form (slug AND None-as-"").
+        assert_eq!(
+            codex_context_window_from_cache(r#"{"models": []}"#, "anything"),
+            None
+        );
+        assert_eq!(
+            codex_context_window_from_cache(r#"{"models": []}"#, ""),
+            None
+        );
+        assert_eq!(codex_context_window_from_cache("not json", "x"), None);
+        assert_eq!(codex_context_window_from_cache("not json", ""), None);
+        assert_eq!(codex_context_window_from_cache("{}", "x"), None);
+        assert_eq!(codex_context_window_from_cache("{}", ""), None);
+    }
+
+    // ---- Resolve-level: constant is the last resort only when cache unusable ---
+
+    #[test]
+    fn resolve_falls_back_to_documented_constant_when_cache_unusable() {
+        // #3263 Issue-2: cache-absent must resolve to the documented last-resort
+        // for BOTH the no-model (`None`) path and a `Some(model)` path. We drive
+        // the *resolve-level* composition (`resolve_context_window_with`) with the
+        // None the cache reader yields on a missing/unparseable file, proving the
+        // constant is reached at the resolve level — not only via the pure helper.
+
+        // Sanity: the cache reader yields None for absent-equivalent inputs
+        // across both lookup forms (empty slug AND a real slug).
+        assert_eq!(codex_context_window_from_cache("not json", ""), None);
+        assert_eq!(
+            codex_context_window_from_cache("not json", "gpt-5.5-codex"),
+            None
+        );
+
+        // Resolve-level: cache-absent (None) → the documented constant, for both
+        // the `None` (empty-slug) and `Some(model)` paths.
+        assert_eq!(
+            ProviderKind::Codex.resolve_context_window_with(None),
+            CODEX_FALLBACK_CONTEXT_WINDOW
+        );
+
+        // And the constant the resolve-level fallback yields IS the provider
+        // default, so a present cache window would supersede it when non-None.
+        assert_eq!(
+            ProviderKind::Codex.default_context_window(),
+            CODEX_FALLBACK_CONTEXT_WINDOW
+        );
+        // A present cache window supersedes the constant at the resolve level.
+        assert_eq!(
+            ProviderKind::Codex.resolve_context_window_with(Some(123_456)),
+            123_456
+        );
+    }
+
+    #[test]
+    fn resolve_is_cache_first_for_none_and_some_consistently() {
+        // #3263 Issue-1/Issue-2: whatever the real `~/.codex` cache yields for an
+        // empty slug (max-of-cache when present, else the constant), the `None`
+        // and "absent-model" `Some("")` resolve paths must agree — proving the
+        // None path is cache-first, not a hardcoded shortcut to the constant.
+        let none_resolved = ProviderKind::Codex.resolve_context_window(None);
+        let empty_resolved = ProviderKind::Codex.resolve_context_window(Some(""));
+        assert_eq!(none_resolved, empty_resolved);
+
+        // Whichever branch wins, the resolved window is a usable positive size
+        // (cache max-of-cache when present, else the constant) — never zero.
+        assert!(none_resolved > 0);
+    }
 }
 
 #[cfg(test)]

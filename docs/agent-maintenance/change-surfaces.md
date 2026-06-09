@@ -902,10 +902,14 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   behavior.
 - `src/services/claude.rs` (3909), `src/services/gemini.rs` (1358),
   `src/services/qwen.rs` (2196), `src/services/codex.rs` (3001),
-  `src/services/opencode.rs` (1881), `src/services/provider.rs` (1727) —
+  `src/services/opencode.rs` (1881), `src/services/provider.rs` (1796) —
   provider adapters. (#3034 removed dead non-cancel `execute_command_simple*`
   twins from the claude/codex/gemini adapters and a superseded
-  `select_counterpart_from` from provider.)
+  `select_counterpart_from` from provider. #3263 added the Codex max-of-cache
+  context-window fallback (now cache-first for both `Some(model)` and the
+  provider-default `None` path — constant only on absent/unusable cache),
+  documented per-provider context-window intent, and a
+  `codex_context_window_from_cache` unit-test module.)
 - `src/services/codex_tui/rollout_tail.rs` (1639) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
   beyond the #2169 session identity fix.
