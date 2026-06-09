@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::config::{AgentChannel, AgentDef, BotConfig, Config};
-use crate::db::Db;
 use crate::runtime_layout;
 
 use crate::services::discord::formatting::normalize_allowed_tools;
@@ -231,18 +230,6 @@ pub(crate) fn precheck_voice_alias_collisions(config: &mut Config) -> Result<(),
     Ok(())
 }
 
-pub(crate) fn audit_and_reconcile(
-    root: &Path,
-    config: Config,
-    yaml_path: PathBuf,
-    yaml_present: bool,
-    _legacy_db: &Db,
-    legacy_scan: &LegacySourceScan,
-    dry_run: bool,
-) -> Result<AuditRunOutcome, String> {
-    audit_and_reconcile_config_only(root, config, yaml_path, yaml_present, legacy_scan, dry_run)
-}
-
 pub(crate) fn audit_and_reconcile_config_only(
     root: &Path,
     mut config: Config,
@@ -300,23 +287,6 @@ fn direct_api_context_unavailable(error: &str) -> bool {
         || error.contains("direct runtime pg context is unavailable")
 }
 
-fn load_persisted_report_pg(pg_pool: Option<&sqlx::PgPool>) -> Option<String> {
-    let pg_pool = pg_pool?;
-    crate::utils::async_bridge::block_on_pg_result(
-        pg_pool,
-        |pool| async move {
-            sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
-                .bind(CONFIG_AUDIT_KV_KEY)
-                .fetch_optional(&pool)
-                .await
-                .map_err(|error| format!("load config audit report from pg: {error}"))
-        },
-        |message| message,
-    )
-    .ok()
-    .flatten()
-}
-
 fn persist_report_pg(config: &Config, rendered: &str) -> bool {
     let config = config.clone();
     let rendered = rendered.to_string();
@@ -341,21 +311,6 @@ fn persist_report_pg(config: &Config, rendered: &str) -> bool {
         |message| message,
     )
     .unwrap_or(false)
-}
-
-pub(crate) fn load_persisted_report(
-    _legacy_db: &Db,
-    pg_pool: Option<&sqlx::PgPool>,
-) -> Option<ConfigAuditReport> {
-    match internal_api::get_kv_value(CONFIG_AUDIT_KV_KEY) {
-        Ok(Some(raw)) => return serde_json::from_str(&raw).ok(),
-        Ok(None) => return None,
-        Err(error) if !direct_api_context_unavailable(&error) => return None,
-        Err(_) => {}
-    }
-
-    let raw = load_persisted_report_pg(pg_pool)?;
-    serde_json::from_str(&raw).ok()
 }
 
 fn persist_report(config: &Config, report: &ConfigAuditReport) {

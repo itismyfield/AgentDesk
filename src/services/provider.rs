@@ -279,18 +279,6 @@ impl ProviderKind {
             .unwrap_or_default()
     }
 
-    pub fn select_counterpart_from<I>(&self, available: I) -> Option<Self>
-    where
-        I: IntoIterator<Item = Self>,
-    {
-        let available: Vec<Self> = available.into_iter().collect();
-        self.preferred_counterparts().into_iter().find(|candidate| {
-            available
-                .iter()
-                .any(|available_provider| available_provider == candidate)
-        })
-    }
-
     pub fn default_channel_provider() -> Option<Self> {
         provider_registry()
             .iter()

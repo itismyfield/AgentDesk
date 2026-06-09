@@ -437,24 +437,6 @@ pub fn paste_buffer(session_name: &str, buffer_name: &str, delete: bool) -> Resu
         .map_err(|e| format!("tmux paste-buffer failed: {e}"))
 }
 
-/// Paste a named tmux buffer as raw pane input.
-///
-/// Unlike [`paste_buffer`], this does not request bracketed paste. It is for
-/// process stdin consumers such as `codex-tmux-wrapper --input-mode pipe`, where
-/// bracketed paste escape sequences would become part of the protocol line.
-pub fn paste_buffer_raw(
-    session_name: &str,
-    buffer_name: &str,
-    delete: bool,
-) -> Result<Output, String> {
-    let target = exact_target(session_name);
-    let args = paste_buffer_raw_args(buffer_name, &target, delete);
-    tmux_command()
-        .args(&args)
-        .output()
-        .map_err(|e| format!("tmux paste-buffer raw failed: {e}"))
-}
-
 fn paste_buffer_args<'a>(buffer_name: &'a str, target: &'a str, delete: bool) -> Vec<&'a str> {
     // `-p` requests bracketed paste and `-r` keeps LF as LF instead of tmux's
     // default LF -> CR replacement, which can look like Enter in TUIs.
@@ -466,6 +448,9 @@ fn paste_buffer_args<'a>(buffer_name: &'a str, target: &'a str, delete: bool) ->
     args
 }
 
+// #3034: raw (non-bracketed) paste arg builder; exercised only by the tmux
+// arg-builder unit tests below now that the raw-paste entrypoint is unused.
+#[allow(dead_code)]
 fn paste_buffer_raw_args<'a>(buffer_name: &'a str, target: &'a str, delete: bool) -> Vec<&'a str> {
     let mut args = vec!["paste-buffer", "-r"];
     if delete {

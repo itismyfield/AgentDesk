@@ -210,8 +210,6 @@ pub fn configured_provider_agents(provider: &str) -> Vec<super::AgentInfo> {
             agent_id: agent.id.clone(),
             provider: provider.to_string(),
             has_active_session: false,
-            tmux_session: None,
-            launch_artifact: None,
         })
         .collect()
 }

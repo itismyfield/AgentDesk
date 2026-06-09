@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -45,17 +44,6 @@ pub struct AgentInfo {
     pub agent_id: String,
     pub provider: String,
     pub has_active_session: bool,
-    pub tmux_session: Option<String>,
-    pub launch_artifact: Option<LaunchArtifact>,
-}
-
-/// Evidence keys written into the launch artifact when a canary session starts.
-pub fn canary_evidence(agent_id: &str, channel: &ProviderCliChannel) -> HashMap<String, String> {
-    let mut m = HashMap::new();
-    m.insert("canary_agent_id".to_string(), agent_id.to_string());
-    m.insert("candidate_path".to_string(), channel.path.clone());
-    m.insert("candidate_version".to_string(), channel.version.clone());
-    m
 }
 
 /// Returns the most recent candidate launch artifact for the given agent recorded after

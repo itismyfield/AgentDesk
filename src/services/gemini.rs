@@ -164,56 +164,6 @@ fn resolve_gemini_binary() -> crate::services::platform::BinaryResolution {
     crate::services::platform::resolve_provider_binary("gemini")
 }
 
-pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
-    execute_command_simple_cancellable(prompt, None)
-}
-
-pub fn execute_command_simple_with_timeout(
-    prompt: &str,
-    timeout: Duration,
-    label: &str,
-) -> Result<String, String> {
-    let resolution = resolve_gemini_binary();
-    let gemini_bin = resolution
-        .resolved_path
-        .clone()
-        .ok_or_else(|| "Gemini CLI not found".to_string())?;
-    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let working_dir = resolve_gemini_requested_dir(current_dir)?;
-    let exec_args = build_exec_args(prompt, None, None, false)?;
-
-    let mut command = Command::new(&gemini_bin);
-    crate::services::platform::apply_binary_resolution(&mut command, &resolution);
-    configure_child_process_group(&mut command);
-    let output = command
-        .args(&exec_args.args)
-        .current_dir(working_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to start Gemini: {}", e))
-        .and_then(|child| wait_with_output_timeout(child, timeout, label))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !output.status.success() {
-        return Err(derive_error_message(
-            &stdout,
-            &stderr,
-            output.status.code(),
-            "Gemini",
-        ));
-    }
-
-    let text = extract_text_from_stream_output(&stdout);
-    if text.trim().is_empty() {
-        Err("Empty response from Gemini".to_string())
-    } else {
-        Ok(text)
-    }
-}
-
 pub fn execute_command_simple_cancellable(
     prompt: &str,
     cancel_token: Option<&CancelToken>,
@@ -1072,10 +1022,6 @@ fn log_gemini_selector_resolution(
     }
 }
 
-fn normalize_resume_selector(session_id: Option<&str>) -> Result<Option<String>, String> {
-    normalize_resume_selector_with_source(session_id).map(|(selector, _)| selector)
-}
-
 fn normalize_resume_selector_with_source(
     session_id: Option<&str>,
 ) -> Result<(Option<String>, GeminiResumeSelectorSource), String> {
@@ -1113,10 +1059,6 @@ fn normalize_resume_selector_with_source(
     }
 
     Err(GEMINI_INVALID_RESUME_SELECTOR_MESSAGE.to_string())
-}
-
-fn observed_session_to_resume_selector(session_id: &str) -> Option<String> {
-    observed_session_to_resume_selector_with_source(session_id).map(|(selector, _)| selector)
 }
 
 fn observed_session_to_resume_selector_with_source(

@@ -417,10 +417,6 @@ pub fn is_ai_supported() -> bool {
 /// Execute a simple Claude CLI call with `--print` flag (no tools, text-only response).
 /// Used for short synchronous tasks like meeting participant selection.
 /// This is a blocking function — call from tokio::task::spawn_blocking.
-pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
-    execute_command_simple_cancellable(prompt, None)
-}
-
 pub fn execute_command_simple_cancellable(
     prompt: &str,
     cancel_token: Option<&CancelToken>,
@@ -428,16 +424,7 @@ pub fn execute_command_simple_cancellable(
     execute_command_simple_with_model_and_cancel(prompt, None, cancel_token, None)
 }
 
-/// Execute a simple Claude CLI call with optional model override (no tools, text-only response).
-/// This is a blocking function — call from tokio::task::spawn_blocking.
-pub fn execute_command_simple_with_model(
-    prompt: &str,
-    model_override: Option<&str>,
-) -> Result<String, String> {
-    execute_command_simple_with_model_and_cancel(prompt, model_override, None, None)
-}
-
-/// Cancel-aware variant of [`execute_command_simple_with_model`].
+/// Cancel-aware variant of the model-override simple execution path.
 ///
 /// Threads the supplied `CancelToken` into the spawned Claude child so that a
 /// mid-flight cancel (e.g. voice barge-in) terminates the process tree
@@ -553,19 +540,8 @@ fn execute_command_simple_with_model_and_cancel(
     }
 }
 
-/// Execute a simple Claude CLI call with an optional timeout.
-/// This is a blocking function — call from tokio::task::spawn_blocking.
-pub fn execute_command_simple_with_timeout(
-    prompt: &str,
-    timeout: std::time::Duration,
-    label: &str,
-) -> Result<String, String> {
-    let prompt = prompt.to_string();
-    execute_command_simple_with_timeout_worker(timeout, label, "claude", move |cancel_for_worker| {
-        execute_command_simple_cancellable(&prompt, Some(&cancel_for_worker))
-    })
-}
-
+// #3034: retained for the #2387 timeout-drain regression test below.
+#[allow(dead_code)]
 fn execute_command_simple_with_timeout_worker<F>(
     timeout: std::time::Duration,
     label: &str,
@@ -4089,22 +4065,6 @@ fn send_followup_to_process(
         remove_process_session(session_name);
     }
     Ok(outcome)
-}
-
-pub fn terminate_local_session(session_name: &str) {
-    if let Some(pid) = process_session_pid(session_name) {
-        remove_process_session(session_name);
-        kill_pid_tree(pid);
-    }
-
-    #[cfg(unix)]
-    if tmux_session_exists(session_name) {
-        record_tmux_exit_reason(session_name, "model change requested fresh session");
-        let _ = crate::services::platform::tmux::kill_session(
-            session_name,
-            "model change requested fresh session",
-        );
-    }
 }
 
 /// Execute Claude inside a tmux session on a remote host via SSH.

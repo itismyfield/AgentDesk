@@ -25,6 +25,8 @@ pub fn launch_artifact_path(root: &Path, session_key: &str) -> PathBuf {
 }
 
 /// `~/.adk/{env}/runtime/provider-cli-diagnostics/{timestamp}.json`
+// #3034: path builder for the unwired snapshot-to-disk diagnostics surface.
+#[allow(dead_code)]
 pub fn diagnostics_snapshot_path(root: &Path, timestamp_ms: u128) -> PathBuf {
     root.join("runtime")
         .join("provider-cli-diagnostics")
