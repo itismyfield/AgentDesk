@@ -70,6 +70,16 @@ impl MaintenanceJobRegistry {
             Arc::new(VoiceTurnLinkGcJob),
             Arc::new(VoiceTranscriptAnnouncementMetaGcJob),
             Arc::new(VoiceBackgroundHandoffMetaGcJob),
+            // #3231 — disk-GC / memory maintenance jobs. Implemented in
+            // `services::maintenance::jobs::*` but historically never wired
+            // (zero callers of `spawn_storage_maintenance_jobs`), so the
+            // disk-full prevention from #3231 never ran. Registered here so
+            // the live leader-only scheduler executes them.
+            Arc::new(StorageTargetSweepJob),
+            Arc::new(StorageWorktreeOrphanSweepJob),
+            Arc::new(StorageHangDumpCleanupJob),
+            Arc::new(StorageDbRetentionJob),
+            Arc::new(MemoryMementoConsolidationJob),
         ])
     }
 
@@ -358,6 +368,160 @@ impl MaintenanceJob for VoiceBackgroundHandoffMetaGcJob {
                 );
             }
             Ok(())
+        })
+    }
+}
+
+/// #3231 — monthly `target/` sweep. Reuses the verbatim sweep logic in
+/// `services::maintenance::jobs::target_sweep` (runs `cargo sweep --time 30`
+/// in the main workspace `target/` when disk usage exceeds the threshold or
+/// the 30d cadence has elapsed). Pool-less. Implemented since #1092 but never
+/// wired into the live scheduler — registered here so the disk-full prevention
+/// from #3231 actually runs.
+struct StorageTargetSweepJob;
+
+impl MaintenanceJob for StorageTargetSweepJob {
+    fn name(&self) -> &'static str {
+        "storage.target_sweep"
+    }
+
+    fn schedule(&self) -> MaintenanceSchedule {
+        // ~30d cadence; the underlying job also self-triggers on the disk
+        // threshold. 30s stagger keeps it off the boot-time pile-up.
+        MaintenanceSchedule::every(
+            Duration::from_secs(30 * 24 * 60 * 60),
+            Duration::from_secs(30),
+        )
+    }
+
+    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
+        Box::pin(async move {
+            let _ = pool;
+            crate::services::maintenance::jobs::target_sweep::run(
+                crate::services::maintenance::jobs::target_sweep::Config::default_runtime(),
+            )
+            .await
+        })
+    }
+}
+
+/// #3231 — hourly orphan-worktree sweep. Reuses the verbatim DESTRUCTIVE
+/// sweep logic in `services::maintenance::jobs::worktree_orphan_sweep`,
+/// which retains every existing safety guard: fail-closed PG keep-set,
+/// runtime naming whitelist (manual dev worktrees are never swept), GUID
+/// keep-set, and the 30-min freshness gate (#3231). This wrapper only
+/// schedules it; it does not weaken any guard. Needs the PG pool for the
+/// active-dispatch / resumable-session keep-set.
+struct StorageWorktreeOrphanSweepJob;
+
+impl MaintenanceJob for StorageWorktreeOrphanSweepJob {
+    fn name(&self) -> &'static str {
+        "storage.worktree_orphan_sweep"
+    }
+
+    fn schedule(&self) -> MaintenanceSchedule {
+        MaintenanceSchedule::every(Duration::from_secs(60 * 60), Duration::from_secs(50))
+    }
+
+    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
+        Box::pin(async move {
+            crate::services::maintenance::jobs::worktree_orphan_sweep::run(
+                crate::services::maintenance::jobs::worktree_orphan_sweep::Config::default_runtime(
+                ),
+                Some(pool.clone()),
+            )
+            .await
+        })
+    }
+}
+
+/// #3231 — weekly hang-dump cleanup. Reuses the verbatim logic in
+/// `services::maintenance::jobs::hang_dump_cleanup` (deletes `adk-hang-*.txt`
+/// older than 14 days from `logs/`). Pool-less.
+struct StorageHangDumpCleanupJob;
+
+impl MaintenanceJob for StorageHangDumpCleanupJob {
+    fn name(&self) -> &'static str {
+        "storage.hang_dump_cleanup"
+    }
+
+    fn schedule(&self) -> MaintenanceSchedule {
+        MaintenanceSchedule::every(
+            Duration::from_secs(7 * 24 * 60 * 60),
+            Duration::from_secs(70),
+        )
+    }
+
+    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
+        Box::pin(async move {
+            let _ = pool;
+            crate::services::maintenance::jobs::hang_dump_cleanup::run(
+                crate::services::maintenance::jobs::hang_dump_cleanup::Config::default_runtime(),
+            )
+            .await
+        })
+    }
+}
+
+/// #1093 / #3231 — weekly postgres retention sweep. Reuses
+/// `services::maintenance::jobs::db_retention::db_retention_job` verbatim
+/// (the same fn the dead `register_db_retention` wrapped). PG-only; the
+/// live scheduler always has a pool so no skip branch is needed here.
+struct StorageDbRetentionJob;
+
+impl MaintenanceJob for StorageDbRetentionJob {
+    fn name(&self) -> &'static str {
+        "storage.db_retention"
+    }
+
+    fn schedule(&self) -> MaintenanceSchedule {
+        MaintenanceSchedule::every(
+            crate::services::maintenance::jobs::STORAGE_MAINTENANCE_INTERVAL,
+            Duration::from_secs(90),
+        )
+    }
+
+    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
+        Box::pin(async move {
+            let report =
+                crate::services::maintenance::jobs::db_retention::db_retention_job(pool, false)
+                    .await?;
+            tracing::info!(
+                job = self.name(),
+                tables = ?report.summary(),
+                "[maintenance] db_retention_job completed"
+            );
+            Ok(())
+        })
+    }
+}
+
+/// #1089 / #3231 — weekly memento consolidation. Reuses
+/// `services::maintenance::jobs::memento_consolidation::run` verbatim;
+/// self-skips when memento is not configured, so registration is
+/// unconditional. Pool-less.
+struct MemoryMementoConsolidationJob;
+
+impl MaintenanceJob for MemoryMementoConsolidationJob {
+    fn name(&self) -> &'static str {
+        "memory.memento_consolidation"
+    }
+
+    fn schedule(&self) -> MaintenanceSchedule {
+        MaintenanceSchedule::every(
+            crate::services::maintenance::jobs::memento_consolidation::DEFAULT_INTERVAL,
+            Duration::from_secs(110),
+        )
+    }
+
+    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
+        Box::pin(async move {
+            let _ = pool;
+            crate::services::maintenance::jobs::memento_consolidation::run(
+                crate::services::maintenance::jobs::memento_consolidation::Config::default_runtime(
+                ),
+            )
+            .await
         })
     }
 }
@@ -798,6 +962,56 @@ mod registry_membership_tests {
             "storage.voice_transcript_announcement_meta_gc must be registered so \
              durable voice announcement metadata cannot accumulate indefinitely. \
              present jobs: {names:?}"
+        );
+    }
+
+    /// #3231 — the disk-GC / memory maintenance jobs were implemented in
+    /// `services::maintenance::jobs::*` but never wired into the live
+    /// scheduler (zero callers of `spawn_storage_maintenance_jobs`; absent
+    /// from this static registry), so the disk-full prevention never ran.
+    /// These assertions fail on origin/main and pass once the wrapper
+    /// structs are registered.
+    #[test]
+    fn static_registry_includes_disk_gc_jobs() {
+        let registry = MaintenanceJobRegistry::static_registry();
+        let names: Vec<&'static str> = registry.jobs().iter().map(|job| job.name()).collect();
+        for expected in [
+            "storage.worktree_orphan_sweep",
+            "storage.target_sweep",
+            "storage.hang_dump_cleanup",
+            "storage.db_retention",
+            "memory.memento_consolidation",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "{expected} must be registered on the production \
+                 MaintenanceJobRegistry so the disk-GC maintenance jobs from \
+                 #3231 actually run on the leader scheduler. present jobs: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn disk_gc_job_schedules_match_documented_intervals() {
+        assert_eq!(
+            StorageTargetSweepJob.schedule().every_ms(),
+            30 * 24 * 60 * 60 * 1_000
+        );
+        assert_eq!(
+            StorageWorktreeOrphanSweepJob.schedule().every_ms(),
+            60 * 60 * 1_000
+        );
+        assert_eq!(
+            StorageHangDumpCleanupJob.schedule().every_ms(),
+            7 * 24 * 60 * 60 * 1_000
+        );
+        assert_eq!(
+            StorageDbRetentionJob.schedule().every_ms(),
+            7 * 24 * 60 * 60 * 1_000
+        );
+        assert_eq!(
+            MemoryMementoConsolidationJob.schedule().every_ms(),
+            7 * 24 * 60 * 60 * 1_000
         );
     }
 
