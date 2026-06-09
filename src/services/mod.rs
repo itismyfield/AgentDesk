@@ -3,9 +3,6 @@ pub mod agent_quality;
 pub mod agents;
 pub mod analytics;
 pub mod api_friction;
-// #3034: 29 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during auto_queue dead-code cleanup.
-#[allow(dead_code)]
 pub mod auto_queue;
 pub mod automation_candidate_contract;
 pub mod automation_candidate_materializer;
@@ -18,9 +15,6 @@ pub mod claude_e;
 // live on clean sibling modules. Remove during claude_tui dead-code cleanup.
 #[allow(dead_code)]
 pub mod claude_tui;
-// #3034: 15 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during cluster dead-code cleanup.
-#[allow(dead_code)]
 pub mod cluster;
 // #3034: 10 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during codex dead-code cleanup.
@@ -53,9 +47,6 @@ pub mod dispatch_watchdog;
 // live on clean sibling modules. Remove during dispatched_sessions dead-code cleanup.
 #[allow(dead_code)]
 pub mod dispatched_sessions;
-// #3034: 23 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during dispatches dead-code cleanup.
-#[allow(dead_code)]
 pub mod dispatches;
 // #3034: 1 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during dispatches_followup dead-code cleanup.
@@ -88,9 +79,6 @@ pub mod memory;
 #[allow(dead_code)]
 pub mod message_outbox;
 pub mod monitoring_store;
-// #3034: 24 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during observability dead-code cleanup.
-#[allow(dead_code)]
 pub mod observability;
 pub mod onboarding;
 pub mod opencode;

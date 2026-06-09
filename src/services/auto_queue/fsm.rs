@@ -271,13 +271,10 @@ pub(super) async fn decide_restore_transition_pg(
         return Ok(RestoreEntryDecision::Done);
     }
 
-    if card_state.has_active_dispatch() {
-        if let Some(dispatch_id) = card_state.latest_dispatch_id {
-            return Ok(RestoreEntryDecision::ExistingDispatch {
-                dispatch_id,
-                title: card_state.title,
-            });
-        }
+    if card_state.has_active_dispatch() && card_state.latest_dispatch_id.is_some() {
+        return Ok(RestoreEntryDecision::ExistingDispatch {
+            title: card_state.title,
+        });
     }
 
     Ok(RestoreEntryDecision::NewDispatch {
@@ -465,24 +462,8 @@ impl AutoQueueActivateDeps {
         }
     }
 
-    pub(crate) fn for_bridge(_db: crate::db::Db, engine: crate::engine::PolicyEngine) -> Self {
-        Self {
-            pg_pool: engine.pg_pool().cloned(),
-            engine,
-            config: Arc::new(crate::config::Config::default()),
-            health_registry: None,
-            guild_id: None,
-        }
-    }
-
     pub(super) fn auto_queue_service(&self) -> crate::services::auto_queue::AutoQueueService {
         crate::services::auto_queue::AutoQueueService::new(self.engine.clone())
-    }
-
-    pub(super) fn entry_json(&self, entry_id: &str) -> serde_json::Value {
-        self.auto_queue_service()
-            .entry_json(entry_id, self.guild_id.as_deref())
-            .unwrap_or(serde_json::Value::Null)
     }
 
     pub(super) async fn entry_json_pg(
@@ -494,28 +475,6 @@ impl AutoQueueActivateDeps {
             .entry_json_with_pg(pool, entry_id, self.guild_id.as_deref())
             .await
             .unwrap_or(serde_json::Value::Null)
-    }
-
-    pub(super) fn entry_json_prefer_pg(&self, entry_id: &str) -> serde_json::Value {
-        if let Some(pool) = self.pg_pool.as_ref() {
-            let entry_id = entry_id.to_string();
-            let guild_id = self.guild_id.clone();
-            let engine = self.engine.clone();
-            return crate::utils::async_bridge::block_on_pg_result(
-                pool,
-                move |bridge_pool| async move {
-                    Ok::<serde_json::Value, String>(
-                        crate::services::auto_queue::AutoQueueService::new(engine)
-                            .entry_json_with_pg(&bridge_pool, &entry_id, guild_id.as_deref())
-                            .await
-                            .unwrap_or(serde_json::Value::Null),
-                    )
-                },
-                |error| error,
-            )
-            .unwrap_or(serde_json::Value::Null);
-        }
-        serde_json::Value::Null
     }
 }
 
@@ -634,152 +593,6 @@ pub(super) fn slot_requires_thread_reset_before_reuse_prefer_pg(
     Err("postgres backend required for auto-queue slot reset".to_string())
 }
 
-pub(super) async fn select_consultation_counterpart_pg(
-    pool: &sqlx::PgPool,
-    agent_id: &str,
-) -> Result<String, String> {
-    let provider = sqlx::query_scalar::<_, String>(
-        "SELECT COALESCE(provider, 'claude')
-         FROM agents
-         WHERE id = $1",
-    )
-    .bind(agent_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| format!("load postgres provider for agent {agent_id}: {error}"))?
-    .map(|raw| ProviderKind::from_str_or_unsupported(&raw))
-    .unwrap_or_else(|| ProviderKind::default_channel_provider().unwrap_or(ProviderKind::Claude));
-
-    let rows = sqlx::query(
-        "SELECT id, COALESCE(provider, 'claude') AS provider
-         FROM agents
-         WHERE id != $1
-         ORDER BY id ASC",
-    )
-    .bind(agent_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| format!("load postgres consultation counterparts for {agent_id}: {error}"))?;
-
-    let mut available_agents = Vec::with_capacity(rows.len());
-    for row in rows {
-        let candidate_id: String = row
-            .try_get("id")
-            .map_err(|error| format!("decode postgres counterpart id for {agent_id}: {error}"))?;
-        let provider_raw: String = row.try_get("provider").map_err(|error| {
-            format!("decode postgres counterpart provider for {candidate_id}: {error}")
-        })?;
-        available_agents.push((
-            candidate_id,
-            ProviderKind::from_str_or_unsupported(&provider_raw),
-        ));
-    }
-
-    Ok(provider
-        .select_counterpart_from(
-            available_agents
-                .iter()
-                .map(|(_, candidate_provider)| candidate_provider.clone()),
-        )
-        .and_then(|counterpart| {
-            available_agents
-                .iter()
-                .find_map(|(candidate_id, candidate_provider)| {
-                    (*candidate_provider == counterpart).then_some(candidate_id.clone())
-                })
-        })
-        .unwrap_or_else(|| agent_id.to_string()))
-}
-
-pub(super) fn select_consultation_counterpart_prefer_pg(
-    deps: &AutoQueueActivateDeps,
-    agent_id: &str,
-) -> Result<String, String> {
-    let Some(pool) = deps.pg_pool.as_ref() else {
-        return Err(format!(
-            "postgres backend is required to select consultation counterpart for {agent_id}"
-        ));
-    };
-    let agent_id_owned = agent_id.to_string();
-    crate::utils::async_bridge::block_on_pg_result(
-        pool,
-        move |bridge_pool| async move {
-            select_consultation_counterpart_pg(&bridge_pool, &agent_id_owned).await
-        },
-        |error| error,
-    )
-}
-
-pub(super) fn record_consultation_dispatch_prefer_pg(
-    deps: &AutoQueueActivateDeps,
-    entry_id: &str,
-    card_id: &str,
-    dispatch_id: &str,
-    trigger_source: &str,
-    base_metadata_json: &str,
-) -> Result<crate::db::auto_queue::ConsultationDispatchRecordResult, String> {
-    let Some(pool) = deps.pg_pool.as_ref() else {
-        return Err(format!(
-            "{entry_id}: postgres backend is required to record consultation dispatch"
-        ));
-    };
-    let entry_id_owned = entry_id.to_string();
-    let card_id = card_id.to_string();
-    let dispatch_id = dispatch_id.to_string();
-    let trigger_source = trigger_source.to_string();
-    let base_metadata_json = base_metadata_json.to_string();
-    crate::utils::async_bridge::block_on_pg_result(
-        pool,
-        move |bridge_pool| async move {
-            crate::db::auto_queue::record_consultation_dispatch_on_pg(
-                &bridge_pool,
-                &entry_id_owned,
-                &card_id,
-                &dispatch_id,
-                &trigger_source,
-                &base_metadata_json,
-            )
-            .await
-        },
-        |error| error,
-    )
-}
-
-pub(super) fn create_activate_dispatch_prefer_pg(
-    deps: &AutoQueueActivateDeps,
-    card_id: &str,
-    to_agent_id: &str,
-    dispatch_type: &str,
-    title: &str,
-    context: &serde_json::Value,
-) -> Result<String, String> {
-    if let Some(pool) = deps.pg_pool.as_ref() {
-        let card_id = card_id.to_string();
-        let to_agent_id = to_agent_id.to_string();
-        let dispatch_type = dispatch_type.to_string();
-        let title = title.to_string();
-        let context = context.clone();
-        return crate::utils::async_bridge::block_on_pg_result(
-            pool,
-            move |bridge_pool| async move {
-                create_activate_dispatch_pg(
-                    &bridge_pool,
-                    &card_id,
-                    &to_agent_id,
-                    &dispatch_type,
-                    &title,
-                    &context,
-                )
-                .await
-            },
-            |error| error,
-        );
-    }
-
-    let _ = (deps, card_id, to_agent_id, dispatch_type, title, context);
-    Err("postgres backend required for auto-queue dispatch creation".to_string())
-}
-
 pub(super) fn create_activate_dispatch_for_entry_prefer_pg(
     deps: &AutoQueueActivateDeps,
     card_id: &str,
@@ -849,24 +662,6 @@ pub(crate) async fn activate_with_bridge_pg(
         guild_id: None,
     };
     activate_with_deps_pg(&deps, body).await
-}
-
-pub(super) enum ActivatePreflightOutcome {
-    Continue,
-    Dispatched(serde_json::Value),
-    Skipped,
-    Deferred,
-}
-
-pub(super) fn run_activate_blocking<T, F>(operation: F) -> T
-where
-    F: FnOnce() -> T,
-{
-    if tokio::runtime::Handle::try_current().is_ok() {
-        tokio::task::block_in_place(operation)
-    } else {
-        operation()
-    }
 }
 
 pub(super) fn clamp_retry_limit(value: u64) -> i64 {

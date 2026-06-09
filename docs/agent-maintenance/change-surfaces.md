@@ -92,9 +92,9 @@
   - `src/dispatch/dispatch_context.rs` (2805 lines).
   - `src/dispatch/dispatch_create.rs` (1381 lines).
   - `src/dispatch/dispatch_status.rs` (1517 lines).
-  - `src/services/dispatches/outbox_route.rs` (1118 lines; route extraction
+  - `src/services/dispatches/outbox_route.rs` (1089 lines; route extraction
     orchestration surface from #1722, split before adding non-bugfix behavior).
-  - `src/services/dispatches/discord_delivery/orchestration.rs` (1654 lines;
+  - `src/services/dispatches/discord_delivery/orchestration.rs` (1490 lines;
     delivery orchestration surface extracted from the route layer in #1760,
     split before adding non-bugfix behavior).
 - active_callsite_coverage: n/a.
@@ -873,7 +873,7 @@ The remaining giant-file modules under `src/services/` not covered above.
 Line counts are *production* LoC (the `Prod` column in `module-inventory.md`,
 which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync.
 
-- `src/services/auto_queue.rs` (1626) and
+- `src/services/auto_queue.rs` (1546) and
   `src/services/auto_queue/activate_command.rs` (1351); auto-queue route
   behavior is split across `src/services/auto_queue/*` slices, with
   `activate_command.rs` now giant-file territory.
@@ -884,7 +884,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `src/services/settings.rs` (1007) — service-layer route support surfaces
   split out of the large dashboard route modules. (`src/services/onboarding.rs`
   and `src/services/api_friction.rs` have been removed/decomposed.)
-- `src/services/dispatches/outbox_route.rs` (1118) — dispatch outbox route
+- `src/services/dispatches/outbox_route.rs` (1089) — dispatch outbox route
   support extracted from the route layer; split before adding non-bugfix
   behavior.
 - `src/services/claude.rs` (3949), `src/services/gemini.rs` (1416),
@@ -903,7 +903,6 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   giant-file territory; split before adding non-bugfix behavior beyond the
   readiness/cancel contract.
 - `src/services/memory/memento.rs` (1893).
-- `src/services/observability/pg_io.rs` (1047).
 - `src/services/dispatched_sessions.rs` (1342) — dispatched session domain
   service. This is the post-#1515 SRP extraction target for route/database
   callsites, but the module itself is now giant-file territory; split focused

@@ -70,7 +70,6 @@ pub(super) struct ResolvedDispatchCard {
 pub(super) struct ActivateCardState {
     pub(super) status: String,
     pub(super) title: String,
-    pub(super) metadata: Option<String>,
     pub(super) latest_dispatch_id: Option<String>,
     pub(super) latest_dispatch_status: Option<String>,
     pub(super) entry_status: String,
@@ -112,7 +111,7 @@ pub(super) const RUN_STATUS_RESTORING: &str = "restoring";
 pub(super) enum RestoreEntryDecision {
     Pending,
     Done,
-    ExistingDispatch { dispatch_id: String, title: String },
+    ExistingDispatch { title: String },
     NewDispatch { title: String },
 }
 
@@ -136,7 +135,7 @@ pub(super) async fn load_activate_card_state_pg(
     entry_id: &str,
 ) -> Result<ActivateCardState, String> {
     let row = sqlx::query(
-        "SELECT status, title, metadata::TEXT AS metadata, latest_dispatch_id, repo_id, assigned_agent_id
+        "SELECT status, title, latest_dispatch_id, repo_id, assigned_agent_id
          FROM kanban_cards
          WHERE id = $1",
     )
@@ -202,9 +201,6 @@ pub(super) async fn load_activate_card_state_pg(
         title: row
             .try_get("title")
             .map_err(|error| format!("decode title for {card_id}: {error}"))?,
-        metadata: row
-            .try_get("metadata")
-            .map_err(|error| format!("decode metadata for {card_id}: {error}"))?,
         latest_dispatch_id,
         latest_dispatch_status,
         entry_status,

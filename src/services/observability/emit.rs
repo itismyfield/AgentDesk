@@ -41,29 +41,6 @@ pub fn emit_turn_started(
     );
 }
 
-pub fn emit_turn_finished(
-    provider: &str,
-    channel_id: u64,
-    dispatch_id: Option<&str>,
-    session_key: Option<&str>,
-    turn_id: Option<&str>,
-    outcome: &str,
-    duration_ms: i64,
-    tmux_handoff: bool,
-) {
-    emit_turn_finished_with_dispatch_kind(
-        provider,
-        channel_id,
-        dispatch_id,
-        session_key,
-        turn_id,
-        outcome,
-        duration_ms,
-        tmux_handoff,
-        None,
-    );
-}
-
 pub fn emit_turn_finished_with_dispatch_kind(
     provider: &str,
     channel_id: u64,

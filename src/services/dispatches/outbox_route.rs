@@ -479,13 +479,6 @@ async fn archive_dispatch_thread(
 
 /// Send Discord notifications for a completed dispatch (review verdicts, etc.).
 /// Callers of `finalize_dispatch` should spawn this after the sync call returns.
-pub(crate) async fn handle_completed_dispatch_followups(
-    db: &crate::db::Db,
-    dispatch_id: &str,
-) -> Result<(), String> {
-    handle_completed_dispatch_followups_with_pg(Some(db), None, dispatch_id).await
-}
-
 pub(crate) async fn handle_completed_dispatch_followups_with_pg(
     db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
@@ -500,28 +493,6 @@ pub(crate) async fn handle_completed_dispatch_followups_with_pg(
         &transport,
     )
     .await
-}
-
-pub(crate) async fn handle_completed_dispatch_followups_with_config(
-    db: &crate::db::Db,
-    dispatch_id: &str,
-    config: &DispatchFollowupConfig,
-) -> Result<(), String> {
-    let transport = HttpDispatchTransport::from_runtime(db);
-    handle_completed_dispatch_followups_internal(Some(db), None, dispatch_id, config, &transport)
-        .await
-}
-
-pub(crate) async fn handle_completed_dispatch_followups_with_config_and_transport<
-    T: DispatchTransport,
->(
-    db: &crate::db::Db,
-    dispatch_id: &str,
-    config: &DispatchFollowupConfig,
-    transport: &T,
-) -> Result<(), String> {
-    handle_completed_dispatch_followups_internal(Some(db), None, dispatch_id, config, transport)
-        .await
 }
 
 async fn handle_completed_dispatch_followups_internal<T: DispatchTransport>(

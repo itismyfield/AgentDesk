@@ -6,34 +6,19 @@ use anyhow::{Result, anyhow};
 use sqlx::PgPool;
 
 use super::helpers::{
-    normalized_quality_daily_limit, normalized_quality_days, normalized_quality_limit,
-    normalized_quality_ranking_limit, now_kst,
+    normalized_quality_daily_limit, normalized_quality_days, normalized_quality_ranking_limit,
+    now_kst,
 };
 use super::pg_io::{
-    pick_ranking_metric_value, query_agent_quality_daily_pg, query_agent_quality_events_pg,
-    query_agent_quality_ranking_pg, ranking_window_sample_size,
-    synth_agent_quality_daily_from_events_pg, upsert_agent_quality_daily_pg,
+    pick_ranking_metric_value, query_agent_quality_daily_pg, query_agent_quality_ranking_pg,
+    ranking_window_sample_size, synth_agent_quality_daily_from_events_pg,
+    upsert_agent_quality_daily_pg,
 };
 use super::quality_alert::enqueue_quality_regression_alerts_pg;
 use super::{
-    AgentQualityDailyRecord, AgentQualityEventRecord, AgentQualityFilters,
-    AgentQualityRankingEntry, AgentQualityRankingResponse, AgentQualityRollupReport,
-    AgentQualitySummary, QUALITY_SAMPLE_GUARD, QualityRankingMetric, QualityRankingWindow,
+    AgentQualityDailyRecord, AgentQualityRankingEntry, AgentQualityRankingResponse,
+    AgentQualityRollupReport, AgentQualitySummary, QualityRankingMetric, QualityRankingWindow,
 };
-
-pub async fn query_agent_quality_events(
-    pg_pool: Option<&PgPool>,
-    filters: &AgentQualityFilters,
-) -> Result<Vec<AgentQualityEventRecord>> {
-    let days = normalized_quality_days(filters.days);
-    let limit = normalized_quality_limit(filters.limit);
-    let Some(pool) = pg_pool else {
-        return Err(anyhow!(
-            "postgres pool unavailable for agent quality events"
-        ));
-    };
-    query_agent_quality_events_pg(pool, filters.agent_id.as_deref(), days, limit).await
-}
 
 pub async fn run_agent_quality_rollup_pg(pool: &PgPool) -> Result<AgentQualityRollupReport> {
     let upserted_rows = upsert_agent_quality_daily_pg(pool).await?;
@@ -102,20 +87,6 @@ fn slice_daily_trend(
     max_days: usize,
 ) -> Vec<AgentQualityDailyRecord> {
     daily.iter().take(max_days).cloned().collect()
-}
-
-pub async fn query_agent_quality_ranking(
-    pg_pool: Option<&PgPool>,
-    limit: usize,
-) -> Result<AgentQualityRankingResponse> {
-    query_agent_quality_ranking_with(
-        pg_pool,
-        limit,
-        QualityRankingMetric::TurnSuccessRate,
-        QualityRankingWindow::Seven,
-        QUALITY_SAMPLE_GUARD,
-    )
-    .await
 }
 
 pub async fn query_agent_quality_ranking_with(

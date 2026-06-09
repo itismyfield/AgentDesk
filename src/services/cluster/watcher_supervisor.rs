@@ -78,6 +78,7 @@ impl Default for SupervisorConfig {
 }
 
 impl SupervisorConfig {
+    #[allow(dead_code)] // test-only config builder; exercised only by #[cfg(test)] tests
     pub fn for_test() -> Self {
         Self {
             backoff: Duration::from_millis(1),

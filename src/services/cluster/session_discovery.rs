@@ -90,6 +90,7 @@ fn discovery_notifier() -> Arc<Notify> {
 /// Request the next discovery tick to run as soon as possible without waiting
 /// for the polling interval to elapse. Idempotent (extra calls coalesce — at
 /// most one wakeup is queued by `Notify::notify_one`).
+#[allow(dead_code)] // future on-demand-discovery hook; exercised only by #[cfg(test)] tests
 pub fn request_discovery_tick() {
     discovery_notifier().notify_one();
 }

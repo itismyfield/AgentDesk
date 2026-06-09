@@ -96,12 +96,6 @@ async fn worker_loop(
                             flush_quality_event_batch(&runtime, &mut quality_batch).await;
                         }
                     }
-                    Some(WorkerMessage::Flush(done)) => {
-                        flush_event_batch(&runtime, &mut batch).await;
-                        flush_quality_event_batch(&runtime, &mut quality_batch).await;
-                        flush_counter_snapshots(&runtime).await;
-                        let _ = done.send(());
-                    }
                     None => break,
                 }
             }

@@ -362,6 +362,9 @@ pub enum RelaySinkOutcome {
     FrameAccepted,
     TerminalDelivered,
     TerminalNotDelivered,
+    // #3041 P1-5: reserved for a future POST-without-confirm sink + cross-actor
+    // symmetry (see enum doc); the session-bound sink never emits it today.
+    #[allow(dead_code)]
     TerminalUnknown,
 }
 
@@ -383,6 +386,9 @@ impl RelaySinkOutcome {
 pub enum RelaySinkError {
     #[error("transient sink failure: {0}")]
     Transient(String),
+    // Documented permanent-failure arm of the sink error taxonomy; no sink site
+    // produces it yet but it is part of the public RelaySinkError contract.
+    #[allow(dead_code)]
     #[error("permanent sink failure: {0}")]
     Permanent(String),
 }
@@ -390,6 +396,7 @@ pub enum RelaySinkError {
 /// No-op sink used when the supervisor is wired without a real Discord
 /// adapter (e.g. flag enabled but the migration hasn't landed E4 yet, or
 /// unit tests that don't care about delivery semantics).
+#[allow(dead_code)] // no-op sink; exercised only by #[cfg(test)] tests
 pub struct DiscardSink;
 
 #[async_trait]
@@ -664,6 +671,7 @@ impl StreamRelayHandle {
         &self.matched
     }
 
+    #[allow(dead_code)] // diagnostic accessor; exercised only by #[cfg(test)] tests
     pub fn metrics(&self) -> &Arc<RelayMetrics> {
         &self.metrics
     }
@@ -686,12 +694,14 @@ impl StreamRelayHandle {
     /// is dropped (we drain one then enqueue) and the dropped counter
     /// increments. Returns `false` only if the relay task has already exited
     /// — the upstream caller should then treat the relay as dead.
+    #[allow(dead_code)] // handle-side sender; exercised only by #[cfg(test)] tests (prod uses RelayProducer)
     pub fn try_send_frame(&self, payload: String) -> bool {
         self.try_send_frame_with_sequence(payload).is_alive()
     }
 
     /// Test/diagnostic variant of [`Self::try_send_frame`] that exposes the
     /// assigned sequence for delivery-ack logic.
+    #[allow(dead_code)] // test/diagnostic sender; exercised only by #[cfg(test)] tests
     pub fn try_send_frame_with_sequence(&self, payload: String) -> RelaySendOutcome {
         try_send_frame_inner(
             &self.matched,

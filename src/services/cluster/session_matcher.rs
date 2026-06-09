@@ -131,6 +131,7 @@ impl ChannelDirectory {
 
     /// Build a directory, rejecting expected-session-name collisions. Use this
     /// whenever you ingest live bindings (PG agents table, yaml config, etc.).
+    #[allow(dead_code)] // collision-checked builder; exercised only by #[cfg(test)] tests
     pub fn try_from_bindings<I>(bindings: I) -> Result<Self, DirectoryBuildError>
     where
         I: IntoIterator<Item = ChannelBinding>,
@@ -145,6 +146,7 @@ impl ChannelDirectory {
     /// Lenient builder for tests / non-critical call sites. Later bindings
     /// **overwrite** earlier ones on collision. Prefer [`Self::try_from_bindings`]
     /// in production paths.
+    #[allow(dead_code)] // lenient test builder; exercised only by #[cfg(test)] tests
     pub fn from_bindings<I>(bindings: I) -> Self
     where
         I: IntoIterator<Item = ChannelBinding>,
@@ -196,10 +198,12 @@ impl ChannelDirectory {
         self.by_session_name.get(session_name)
     }
 
+    #[allow(dead_code)] // pairs with len(); exercised only by #[cfg(test)] tests
     pub fn is_empty(&self) -> bool {
         self.by_session_name.is_empty()
     }
 
+    #[allow(dead_code)] // exercised only by #[cfg(test)] tests
     pub fn len(&self) -> usize {
         self.by_session_name.len()
     }
@@ -297,6 +301,7 @@ pub enum MatchOutcome {
 ///
 /// `None` is returned for any rejection — call [`match_session_detailed`] when
 /// you want to know *why*.
+#[allow(dead_code)] // thin Option<> wrapper over match_session_detailed; exercised only by #[cfg(test)] tests
 pub fn match_session(
     session_name: &str,
     pane_current_command: &str,
@@ -313,6 +318,7 @@ pub fn match_session(
 /// this binding be present, ignoring provider liveness?". The output is a
 /// distinct type so it can never be mistaken for the adoption-grade result of
 /// [`match_session`].
+#[allow(dead_code)] // audit/offline matcher; exercised only by #[cfg(test)] tests
 pub fn match_session_offline(
     session_name: &str,
     channels: &ChannelDirectory,
@@ -333,9 +339,11 @@ pub fn match_session_offline(
 /// callers wanting to actually attach a watcher go through [`match_session`]
 /// (which verifies the pane provider) instead of the offline path.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // audit wrapper produced by match_session_offline; exercised only by #[cfg(test)] tests
 pub struct MatchedChannelAudit(MatchedChannel);
 
 impl MatchedChannelAudit {
+    #[allow(dead_code)] // exercised only by #[cfg(test)] tests
     pub fn binding(&self) -> &MatchedChannel {
         &self.0
     }
@@ -506,6 +514,7 @@ pub fn is_agentdesk_managed_wrapper_command(pane_cmd: &str) -> bool {
 /// Sanity-check helper exposed for the upcoming session discovery loop (E2):
 /// returns `true` when `session_name` looks plausibly like an AgentDesk session
 /// regardless of whether the directory has a binding for it.
+#[allow(dead_code)] // future discovery-loop hook; exercised only by #[cfg(test)] tests
 pub fn looks_like_agentdesk_session(session_name: &str) -> bool {
     let prefix = format!("{}-", TMUX_SESSION_PREFIX);
     let suffix = tmux_env_suffix();

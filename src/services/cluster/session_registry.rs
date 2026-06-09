@@ -98,15 +98,6 @@ pub enum RegistryChange {
     Removed { session_name: String },
 }
 
-impl RegistryChange {
-    pub fn session_name(&self) -> &str {
-        match self {
-            Self::Added(entry) | Self::Updated(entry) => &entry.matched.expected_session_name,
-            Self::Removed { session_name } => session_name,
-        }
-    }
-}
-
 /// Thread-safe, in-process registry of matched sessions.
 pub struct SessionRegistry {
     inner: RwLock<BTreeMap<String, RegisteredSession>>,
@@ -139,6 +130,7 @@ impl SessionRegistry {
     /// change that was published (or `None` if the entry was identical and no
     /// event was sent — idempotent reconciles do not spam the broadcast
     /// channel).
+    #[allow(dead_code)] // exercised only by #[cfg(test)] registry tests
     pub fn upsert(
         &self,
         matched: MatchedChannel,
@@ -224,6 +216,7 @@ impl SessionRegistry {
     }
 
     /// Single-entry lookup by tmux session name. Lock-cheap read.
+    #[allow(dead_code)] // exercised only by #[cfg(test)] registry tests
     pub fn lookup(&self, session_name: &str) -> Option<RegisteredSession> {
         self.inner
             .read()
@@ -236,6 +229,7 @@ impl SessionRegistry {
         self.inner.read().expect("session registry read lock").len()
     }
 
+    #[allow(dead_code)] // pairs with len(); exercised only by #[cfg(test)] tests
     pub fn is_empty(&self) -> bool {
         self.inner
             .read()

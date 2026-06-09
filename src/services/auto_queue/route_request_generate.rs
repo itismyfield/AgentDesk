@@ -24,6 +24,7 @@ pub struct RequestGenerateBody {
     /// for forward compatibility but currently has no effect and is not
     /// echoed in the response — do not depend on it round-tripping.
     #[serde(default)]
+    #[allow(dead_code)] // serde-deserialized forward-compat placeholder (see doc above)
     pub force: Option<bool>,
 }
 

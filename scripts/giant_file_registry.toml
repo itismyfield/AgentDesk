@@ -204,7 +204,6 @@ grandfathered = [
   "src/services/dispatches/outbox_route.rs",
   "src/services/gemini.rs",
   "src/services/memory/memento.rs",
-  "src/services/observability/pg_io.rs",
   "src/services/onboarding/mod.rs",
   "src/services/opencode.rs",
   "src/services/platform/binary_resolver.rs",

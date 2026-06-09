@@ -329,6 +329,9 @@ pub struct AutoQueueStatusEntryView {
     pub dispatch_status: Option<String>,
     #[serde(skip)]
     pub dispatch_created_at: Option<i64>,
+    // Mirrors `db::auto_queue::StatusEntryRecord.dispatch_updated_at`; kept so
+    // that DB record field stays live (deleting it would orphan out-of-scope db code).
+    #[allow(dead_code)]
     #[serde(skip)]
     pub dispatch_updated_at: Option<i64>,
     #[serde(skip)]
@@ -441,15 +444,6 @@ impl AutoQueueService {
         self.status_for_run_pg(pool, &run_id, input).await
     }
 
-    pub fn prepare_generate_cards(
-        &self,
-        _input: &PrepareGenerateInput,
-    ) -> ServiceResult<Vec<GenerateCandidate>> {
-        Err(ServiceError::internal("postgres backend is unavailable")
-            .with_code(ErrorCode::Database)
-            .with_operation("prepare_generate_cards"))
-    }
-
     pub async fn prepare_generate_cards_with_pg(
         &self,
         pool: &PgPool,
@@ -545,18 +539,6 @@ impl AutoQueueService {
         Ok(cards.into_iter().map(GenerateCandidate::from).collect())
     }
 
-    pub fn count_cards_by_status(
-        &self,
-        _repo: Option<&str>,
-        _agent_id: Option<&str>,
-        status: &str,
-    ) -> ServiceResult<i64> {
-        Err(ServiceError::internal("postgres backend is unavailable")
-            .with_code(ErrorCode::Database)
-            .with_operation("count_cards_by_status")
-            .with_context("status", status))
-    }
-
     pub async fn count_cards_by_status_with_pg(
         &self,
         pool: &PgPool,
@@ -572,13 +554,6 @@ impl AutoQueueService {
                     .with_operation("count_cards_by_status_with_pg")
                     .with_context("status", status)
             })
-    }
-
-    pub fn run_view(&self, run_id: &str) -> ServiceResult<Option<AutoQueueRunView>> {
-        Err(ServiceError::internal("postgres backend is unavailable")
-            .with_code(ErrorCode::Database)
-            .with_operation("run_view")
-            .with_context("run_id", run_id))
     }
 
     pub async fn run_view_with_pg(
@@ -598,36 +573,11 @@ impl AutoQueueService {
             })
     }
 
-    pub fn run_json(&self, run_id: &str) -> ServiceResult<Value> {
-        Ok(self
-            .run_view(run_id)?
-            .map(|run| json!(run))
-            .unwrap_or(Value::Null))
-    }
-
     pub async fn run_json_with_pg(&self, pool: &PgPool, run_id: &str) -> ServiceResult<Value> {
         Ok(self
             .run_view_with_pg(pool, run_id)
             .await?
             .map(|run| json!(run))
-            .unwrap_or(Value::Null))
-    }
-
-    pub fn entry_view(
-        &self,
-        entry_id: &str,
-        _guild_id: Option<&str>,
-    ) -> ServiceResult<Option<AutoQueueStatusEntryView>> {
-        Err(ServiceError::internal("postgres backend is unavailable")
-            .with_code(ErrorCode::Database)
-            .with_operation("entry_view")
-            .with_context("entry_id", entry_id))
-    }
-
-    pub fn entry_json(&self, entry_id: &str, guild_id: Option<&str>) -> ServiceResult<Value> {
-        Ok(self
-            .entry_view(entry_id, guild_id)?
-            .map(|entry| json!(entry))
             .unwrap_or(Value::Null))
     }
 
@@ -651,36 +601,6 @@ impl AutoQueueService {
         let mut agent_bindings_cache = HashMap::new();
         let entry = build_entry_view_pg(pool, record, guild_id, &mut agent_bindings_cache).await?;
         Ok(json!(entry))
-    }
-
-    pub fn status_for_run(
-        &self,
-        run_id: &str,
-        _input: StatusInput,
-    ) -> ServiceResult<AutoQueueStatusResponse> {
-        Err(ServiceError::internal("postgres backend is unavailable")
-            .with_code(ErrorCode::Database)
-            .with_operation("status_for_run")
-            .with_context("run_id", run_id))
-    }
-
-    pub fn status_json_for_run(&self, run_id: &str, input: StatusInput) -> ServiceResult<Value> {
-        Ok(json!(self.status_for_run(run_id, input)?))
-    }
-
-    pub async fn status_json_for_run_with_pg(
-        &self,
-        pool: &PgPool,
-        run_id: &str,
-        input: StatusInput,
-    ) -> ServiceResult<Value> {
-        Ok(json!(self.status_for_run_pg(pool, run_id, input).await?))
-    }
-
-    pub fn status(&self, _input: StatusInput) -> ServiceResult<AutoQueueStatusResponse> {
-        Err(ServiceError::internal("postgres backend is unavailable")
-            .with_code(ErrorCode::Database)
-            .with_operation("status"))
     }
 
     async fn status_for_run_pg(

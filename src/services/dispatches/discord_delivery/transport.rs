@@ -394,27 +394,6 @@ pub(crate) async fn edit_raw_message_once(
         })
 }
 
-pub(crate) async fn post_dispatch_message_to_channel(
-    client: &reqwest::Client,
-    token: &str,
-    base_url: &str,
-    channel_id: &str,
-    message: &str,
-    minimal_message: &str,
-) -> Result<String, DispatchMessagePostError> {
-    post_dispatch_message_to_channel_with_delivery(
-        client,
-        token,
-        base_url,
-        channel_id,
-        message,
-        minimal_message,
-        None,
-    )
-    .await
-    .map(|outcome| outcome.message_id)
-}
-
 pub(crate) async fn post_dispatch_message_to_channel_with_delivery(
     client: &reqwest::Client,
     token: &str,
