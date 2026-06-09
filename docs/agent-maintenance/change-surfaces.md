@@ -554,7 +554,7 @@
     mailbox/inflight probe, and the `post_recheck_action` seam that skips/undoes
     a recap post when a turn raced the compose window. Split compose vs
     lifecycle/clear submodules before adding behavior).
-  - `src/services/codex_tmux_wrapper.rs` (1222 lines; Codex tmux wrapper JSON
+  - `src/services/codex_tmux_wrapper.rs` (1215 lines; Codex tmux wrapper JSON
     event parser and relay bridge for native Codex session events — bugfix only
     outside an extraction plan).
   - `src/services/tui_prompt_dedupe.rs` (1294 lines; shared TUI prompt
@@ -873,7 +873,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   support extracted from the route layer; split before adding non-bugfix
   behavior.
 - `src/services/claude.rs` (3949), `src/services/gemini.rs` (1416),
-  `src/services/qwen.rs` (2200), `src/services/codex.rs` (3083),
+  `src/services/qwen.rs` (2196), `src/services/codex.rs` (3083),
   `src/services/opencode.rs` (1881), `src/services/provider.rs` (1739) —
   provider adapters.
 - `src/services/codex_tui/rollout_tail.rs` (1738) — Codex TUI rollout tail

@@ -8,8 +8,6 @@ fn tmux_exit_reason_path(tmux_session_name: &str) -> String {
     crate::services::tmux_common::session_temp_path(tmux_session_name, "exit_reason")
 }
 
-pub const TMUX_NORMAL_COMPLETION_REASON: &str = "turn completed (code 0)";
-
 pub fn tmux_session_exists(tmux_session_name: &str) -> bool {
     crate::services::platform::tmux::has_session(tmux_session_name)
 }
@@ -52,10 +50,6 @@ pub fn record_tmux_exit_reason(tmux_session_name: &str, reason: &str) {
         let _ = std::fs::rename(&tmp_path, path);
     }
     let _ = std::fs::remove_file(tmp_path);
-}
-
-pub fn record_normal_tmux_exit_reason(tmux_session_name: &str) {
-    record_tmux_exit_reason(tmux_session_name, TMUX_NORMAL_COMPLETION_REASON);
 }
 
 pub fn tmux_exit_reason_is_normal_completion(reason: &str) -> bool {

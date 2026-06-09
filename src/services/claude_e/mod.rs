@@ -9,9 +9,6 @@ pub mod spawn_queue;
 
 pub use process::execute_streaming;
 
-/// Stable telemetry label.
-pub const ADAPTER_LABEL: &str = "claude-e";
-
 /// Returns true when the `claude-e` binary can be located on PATH.
 /// `provider_hosting::resolve_provider_session_selection_with_channel`
 /// reads this to decide whether the operator's `runtime: claude-e`

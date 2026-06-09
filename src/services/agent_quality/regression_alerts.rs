@@ -68,13 +68,6 @@ impl QualityMetric {
             QualityMetric::ReviewPassRate => "review_pass_rate",
         }
     }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            QualityMetric::TurnSuccessRate => "turn success rate",
-            QualityMetric::ReviewPassRate => "review pass rate",
-        }
-    }
 }
 
 /// One regression candidate. Captured before the cooldown filter; the

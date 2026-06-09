@@ -98,28 +98,3 @@ pub fn observe(tool_name: Option<&str>, is_error: bool, content: &str) -> Oversi
     }
     report
 }
-
-/// Snapshot of global counters. Used by `/api/analytics/observability` and
-/// tests. Returned as a plain struct so callers do not depend on atomics.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ToolOutputCounters {
-    pub tool_output_oversize_count: u64,
-    pub total_output_bytes: u64,
-    pub total_output_samples: u64,
-    /// Convenience: mean bytes per observed tool output. Returns 0 when no
-    /// samples have been recorded yet.
-    pub avg_output_bytes: u64,
-}
-
-pub fn snapshot_counters() -> ToolOutputCounters {
-    let oversize = OVERSIZE_COUNT.load(Ordering::Relaxed);
-    let bytes = TOTAL_OUTPUT_BYTES.load(Ordering::Relaxed);
-    let samples = TOTAL_OUTPUT_SAMPLES.load(Ordering::Relaxed);
-    let avg = if samples == 0 { 0 } else { bytes / samples };
-    ToolOutputCounters {
-        tool_output_oversize_count: oversize,
-        total_output_bytes: bytes,
-        total_output_samples: samples,
-        avg_output_bytes: avg,
-    }
-}

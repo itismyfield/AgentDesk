@@ -48,16 +48,6 @@ pub enum GuardDecision {
     Block { reason: String, suggestion: String },
 }
 
-impl GuardDecision {
-    pub fn is_allow(&self) -> bool {
-        matches!(self, GuardDecision::Allow)
-    }
-
-    pub fn is_block(&self) -> bool {
-        matches!(self, GuardDecision::Block { .. })
-    }
-}
-
 /// Inspect a single shell command string and decide whether to allow it.
 ///
 /// The detector is intentionally lexical — it does not invoke a real shell

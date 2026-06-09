@@ -1,10 +1,4 @@
-// #3034: 1 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during agent_protocol dead-code cleanup.
-#[allow(dead_code)]
 pub mod agent_protocol;
-// #3034: 1 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during agent_quality dead-code cleanup.
-#[allow(dead_code)]
 pub mod agent_quality;
 pub mod agents;
 pub mod analytics;
@@ -19,9 +13,6 @@ pub mod automation_candidate_materializer;
 // live on clean sibling modules. Remove during claude dead-code cleanup.
 #[allow(dead_code)]
 pub mod claude;
-// #3034: 1 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during claude_e dead-code cleanup.
-#[allow(dead_code)]
 pub mod claude_e;
 // #3034: 16 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during claude_tui dead-code cleanup.
@@ -37,9 +28,6 @@ pub mod cluster;
 pub mod codex;
 pub mod codex_remote_policy;
 #[cfg(unix)]
-// #3034: 1 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during codex_tmux_wrapper dead-code cleanup.
-#[allow(dead_code)]
 pub mod codex_tmux_wrapper;
 // #3034: 31 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during codex_tui dead-code cleanup.
@@ -133,9 +121,6 @@ pub mod provider_auth;
 // live on clean sibling modules. Remove during provider_cli dead-code cleanup.
 #[allow(dead_code)]
 pub mod provider_cli;
-// #3034: 1 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during provider_exec dead-code cleanup.
-#[allow(dead_code)]
 pub mod provider_exec;
 // #3034: 1 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during provider_hosting dead-code cleanup.
@@ -143,9 +128,6 @@ pub mod provider_exec;
 pub mod provider_hosting;
 pub mod provider_runtime;
 pub mod queue;
-// #3034: 1 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during qwen dead-code cleanup.
-#[allow(dead_code)]
 pub mod qwen;
 #[cfg(unix)]
 pub mod qwen_tmux_wrapper;
@@ -167,28 +149,16 @@ pub mod session_activity;
 pub mod session_backend;
 pub mod session_forwarding;
 pub mod settings;
-// #3034: 1 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during shell_guard dead-code cleanup.
-#[allow(dead_code)]
 pub mod shell_guard;
-// #3034: 1 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during slo dead-code cleanup.
-#[allow(dead_code)]
 pub mod slo;
 // #3034: 1 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during termination_audit dead-code cleanup.
 #[allow(dead_code)]
 pub mod termination_audit;
 pub mod tmux_common;
-// #3034: 2 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during tmux_diagnostics dead-code cleanup.
-#[allow(dead_code)]
 pub mod tmux_diagnostics;
 #[cfg(unix)]
 pub mod tmux_wrapper;
-// #3034: 2 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during tool_output_guard dead-code cleanup.
-#[allow(dead_code)]
 pub mod tool_output_guard;
 // #3034: 4 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during tui_prompt_dedupe dead-code cleanup.

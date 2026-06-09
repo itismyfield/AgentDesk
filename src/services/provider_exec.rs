@@ -37,18 +37,6 @@ pub async fn execute_simple(provider: ProviderKind, prompt: String) -> Result<St
         .map_err(|e| format!("Task join error: {}", e))?
 }
 
-pub async fn execute_simple_with_context(
-    provider: ProviderKind,
-    prompt: String,
-    context: ProviderExecutionContext,
-) -> Result<String, String> {
-    tokio::task::spawn_blocking(move || {
-        execute_simple_blocking(provider, prompt, None, Some(context))
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))?
-}
-
 pub async fn execute_simple_with_timeout(
     provider: ProviderKind,
     prompt: String,

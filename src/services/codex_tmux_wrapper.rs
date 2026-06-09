@@ -328,13 +328,6 @@ fn decode_base64_prompt(encoded: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|e| format!("invalid utf-8 payload: {}", e))
 }
 
-fn decode_external_prompt(line: &str) -> Result<String, String> {
-    if let Some(encoded) = line.strip_prefix(TMUX_PROMPT_B64_PREFIX) {
-        return decode_base64_prompt(encoded);
-    }
-    Ok(line.to_string())
-}
-
 fn codex_first_event_timeout() -> std::time::Duration {
     let seconds = std::env::var("AGENTDESK_CODEX_FIRST_EVENT_TIMEOUT_SECS")
         .ok()

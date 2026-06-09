@@ -145,18 +145,6 @@ pub enum RuntimeHandoff {
     },
 }
 
-impl RuntimeHandoff {
-    pub fn kind(&self) -> RuntimeHandoffKind {
-        match self {
-            Self::LegacyTmuxWrapper { .. } => RuntimeHandoffKind::LegacyTmuxWrapper,
-            Self::ClaudeTui { .. } => RuntimeHandoffKind::ClaudeTui,
-            Self::CodexTui { .. } => RuntimeHandoffKind::CodexTui,
-            Self::ProcessBackend { .. } => RuntimeHandoffKind::ProcessBackend,
-            Self::ClaudeEAdapter { .. } => RuntimeHandoffKind::ClaudeEAdapter,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum StreamMessage {
     /// Initialization - contains session_id

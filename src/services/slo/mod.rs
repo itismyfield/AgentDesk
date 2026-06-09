@@ -62,12 +62,6 @@ pub enum SloMetric {
 }
 
 impl SloMetric {
-    pub const ALL: &'static [SloMetric] = &[
-        SloMetric::TurnSuccessRate,
-        SloMetric::DuplicateRelayCount,
-        SloMetric::AvgTurnLatencyMs,
-    ];
-
     pub fn as_str(&self) -> &'static str {
         match self {
             SloMetric::TurnSuccessRate => "turn_success_rate",

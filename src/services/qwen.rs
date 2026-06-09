@@ -260,10 +260,6 @@ fn resolve_qwen_binary() -> crate::services::platform::BinaryResolution {
     crate::services::platform::resolve_provider_binary("qwen")
 }
 
-pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
-    execute_command_simple_cancellable(prompt, None)
-}
-
 pub fn execute_command_simple_cancellable(
     prompt: &str,
     cancel_token: Option<&CancelToken>,
