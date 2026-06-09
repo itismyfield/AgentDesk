@@ -579,6 +579,9 @@ static LAUNCH_SELF_CHECK_SEEN: std::sync::LazyLock<
 ///
 /// Returns `true` if the launch binary passed the check (or was already
 /// reported in this process); `false` if a warning was logged.
+// #3034: test-only default-exec-path convenience wrapper; production callers
+// invoke `run_codex_hook_launch_self_check_with_exec_path` directly.
+#[allow(dead_code)]
 pub fn run_codex_hook_launch_self_check(codex_bin_path: &str) -> bool {
     run_codex_hook_launch_self_check_with_exec_path(codex_bin_path, None)
 }

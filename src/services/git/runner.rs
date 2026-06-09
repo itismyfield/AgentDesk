@@ -56,6 +56,9 @@ impl GitCommand {
         self
     }
 
+    // #3034: test-only builder setter — exercised by the runner timeout tests;
+    // production callers rely on the default timeout.
+    #[allow(dead_code)]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
@@ -316,6 +319,9 @@ impl GitCommandError {
         &self.stdout
     }
 
+    // #3034: test-only accessor — the error tests assert on raw stderr;
+    // production formats via Display.
+    #[allow(dead_code)]
     pub fn stderr(&self) -> &[u8] {
         &self.stderr
     }

@@ -8,18 +8,12 @@ pub mod automation_candidate_contract;
 pub mod automation_candidate_materializer;
 pub mod claude;
 pub mod claude_e;
-// #3034: 16 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during claude_tui dead-code cleanup.
-#[allow(dead_code)]
 pub mod claude_tui;
 pub mod cluster;
 pub mod codex;
 pub mod codex_remote_policy;
 #[cfg(unix)]
 pub mod codex_tmux_wrapper;
-// #3034: 31 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during codex_tui dead-code cleanup.
-#[allow(dead_code)]
 pub mod codex_tui;
 // #3034: 113 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during discord dead-code cleanup.
@@ -34,9 +28,6 @@ pub(crate) use dispatches::discord_delivery;
 pub mod discord_dm_reply_store;
 pub mod disk_monitor;
 pub mod dispatch_watchdog;
-// #3034: 1 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during dispatched_sessions dead-code cleanup.
-#[allow(dead_code)]
 pub mod dispatched_sessions;
 pub mod dispatches;
 // #3034: 1 residual dead-code items; scoped here so the lint stays
@@ -50,9 +41,6 @@ pub mod dispatches_followup;
 pub mod envelope_dedup;
 pub mod escalation_settings;
 pub mod gemini;
-// #3034: 2 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during git dead-code cleanup.
-#[allow(dead_code)]
 pub mod git;
 pub mod issue_announcements;
 pub mod kanban;
@@ -82,9 +70,6 @@ pub mod platform;
 // live on clean sibling modules. Remove during pr_summary dead-code cleanup.
 #[allow(dead_code)]
 pub mod pr_summary;
-// #3034: 14 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during process dead-code cleanup.
-#[allow(dead_code)]
 pub mod process;
 // #3034: residual dead code here is the intentional-but-unwired #2662/#2668
 // envelope + dev-role dedup infrastructure (gated behind AGENTDESK_ENVELOPE_DEDUP

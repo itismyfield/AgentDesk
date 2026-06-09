@@ -1,14 +1,13 @@
-use std::net::SocketAddr;
 use std::sync::{Arc, LazyLock, RwLock};
 
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::post;
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::{Notify, broadcast, oneshot};
+use tokio::sync::{Notify, broadcast};
 
 const EVENT_BUFFER_CAPACITY: usize = 256;
 
@@ -30,6 +29,8 @@ pub fn prompt_ready_notify() -> Arc<Notify> {
 /// Internal entry point used by `receive_hook` to wake `prompt_ready_notify`
 /// waiters. Exposed (crate-visible) for unit tests that exercise the wake path
 /// without spinning up the full HTTP receiver.
+// #3034: test-only wake hook (consumed by input.rs end-to-end wiring tests).
+#[allow(dead_code)]
 pub(crate) fn signal_prompt_ready_for_test() {
     PROMPT_READY_NOTIFY.notify_waiters();
 }
@@ -125,33 +126,8 @@ impl Default for HookServerState {
     }
 }
 
-pub struct HookServerHandle {
-    addr: SocketAddr,
-    shutdown_tx: Option<oneshot::Sender<()>>,
-    task: tokio::task::JoinHandle<()>,
-}
-
 pub struct HookEndpointGuard {
     endpoint: String,
-}
-
-impl HookServerHandle {
-    pub fn addr(&self) -> SocketAddr {
-        self.addr
-    }
-
-    pub fn base_url(&self) -> String {
-        format!("http://{}", self.addr)
-    }
-}
-
-impl Drop for HookServerHandle {
-    fn drop(&mut self) {
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
-        }
-        clear_hook_endpoint_if_current(&self.base_url());
-    }
 }
 
 impl Drop for HookEndpointGuard {
@@ -187,54 +163,8 @@ pub fn subscribe_hook_events() -> broadcast::Receiver<HookEvent> {
     HOOK_SERVER_STATE.subscribe()
 }
 
-pub async fn spawn_hook_server() -> Result<HookServerHandle, String> {
-    spawn_hook_server_with_state(HOOK_SERVER_STATE.clone()).await
-}
-
-pub async fn spawn_hook_server_with_state(
-    state: HookServerState,
-) -> Result<HookServerHandle, String> {
-    let app = hook_standalone_router(state);
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .map_err(|error| format!("bind hook server: {error}"))?;
-    let addr = listener
-        .local_addr()
-        .map_err(|error| format!("hook server local_addr: {error}"))?;
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let task = tokio::spawn(async move {
-        let result = axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                let _ = shutdown_rx.await;
-            })
-            .await;
-        if let Err(error) = result {
-            tracing::warn!("tui hook server stopped with error: {error}");
-        }
-    });
-
-    let handle = HookServerHandle {
-        addr,
-        shutdown_tx: Some(shutdown_tx),
-        task,
-    };
-    *HOOK_ENDPOINT
-        .write()
-        .unwrap_or_else(|error| error.into_inner()) = Some(handle.base_url());
-    tracing::info!(endpoint = handle.base_url(), "tui hook server started");
-    Ok(handle)
-}
-
 pub fn hook_receiver_router() -> Router {
     hook_receiver_router_with_state(HOOK_SERVER_STATE.clone())
-}
-
-fn hook_standalone_router(state: HookServerState) -> Router {
-    Router::new()
-        .route("/health", get(health))
-        .route("/hooks/{provider}/{event}", post(receive_hook))
-        .layer(DefaultBodyLimit::max(8 * 1024 * 1024))
-        .with_state(state)
 }
 
 fn hook_receiver_router_with_state(state: HookServerState) -> Router {
@@ -242,10 +172,6 @@ fn hook_receiver_router_with_state(state: HookServerState) -> Router {
         .route("/hooks/{provider}/{event}", post(receive_hook))
         .layer(DefaultBodyLimit::max(8 * 1024 * 1024))
         .with_state(state)
-}
-
-async fn health() -> Json<Value> {
-    Json(json!({ "ok": true }))
 }
 
 #[derive(Debug, Deserialize)]

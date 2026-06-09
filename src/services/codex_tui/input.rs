@@ -93,6 +93,12 @@ use crate::services::provider::{CancelToken, cancel_requested};
 use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::Notify;
 
+// #3034: test-only — the `TuiInputAction` action-plan layer below (plan/run/
+// validate/executor) is exercised by this module's regression suite but no
+// longer has a production caller; live codex input drives tmux directly through
+// the readiness-gated path. Retained as the pinned contract for that test
+// surface; individual `#[allow(dead_code)]` markers below.
+#[allow(dead_code)]
 const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
 const PROMPT_READY_CAPTURE_SCROLLBACK: i32 = -80;
 const PROMPT_READY_DEBUG_TAIL_LINES: usize = 24;
@@ -138,6 +144,9 @@ pub const PROMPT_READY_CANCELLED_ERROR: &str = "codex tui prompt readiness wait 
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptReadinessKind {
+    // #3034: constructed only by tests now (the fresh-turn send path was
+    // retired); kept for taxonomy completeness — `timeout`/`label` match it.
+    #[allow(dead_code)]
     FreshTurn,
     Followup,
     /// Bounded post-turn probe used by the Codex TUI launch frame to
@@ -175,6 +184,9 @@ impl PromptReadinessKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PromptDraftPolicy {
     RejectDraft,
+    // #3034: the accept-for-clear policy fed the retired draft-clear path;
+    // retained as the second policy state pinned by `accepts`.
+    #[allow(dead_code)]
     AcceptDraftForClear,
 }
 
@@ -236,6 +248,7 @@ pub(crate) fn record_rollout_composer_ready(session_name: &str) {
     state.notify.notify_waiters();
 }
 
+#[allow(dead_code)] // #3034: test-only; consumed by composer-ready state tests.
 fn mark_rollout_composer_busy(session_name: &str) {
     rollout_composer_ready_state()
         .ready_sessions
@@ -266,6 +279,7 @@ pub struct PromptReadinessSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // #3034: test-only action taxonomy (see header note).
 pub enum TuiInputAction {
     Literal(String),
     PasteBuffer(String),
@@ -276,6 +290,7 @@ pub enum TuiInputAction {
 /// Plan the sequence of tmux input actions required to deliver `prompt`
 /// to a Codex TUI composer. Multiline prompts use a paste buffer so
 /// embedded newlines do not get interpreted as `Enter` submissions.
+#[allow(dead_code)] // #3034: test-only (see header note).
 pub fn plan_prompt_submit(prompt: &str) -> Result<Vec<TuiInputAction>, String> {
     let normalized_prompt;
     let prompt = if prompt.contains('\r') {
@@ -298,38 +313,9 @@ pub fn plan_prompt_submit(prompt: &str) -> Result<Vec<TuiInputAction>, String> {
     Ok(actions)
 }
 
+#[allow(dead_code)] // #3034: test-only (see header note).
 pub fn plan_cancel() -> Vec<TuiInputAction> {
     vec![TuiInputAction::Escape]
-}
-
-/// Inject a fresh-turn prompt: waits up to `FRESH_PROMPT_READY_TIMEOUT`
-/// for the composer to appear before sending.
-pub fn send_fresh_prompt(
-    session_name: &str,
-    prompt: &str,
-    cancel_token: Option<&Arc<CancelToken>>,
-) -> Result<(), String> {
-    send_prompt_with_readiness(
-        session_name,
-        prompt,
-        PromptReadinessKind::FreshTurn,
-        cancel_token,
-    )
-}
-
-/// Inject a follow-up prompt: waits up to `FOLLOWUP_PROMPT_READY_TIMEOUT`
-/// for the composer to redraw after the previous turn before sending.
-pub fn send_followup_prompt(
-    session_name: &str,
-    prompt: &str,
-    cancel_token: Option<&Arc<CancelToken>>,
-) -> Result<(), String> {
-    send_prompt_with_readiness(
-        session_name,
-        prompt,
-        PromptReadinessKind::Followup,
-        cancel_token,
-    )
 }
 
 pub fn is_prompt_ready_timeout_error(error: &str) -> bool {
@@ -417,19 +403,6 @@ pub fn wait_until_codex_tui_input_ready(
         readiness,
         cancel_token,
         PromptDraftPolicy::RejectDraft,
-    )
-}
-
-fn wait_until_codex_tui_input_visible_for_clear(
-    session_name: &str,
-    readiness: PromptReadinessKind,
-    cancel_token: Option<&Arc<CancelToken>>,
-) -> Result<(), String> {
-    wait_until_codex_tui_input_ready_with_policy(
-        session_name,
-        readiness,
-        cancel_token,
-        PromptDraftPolicy::AcceptDraftForClear,
     )
 }
 
@@ -806,110 +779,7 @@ impl FastPathFallback for (HookFastPathOutcome, Option<PromptReadinessSnapshot>)
     }
 }
 
-fn send_prompt_with_readiness(
-    session_name: &str,
-    prompt: &str,
-    readiness: PromptReadinessKind,
-    cancel_token: Option<&Arc<CancelToken>>,
-) -> Result<(), String> {
-    let actions = plan_prompt_submit(prompt)?;
-    wait_until_codex_tui_input_visible_for_clear(session_name, readiness, cancel_token)?;
-    clear_codex_tui_prompt_draft_if_present(session_name, cancel_token.map(Arc::as_ref))?;
-    wait_until_codex_tui_input_ready(session_name, readiness, cancel_token)?;
-    mark_rollout_composer_busy(session_name);
-    if cancel_requested(cancel_token.map(Arc::as_ref)) {
-        return Err(PROMPT_READY_CANCELLED_ERROR.to_string());
-    }
-    crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
-        "codex",
-        session_name,
-        prompt,
-    );
-    match run_actions(session_name, &actions, cancel_token.map(Arc::as_ref)) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
-                "codex",
-                session_name,
-                prompt,
-            );
-            Err(error)
-        }
-    }
-}
-
-fn clear_codex_tui_prompt_draft_if_present(
-    session_name: &str,
-    cancel_token: Option<&CancelToken>,
-) -> Result<(), String> {
-    let mut snapshot = prompt_readiness_snapshot(session_name);
-    if !snapshot.prompt_draft_detected || !snapshot.tmux_pane_alive {
-        return Ok(());
-    }
-
-    let clear_key_plans: [&[&str]; 4] = [
-        &["Escape", "Escape"],
-        &["C-e", "C-u"],
-        &["C-a", "C-k"],
-        &["C-u"],
-    ];
-    for attempt in 1..=2 {
-        check_prompt_cancel(cancel_token)?;
-        for keys in clear_key_plans {
-            let output = crate::services::platform::tmux::send_keys(session_name, keys)?;
-            ensure_tmux_key_success(output, "clear-draft")?;
-            std::thread::sleep(Duration::from_millis(240));
-            check_prompt_cancel(cancel_token)?;
-            snapshot = prompt_readiness_snapshot(session_name);
-            if !snapshot.prompt_draft_detected || !snapshot.tmux_pane_alive {
-                tracing::info!(
-                    tmux_session_name = session_name,
-                    attempt,
-                    "codex_tui prompt draft cleared before submit"
-                );
-                return Ok(());
-            }
-        }
-        if let Some(backspace_count) = codex_visible_prompt_draft_backspace_budget(&snapshot) {
-            let mut backspace_keys = Vec::with_capacity(backspace_count + 1);
-            backspace_keys.push("C-e");
-            backspace_keys.extend(std::iter::repeat_n("BSpace", backspace_count));
-            let output = crate::services::platform::tmux::send_keys(session_name, &backspace_keys)?;
-            ensure_tmux_key_success(output, "clear-draft-backspace")?;
-            std::thread::sleep(Duration::from_millis(240));
-            check_prompt_cancel(cancel_token)?;
-            snapshot = prompt_readiness_snapshot(session_name);
-            if !snapshot.prompt_draft_detected || !snapshot.tmux_pane_alive {
-                tracing::info!(
-                    tmux_session_name = session_name,
-                    attempt,
-                    backspace_count,
-                    "codex_tui prompt draft cleared by backspace sweep before submit"
-                );
-                return Ok(());
-            }
-        }
-        tracing::warn!(
-            tmux_session_name = session_name,
-            attempt,
-            composer_marker_detected = snapshot.composer_marker_detected,
-            prompt_draft_detected = snapshot.prompt_draft_detected,
-            tmux_pane_alive = snapshot.tmux_pane_alive,
-            capture_available = snapshot.capture_available,
-            pane_tail = %snapshot.pane_tail,
-            "codex_tui prompt draft still present after clear attempt"
-        );
-    }
-    Err(format!(
-        "codex tui prompt draft could not be cleared before prompt submit (tmux_session_name={session_name} pane_tail={})",
-        snapshot.pane_tail
-    ))
-}
-
-pub fn send_cancel(session_name: &str) -> Result<(), String> {
-    run_actions(session_name, &plan_cancel(), None)
-}
-
+#[allow(dead_code)] // #3034: test-only executor abstraction (see header note).
 trait TuiActionExecutor {
     fn send_literal(&mut self, session_name: &str, text: &str) -> Result<Output, String>;
     fn load_buffer(&mut self, buffer_name: &str, text: &str) -> Result<Output, String>;
@@ -922,6 +792,8 @@ trait TuiActionExecutor {
     fn send_keys(&mut self, session_name: &str, keys: &[&str]) -> Result<Output, String>;
 }
 
+#[allow(dead_code)] // #3034: production executor impl, only reached via the
+// test-only action layer; kept as the real tmux backing for `run_actions_with_executor`.
 struct TmuxTuiActionExecutor;
 
 impl TuiActionExecutor for TmuxTuiActionExecutor {
@@ -947,15 +819,7 @@ impl TuiActionExecutor for TmuxTuiActionExecutor {
     }
 }
 
-fn run_actions(
-    session_name: &str,
-    actions: &[TuiInputAction],
-    cancel_token: Option<&CancelToken>,
-) -> Result<(), String> {
-    let mut executor = TmuxTuiActionExecutor;
-    run_actions_with_executor(session_name, actions, cancel_token, &mut executor)
-}
-
+#[allow(dead_code)] // #3034: test-only (see header note).
 fn run_actions_with_executor(
     session_name: &str,
     actions: &[TuiInputAction],
@@ -981,6 +845,7 @@ fn run_actions_with_executor(
     Ok(())
 }
 
+#[allow(dead_code)] // #3034: test-only (reached via run_actions_with_executor).
 fn check_prompt_cancel(cancel_token: Option<&CancelToken>) -> Result<(), String> {
     if cancel_requested(cancel_token) {
         Err(PROMPT_READY_CANCELLED_ERROR.to_string())
@@ -989,6 +854,7 @@ fn check_prompt_cancel(cancel_token: Option<&CancelToken>) -> Result<(), String>
     }
 }
 
+#[allow(dead_code)] // #3034: test-only (reached via run_actions_with_executor).
 fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), String> {
     if output.status.success() {
         return Ok(());
@@ -1000,18 +866,6 @@ fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), St
         TuiInputAction::Enter => "enter",
         TuiInputAction::Escape => "escape",
     };
-    if stderr.is_empty() {
-        Err(format!("tmux send {action_name} failed: {}", output.status))
-    } else {
-        Err(format!("tmux send {action_name} failed: {stderr}"))
-    }
-}
-
-fn ensure_tmux_key_success(output: Output, action_name: &str) -> Result<(), String> {
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if stderr.is_empty() {
         Err(format!("tmux send {action_name} failed: {}", output.status))
     } else {
@@ -1275,6 +1129,7 @@ fn pane_has_codex_prompt_draft(pane: &str) -> bool {
             .any(|line| codex_composer_body_line_has_draft(line))
 }
 
+#[allow(dead_code)] // #3034: test-only (draft-clear path retired).
 fn codex_visible_prompt_draft_backspace_budget(
     snapshot: &PromptReadinessSnapshot,
 ) -> Option<usize> {
@@ -1447,6 +1302,7 @@ fn prompt_ready_debug_tail(pane: &str) -> String {
     crate::utils::format::safe_suffix(tail.trim(), PROMPT_READY_DEBUG_TAIL_BYTES).to_string()
 }
 
+#[allow(dead_code)] // #3034: test-only (reached via plan_prompt_submit).
 fn validate_prompt_text(input: &str) -> Result<(), String> {
     // Block terminal control channels such as ESC bracketed-paste markers,
     // DEL, and C1 controls before either literal send or tmux paste-buffer
@@ -1461,6 +1317,7 @@ fn validate_prompt_text(input: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(dead_code)] // #3034: test-only (reached via plan_prompt_submit).
 fn validate_prompt_not_empty(input: &str) -> Result<(), String> {
     if input.trim().is_empty() {
         return Err("prompt must contain non-whitespace text".to_string());
@@ -1468,6 +1325,7 @@ fn validate_prompt_not_empty(input: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(dead_code)] // #3034: test-only (reached via plan_prompt_submit).
 fn split_literal_chunks(input: &str, max_chars: usize) -> Vec<String> {
     if input.is_empty() {
         return Vec::new();
