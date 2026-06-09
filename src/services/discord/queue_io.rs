@@ -1,71 +1,5 @@
 use super::*;
 
-#[cfg_attr(not(test), allow(dead_code))]
-fn prune_interventions_at(queue: &mut Vec<Intervention>, now: Instant) {
-    // #3177: no age-based eviction — only the overflow cap bounds the queue.
-    let _ = now;
-    if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
-        let overflow = queue.len() - MAX_INTERVENTIONS_PER_CHANNEL;
-        queue.drain(0..overflow);
-    }
-}
-
-#[allow(dead_code)]
-pub(super) fn channel_has_pending_soft_queue(
-    intervention_queue: &mut HashMap<ChannelId, Vec<Intervention>>,
-    channel_id: ChannelId,
-) -> bool {
-    channel_has_pending_soft_queue_at(intervention_queue, channel_id, Instant::now())
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn channel_has_pending_soft_queue_at(
-    intervention_queue: &mut HashMap<ChannelId, Vec<Intervention>>,
-    channel_id: ChannelId,
-    now: Instant,
-) -> bool {
-    let mut remove_queue = false;
-    let has_pending = if let Some(queue) = intervention_queue.get_mut(&channel_id) {
-        prune_interventions_at(queue, now);
-        let has_pending = queue.iter().any(|item| item.mode == InterventionMode::Soft);
-        remove_queue = queue.is_empty();
-        has_pending
-    } else {
-        false
-    };
-    if remove_queue {
-        intervention_queue.remove(&channel_id);
-    }
-    has_pending
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn watcher_should_kickoff_idle_queue(
-    has_active_turn: bool,
-    intervention_queue: &mut HashMap<ChannelId, Vec<Intervention>>,
-    channel_id: ChannelId,
-) -> bool {
-    watcher_should_kickoff_idle_queue_at(
-        has_active_turn,
-        intervention_queue,
-        channel_id,
-        Instant::now(),
-    )
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn watcher_should_kickoff_idle_queue_at(
-    has_active_turn: bool,
-    intervention_queue: &mut HashMap<ChannelId, Vec<Intervention>>,
-    channel_id: ChannelId,
-    now: Instant,
-) -> bool {
-    if has_active_turn {
-        return false;
-    }
-    channel_has_pending_soft_queue_at(intervention_queue, channel_id, now)
-}
-
 /// #2044 F3: RAII guard that ensures `deferred_hook_backlog` is
 /// decremented even if the spawned future panics inside
 /// `kickoff_idle_queues` (which awaits multiple IO calls and may
@@ -87,7 +21,6 @@ const DEFERRED_IDLE_QUEUE_KICKOFF_RETRY_DELAY: std::time::Duration =
 // because cached ctx/token arrived slightly after the first post-turn kickoff.
 const DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS: usize = 150;
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn should_retry_deferred_idle_queue_kickoff(attempt: usize) -> bool {
     attempt < DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
 }
@@ -97,7 +30,6 @@ fn should_retry_deferred_idle_queue_kickoff(attempt: usize) -> bool {
 /// the first kickoff runs without the 2s `INITIAL_DELAY` guard; every other
 /// caller keeps the full delay to avoid spinning during the dcserver/gateway
 /// restart window.
-#[cfg_attr(not(test), allow(dead_code))]
 fn deferred_idle_queue_initial_presleep(immediate_once: bool) -> std::time::Duration {
     if immediate_once {
         std::time::Duration::ZERO

@@ -2,9 +2,6 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-#[cfg_attr(not(test), allow(dead_code))]
-const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
-
 pub(super) fn agentdesk_root() -> Option<PathBuf> {
     crate::config::runtime_root()
 }
@@ -90,11 +87,6 @@ pub(crate) fn discord_queue_exit_placeholder_clears_root() -> Option<PathBuf> {
 /// legacy JSON records from builds that had a reader but no live writer.
 pub(super) fn legacy_discord_handoff_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_handoff"))
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn shared_agent_memory_root() -> Option<PathBuf> {
-    agentdesk_root().map(|root| crate::runtime_layout::shared_agent_memory_root(&root))
 }
 
 pub(super) fn shared_agent_knowledge_path() -> Option<PathBuf> {

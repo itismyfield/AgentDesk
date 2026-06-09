@@ -77,30 +77,6 @@ pub(in crate::services::discord::router) enum TextStopLookup {
     Stop(Arc<CancelToken>),
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-pub(in crate::services::discord::router) fn lookup_text_stop_token(
-    cancel_tokens: &std::collections::HashMap<serenity::ChannelId, Arc<CancelToken>>,
-    channel_id: serenity::ChannelId,
-) -> TextStopLookup {
-    match cancel_tokens.get(&channel_id).cloned() {
-        Some(token) if cancel_requested(Some(token.as_ref())) => TextStopLookup::AlreadyStopping,
-        Some(token) => TextStopLookup::Stop(token),
-        None => TextStopLookup::NoActiveTurn,
-    }
-}
-
-#[allow(dead_code)]
-pub(in crate::services::discord::router) async fn lookup_text_stop_token_mailbox(
-    shared: &Arc<SharedData>,
-    channel_id: serenity::ChannelId,
-) -> TextStopLookup {
-    match super::super::super::mailbox_cancel_token(shared, channel_id).await {
-        Some(token) if cancel_requested(Some(token.as_ref())) => TextStopLookup::AlreadyStopping,
-        Some(token) => TextStopLookup::Stop(token),
-        None => TextStopLookup::NoActiveTurn,
-    }
-}
-
 pub(in crate::services::discord::router) async fn cancel_text_stop_token_mailbox(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

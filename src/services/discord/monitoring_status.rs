@@ -16,19 +16,14 @@ use super::{SharedData, health, rate_limit_wait};
 use crate::services::dispatches::discord_delivery::{
     DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
-use crate::services::monitoring_store::{
-    MonitoringEntry, MonitoringStore, global_monitoring_store,
-};
+use crate::services::monitoring_store::{MonitoringEntry, MonitoringStore};
 
 const RENDER_DEBOUNCE: StdDuration = StdDuration::from_millis(300);
 
-#[cfg_attr(test, allow(dead_code))]
 const MONITORING_TTL: chrono::Duration = chrono::Duration::minutes(10);
 
-#[cfg_attr(test, allow(dead_code))]
 const SWEEP_INTERVAL: StdDuration = StdDuration::from_secs(60);
 
-#[cfg_attr(test, allow(dead_code))]
 static SWEEPER_STARTED: OnceLock<()> = OnceLock::new();
 
 #[derive(Clone)]
@@ -201,7 +196,6 @@ pub(crate) fn schedule_render_channel(
     });
 }
 
-#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn spawn_expiry_sweeper(
     monitoring: Arc<Mutex<MonitoringStore>>,
     health_registry: Option<Arc<health::HealthRegistry>>,
@@ -228,25 +222,6 @@ pub(crate) fn spawn_expiry_sweeper(
             }
         }
     });
-}
-
-#[allow(dead_code)]
-pub(in crate::services::discord) async fn render_channel_monitoring(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
-    channel_id: ChannelId,
-) {
-    let monitoring = global_monitoring_store();
-    if let Err(error) =
-        render_channel_monitoring_from_store(http, &monitoring, Some(shared), channel_id).await
-    {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⚠ monitoring status render failed for channel {}: {}",
-            channel_id.get(),
-            error
-        );
-    }
 }
 
 async fn render_channel_monitoring_from_registry(

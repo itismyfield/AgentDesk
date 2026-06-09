@@ -122,6 +122,9 @@ pub(crate) struct RoleBinding {
     /// Optional model override (e.g. "opus", "sonnet", "haiku", "o3")
     pub model: Option<String>,
     /// Optional reasoning effort for Codex (e.g. "low", "normal", "high", "xhigh")
+    // #3034: config field carried through the role binding; the consumer that
+    // applies per-role reasoning effort is not wired yet (the Codex path reads
+    // effort from dispatch options today).
     #[allow(dead_code)]
     pub reasoning_effort: Option<String>,
     /// Whether this role may see peer-agent handoff guidance in the system prompt.

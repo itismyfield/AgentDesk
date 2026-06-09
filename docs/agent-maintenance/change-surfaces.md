@@ -608,9 +608,11 @@
     `reseed_watcher_owned_finalizer_ledger` + two guarded reattach call-sites that
     re-register the watcher-owned turn in the post-restart finalizer ledger so a
     mid-turn deploy's live pane auto-reconciles without a new user turn).
-  - `src/services/discord/health.rs` (2293 lines after #3038 send-to-agent
-    dispatch extraction to `outbound/send_to_agent.rs`; previously 2369 after
-    #1879 snapshot/mailbox extraction and #3082 answer-flush-barrier field).
+  - `src/services/discord/health.rs` (2240 lines after #3034 dead-code sweep
+    removed `notify_http_clone`/`send_message`/`parse_send_body`; previously
+    2292 after #3038 send-to-agent dispatch extraction to
+    `outbound/send_to_agent.rs`, #1879 snapshot/mailbox extraction, and #3082
+    answer-flush-barrier field).
   - `src/services/discord/health/recovery.rs` (2655 lines; health recovery
     extraction surface, split further before adding non-bugfix behavior; +70
     from #3126 stall-watchdog completed-idle false-positive guard tests; +88
@@ -628,7 +630,8 @@
   - `src/services/discord/router/message_handler/headless_turn.rs` (1316 lines;
     headless Discord turn launch/terminal-response path split from the router
     message handler; bugfix only outside a further extraction plan).
-  - `src/services/discord/meeting_orchestrator.rs` (3227 lines).
+  - `src/services/discord/meeting_orchestrator.rs` (3222 lines after #3034
+    dead-code sweep removed `is_meeting_channel`).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (1545 lines; provider
     stop-token/tmux binding runtime + PID-exit observation helper (#2426),
     split before adding non-bugfix behavior. #3169: added the
@@ -656,7 +659,11 @@
     monitor turn-key/ledger-generation logic; tracked decompose target — see
     `giant-file-registry.md` (owner `discord-finalizer`, deadline 2026-08-31,
     issue #3016). Bugfix only outside a finalizer-decomposition plan).
-  - `src/services/discord/formatting.rs` (2802 lines; +46 from #3082
+  - `src/services/discord/formatting.rs` (2802 lines; net +0 from #3034 scoped
+    dead-code allows on the `MonitorHandoffReason::InlineTimeout` /
+    `MonitorHandoffStatus::Failed` reserved variants — the two added `#[allow]`
+    lines were offset by collapsing the adjacent reason comments back to inline
+    form, so the file stays at its frozen baseline; +46 from #3082
     answer-flush-barrier guards (+11 around the plain multi-chunk send loops;
     +24 from the #3082 codex follow-up that also guards the edit/replace path
     `replace_long_message_raw_with_outcome` and bumps `note_progress` after each
@@ -688,7 +695,13 @@
     inline — its move-captured locals make a clean extraction risky and is
     deferred).
   - `src/services/discord/session_runtime.rs` (1781 lines).
-  - `src/services/discord/voice_barge_in.rs` (4657 lines; voice STT/TTS,
+  - `src/services/discord/voice_barge_in.rs` (4657 lines; net +0 from #3034
+    scoped dead-code allows on the test-only runtime API
+    (`disabled` / `runtime_config_snapshot` / `apply_voice_command` /
+    `reset_after_playback_start` / `clear_playback`) — the five added `#[allow]`
+    lines were offset by collapsing their reason comments to inline form and
+    rewrapping adjacent doc comments, so the file stays at its frozen baseline;
+    voice STT/TTS,
     lobby routing, progress mirroring, and barge-in orchestration surface;
     tracked decompose target — see `giant-file-registry.md` (owner
     `voice-runtime`, deadline 2026-08-31, #3036)).
