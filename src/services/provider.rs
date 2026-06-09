@@ -8,6 +8,18 @@ use std::thread::JoinHandle;
 /// Tmux session name prefix — always "AgentDesk".
 pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";
 
+/// #3263: Codex context-window LAST-RESORT fallback (tokens).
+///
+/// Codex is the only provider with a dynamic local context-window source
+/// (`~/.codex/models_cache.json`, keyed by model slug). Resolution order is:
+///   1. exact slug match in the cache (`context_window`),
+///   2. max `context_window` across cached models (cache present, slug drift),
+///   3. this constant (cache absent / empty / unparseable).
+/// It is set to a conservative current-generation Codex window (matching the
+/// current gpt-5.x cache value) so the fallback is not stale; the cache and the
+/// max-of-cache value above are authoritative whenever the cache exists.
+const CODEX_FALLBACK_CONTEXT_WINDOW: u64 = 272_000;
+
 /// Tmux session name suffix (reserved for future isolation use; currently empty).
 pub fn tmux_env_suffix() -> &'static str {
     ""
@@ -113,6 +125,8 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
             runtime_model: None,
             source_label: "Claude provider default",
         },
+        // #3263: Claude exposes no local/CLI context-window source, but AgentDesk
+        // launches it in 1M-context mode, so this hardcoded 1M is accurate.
         default_context_window: 1_000_000,
         managed_tmux_backend: true,
         managed_tmux_wrapper_subcommand: Some("tmux-wrapper"),
@@ -140,7 +154,11 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
             runtime_model: None,
             source_label: "provider default",
         },
-        default_context_window: 200_000,
+        // #3263: Codex resolves its context window cache-first from
+        // ~/.codex/models_cache.json (see resolve_context_window /
+        // codex_model_context_window). This registry value is only the
+        // last-resort fallback when that cache is absent/unusable.
+        default_context_window: CODEX_FALLBACK_CONTEXT_WINDOW,
         managed_tmux_backend: true,
         managed_tmux_wrapper_subcommand: Some("codex-tmux-wrapper"),
         auth: ProviderAuthSpec {
@@ -167,6 +185,8 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
             runtime_model: None,
             source_label: "provider default",
         },
+        // #3263: Gemini exposes no local/CLI context-window source, but AgentDesk
+        // launches it in 1M-context mode, so this hardcoded 1M is accurate.
         default_context_window: 1_000_000,
         managed_tmux_backend: false,
         managed_tmux_wrapper_subcommand: None,
@@ -194,6 +214,8 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
             runtime_model: None,
             source_label: "provider default",
         },
+        // #3263: OpenCode exposes no local/CLI context-window source; this
+        // conservative 128k is a hardcoded default (no dynamic source exists).
         default_context_window: 128_000,
         managed_tmux_backend: false,
         managed_tmux_wrapper_subcommand: None,
@@ -221,6 +243,8 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
             runtime_model: None,
             source_label: "provider default",
         },
+        // #3263: Qwen exposes no local/CLI context-window source; this
+        // conservative 128k is a hardcoded default (no dynamic source exists).
         default_context_window: 128_000,
         managed_tmux_backend: true,
         managed_tmux_wrapper_subcommand: Some("qwen-tmux-wrapper"),
@@ -436,8 +460,13 @@ impl ProviderKind {
             .unwrap_or(200_000)
     }
 
-    /// Resolve the context window for a specific model, falling back to
-    /// the provider default if the model-specific value is unavailable.
+    /// Resolve the context window for a specific model.
+    ///
+    /// #3263: Codex is cache-first — `codex_model_context_window` reads
+    /// `~/.codex/models_cache.json` (exact slug, else max-of-cache). Only when
+    /// that cache is absent/unusable do we fall back to the provider default
+    /// (`CODEX_FALLBACK_CONTEXT_WINDOW`). Other providers have no local source
+    /// and always use their documented registry default.
     pub fn resolve_context_window(&self, model: Option<&str>) -> u64 {
         if let (Self::Codex, Some(m)) = (self, model) {
             if let Some(window) = codex_model_context_window(m) {
@@ -2247,17 +2276,92 @@ where
 }
 
 /// Read Codex model context_window from the local CLI cache file.
-/// Returns None if the cache is missing, unreadable, or the model isn't found.
+/// Returns None only when the cache is missing/unreadable; resolution within a
+/// present-but-non-matching cache is handled by `codex_context_window_from_cache`.
 fn codex_model_context_window(model: &str) -> Option<u64> {
     let cache_path = dirs::home_dir()?.join(".codex/models_cache.json");
     let data = std::fs::read_to_string(cache_path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&data).ok()?;
+    codex_context_window_from_cache(&data, model)
+}
+
+/// #3263: Resolve a Codex context window from the raw `models_cache.json` body.
+///
+/// 1. Exact slug match → that entry's `context_window`.
+/// 2. Cache present with models but no slug match (slug drift) → the MAX
+///    `context_window` across cached entries. The cache is authoritative and
+///    far fresher than the hardcoded last-resort, so we prefer it.
+/// 3. Cache empty / unparseable / no usable `context_window` → None, letting the
+///    caller fall back to `CODEX_FALLBACK_CONTEXT_WINDOW`.
+///
+/// Defensive: malformed JSON or unexpected shapes yield None, never a panic.
+fn codex_context_window_from_cache(data: &str, model: &str) -> Option<u64> {
+    let json: serde_json::Value = serde_json::from_str(data).ok()?;
     let models = json.get("models")?.as_array()?;
-    models
-        .iter()
-        .find(|m| m.get("slug").and_then(|s| s.as_str()) == Some(model))
-        .and_then(|m| m.get("context_window"))
-        .and_then(|v| v.as_u64())
+
+    let mut max_window: Option<u64> = None;
+    for entry in models {
+        let Some(window) = entry.get("context_window").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        if entry.get("slug").and_then(|s| s.as_str()) == Some(model) {
+            return Some(window);
+        }
+        max_window = Some(max_window.map_or(window, |m| m.max(window)));
+    }
+    max_window
+}
+
+#[cfg(test)]
+mod codex_context_window_tests {
+    use super::{CODEX_FALLBACK_CONTEXT_WINDOW, ProviderKind, codex_context_window_from_cache};
+
+    const CACHE: &str = r#"{
+        "models": [
+            { "slug": "gpt-5.1-codex", "context_window": 200000 },
+            { "slug": "gpt-5.5-codex", "context_window": 272000 }
+        ]
+    }"#;
+
+    #[test]
+    fn exact_slug_match_returns_that_window() {
+        assert_eq!(
+            codex_context_window_from_cache(CACHE, "gpt-5.5-codex"),
+            Some(272_000)
+        );
+    }
+
+    #[test]
+    fn cache_present_with_unknown_slug_returns_max_of_cache() {
+        // #3263: slug drift — cache exists, requested slug absent → use the MAX
+        // cached context_window, not the stale hardcoded last-resort.
+        assert_eq!(
+            codex_context_window_from_cache(CACHE, "gpt-6-codex-future"),
+            Some(272_000)
+        );
+    }
+
+    #[test]
+    fn empty_or_unparseable_cache_returns_none() {
+        assert_eq!(
+            codex_context_window_from_cache(r#"{"models": []}"#, "anything"),
+            None
+        );
+        assert_eq!(codex_context_window_from_cache("not json", "x"), None);
+        assert_eq!(codex_context_window_from_cache("{}", "x"), None);
+    }
+
+    #[test]
+    fn resolve_falls_back_to_documented_constant_when_cache_absent() {
+        // No model + no usable cache resolves to the documented last-resort.
+        assert_eq!(
+            ProviderKind::Codex.resolve_context_window(None),
+            CODEX_FALLBACK_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            ProviderKind::Codex.default_context_window(),
+            CODEX_FALLBACK_CONTEXT_WINDOW
+        );
+    }
 }
 
 #[cfg(test)]

@@ -584,3 +584,12 @@
   offset advance on success (write-side ledger) are unchanged — no new multinode
   ownership, singleton, or lease assumption is introduced. Classification:
   **worker-local relay path**.
+- #3263 (Codex context-window fallback): `provider.rs` changed by adding a
+  **pure** max-of-cache fallback to Codex context-window resolution
+  (`codex_context_window_from_cache`: exact slug → max-of-cache on slug drift →
+  documented `CODEX_FALLBACK_CONTEXT_WINDOW` last-resort), documenting each
+  provider's hardcoded `default_context_window` intent, and a unit-test module.
+  The resolver is a **worker-local** read of the local CLI cache
+  (`~/.codex/models_cache.json`) on the node that owns the session — it owns no
+  global state, no durable queue, and no lease, and touches no PG-lease/leader
+  path. No new multinode ownership, singleton, or lease assumption is introduced.
