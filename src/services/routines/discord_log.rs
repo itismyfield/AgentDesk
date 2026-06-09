@@ -47,24 +47,6 @@ impl RoutineDiscordLogger {
         }
     }
 
-    pub async fn log_routine_event(
-        &self,
-        routine: &RoutineRecord,
-        event: RoutineLifecycleEvent,
-    ) -> RoutineDiscordLogStatus {
-        self.log_to_routine_target(
-            None,
-            Some(&routine.id),
-            Some(&routine.name),
-            routine.agent_id.as_deref(),
-            routine.discord_thread_id.as_deref(),
-            event.reason_code(),
-            &format!("routine:{}:{}", routine.id, event.reason_code()),
-            &routine_lifecycle_message(routine, event),
-        )
-        .await
-    }
-
     pub async fn log_routine_event_by_id(
         &self,
         store: &RoutineStore,
@@ -1020,6 +1002,8 @@ fn recovery_message(recovered: &RecoveredRoutineRun) -> String {
     )
 }
 
+// #3034: exercised only by the discord_log unit tests below.
+#[allow(dead_code)]
 fn run_started_message(claimed: &ClaimedRoutineRun) -> String {
     routine_run_progress_message(&run_started_section(claimed))
 }
@@ -1038,6 +1022,8 @@ fn run_started_section(claimed: &ClaimedRoutineRun) -> String {
     )
 }
 
+// #3034: exercised only by the discord_log unit tests below.
+#[allow(dead_code)]
 fn run_js_inputs_message(
     claimed: &ClaimedRoutineRun,
     observation_count: usize,
@@ -1126,6 +1112,8 @@ fn checkpoint_state_summary(cp: &Value) -> String {
     }
 }
 
+// #3034: exercised only by the discord_log unit tests below.
+#[allow(dead_code)]
 fn run_js_action_message(
     claimed: &ClaimedRoutineRun,
     action: &str,
@@ -1173,6 +1161,8 @@ fn run_js_action_section(
     routine_log_section("루틴 JS 처리 결과", sections)
 }
 
+// #3034: exercised only by the discord_log unit tests below.
+#[allow(dead_code)]
 fn run_outcome_message(routine: &RoutineRecord, outcome: &RoutineRunOutcome) -> String {
     routine_run_progress_message(&run_outcome_section(routine, outcome))
 }

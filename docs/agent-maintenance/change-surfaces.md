@@ -887,10 +887,12 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
 - `src/services/dispatches/outbox_route.rs` (1089) — dispatch outbox route
   support extracted from the route layer; split before adding non-bugfix
   behavior.
-- `src/services/claude.rs` (3949), `src/services/gemini.rs` (1416),
-  `src/services/qwen.rs` (2196), `src/services/codex.rs` (3083),
-  `src/services/opencode.rs` (1881), `src/services/provider.rs` (1739) —
-  provider adapters.
+- `src/services/claude.rs` (3909), `src/services/gemini.rs` (1358),
+  `src/services/qwen.rs` (2196), `src/services/codex.rs` (3001),
+  `src/services/opencode.rs` (1881), `src/services/provider.rs` (1727) —
+  provider adapters. (#3034 removed dead non-cancel `execute_command_simple*`
+  twins from the claude/codex/gemini adapters and a superseded
+  `select_counterpart_from` from provider.)
 - `src/services/codex_tui/rollout_tail.rs` (1738) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
   beyond the #2169 session identity fix.
@@ -913,11 +915,11 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   the route layer in #1519. Keep follow-up changes bugfix-only unless the file
   is split further.
 - `src/services/routines/{store.rs (2844), migrated.rs (1286),
-  discord_log.rs (1353), agent_executor.rs (1044)}` — durable routine storage,
+  discord_log.rs (1344), agent_executor.rs (1044)}` — durable routine storage,
   migrated launchd validation, Discord notification plumbing, and agent
   execution are the canonical scheduled JS routine surfaces. Split focused
   helper modules before growing these files again.
-- `src/services/platform/binary_resolver.rs` (1244).
+- `src/services/platform/binary_resolver.rs` (1221).
 - `src/services/discord/mod.rs` (4465; +34 from #3019 added the
   single-authority `increment_global_active` helper + doc mirroring the
   existing decrement helper — offset by removing 6 inline raw `fetch_add`
@@ -927,7 +929,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `restore_owner_channel_for_tmux_session`/`clear_restored_owner_for_tmux_session`
   so a live thread-suffixed TUI session with no live watcher slot can be
   re-registered authoritatively instead of dropped forever),
-  `src/services/discord_config_audit.rs` (1318).
+  `src/services/discord_config_audit.rs` (1273).
 - `src/services/turn_orchestrator.rs` (3090).
 
 Decomposed below the giant-file threshold (no longer frozen; bugfix-scoped but

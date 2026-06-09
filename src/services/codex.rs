@@ -45,6 +45,8 @@ enum CodexRuntimeKind {
     LegacyWrapperFallback,
     ProcessBackend,
     RemoteDirect,
+    // #3034: runtime-kind taxonomy variant; constructed only in tests today.
+    #[allow(dead_code)]
     RemoteTmux,
     DirectHeadless,
     SimpleHeadless,
@@ -308,19 +310,6 @@ fn append_codex_config_overrides(
     args.splice(insert_at..insert_at, override_args);
 }
 
-fn insert_codex_option_before_prompt_delimiter(args: &mut Vec<String>, option: &str) {
-    let insert_at = match args.iter().position(|arg| arg == "--") {
-        Some(delimiter_index)
-            if args.first().map(String::as_str) == Some("resume") && delimiter_index > 0 =>
-        {
-            delimiter_index - 1
-        }
-        Some(delimiter_index) => delimiter_index,
-        None => args.len(),
-    };
-    args.insert(insert_at, option.to_string());
-}
-
 fn insert_codex_resume_option_before_other_options(args: &mut Vec<String>, option: &str) {
     args.insert(0, option.to_string());
 }
@@ -437,6 +426,8 @@ fn append_codex_sandbox_args(args: &mut Vec<String>, readonly_mode: bool) {
     }
 }
 
+// #3034: exercised only by the codex arg-builder unit tests below.
+#[allow(dead_code)]
 fn base_tui_args(
     resume_session_id: Option<&str>,
     prompt: &str,
@@ -794,25 +785,7 @@ fn record_codex_tmux_termination(
 #[cfg(unix)]
 use crate::services::tmux_common::{tmux_owner_path, write_tmux_owner_marker};
 
-pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
-    execute_command_simple_cancellable(prompt, None)
-}
-
-pub fn execute_command_simple_with_model(
-    prompt: &str,
-    model: Option<&str>,
-) -> Result<String, String> {
-    execute_command_simple_cancellable_with_options(
-        prompt,
-        model,
-        true,
-        Some(true),
-        Some(false),
-        None,
-    )
-}
-
-/// Cancel-aware variant of [`execute_command_simple_with_model`].
+/// Cancel-aware variant of the model-override simple execution path.
 ///
 /// Threads the supplied `CancelToken` into the spawned Codex child so that a
 /// mid-flight cancel (e.g. voice barge-in) terminates the process tree
@@ -858,17 +831,8 @@ pub fn execute_command_simple_cancellable_with_model(
 /// stale PID. Thread cleanup is bounded: we only `join()` the worker
 /// after observing it sent its result (or after the kill drained it),
 /// never on an indefinitely blocked thread.
-pub fn execute_command_simple_with_timeout(
-    prompt: &str,
-    timeout: Duration,
-    label: &str,
-) -> Result<String, String> {
-    let prompt = prompt.to_string();
-    execute_command_simple_with_timeout_worker(timeout, label, "codex", move |cancel_for_worker| {
-        execute_command_simple_cancellable(&prompt, Some(&cancel_for_worker))
-    })
-}
-
+// #3034: retained for the #2387 timeout-drain regression test below.
+#[allow(dead_code)]
 fn execute_command_simple_with_timeout_worker<F>(
     timeout: Duration,
     label: &str,
@@ -1545,23 +1509,6 @@ fn execute_streaming_remote_direct(
     _cancel_token: Option<std::sync::Arc<CancelToken>>,
 ) -> Result<(), String> {
     Err("Remote SSH execution is not available in AgentDesk".to_string())
-}
-
-#[cfg(unix)]
-fn execute_streaming_remote_tmux(
-    _profile: &RemoteProfile,
-    _prompt: &str,
-    _model: Option<&str>,
-    _fast_mode_enabled: Option<bool>,
-    _goals_enabled: Option<bool>,
-    _working_dir: &str,
-    _sender: Sender<StreamMessage>,
-    _cancel_token: Option<std::sync::Arc<CancelToken>>,
-    _tmux_session_name: &str,
-    _report_channel_id: Option<u64>,
-    _report_provider: Option<ProviderKind>,
-) -> Result<(), String> {
-    Err("Remote SSH tmux execution is not available in AgentDesk".to_string())
 }
 
 /// Tear down a pre-existing tmux session before relaunching a Codex Direct TUI
@@ -2417,15 +2364,6 @@ fn execute_streaming_local_tmux(
 }
 
 #[cfg(unix)]
-fn codex_pipe_prompt_line(prompt: &str) -> String {
-    format!(
-        "{}{}",
-        TMUX_PROMPT_B64_PREFIX,
-        BASE64_STANDARD.encode(prompt.as_bytes())
-    )
-}
-
-#[cfg(unix)]
 fn codex_pipe_prompt_lines_with_id(prompt: &str, message_id: &str) -> Vec<String> {
     let encoded = BASE64_STANDARD.encode(prompt.as_bytes());
     if encoded.len() <= TMUX_PROMPT_B64_CHUNK_SIZE {
@@ -2808,26 +2746,6 @@ fn execute_streaming_local_process_codex(
     );
 
     Ok(())
-}
-
-fn base_exec_args(
-    session_id: Option<&str>,
-    prompt: &str,
-    model: Option<&str>,
-    model_reasoning_effort: Option<&str>,
-    readonly_mode: bool,
-    fast_mode_enabled: Option<bool>,
-    goals_enabled: Option<bool>,
-) -> Vec<String> {
-    build_codex_exec_args(
-        &CodexLaunchOptions::new(prompt)
-            .with_resume_session_id(session_id)
-            .with_model(model)
-            .with_reasoning_effort(model_reasoning_effort)
-            .with_readonly_mode(readonly_mode)
-            .with_fast_mode_enabled(fast_mode_enabled)
-            .with_goals_enabled(goals_enabled),
-    )
 }
 
 fn normalize_codex_mcp_segment(value: &str) -> Option<String> {

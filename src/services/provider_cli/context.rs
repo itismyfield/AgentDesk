@@ -26,12 +26,3 @@ pub struct ProviderExecutionContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_mode: Option<String>,
 }
-
-impl ProviderExecutionContext {
-    pub fn for_provider(provider: impl Into<String>) -> Self {
-        Self {
-            provider: provider.into(),
-            ..Default::default()
-        }
-    }
-}

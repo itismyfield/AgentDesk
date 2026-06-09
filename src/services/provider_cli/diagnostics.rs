@@ -9,6 +9,9 @@ use super::registry::{MigrationState, ProviderCliChannel, ProviderCliMigrationSt
 /// Stored at `~/.adk/{env}/runtime/provider-cli-diagnostics/{timestamp_ms}.json`.
 /// Optional consumers (skills, watchers) may read this file; AgentDesk core
 /// migration does not depend on them reading it.
+// #3034: serde snapshot-to-disk diagnostics — intentional-but-unwired
+// (no writer is hooked up yet); kept for the documented optional consumers.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DiagnosticsSnapshot {
     pub generated_at: DateTime<Utc>,
@@ -34,6 +37,8 @@ pub struct ProviderDiagnostics {
     pub evidence: HashMap<String, String>,
 }
 
+// #3034: part of the unwired snapshot-to-disk diagnostics surface (serde).
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionDiagnostics {
     pub agent_id: String,
@@ -48,6 +53,8 @@ pub struct SessionDiagnostics {
     pub runtime_consistency: RuntimeConsistency,
 }
 
+// #3034: part of the unwired snapshot-to-disk diagnostics surface (serde enum).
+#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeConsistency {
@@ -99,6 +106,8 @@ pub struct ProviderCliActionRequest {
 }
 
 /// Build a `DiagnosticsSnapshot` from available in-memory data.
+// #3034: builder for the unwired snapshot-to-disk diagnostics surface.
+#[allow(dead_code)]
 pub fn build_snapshot(
     provider_diagnostics: Vec<ProviderDiagnostics>,
     session_diagnostics: Vec<SessionDiagnostics>,

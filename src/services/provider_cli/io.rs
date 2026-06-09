@@ -14,7 +14,6 @@ struct LaunchArtifactProviderHint {
 pub enum IoError {
     Io(std::io::Error),
     Json(serde_json::Error),
-    NoRuntimeRoot,
 }
 
 impl std::fmt::Display for IoError {
@@ -22,7 +21,6 @@ impl std::fmt::Display for IoError {
         match self {
             IoError::Io(e) => write!(f, "io: {e}"),
             IoError::Json(e) => write!(f, "json: {e}"),
-            IoError::NoRuntimeRoot => write!(f, "runtime root not configured"),
         }
     }
 }
@@ -84,13 +82,6 @@ pub fn save_migration_state(root: &Path, state: &ProviderCliMigrationState) -> R
 pub fn save_launch_artifact(root: &Path, artifact: &LaunchArtifact) -> Result<(), IoError> {
     let key = artifact.session_key.as_deref().unwrap_or("default");
     write_json(&paths::launch_artifact_path(root, key), artifact)
-}
-
-pub fn load_launch_artifact(
-    root: &Path,
-    session_key: &str,
-) -> Result<Option<LaunchArtifact>, IoError> {
-    read_json(&paths::launch_artifact_path(root, session_key))
 }
 
 pub fn load_launch_artifacts(root: &Path, provider: &str) -> Result<Vec<LaunchArtifact>, IoError> {

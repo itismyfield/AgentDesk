@@ -2,7 +2,7 @@
 //!
 //! Abstracts `bash -c` (Unix) vs `cmd /C` (Windows) behind a unified API.
 
-use std::process::{Command, Output};
+use std::process::Command;
 
 #[allow(unused_imports)]
 pub(crate) use crate::services::git::{
@@ -14,35 +14,6 @@ pub(crate) use crate::services::git::{
     git_tracked_change_paths_strict, is_mainlike_branch, parse_github_repo_from_remote,
     resolve_repo_dir, resolve_repo_dir_for_id, resolve_repo_dir_for_target,
 };
-
-/// Execute a shell command string using the platform's default shell.
-///
-/// - **Unix**: `bash -c "<cmd>"`
-/// - **Windows**: `cmd.exe /C "<cmd>"`
-pub fn shell_command(cmd: &str) -> Result<Output, String> {
-    #[cfg(unix)]
-    let result = Command::new("bash").args(["-c", cmd]).output();
-    #[cfg(windows)]
-    let result = Command::new("cmd.exe").args(["/C", cmd]).output();
-
-    result.map_err(|e| format!("Failed to execute shell command: {}", e))
-}
-
-/// Async version of `shell_command`.
-pub async fn async_shell_command(cmd: &str) -> Result<Output, String> {
-    #[cfg(unix)]
-    let result = tokio::process::Command::new("bash")
-        .args(["-c", cmd])
-        .output()
-        .await;
-    #[cfg(windows)]
-    let result = tokio::process::Command::new("cmd.exe")
-        .args(["/C", cmd])
-        .output()
-        .await;
-
-    result.map_err(|e| format!("Failed to execute shell command: {}", e))
-}
 
 /// Build a `Command` for the platform shell, ready for further customization.
 ///
@@ -58,22 +29,6 @@ pub fn shell_command_builder(cmd: &str) -> Command {
     #[cfg(windows)]
     {
         let mut c = Command::new("cmd.exe");
-        c.args(["/C", cmd]);
-        c
-    }
-}
-
-/// Build a tokio `Command` for the platform shell.
-pub fn async_shell_command_builder(cmd: &str) -> tokio::process::Command {
-    #[cfg(unix)]
-    {
-        let mut c = tokio::process::Command::new("bash");
-        c.args(["-c", cmd]);
-        c
-    }
-    #[cfg(windows)]
-    {
-        let mut c = tokio::process::Command::new("cmd.exe");
         c.args(["/C", cmd]);
         c
     }

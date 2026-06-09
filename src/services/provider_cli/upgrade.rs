@@ -16,7 +16,6 @@ const UPGRADE_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 #[derive(Debug)]
 pub enum UpgradeError {
     NoStrategy,
-    CurrentSnapshotRequired,
     PreviousPreservationRequired {
         reason: String,
     },
@@ -53,7 +52,6 @@ impl std::fmt::Display for UpgradeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             UpgradeError::NoStrategy => write!(f, "update_strategy_missing"),
-            UpgradeError::CurrentSnapshotRequired => write!(f, "current_snapshot_required"),
             UpgradeError::PreviousPreservationRequired { reason } => {
                 write!(f, "previous_preservation_required: {reason}")
             }
@@ -109,6 +107,9 @@ pub struct UpgradeResult {
     pub pre_version: String,
     pub post_version: String,
     pub candidate_channel: ProviderCliChannel,
+    // #3034: upgrade evidence captured for diagnostics; not yet surfaced by any
+    // consumer. Kept so the upgrade path keeps recording it for a future reader.
+    #[allow(dead_code)]
     pub evidence: HashMap<String, String>,
 }
 

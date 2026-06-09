@@ -6,9 +6,6 @@ pub mod api_friction;
 pub mod auto_queue;
 pub mod automation_candidate_contract;
 pub mod automation_candidate_materializer;
-// #3034: 5 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during claude dead-code cleanup.
-#[allow(dead_code)]
 pub mod claude;
 pub mod claude_e;
 // #3034: 16 residual dead-code items; scoped here so the lint stays
@@ -16,9 +13,6 @@ pub mod claude_e;
 #[allow(dead_code)]
 pub mod claude_tui;
 pub mod cluster;
-// #3034: 10 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during codex dead-code cleanup.
-#[allow(dead_code)]
 pub mod codex;
 pub mod codex_remote_policy;
 #[cfg(unix)]
@@ -31,9 +25,6 @@ pub mod codex_tui;
 // live on clean sibling modules. Remove during discord dead-code cleanup.
 #[allow(dead_code)]
 pub mod discord;
-// #3034: 3 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during discord_config_audit dead-code cleanup.
-#[allow(dead_code)]
 pub mod discord_config_audit;
 // #1693: `discord_delivery` moved to `dispatches::discord_delivery`. The
 // flat path is preserved as a re-export so existing import sites and
@@ -52,14 +43,12 @@ pub mod dispatches;
 // live on clean sibling modules. Remove during dispatches_followup dead-code cleanup.
 #[allow(dead_code)]
 pub mod dispatches_followup;
-// #3034: 3 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during envelope_dedup dead-code cleanup.
+// #3034: intentional-but-unwired #2662 envelope-dedup infrastructure (opt-in
+// via AGENTDESK_ENVELOPE_DEDUP, awaiting a follow-up to flip the policy);
+// scoped allow retained pending a human decision to wire or remove it.
 #[allow(dead_code)]
 pub mod envelope_dedup;
 pub mod escalation_settings;
-// #3034: 4 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during gemini dead-code cleanup.
-#[allow(dead_code)]
 pub mod gemini;
 // #3034: 2 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during git dead-code cleanup.
@@ -88,9 +77,6 @@ pub mod opencode;
 pub mod operator_connectors;
 pub mod pipeline_override;
 pub mod pipeline_routes;
-// #3034: 5 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during platform dead-code cleanup.
-#[allow(dead_code)]
 pub mod platform;
 // #3034: 2 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during pr_summary dead-code cleanup.
@@ -100,14 +86,14 @@ pub mod pr_summary;
 // live on clean sibling modules. Remove during process dead-code cleanup.
 #[allow(dead_code)]
 pub mod process;
-// #3034: 8 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during provider dead-code cleanup.
+// #3034: residual dead code here is the intentional-but-unwired #2662/#2668
+// envelope + dev-role dedup infrastructure (gated behind AGENTDESK_ENVELOPE_DEDUP
+// and the per-process dev-role registry, awaiting a follow-up to wire it) plus a
+// dormant recovery-priming constructor; scoped allow retained pending a human
+// decision. Genuinely orphaned items have already been removed.
 #[allow(dead_code)]
 pub mod provider;
 pub mod provider_auth;
-// #3034: 18 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during provider_cli dead-code cleanup.
-#[allow(dead_code)]
 pub mod provider_cli;
 pub mod provider_exec;
 // #3034: 1 residual dead-code items; scoped here so the lint stays
@@ -125,9 +111,6 @@ pub mod qwen_tmux_wrapper;
 pub mod remote_stub;
 pub mod retrospectives;
 pub mod review_decision;
-// #3034: 5 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during routines dead-code cleanup.
-#[allow(dead_code)]
 pub mod routines;
 pub mod service_error;
 pub mod session_activity;

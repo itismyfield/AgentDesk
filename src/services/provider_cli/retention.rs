@@ -19,19 +19,11 @@ impl RetentionSet {
         }
     }
 
-    pub fn is_protected(&self, path: impl AsRef<Path>) -> bool {
-        self.protected.contains(&path.as_ref().to_path_buf())
-    }
-
     pub fn is_protected_or_contains_protected(&self, path: impl AsRef<Path>) -> bool {
         let path = path.as_ref();
         self.protected
             .iter()
             .any(|protected| protected == path || protected.starts_with(path))
-    }
-
-    pub fn protected_paths(&self) -> &[PathBuf] {
-        &self.protected
     }
 }
 

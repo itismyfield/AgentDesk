@@ -106,11 +106,6 @@ fn probed_binary_cache() -> &'static Mutex<HashMap<BinaryProbeCacheKey, BinaryVe
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub fn resolve_binary(name: &str) -> Option<String> {
-    resolve_in_paths(name, std::env::var_os("PATH"), &current_dir_fallback())
-        .map(|path| path.to_string_lossy().to_string())
-}
-
 pub fn git_binary() -> &'static OsString {
     static GIT_BINARY: OnceLock<OsString> = OnceLock::new();
     GIT_BINARY.get_or_init(|| {
@@ -178,13 +173,6 @@ pub fn resolve_provider_binary(provider: &str) -> BinaryResolution {
             _ => cached_probe_provider_binary_candidates(provider, candidates).resolution,
         },
         ProviderResolutionSet::Failure(failure) => failure,
-    }
-}
-
-pub fn resolve_provider_binary_candidates(provider: &str) -> Vec<BinaryResolution> {
-    match resolve_provider_binary_set(provider) {
-        ProviderResolutionSet::Candidates(candidates) => candidates,
-        ProviderResolutionSet::Failure(_) => Vec::new(),
     }
 }
 
@@ -613,10 +601,6 @@ fn active_provider_context(
     })
 }
 
-pub fn resolve_login_shell_path() -> Option<String> {
-    resolve_login_shell_path_os().map(|value| value.to_string_lossy().to_string())
-}
-
 pub fn merged_runtime_path() -> Option<String> {
     join_paths_lossy(runtime_path_entries()).map(|value| value.to_string_lossy().to_string())
 }
@@ -643,13 +627,6 @@ pub fn apply_binary_resolution(command: &mut Command, resolution: &BinaryResolut
     } else {
         apply_runtime_path(command);
     }
-}
-
-pub fn prepare_provider_command(resolution: &BinaryResolution) -> Option<Command> {
-    let resolved_path = resolution.resolved_path.as_ref()?;
-    let mut command = Command::new(resolved_path);
-    apply_binary_resolution(&mut command, resolution);
-    Some(command)
 }
 
 fn drain_limited_output<R>(mut reader: R) -> Vec<u8>
