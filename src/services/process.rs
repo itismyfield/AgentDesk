@@ -124,14 +124,6 @@ pub fn wait_with_output_timeout(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortField {
-    Pid,
-    Cpu,
-    Mem,
-    Command,
-}
-
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
@@ -461,48 +453,6 @@ pub(crate) fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Protected PIDs that should never be killed
-const PROTECTED_PIDS: &[i32] = &[1, 2];
-
-/// Minimum PID threshold - PIDs below this are likely kernel threads
-const MIN_SAFE_PID: i32 = 300;
-
-/// Validate PID is a safe positive integer
-fn is_valid_pid(pid: i32) -> bool {
-    pid > 0 && pid <= 4194304 // Max PID on Linux
-}
-
-/// Check if PID is protected from being killed
-fn is_protected_pid(pid: i32, command: Option<&str>) -> Result<(), String> {
-    // Check if it's our own process
-    let current_pid = std::process::id() as i32;
-    if pid == current_pid {
-        return Err("Cannot kill the file manager itself".to_string());
-    }
-
-    // Check protected system PIDs
-    if PROTECTED_PIDS.contains(&pid) {
-        return Err(format!("Cannot kill system process (PID {})", pid));
-    }
-
-    // Warn about low PIDs (likely kernel threads)
-    if pid < MIN_SAFE_PID {
-        return Err(format!(
-            "Cannot kill low PID ({}) - likely a kernel thread",
-            pid
-        ));
-    }
-
-    // Check if command indicates kernel thread
-    if let Some(cmd) = command {
-        if cmd.starts_with('[') && cmd.ends_with(']') {
-            return Err("Cannot kill kernel threads".to_string());
-        }
-    }
-
-    Ok(())
-}
-
 /// Result type for process list operations
 pub type ProcessListResult = Result<Vec<ProcessInfo>, String>;
 
@@ -590,6 +540,9 @@ fn parse_process_line(line: &str) -> Option<ProcessInfo> {
     })
 }
 
+// #3034: Windows-only — reached solely from the tasklist branch of
+// `get_process_list_result`; gated so the non-Windows build does not flag it.
+#[cfg(target_os = "windows")]
 fn parse_tasklist_line(line: &str) -> Option<ProcessInfo> {
     let fields = parse_csv_record(line)?;
     if fields.len() < 5 {
@@ -629,6 +582,8 @@ fn parse_tasklist_line(line: &str) -> Option<ProcessInfo> {
     })
 }
 
+// #3034: Windows-only — CSV splitter for tasklist output (see parse_tasklist_line).
+#[cfg(target_os = "windows")]
 fn parse_csv_record(line: &str) -> Option<Vec<String>> {
     let mut fields = Vec::new();
     let mut current = String::new();
@@ -661,6 +616,8 @@ fn parse_csv_record(line: &str) -> Option<Vec<String>> {
     Some(fields)
 }
 
+// #3034: Windows-only — parses tasklist "Mem Usage" KB column (see parse_tasklist_line).
+#[cfg(target_os = "windows")]
 fn parse_tasklist_memory_kb(value: &str) -> u64 {
     value
         .chars()
@@ -676,161 +633,6 @@ fn get_process_starttime(pid: i32) -> Option<u64> {
     let stat_path = format!("/proc/{}/stat", pid);
     let content = std::fs::read_to_string(stat_path).ok()?;
     parse_linux_proc_stat_starttime(&content)
-}
-
-/// Verify process identity before kill to mitigate PID reuse race condition
-#[cfg(target_os = "linux")]
-fn verify_process_identity(pid: i32, saved_starttime: Option<u64>) -> Result<(), String> {
-    if let Some(saved) = saved_starttime {
-        if let Some(current) = get_process_starttime(pid) {
-            if saved != current {
-                return Err("Process PID was reused by a different process".to_string());
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn verify_process_identity(_pid: i32, _saved_starttime: Option<u64>) -> Result<(), String> {
-    // On non-Linux platforms, skip starttime verification
-    Ok(())
-}
-
-/// Kill a process by PID
-pub fn kill_process(pid: i32) -> Result<(), String> {
-    kill_process_with_verification(pid, None)
-}
-
-/// Kill a process by PID with optional starttime verification
-pub fn kill_process_with_verification(pid: i32, starttime: Option<u64>) -> Result<(), String> {
-    if !is_valid_pid(pid) {
-        return Err("Invalid PID".to_string());
-    }
-
-    // Get process info to check if it's a kernel thread
-    let command = get_process_command(pid);
-    is_protected_pid(pid, command.as_deref())?;
-
-    verify_process_identity(pid, starttime)?;
-
-    #[cfg(unix)]
-    {
-        // Use libc kill for safety
-        #[allow(unsafe_code)]
-        let result = unsafe { libc::kill(pid, libc::SIGTERM) };
-        if result == 0 {
-            Ok(())
-        } else {
-            let errno = std::io::Error::last_os_error();
-            match errno.raw_os_error() {
-                Some(libc::ESRCH) => Err("Process not found".to_string()),
-                Some(libc::EPERM) => Err("Permission denied".to_string()),
-                _ => Err(errno.to_string()),
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        // Use taskkill on Windows
-        let status = Command::new("taskkill")
-            .args(["/PID", &pid.to_string()])
-            .status()
-            .map_err(|e| format!("Failed to execute taskkill: {}", e))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!("taskkill failed with code {:?}", status.code()))
-        }
-    }
-}
-
-/// Force kill a process by PID (SIGKILL)
-pub fn force_kill_process(pid: i32) -> Result<(), String> {
-    force_kill_process_with_verification(pid, None)
-}
-
-/// Force kill a process by PID (SIGKILL) with optional starttime verification
-pub fn force_kill_process_with_verification(
-    pid: i32,
-    starttime: Option<u64>,
-) -> Result<(), String> {
-    if !is_valid_pid(pid) {
-        return Err("Invalid PID".to_string());
-    }
-
-    let command = get_process_command(pid);
-    is_protected_pid(pid, command.as_deref())?;
-
-    verify_process_identity(pid, starttime)?;
-
-    #[cfg(unix)]
-    {
-        #[allow(unsafe_code)]
-        let result = unsafe { libc::kill(pid, libc::SIGKILL) };
-        if result == 0 {
-            Ok(())
-        } else {
-            let errno = std::io::Error::last_os_error();
-            match errno.raw_os_error() {
-                Some(libc::ESRCH) => Err("Process not found".to_string()),
-                Some(libc::EPERM) => Err("Permission denied".to_string()),
-                _ => Err(errno.to_string()),
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        // Use taskkill /F for force kill on Windows
-        let status = Command::new("taskkill")
-            .args(["/F", "/PID", &pid.to_string()])
-            .status()
-            .map_err(|e| format!("Failed to execute taskkill: {}", e))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!("taskkill failed with code {:?}", status.code()))
-        }
-    }
-}
-
-/// Get process command by PID
-fn get_process_command(pid: i32) -> Option<String> {
-    #[cfg(target_os = "windows")]
-    {
-        let filter = format!("PID eq {pid}");
-        let output = Command::new("tasklist")
-            .args(["/FO", "CSV", "/NH", "/FI", &filter])
-            .output()
-            .ok()?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        stdout.lines().find_map(|line| {
-            let fields = parse_csv_record(line)?;
-            let image = fields.first()?.trim();
-            if image.is_empty() || image.starts_with("INFO:") {
-                None
-            } else {
-                Some(image.to_string())
-            }
-        })
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        // Use "command=" format to suppress header (POSIX compatible, works on Linux and macOS)
-        let output = Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "command="])
-            .output()
-            .ok()?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let command = stdout.trim();
-        if command.is_empty() {
-            None
-        } else {
-            Some(command.to_string())
-        }
-    }
 }
 
 #[cfg(all(test, unix))]

@@ -158,6 +158,9 @@ pub fn plan_prompt_submit(prompt: &str) -> Result<Vec<TuiInputAction>, String> {
     Ok(actions)
 }
 
+// #3034: test-only — pins the Escape cancel-key plan; production cancel now
+// routes through the orchestrator, not this helper.
+#[allow(dead_code)]
 pub fn plan_cancel() -> Vec<TuiInputAction> {
     vec![TuiInputAction::Escape]
 }
@@ -239,14 +242,6 @@ pub fn send_followup_prompt(
         PromptReadinessKind::Followup,
         cancel_token,
     )
-}
-
-pub fn send_prompt(
-    session_name: &str,
-    prompt: &str,
-    cancel_token: Option<&CancelToken>,
-) -> Result<(), String> {
-    send_followup_prompt(session_name, prompt, cancel_token)
 }
 
 pub fn is_prompt_ready_timeout_error(error: &str) -> bool {
@@ -525,10 +520,6 @@ fn log_selector_never_opened(
     );
 }
 
-pub fn send_cancel(session_name: &str) -> Result<(), String> {
-    run_actions(session_name, &plan_cancel(), None)
-}
-
 /// #2730: settle delay between a PasteBuffer action and any follow-up
 /// (typically `Enter`). Claude TUI 2.1.x parses bracketed-paste sequences
 /// byte-by-byte from the pane; without a brief settle window the Enter sent
@@ -720,6 +711,9 @@ pub(crate) fn claude_prompt_draft_is_idle_suggestion_tail(pane_tail: &str) -> bo
     crate::services::tmux_common::tmux_capture_indicates_claude_tui_idle_suggestion(pane_tail)
 }
 
+// #3034: test-only thin wrapper retained to pin the tmux_common backspace
+// budget contract from this module's test suite.
+#[allow(dead_code)]
 pub(crate) fn claude_prompt_draft_backspace_budget_from_line(line: &str) -> Option<usize> {
     crate::services::tmux_common::claude_tui_prompt_draft_backspace_budget_from_line(line)
 }
@@ -925,6 +919,10 @@ fn wait_for_prompt_ready_inner(
 /// invoked and the select being polled is still observed. Combined with the
 /// subscribe-before-snapshot ordering in `run_prompt_ready_fast_path`, this
 /// closes the residual race flagged in #2445.
+// #3034: test-only — the #2445 race-closing wrapper is exercised directly by
+// the regression suite; production drives readiness through the fast-path
+// caller. Retained as the canonical pinned implementation of the wake ordering.
+#[allow(dead_code)]
 fn wait_for_prompt_ready_event(notify: Arc<Notify>, budget: Duration) -> HookFastPathOutcome {
     let fut = async move {
         let notified = notify.notified();

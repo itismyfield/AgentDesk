@@ -6,6 +6,10 @@ use crate::services::agent_protocol::StreamMessage;
 use crate::services::session_backend::{StreamLineState, process_stream_line};
 use chrono::{DateTime, Utc};
 
+// #3034: test-only replay surface — `replay_transcript_file` and its outcome
+// type are exercised by the transcript-parser regression suite but not wired to
+// a production caller (replay now happens via the streaming session backend).
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscriptReplayOutcome {
     pub bytes_read: u64,
@@ -48,6 +52,9 @@ pub fn claude_transcript_path_candidates(
         .collect())
 }
 
+// #3034: test-only single-candidate helper; production resolves transcripts via
+// `claude_project_dir_candidates_for_cwd` (the multi-candidate form).
+#[allow(dead_code)]
 pub fn claude_project_dir_for_cwd(
     cwd: &Path,
     claude_home: Option<&Path>,
@@ -181,6 +188,9 @@ pub fn claude_transcripts_for_cwd_since(
     found.into_iter().map(|(_, path)| path).collect()
 }
 
+// #3034: test-only — see `TranscriptReplayOutcome` note. Pins the JSONL replay
+// parser contract; no production caller (streaming backend owns live replay).
+#[allow(dead_code)]
 pub fn replay_transcript_file(
     transcript_path: &Path,
     sender: &Sender<StreamMessage>,

@@ -237,23 +237,6 @@ pub fn default_codex_sessions_dir() -> Option<PathBuf> {
         .map(|home| home.join("sessions"))
 }
 
-pub fn tail_latest_rollout_for_cwd(
-    cwd: &Path,
-    modified_since: SystemTime,
-    sender: Sender<StreamMessage>,
-    cancel_token: Option<Arc<CancelToken>>,
-    is_alive: impl FnMut() -> bool,
-) -> Result<ReadOutputResult, String> {
-    tail_latest_rollout_for_cwd_with_options(
-        cwd,
-        modified_since,
-        sender,
-        cancel_token,
-        is_alive,
-        RolloutTailOptions::default(),
-    )
-}
-
 pub(crate) fn observe_rollout_turn_state(
     rollout_path: &Path,
 ) -> crate::services::tui_turn_state::TuiTurnState {
@@ -263,23 +246,6 @@ pub(crate) fn observe_rollout_turn_state(
 pub(crate) fn rollout_file_matches_cwd(rollout_path: &Path, cwd: &Path) -> bool {
     let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     rollout_session_cwd_matches(rollout_path, &canonical_cwd)
-}
-
-pub fn tail_latest_rollout_for_cwd_with_handoff(
-    cwd: &Path,
-    modified_since: SystemTime,
-    sender: Sender<StreamMessage>,
-    cancel_token: Option<Arc<CancelToken>>,
-    is_alive: impl FnMut() -> bool,
-) -> Result<CodexTuiTailResult, String> {
-    tail_latest_rollout_for_cwd_with_handoff_options(
-        cwd,
-        modified_since,
-        sender,
-        cancel_token,
-        is_alive,
-        RolloutTailOptions::default(),
-    )
 }
 
 pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux(
@@ -302,25 +268,6 @@ pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux(
         is_alive,
         options,
     )
-}
-
-pub fn tail_latest_rollout_for_cwd_with_options(
-    cwd: &Path,
-    modified_since: SystemTime,
-    sender: Sender<StreamMessage>,
-    cancel_token: Option<Arc<CancelToken>>,
-    is_alive: impl FnMut() -> bool,
-    options: RolloutTailOptions,
-) -> Result<ReadOutputResult, String> {
-    tail_latest_rollout_for_cwd_with_handoff_options(
-        cwd,
-        modified_since,
-        sender,
-        cancel_token,
-        is_alive,
-        options,
-    )
-    .map(|result| result.read_result)
 }
 
 fn tail_latest_rollout_for_cwd_with_handoff_options(
@@ -365,6 +312,9 @@ fn tail_latest_rollout_for_cwd_with_handoff_options(
     })
 }
 
+// #3034: test-only — pins the from-offset replay contract; production replays
+// via `tail_rollout_file_from_offset` (which threads cancel/is-alive).
+#[allow(dead_code)]
 pub fn replay_rollout_file(
     rollout_path: &Path,
     start_offset: u64,
@@ -420,58 +370,6 @@ pub fn tail_rollout_file_from_offset(
     .map(|result| result.0)
 }
 
-pub fn tail_resumed_rollout_for_session(
-    cwd: &Path,
-    session_id: &str,
-    previous_rollout_path: &Path,
-    previous_start_offset: u64,
-    modified_since: SystemTime,
-    sender: Sender<StreamMessage>,
-    cancel_token: Option<Arc<CancelToken>>,
-    is_alive: impl FnMut() -> bool,
-) -> Result<ReadOutputResult, String> {
-    let sessions_dir = default_codex_sessions_dir()
-        .ok_or_else(|| "Codex sessions directory is unavailable".to_string())?;
-    tail_resumed_rollout_for_session_with_options(
-        cwd,
-        session_id,
-        previous_rollout_path,
-        previous_start_offset,
-        modified_since,
-        &sessions_dir,
-        sender,
-        cancel_token,
-        is_alive,
-        RolloutTailOptions::default(),
-    )
-}
-
-pub fn tail_resumed_rollout_for_session_with_handoff(
-    cwd: &Path,
-    session_id: &str,
-    previous_rollout_path: &Path,
-    previous_start_offset: u64,
-    modified_since: SystemTime,
-    sender: Sender<StreamMessage>,
-    cancel_token: Option<Arc<CancelToken>>,
-    is_alive: impl FnMut() -> bool,
-) -> Result<CodexTuiTailResult, String> {
-    let sessions_dir = default_codex_sessions_dir()
-        .ok_or_else(|| "Codex sessions directory is unavailable".to_string())?;
-    tail_resumed_rollout_for_session_with_handoff_options(
-        cwd,
-        session_id,
-        previous_rollout_path,
-        previous_start_offset,
-        modified_since,
-        &sessions_dir,
-        sender,
-        cancel_token,
-        is_alive,
-        RolloutTailOptions::default(),
-    )
-}
-
 pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux(
     cwd: &Path,
     session_id: &str,
@@ -503,6 +401,9 @@ pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux(
     )
 }
 
+// #3034: test-only — the non-handoff resumed-tail variant is exercised by the
+// resume regression tests; production uses the `_with_handoff_for_tmux` form.
+#[allow(dead_code)]
 fn tail_resumed_rollout_for_session_with_options(
     cwd: &Path,
     session_id: &str,

@@ -880,7 +880,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `src/services/auto_queue/cancel_run.rs` (1032) is also giant-file territory;
   split before further non-bugfix growth.
 - `src/services/onboarding/mod.rs` (2936),
-  `src/services/dispatched_sessions.rs` (1342), and
+  `src/services/dispatched_sessions.rs` (1328), and
   `src/services/settings.rs` (1007) — service-layer route support surfaces
   split out of the large dashboard route modules. (`src/services/onboarding.rs`
   and `src/services/api_friction.rs` have been removed/decomposed.)
@@ -893,19 +893,19 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   provider adapters. (#3034 removed dead non-cancel `execute_command_simple*`
   twins from the claude/codex/gemini adapters and a superseded
   `select_counterpart_from` from provider.)
-- `src/services/codex_tui/rollout_tail.rs` (1738) — Codex TUI rollout tail
+- `src/services/codex_tui/rollout_tail.rs` (1639) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
   beyond the #2169 session identity fix.
-- `src/services/codex_tui/input.rs` (1492) — Codex TUI input readiness
+- `src/services/codex_tui/input.rs` (1350) — Codex TUI input readiness
   detector and prompt delivery surface (#2399 hardened the post-turn
   handoff deadline). Treat as giant-file territory; split before adding
   non-bugfix behavior beyond the readiness/cancel contract.
-- `src/services/claude_tui/input.rs` (1296) — Claude TUI input readiness
+- `src/services/claude_tui/input.rs` (1294) — Claude TUI input readiness
   detector, prompt delivery, and cancellation/offset handoff surface. Treat as
   giant-file territory; split before adding non-bugfix behavior beyond the
   readiness/cancel contract.
 - `src/services/memory/memento.rs` (1893).
-- `src/services/dispatched_sessions.rs` (1342) — dispatched session domain
+- `src/services/dispatched_sessions.rs` (1328) — dispatched session domain
   service. This is the post-#1515 SRP extraction target for route/database
   callsites, but the module itself is now giant-file territory; split focused
   helpers before adding non-bugfix behavior. (+5 from #3169 exposing the idle-
