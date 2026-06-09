@@ -204,12 +204,12 @@ struct BotSettingsEntryPlan {
     allowed_tools: Option<Vec<String>>,
 }
 
-pub(super) fn apply_import_plan(
+/// Partition the planned agents into importable (eligible for v1) and skipped
+/// (source ids), erroring early when nothing remains importable. Behavior is
+/// identical to the inline prelude it replaces in `apply_import_plan`.
+fn apply_import_partition_agents(
     plan: &ImportPlan,
-    source: &ResolvedSourceRoot,
-    args: &OpenClawMigrateArgs,
-    runtime_root: &Path,
-) -> Result<(), String> {
+) -> Result<(Vec<&ImportAgentPlan>, Vec<String>), String> {
     let importable_agents = plan
         .agents
         .iter()
@@ -233,6 +233,233 @@ pub(super) fn apply_import_plan(
         .filter(|agent| !agent.eligible_for_v1)
         .map(|agent| agent.source_id.clone())
         .collect::<Vec<_>>();
+
+    Ok((importable_agents, skipped_agents))
+}
+
+/// Persist an in-progress audit snapshot with the canonical `running`/`running`
+/// status pair and the live session map. This is the exact `persist_audit_state`
+/// invocation repeated between each apply phase; extracting it removes the
+/// duplicated 16-argument call without altering any value passed through.
+#[allow(clippy::too_many_arguments)]
+fn persist_running_audit_state(
+    audit_root: &Path,
+    import_id: &str,
+    source: &ResolvedSourceRoot,
+    plan: &ImportPlan,
+    discord_auth_report: &DiscordAuthReportData,
+    agent_map: &[AgentMapEntry],
+    manifest_agents: &[ManifestAgent],
+    written_paths: &[String],
+    warnings: &[String],
+    apply_agents: &BTreeMap<String, ApplyAgentState>,
+    phase_status: &BTreeMap<String, ApplyPhaseState>,
+    source_fingerprint: &str,
+    session_map: &[SessionMapEntry],
+) -> Result<(), String> {
+    persist_audit_state(
+        audit_root,
+        import_id,
+        source,
+        plan,
+        discord_auth_report,
+        agent_map,
+        manifest_agents,
+        written_paths,
+        warnings,
+        apply_agents,
+        phase_status,
+        source_fingerprint,
+        "running",
+        "running",
+        Some(session_map),
+    )
+}
+
+/// Apply the per-agent file outputs (prompt, memory, workspace) for a single
+/// importable agent, update its manifest/task state, and persist a running audit
+/// snapshot — exactly the body that previously ran inline inside the
+/// `apply_files` phase loop. The mutable accumulators are threaded through by
+/// reference so the ordering, resume short-circuits, and side effects are
+/// byte-for-byte identical to the original loop iteration.
+#[allow(clippy::too_many_arguments)]
+fn apply_import_agent_files(
+    agent: &ImportAgentPlan,
+    args: &OpenClawMigrateArgs,
+    runtime_root: &Path,
+    backups_root: &Path,
+    prompts_root: &Path,
+    role_context_root: &Path,
+    workspaces_root: &Path,
+    audit_root: &Path,
+    import_id: &str,
+    source: &ResolvedSourceRoot,
+    plan: &ImportPlan,
+    discord_auth_report: &DiscordAuthReportData,
+    agent_map: &[AgentMapEntry],
+    source_fingerprint: &str,
+    session_map: &[SessionMapEntry],
+    manifest_agents: &mut Vec<ManifestAgent>,
+    written_paths: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+    apply_agents: &mut BTreeMap<String, ApplyAgentState>,
+    phase_status: &BTreeMap<String, ApplyPhaseState>,
+) -> Result<(), String> {
+    let existing_manifest = manifest_agent_lookup(manifest_agents, &agent.final_role_id).cloned();
+    let prompt_already_done = task_is_finished(apply_agents, &agent.final_role_id, "prompt_write");
+    let memory_already_done = task_is_finished(apply_agents, &agent.final_role_id, "memory_import");
+    let workspace_already_done =
+        task_is_finished(apply_agents, &agent.final_role_id, "workspace_copy");
+    let prompt_path = prompts_root.join(&agent.final_role_id).join("IDENTITY.md");
+    let written_prompt_path = if args.no_prompts || prompt_already_done {
+        existing_manifest
+            .as_ref()
+            .and_then(|entry| entry.prompt_path.clone())
+    } else {
+        let prompt_content = render_imported_prompt(agent, runtime_root, args);
+        write_text_file(
+            &prompt_path,
+            &prompt_content,
+            runtime_root,
+            backups_root,
+            args.overwrite || args.resume.is_some(),
+        )?;
+        Some(prompt_path.display().to_string())
+    };
+
+    let memory_dir = role_context_root.join(&agent.final_role_id);
+    let memory_outputs = if args.no_memory || memory_already_done {
+        existing_manifest
+            .as_ref()
+            .and_then(|entry| entry.memory_dir.as_ref().map(PathBuf::from))
+            .map(|root| collect_existing_tree_files(&root))
+            .transpose()?
+            .unwrap_or_default()
+    } else {
+        import_memory_files(
+            agent,
+            &memory_dir,
+            runtime_root,
+            backups_root,
+            args.overwrite || args.resume.is_some(),
+        )?
+    };
+    let written_memory_dir = if args.no_memory {
+        None
+    } else if memory_already_done {
+        existing_manifest
+            .as_ref()
+            .and_then(|entry| entry.memory_dir.clone())
+    } else {
+        Some(memory_dir.display().to_string())
+    };
+
+    let workspace_target = if args.no_workspace {
+        None
+    } else {
+        let destination = workspaces_root.join(&agent.final_role_id);
+        if !workspace_already_done {
+            copy_workspace_snapshot(
+                Path::new(&agent.workspace_source),
+                &destination,
+                runtime_root,
+                backups_root,
+                args.overwrite || args.resume.is_some(),
+                warnings,
+            )?;
+        }
+        Some(destination)
+    };
+
+    if let Some(prompt_path) = &written_prompt_path {
+        written_paths.push(prompt_path.clone());
+    }
+    written_paths.extend(memory_outputs.iter().map(|path| path.display().to_string()));
+    if let Some(workspace_target) = &workspace_target {
+        written_paths.push(workspace_target.display().to_string());
+    }
+
+    upsert_manifest_agent(
+        manifest_agents,
+        ManifestAgent {
+            source_id: agent.source_id.clone(),
+            role_id: agent.final_role_id.clone(),
+            provider: agent
+                .mapped_provider
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            prompt_path: written_prompt_path.clone(),
+            memory_dir: written_memory_dir,
+            workspace_source: agent.workspace_source.clone(),
+            workspace_target: workspace_target
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        },
+    );
+
+    if let Some(state) = apply_agents.get_mut(&agent.final_role_id) {
+        update_task_state(
+            state,
+            "workspace_copy",
+            if args.no_workspace {
+                "skipped"
+            } else {
+                "completed"
+            },
+            workspace_target
+                .as_ref()
+                .map(|path| vec![path.display().to_string()])
+                .unwrap_or_default(),
+        );
+        update_task_state(
+            state,
+            "prompt_write",
+            if args.no_prompts {
+                "skipped"
+            } else {
+                "completed"
+            },
+            written_prompt_path.clone().into_iter().collect(),
+        );
+        update_task_state(
+            state,
+            "memory_import",
+            if args.no_memory {
+                "skipped"
+            } else {
+                "completed"
+            },
+            memory_outputs
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        );
+    }
+
+    persist_running_audit_state(
+        audit_root,
+        import_id,
+        source,
+        plan,
+        discord_auth_report,
+        agent_map,
+        manifest_agents,
+        written_paths,
+        warnings,
+        apply_agents,
+        phase_status,
+        source_fingerprint,
+        session_map,
+    )
+}
+
+pub(super) fn apply_import_plan(
+    plan: &ImportPlan,
+    source: &ResolvedSourceRoot,
+    args: &OpenClawMigrateArgs,
+    runtime_root: &Path,
+) -> Result<(), String> {
+    let (importable_agents, skipped_agents) = apply_import_partition_agents(plan)?;
 
     let audit_root = plan
         .audit_root
@@ -317,7 +544,7 @@ pub(super) fn apply_import_plan(
         warnings.dedup();
     }
 
-    persist_audit_state(
+    persist_running_audit_state(
         &audit_root,
         &import_id,
         source,
@@ -330,9 +557,7 @@ pub(super) fn apply_import_plan(
         &apply_agents,
         &phase_status,
         &source_fingerprint,
-        "running",
-        "running",
-        Some(&session_map),
+        &session_map,
     )?;
 
     let result = (|| -> Result<(), String> {
@@ -355,7 +580,7 @@ pub(super) fn apply_import_plan(
 
         if args.with_sessions && phase_needs_apply(&phase_status, "sessions") {
             mark_phase_running(&mut phase_status, "sessions");
-            persist_audit_state(
+            persist_running_audit_state(
                 &audit_root,
                 &import_id,
                 source,
@@ -368,9 +593,7 @@ pub(super) fn apply_import_plan(
                 &apply_agents,
                 &phase_status,
                 &source_fingerprint,
-                "running",
-                "running",
-                Some(&session_map),
+                &session_map,
             )?;
 
             let session_outputs = import_sessions(
@@ -393,7 +616,7 @@ pub(super) fn apply_import_plan(
 
         if phase_needs_apply(&phase_status, "apply_files") {
             mark_phase_running(&mut phase_status, "apply_files");
-            persist_audit_state(
+            persist_running_audit_state(
                 &audit_root,
                 &import_id,
                 source,
@@ -406,9 +629,7 @@ pub(super) fn apply_import_plan(
                 &apply_agents,
                 &phase_status,
                 &source_fingerprint,
-                "running",
-                "running",
-                Some(&session_map),
+                &session_map,
             )?;
 
             if yaml_path.exists() {
@@ -419,156 +640,27 @@ pub(super) fn apply_import_plan(
             written_paths.push(yaml_path.display().to_string());
 
             for agent in importable_agents.iter().copied() {
-                let existing_manifest =
-                    manifest_agent_lookup(&manifest_agents, &agent.final_role_id).cloned();
-                let prompt_already_done =
-                    task_is_finished(&apply_agents, &agent.final_role_id, "prompt_write");
-                let memory_already_done =
-                    task_is_finished(&apply_agents, &agent.final_role_id, "memory_import");
-                let workspace_already_done =
-                    task_is_finished(&apply_agents, &agent.final_role_id, "workspace_copy");
-                let prompt_path = prompts_root.join(&agent.final_role_id).join("IDENTITY.md");
-                let written_prompt_path = if args.no_prompts || prompt_already_done {
-                    existing_manifest
-                        .as_ref()
-                        .and_then(|entry| entry.prompt_path.clone())
-                } else {
-                    let prompt_content = render_imported_prompt(agent, runtime_root, args);
-                    write_text_file(
-                        &prompt_path,
-                        &prompt_content,
-                        runtime_root,
-                        &backups_root,
-                        args.overwrite || args.resume.is_some(),
-                    )?;
-                    Some(prompt_path.display().to_string())
-                };
-
-                let memory_dir = role_context_root.join(&agent.final_role_id);
-                let memory_outputs = if args.no_memory || memory_already_done {
-                    existing_manifest
-                        .as_ref()
-                        .and_then(|entry| entry.memory_dir.as_ref().map(PathBuf::from))
-                        .map(|root| collect_existing_tree_files(&root))
-                        .transpose()?
-                        .unwrap_or_default()
-                } else {
-                    import_memory_files(
-                        agent,
-                        &memory_dir,
-                        runtime_root,
-                        &backups_root,
-                        args.overwrite || args.resume.is_some(),
-                    )?
-                };
-                let written_memory_dir = if args.no_memory {
-                    None
-                } else if memory_already_done {
-                    existing_manifest
-                        .as_ref()
-                        .and_then(|entry| entry.memory_dir.clone())
-                } else {
-                    Some(memory_dir.display().to_string())
-                };
-
-                let workspace_target = if args.no_workspace {
-                    None
-                } else {
-                    let destination = workspaces_root.join(&agent.final_role_id);
-                    if !workspace_already_done {
-                        copy_workspace_snapshot(
-                            Path::new(&agent.workspace_source),
-                            &destination,
-                            runtime_root,
-                            &backups_root,
-                            args.overwrite || args.resume.is_some(),
-                            &mut warnings,
-                        )?;
-                    }
-                    Some(destination)
-                };
-
-                if let Some(prompt_path) = &written_prompt_path {
-                    written_paths.push(prompt_path.clone());
-                }
-                written_paths.extend(memory_outputs.iter().map(|path| path.display().to_string()));
-                if let Some(workspace_target) = &workspace_target {
-                    written_paths.push(workspace_target.display().to_string());
-                }
-
-                upsert_manifest_agent(
-                    &mut manifest_agents,
-                    ManifestAgent {
-                        source_id: agent.source_id.clone(),
-                        role_id: agent.final_role_id.clone(),
-                        provider: agent
-                            .mapped_provider
-                            .clone()
-                            .unwrap_or_else(|| "unknown".to_string()),
-                        prompt_path: written_prompt_path.clone(),
-                        memory_dir: written_memory_dir,
-                        workspace_source: agent.workspace_source.clone(),
-                        workspace_target: workspace_target
-                            .as_ref()
-                            .map(|path| path.display().to_string()),
-                    },
-                );
-
-                if let Some(state) = apply_agents.get_mut(&agent.final_role_id) {
-                    update_task_state(
-                        state,
-                        "workspace_copy",
-                        if args.no_workspace {
-                            "skipped"
-                        } else {
-                            "completed"
-                        },
-                        workspace_target
-                            .as_ref()
-                            .map(|path| vec![path.display().to_string()])
-                            .unwrap_or_default(),
-                    );
-                    update_task_state(
-                        state,
-                        "prompt_write",
-                        if args.no_prompts {
-                            "skipped"
-                        } else {
-                            "completed"
-                        },
-                        written_prompt_path.clone().into_iter().collect(),
-                    );
-                    update_task_state(
-                        state,
-                        "memory_import",
-                        if args.no_memory {
-                            "skipped"
-                        } else {
-                            "completed"
-                        },
-                        memory_outputs
-                            .iter()
-                            .map(|path| path.display().to_string())
-                            .collect(),
-                    );
-                }
-
-                persist_audit_state(
+                apply_import_agent_files(
+                    agent,
+                    args,
+                    runtime_root,
+                    &backups_root,
+                    &prompts_root,
+                    &role_context_root,
+                    &workspaces_root,
                     &audit_root,
                     &import_id,
                     source,
                     plan,
                     &discord_auth_report,
                     &agent_map,
-                    &manifest_agents,
-                    &written_paths,
-                    &warnings,
-                    &apply_agents,
-                    &phase_status,
                     &source_fingerprint,
-                    "running",
-                    "running",
-                    Some(&session_map),
+                    &session_map,
+                    &mut manifest_agents,
+                    &mut written_paths,
+                    &mut warnings,
+                    &mut apply_agents,
+                    &phase_status,
                 )?;
             }
 
@@ -576,7 +668,7 @@ pub(super) fn apply_import_plan(
         }
         if args.write_org && phase_needs_apply(&phase_status, "apply_org") {
             mark_phase_running(&mut phase_status, "apply_org");
-            persist_audit_state(
+            persist_running_audit_state(
                 &audit_root,
                 &import_id,
                 source,
@@ -589,9 +681,7 @@ pub(super) fn apply_import_plan(
                 &apply_agents,
                 &phase_status,
                 &source_fingerprint,
-                "running",
-                "running",
-                Some(&session_map),
+                &session_map,
             )?;
 
             let rendered_org = org_writer::merge_org_updates(
@@ -622,7 +712,7 @@ pub(super) fn apply_import_plan(
 
         if args.write_bot_settings && phase_needs_apply(&phase_status, "apply_bot_settings") {
             mark_phase_running(&mut phase_status, "apply_bot_settings");
-            persist_audit_state(
+            persist_running_audit_state(
                 &audit_root,
                 &import_id,
                 source,
@@ -635,9 +725,7 @@ pub(super) fn apply_import_plan(
                 &apply_agents,
                 &phase_status,
                 &source_fingerprint,
-                "running",
-                "running",
-                Some(&session_map),
+                &session_map,
             )?;
 
             let bot_entries = build_bot_settings_entry_plans(plan, source, args, &mut warnings)?;
@@ -661,7 +749,7 @@ pub(super) fn apply_import_plan(
 
         if args.write_db && phase_needs_apply(&phase_status, "apply_db") {
             mark_phase_running(&mut phase_status, "apply_db");
-            persist_audit_state(
+            persist_running_audit_state(
                 &audit_root,
                 &import_id,
                 source,
@@ -674,9 +762,7 @@ pub(super) fn apply_import_plan(
                 &apply_agents,
                 &phase_status,
                 &source_fingerprint,
-                "running",
-                "running",
-                Some(&session_map),
+                &session_map,
             )?;
 
             let db_target = apply_db_import(
@@ -710,7 +796,7 @@ pub(super) fn apply_import_plan(
             warnings.dedup();
             written_paths.sort();
             written_paths.dedup();
-            persist_audit_state(
+            persist_running_audit_state(
                 &audit_root,
                 &import_id,
                 source,
@@ -723,9 +809,7 @@ pub(super) fn apply_import_plan(
                 &apply_agents,
                 &phase_status,
                 &source_fingerprint,
-                "running",
-                "running",
-                Some(&session_map),
+                &session_map,
             )?;
             mark_phase_completed(&mut phase_status, "finalize");
         }

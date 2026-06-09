@@ -771,7 +771,7 @@
   - `src/cli/migrate.rs` is the retired postgres-cutover facade (now below the
     giant-file threshold; bugfix only).
   - `src/cli/doctor/orchestrator.rs` (4376 lines).
-  - `src/cli/migrate/apply.rs` (3146 lines).
+  - `src/cli/migrate/apply.rs` (3230 lines).
   - `src/cli/migrate/{plan.rs (1513), source.rs (1612)}`.
   - `src/cli/{init.rs (1445), client.rs (2955), direct.rs (1781),
     dcserver.rs (1560)}`.
