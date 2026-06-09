@@ -902,7 +902,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   behavior.
 - `src/services/claude.rs` (3909), `src/services/gemini.rs` (1358),
   `src/services/qwen.rs` (2196), `src/services/codex.rs` (3001),
-  `src/services/opencode.rs` (1881), `src/services/provider.rs` (1784) —
+  `src/services/opencode.rs` (1881), `src/services/provider.rs` (1796) —
   provider adapters. (#3034 removed dead non-cancel `execute_command_simple*`
   twins from the claude/codex/gemini adapters and a superseded
   `select_counterpart_from` from provider. #3263 added the Codex max-of-cache
