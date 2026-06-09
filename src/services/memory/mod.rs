@@ -72,8 +72,12 @@ pub(crate) enum RecallMode {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub(crate) struct RecallRequest {
+    // reason: populated by all discord recall constructors for parity with
+    // CaptureRequest but not yet consumed on the recall path; kept as a stable
+    // request field rather than churning the (out-of-scope) discord call sites.
+    // See #3034.
+    #[allow(dead_code)]
     pub provider: ProviderKind,
     pub role_id: String,
     pub channel_id: u64,

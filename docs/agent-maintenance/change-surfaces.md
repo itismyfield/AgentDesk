@@ -757,7 +757,7 @@
     `crate::services::kanban`).
   - `src/server/routes/docs.rs` (5880 lines).
   - `src/server/routes/escalation.rs` (1376 lines).
-  - `src/server/routes/meetings.rs` (1686 lines).
+  - `src/server/routes/meetings.rs` (1675 lines).
   - `src/server/routes/review_verdict/decision_route.rs` (4377 lines).
   - `src/server/routes/{agents,agents_crud,agents_setup,v1,resume}.rs` (all
     1000+ production lines). (`dispatches/thread_reuse.rs` dropped below the

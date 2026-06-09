@@ -1602,17 +1602,6 @@ fn direct_start_error_status(error: &str) -> StatusCode {
     StatusCode::INTERNAL_SERVER_ERROR
 }
 
-// reason: meeting-start command builder currently exercised only by the
-// `#[cfg(test)]` unit tests in this module; no production caller in the lib
-// build. See #3034.
-#[allow(dead_code)]
-fn build_meeting_start_command(agenda: &str, primary_provider: Option<ProviderKind>) -> String {
-    match primary_provider {
-        Some(provider) => format!("/meeting start --primary {} {}", provider.as_str(), agenda),
-        None => format!("/meeting start {agenda}"),
-    }
-}
-
 fn short_query_hash(input: &str) -> String {
     use sha2::{Digest, Sha256};
 

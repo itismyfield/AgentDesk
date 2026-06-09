@@ -39,42 +39,12 @@ async fn quality_alert_target_pg(pool: &PgPool) -> Result<Option<String>> {
     Ok(value.as_deref().and_then(normalize_channel_target))
 }
 
-#[allow(dead_code)] // #2049 Finding 7: superseded by claim_quality_alert_slot_pg.
-// Kept for unit tests and operator-facing ad-hoc tooling.
-async fn quality_alert_recently_sent_pg(pool: &PgPool, key: &str, now_ms: i64) -> Result<bool> {
-    let last_ms =
-        sqlx::query_scalar::<_, Option<String>>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
-            .bind(key)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| anyhow!("load quality alert dedupe key {key}: {error}"))?
-            .flatten()
-            .and_then(|value| value.parse::<i64>().ok());
-    Ok(last_ms.is_some_and(|last_ms| now_ms.saturating_sub(last_ms) < QUALITY_ALERT_DEDUPE_MS))
-}
-
-#[allow(dead_code)] // #2049 Finding 7: superseded by claim_quality_alert_slot_pg.
-async fn mark_quality_alert_sent_pg(pool: &PgPool, key: &str, now_ms: i64) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO kv_meta (key, value)
-         VALUES ($1, $2)
-         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-    )
-    .bind(key)
-    .bind(now_ms.to_string())
-    .execute(pool)
-    .await
-    .map_err(|error| anyhow!("mark quality alert dedupe key {key}: {error}"))?;
-    Ok(())
-}
-
 /// #2049 Finding 7: atomically claim the dedupe slot for `key` if and only if
 /// the previous claim is older than `QUALITY_ALERT_DEDUPE_MS`. Returns `true`
 /// when this caller won the race and may proceed to enqueue the outbox row;
 /// `false` when another concurrent rollup already claimed the slot. Compresses
-/// the prior `quality_alert_recently_sent_pg` + `mark_quality_alert_sent_pg`
-/// two-step (TOCTOU) into a single statement using `INSERT ... ON CONFLICT ...
-/// WHERE`.
+/// the prior recently-sent check + mark-sent two-step (TOCTOU) into a single
+/// statement using `INSERT ... ON CONFLICT ... WHERE`.
 async fn claim_quality_alert_slot_pg(pool: &PgPool, key: &str, now_ms: i64) -> Result<bool> {
     let dedupe_ms = QUALITY_ALERT_DEDUPE_MS;
     // Defensive cast: kv_meta.value is shared by other writers and may hold
