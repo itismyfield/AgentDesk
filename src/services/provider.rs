@@ -462,14 +462,19 @@ impl ProviderKind {
 
     /// Resolve the context window for a specific model.
     ///
-    /// #3263: Codex is cache-first — `codex_model_context_window` reads
-    /// `~/.codex/models_cache.json` (exact slug, else max-of-cache). Only when
-    /// that cache is absent/unusable do we fall back to the provider default
-    /// (`CODEX_FALLBACK_CONTEXT_WINDOW`). Other providers have no local source
-    /// and always use their documented registry default.
+    /// #3263: Codex is cache-first REGARDLESS of whether `model` is `Some`/`None`
+    /// — `codex_model_context_window` reads `~/.codex/models_cache.json` (exact
+    /// slug when supplied, else max-of-cache). A provider-default Codex turn
+    /// (`None`) therefore still prefers the cache's max-of-cache window over the
+    /// stale constant. Only when that cache is absent/empty/unparseable do we
+    /// fall back to the provider default (`CODEX_FALLBACK_CONTEXT_WINDOW`). Other
+    /// providers have no local source and always use their registry default.
     pub fn resolve_context_window(&self, model: Option<&str>) -> u64 {
-        if let (Self::Codex, Some(m)) = (self, model) {
-            if let Some(window) = codex_model_context_window(m) {
+        if let Self::Codex = self {
+            // `None` (provider-default turn) maps to an empty slug, which never
+            // matches an entry, so `codex_context_window_from_cache` skips the
+            // exact-match branch and yields the cache's max-of-cache window.
+            if let Some(window) = codex_model_context_window(model.unwrap_or("")) {
                 return window;
             }
         }
@@ -2322,11 +2327,18 @@ mod codex_context_window_tests {
         ]
     }"#;
 
+    // ---- Pure helper: present cache × {exact slug, unknown slug, None-as-""} ----
+
     #[test]
     fn exact_slug_match_returns_that_window() {
         assert_eq!(
             codex_context_window_from_cache(CACHE, "gpt-5.5-codex"),
             Some(272_000)
+        );
+        // A non-max exact match still wins over max-of-cache.
+        assert_eq!(
+            codex_context_window_from_cache(CACHE, "gpt-5.1-codex"),
+            Some(200_000)
         );
     }
 
@@ -2341,26 +2353,65 @@ mod codex_context_window_tests {
     }
 
     #[test]
+    fn cache_present_with_empty_slug_returns_max_of_cache() {
+        // #3263 Issue-1: the `None` (provider-default) path maps to "" and must
+        // never exact-match, so the helper yields the cache's max-of-cache.
+        assert_eq!(codex_context_window_from_cache(CACHE, ""), Some(272_000));
+    }
+
+    // ---- Pure helper: absent / empty / unparseable cache → None (constant) ----
+
+    #[test]
     fn empty_or_unparseable_cache_returns_none() {
+        // Absent-equivalent shapes for every lookup form (slug AND None-as-"").
         assert_eq!(
             codex_context_window_from_cache(r#"{"models": []}"#, "anything"),
             None
         );
+        assert_eq!(
+            codex_context_window_from_cache(r#"{"models": []}"#, ""),
+            None
+        );
         assert_eq!(codex_context_window_from_cache("not json", "x"), None);
+        assert_eq!(codex_context_window_from_cache("not json", ""), None);
         assert_eq!(codex_context_window_from_cache("{}", "x"), None);
+        assert_eq!(codex_context_window_from_cache("{}", ""), None);
     }
 
+    // ---- Resolve-level: constant is the last resort only when cache unusable ---
+
     #[test]
-    fn resolve_falls_back_to_documented_constant_when_cache_absent() {
-        // No model + no usable cache resolves to the documented last-resort.
+    fn resolve_falls_back_to_documented_constant_when_cache_unusable() {
+        // #3263 Issue-2: cache-absent must resolve to the documented last-resort
+        // for BOTH the no-model (`None`) path and a `Some(model)` path. The
+        // resolve-level code consults the real `~/.codex` file, so we assert the
+        // pure helper's None→constant contract (what `resolve_context_window`
+        // does when the file is missing/unparseable) across both lookup forms.
+        assert_eq!(codex_context_window_from_cache("not json", ""), None);
         assert_eq!(
-            ProviderKind::Codex.resolve_context_window(None),
-            CODEX_FALLBACK_CONTEXT_WINDOW
+            codex_context_window_from_cache("not json", "gpt-5.5-codex"),
+            None
         );
+        // The default the caller falls back to in that case.
         assert_eq!(
             ProviderKind::Codex.default_context_window(),
             CODEX_FALLBACK_CONTEXT_WINDOW
         );
+    }
+
+    #[test]
+    fn resolve_is_cache_first_for_none_and_some_consistently() {
+        // #3263 Issue-1/Issue-2: whatever the real `~/.codex` cache yields for an
+        // empty slug (max-of-cache when present, else the constant), the `None`
+        // and "absent-model" `Some("")` resolve paths must agree — proving the
+        // None path is cache-first, not a hardcoded shortcut to the constant.
+        let none_resolved = ProviderKind::Codex.resolve_context_window(None);
+        let empty_resolved = ProviderKind::Codex.resolve_context_window(Some(""));
+        assert_eq!(none_resolved, empty_resolved);
+
+        // Whichever branch wins, the resolved window is a usable positive size
+        // (cache max-of-cache when present, else the constant) — never zero.
+        assert!(none_resolved > 0);
     }
 }
 
