@@ -45,10 +45,6 @@ const PHASE_GATE_KINDS: &[PhaseGateKind] = &[
     },
 ];
 
-pub fn list_phase_gate_kinds() -> &'static [PhaseGateKind] {
-    PHASE_GATE_KINDS
-}
-
 pub fn is_valid_phase_gate_kind(id: &str) -> bool {
     PHASE_GATE_KINDS.iter().any(|kind| kind.id == id)
 }

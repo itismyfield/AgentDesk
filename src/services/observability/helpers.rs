@@ -3,14 +3,11 @@
 //! no I/O. All call sites import via `super::*` re-export, so external
 //! consumers see no API change.
 
-use serde_json::Value;
-
 use super::{
     AGENT_QUALITY_EVENT_TYPES, AnalyticsCounterSnapshot, AnalyticsFilters, CounterValues,
-    DEFAULT_COUNTER_LIMIT, DEFAULT_EVENT_LIMIT, DEFAULT_INVARIANT_LIMIT,
-    DEFAULT_QUALITY_DAILY_LIMIT, DEFAULT_QUALITY_DAYS, DEFAULT_QUALITY_LIMIT,
-    DEFAULT_QUALITY_RANKING_LIMIT, MAX_COUNTER_LIMIT, MAX_EVENT_LIMIT, MAX_INVARIANT_LIMIT,
-    MAX_QUALITY_DAILY_LIMIT, MAX_QUALITY_DAYS, MAX_QUALITY_LIMIT, MAX_QUALITY_RANKING_LIMIT,
+    DEFAULT_COUNTER_LIMIT, DEFAULT_QUALITY_DAILY_LIMIT, DEFAULT_QUALITY_DAYS,
+    DEFAULT_QUALITY_RANKING_LIMIT, MAX_COUNTER_LIMIT, MAX_QUALITY_DAILY_LIMIT, MAX_QUALITY_DAYS,
+    MAX_QUALITY_RANKING_LIMIT,
 };
 
 pub(super) fn counter_snapshot_from_values(
@@ -93,38 +90,10 @@ pub(super) fn normalize_quality_event_type(value: &str) -> Option<String> {
         .then_some(normalized)
 }
 
-pub(super) fn value_as_string(value: &Value) -> Option<String> {
-    value
-        .as_str()
-        .map(str::to_string)
-        .filter(|value| !value.trim().is_empty())
-}
-
-pub(super) fn normalized_event_limit(limit: usize) -> usize {
-    match limit {
-        0 => DEFAULT_EVENT_LIMIT,
-        value => value.min(MAX_EVENT_LIMIT),
-    }
-}
-
 pub(super) fn normalized_counter_limit(limit: usize) -> usize {
     match limit {
         0 => DEFAULT_COUNTER_LIMIT,
         value => value.min(MAX_COUNTER_LIMIT),
-    }
-}
-
-pub(super) fn normalized_invariant_limit(limit: usize) -> usize {
-    match limit {
-        0 => DEFAULT_INVARIANT_LIMIT,
-        value => value.min(MAX_INVARIANT_LIMIT),
-    }
-}
-
-pub(super) fn normalized_quality_limit(limit: usize) -> usize {
-    match limit {
-        0 => DEFAULT_QUALITY_LIMIT,
-        value => value.min(MAX_QUALITY_LIMIT),
     }
 }
 

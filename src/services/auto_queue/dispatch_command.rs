@@ -190,25 +190,6 @@ pub(super) fn existing_live_run_conflict_response(
     )
 }
 
-pub(super) fn enqueueable_states_for(pipeline: &crate::pipeline::PipelineConfig) -> Vec<String> {
-    let mut states: Vec<String> = pipeline
-        .dispatchable_states()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    // Requested is a pre-execution staging state in the default pipeline. Allow
-    // enqueueing it directly so callers can queue already-requested work.
-    if pipeline.is_valid_state("requested") && !states.iter().any(|s| s == "requested") {
-        states.push("requested".to_string());
-    }
-    // Ready is an explicit preparation state. Backlog is intentionally excluded:
-    // auto-queue should only accept work that has already been prepared.
-    if pipeline.is_valid_state("ready") && !states.iter().any(|s| s == "ready") {
-        states.push("ready".to_string());
-    }
-    states
-}
-
 pub(super) fn priority_sort_key(priority: &str) -> i32 {
     match priority {
         "urgent" => 0,

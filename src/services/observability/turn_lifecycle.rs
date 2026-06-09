@@ -70,6 +70,8 @@ pub struct TurnCancellationDetails {
 }
 
 impl TurnCancellationDetails {
+    // Used only by #[cfg(test)] unit tests; kept for test ergonomics.
+    #[allow(dead_code)]
     pub fn new(
         reason: &str,
         surface: &str,
@@ -217,14 +219,6 @@ impl TurnEvent {
             }
             Self::ContextCompacted(_) => Self::CONTEXT_COMPACTED_META,
         }
-    }
-
-    pub const fn persist(&self) -> bool {
-        self.meta().persist
-    }
-
-    pub const fn notify_user(&self) -> bool {
-        self.meta().notify_user
     }
 
     pub(crate) fn details_json(&self) -> Value {

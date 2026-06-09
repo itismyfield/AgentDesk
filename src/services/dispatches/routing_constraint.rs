@@ -3,9 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-use crate::config::{
-    ClusterBlackoutWindowConfig, ClusterConfig, ClusterDispatchRoutingConfig, ClusterNodeConfig,
-};
+use crate::config::{ClusterBlackoutWindowConfig, ClusterConfig, ClusterNodeConfig};
 use crate::services::cluster::node_registry::CapabilityRouteCandidate;
 
 pub(crate) const NOOP_CONSTRAINT_NAME: &str = "noop";
@@ -47,8 +45,14 @@ impl ConstraintOutcome {
 
 #[derive(Clone, Debug)]
 pub(crate) struct RoutingDispatch {
+    // Routing-input contract built at every dispatch site (RoutingDispatch::new);
+    // constraints receive the full dispatch so future capability/type-aware
+    // constraints can inspect these without changing all call sites.
+    #[allow(dead_code)]
     pub(crate) dispatch_id: String,
+    #[allow(dead_code)]
     pub(crate) dispatch_type: Option<String>,
+    #[allow(dead_code)]
     pub(crate) required_capabilities: Option<Value>,
 }
 
@@ -145,10 +149,6 @@ pub(crate) struct RoutingEngine {
 }
 
 impl RoutingEngine {
-    pub(crate) fn from_config(config: &ClusterDispatchRoutingConfig) -> Self {
-        Self::new(constraints_from_config(config))
-    }
-
     pub(crate) fn from_cluster_config(config: &ClusterConfig) -> Self {
         Self::new(constraints_from_cluster_config(config))
     }
@@ -388,12 +388,6 @@ impl RoutingConstraint for BlackoutWindowConstraint {
 
 fn noop_constraint() -> Box<dyn RoutingConstraint> {
     Box::new(NoOpConstraint)
-}
-
-pub(crate) fn constraints_from_config(
-    config: &ClusterDispatchRoutingConfig,
-) -> Vec<Box<dyn RoutingConstraint>> {
-    constraints_from_names(&config.constraints, None, None)
 }
 
 pub(crate) fn constraints_from_cluster_config(

@@ -56,6 +56,7 @@ impl RegistryAdapterSink {
     }
 
     /// Total frames observed across all sessions since the sink was created.
+    #[allow(dead_code)] // observability accessor exercised only by #[cfg(test)] tests
     pub fn frames_total(&self) -> u64 {
         self.frames_total.load(Ordering::Acquire)
     }
@@ -63,6 +64,7 @@ impl RegistryAdapterSink {
     /// Snapshot of the per-session counters. The lock is held only long
     /// enough to clone the small `HashMap<String, SessionMetrics>` so this
     /// never contends with the hot path beyond a single insert.
+    #[allow(dead_code)] // observability accessor exercised only by #[cfg(test)] tests
     pub fn snapshot(&self) -> HashMap<String, SessionMetrics> {
         self.by_session
             .lock()
@@ -71,6 +73,7 @@ impl RegistryAdapterSink {
     }
 
     /// Direct lookup for a single session — convenience for tests.
+    #[allow(dead_code)] // convenience accessor exercised only by #[cfg(test)] tests
     pub fn frames_for(&self, session_name: &str) -> u64 {
         self.by_session
             .lock()

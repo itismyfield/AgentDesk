@@ -6,15 +6,13 @@ use axum::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use sqlx::{Postgres, QueryBuilder, Row as SqlxRow};
+use sqlx::Row as SqlxRow;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use crate::app_state::AppState;
-use crate::services::{auto_queue::AutoQueueLogContext, provider::ProviderKind};
+use crate::services::auto_queue::AutoQueueLogContext;
 
-#[path = "activate_bridge.rs"]
-mod activate_bridge;
 #[path = "activate_command.rs"]
 mod activate_command;
 #[path = "activate_preflight.rs"]
@@ -76,7 +74,6 @@ pub use route_types::{
 pub use slot_routes::{rebind_slot, skip_entry};
 pub use view_admin_routes::{add_run_entry, history, restore_run, status, update_entry};
 
-pub(crate) use activate_bridge::activate_with_deps;
 pub(crate) use activate_command::activate_with_deps_pg;
 pub(crate) use fsm::{AutoQueueActivateDeps, activate_with_bridge_pg};
 
@@ -86,10 +83,8 @@ use dispatch_assignment_command::*;
 use dispatch_command::*;
 use dispatch_query::*;
 use fsm::{
-    ActivatePreflightOutcome, apply_restore_state_changes_pg, attempt_restore_dispatch,
-    clamp_retry_limit, create_activate_dispatch_for_entry_prefer_pg, finalize_restore_run_pg,
-    load_kv_meta_value_pg, record_consultation_dispatch_prefer_pg,
-    select_consultation_counterpart_prefer_pg, update_entry_status_prefer_pg,
+    apply_restore_state_changes_pg, attempt_restore_dispatch, clamp_retry_limit,
+    finalize_restore_run_pg, load_kv_meta_value_pg,
 };
 use phase_gate::*;
 use planning::*;

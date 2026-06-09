@@ -6,91 +6,14 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Result, anyhow};
-use serde_json::json;
 use sqlx::{PgPool, Row};
 
 use super::helpers::saturating_i64;
 use super::{
-    AgentQualityDailyRecord, AgentQualityEventRecord, AgentQualityRankingEntry, AgentQualityWindow,
-    MAX_QUALITY_DAYS, QUALITY_SAMPLE_GUARD, QualityRankingMetric, QualityRankingWindow,
-    QueuedEvent, QueuedQualityEvent, SnapshotRow,
+    AgentQualityDailyRecord, AgentQualityRankingEntry, AgentQualityWindow, MAX_QUALITY_DAYS,
+    QUALITY_SAMPLE_GUARD, QualityRankingMetric, QualityRankingWindow, QueuedEvent,
+    QueuedQualityEvent, SnapshotRow,
 };
-
-pub(super) async fn query_agent_quality_events_pg(
-    pool: &PgPool,
-    agent_id: Option<&str>,
-    days: i64,
-    limit: usize,
-) -> Result<Vec<AgentQualityEventRecord>> {
-    let rows = sqlx::query(
-        "SELECT id,
-                source_event_id,
-                correlation_id,
-                agent_id,
-                provider,
-                channel_id,
-                card_id,
-                dispatch_id,
-                event_type::text AS event_type,
-                payload::text AS payload_json,
-                to_char(created_at AT TIME ZONE 'Asia/Seoul', 'YYYY-MM-DD HH24:MI:SS') AS created_at_kst
-         FROM agent_quality_event
-         WHERE ($1::text IS NULL OR agent_id = $1)
-           AND created_at >= NOW() - ($2::int * INTERVAL '1 day')
-         ORDER BY created_at DESC, id DESC
-         LIMIT $3",
-    )
-    .bind(agent_id)
-    .bind(days as i32)
-    .bind(limit as i64)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| anyhow!("query postgres agent quality events: {error}"))?;
-
-    rows.into_iter()
-        .map(|row| {
-            let payload_json: Option<String> = row
-                .try_get("payload_json")
-                .map_err(|error| anyhow!("decode agent quality payload_json: {error}"))?;
-            Ok(AgentQualityEventRecord {
-                id: row
-                    .try_get("id")
-                    .map_err(|error| anyhow!("decode agent quality event id: {error}"))?,
-                source_event_id: row
-                    .try_get("source_event_id")
-                    .map_err(|error| anyhow!("decode agent quality source_event_id: {error}"))?,
-                correlation_id: row
-                    .try_get("correlation_id")
-                    .map_err(|error| anyhow!("decode agent quality correlation_id: {error}"))?,
-                agent_id: row
-                    .try_get("agent_id")
-                    .map_err(|error| anyhow!("decode agent quality agent_id: {error}"))?,
-                provider: row
-                    .try_get("provider")
-                    .map_err(|error| anyhow!("decode agent quality provider: {error}"))?,
-                channel_id: row
-                    .try_get("channel_id")
-                    .map_err(|error| anyhow!("decode agent quality channel_id: {error}"))?,
-                card_id: row
-                    .try_get("card_id")
-                    .map_err(|error| anyhow!("decode agent quality card_id: {error}"))?,
-                dispatch_id: row
-                    .try_get("dispatch_id")
-                    .map_err(|error| anyhow!("decode agent quality dispatch_id: {error}"))?,
-                event_type: row
-                    .try_get("event_type")
-                    .map_err(|error| anyhow!("decode agent quality event_type: {error}"))?,
-                payload: payload_json
-                    .as_deref()
-                    .and_then(|value| serde_json::from_str(value).ok())
-                    .unwrap_or_else(|| json!({})),
-                created_at: row
-                    .try_get("created_at_kst")
-                    .map_err(|error| anyhow!("decode agent quality created_at: {error}"))?,
-            })
-        })
-        .collect()
-}
 
 pub(super) async fn upsert_agent_quality_daily_pg(pool: &PgPool) -> Result<u64> {
     // #1101 extends #930's rollup with four additional daily metrics:

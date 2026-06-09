@@ -297,10 +297,6 @@ pub(crate) struct HttpDispatchTransport {
 }
 
 impl HttpDispatchTransport {
-    pub(crate) fn from_runtime(db: &crate::db::Db) -> Self {
-        Self::from_runtime_with_pg(Some(db), None)
-    }
-
     pub(crate) fn from_runtime_with_pg(
         db: Option<&crate::db::Db>,
         pg_pool: Option<PgPool>,
@@ -310,19 +306,6 @@ impl HttpDispatchTransport {
             discord_api_base: discord_api_base_url(),
             thread_owner_user_id: resolve_dispatch_thread_owner_user_id(db, pg_pool.as_ref()),
             pg_pool,
-        }
-    }
-
-    fn with_context(
-        announce_bot_token: Option<&str>,
-        discord_api_base: &str,
-        thread_owner_user_id: Option<u64>,
-    ) -> Self {
-        Self {
-            announce_bot_token: announce_bot_token.map(str::to_string),
-            discord_api_base: discord_api_base.to_string(),
-            thread_owner_user_id,
-            pg_pool: None,
         }
     }
 }
@@ -461,13 +444,6 @@ pub(crate) async fn persist_dispatch_message_target_and_add_pending_reaction_wit
 ///
 /// `pending` / `dispatched` are never enqueued — command bot's ⏳ is the
 /// single ⏳ source.
-pub(crate) async fn sync_dispatch_status_reaction(
-    db: &crate::db::Db,
-    dispatch_id: &str,
-) -> Result<(), String> {
-    sync_dispatch_status_reaction_with_pg(Some(db), None, dispatch_id).await
-}
-
 pub(crate) async fn sync_dispatch_status_reaction_with_pg(
     db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
@@ -619,66 +595,9 @@ async fn latest_work_dispatch_thread_pg(
     crate::db::dispatches::latest_work_dispatch_thread_pg(pool, card_id).await
 }
 
-pub(crate) fn resolve_dispatch_delivery_channel_on_conn<T>(
-    _conn: &T,
-    _agent_id: &str,
-    _card_id: &str,
-    _dispatch_type: Option<&str>,
-    _dispatch_context: Option<&str>,
-) -> Result<Option<String>, String> {
-    Ok(None)
-}
-
 // #1693: `latest_completed_review_provider_on_conn` (legacy-sqlite-tests only)
 // moved to `crate::db::dispatches::latest_completed_review_provider_on_conn`
 // so the route layer no longer holds raw SQL strings.
-
-/// Send a dispatch notification to the target agent's Discord channel.
-/// Message format: `DISPATCH:<dispatch_id> - <title>\n<issue_url>`
-/// The `DISPATCH:<uuid>` prefix is required for the dcserver to link the
-/// resulting Claude session back to the kanban card (via `parse_dispatch_id`).
-pub(crate) async fn send_dispatch_to_discord(
-    db: &crate::db::Db,
-    agent_id: &str,
-    title: &str,
-    card_id: &str,
-    dispatch_id: &str,
-) -> Result<(), String> {
-    let transport = HttpDispatchTransport::from_runtime(db);
-    send_dispatch_with_delivery_guard(
-        Some(db),
-        None,
-        agent_id,
-        title,
-        card_id,
-        dispatch_id,
-        &transport,
-    )
-    .await
-    .map(|_| ())
-}
-
-pub(crate) async fn send_dispatch_to_discord_with_pg(
-    db: Option<&crate::db::Db>,
-    pg_pool: Option<&PgPool>,
-    agent_id: &str,
-    title: &str,
-    card_id: &str,
-    dispatch_id: &str,
-) -> Result<(), String> {
-    let transport = HttpDispatchTransport::from_runtime_with_pg(db, pg_pool.cloned());
-    send_dispatch_with_delivery_guard(
-        db,
-        pg_pool,
-        agent_id,
-        title,
-        card_id,
-        dispatch_id,
-        &transport,
-    )
-    .await
-    .map(|_| ())
-}
 
 pub(crate) async fn send_dispatch_to_discord_with_pg_result(
     db: Option<&crate::db::Db>,
@@ -697,51 +616,6 @@ pub(crate) async fn send_dispatch_to_discord_with_pg_result(
         card_id,
         dispatch_id,
         &transport,
-    )
-    .await
-}
-
-pub(crate) async fn send_dispatch_to_discord_with_transport<T: DispatchTransport>(
-    db: &crate::db::Db,
-    agent_id: &str,
-    title: &str,
-    card_id: &str,
-    dispatch_id: &str,
-    transport: &T,
-) -> Result<(), String> {
-    send_dispatch_with_delivery_guard(
-        Some(db),
-        transport.pg_pool(),
-        agent_id,
-        title,
-        card_id,
-        dispatch_id,
-        transport,
-    )
-    .await
-    .map(|_| ())
-}
-
-async fn send_dispatch_to_discord_inner_with_context(
-    db: &crate::db::Db,
-    agent_id: &str,
-    title: &str,
-    card_id: &str,
-    dispatch_id: &str,
-    token: &str,
-    discord_api_base: &str,
-    thread_owner_user_id: Option<u64>,
-) -> Result<DispatchNotifyDeliveryResult, String> {
-    send_dispatch_to_discord_inner_with_context_pg(
-        Some(db),
-        agent_id,
-        title,
-        card_id,
-        dispatch_id,
-        token,
-        discord_api_base,
-        thread_owner_user_id,
-        None,
     )
     .await
 }
@@ -1332,25 +1206,6 @@ async fn resolve_review_followup_target_channel(
 /// Handle primary-channel followup after a counter-model review completes.
 /// pass/unknown verdicts send an immediate message; improve/rework/reject
 /// create a review-decision dispatch whose notify row is delivered by outbox.
-pub(crate) async fn send_review_result_to_primary(
-    db: &crate::db::Db,
-    card_id: &str,
-    review_dispatch_id: &str,
-    verdict: &str,
-) -> Result<(), String> {
-    let discord_api_base = discord_api_base_url();
-    let token = crate::credential::read_bot_token("announce");
-    let transport = HttpDispatchTransport::with_context(token.as_deref(), &discord_api_base, None);
-    send_review_result_to_primary_with_transport(
-        Some(db),
-        card_id,
-        review_dispatch_id,
-        verdict,
-        &transport,
-    )
-    .await
-}
-
 pub(crate) async fn send_review_result_to_primary_with_transport<T: DispatchTransport>(
     db: Option<&crate::db::Db>,
     card_id: &str,
@@ -1364,25 +1219,6 @@ pub(crate) async fn send_review_result_to_primary_with_transport<T: DispatchTran
         review_dispatch_id,
         verdict,
         transport,
-    )
-    .await
-}
-
-async fn send_review_result_to_primary_with_context(
-    db: &crate::db::Db,
-    card_id: &str,
-    review_dispatch_id: &str,
-    verdict: &str,
-    token: Option<&str>,
-    discord_api_base: &str,
-) -> Result<(), String> {
-    let transport = HttpDispatchTransport::with_context(token, discord_api_base, None);
-    send_review_result_to_primary_with_context_and_transport(
-        Some(db),
-        card_id,
-        review_dispatch_id,
-        verdict,
-        &transport,
     )
     .await
 }

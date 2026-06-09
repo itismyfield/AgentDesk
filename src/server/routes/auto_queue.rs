@@ -16,9 +16,7 @@ pub use route::{
 };
 
 #[allow(unused_imports)]
-pub(crate) use route::{
-    AutoQueueActivateDeps, activate_with_bridge_pg, activate_with_deps, activate_with_deps_pg,
-};
+pub(crate) use route::{AutoQueueActivateDeps, activate_with_bridge_pg, activate_with_deps_pg};
 
 /// POST /api/queue/generate
 ///

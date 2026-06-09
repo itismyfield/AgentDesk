@@ -17,26 +17,6 @@ impl ActivateDispatchEntryAttachment {
     }
 }
 
-pub(super) async fn create_activate_dispatch_pg(
-    pool: &sqlx::PgPool,
-    card_id: &str,
-    to_agent_id: &str,
-    dispatch_type: &str,
-    title: &str,
-    context: &serde_json::Value,
-) -> Result<String, String> {
-    create_activate_dispatch_pg_inner(
-        pool,
-        card_id,
-        to_agent_id,
-        dispatch_type,
-        title,
-        context,
-        None,
-    )
-    .await
-}
-
 pub(super) async fn create_activate_dispatch_for_entry_pg(
     pool: &sqlx::PgPool,
     card_id: &str,

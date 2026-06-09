@@ -183,16 +183,6 @@ fn generic_outbox_delivery_result(
 ///   set next_attempt_at with exponential backoff, revert to 'pending'
 /// - On max retry exceeded: mark as 'failed' (permanent failure)
 /// - For 'notify' actions: manages dispatch_notified reservation atomically
-pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
-    db: &crate::db::Db,
-    notifier: &N,
-) -> usize {
-    {
-        let _ = (db, notifier);
-        0
-    }
-}
-
 pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
     db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,

@@ -63,39 +63,6 @@ pub(super) async fn resolve_dispatch_cards_with_pg(
     Ok(cards_by_issue)
 }
 
-pub(super) async fn validate_dispatchable_cards_with_pg(
-    pool: &sqlx::PgPool,
-    cards_by_issue: &HashMap<i64, ResolvedDispatchCard>,
-) -> Result<(), String> {
-    crate::pipeline::ensure_loaded();
-
-    for card in cards_by_issue.values() {
-        if card.status == "backlog" {
-            continue;
-        }
-
-        let effective = crate::pipeline::resolve_for_card_pg(
-            pool,
-            card.repo_id.as_deref(),
-            card.assigned_agent_id.as_deref(),
-        )
-        .await;
-        let enqueueable_states = enqueueable_states_for(&effective);
-        if enqueueable_states.iter().any(|state| state == &card.status) {
-            continue;
-        }
-
-        return Err(format!(
-            "issue #{} is in status '{}' and cannot be auto-queued; allowed states are backlog or {}",
-            card.issue_number,
-            card.status,
-            enqueueable_states.join(", ")
-        ));
-    }
-
-    Ok(())
-}
-
 pub(super) async fn find_matching_active_run_id_pg(
     pool: &sqlx::PgPool,
     repo: Option<&str>,

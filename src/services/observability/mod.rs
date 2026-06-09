@@ -6,7 +6,7 @@ use dashmap::DashMap;
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::PgPool;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 // Foundation observability layer introduced by #1070 (Epic #905 Phase 1).
 // `metrics` → lightweight channel/provider atomic counters for hot paths.
@@ -40,14 +40,12 @@ mod worker;
 pub use emit::{
     emit_agent_quality_event, emit_dispatch_result, emit_guard_fired,
     emit_inflight_lifecycle_event, emit_intake_placeholder_post_failed, emit_recovery_fired,
-    emit_relay_delivery, emit_turn_cancelled, emit_turn_finished,
-    emit_turn_finished_with_dispatch_kind, emit_turn_started, emit_watcher_replaced,
-    record_invariant_check,
+    emit_relay_delivery, emit_turn_cancelled, emit_turn_finished_with_dispatch_kind,
+    emit_turn_started, emit_watcher_replaced, record_invariant_check,
 };
 #[allow(unused_imports)]
 pub use queries::{
-    query_agent_quality_events, query_agent_quality_ranking, query_agent_quality_ranking_with,
-    query_agent_quality_summary, run_agent_quality_rollup_pg,
+    query_agent_quality_ranking_with, query_agent_quality_summary, run_agent_quality_rollup_pg,
 };
 
 pub(super) const EVENT_BATCH_SIZE: usize = 64;
@@ -59,14 +57,8 @@ pub(super) const RETENTION_SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
 pub(super) const DEFAULT_OBSERVABILITY_EVENT_RETENTION_DAYS: i64 = 90;
 pub(super) const DEFAULT_QUALITY_EVENT_RETENTION_DAYS: i64 = 90;
 pub(super) const DEFAULT_COUNTER_SNAPSHOT_RETENTION_DAYS: i64 = 7;
-pub(super) const DEFAULT_EVENT_LIMIT: usize = 100;
 pub(super) const DEFAULT_COUNTER_LIMIT: usize = 200;
-pub(super) const MAX_EVENT_LIMIT: usize = 500;
 pub(super) const MAX_COUNTER_LIMIT: usize = 500;
-pub(super) const DEFAULT_INVARIANT_LIMIT: usize = 50;
-pub(super) const MAX_INVARIANT_LIMIT: usize = 500;
-pub(super) const DEFAULT_QUALITY_LIMIT: usize = 200;
-pub(super) const MAX_QUALITY_LIMIT: usize = 500;
 pub(super) const DEFAULT_QUALITY_DAYS: i64 = 7;
 pub(super) const MAX_QUALITY_DAYS: i64 = 365;
 pub(super) const DEFAULT_QUALITY_DAILY_LIMIT: usize = 60;
@@ -222,7 +214,6 @@ pub(super) struct QueuedQualityEvent {
 pub(super) enum WorkerMessage {
     Event(QueuedEvent),
     QualityEvent(QueuedQualityEvent),
-    Flush(oneshot::Sender<()>),
 }
 
 #[derive(Clone, Default)]
@@ -264,20 +255,6 @@ pub struct AnalyticsFilters {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct AnalyticsEventRecord {
-    pub id: i64,
-    pub event_type: String,
-    pub provider: Option<String>,
-    pub channel_id: Option<String>,
-    pub dispatch_id: Option<String>,
-    pub session_key: Option<String>,
-    pub turn_id: Option<String>,
-    pub status: Option<String>,
-    pub payload: Value,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AnalyticsCounterSnapshot {
     pub provider: String,
     pub channel_id: String,
@@ -300,48 +277,12 @@ pub struct AnalyticsCounterSnapshot {
     pub source: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct AnalyticsResponse {
-    pub generated_at: String,
-    pub counters: Vec<AnalyticsCounterSnapshot>,
-    pub events: Vec<AnalyticsEventRecord>,
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct InvariantAnalyticsFilters {
     pub provider: Option<String>,
     pub channel_id: Option<String>,
     pub invariant: Option<String>,
     pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct InvariantViolationCount {
-    pub invariant: String,
-    pub count: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct InvariantViolationRecord {
-    pub id: i64,
-    pub invariant: String,
-    pub provider: Option<String>,
-    pub channel_id: Option<String>,
-    pub dispatch_id: Option<String>,
-    pub session_key: Option<String>,
-    pub turn_id: Option<String>,
-    pub message: Option<String>,
-    pub code_location: Option<String>,
-    pub details: Value,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct InvariantAnalyticsResponse {
-    pub generated_at: String,
-    pub total_violations: u64,
-    pub counts: Vec<InvariantViolationCount>,
-    pub recent: Vec<InvariantViolationRecord>,
 }
 
 pub struct InvariantViolation<'a> {
@@ -374,21 +315,6 @@ pub struct AgentQualityFilters {
     pub agent_id: Option<String>,
     pub days: i64,
     pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct AgentQualityEventRecord {
-    pub id: i64,
-    pub source_event_id: Option<String>,
-    pub correlation_id: Option<String>,
-    pub agent_id: Option<String>,
-    pub provider: Option<String>,
-    pub channel_id: Option<String>,
-    pub card_id: Option<String>,
-    pub dispatch_id: Option<String>,
-    pub event_type: String,
-    pub payload: Value,
-    pub created_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

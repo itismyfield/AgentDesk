@@ -122,17 +122,6 @@ impl EventLog {
         inner.buffer.iter().skip(len - take).cloned().collect()
     }
 
-    pub fn len(&self) -> usize {
-        self.inner.lock().map(|i| i.buffer.len()).unwrap_or(0)
-    }
-
-    /// #2049 Finding 13: number of events dropped because the ring overflowed
-    /// before they were drained. Useful regression signal if the flush cadence
-    /// is starving.
-    pub fn dropped_total(&self) -> u64 {
-        self.inner.lock().map(|i| i.dropped_total).unwrap_or(0)
-    }
-
     /// Drain any events that haven't been flushed to disk yet. Returns
     /// `(events, new_flushed_idx)` — caller must advance via
     /// `commit_flushed(new_flushed_idx)` on successful persistence so that the

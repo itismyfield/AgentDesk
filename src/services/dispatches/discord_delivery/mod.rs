@@ -6,10 +6,7 @@ mod transport;
 pub(crate) use guard::send_dispatch_with_delivery_guard;
 pub(crate) use orchestration::{
     HttpDispatchTransport, persist_dispatch_message_target_and_add_pending_reaction_with_pg,
-    resolve_dispatch_delivery_channel_on_conn, send_dispatch_to_discord,
-    send_dispatch_to_discord_with_pg, send_dispatch_to_discord_with_pg_result,
-    send_dispatch_to_discord_with_transport, send_review_result_to_primary,
-    send_review_result_to_primary_with_transport, sync_dispatch_status_reaction,
+    send_dispatch_to_discord_with_pg_result, send_review_result_to_primary_with_transport,
     sync_dispatch_status_reaction_with_pg,
 };
 pub(crate) use thread_reuse::{
