@@ -22,8 +22,6 @@
 //! reason to the user surface (Discord) and for applying the no-output
 //! timeout independently — see [`wait_with_no_output_timeout`] below.
 
-#![allow(dead_code)]
-
 use std::io::Read;
 use std::process::Child;
 use std::sync::mpsc;

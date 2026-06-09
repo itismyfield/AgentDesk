@@ -3,8 +3,6 @@
 //! Provides a single resolution contract for provider CLIs across macOS,
 //! Linux, and Windows.
 
-#![allow(dead_code)]
-
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::{OsStr, OsString};
