@@ -100,14 +100,6 @@ fn default_org_version() -> u32 {
     1
 }
 
-pub(crate) fn merge_org_agents(
-    runtime_root: &Path,
-    updates: &[OrgAgentUpdate],
-    overwrite: bool,
-) -> Result<String, String> {
-    merge_org_updates(runtime_root, updates, &[], overwrite)
-}
-
 pub(crate) fn merge_org_updates(
     runtime_root: &Path,
     agent_updates: &[OrgAgentUpdate],

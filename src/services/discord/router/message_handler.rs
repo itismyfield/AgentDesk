@@ -36,7 +36,7 @@ use crate::services::memory::{
 };
 #[cfg(test)]
 use crate::services::observability::turn_lifecycle::TurnEvent;
-use crate::services::provider::{CancelToken, cancel_requested};
+use crate::services::provider::CancelToken;
 use std::future::Future;
 use std::sync::Arc;
 use url::Url;
@@ -57,9 +57,6 @@ use self::turn_lifecycle::*;
 use self::watchdog::*;
 
 pub(super) use self::attachments::handle_file_upload;
-#[cfg(test)]
-#[allow(unused_imports)]
-pub(super) use self::control::lookup_text_stop_token;
 pub(super) use self::control::{
     TextStopLookup, cancel_text_stop_token_mailbox, cancel_text_stop_token_mailbox_if_current,
     handle_shell_command_raw, handle_text_command,

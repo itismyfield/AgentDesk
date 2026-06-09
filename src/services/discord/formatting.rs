@@ -2761,10 +2761,13 @@ pub(super) fn humanize_tool_status(tool_line: &str) -> String {
 /// `Queued` (#1332) is paired with `MonitorHandoffStatus::Queued` to render
 /// the mailbox-queued placeholder card (앞선 턴 진행 중).
 /// `InlineTimeout` and `ExplicitCall` are exposed for downstream wiring
-/// (#1113 lifecycle, #1115 sweeper) and are exercised via tests today.
+/// (#1113 lifecycle, #1115 sweeper).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MonitorHandoffReason {
     AsyncDispatch,
+    // #3034: matched in `label()` but not yet constructed; reserved for the
+    // #1113 inline-timeout handoff wiring.
+    #[allow(dead_code)]
     InlineTimeout,
     ExplicitCall,
     Queued,
@@ -2784,7 +2787,7 @@ impl MonitorHandoffReason {
 /// Lifecycle status of a monitor handoff placeholder. Drives the leading
 /// emoji/title pair shown to the user. Terminal variants (Completed / Failed
 /// / TimedOut / Aborted) are exposed for downstream wiring (#1115 sweeper,
-/// watcher terminal updates) and are exercised via tests today.
+/// watcher terminal updates).
 /// `Queued` (#1332) is the pre-active state used while a user message waits
 /// for the mailbox dequeue.
 #[derive(Debug, Clone, Copy)]
@@ -2793,7 +2796,12 @@ pub(super) enum MonitorHandoffStatus<'a> {
     Active,
     Stalled,
     Completed,
-    Failed { reason: &'a str },
+    // #3034: matched in the header/detail renderers but not yet constructed;
+    // reserved for the #1115 sweeper terminal-status wiring.
+    #[allow(dead_code)]
+    Failed {
+        reason: &'a str,
+    },
     TimedOut,
     Aborted,
 }

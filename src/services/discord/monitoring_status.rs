@@ -16,9 +16,7 @@ use super::{SharedData, health, rate_limit_wait};
 use crate::services::dispatches::discord_delivery::{
     DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
-use crate::services::monitoring_store::{
-    MonitoringEntry, MonitoringStore, global_monitoring_store,
-};
+use crate::services::monitoring_store::{MonitoringEntry, MonitoringStore};
 
 const RENDER_DEBOUNCE: StdDuration = StdDuration::from_millis(300);
 
@@ -224,24 +222,6 @@ pub(crate) fn spawn_expiry_sweeper(
             }
         }
     });
-}
-
-pub(in crate::services::discord) async fn render_channel_monitoring(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
-    channel_id: ChannelId,
-) {
-    let monitoring = global_monitoring_store();
-    if let Err(error) =
-        render_channel_monitoring_from_store(http, &monitoring, Some(shared), channel_id).await
-    {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⚠ monitoring status render failed for channel {}: {}",
-            channel_id.get(),
-            error
-        );
-    }
 }
 
 async fn render_channel_monitoring_from_registry(

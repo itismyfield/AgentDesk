@@ -1242,6 +1242,9 @@ impl VoiceBargeInRuntime {
         }
     }
 
+    // #3034: test-only runtime constructor (used by make_shared_data_for_tests
+    // and the voice unit tests); no production caller.
+    #[allow(dead_code)]
     pub(in crate::services::discord) fn disabled() -> Self {
         let (progress_tx, _) = broadcast::channel(128);
         Self {
@@ -1355,6 +1358,8 @@ impl VoiceBargeInRuntime {
         self.enabled
     }
 
+    // #3034: test-only mutable-state inspector; no production caller.
+    #[allow(dead_code)]
     pub(in crate::services::discord) async fn runtime_config_snapshot(
         &self,
     ) -> VoiceRuntimeConfigSnapshot {
@@ -2136,6 +2141,8 @@ impl VoiceBargeInRuntime {
         self.update_existing_monitor_sensitivity(sensitivity);
     }
 
+    // #3034: test-only voice-command entry point; no production caller.
+    #[allow(dead_code)]
     pub(in crate::services::discord) async fn apply_voice_command(
         &self,
         transcript: &str,
@@ -2148,6 +2155,9 @@ impl VoiceBargeInRuntime {
         Some(sensitivity)
     }
 
+    // #3034: test-only playback-reset entry point; production resets go
+    // through `reset_after_playback_start_with_owner`.
+    #[allow(dead_code)]
     pub(in crate::services::discord) fn reset_after_playback_start<P>(
         &self,
         channel_id: ChannelId,
@@ -2191,6 +2201,9 @@ impl VoiceBargeInRuntime {
         );
     }
 
+    // #3034: test-only playback clear; production uses
+    // `clear_playback_if_owner`.
+    #[allow(dead_code)]
     pub(in crate::services::discord) fn clear_playback(&self, channel_id: ChannelId) {
         self.playbacks.remove(&channel_id.get());
     }

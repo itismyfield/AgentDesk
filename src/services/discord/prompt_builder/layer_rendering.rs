@@ -96,6 +96,8 @@ pub(super) fn agent_performance_day_bucket() -> i64 {
 /// tests still reference `agent_performance_hour_bucket`; the function now
 /// returns a *day* bucket, but the name was deliberately kept to minimize
 /// the call-site diff. Prefer [`agent_performance_day_bucket`] in new code.
+// #3034: test-only contract surface (legacy-name compatibility alias).
+#[allow(dead_code)]
 pub(super) fn agent_performance_hour_bucket() -> i64 {
     agent_performance_day_bucket()
 }
@@ -103,6 +105,9 @@ pub(super) fn agent_performance_hour_bucket() -> i64 {
 /// Snapshot of cache observability counters. `(hits, misses)`. Atomically
 /// consistent only per-field; we accept a torn read between the two values
 /// since they are used for log/metric emission, not for control flow.
+// #3034: cache-observability surface (#2666); exercised by tests, dashboard/
+// health-endpoint wiring pending.
+#[allow(dead_code)]
 pub fn agent_performance_cache_metrics() -> (u64, u64) {
     (
         AGENT_PERFORMANCE_CACHE_HITS.load(std::sync::atomic::Ordering::Relaxed),
@@ -115,6 +120,9 @@ pub fn agent_performance_cache_metrics() -> (u64, u64) {
 /// picks up the fresh snapshot without waiting for the UTC day boundary.
 ///
 /// Idempotent — safe to call when no entries exist.
+// #3034: cache-invalidation hook for the daily rollup writer (#2666);
+// exercised by tests, rollup-writer wiring pending.
+#[allow(dead_code)]
 pub fn invalidate_agent_performance_cache() {
     let cache = AGENT_PERFORMANCE_PROMPT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(mut guard) = cache.lock() {
@@ -124,6 +132,9 @@ pub fn invalidate_agent_performance_cache() {
 
 /// Drop the cached entry for a single role. Useful when a per-role
 /// rollup is refreshed while leaving others stale.
+// #3034: per-role cache-invalidation hook (#2666); exercised by tests,
+// rollup-writer wiring pending.
+#[allow(dead_code)]
 pub fn invalidate_agent_performance_cache_for_role(role_id: &str) {
     let cache = AGENT_PERFORMANCE_PROMPT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(mut guard) = cache.lock() {

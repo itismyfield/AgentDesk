@@ -193,6 +193,9 @@ impl SummaryAgentConfig {
 /// Meeting configuration from role_map.json "meeting" section
 #[derive(Clone, Debug)]
 pub(super) struct MeetingConfig {
+    // #3034: config field carried from the org-schema/role-map meeting
+    // section; no in-code reader after the name-match helper was removed.
+    #[allow(dead_code)]
     pub channel_name: String,
     pub max_rounds: u32,
     pub max_participants: usize,
@@ -1508,13 +1511,6 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
         }
     }
     load_meeting_config_from_role_map()
-}
-
-/// Check if a channel name matches the configured meeting channel
-pub(super) fn is_meeting_channel(channel_name: &str) -> bool {
-    load_meeting_config()
-        .map(|cfg| cfg.channel_name == channel_name)
-        .unwrap_or(false)
 }
 
 // ─── Meeting Lifecycle ───────────────────────────────────────────────────────

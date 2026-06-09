@@ -16,7 +16,11 @@ use crate::services::provider::ProviderKind;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct OrgSchema {
+    // #3034: serde wire fields deserialized from the org schema for forward
+    // compatibility; no in-code reader today.
+    #[allow(dead_code)]
     pub version: u32,
+    #[allow(dead_code)]
     pub name: Option<String>,
     pub shared_prompt: Option<String>,
     /// Root directory for prompt files (e.g. "$AGENTDESK_ROOT_DIR/prompts").
@@ -24,6 +28,9 @@ pub(super) struct OrgSchema {
     /// `{prompts_root}/agents/{role_id}/IDENTITY.md` if not explicitly specified.
     pub prompts_root: Option<String>,
     /// Root directory for skill files (e.g. "$AGENTDESK_ROOT_DIR/skills").
+    // #3034: serde wire field; the loader was removed as dead, the config
+    // surface is retained for forward compatibility.
+    #[allow(dead_code)]
     pub skills_root: Option<String>,
     pub agents: HashMap<String, AgentDef>,
     pub channels: Option<ChannelsConfig>,
@@ -228,6 +235,10 @@ pub(super) fn resolve_workspace(
     Some(expand_tilde(ws))
 }
 
+// #3034: consumed by `settings::content::load_shared_prompt_for_profile`,
+// the profile-aware shared-prompt loader (currently unwired in prod but a
+// real feature surface). Keep the org-schema resolver live.
+#[allow(dead_code)]
 pub(super) fn load_shared_prompt_path() -> Option<String> {
     let schema = load_org_schema()?;
     // Explicit shared_prompt > auto-derived from prompts_root/agents/_shared.prompt.md
@@ -245,12 +256,6 @@ pub(super) fn load_shared_prompt_path() -> Option<String> {
             let legacy = root.join("_shared.md");
             legacy.exists().then(|| legacy.display().to_string())
         })
-}
-
-/// Return the configured skills_root path (expanded).
-pub(super) fn load_skills_root() -> Option<String> {
-    let schema = load_org_schema()?;
-    schema.skills_root.as_deref().map(expand_tilde)
 }
 
 pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
@@ -403,47 +408,4 @@ pub(super) fn lookup_suffix_provider(channel_name: &str) -> Option<ProviderKind>
         }
     }
     None
-}
-
-/// A channel entry exposed to the HTTP layer for the meeting channel selector.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct RegisteredChannel {
-    pub channel_id: String,
-    pub agent: String,
-    pub provider: Option<String>,
-}
-
-/// List all channels registered via `channels.by_id`.
-/// `by_name`-only entries are excluded because they have no concrete channel_id
-/// and cannot be used for direct-start meeting invocations.
-pub(crate) fn list_registered_channels() -> Vec<RegisteredChannel> {
-    let Some(schema) = load_org_schema() else {
-        return Vec::new();
-    };
-    let Some(channels) = schema.channels.as_ref() else {
-        return Vec::new();
-    };
-    let Some(by_id) = channels.by_id.as_ref() else {
-        return Vec::new();
-    };
-
-    let mut result: Vec<RegisteredChannel> = by_id
-        .iter()
-        .map(|(channel_id, binding)| {
-            // Provider: channel-level override > agent-level default
-            let provider = binding
-                .provider
-                .clone()
-                .or_else(|| schema.agents.get(&binding.agent)?.provider.clone());
-            RegisteredChannel {
-                channel_id: channel_id.clone(),
-                agent: binding.agent.clone(),
-                provider,
-            }
-        })
-        .collect();
-
-    // Stable ordering by channel_id
-    result.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
-    result
 }

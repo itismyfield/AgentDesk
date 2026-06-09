@@ -101,14 +101,6 @@ impl HealthRegistry {
         self.started_at_unix
     }
 
-    /// Snapshot the notify-bot HTTP client (for non-actionable side channels
-    /// like the idle-recap renderer). Returns `None` when the notify bot
-    /// hasn't been registered yet — caller treats that as "skip the post
-    /// this cycle".
-    pub(crate) async fn notify_http_clone(&self) -> Option<Arc<serenity::Http>> {
-        self.notify_http.lock().await.clone()
-    }
-
     /// Snapshot the announce-bot HTTP client. The announce bot is where
     /// `Manage Messages` (and other channel-mod) permissions are concentrated
     /// in this deployment, so pin/unpin lifecycle code prefers it over the
@@ -305,6 +297,9 @@ impl HealthRegistry {
     /// surface a clean status. Tokens that fail [`crate::credential::is_valid_bot_name`]
     /// or whose credential file is absent leave the corresponding HTTP slot
     /// untouched (caller can decide whether to treat that as an error).
+    // #3034: operator-triggered token-rotation entry point (#2047 Finding 11);
+    // not yet wired to an HTTP/CLI route. Keep the rotation API live.
+    #[allow(dead_code)]
     pub async fn reload_bot_tokens(&self) -> (bool, bool) {
         self.reload_bot_tokens_inner(true).await
     }
@@ -1367,14 +1362,21 @@ pub enum SendCallerClass {
     /// In-process dcserver call (loopback peer + matching bearer, or no
     /// bearer when auth is disabled). Allowed to use any internal label.
     LoopbackInternal,
+    // #3034: header-attested caller classes (#2047). The `from_header` path
+    // that constructs these is wired through tests today; the HTTP send route
+    // still infers `LoopbackInternal` from the peer. Keep the class taxonomy
+    // and the parser live as the header-attestation contract surface.
     /// External CLI/agent presenting `X-AgentDesk-Source: cli` and a valid
     /// bearer token. Restricted to a small set of labels.
+    #[allow(dead_code)]
     Cli,
     /// Browser dashboard with same-origin loopback. Can only attribute
     /// messages to `dashboard` or to a known agent role id.
+    #[allow(dead_code)]
     Dashboard,
     /// Fallback when no header is provided and the request isn't loopback —
     /// most restrictive bucket.
+    #[allow(dead_code)]
     Unknown,
 }
 
@@ -1382,6 +1384,8 @@ impl SendCallerClass {
     /// Parse the `X-AgentDesk-Source` header value (case-insensitive). Returns
     /// `None` for unknown / empty values so the caller can fall back to
     /// peer-based inference.
+    // #3034: header-attestation parser; exercised by tests, route wiring pending.
+    #[allow(dead_code)]
     pub fn from_header(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "loopback" | "dcserver" | "internal" => Some(Self::LoopbackInternal),
@@ -2102,28 +2106,6 @@ async fn deliver_chunked_manual_notification<C: ManualOutboundClient>(
     })
 }
 
-pub async fn send_message(
-    registry: &HealthRegistry,
-    sqlite: &Db,
-    target: &str,
-    content: &str,
-    source: &str,
-    bot: &str,
-    summary: Option<&str>,
-) -> (&'static str, String) {
-    send_message_with_backends(
-        registry,
-        Some(sqlite),
-        None,
-        target,
-        content,
-        source,
-        bot,
-        summary,
-    )
-    .await
-}
-
 pub async fn handle_send<'a>(
     registry: &HealthRegistry,
     sqlite: Option<&Db>,
@@ -2363,40 +2345,6 @@ fn parse_senddm_body(body: &str) -> Result<SendDmRequest, String> {
         semantic_event_id,
         idempotency_key,
     })
-}
-
-/// Parse a /api/discord/send JSON body and extract (target, content, source).
-/// Returns Err with an error message on invalid input.
-/// Factored out of handle_send for testability.
-fn parse_send_body(body: &str) -> Result<(String, String, String), &'static str> {
-    let json: serde_json::Value = serde_json::from_str(body).map_err(|_| "invalid JSON")?;
-    let content = json
-        .get("content")
-        .and_then(|v| v.as_str())
-        .or_else(|| json.get("message").and_then(|v| v.as_str()))
-        .unwrap_or("")
-        .to_string();
-    if content.is_empty() {
-        return Err("content is required");
-    }
-    let mut target = json
-        .get("target")
-        .and_then(|v| v.as_str())
-        .or_else(|| json.get("channel_id").and_then(|v| v.as_str()))
-        .unwrap_or("")
-        .to_string();
-    if !target.trim().is_empty()
-        && json.get("target").and_then(|v| v.as_str()).is_none()
-        && !target.trim_start().starts_with("channel:")
-    {
-        target = format!("channel:{target}");
-    }
-    let source = json
-        .get("source")
-        .and_then(|v| v.as_str())
-        .unwrap_or("system")
-        .to_string();
-    Ok((target, content, source))
 }
 
 #[cfg(test)]
