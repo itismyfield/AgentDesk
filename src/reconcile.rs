@@ -16,11 +16,18 @@ use crate::{db::Db, engine::PolicyEngine};
 /// Hard cutoff for "stale inflight" detection in the periodic reconcile.
 /// Anything older than this with no live tmux pane is considered abandoned.
 /// #1076 (905-7): zombie resource sweep cadence.
+// #3034: only consumer was the dynamic maintenance scheduler job
+// (deleted as dead scaffolding); retained for the future rewire of the
+// zombie-resource sweep.
+#[allow(dead_code)]
 const STALE_INFLIGHT_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Hard cutoff for orphan `discord_uploads/<channel>/*` files. 7 days matches
 /// the default retention hint used by `settings/content.rs::cleanup_old_uploads`
 /// for manually-aged attachments, so the periodic sweep is a strict superset.
+// #3034: only consumer was the deleted maintenance scheduler job; retained
+// for the future rewire of the zombie-resource sweep.
+#[allow(dead_code)]
 const STALE_UPLOAD_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const COMPLETED_QUEUE_REVIEW_DRIFT_GRACE: Duration = Duration::from_secs(5 * 60);
 const COMPLETED_QUEUE_REVIEW_DRIFT_BATCH_LIMIT: i64 = 50;
@@ -1606,6 +1613,9 @@ async fn active_review_dispatch_exists_pg(pool: &PgPool, card_id: &str) -> Resul
 // unavailable — all helpers degrade gracefully (zero count + warn log).
 
 /// Aggregate stats from one run of [`reconcile_zombie_resources`].
+// #3034: only consumer was the deleted maintenance scheduler job; retained
+// for the future rewire of the zombie-resource sweep.
+#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ZombieReconcileStats {
     pub orphan_tmux_killed: usize,
@@ -1615,6 +1625,9 @@ pub(crate) struct ZombieReconcileStats {
 }
 
 impl ZombieReconcileStats {
+    // #3034: only consumer was the deleted maintenance scheduler job; retained
+    // for the future rewire of the zombie-resource sweep.
+    #[allow(dead_code)]
     pub(crate) fn total(&self) -> usize {
         self.orphan_tmux_killed
             + self.stale_inflight_removed
@@ -1626,6 +1639,9 @@ impl ZombieReconcileStats {
 /// Remove inflight state JSON files older than [`STALE_INFLIGHT_MAX_AGE`] that
 /// have no `restart_mode` assignment (i.e. were never scheduled for resume).
 /// Returns the number of files deleted. Safe to call without a Postgres pool.
+// #3034: only consumer was the deleted maintenance scheduler job; retained
+// for the future rewire of the zombie-resource sweep.
+#[allow(dead_code)]
 pub(crate) fn sweep_stale_inflight_files() -> usize {
     let Some(root) =
         crate::config::runtime_root().map(|p| p.join("runtime").join("discord_inflight"))
@@ -1635,6 +1651,9 @@ pub(crate) fn sweep_stale_inflight_files() -> usize {
     sweep_stale_inflight_files_at(&root, STALE_INFLIGHT_MAX_AGE)
 }
 
+// #3034: only consumer was the deleted maintenance scheduler job; retained
+// for the future rewire of the zombie-resource sweep.
+#[allow(dead_code)]
 pub(crate) fn sweep_stale_inflight_files_at(root: &std::path::Path, max_age: Duration) -> usize {
     use std::fs;
     use std::time::SystemTime;
@@ -1706,6 +1725,9 @@ pub(crate) fn sweep_stale_inflight_files_at(root: &std::path::Path, max_age: Dur
 
 /// Remove `discord_uploads/<channel>/*` files older than
 /// [`STALE_UPLOAD_MAX_AGE`]. Returns the number of files removed.
+// #3034: only consumer was the deleted maintenance scheduler job; retained
+// for the future rewire of the zombie-resource sweep.
+#[allow(dead_code)]
 pub(crate) fn sweep_stale_discord_uploads() -> usize {
     let Some(root) =
         crate::config::runtime_root().map(|p| p.join("runtime").join("discord_uploads"))
@@ -1715,6 +1737,9 @@ pub(crate) fn sweep_stale_discord_uploads() -> usize {
     sweep_stale_discord_uploads_at(&root, STALE_UPLOAD_MAX_AGE)
 }
 
+// #3034: only consumer was the deleted maintenance scheduler job; retained
+// for the future rewire of the zombie-resource sweep.
+#[allow(dead_code)]
 pub(crate) fn sweep_stale_discord_uploads_at(root: &std::path::Path, max_age: Duration) -> usize {
     use std::fs;
     use std::time::SystemTime;
@@ -1773,6 +1798,9 @@ pub(crate) fn sweep_stale_discord_uploads_at(root: &std::path::Path, max_age: Du
 /// maintenance job records whatever the file-system and PG layers can do
 /// without the Discord runtime handle, which means it is safe to run before
 /// (and independently of) the bot coming up.
+// #3034: only consumer was the deleted maintenance scheduler job; retained
+// for the future rewire of the zombie-resource sweep.
+#[allow(dead_code)]
 pub(crate) async fn reconcile_zombie_resources() -> ZombieReconcileStats {
     let stale_inflight_removed = tokio::task::spawn_blocking(sweep_stale_inflight_files)
         .await

@@ -567,13 +567,6 @@ src/
 │   │   ├── runner.rs
 │   │   └── worktree_resolver.rs
 │   ├── maintenance/
-│   │   ├── jobs/
-│   │   │   ├── db_retention.rs
-│   │   │   ├── hang_dump_cleanup.rs
-│   │   │   ├── memento_consolidation.rs
-│   │   │   ├── mod.rs
-│   │   │   ├── target_sweep.rs
-│   │   │   └── worktree_orphan_sweep.rs
 │   │   └── mod.rs
 │   ├── memory/
 │   │   ├── local.rs

@@ -1,67 +1,28 @@
-//! ADK-internal maintenance job infrastructure (#1091 / 909-2).
+//! ADK-internal maintenance job registry surface (#1091 / 909-2).
 //!
-//! Provides a dynamic, in-process registry for lightweight periodic background
-//! work. Unlike the static `server::maintenance` subsystem (which drives
-//! postgres-pool-bound jobs keyed into `kv_meta`), this module is intentionally
-//! self-contained:
-//!
-//!   * Callers register jobs via [`register_maintenance_job`] at startup —
-//!     no DB schema, no trait impls, just `(name, interval, async fn)`.
-//!   * The scheduler loop ticks every [`DEFAULT_TICK_INTERVAL`] and, for every
-//!     job whose `last_run + interval <= now`, spawns the handler on a detached
-//!     `tokio::spawn` so a long-running job never blocks siblings.
-//!   * Results (success/failure + duration) are recorded in-memory for the
-//!     `/api/cron-jobs` surface and emitted as structured observability events
-//!     via [`crate::services::observability::events::record_simple`] (landed in
-//!     #1070).
-//!
-//! Intended use: per-agent reconciliation tasks, cache warmers, soft-TTL
-//! sweepers — anything that needs to run "every N seconds/minutes" without the
-//! ceremony of adding a row to `server::worker_registry` or a kv_meta key.
-//!
-//! 909-3 will register the first real job against this surface.
+//! Exposes the read-only [`list_maintenance_jobs`] snapshot consumed by the
+//! `/api/cron-jobs` route (`server::routes::cron_api`). The in-process job
+//! registry it reads is currently never populated — the dynamic scheduler that
+//! used to register jobs here was never wired into server boot — so the
+//! snapshot is presently always empty. The surface is retained because the
+//! cron API contract depends on it.
 
-pub mod jobs;
+use std::sync::{OnceLock, RwLock};
+use std::time::Duration;
 
-use std::sync::{Arc, OnceLock, RwLock};
-use std::time::{Duration, Instant};
-
-use chrono::Utc;
-use futures::future::BoxFuture;
 use serde::Serialize;
-use serde_json::json;
 
-/// How often the scheduler wakes up to re-check job schedules. Individual jobs
-/// fire on their own `interval`; this tick just bounds scheduling latency.
-pub const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(30);
-
-/// Handler signature: takes no arguments (closures capture any state they
-/// need) and returns a `BoxFuture<'static, Result<()>>`.
-pub type MaintenanceHandler = Arc<dyn Fn() -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync>;
-
-/// A registered maintenance job. Constructed via [`register_maintenance_job`].
-#[derive(Clone)]
-pub struct MaintenanceJob {
-    pub name: String,
-    pub interval: Duration,
-    pub handler: MaintenanceHandler,
-}
-
-impl std::fmt::Debug for MaintenanceJob {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MaintenanceJob")
-            .field("name", &self.name)
-            .field("interval", &self.interval)
-            .finish_non_exhaustive()
-    }
+/// A registered maintenance job. The registry is not currently populated.
+#[derive(Clone, Debug)]
+struct MaintenanceJob {
+    name: String,
+    interval: Duration,
 }
 
 /// Snapshot of a job's runtime state. Tracked in-memory alongside the
 /// registry; exposed through [`list_maintenance_jobs`].
 #[derive(Debug, Clone, Default)]
 struct JobState {
-    /// `Instant` of the last completed run (monotonic — used for scheduling).
-    last_run_instant: Option<Instant>,
     /// Wall-clock ms of the last completed run (for API output).
     last_run_at_ms: Option<i64>,
     /// `"ok" | "error" | "running" | "never"`.
@@ -70,9 +31,6 @@ struct JobState {
     last_duration_ms: Option<i64>,
     run_count: i64,
     failure_count: i64,
-    /// Set when the job is currently running so the scheduler does not
-    /// double-dispatch if a previous invocation is still in flight.
-    in_flight: bool,
 }
 
 /// Public-facing snapshot for [`/api/cron-jobs`].
@@ -120,45 +78,6 @@ fn registry() -> &'static Registry {
     REGISTRY.get_or_init(|| RwLock::new(Vec::new()))
 }
 
-/// Register a maintenance job to be driven by [`spawn_maintenance_scheduler`].
-///
-/// Idempotent on `name`: re-registering the same name replaces the handler
-/// and interval (the state counters are preserved). This keeps restart-loops
-/// and test re-registrations safe.
-pub fn register_maintenance_job<F>(name: impl Into<String>, interval: Duration, handler: F)
-where
-    F: Fn() -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync + 'static,
-{
-    let name = name.into();
-    let job = MaintenanceJob {
-        name: name.clone(),
-        interval,
-        handler: Arc::new(handler),
-    };
-
-    let Ok(mut guard) = registry().write() else {
-        tracing::warn!(
-            job = %name,
-            "[maintenance] registry poisoned; dropping registration"
-        );
-        return;
-    };
-
-    if let Some(existing) = guard.iter_mut().find(|entry| entry.job.name == name) {
-        existing.job = job;
-        tracing::info!(job = %name, "[maintenance] job re-registered (handler replaced)");
-    } else {
-        guard.push(RegistryEntry {
-            job,
-            state: JobState {
-                last_status: "never".to_string(),
-                ..JobState::default()
-            },
-        });
-        tracing::info!(job = %name, "[maintenance] job registered");
-    }
-}
-
 /// Snapshot of every registered job, for `/api/cron-jobs`.
 pub fn list_maintenance_jobs() -> Vec<MaintenanceJobInfo> {
     let Ok(guard) = registry().read() else {
@@ -194,136 +113,6 @@ pub fn list_maintenance_jobs() -> Vec<MaintenanceJobInfo> {
             }
         })
         .collect()
-}
-
-/// Spawn the maintenance scheduler task. The task runs until the tokio
-/// runtime shuts down. Call once during server boot (under `#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]`).
-///
-/// Scheduling model: every [`DEFAULT_TICK_INTERVAL`] the scheduler iterates
-/// the registry; for each job whose `last_run + interval <= now` (or which
-/// has never run), it spawns `tokio::spawn(handler())`. The scheduler itself
-/// never `.await`s the handler — long-running jobs do not block the tick.
-pub async fn spawn_maintenance_scheduler() {
-    run_scheduler_loop(DEFAULT_TICK_INTERVAL, None).await;
-}
-
-/// Core loop. Extracted so tests can control tick cadence and bounded runs.
-async fn run_scheduler_loop(tick: Duration, max_iterations: Option<usize>) {
-    let mut iteration = 0usize;
-    tracing::info!(
-        tick_ms = duration_to_i64_ms(tick),
-        "[maintenance] scheduler loop started"
-    );
-    loop {
-        // Snapshot the due jobs under the write lock so we can mark
-        // `in_flight = true` atomically with the "should we dispatch" check.
-        let due: Vec<(String, MaintenanceHandler)> = {
-            let Ok(mut guard) = registry().write() else {
-                tracing::warn!("[maintenance] registry poisoned; scheduler idling");
-                tokio::time::sleep(tick).await;
-                continue;
-            };
-            let now = Instant::now();
-            let mut collected = Vec::new();
-            for entry in guard.iter_mut() {
-                if entry.state.in_flight {
-                    continue;
-                }
-                let due = match entry.state.last_run_instant {
-                    None => true,
-                    Some(last) => now.saturating_duration_since(last) >= entry.job.interval,
-                };
-                if due {
-                    entry.state.in_flight = true;
-                    collected.push((entry.job.name.clone(), entry.job.handler.clone()));
-                }
-            }
-            collected
-        };
-
-        for (name, handler) in due {
-            tokio::spawn(run_job_and_record(name, handler));
-        }
-
-        iteration = iteration.saturating_add(1);
-        if max_iterations.is_some_and(|limit| iteration >= limit) {
-            return;
-        }
-        tokio::time::sleep(tick).await;
-    }
-}
-
-async fn run_job_and_record(name: String, handler: MaintenanceHandler) {
-    let started_ms = Utc::now().timestamp_millis();
-    let started = Instant::now();
-    tracing::info!(job = %name, "[maintenance] job started");
-
-    // Handler may panic — isolate behind an inner `tokio::spawn` so a rogue
-    // job surfaces as `Err(JoinError)` here instead of bubbling up through
-    // the outer detached task.
-    let future = handler();
-    let outcome = tokio::task::spawn(future).await;
-
-    let elapsed = started.elapsed();
-    let elapsed_ms = duration_to_i64_ms(elapsed);
-    let finished_ms = Utc::now().timestamp_millis();
-
-    let (status_text, error_text): (&'static str, Option<String>) = match outcome {
-        Ok(Ok(())) => ("ok", None),
-        Ok(Err(error)) => ("error", Some(error.to_string())),
-        Err(join_error) => ("error", Some(format!("handler panicked: {join_error}"))),
-    };
-
-    // Update in-memory state.
-    if let Ok(mut guard) = registry().write() {
-        if let Some(entry) = guard.iter_mut().find(|entry| entry.job.name == name) {
-            entry.state.in_flight = false;
-            entry.state.last_run_instant = Some(started);
-            entry.state.last_run_at_ms = Some(finished_ms);
-            entry.state.last_duration_ms = Some(elapsed_ms);
-            entry.state.run_count = entry.state.run_count.saturating_add(1);
-            entry.state.last_status = status_text.to_string();
-            if status_text == "error" {
-                entry.state.failure_count = entry.state.failure_count.saturating_add(1);
-                entry.state.last_error = error_text.clone();
-            } else {
-                entry.state.last_error = None;
-            }
-        }
-    }
-
-    // Structured event (#1070 observability integration).
-    let payload = json!({
-        "job": name,
-        "status": status_text,
-        "duration_ms": elapsed_ms,
-        "started_ms": started_ms,
-        "finished_ms": finished_ms,
-        "error": error_text,
-    });
-    crate::services::observability::events::record_simple(
-        "maintenance_job_completed",
-        None,
-        None,
-        payload,
-    );
-
-    match (status_text, &error_text) {
-        ("ok", _) => tracing::info!(
-            job = %name,
-            duration_ms = elapsed_ms,
-            outcome = "ok",
-            "[maintenance] job completed"
-        ),
-        ("error", Some(message)) => tracing::warn!(
-            job = %name,
-            duration_ms = elapsed_ms,
-            outcome = "error",
-            error = %message,
-            "[maintenance] job completed"
-        ),
-        _ => {}
-    }
 }
 
 fn duration_to_i64_ms(duration: Duration) -> i64 {

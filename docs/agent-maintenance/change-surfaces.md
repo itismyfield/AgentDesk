@@ -813,7 +813,7 @@
   - `src/server/mod.rs` (2239 lines).
   - `src/receipt.rs` (1842 lines).
   - `src/github/sync.rs` (1488 lines).
-  - `src/reconcile.rs` (1809 lines; periodic reconcile loop covering stale
+  - `src/reconcile.rs` (1837 lines; periodic reconcile loop covering stale
     inflights, orphan uploads, dispatched-session drift, and queue-review
     drift — split before adding non-bugfix behavior).
 - active_callsite_coverage: n/a.
