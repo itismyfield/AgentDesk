@@ -641,6 +641,7 @@ src/
 │   ├── automation_candidate_contract.rs
 │   ├── automation_candidate_materializer.rs
 │   ├── claude.rs
+│   ├── claude_compact_trigger.rs
 │   ├── codex.rs
 │   ├── codex_remote_policy.rs
 │   ├── codex_tmux_wrapper.rs

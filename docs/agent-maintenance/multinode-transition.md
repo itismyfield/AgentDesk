@@ -257,6 +257,14 @@
   later merge gates can require the exact tested commit before accepting a phase.
 - Local telemetry capture and cache state: `src/services/memory/memento_throttle.rs:128`,
   `src/services/observability/mod.rs:460`, `src/services/observability/metrics.rs:238`.
+- #3262 Claude auto-compact `/compact` injection trigger state:
+  `src/services/claude_compact_trigger.rs`. The once-per-fill-cycle "armed" latch
+  is a **worker-local** process-global `LazyLock<Mutex<HashMap<channel_id, bool>>>`
+  and the injection drives the node-local tmux pane via
+  `claude_tui::input::send_followup_prompt`. A channel's live tmux session is
+  pinned to a single worker (see `tmux_provider_sessions`), so the per-channel
+  latch never needs cross-node coordination; a worker restart simply re-arms the
+  channel (re-injecting at most one redundant `/compact` is harmless and idle-gated).
 
 ## Required Invariants
 
