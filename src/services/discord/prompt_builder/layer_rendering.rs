@@ -96,7 +96,6 @@ pub(super) fn agent_performance_day_bucket() -> i64 {
 /// tests still reference `agent_performance_hour_bucket`; the function now
 /// returns a *day* bucket, but the name was deliberately kept to minimize
 /// the call-site diff. Prefer [`agent_performance_day_bucket`] in new code.
-#[allow(dead_code)]
 pub(super) fn agent_performance_hour_bucket() -> i64 {
     agent_performance_day_bucket()
 }

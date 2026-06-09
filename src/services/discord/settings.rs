@@ -122,7 +122,6 @@ pub(crate) struct RoleBinding {
     /// Optional model override (e.g. "opus", "sonnet", "haiku", "o3")
     pub model: Option<String>,
     /// Optional reasoning effort for Codex (e.g. "low", "normal", "high", "xhigh")
-    #[allow(dead_code)]
     pub reasoning_effort: Option<String>,
     /// Whether this role may see peer-agent handoff guidance in the system prompt.
     pub peer_agents_enabled: bool,

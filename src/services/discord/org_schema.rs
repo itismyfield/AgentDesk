@@ -16,9 +16,7 @@ use crate::services::provider::ProviderKind;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct OrgSchema {
-    #[allow(dead_code)]
     pub version: u32,
-    #[allow(dead_code)]
     pub name: Option<String>,
     pub shared_prompt: Option<String>,
     /// Root directory for prompt files (e.g. "$AGENTDESK_ROOT_DIR/prompts").
@@ -26,7 +24,6 @@ pub(super) struct OrgSchema {
     /// `{prompts_root}/agents/{role_id}/IDENTITY.md` if not explicitly specified.
     pub prompts_root: Option<String>,
     /// Root directory for skill files (e.g. "$AGENTDESK_ROOT_DIR/skills").
-    #[allow(dead_code)]
     pub skills_root: Option<String>,
     pub agents: HashMap<String, AgentDef>,
     pub channels: Option<ChannelsConfig>,
@@ -251,7 +248,6 @@ pub(super) fn load_shared_prompt_path() -> Option<String> {
 }
 
 /// Return the configured skills_root path (expanded).
-#[allow(dead_code)]
 pub(super) fn load_skills_root() -> Option<String> {
     let schema = load_org_schema()?;
     schema.skills_root.as_deref().map(expand_tilde)

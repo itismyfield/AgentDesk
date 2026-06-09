@@ -77,7 +77,6 @@ pub(in crate::services::discord::router) enum TextStopLookup {
     Stop(Arc<CancelToken>),
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::services::discord::router) fn lookup_text_stop_token(
     cancel_tokens: &std::collections::HashMap<serenity::ChannelId, Arc<CancelToken>>,
     channel_id: serenity::ChannelId,
@@ -89,7 +88,6 @@ pub(in crate::services::discord::router) fn lookup_text_stop_token(
     }
 }
 
-#[allow(dead_code)]
 pub(in crate::services::discord::router) async fn lookup_text_stop_token_mailbox(
     shared: &Arc<SharedData>,
     channel_id: serenity::ChannelId,

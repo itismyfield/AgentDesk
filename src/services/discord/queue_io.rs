@@ -1,6 +1,5 @@
 use super::*;
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn prune_interventions_at(queue: &mut Vec<Intervention>, now: Instant) {
     // #3177: no age-based eviction — only the overflow cap bounds the queue.
     let _ = now;
@@ -10,7 +9,6 @@ fn prune_interventions_at(queue: &mut Vec<Intervention>, now: Instant) {
     }
 }
 
-#[allow(dead_code)]
 pub(super) fn channel_has_pending_soft_queue(
     intervention_queue: &mut HashMap<ChannelId, Vec<Intervention>>,
     channel_id: ChannelId,
@@ -18,7 +16,6 @@ pub(super) fn channel_has_pending_soft_queue(
     channel_has_pending_soft_queue_at(intervention_queue, channel_id, Instant::now())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn channel_has_pending_soft_queue_at(
     intervention_queue: &mut HashMap<ChannelId, Vec<Intervention>>,
     channel_id: ChannelId,
@@ -39,7 +36,6 @@ pub(super) fn channel_has_pending_soft_queue_at(
     has_pending
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn watcher_should_kickoff_idle_queue(
     has_active_turn: bool,
     intervention_queue: &mut HashMap<ChannelId, Vec<Intervention>>,
@@ -53,7 +49,6 @@ pub(super) fn watcher_should_kickoff_idle_queue(
     )
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn watcher_should_kickoff_idle_queue_at(
     has_active_turn: bool,
     intervention_queue: &mut HashMap<ChannelId, Vec<Intervention>>,
@@ -87,7 +82,6 @@ const DEFERRED_IDLE_QUEUE_KICKOFF_RETRY_DELAY: std::time::Duration =
 // because cached ctx/token arrived slightly after the first post-turn kickoff.
 const DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS: usize = 150;
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn should_retry_deferred_idle_queue_kickoff(attempt: usize) -> bool {
     attempt < DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
 }
@@ -97,7 +91,6 @@ fn should_retry_deferred_idle_queue_kickoff(attempt: usize) -> bool {
 /// the first kickoff runs without the 2s `INITIAL_DELAY` guard; every other
 /// caller keeps the full delay to avoid spinning during the dcserver/gateway
 /// restart window.
-#[cfg_attr(not(test), allow(dead_code))]
 fn deferred_idle_queue_initial_presleep(immediate_once: bool) -> std::time::Duration {
     if immediate_once {
         std::time::Duration::ZERO

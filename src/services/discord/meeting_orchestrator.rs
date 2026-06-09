@@ -1511,7 +1511,6 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
 }
 
 /// Check if a channel name matches the configured meeting channel
-#[allow(dead_code)]
 pub(super) fn is_meeting_channel(channel_name: &str) -> bool {
     load_meeting_config()
         .map(|cfg| cfg.channel_name == channel_name)
