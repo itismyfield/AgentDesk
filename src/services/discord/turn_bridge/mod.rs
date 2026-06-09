@@ -10,6 +10,7 @@ mod stale_resume;
 mod terminal_delivery;
 mod tmux_runtime;
 mod turn_analytics;
+mod watcher_handoff;
 
 use super::gateway::TurnGateway;
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
@@ -1422,6 +1423,7 @@ use turn_analytics::{
     assert_response_sent_offset_progress, discord_turn_id, emit_turn_quality_event,
     record_turn_bridge_invariant, turn_duration_ms,
 };
+use watcher_handoff::{live_watcher_registered_for_relay, should_delegate_bridge_relay_to_watcher};
 
 use super::watcher_lifecycle_decision::should_resume_watcher_after_turn;
 use crate::db::session_status::{AWAITING_BG, IDLE, TURN_ACTIVE};
@@ -3144,54 +3146,6 @@ mod pre_submission_tui_prompt_error_tests {
     }
 }
 
-fn should_delegate_bridge_relay_to_watcher(
-    watcher_owns_assistant_relay: bool,
-    watcher_relay_available_for_turn: bool,
-    bridge_response_pending: bool,
-    cancelled: bool,
-    is_prompt_too_long: bool,
-    transport_error: bool,
-    recovery_retry: bool,
-) -> bool {
-    watcher_owns_assistant_relay
-        && watcher_relay_available_for_turn
-        && !bridge_response_pending
-        && !cancelled
-        && !is_prompt_too_long
-        && !transport_error
-        && !recovery_retry
-}
-
-/// #3268 (Defect B): should the bridge hand a still-busy long-lived turn back to
-/// the live watcher instead of finalizing it on the bridge side?
-///
-/// True ONLY when ALL hold: the TUI quiescence gate TIMED OUT (the pane is
-/// genuinely still producing output), the turn was NOT already being delegated
-/// to the watcher, this is NOT a terminal-error path (terminal errors still
-/// finalize on the bridge), and a LIVE watcher is registered for this turn's
-/// relay (so there is an authority to keep relaying + finalize on real idle).
-///
-/// Pure so the self-healing handoff CONDITION is unit-testable without driving
-/// the whole turn loop, mirroring `should_delegate_bridge_relay_to_watcher`.
-fn bridge_should_hand_off_busy_turn_to_watcher(
-    bridge_early_gate_timed_out: bool,
-    terminal_error_path: bool,
-    bridge_relay_delegated_to_watcher: bool,
-    live_watcher_registered: bool,
-) -> bool {
-    bridge_early_gate_timed_out
-        && !terminal_error_path
-        && !bridge_relay_delegated_to_watcher
-        && live_watcher_registered
-}
-
-fn live_watcher_registered_for_relay(shared: &SharedData, owner_channel_id: ChannelId) -> bool {
-    shared
-        .tmux_watchers
-        .get(&owner_channel_id)
-        .is_some_and(|watcher| !watcher.cancel.load(Ordering::Relaxed))
-}
-
 /// #3041 P1-2 (codex P1-a): resolve the AUTHORITATIVE owner channel a turn's
 /// tmux session belongs to, so the bridge's availability check AND its delivery
 /// lease acquire+advance key on the SAME channel the (possibly reused) watcher
@@ -3318,6 +3272,28 @@ mod bridge_owner_channel_resolution_tests {
 mod bridge_busy_turn_handoff_tests {
     use super::*;
     use output_lifecycle::{BridgeOutputOwner, classify_bridge_output_owner};
+    use watcher_handoff::{
+        bridge_should_hand_off_busy_turn_to_watcher, genuinely_live_watcher_for_relay,
+    };
+
+    // Build a watcher handle with controllable liveness for the #3268 FIX 1
+    // gate tests: `cancel` and the heartbeat age determine staleness.
+    fn watcher_handle_with_liveness(
+        tmux_session_name: &str,
+        cancel: bool,
+        heartbeat_ts_ms: i64,
+    ) -> TmuxWatcherHandle {
+        TmuxWatcherHandle {
+            tmux_session_name: tmux_session_name.to_string(),
+            output_path: format!("/tmp/{tmux_session_name}.jsonl"),
+            paused: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(cancel)),
+            pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(heartbeat_ts_ms)),
+        }
+    }
 
     // #3268 (Defect B) — the core regression. A NON-terminal turn whose early
     // TUI quiescence gate TIMED OUT (the pane is genuinely still busy on a
@@ -3401,6 +3377,96 @@ mod bridge_busy_turn_handoff_tests {
         assert!(
             !bridge_should_hand_off_busy_turn_to_watcher(true, false, false, false),
             "without a live watcher the bridge keeps finalize ownership"
+        );
+    }
+
+    // #3268 FIX 1 (codex blocker): the handoff liveness gate must reject a STALE
+    // watcher (heartbeat dead, not yet cancelled). Handing off to a stale handle
+    // re-strands the turn — the bridge suppresses its own finalize while the
+    // lingering handle has no real authority to finalize. A genuinely-live
+    // watcher (recent heartbeat, not cancelled) is the ONLY one that may pass.
+    #[test]
+    fn handoff_liveness_gate_rejects_stale_watcher() {
+        let registry = TmuxWatcherRegistry::new();
+        let tmux = "AgentDesk-claude-adk-cc-t1500000000000003268";
+        let channel = ChannelId::new(1_500_000_000_000_003_268);
+        // heartbeat_ts_ms = 1 → ancient → heartbeat_stale() == true, cancel=false.
+        registry.insert(channel, watcher_handle_with_liveness(tmux, false, 1));
+        assert!(
+            !genuinely_live_watcher_for_relay(&registry, channel),
+            "a heartbeat-stale watcher must NOT count as live for the handoff gate"
+        );
+        // The bridge therefore keeps finalize ownership (no handoff / no strand).
+        assert!(
+            !bridge_should_hand_off_busy_turn_to_watcher(
+                true,
+                false,
+                false,
+                genuinely_live_watcher_for_relay(&registry, channel),
+            ),
+            "a stale watcher on the timeout path must finalize on the bridge, not hand off"
+        );
+    }
+
+    // A cancelled handle (sweeper set cancel=true, cleanup deliberately keeps the
+    // handle) must also be rejected by the liveness gate.
+    #[test]
+    fn handoff_liveness_gate_rejects_cancelled_watcher() {
+        let registry = TmuxWatcherRegistry::new();
+        let tmux = "AgentDesk-claude-adk-cc-t1500000000000003269";
+        let channel = ChannelId::new(1_500_000_000_000_003_269);
+        registry.insert(
+            channel,
+            watcher_handle_with_liveness(
+                tmux,
+                true,
+                crate::services::discord::tmux_watcher_now_ms(),
+            ),
+        );
+        assert!(
+            !genuinely_live_watcher_for_relay(&registry, channel),
+            "a cancelled watcher must NOT count as live for the handoff gate"
+        );
+    }
+
+    // An absent handle (no live watcher at all) is rejected.
+    #[test]
+    fn handoff_liveness_gate_rejects_absent_watcher() {
+        let registry = TmuxWatcherRegistry::new();
+        let channel = ChannelId::new(1_500_000_000_000_003_270);
+        assert!(
+            !genuinely_live_watcher_for_relay(&registry, channel),
+            "an absent watcher must NOT count as live for the handoff gate"
+        );
+    }
+
+    // The positive case: a genuinely-live watcher (recent heartbeat, not
+    // cancelled) DOES pass the liveness gate, so the timeout path hands off.
+    #[test]
+    fn handoff_liveness_gate_accepts_genuinely_live_watcher() {
+        let registry = TmuxWatcherRegistry::new();
+        let tmux = "AgentDesk-claude-adk-cc-t1500000000000003271";
+        let channel = ChannelId::new(1_500_000_000_000_003_271);
+        registry.insert(
+            channel,
+            watcher_handle_with_liveness(
+                tmux,
+                false,
+                crate::services::discord::tmux_watcher_now_ms(),
+            ),
+        );
+        assert!(
+            genuinely_live_watcher_for_relay(&registry, channel),
+            "a present, non-cancelled, fresh-heartbeat watcher is genuinely live"
+        );
+        assert!(
+            bridge_should_hand_off_busy_turn_to_watcher(
+                true,
+                false,
+                false,
+                genuinely_live_watcher_for_relay(&registry, channel),
+            ),
+            "a genuinely-live watcher on the timeout path must hand off as before"
         );
     }
 }
@@ -6988,9 +7054,7 @@ pub(super) fn spawn_turn_bridge(
                 && watcher_owns_assistant_relay
                 && watcher_relay_available_for_turn
                 && !terminal_error_path;
-        // #3268: `mut` so a post-gate self-healing handoff (below) can flip this
-        // true when the bridge would otherwise finalize a still-busy long-lived
-        // turn on a TUI quiescence timeout while a live watcher is available.
+        // #3268: `mut` so the post-gate self-healing handoff (below) can promote it.
         let mut bridge_relay_delegated_to_watcher = recovered_watcher_owns_output
             || should_delegate_bridge_relay_to_watcher(
                 watcher_owns_assistant_relay,
@@ -7003,10 +7067,8 @@ pub(super) fn spawn_turn_bridge(
                 transport_error,
                 recovery_retry,
             );
-        // #3268: `mut` so the post-gate self-healing handoff can promote this to
-        // `WatcherRelay` once the gate confirms the pane is still busy, routing
-        // the rest of the turn through the existing watcher-delegation branches
-        // instead of the bridge-owned delivery/finalize branch.
+        // #3268: `mut` so the post-gate self-healing handoff can promote it to
+        // `WatcherRelay` once the gate confirms the pane is still busy.
         let mut bridge_output_owner = classify_bridge_output_owner(
             standby_relay_owns_output
                 && !cancelled
@@ -7054,10 +7116,8 @@ pub(super) fn spawn_turn_bridge(
         // dispatch followups / auto-queue slot release race ahead of the final
         // message edit, so an archived/deleted thread could strand the turn
         // while the queue already advanced.
-        // #3268: `mut` so the post-gate self-healing handoff can clear this — a
-        // handed-off turn is NOT done on the bridge side; the watcher (or the
-        // far-backstop) completes the work dispatch when the pane goes idle,
-        // matching the normal `bridge_output_owner == Some(WatcherRelay)` case.
+        // #3268: `mut` so the post-gate self-healing handoff can clear it — a
+        // handed-off turn is NOT done on the bridge side.
         let mut should_complete_work_dispatch_after_delivery = !cancelled
             && !is_prompt_too_long
             && !transport_error
@@ -7159,94 +7219,22 @@ pub(super) fn spawn_turn_bridge(
                 Some(super::tmux::TuiCompletionGateOutcome::TimedOut)
             );
         }
-        // #3268 (Defect B): self-healing watcher handoff on a TUI quiescence
-        // timeout. When the bridge was about to take the bridge-owned finalize
-        // path (`bridge_relay_delegated_to_watcher == false`) for a NON-terminal
-        // turn, but the early gate timed out because the pane is GENUINELY still
-        // busy (a long-lived continuous session) AND a live watcher is registered
-        // for this turn's relay, finalizing here would strand the turn:
-        // `submit_terminal(Complete)` cleans up inflight, the watcher then sees
-        // the turn as bridge-delivered and SUPPRESSES the still-producing output
-        // (relay permanently stops). Instead, hand the turn back to the watcher,
-        // which already finalizes on real idle (or the finalizer's watcher
-        // far-backstop reconcile does, after a liveness re-check). This reuses
-        // the EXISTING watcher-delegation machinery rather than inventing a new
-        // path: we register the watcher in the single-authority finalizer ledger
-        // (which the delegation finalize branch below verifies via
-        // `has_live_watcher_pending`, and which arms the never-finalize
-        // far-backstop), unpause the watcher at the bridge's confirmed offset,
-        // and promote the relay-ownership variables so every downstream branch
-        // (delivery skip at `bridge_output_owner == Some(WatcherRelay)`, the
-        // delegated finalize branch, `bridge_epilogue_marks_watcher_delivered`
-        // returning false so the watcher is NOT marked delivered, and the
-        // dispatch-completion deferral) behaves identically to a turn the watcher
-        // owned from the start. Terminal-error paths (cancelled / prompt_too_long
-        // / transport_error / recovery_retry) are excluded by `terminal_error_path`
-        // and still finalize on the bridge as before.
+        // #3268 (Defect B): on (gate timeout + non-terminal + genuinely-live
+        // watcher) hand the busy turn back to the watcher — see `watcher_handoff`.
         #[cfg(unix)]
-        if bridge_should_hand_off_busy_turn_to_watcher(
+        watcher_handoff::maybe_hand_off_busy_turn_to_watcher(
+            &shared_owned,
             bridge_early_gate_timed_out,
             terminal_error_path,
-            bridge_relay_delegated_to_watcher,
-            live_watcher_registered_for_relay(shared_owned.as_ref(), watcher_owner_channel_id),
-        ) && let Some(watcher) = shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
-        {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                provider = %provider.as_str(),
-                channel = channel_id.get(),
-                watcher_owner_channel = watcher_owner_channel_id.get(),
-                "  [{ts}] 👁 #3268: TUI still busy on quiescence timeout — bridge handing long-lived turn back to live watcher instead of finalizing (relay continues)"
-            );
-            // Persist watcher ownership so a later recovery rehydrates with the
-            // correct relay owner (mirrors the watcher-unpause sites).
-            inflight_state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
-            let _ = save_inflight_state(&inflight_state);
-            // Register the turn as watcher-owned in the single-authority ledger
-            // BEFORE unpausing, exactly like the ~4186 unpause site: this is the
-            // modern replacement for the legacy `mailbox_finalize_owed` publish
-            // (phase-5b2). It (a) makes the delegated finalize branch's
-            // `has_live_watcher_pending` query below TRUE so the bridge does NOT
-            // submit a terminal, and (b) arms the watcher far-backstop so a turn
-            // whose watcher never submits its own terminal is still GUARANTEED to
-            // finalize (after a liveness re-check that never over-finalizes a
-            // still-busy turn). Keyed on the SAME channel_id + current_generation
-            // the finalize-branch query uses.
-            shared_owned.turn_finalizer.register_start(
-                super::turn_finalizer::TurnKey::new(
-                    channel_id,
-                    inflight_state.user_msg_id,
-                    shared_owned.current_generation,
-                ),
-                provider.clone(),
-                super::inflight::RelayOwnerKind::Watcher,
-                &shared_owned,
-            );
-            // Resume the watcher from the bridge's confirmed offset and clear the
-            // delivered flag so it relays the still-producing output (NOT marked
-            // delivered → no suppression). The bridge owned relay for this turn,
-            // so the watcher is paused; unpause it now. This is the same
-            // resume_offset + turn_delivered + unpause sequence as the ~8783 /
-            // ~4170 sites, performed here because the `!bridge_relay_delegated_to_watcher`
-            // resume gate below would otherwise (correctly, for genuine
-            // delegations) skip it once we promote the flag.
-            if let Some(offset) = tmux_last_offset
-                && let Ok(mut guard) = watcher.resume_offset.lock()
-            {
-                *guard = Some(offset);
-            }
-            watcher
-                .turn_delivered
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-            watcher
-                .paused
-                .store(false, std::sync::atomic::Ordering::Release);
-            // Promote the relay-ownership variables so the rest of the turn flows
-            // through the existing watcher-delegation branches.
-            bridge_relay_delegated_to_watcher = true;
-            bridge_output_owner = Some(output_lifecycle::BridgeOutputOwner::WatcherRelay);
-            should_complete_work_dispatch_after_delivery = false;
-        }
+            watcher_owner_channel_id,
+            channel_id,
+            &provider,
+            tmux_last_offset,
+            &mut inflight_state,
+            &mut bridge_relay_delegated_to_watcher,
+            &mut bridge_output_owner,
+            &mut should_complete_work_dispatch_after_delivery,
+        );
         let has_queued_turns = if bridge_relay_delegated_to_watcher {
             // #1452 (Codex P1): the actual `mailbox_finalize_owed.store(true,
             // Release)` happens EARLIER, at the watcher-unpause site in the
