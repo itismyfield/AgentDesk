@@ -32,11 +32,31 @@ pub struct Config {
 }
 
 impl Config {
-    /// Default config for production: the current workspace's parent directory
-    /// (so `target/` resolves correctly under cargo-run).
+    /// Default config for production: the managed workspace repo
+    /// (`~/.adk/release/workspaces/agentdesk`), whose `target/` is the
+    /// build-cache that accumulates and triggered the #3231 disk-full incident.
+    ///
+    /// In the release runtime the process cwd is `AGENTDESK_ROOT_DIR`
+    /// (`~/.adk/release`) and `CARGO_MANIFEST_DIR` is unset, so the old
+    /// `CARGO_MANIFEST_DIR`→`"."` fallback resolved `~/.adk/release/target`
+    /// (wrong/absent) and the sweep silently no-op'd. Resolve via the runtime
+    /// root when available; fall back to `CARGO_MANIFEST_DIR` (dev checkouts)
+    /// then `"."`.
     pub fn default_runtime() -> Self {
+        // Order matters: `CARGO_MANIFEST_DIR` is set by cargo during dev/test runs
+        // (resolving the actual checkout) but is UNSET in the deployed release
+        // binary, so it cleanly distinguishes dev from prod. In prod we fall
+        // through to the runtime root (`agentdesk_runtime_root()` →
+        // `config::runtime_root()`, which yields `$AGENTDESK_ROOT_DIR` or
+        // `$HOME/.adk/release`) and target the managed repo
+        // `~/.adk/release/workspaces/agentdesk`. Final `"."` guards the rare case
+        // where neither resolves. (Putting runtime_root first would shadow the
+        // dev checkout because runtime_root always returns Some.)
         let workspace_root = std::env::var_os("CARGO_MANIFEST_DIR")
             .map(PathBuf::from)
+            .or_else(|| {
+                crate::cli::agentdesk_runtime_root().map(|root| root.join("workspaces/agentdesk"))
+            })
             .unwrap_or_else(|| PathBuf::from("."));
         Self {
             workspace_root,
