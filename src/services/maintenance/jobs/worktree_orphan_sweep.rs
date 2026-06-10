@@ -26,6 +26,15 @@
 //! and mainline-unmerged trees). A far age backstop catches cancel-leaks (a
 //! cancelled dispatch whose worktree was never terminal-cleaned).
 //!
+//! **Name-prefix infra protection (#3276)**: BOTH passes share a hard
+//! name-prefix guard inside [`should_sweep_worktree`]: a directory whose NAME
+//! starts with `release-` (e.g. the reusable `release-main-deploy-*` deploy
+//! worktree that `scripts/deploy-release.sh` runs from) is deployment
+//! infrastructure, not a runtime session worktree — it is never a dispatch
+//! cwd, never a resumable session cwd, and never a live AgentDesk tmux pane,
+//! so every ownership keep-set source misses it by construction. It is KEPT
+//! unconditionally, before any owner check.
+//!
 //! For each orphan:
 //!   1. Attempt `git worktree remove --force <path>` (from the parent repo).
 //!      This is a no-op if the dir isn't actually a registered worktree.
@@ -621,6 +630,38 @@ const MANAGED_CANCEL_LEAK_BACKSTOP: std::time::Duration =
 const MANAGED_FRESH_PROVISION_MIN_AGE: std::time::Duration =
     std::time::Duration::from_secs(60 * 30); // 30m
 
+/// #3276: infrastructure worktree NAME prefixes protected from the sweep in
+/// BOTH passes, regardless of any owner signal. The release deploy worktree
+/// (`release-main-deploy-<ts>`, the cwd `scripts/deploy-release.sh` reuses
+/// across deploys) is created once by an operator and is never a dispatch cwd,
+/// never a resumable session cwd, and never a live AgentDesk tmux pane — so
+/// every ownership keep-set source misses it by construction and an
+/// owner-based decision would always (wrongly) select it. Deleting it breaks
+/// the next deploy, hence the unconditional name guard.
+///
+/// `release-` (broader than the exact `release-main-deploy` form, per the
+/// issue's recommendation) is safe to protect wholesale WITHOUT pinning real
+/// orphans forever: the runtime NEVER creates `release-*` names — flat-root
+/// worktrees are `{provider}-…` (`claude-…` / `codex-adk-cdx…` / `wt-…`, see
+/// [`is_runtime_named_worktree`]) and managed worktrees are `issue-<n>-<ts>` /
+/// `automation-<card>-iter-<n>` (`crate::services::git::worktree_resolver`) —
+/// so no genuine runtime orphan can ever hide behind this prefix.
+const PROTECTED_INFRA_NAME_PREFIXES: &[&str] = &["release-"];
+
+/// #3276: true when `dir`'s NAME (the final path segment only — the scan root
+/// itself lives under `~/.adk/release/`, so matching the full path would
+/// protect everything) starts with a protected infrastructure prefix.
+/// Case-insensitive, mirroring [`is_runtime_named_worktree`].
+pub(crate) fn is_protected_infra_worktree(dir: &Path) -> bool {
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    PROTECTED_INFRA_NAME_PREFIXES
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+}
+
 /// #3231 (A): true when the worktree dir name matches the runtime per-channel
 /// naming the AgentDesk runtime actually creates — `{provider}-…` flat-root dirs
 /// (`create_git_worktree`: `claude-…` / `codex-…`, branch `wt/<provider>-…`).
@@ -727,6 +768,9 @@ pub(crate) fn is_dir_active(dir: &Path, active_cwds: &HashSet<String>) -> bool {
 /// #3216 (gap 3): the pure sweep decision for a single managed worktree dir.
 ///
 /// A worktree is swept ONLY when ALL of the following hold:
+///   * its NAME does not carry a protected infrastructure prefix (`release-`,
+///     #3276) — deploy worktrees are owned by NO keep-set source, so they must
+///     be excluded by name BEFORE any owner-based reasoning; AND
 ///   * the tmux query SUCCEEDED (`live_tmux_paths` is `Some`). When it FAILED
 ///     (`None`, #3216 P0-1) we cannot prove the worktree has no live owner, so
 ///     we fail-closed and KEEP everything; AND
@@ -745,6 +789,18 @@ pub(crate) fn should_sweep_worktree(
     kept_cwds: &HashSet<String>,
     live_tmux_paths: Option<&HashSet<String>>,
 ) -> bool {
+    // #3276: infrastructure worktrees (release deploy trees) are protected by
+    // NAME, unconditionally — no keep-set source can ever own them, so any
+    // owner-based decision below would always (wrongly) select them.
+    if is_protected_infra_worktree(dir) {
+        tracing::info!(
+            target: "maintenance",
+            job = "storage.worktree_orphan_sweep",
+            path = %dir.display(),
+            "protected infrastructure worktree (name prefix 'release-') — kept regardless of owner (#3276)"
+        );
+        return false;
+    }
     // Fail-closed: a failed tmux query proves nothing about live ownership.
     let Some(live_tmux_paths) = live_tmux_paths else {
         return false;
@@ -1171,6 +1227,97 @@ mod phantom_sweep_decision_tests {
         let sessions = vec!["AgentDesk-claude-adk-cc".to_string()];
         let result = fold_pane_paths(sessions, |_| Some(String::new()));
         assert!(result.is_none(), "empty pane path must fail-closed");
+    }
+}
+
+#[cfg(test)]
+mod deploy_worktree_protection_tests {
+    //! #3276: the release deploy worktree (`release-main-deploy-*`) under the
+    //! flat scan root is deployment infrastructure — never a dispatch cwd,
+    //! never a resumable session cwd, never a live AgentDesk tmux pane — so
+    //! EVERY owner-based KEEP condition misses it by construction. The
+    //! name-prefix guard in `should_sweep_worktree` must keep it
+    //! unconditionally, in BOTH the flat-root and managed-root passes, while
+    //! non-protected names keep the existing sweep behavior.
+    use super::{is_protected_infra_worktree, should_sweep_worktree};
+    use std::collections::HashSet;
+    use std::path::Path;
+
+    const DEPLOY: &str = "/home/u/.adk/release/worktrees/release-main-deploy-20260530";
+    const PHANTOM: &str = "/home/u/.adk/release/worktrees/claude-adk-cc-20260607-212437";
+
+    /// The exact #3276 failure mode: tmux query SUCCEEDED with zero panes and
+    /// the DB keep-set is empty — every KEEP condition misses, yet the deploy
+    /// worktree must never be swept.
+    #[test]
+    fn deploy_worktree_is_never_swept_when_all_keep_conditions_miss() {
+        let kept: HashSet<String> = HashSet::new();
+        let live: HashSet<String> = HashSet::new(); // tmux up, zero AgentDesk panes
+        assert!(
+            !should_sweep_worktree(Path::new(DEPLOY), &kept, Some(&live)),
+            "the release deploy worktree must survive even with no owner in any keep-set"
+        );
+    }
+
+    /// A populated keep-set / live-pane set that points elsewhere changes
+    /// nothing — the protection is independent of every owner signal.
+    #[test]
+    fn deploy_worktree_is_kept_with_unrelated_keepset_and_panes() {
+        let mut kept: HashSet<String> = HashSet::new();
+        kept.insert(PHANTOM.to_string());
+        let mut live: HashSet<String> = HashSet::new();
+        live.insert(PHANTOM.to_string());
+        assert!(!should_sweep_worktree(
+            Path::new(DEPLOY),
+            &kept,
+            Some(&live)
+        ));
+    }
+
+    /// The managed-root pass (`sweep_managed_root`) reuses the same
+    /// `should_sweep_worktree` — a `release-*` name one level deeper
+    /// (`worktrees/<repo>/release-…`) is protected there too.
+    #[test]
+    fn deploy_worktree_under_managed_root_is_protected_too() {
+        let nested = "/home/u/.adk/release/worktrees/agentdesk/release-main-deploy-20260530";
+        let kept: HashSet<String> = HashSet::new();
+        let live: HashSet<String> = HashSet::new();
+        assert!(!should_sweep_worktree(
+            Path::new(nested),
+            &kept,
+            Some(&live)
+        ));
+    }
+
+    /// Protection matches on the directory NAME only — the scan root itself
+    /// lives under `~/.adk/release/`, so a full-path match would protect
+    /// everything. A non-protected runtime-named orphan with no owner keeps
+    /// the existing sweep behavior (it IS swept).
+    #[test]
+    fn non_protected_names_keep_existing_sweep_behavior() {
+        let kept: HashSet<String> = HashSet::new();
+        let live: HashSet<String> = HashSet::new();
+        assert!(
+            should_sweep_worktree(Path::new(PHANTOM), &kept, Some(&live)),
+            "an unowned runtime-named worktree must remain a sweep candidate"
+        );
+    }
+
+    /// Predicate basics: prefix match on the dir NAME, case-insensitive
+    /// (mirroring `is_runtime_named_worktree`); names merely CONTAINING
+    /// `release` (or with it mid-name) are not protected.
+    #[test]
+    fn protected_infra_name_predicate() {
+        assert!(is_protected_infra_worktree(Path::new(DEPLOY)));
+        assert!(is_protected_infra_worktree(Path::new(
+            "/x/Release-Main-Deploy-20260530"
+        )));
+        assert!(is_protected_infra_worktree(Path::new("/x/release-2026")));
+        assert!(!is_protected_infra_worktree(Path::new(PHANTOM)));
+        assert!(!is_protected_infra_worktree(Path::new(
+            "/x/pre-release-main-deploy"
+        )));
+        assert!(!is_protected_infra_worktree(Path::new("/x/main")));
     }
 }
 
