@@ -143,19 +143,21 @@ module.exports = function attachLongTurnMonitor(timeouts, helpers) {
           );
           agentdesk.log.warn("[long-turn] " + (inf.channel_name || inf.channel_id) + " — " + Math.round(elapsedMin) + "min (" + currentThreshold + "min threshold)");
         }
+        // Pre-compute active inflight keys for O(1) lookups
+        var activeInflightSet = {};
+        for (var si = 0; si < inflights.length; si++) {
+          if (inflights[si].provider && inflights[si].channel_id) {
+            activeInflightSet[inflights[si].provider + ":" + inflights[si].channel_id] = true;
+          }
+        }
+
         // Clean up tier keys for inflights that no longer exist
         var tierKeys = agentdesk.db.query("SELECT key FROM kv_meta WHERE key LIKE 'long_turn_tier:%'");
         for (var tk = 0; tk < tierKeys.length; tk++) {
           var parts = tierKeys[tk].key.split(":");
           var tkProvider = parts[1];
           var tkChannel = parts[2];
-          var stillActive = false;
-          for (var si = 0; si < inflights.length; si++) {
-            if (inflights[si].provider === tkProvider && inflights[si].channel_id === tkChannel) {
-              stillActive = true; break;
-            }
-          }
-          if (!stillActive) {
+          if (!activeInflightSet[tkProvider + ":" + tkChannel]) {
             agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [tierKeys[tk].key]);
           }
         }
@@ -169,13 +171,7 @@ module.exports = function attachLongTurnMonitor(timeouts, helpers) {
           var eParts = extensionKeys[ek].key.split(":");
           var eProvider = eParts[1];
           var eChannel = eParts[2];
-          var extensionStillActive = false;
-          for (var ei = 0; ei < inflights.length; ei++) {
-            if (inflights[ei].provider === eProvider && inflights[ei].channel_id === eChannel) {
-              extensionStillActive = true; break;
-            }
-          }
-          if (!extensionStillActive) {
+          if (!activeInflightSet[eProvider + ":" + eChannel]) {
             agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [extensionKeys[ek].key]);
           }
         }
