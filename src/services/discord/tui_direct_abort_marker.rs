@@ -17,17 +17,25 @@
 //!
 //! 1. **Terminal-commit drain** ([`drain_on_terminal_commit`]) — the tmux
 //!    watcher's terminal chokepoint calls this on every body-visible normal
-//!    commit; a commit on the SAME `(provider, tmux, channel)` strictly AFTER
-//!    the abort means the prior owner covered the input → `⏳ → ✅`, marker
-//!    drained. Deliberately NOT TTL-bounded (verify r1): the sweep defers to
-//!    a live same-session inflight indefinitely, so a foreign turn streaming
-//!    past the TTL must still have its eventual commit accepted — a TTL bound
-//!    here turned exactly that case into a false `⚠` on an answered anchor.
+//!    commit, passing the identity of the turn that just committed. A marker
+//!    is covered ONLY by a commit whose turn identity MATCHES the foreign
+//!    prior inflight the ABORT recorded (`foreign_user_msg_id` +
+//!    `foreign_started_at` — codex r1: positive correlation; the bare
+//!    same-`(provider, tmux, channel)` + strictly-after-abort wall-clock test
+//!    let a prior-owner commit racing the marker write, a recreated same-name
+//!    tmux session, or a dropped-input prior turn falsely `✅` an unanswered
+//!    anchor). Covering commits are deliberately NOT TTL-bounded (verify r1):
+//!    the sweep defers to a live same-session inflight, so a foreign turn
+//!    streaming past the TTL must still have its eventual commit accepted.
 //! 2. **TTL sweep** ([`sweep_expired`]) — the placeholder sweeper's pass: once
 //!    [`ABORT_MARKER_TTL`] elapsed with NO live inflight for the session (a
-//!    long turn still streaming holds the verdict), nothing ever covered the
-//!    anchor → `⏳ → ⚠`, so a genuine failure is still surfaced in bounded
-//!    time (no #3282 eternal-hourglass regression: the sweeper is the owner).
+//!    long turn still streaming holds the verdict; a NAME-LESS inflight holds
+//!    only when it IS the recorded foreign turn — codex r1 finding 2), nothing
+//!    ever covered the anchor → `⏳ → ⚠`, so a genuine failure is still
+//!    surfaced in bounded time (no #3282 eternal-hourglass regression). The
+//!    inflight hold itself is bounded by the absolute
+//!    [`ABORT_MARKER_HARD_CAP_TTL_MULTIPLIER`] cap, so a stale/recreated
+//!    same-channel inflight can never orphan a `⏳` forever.
 //!
 //! The two reconcilers are mutually excluded per marker by a non-blocking
 //! sidecar flock claim ([`try_claim_marker`], the `inflight.rs` sidecar-lock
@@ -66,6 +74,16 @@ use super::SharedData;
 /// `✅` cover is not TTL-bounded (see [`terminal_commit_covers_marker`]).
 pub(super) const ABORT_MARKER_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// Absolute bound on the sweep's live-inflight hold (codex r1 finding 2):
+/// once `aborted_at + TTL × THIS` (6 × 600s = 1 hour) elapses, an UNCOVERED
+/// marker takes the `⚠` fallback regardless of any live inflight. Without it,
+/// back-to-back turns, a recreated same-name tmux session, or a stale
+/// same-channel row could renew the hold forever and orphan the `⏳`.
+/// Documented trade-off: a genuinely-covering prior turn that streams for
+/// over an hour past the abort without committing loses its hold — accepted,
+/// since bounded convergence is the sweeper's contract (#3282).
+pub(super) const ABORT_MARKER_HARD_CAP_TTL_MULTIPLIER: u64 = 6;
+
 /// Durable record for an anchor whose synthetic turn-start ABORTed while the
 /// input was already provider-submitted. All fields are primitives so the JSON
 /// survives a dcserver version swap.
@@ -80,9 +98,21 @@ pub(super) struct AbortedAnchorMarker {
     pub aborted_at_ms: u64,
     /// Stamped when a covering terminal commit was seen but the `✅` delivery
     /// failed (or http was unavailable) — the sweep retries the completion
-    /// instead of ever degrading a covered anchor to `⚠` (I6).
+    /// instead of ever degrading a covered anchor to `⚠` (I6). Also stamped at
+    /// RECORD time when the foreign prior inflight is already gone (see
+    /// [`AbortedAnchorMarker::for_abort`]).
     #[serde(default)]
     pub covered_at_ms: Option<u64>,
+    /// Identity of the live FOREIGN prior inflight at the ABORT instant
+    /// (codex r1: positive correlation — `inflight.rs` `InflightTurnIdentity`
+    /// convention). The drain covers this marker ONLY on a terminal commit
+    /// whose turn identity matches BOTH fields. `None` on legacy (pre-r1)
+    /// markers: those are never drain-covered — the sweep alone resolves them
+    /// within its TTL/hard-cap bound.
+    #[serde(default)]
+    pub foreign_user_msg_id: Option<u64>,
+    #[serde(default)]
+    pub foreign_started_at: Option<String>,
 }
 
 impl AbortedAnchorMarker {
@@ -91,6 +121,51 @@ impl AbortedAnchorMarker {
             "{}_{}_{}",
             self.provider, self.channel_id, self.anchor_message_id
         )
+    }
+
+    /// Build the marker the ABORT path records. `foreign` is the live foreign
+    /// prior inflight's `(user_msg_id, started_at)` loaded AT the record
+    /// instant: when present, it is pinned so only THAT turn's commit covers.
+    /// When the row is ALREADY gone, the prior owner terminal-committed inside
+    /// the µs gap since the final backstop view read (which saw it LIVE) — its
+    /// drain chokepoint may have run before this marker existed, so the marker
+    /// is recorded PRE-COVERED (the anchor's input was provider-submitted long
+    /// before that commit; the sweep delivers the `✅`). The pair cannot alias
+    /// another turn: one inflight row exists per `(provider, channel)` and a
+    /// successor row starts ≥ the 32s backstop budget after `started_at`
+    /// (1-second resolution), so equality identifies the foreign turn.
+    pub(super) fn for_abort(
+        provider: String,
+        channel_id: u64,
+        anchor_message_id: u64,
+        tmux_session_name: String,
+        aborted_at_ms: u64,
+        foreign: Option<(u64, String)>,
+    ) -> Self {
+        let covered_at_ms = foreign.is_none().then_some(aborted_at_ms);
+        let (foreign_user_msg_id, foreign_started_at) = match foreign {
+            Some((user_msg_id, started_at)) => (Some(user_msg_id), Some(started_at)),
+            None => (None, None),
+        };
+        Self {
+            provider,
+            channel_id,
+            anchor_message_id,
+            tmux_session_name,
+            aborted_at_ms,
+            covered_at_ms,
+            foreign_user_msg_id,
+            foreign_started_at,
+        }
+    }
+
+    /// `true` iff this marker carries a recorded foreign identity AND it
+    /// equals the given turn identity (codex r1: the positive-correlation
+    /// test shared by the drain cover and the sweep's name-less-inflight
+    /// hold). Identity-absent markers match nothing.
+    pub(super) fn matches_foreign_identity(&self, user_msg_id: u64, started_at: &str) -> bool {
+        self.foreign_user_msg_id == Some(user_msg_id)
+            && self.foreign_started_at.as_deref() == Some(started_at)
     }
 }
 
@@ -289,7 +364,10 @@ pub(super) enum MarkerDisposition {
 /// The sweep's per-marker verdict. Conservative by design (I10): `⚠` requires
 /// BOTH the TTL to have elapsed AND no live inflight for the session, so a
 /// long-running prior turn is never falsely branded; `✅` retry requires a
-/// previously-seen covering commit.
+/// previously-seen covering commit. The live-inflight hold is absolutely
+/// bounded by [`ABORT_MARKER_HARD_CAP_TTL_MULTIPLIER`] (codex r1 finding 2) so
+/// no inflight churn can orphan the `⏳` forever — this hard cap is also the
+/// sole terminator for identity-ABSENT markers, which the drain never covers.
 pub(super) fn decide_marker_disposition(
     now_ms: u64,
     marker: &AbortedAnchorMarker,
@@ -303,26 +381,59 @@ pub(super) fn decide_marker_disposition(
     if marker.covered_at_ms.is_some() {
         return MarkerDisposition::DeliverCompletion;
     }
-    let ttl_elapsed = now_ms.saturating_sub(marker.aborted_at_ms) >= ttl.as_millis() as u64;
-    if !ttl_elapsed || live_inflight_for_session {
+    let elapsed_ms = now_ms.saturating_sub(marker.aborted_at_ms);
+    let ttl_ms = ttl.as_millis() as u64;
+    if elapsed_ms >= ttl_ms.saturating_mul(ABORT_MARKER_HARD_CAP_TTL_MULTIPLIER) {
+        return MarkerDisposition::DeliverFailureWarn;
+    }
+    if elapsed_ms < ttl_ms || live_inflight_for_session {
         return MarkerDisposition::KeepWaiting;
     }
     MarkerDisposition::DeliverFailureWarn
 }
 
-/// Does a terminal commit observed at `now_ms` cover this marker? Only a commit
-/// STRICTLY AFTER the abort counts (a pre-abort commit belongs to an older
-/// turn). Deliberately NO TTL upper bound (verify r1, I10: covering commit
-/// time > aborted_at is the design condition): the sweep defers to a live
-/// same-session inflight indefinitely, so a foreign turn streaming past the
-/// TTL must still have its eventual commit accepted — a TTL bound here
-/// re-created the false `⚠`-on-answered-anchor symptom this module fixes.
-/// The recycled-session `✅` mis-fire the bound targeted (SC2/R3) stays
-/// narrow without it: a marker only outlives the TTL while the sweep is
-/// deferring, i.e. while a live same-`(provider, tmux, channel)` inflight —
-/// the covering prior owner — exists; otherwise the sweep already resolved it.
-pub(super) fn terminal_commit_covers_marker(now_ms: u64, marker: &AbortedAnchorMarker) -> bool {
-    marker.anchor_message_id != 0 && now_ms > marker.aborted_at_ms
+/// Does a terminal commit by the turn identified by `(committed_user_msg_id,
+/// committed_started_at)` cover this marker? Codex r1: POSITIVE correlation
+/// required — the committed turn must BE the foreign prior inflight recorded
+/// at ABORT time. The old condition (any same-`(provider,tmux,channel)`
+/// commit with `now_ms > aborted_at_ms`) let three impostors through: a
+/// prior-owner commit racing the marker write, a later turn in a re-created
+/// same-name tmux session, and an ordinary prior commit whose queued input
+/// was dropped — each a false `✅` on a possibly-unanswered anchor. The
+/// strictly-after-abort wall-clock test is retained as a SUBSIDIARY guard
+/// only. Identity-absent (legacy) markers never cover here — the sweep's
+/// TTL/hard-cap bound is their sole terminator. Deliberately NO TTL upper
+/// bound (verify r1): the sweep defers to a live same-session inflight, so a
+/// foreign turn streaming past the TTL must still have its eventual commit
+/// accepted — a TTL bound here re-created the false-`⚠`-on-answered symptom.
+pub(super) fn terminal_commit_covers_marker(
+    now_ms: u64,
+    marker: &AbortedAnchorMarker,
+    committed_user_msg_id: u64,
+    committed_started_at: &str,
+) -> bool {
+    marker.anchor_message_id != 0
+        && now_ms > marker.aborted_at_ms
+        && marker.matches_foreign_identity(committed_user_msg_id, committed_started_at)
+}
+
+/// Does a live same-channel inflight defer the sweep's `⚠` fallback for this
+/// marker? A NAME-BEARING row defers on a tmux-session-name match (the
+/// long-prior-turn hold). A NAME-LESS row defers ONLY when it IS the recorded
+/// foreign prior turn (codex r1 finding 2: the old `is_none_or(..)` treated
+/// EVERY name-less same-channel row as "could be the prior owner", letting an
+/// unrelated/stale inflight hold the marker; the hold is now positive-match
+/// only, and even a matching hold is bounded by the hard cap upstream).
+pub(super) fn inflight_defers_sweep(
+    marker: &AbortedAnchorMarker,
+    inflight_tmux_session_name: Option<&str>,
+    inflight_user_msg_id: u64,
+    inflight_started_at: &str,
+) -> bool {
+    match inflight_tmux_session_name {
+        Some(name) => name == marker.tmux_session_name,
+        None => marker.matches_foreign_identity(inflight_user_msg_id, inflight_started_at),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -443,13 +554,16 @@ fn now_ms() -> u64 {
 }
 
 /// Watcher terminal-commit chokepoint: a body-visible normal commit for
-/// `(provider, tmux, channel)` covers every matching marker → `⏳ → ✅`.
-/// Returns the number of markers fully drained.
+/// `(provider, tmux, channel)` covers every marker whose recorded foreign
+/// identity matches the COMMITTED turn (`committed_user_msg_id` +
+/// `committed_started_at` — codex r1) → `⏳ → ✅`. Returns markers drained.
 pub(super) async fn drain_on_terminal_commit(
     shared: &Arc<SharedData>,
     provider: &str,
     tmux_session_name: &str,
     channel_id: u64,
+    committed_user_msg_id: u64,
+    committed_started_at: &str,
 ) -> usize {
     let applier = shared_reaction_applier(shared.clone());
     drain_on_terminal_commit_with_applier(
@@ -457,6 +571,8 @@ pub(super) async fn drain_on_terminal_commit(
         tmux_session_name,
         channel_id,
         now_ms(),
+        committed_user_msg_id,
+        committed_started_at,
         &applier,
     )
     .await
@@ -467,6 +583,8 @@ pub(super) async fn drain_on_terminal_commit_with_applier(
     tmux_session_name: &str,
     channel_id: u64,
     now_ms: u64,
+    committed_user_msg_id: u64,
+    committed_started_at: &str,
     applier: &ReactionApplierFn,
 ) -> usize {
     let mut drained = 0usize;
@@ -482,7 +600,12 @@ pub(super) async fn drain_on_terminal_commit_with_applier(
         let Some(mut marker) = reload(&marker) else {
             continue; // resolved while unclaimed
         };
-        if !terminal_commit_covers_marker(now_ms, &marker) {
+        if !terminal_commit_covers_marker(
+            now_ms,
+            &marker,
+            committed_user_msg_id,
+            committed_started_at,
+        ) {
             continue;
         }
         match applier(&marker, ReactionOp::Complete).await {
@@ -535,7 +658,8 @@ pub(super) async fn drain_on_terminal_commit_with_applier(
 
 /// Placeholder-sweeper pass: retry `✅` for covered markers; apply the TTL'd
 /// `⏳ → ⚠` fallback for anchors no commit ever covered (held while a live
-/// inflight for the session may still cover them). Returns markers resolved.
+/// inflight may still cover them — see [`inflight_defers_sweep`] — up to the
+/// absolute hard cap). Returns markers resolved.
 pub(super) async fn sweep_expired(
     shared: &Arc<SharedData>,
     provider: &super::ProviderKind,
@@ -544,12 +668,12 @@ pub(super) async fn sweep_expired(
     let applier = shared_reaction_applier(shared.clone());
     let live_inflight = |marker: &AbortedAnchorMarker| -> bool {
         super::inflight::load_inflight_state(provider, marker.channel_id).is_some_and(|state| {
-            // Conservative (I10): an inflight without a tmux name COULD be the
-            // covering prior owner — hold rather than risk a false ⚠.
-            state
-                .tmux_session_name
-                .as_deref()
-                .is_none_or(|name| name == marker.tmux_session_name)
+            inflight_defers_sweep(
+                marker,
+                state.tmux_session_name.as_deref(),
+                state.user_msg_id,
+                &state.started_at,
+            )
         })
     };
     sweep_expired_with_applier(
@@ -671,6 +795,10 @@ mod tests {
             .unwrap()
     }
 
+    /// `started_at` of every test marker's recorded foreign prior turn
+    /// (`now_string` localtime form, 1-second resolution like production).
+    const FOREIGN_STARTED_AT: &str = "2026-06-10 12:00:00";
+
     fn marker(
         provider: &str,
         channel: u64,
@@ -684,7 +812,22 @@ mod tests {
             tmux_session_name: format!("tmux-{channel}"),
             aborted_at_ms,
             covered_at_ms: None,
+            // codex r1: test markers carry a recorded foreign identity by
+            // default (the ABORT path pins one whenever the prior row is live).
+            foreign_user_msg_id: Some(anchor + 500_000),
+            foreign_started_at: Some(FOREIGN_STARTED_AT.to_string()),
         }
+    }
+
+    /// The committed-turn identity that MATCHES `marker()`'s recorded foreign
+    /// prior turn — what the watcher passes when that turn terminal-commits.
+    fn committed(m: &AbortedAnchorMarker) -> (u64, String) {
+        (
+            m.foreign_user_msg_id.expect("test markers carry identity"),
+            m.foreign_started_at
+                .clone()
+                .expect("test markers carry identity"),
+        )
     }
 
     type RecordedOps = Arc<Mutex<Vec<(u64, ReactionOp)>>>;
@@ -831,23 +974,163 @@ mod tests {
     #[test]
     fn terminal_commit_cover_requires_strictly_post_abort_commit() {
         let m = marker("claude", 1, 10, 5_000);
+        let (cid, cstart) = committed(&m);
         // Strictly-after-abort: a commit AT or BEFORE the abort instant belongs
         // to an older turn and must not cover (RED if `>=`).
-        assert!(!terminal_commit_covers_marker(5_000, &m));
-        assert!(!terminal_commit_covers_marker(4_000, &m));
-        assert!(terminal_commit_covers_marker(5_001, &m));
-        assert!(terminal_commit_covers_marker(5_000 + TTL_MS, &m));
+        assert!(!terminal_commit_covers_marker(5_000, &m, cid, &cstart));
+        assert!(!terminal_commit_covers_marker(4_000, &m, cid, &cstart));
+        assert!(terminal_commit_covers_marker(5_001, &m, cid, &cstart));
+        assert!(terminal_commit_covers_marker(
+            5_000 + TTL_MS,
+            &m,
+            cid,
+            &cstart
+        ));
         // verify r1 fix #1: a commit PAST the TTL still covers — the sweep
         // defers to a live same-session inflight indefinitely, so a foreign
         // turn streaming longer than the TTL must not lose its cover (RED on
         // the old `<= ttl` bound: false ⚠ on an answered anchor).
-        assert!(terminal_commit_covers_marker(5_000 + TTL_MS + 1, &m));
+        assert!(terminal_commit_covers_marker(
+            5_000 + TTL_MS + 1,
+            &m,
+            cid,
+            &cstart
+        ));
         // Zero anchor id never covers (I5).
         let zero = AbortedAnchorMarker {
             anchor_message_id: 0,
             ..m
         };
-        assert!(!terminal_commit_covers_marker(5_001, &zero));
+        assert!(!terminal_commit_covers_marker(5_001, &zero, cid, &cstart));
+    }
+
+    /// codex r1 (RED ① — pure): a commit by a DIFFERENT turn must NOT cover,
+    /// however plausible its wall-clock. RED pre-fix: the cover test was
+    /// `now_ms > aborted_at_ms` alone, so a prior-owner commit racing the
+    /// marker write, a recreated same-name tmux session, and a prior turn
+    /// that DROPPED the queued input all false-`✅`'d the anchor.
+    #[test]
+    fn terminal_commit_cover_requires_matching_foreign_identity() {
+        let m = marker("claude", 1, 11, 5_000);
+        let (cid, cstart) = committed(&m);
+        assert!(
+            terminal_commit_covers_marker(6_000, &m, cid, &cstart),
+            "sanity: the recorded foreign turn's own commit covers"
+        );
+        assert!(
+            !terminal_commit_covers_marker(6_000, &m, cid + 1, &cstart),
+            "a different user_msg_id is a different turn — no cover (RED ①)"
+        );
+        assert!(
+            !terminal_commit_covers_marker(6_000, &m, cid, "2026-06-10 12:00:01"),
+            "a different started_at is a different turn — no cover"
+        );
+        let legacy = AbortedAnchorMarker {
+            foreign_user_msg_id: None,
+            foreign_started_at: None,
+            ..m
+        };
+        assert!(
+            !terminal_commit_covers_marker(6_000, &legacy, cid, &cstart),
+            "an identity-absent (legacy) marker is sweep-only — never drain-covered"
+        );
+    }
+
+    /// codex r1: the ABORT constructor. A LIVE foreign prior inflight pins its
+    /// identity (marker uncovered); an ALREADY-GONE foreign row means the
+    /// prior owner committed in the µs race before the marker existed — its
+    /// drain chokepoint can never see this marker, so it is recorded
+    /// PRE-COVERED and the sweep delivers the `✅` (RED as a TTL'd false `⚠`
+    /// on an answered anchor otherwise).
+    #[test]
+    fn for_abort_pins_identity_or_records_pre_covered() {
+        let live = AbortedAnchorMarker::for_abort(
+            "claude".into(),
+            9,
+            901,
+            "tmux-9".into(),
+            42_000,
+            Some((777, "2026-06-10 09:00:00".into())),
+        );
+        assert_eq!(live.foreign_user_msg_id, Some(777));
+        assert_eq!(
+            live.foreign_started_at.as_deref(),
+            Some("2026-06-10 09:00:00")
+        );
+        assert_eq!(
+            live.covered_at_ms, None,
+            "a still-live foreign turn has covered nothing yet"
+        );
+        let raced =
+            AbortedAnchorMarker::for_abort("claude".into(), 9, 902, "tmux-9".into(), 42_000, None);
+        assert_eq!(
+            raced.covered_at_ms,
+            Some(42_000),
+            "foreign row gone at the record instant ⇒ its commit already \
+             happened ⇒ pre-covered (the drain can never see this marker)"
+        );
+        assert_eq!(raced.foreign_user_msg_id, None);
+        assert_eq!(raced.foreign_started_at, None);
+    }
+
+    /// codex r1 finding 2 (RED ③ — pure): a NAME-LESS same-channel inflight
+    /// defers the sweep ONLY when it IS the recorded foreign turn. RED
+    /// pre-fix: `is_none_or(..)` held for EVERY name-less row, so an
+    /// unrelated/stale inflight kept the marker `KeepWaiting` indefinitely
+    /// (orphaned ⏳). Name-bearing rows keep the session-name hold.
+    #[test]
+    fn nameless_inflight_defers_sweep_only_on_foreign_identity_match() {
+        let m = marker("claude", 1, 12, 5_000);
+        let (cid, cstart) = committed(&m);
+        // Name-bearing rows: session-name match decides (unchanged).
+        assert!(inflight_defers_sweep(&m, Some("tmux-1"), 0, ""));
+        assert!(!inflight_defers_sweep(&m, Some("tmux-other"), cid, &cstart));
+        // Name-less rows: positive identity match only.
+        assert!(inflight_defers_sweep(&m, None, cid, &cstart));
+        assert!(
+            !inflight_defers_sweep(&m, None, cid + 1, &cstart),
+            "an unrelated name-less inflight must not hold the marker (RED ③)"
+        );
+        assert!(!inflight_defers_sweep(&m, None, cid, "1999-01-01 00:00:00"));
+        let legacy = AbortedAnchorMarker {
+            foreign_user_msg_id: None,
+            foreign_started_at: None,
+            ..m
+        };
+        assert!(
+            !inflight_defers_sweep(&legacy, None, cid, &cstart),
+            "an identity-absent marker gains no name-less hold"
+        );
+    }
+
+    /// codex r1 finding 2 (hard cap): past `TTL × ABORT_MARKER_HARD_CAP_TTL_MULTIPLIER`
+    /// an UNCOVERED marker takes the `⚠` fallback even with a live holding
+    /// inflight — the hold can no longer be renewed forever (RED pre-fix:
+    /// unconditional `KeepWaiting` while any holding inflight existed).
+    /// A COVERED marker stays immune: completion always wins.
+    #[test]
+    fn sweep_hard_cap_overrides_live_inflight_hold() {
+        let base = marker("claude", 1, 13, 1_000);
+        let cap = 1_000 + TTL_MS * ABORT_MARKER_HARD_CAP_TTL_MULTIPLIER;
+        assert_eq!(
+            decide_marker_disposition(cap - 1, &base, true, ABORT_MARKER_TTL, true),
+            MarkerDisposition::KeepWaiting,
+            "inside the cap a live inflight still holds the verdict"
+        );
+        assert_eq!(
+            decide_marker_disposition(cap, &base, true, ABORT_MARKER_TTL, true),
+            MarkerDisposition::DeliverFailureWarn,
+            "at the cap the ⚠ fallback fires regardless of the inflight (RED: eternal hold)"
+        );
+        let covered = AbortedAnchorMarker {
+            covered_at_ms: Some(2_000),
+            ..base
+        };
+        assert_eq!(
+            decide_marker_disposition(cap + 1, &covered, true, ABORT_MARKER_TTL, true),
+            MarkerDisposition::DeliverCompletion,
+            "a covered anchor is never degraded to ⚠, cap or not"
+        );
     }
 
     /// I5: the recorder refuses zero anchor ids outright.
@@ -884,10 +1167,11 @@ mod tests {
         let _root = test_root();
         let m = marker("claude", 100, 555, 10_000);
         record(&m).unwrap();
+        let (cid, cstart) = committed(&m);
         let (applier, calls) = recording_applier(ReactionDelivery::Delivered);
         let drained = test_rt().block_on(drain_on_terminal_commit_with_applier(
             "claude", "tmux-100", 100, 10_500, // commit strictly after the abort, within TTL
-            &applier,
+            cid, &cstart, &applier,
         ));
         assert_eq!(drained, 1);
         let calls = calls.lock().unwrap();
@@ -911,6 +1195,7 @@ mod tests {
         let _root = test_root();
         let m = marker("claude", 100, 556, 10_000);
         record(&m).unwrap();
+        let (cid, cstart) = committed(&m);
         let (applier, calls) = recording_applier(ReactionDelivery::Delivered);
         let rt = test_rt();
         // Foreign tmux session on the same channel → no-op.
@@ -919,16 +1204,103 @@ mod tests {
             "tmux-other",
             100,
             10_500,
+            cid,
+            &cstart,
             &applier,
         ));
         assert_eq!(drained, 0);
         // Commit not after the abort → no-op (an older turn's commit).
         let drained = rt.block_on(drain_on_terminal_commit_with_applier(
-            "claude", "tmux-100", 100, 10_000, &applier,
+            "claude", "tmux-100", 100, 10_000, cid, &cstart, &applier,
         ));
         assert_eq!(drained, 0);
         assert!(calls.lock().unwrap().is_empty());
         assert_eq!(load_for_channel("claude", 100).len(), 1, "marker retained");
+    }
+
+    /// codex r1 (RED ① — drain level): a body-visible commit by an UNRELATED
+    /// turn on the SAME `(provider, tmux, channel)` leaves the marker
+    /// untouched; the recorded foreign turn's own commit then drains it.
+    /// RED pre-fix: the unrelated commit `✅`'d the possibly-unanswered anchor
+    /// (wall-clock was the only test).
+    #[test]
+    fn drain_refuses_unrelated_commit_and_accepts_foreign_identity_commit() {
+        let _root = test_root();
+        let m = marker("claude", 100, 580, 10_000);
+        record(&m).unwrap();
+        let (cid, cstart) = committed(&m);
+        let (applier, calls) = recording_applier(ReactionDelivery::Delivered);
+        let rt = test_rt();
+        let drained = rt.block_on(drain_on_terminal_commit_with_applier(
+            "claude",
+            "tmux-100",
+            100,
+            10_500,
+            cid + 7, // an unrelated turn (recreated session / dropped-input prior)
+            &cstart,
+            &applier,
+        ));
+        assert_eq!(drained, 0, "no positive identity match → no cover (RED ①)");
+        assert!(calls.lock().unwrap().is_empty());
+        assert_eq!(load_for_channel("claude", 100).len(), 1, "marker retained");
+        let drained = rt.block_on(drain_on_terminal_commit_with_applier(
+            "claude", "tmux-100", 100, 11_000, cid, &cstart, &applier,
+        ));
+        assert_eq!(drained, 1, "the foreign turn's own commit covers (②)");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(580, ReactionOp::Complete)]
+        );
+        assert!(load_for_channel("claude", 100).is_empty());
+    }
+
+    /// codex r1 schema compat: a legacy (pre-r1) marker JSON without the
+    /// foreign-identity fields loads with `None` identity — NEVER
+    /// drain-covered (no wall-clock fallback), terminated by the sweep's
+    /// TTL/hard-cap bound alone.
+    #[test]
+    fn legacy_marker_without_identity_fields_is_sweep_only() {
+        let _root = test_root();
+        let store = root().unwrap();
+        std::fs::write(
+            store.join("claude_100_590.json"),
+            r#"{"provider":"claude","channel_id":100,"anchor_message_id":590,"tmux_session_name":"tmux-100","aborted_at_ms":10000}"#,
+        )
+        .unwrap();
+        let loaded = load_for_channel("claude", 100);
+        assert_eq!(
+            loaded.len(),
+            1,
+            "legacy schema must keep parsing (#[serde(default)])"
+        );
+        assert_eq!(loaded[0].foreign_user_msg_id, None);
+        assert_eq!(loaded[0].foreign_started_at, None);
+        assert_eq!(loaded[0].covered_at_ms, None);
+        let (applier, calls) = recording_applier(ReactionDelivery::Delivered);
+        let rt = test_rt();
+        let drained = rt.block_on(drain_on_terminal_commit_with_applier(
+            "claude",
+            "tmux-100",
+            100,
+            10_500,
+            12_345,
+            FOREIGN_STARTED_AT,
+            &applier,
+        ));
+        assert_eq!(drained, 0, "identity-absent marker is never drain-covered");
+        assert!(calls.lock().unwrap().is_empty());
+        let resolved = rt.block_on(sweep_expired_with_applier(
+            "claude",
+            10_000 + TTL_MS + 1,
+            true,
+            &|_| false,
+            &applier,
+        ));
+        assert_eq!(resolved, 1, "the sweep bound terminates it");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(590, ReactionOp::FailureWarn)]
+        );
     }
 
     /// I6: a covering commit whose ✅ delivery FAILS preserves the marker with
@@ -939,10 +1311,11 @@ mod tests {
         let _root = test_root();
         let m = marker("claude", 100, 557, 10_000);
         record(&m).unwrap();
+        let (cid, cstart) = committed(&m);
         let rt = test_rt();
         let (failing, _calls) = recording_applier(ReactionDelivery::Failed);
         let drained = rt.block_on(drain_on_terminal_commit_with_applier(
-            "claude", "tmux-100", 100, 10_500, &failing,
+            "claude", "tmux-100", 100, 10_500, cid, &cstart, &failing,
         ));
         assert_eq!(drained, 0);
         let kept = load_for_channel("claude", 100);
@@ -1056,6 +1429,7 @@ mod tests {
         let _root = test_root();
         let m = marker("claude", 100, 563, 10_000);
         record(&m).unwrap();
+        let (cid, cstart) = committed(&m);
         let rt = test_rt();
         let (applier, calls) = recording_applier(ReactionDelivery::Delivered);
         // Sweep passes during the long foreign turn: live inflight → hold.
@@ -1070,7 +1444,7 @@ mod tests {
         // The foreign turn finally commits ~100s past the TTL.
         let commit_at = 10_000 + TTL_MS + 100_000;
         let drained = rt.block_on(drain_on_terminal_commit_with_applier(
-            "claude", "tmux-100", 100, commit_at, &applier,
+            "claude", "tmux-100", 100, commit_at, cid, &cstart, &applier,
         ));
         assert_eq!(
             drained, 1,
@@ -1130,6 +1504,8 @@ mod tests {
                     "tmux-100",
                     100,
                     10_500,
+                    562 + 500_000, // the marker's recorded foreign turn
+                    FOREIGN_STARTED_AT,
                     &drain_applier,
                 )
                 .await;
@@ -1163,11 +1539,12 @@ mod tests {
         let _root = test_root();
         let m = marker("claude", 100, 570, 10_000);
         record(&m).unwrap();
+        let (cid, cstart) = committed(&m);
         let claim = try_claim_marker(&m).expect("first claim succeeds");
         let (applier, calls) = recording_applier(ReactionDelivery::Delivered);
         let rt = test_rt();
         let drained = rt.block_on(drain_on_terminal_commit_with_applier(
-            "claude", "tmux-100", 100, 10_500, &applier,
+            "claude", "tmux-100", 100, 10_500, cid, &cstart, &applier,
         ));
         assert_eq!(drained, 0, "drain must skip a claimed marker");
         let resolved = rt.block_on(sweep_expired_with_applier(
@@ -1182,7 +1559,7 @@ mod tests {
         assert_eq!(load_for_channel("claude", 100).len(), 1);
         drop(claim);
         let drained = rt.block_on(drain_on_terminal_commit_with_applier(
-            "claude", "tmux-100", 100, 10_500, &applier,
+            "claude", "tmux-100", 100, 10_500, cid, &cstart, &applier,
         ));
         assert_eq!(drained, 1, "released claim → next pass processes normally");
     }
@@ -1199,8 +1576,9 @@ mod tests {
         // Drain path: covering commit, but the anchor message is gone.
         let m = marker("claude", 100, 571, 10_000);
         record(&m).unwrap();
+        let (cid, cstart) = committed(&m);
         let drained = rt.block_on(drain_on_terminal_commit_with_applier(
-            "claude", "tmux-100", 100, 10_500, &applier,
+            "claude", "tmux-100", 100, 10_500, cid, &cstart, &applier,
         ));
         assert_eq!(drained, 0, "a terminated marker is not a delivered ✅");
         assert!(
@@ -1277,6 +1655,7 @@ mod tests {
         let store = root().unwrap();
         let m = marker("claude", 100, 573, 10_000);
         record(&m).unwrap();
+        let (cid, cstart) = committed(&m);
         // Pre-create the claim sidecar so the read-only store below blocks
         // ONLY the stamp rewrite, not the claim acquisition.
         drop(try_claim_marker(&m).expect("pre-create claim sidecar"));
@@ -1284,7 +1663,7 @@ mod tests {
         let rt = test_rt();
         let (failing, _ops) = recording_applier(ReactionDelivery::Failed);
         let drained = rt.block_on(drain_on_terminal_commit_with_applier(
-            "claude", "tmux-100", 100, 10_500, &failing,
+            "claude", "tmux-100", 100, 10_500, cid, &cstart, &failing,
         ));
         std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(drained, 0);
@@ -1297,7 +1676,7 @@ mod tests {
         // The next covering commit retries and completes (✅ idempotent).
         let (applier, calls) = recording_applier(ReactionDelivery::Delivered);
         let drained = rt.block_on(drain_on_terminal_commit_with_applier(
-            "claude", "tmux-100", 100, 11_000, &applier,
+            "claude", "tmux-100", 100, 11_000, cid, &cstart, &applier,
         ));
         assert_eq!(drained, 1, "next drain pass must retry the cover");
         assert_eq!(

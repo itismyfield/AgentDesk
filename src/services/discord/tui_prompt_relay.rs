@@ -1747,13 +1747,14 @@ fn pending_start_claim_fn() -> super::tui_direct_pending_start::ClaimFn {
 /// the anchor's `⏳` is still TRUE — and every live observation ended with the
 /// prior owner relaying the response, so the old `⚠` swap branded ANSWERED
 /// messages as failures. Instead: KEEP the `⏳` and record a durable
-/// aborted-anchor marker. The watcher terminal-commit drain flips it `⏳ → ✅`
-/// once a same-(provider,tmux,channel) commit covers it; the placeholder
-/// sweeper flips it `⏳ → ⚠` only after the TTL with no live inflight — a
-/// genuine failure still surfaces in bounded time (the sweeper owns the
-/// reclaim, so no #3282 eternal-hourglass regression). The marker is recorded
-/// even when http is currently unavailable (better than the old skip-entirely
-/// path); every later reaction op resolves
+/// aborted-anchor marker pinning the live FOREIGN prior inflight's identity
+/// (codex r1). The watcher terminal-commit drain flips it `⏳ → ✅` ONLY when
+/// THAT turn commits (positive correlation — no unrelated same-session commit
+/// can cover); the placeholder sweeper flips it `⏳ → ⚠` after the TTL with no
+/// holding inflight (hard-cap bounded) — a genuine failure still surfaces in
+/// bounded time (the sweeper owns the reclaim, so no #3282 eternal-hourglass
+/// regression). The marker is recorded even when http is currently unavailable
+/// (better than the old skip-entirely path); every later reaction op resolves
 /// `shared.serenity_http_or_token_fallback()` INSIDE the marker module — the
 /// same bot identity that added the `⏳` (#3164 add≡remove).
 fn pending_start_abort_cleanup_fn() -> super::tui_direct_pending_start::AbortCleanupFn {
@@ -1765,21 +1766,34 @@ fn pending_start_abort_cleanup_fn() -> super::tui_direct_pending_start::AbortCle
             if record.anchor_message_id == 0 {
                 return;
             }
-            let marker = super::tui_direct_abort_marker::AbortedAnchorMarker {
-                provider: record.provider.clone(),
-                channel_id: record.channel_id,
-                anchor_message_id: record.anchor_message_id,
-                tmux_session_name: record.tmux_session_name.clone(),
-                aborted_at_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
-                covered_at_ms: None,
-            };
+            // codex r1: load the foreign prior inflight AT the record instant.
+            // Present → its `(user_msg_id, started_at)` is pinned on the
+            // marker. Gone → it terminal-committed in the µs gap since the
+            // final backstop view read (which saw it LIVE) — that commit's
+            // drain chokepoint may predate this marker, so `for_abort`
+            // records the marker pre-covered (the sweep delivers the ✅).
+            let foreign = ProviderKind::from_str(&record.provider)
+                .and_then(|provider| {
+                    super::inflight::load_inflight_state(&provider, record.channel_id)
+                })
+                .map(|state| (state.user_msg_id, state.started_at));
+            let marker = super::tui_direct_abort_marker::AbortedAnchorMarker::for_abort(
+                record.provider.clone(),
+                record.channel_id,
+                record.anchor_message_id,
+                record.tmux_session_name.clone(),
+                chrono::Utc::now().timestamp_millis().max(0) as u64,
+                foreign,
+            );
             match super::tui_direct_abort_marker::record(&marker) {
                 Ok(()) => tracing::info!(
                     provider = %record.provider,
                     channel_id = record.channel_id,
                     tmux_session_name = %record.tmux_session_name,
                     anchor_message_id = record.anchor_message_id,
-                    "tui_direct_pending_start: synthetic turn-start ABORTed; anchor keeps ⏳ and a durable aborted-anchor marker was recorded — reconcile lands ✅ on prior-owner completion or ⚠ via TTL fallback (#3296)"
+                    foreign_user_msg_id = ?marker.foreign_user_msg_id,
+                    pre_covered = marker.covered_at_ms.is_some(),
+                    "tui_direct_pending_start: synthetic turn-start ABORTed; anchor keeps ⏳ and a durable aborted-anchor marker was recorded — reconcile lands ✅ on the recorded foreign turn's commit (pre-covered when it already committed) or ⚠ via the sweep bound (#3296)"
                 ),
                 Err(error) => tracing::warn!(
                     provider = %record.provider,
@@ -5681,9 +5695,17 @@ mod tests {
             markers[0].anchor_message_id, 777_001,
             "identity-pinned (I4)"
         );
-        assert_eq!(
-            markers[0].covered_at_ms, None,
-            "freshly-aborted anchors are uncovered until a terminal commit lands"
+        // codex r1: no inflight row exists for this channel in the test env,
+        // i.e. the foreign prior turn is ALREADY GONE at the record instant —
+        // the hook must record the marker PRE-COVERED with no pinned identity
+        // (the prior owner's commit raced ahead of the marker; the sweep
+        // delivers the ✅). The live-foreign branch (identity pinned,
+        // uncovered) is pinned by `for_abort_pins_identity_or_records_pre_covered`
+        // in the marker module's own tests.
+        assert_eq!(markers[0].foreign_user_msg_id, None);
+        assert!(
+            markers[0].covered_at_ms.is_some(),
+            "foreign row absent at the record instant ⇒ pre-covered (codex r1)"
         );
 
         // Zero anchor id (I5): nothing recorded, nothing panics.

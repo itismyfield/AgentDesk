@@ -131,7 +131,7 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (9580 lines after #2558
+  - `src/services/discord/tmux_watcher.rs` (9582 lines after #2558
     dead-code sweep; #3016 phase-5b2 removed the `mailbox_finalize_owed`
     swap reads, the watcher-fn flag params, and the `LegacyFlagGated`
     decision variant; #1520 watcher loop extraction + #2427 D/A
@@ -416,17 +416,22 @@
     helper additionally fires the claude-only AgentDesk-side `/compact` injection
     when live usage crosses `context_compact_percent_claude` (Claude Code ignores
     `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`); see `src/services/claude_compact_trigger.rs`.
-    +17 from #3296: the aborted-anchor reconcile chokepoint — after the terminal
-    anchor-cleanup branches, a body-visible normal commit
-    (`terminal_output_committed && tui_direct_anchor_terminal_body_visible &&
-    !lifecycle_stage_paused`) calls
-    `tui_direct_abort_marker::drain_on_terminal_commit` so an anchor whose
-    synthetic turn-start ABORTed (input already provider-submitted, `⏳` kept)
-    flips `⏳ → ✅` when the prior owner covers it; the marker logic itself lives
-    in the new non-giant `tui_direct_abort_marker.rs` (sweeper TTL `⚠` fallback);
-    the +17 is offset in-file by compressing the #3016-S3 finalize/TOCTOU
+    +19 from #3296: the aborted-anchor reconcile chokepoint — on a body-visible
+    normal commit (`terminal_output_committed &&
+    tui_direct_anchor_terminal_body_visible && !lifecycle_stage_paused`, sited
+    AFTER `clear_inflight_state` for race ordering) the watcher calls
+    `tui_direct_abort_marker::drain_on_terminal_commit` with the COMMITTED
+    turn's identity (codex r1: positive correlation — only the foreign prior
+    inflight the ABORT pinned may cover), so an anchor whose synthetic
+    turn-start ABORTed (input already provider-submitted, `⏳` kept) flips
+    `⏳ → ✅` when that turn commits; the marker logic itself lives in the new
+    non-giant `tui_direct_abort_marker.rs` (sweeper TTL/hard-cap `⚠` fallback);
+    the +19 is offset in-file by compressing the #3016-S3 finalize/TOCTOU
     comment block (−20), so the 9583 ratchet baseline is unchanged.
-  - `src/services/discord/tui_prompt_relay.rs` (5417 lines; #3016 phase-5b2
+  - `src/services/discord/tui_prompt_relay.rs` (5431 lines; +14 from #3296
+    codex r1: the ABORT cleanup hook pins the live foreign prior inflight's
+    identity — or records the marker pre-covered when that row is already
+    gone — before persisting the aborted-anchor marker; #3016 phase-5b2
     removed the dead `publish_tui_direct_watcher_finalize_debt` producer;
     SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only

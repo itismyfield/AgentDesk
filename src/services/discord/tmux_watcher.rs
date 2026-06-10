@@ -11030,25 +11030,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             .await;
         }
 
-        // #3296: aborted-anchor reconcile chokepoint. A synthetic turn-start
-        // that ABORTed (backstop_abort_foreign_inflight_live) kept its `⏳` and
-        // recorded a durable marker; a body-visible normal commit on this SAME
-        // (provider, tmux, channel) means the prior owner covered that input —
-        // drain the marker (`⏳ → ✅` on the marker's own pinned anchor id).
-        // Reaction identity resolves inside the module (#3164 add≡remove).
-        if terminal_output_committed
-            && tui_direct_anchor_terminal_body_visible
-            && !lifecycle_stage_paused
-        {
-            let _ = crate::services::discord::tui_direct_abort_marker::drain_on_terminal_commit(
-                &shared,
-                watcher_provider.as_str(),
-                &tmux_session_name,
-                channel_id.get(),
-            )
-            .await;
-        }
-
         // Mark user message as completed: ⏳ → ✅ when inflight metadata is
         // available and terminal output is committed. #897 round-3 Medium:
         // skip the reaction + transcript + analytics block entirely for
@@ -11369,6 +11350,27 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         "full_response_len": full_response.len(),
                     }),
                 );
+            }
+            // #3296 codex r1: aborted-anchor reconcile drain — covers a marker
+            // ONLY when the committed turn (late inflight read; never a stale
+            // NEWER turn) IS the foreign prior inflight the ABORT pinned. Sited
+            // AFTER clear_inflight_state so an abort racing this pass either
+            // writes its marker before this drain runs or finds the row already
+            // cleared and records itself pre-covered (no orphaned marker).
+            if tui_direct_anchor_terminal_body_visible
+                && !completion_is_stale_for_newer_turn
+                && let Some(committed) = inflight_state.as_ref()
+            {
+                let _ =
+                    crate::services::discord::tui_direct_abort_marker::drain_on_terminal_commit(
+                        &shared,
+                        watcher_provider.as_str(),
+                        &tmux_session_name,
+                        channel_id.get(),
+                        committed.user_msg_id,
+                        &committed.started_at,
+                    )
+                    .await;
             }
             // codex P2 (#1670): cleanup (mailbox_finish_turn + cancel_token
             // release) MUST run on every relay-completed terminal even when
