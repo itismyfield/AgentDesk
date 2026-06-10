@@ -76,6 +76,16 @@ pub(crate) fn tui_direct_abort_marker_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_tui_direct_abort_marker"))
 }
 
+/// #3296 codex r2: durable terminal-commit tombstones for `(provider, tmux,
+/// channel)`. The tmux watcher's terminal-commit chokepoint records one BEFORE
+/// it clears the inflight row, so the aborted-anchor reconcilers can
+/// distinguish "the foreign row vanished because its owner committed" (`✅`)
+/// from a non-commit deletion (force-clear/stop/recovery → bounded `⚠`).
+/// Short-lived: the marker sweep GC's tombstones past the marker hard cap.
+pub(crate) fn tui_direct_commit_tombstone_root() -> Option<PathBuf> {
+    runtime_root().map(|root| root.join("discord_tui_direct_commit_tombstone"))
+}
+
 /// #3003: durable retry store for orphaned status-panel-v2 message deletes that
 /// failed transiently when no per-turn inflight handle survived (e.g. a
 /// stopped/cancelled TUI-direct turn). Drained by the placeholder sweeper.

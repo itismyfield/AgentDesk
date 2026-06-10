@@ -419,19 +419,26 @@
     +19 from #3296: the aborted-anchor reconcile chokepoint — on a body-visible
     normal commit (`terminal_output_committed &&
     tui_direct_anchor_terminal_body_visible && !lifecycle_stage_paused`, sited
-    AFTER `clear_inflight_state` for race ordering) the watcher calls
+    BEFORE `clear_inflight_state` since codex r2) the watcher durably records a
+    `tui_direct_abort_marker::record_commit_tombstone` (committed turn
+    identity — written FIRST, so any reconciler that observes "no live row"
+    already sees the commit evidence) and then calls
     `tui_direct_abort_marker::drain_on_terminal_commit` with the COMMITTED
     turn's identity (codex r1: positive correlation — only the foreign prior
     inflight the ABORT pinned may cover), so an anchor whose synthetic
     turn-start ABORTed (input already provider-submitted, `⏳` kept) flips
     `⏳ → ✅` when that turn commits; the marker logic itself lives in the new
-    non-giant `tui_direct_abort_marker.rs` (sweeper TTL/hard-cap `⚠` fallback);
-    the +19 is offset in-file by compressing the #3016-S3 finalize/TOCTOU
-    comment block (−20), so the 9583 ratchet baseline is unchanged.
-  - `src/services/discord/tui_prompt_relay.rs` (5431 lines; +14 from #3296
-    codex r1: the ABORT cleanup hook pins the live foreign prior inflight's
-    identity — or records the marker pre-covered when that row is already
-    gone — before persisting the aborted-anchor marker; #3016 phase-5b2
+    non-giant `tui_direct_abort_marker.rs` (sweeper TTL/hard-cap `⚠` fallback +
+    commit-tombstone 대조); the additions are offset in-file by compressing the
+    #3016-S3 finalize/TOCTOU and #1670/#1708 decoupling comment blocks, so the
+    9583 ratchet baseline is unchanged.
+  - `src/services/discord/tui_prompt_relay.rs` (5438 production lines; #3296
+    codex r1+r2: the ABORT cleanup hook pins the foreign prior inflight's
+    identity — the live row at the record instant, or the worker's LAST-VIEW
+    identity when that row just vanished — and persists the marker via
+    `record_for_abort`, whose commit-tombstone 대조 (never bare row-absence:
+    codex r2 removed the unfounded pre-covered promotion) decides whether it
+    starts covered; #3016 phase-5b2
     removed the dead `publish_tui_direct_watcher_finalize_debt` producer;
     SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
@@ -590,7 +597,9 @@
     added the anchor `⏳` (#3164 add≡remove invariant) — removing the stranded
     `⏳` and marking `⚠` on the anchor message (precedent: the watcher's
     auth-expired `⏳ → ⚠` swap), because no claim ever drives the normal
-    `⏳ → ✅` completion for an ABORTed synthetic start; -75 from #3282
+    `⏳ → ✅` completion for an ABORTed synthetic start (the `⚠` swap itself is
+    superseded by #3296: the hook now KEEPS the `⏳` and records the durable
+    aborted-anchor marker — see the entry head); -75 from #3282
     follow-up: verbose multi-line comment blocks compressed (no semantic
     change) to offset the +54 growth and keep prod LoC under the frozen
     `giant_file_ratchet` baseline (5438, #3028).

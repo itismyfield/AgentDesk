@@ -3,12 +3,11 @@
 //!
 //! ## Why this exists
 //! When a TUI-direct synthetic turn-start ABORTs on the backstop escalation
-//! budget (`backstop_abort_foreign_inflight_live`, see
-//! [`super::tui_direct_pending_start`]), the user's input was ALREADY submitted
-//! to the provider — the abort drops only the synthetic OWNERSHIP claim. In
-//! every live observation the prior turn's owner then relayed the response
-//! normally, yet the #3282-era cleanup swapped the anchor's `⏳` for a `⚠`,
-//! permanently branding an ANSWERED message as failed (#3296).
+//! budget (`backstop_abort_foreign_inflight_live`,
+//! [`super::tui_direct_pending_start`]), the input was ALREADY provider-
+//! submitted — the abort drops only the synthetic OWNERSHIP claim — and the
+//! prior owner then relays the response; the #3282-era `⏳ → ⚠` swap branded
+//! that ANSWERED message as failed (#3296).
 //!
 //! ## Mechanism
 //! The ABORT path now KEEPS the `⏳` (it is still true: the provider holds the
@@ -17,30 +16,35 @@
 //!
 //! 1. **Terminal-commit drain** ([`drain_on_terminal_commit`]) — the tmux
 //!    watcher's terminal chokepoint calls this on every body-visible normal
-//!    commit, passing the identity of the turn that just committed. A marker
-//!    is covered ONLY by a commit whose turn identity MATCHES the foreign
-//!    prior inflight the ABORT recorded (`foreign_user_msg_id` +
-//!    `foreign_started_at` — codex r1: positive correlation; the bare
-//!    same-`(provider, tmux, channel)` + strictly-after-abort wall-clock test
-//!    let a prior-owner commit racing the marker write, a recreated same-name
-//!    tmux session, or a dropped-input prior turn falsely `✅` an unanswered
-//!    anchor). Covering commits are deliberately NOT TTL-bounded (verify r1):
-//!    the sweep defers to a live same-session inflight, so a foreign turn
-//!    streaming past the TTL must still have its eventual commit accepted.
+//!    commit, passing the committed turn's identity. A marker is covered ONLY
+//!    by a commit whose identity MATCHES the foreign prior inflight the ABORT
+//!    recorded (codex r1: positive correlation — the bare same-session +
+//!    after-abort wall-clock test falsely `✅`'d unanswered anchors). Covering
+//!    commits are deliberately NOT TTL-bounded (verify r1): the sweep defers
+//!    to a live same-session inflight, so a foreign turn streaming past the
+//!    TTL must still have its eventual commit accepted.
 //! 2. **TTL sweep** ([`sweep_expired`]) — the placeholder sweeper's pass: once
 //!    [`ABORT_MARKER_TTL`] elapsed with NO live inflight for the session (a
-//!    long turn still streaming holds the verdict; a NAME-LESS inflight holds
-//!    only when it IS the recorded foreign turn — codex r1 finding 2), nothing
-//!    ever covered the anchor → `⏳ → ⚠`, so a genuine failure is still
-//!    surfaced in bounded time (no #3282 eternal-hourglass regression). The
-//!    inflight hold itself is bounded by the absolute
-//!    [`ABORT_MARKER_HARD_CAP_TTL_MULTIPLIER`] cap, so a stale/recreated
+//!    long streaming turn holds the verdict; a NAME-LESS inflight holds only
+//!    when it IS the recorded foreign turn — r1 finding 2), nothing ever
+//!    covered the anchor → `⏳ → ⚠`: a genuine failure still surfaces in
+//!    bounded time (no #3282 eternal hourglass), and the hold itself is capped
+//!    by [`ABORT_MARKER_HARD_CAP_TTL_MULTIPLIER`] so a stale/recreated
 //!    same-channel inflight can never orphan a `⏳` forever.
 //!
 //! The two reconcilers are mutually excluded per marker by a non-blocking
 //! sidecar flock claim ([`try_claim_marker`], the `inflight.rs` sidecar-lock
 //! pattern): claim → re-read → react → delete, so a commit racing the sweep's
 //! delivery window can never stack `✅` + `⚠` on one anchor (verify r1).
+//!
+//! **Commit tombstones** (codex r2) make the RIGHT verdict win those races,
+//! not just the first claimant: the watcher chokepoint durably records a
+//! [`CommitTombstone`] BEFORE it clears the inflight row and runs the drain.
+//! The sweep 대조s uncovered markers against them (post-live-read, so a
+//! commit-caused row clear is never mistaken for "nothing covers this"), and
+//! the ABORT record path 대조s once at record time — replacing the r1
+//! "pre-covered" promotion, which treated bare row-absence as commit evidence
+//! even though force-clears (sweeper/stop/recovery) also delete rows.
 //!
 //! ## Invariants
 //! * **I1 (#3164 add≡remove)**: every reaction op (`⏳` remove, `✅`/`⚠` add)
@@ -123,17 +127,15 @@ impl AbortedAnchorMarker {
         )
     }
 
-    /// Build the marker the ABORT path records. `foreign` is the live foreign
-    /// prior inflight's `(user_msg_id, started_at)` loaded AT the record
-    /// instant: when present, it is pinned so only THAT turn's commit covers.
-    /// When the row is ALREADY gone, the prior owner terminal-committed inside
-    /// the µs gap since the final backstop view read (which saw it LIVE) — its
-    /// drain chokepoint may have run before this marker existed, so the marker
-    /// is recorded PRE-COVERED (the anchor's input was provider-submitted long
-    /// before that commit; the sweep delivers the `✅`). The pair cannot alias
-    /// another turn: one inflight row exists per `(provider, channel)` and a
-    /// successor row starts ≥ the 32s backstop budget after `started_at`
-    /// (1-second resolution), so equality identifies the foreign turn.
+    /// Build the marker the ABORT path records. `foreign` is the foreign prior
+    /// inflight's `(user_msg_id, started_at)` — the live row read AT the record
+    /// instant, or (codex r2) the worker's LAST-VIEW identity when that row
+    /// vanished in the µs gap since the final backstop view. ALWAYS uncovered:
+    /// bare row-absence is NOT commit evidence (force-clears also delete rows;
+    /// the r1 "pre-covered" promotion false-`✅`'d those) — coverage needs the
+    /// drain or a commit-tombstone 대조. The pair cannot alias another turn:
+    /// one row exists per `(provider, channel)` and a successor starts ≥ the
+    /// 32s backstop after `started_at`, so equality identifies the turn.
     pub(super) fn for_abort(
         provider: String,
         channel_id: u64,
@@ -142,7 +144,6 @@ impl AbortedAnchorMarker {
         aborted_at_ms: u64,
         foreign: Option<(u64, String)>,
     ) -> Self {
-        let covered_at_ms = foreign.is_none().then_some(aborted_at_ms);
         let (foreign_user_msg_id, foreign_started_at) = match foreign {
             Some((user_msg_id, started_at)) => (Some(user_msg_id), Some(started_at)),
             None => (None, None),
@@ -153,7 +154,7 @@ impl AbortedAnchorMarker {
             anchor_message_id,
             tmux_session_name,
             aborted_at_ms,
-            covered_at_ms,
+            covered_at_ms: None,
             foreign_user_msg_id,
             foreign_started_at,
         }
@@ -173,13 +174,13 @@ impl AbortedAnchorMarker {
 // Durable store (mirrors `tui_direct_pending_start`'s store + atomic writes)
 // ---------------------------------------------------------------------------
 
-// Thread-local test seam for the durable root (the `TEST_TMUX_ALIVE_OVERRIDE`
-// convention, inflight.rs). Tests inject a tempdir here instead of mutating
-// the process-global `AGENTDESK_ROOT_DIR` env: env mutation races every test
-// that READS the root without holding the crate env lock (e.g. the
-// `tui_direct_pending_start` worker tests' `persist()`), and a thread-local
-// needs no lock at all (each test thread sees only its own override; the
-// current-thread `block_on` runtimes the tests use stay on this thread).
+// Thread-local test seam for the durable BASE root (the
+// `TEST_TMUX_ALIVE_OVERRIDE` convention, inflight.rs). Tests inject a tempdir
+// here instead of mutating the process-global `AGENTDESK_ROOT_DIR` env (env
+// mutation races lock-free root readers, e.g. the `tui_direct_pending_start`
+// worker tests' `persist()`); a thread-local needs no lock and the tests'
+// current-thread `block_on` runtimes stay on this thread. The override is the
+// BASE both sibling stores (markers + commit tombstones) join subdirs onto.
 #[cfg(test)]
 thread_local! {
     static TEST_ROOT_OVERRIDE: std::cell::RefCell<Option<std::path::PathBuf>> =
@@ -193,10 +194,18 @@ pub(super) fn set_test_root_override(path: Option<std::path::PathBuf>) {
 
 fn root() -> Option<std::path::PathBuf> {
     #[cfg(test)]
-    if let Some(path) = TEST_ROOT_OVERRIDE.with(|cell| cell.borrow().clone()) {
-        return Some(path);
+    if let Some(base) = TEST_ROOT_OVERRIDE.with(|cell| cell.borrow().clone()) {
+        return Some(base.join("discord_tui_direct_abort_marker"));
     }
     super::runtime_store::tui_direct_abort_marker_root()
+}
+
+fn tombstone_root() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(base) = TEST_ROOT_OVERRIDE.with(|cell| cell.borrow().clone()) {
+        return Some(base.join("discord_tui_direct_commit_tombstone"));
+    }
+    super::runtime_store::tui_direct_commit_tombstone_root()
 }
 
 /// Persist (or update) a marker. Recorded by the ABORT path BEFORE any http
@@ -223,9 +232,8 @@ pub(super) fn record(marker: &AbortedAnchorMarker) -> Result<(), String> {
 /// Drop a marker once its correction was delivered (plus its claim sidecar so
 /// the store does not accumulate lock files). Idempotent. The sidecar unlink
 /// is benign even if a contender still holds an fd on the old inode: it
-/// re-reads the marker file under its claim and finds it gone (file stems are
-/// keyed on unique anchor snowflakes, so a stem is never reused for a
-/// different logical marker).
+/// re-reads the marker under its claim and finds it gone (stems are keyed on
+/// unique anchor snowflakes — never reused for a different logical marker).
 pub(super) fn delete(marker: &AbortedAnchorMarker) {
     if let Some(root) = root() {
         let stem = marker.file_stem();
@@ -235,10 +243,9 @@ pub(super) fn delete(marker: &AbortedAnchorMarker) {
 }
 
 /// Load every durable marker (sweep + restart survival: the store IS the
-/// restart state — no in-memory index to rebuild). Unparseable JSON (writes
-/// are atomic, so this means corruption or an incompatible schema, never a
-/// torn write) is QUARANTINED via a `.bad` rename instead of being silently
-/// re-skipped forever (verify r1 fix #3 — bounded noise, one WARN per file).
+/// restart state). Unparseable JSON (atomic writes ⇒ corruption or schema
+/// drift, never a torn write) is QUARANTINED via a `.bad` rename instead of
+/// silently re-skipped forever (verify r1 fix #3 — one WARN per file).
 pub(super) fn load_all() -> Vec<AbortedAnchorMarker> {
     let Some(root) = root() else {
         return Vec::new();
@@ -291,6 +298,222 @@ pub(super) fn load_for_channel(provider: &str, channel_id: u64) -> Vec<AbortedAn
 }
 
 // ---------------------------------------------------------------------------
+// Commit tombstones (codex r2 — durable terminal-commit evidence)
+// ---------------------------------------------------------------------------
+
+/// Tombstone retention = the marker hard cap (1h): any marker a tombstone
+/// could still cover resolves within that bound, so older evidence has no
+/// consumer. GC runs at the END of each sweep pass, so a first post-restart
+/// pass still 대조s against evidence that aged out during downtime.
+pub(super) const COMMIT_TOMBSTONE_RETENTION_MS: u64 =
+    ABORT_MARKER_TTL.as_millis() as u64 * ABORT_MARKER_HARD_CAP_TTL_MULTIPLIER;
+
+/// Durable record of one body-visible terminal commit, written by the watcher
+/// chokepoint BEFORE it clears the inflight row (codex r2). Write-before-clear
+/// is the load-bearing invariant: whenever a reconciler observes "the foreign
+/// row is gone", a commit-caused deletion has ALREADY made its tombstone
+/// visible — row-absence + matching tombstone proves the prior owner committed
+/// (`✅`); row-absence WITHOUT one is a non-commit force-clear/stop/recovery
+/// deletion (bounded `⚠`). Primitive fields survive a dcserver version swap.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct CommitTombstone {
+    pub provider: String,
+    pub channel_id: u64,
+    pub tmux_session_name: String,
+    /// Identity of the COMMITTED turn (`inflight.rs` `InflightTurnIdentity`
+    /// convention) — 대조 against a marker's recorded foreign identity is the
+    /// same positive correlation the drain cover uses (codex r1).
+    pub committed_user_msg_id: u64,
+    pub committed_started_at: String,
+    /// Wall-clock ms of the commit (the chokepoint's clock). Also the GC key.
+    pub committed_at_ms: u64,
+}
+
+/// Persist a terminal-commit tombstone. Best-effort by design (a failed write
+/// degrades to the conservative `⚠`-after-cap path, never a false `✅`); the
+/// stem is keyed on the write instant so successive commits on one channel
+/// never erase earlier still-retained evidence.
+pub(super) fn record_commit_tombstone(
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+    committed_user_msg_id: u64,
+    committed_started_at: &str,
+) {
+    record_commit_tombstone_at(
+        now_ms(),
+        provider,
+        tmux_session_name,
+        channel_id,
+        committed_user_msg_id,
+        committed_started_at,
+    );
+}
+
+pub(super) fn record_commit_tombstone_at(
+    now_ms: u64,
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+    committed_user_msg_id: u64,
+    committed_started_at: &str,
+) {
+    let Some(root) = tombstone_root() else {
+        return; // tests / unconfigured root — nothing durable to write
+    };
+    let tombstone = CommitTombstone {
+        provider: provider.to_string(),
+        channel_id,
+        tmux_session_name: tmux_session_name.to_string(),
+        committed_user_msg_id,
+        committed_started_at: committed_started_at.to_string(),
+        committed_at_ms: now_ms,
+    };
+    let path = root.join(format!("{provider}_{channel_id}_{now_ms}.json"));
+    let written = serde_json::to_string_pretty(&tombstone)
+        .map_err(|e| e.to_string())
+        .and_then(|data| {
+            super::runtime_store::critical_atomic_write(
+                &path,
+                &data,
+                super::runtime_store::AtomicWriteContext::new("tui_direct_commit_tombstone")
+                    .provider(provider)
+                    .channel_id(channel_id),
+            )
+        });
+    if let Err(error) = written {
+        tracing::warn!(
+            provider,
+            channel_id,
+            committed_user_msg_id,
+            error = %error,
+            "tui_direct_abort_marker: failed to persist commit tombstone; a racing marker degrades to the bounded ⚠ fallback (#3296 r2)"
+        );
+    }
+}
+
+/// Every parseable tombstone as `(path, tombstone)`. Unparseable JSON is
+/// deleted outright (unlike markers there is nothing to reconcile from
+/// corrupt evidence — losing it degrades to the conservative `⚠`).
+fn tombstone_files() -> Vec<(std::path::PathBuf, CommitTombstone)> {
+    let Some(root) = tombstone_root() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue; // transient read failure — retry next pass
+        };
+        match serde_json::from_str::<CommitTombstone>(&text) {
+            Ok(t) => out.push((path, t)),
+            Err(error) => {
+                let removed = std::fs::remove_file(&path);
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    removed_ok = removed.is_ok(),
+                    "tui_direct_abort_marker: unparseable commit tombstone deleted (#3296 r2)"
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Retained tombstones for one `(provider, channel)` — the 대조 working set.
+pub(super) fn load_commit_tombstones(provider: &str, channel_id: u64) -> Vec<CommitTombstone> {
+    tombstone_files()
+        .into_iter()
+        .map(|(_, t)| t)
+        .filter(|t| t.channel_id == channel_id && t.provider.eq_ignore_ascii_case(provider))
+        .collect()
+}
+
+/// Drop tombstones older than [`COMMIT_TOMBSTONE_RETENTION_MS`]. Called at the
+/// END of each sweep pass (post-대조, see the retention const's rationale).
+pub(super) fn gc_expired_commit_tombstones(now_ms: u64) {
+    for (path, t) in tombstone_files() {
+        if now_ms.saturating_sub(t.committed_at_ms) >= COMMIT_TOMBSTONE_RETENTION_MS {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// `true` iff this tombstone is commit evidence for this marker's recorded
+/// foreign turn: same tmux session AND the committed identity IS the pinned
+/// foreign identity (the codex-r1 positive correlation — identity-absent
+/// markers match nothing, and an unrelated turn's tombstone never covers).
+fn commit_tombstone_matches_marker(marker: &AbortedAnchorMarker, t: &CommitTombstone) -> bool {
+    t.tmux_session_name == marker.tmux_session_name
+        && marker.matches_foreign_identity(t.committed_user_msg_id, &t.committed_started_at)
+}
+
+/// Record-instant 대조 (codex r2 — replaces the unfounded "pre-covered"
+/// promotion): a tombstone matching the marker's foreign identity ALREADY
+/// durable at record time means that turn terminal-committed before this
+/// marker existed (its drain pass could never see it) → stamp covered with the
+/// commit instant. No wall-clock condition: the identity was captured from a
+/// row observed LIVE after the anchor's input was provider-submitted, so that
+/// turn's unique terminal commit post-dates the submission regardless of how
+/// it interleaves with the marker write.
+pub(super) fn cover_from_commit_tombstone(marker: &mut AbortedAnchorMarker) -> bool {
+    if marker.covered_at_ms.is_some() {
+        return false;
+    }
+    let Some(t) = load_commit_tombstones(&marker.provider, marker.channel_id)
+        .into_iter()
+        .find(|t| commit_tombstone_matches_marker(marker, t))
+    else {
+        return false;
+    };
+    marker.covered_at_ms = Some(t.committed_at_ms);
+    true
+}
+
+/// Sweep-side 대조: a tombstone covers an UNCOVERED marker when it matches the
+/// foreign identity AND its commit is strictly later than the abort (the
+/// record-instant 대조 above owns evidence that predates the marker, so the
+/// subsidiary wall-clock guard costs nothing here and mirrors the drain's).
+pub(super) fn post_abort_commit_tombstone(marker: &AbortedAnchorMarker) -> Option<u64> {
+    load_commit_tombstones(&marker.provider, marker.channel_id)
+        .into_iter()
+        .find(|t| {
+            commit_tombstone_matches_marker(marker, t) && t.committed_at_ms > marker.aborted_at_ms
+        })
+        .map(|t| t.committed_at_ms)
+}
+
+/// The ABORT path's one-call record: build the marker (always uncovered —
+/// codex r2), run the record-instant tombstone 대조, persist. Returns the
+/// persisted marker for the caller's structured log fields.
+pub(super) fn record_for_abort(
+    provider: String,
+    channel_id: u64,
+    anchor_message_id: u64,
+    tmux_session_name: String,
+    foreign: Option<(u64, String)>,
+) -> Result<AbortedAnchorMarker, String> {
+    let mut marker = AbortedAnchorMarker::for_abort(
+        provider,
+        channel_id,
+        anchor_message_id,
+        tmux_session_name,
+        now_ms(),
+        foreign,
+    );
+    cover_from_commit_tombstone(&mut marker);
+    record(&marker)?;
+    Ok(marker)
+}
+
+// ---------------------------------------------------------------------------
 // Per-marker claim (verify r1 fix #2 — the inflight.rs sidecar-flock pattern)
 // ---------------------------------------------------------------------------
 
@@ -314,10 +537,9 @@ impl Drop for MarkerClaim {
 
 /// NON-BLOCKING exclusive claim on one marker's `<stem>.json.lock` sidecar.
 /// `None` means the OTHER reconciler (drain vs sweep) owns the marker this
-/// instant — skip it; the loser's pass is idempotent and retries later. The
-/// claim is awaited across the Discord delivery deliberately: it is a file
-/// flock guard (not a `std::sync` lock — no `await_holding_lock` site), and
-/// the only possible waiter skips instead of blocking.
+/// instant — skip; the loser's pass is idempotent and retries later. The claim
+/// is held across the Discord delivery deliberately: it is a file flock (no
+/// `await_holding_lock` site) and the only possible waiter skips, not blocks.
 pub(super) fn try_claim_marker(marker: &AbortedAnchorMarker) -> Option<MarkerClaim> {
     let root = root()?;
     let lock_path = root.join(format!("{}.json.lock", marker.file_stem()));
@@ -362,12 +584,11 @@ pub(super) enum MarkerDisposition {
 }
 
 /// The sweep's per-marker verdict. Conservative by design (I10): `⚠` requires
-/// BOTH the TTL to have elapsed AND no live inflight for the session, so a
-/// long-running prior turn is never falsely branded; `✅` retry requires a
-/// previously-seen covering commit. The live-inflight hold is absolutely
-/// bounded by [`ABORT_MARKER_HARD_CAP_TTL_MULTIPLIER`] (codex r1 finding 2) so
-/// no inflight churn can orphan the `⏳` forever — this hard cap is also the
-/// sole terminator for identity-ABSENT markers, which the drain never covers.
+/// BOTH an elapsed TTL AND no live inflight for the session (a long prior turn
+/// is never falsely branded); `✅` retry requires a previously-seen covering
+/// commit. The live-inflight hold is bounded by the hard cap (r1 finding 2) so
+/// no inflight churn can orphan the `⏳` — the cap is also the sole terminator
+/// for identity-ABSENT markers, which the drain never covers.
 pub(super) fn decide_marker_disposition(
     now_ms: u64,
     marker: &AbortedAnchorMarker,
@@ -392,20 +613,16 @@ pub(super) fn decide_marker_disposition(
     MarkerDisposition::DeliverFailureWarn
 }
 
-/// Does a terminal commit by the turn identified by `(committed_user_msg_id,
-/// committed_started_at)` cover this marker? Codex r1: POSITIVE correlation
-/// required — the committed turn must BE the foreign prior inflight recorded
-/// at ABORT time. The old condition (any same-`(provider,tmux,channel)`
-/// commit with `now_ms > aborted_at_ms`) let three impostors through: a
-/// prior-owner commit racing the marker write, a later turn in a re-created
-/// same-name tmux session, and an ordinary prior commit whose queued input
-/// was dropped — each a false `✅` on a possibly-unanswered anchor. The
-/// strictly-after-abort wall-clock test is retained as a SUBSIDIARY guard
-/// only. Identity-absent (legacy) markers never cover here — the sweep's
-/// TTL/hard-cap bound is their sole terminator. Deliberately NO TTL upper
-/// bound (verify r1): the sweep defers to a live same-session inflight, so a
-/// foreign turn streaming past the TTL must still have its eventual commit
-/// accepted — a TTL bound here re-created the false-`⚠`-on-answered symptom.
+/// Does a terminal commit by `(committed_user_msg_id, committed_started_at)`
+/// cover this marker? Codex r1: POSITIVE correlation required — the committed
+/// turn must BE the foreign prior inflight recorded at ABORT time (the old
+/// wall-clock-only condition let a racing prior-owner commit, a re-created
+/// same-name tmux session, and a dropped-input prior commit each false-`✅` a
+/// possibly-unanswered anchor); strictly-after-abort stays as a SUBSIDIARY
+/// guard only. Identity-absent (legacy) markers never cover here — the sweep
+/// bound is their sole terminator. Deliberately NO TTL upper bound (verify
+/// r1): the sweep defers to a live same-session inflight, so a foreign turn
+/// streaming past the TTL must still have its eventual commit accepted.
 pub(super) fn terminal_commit_covers_marker(
     now_ms: u64,
     marker: &AbortedAnchorMarker,
@@ -489,12 +706,11 @@ pub(super) type ReactionApplierFn = Box<
 >;
 
 /// The production applier. Bot identity (#3164 add≡remove, I1): the `⏳` was
-/// added via the relay's `shared.serenity_http_or_token_fallback()` (the
-/// provider/command bot), and `remove_reaction_raw` only removes `@me`'s
-/// reaction — resolving the SAME source here guarantees the removal targets
-/// exactly the reaction the add created. Success is keyed on the `✅`/`⚠`
-/// create (the remove is best-effort, mirroring
-/// `complete_tui_direct_prompt_anchor_lifecycle_if_present`).
+/// added via the relay's `shared.serenity_http_or_token_fallback()`, and
+/// `remove_reaction_raw` only removes `@me`'s reaction — resolving the SAME
+/// source guarantees the removal targets exactly the reaction the add created.
+/// Success is keyed on the `✅`/`⚠` create (the remove is best-effort,
+/// mirroring `complete_tui_direct_prompt_anchor_lifecycle_if_present`).
 pub(super) fn shared_reaction_applier(shared: Arc<SharedData>) -> ReactionApplierFn {
     Box::new(move |marker, op| {
         let shared = shared.clone();
@@ -553,10 +769,9 @@ fn now_ms() -> u64 {
     chrono::Utc::now().timestamp_millis().max(0) as u64
 }
 
-/// Watcher terminal-commit chokepoint: a body-visible normal commit for
-/// `(provider, tmux, channel)` covers every marker whose recorded foreign
-/// identity matches the COMMITTED turn (`committed_user_msg_id` +
-/// `committed_started_at` — codex r1) → `⏳ → ✅`. Returns markers drained.
+/// Watcher terminal-commit chokepoint: a body-visible normal commit covers
+/// every marker whose recorded foreign identity matches the COMMITTED turn
+/// (codex r1) → `⏳ → ✅`. Returns markers drained.
 pub(super) async fn drain_on_terminal_commit(
     shared: &Arc<SharedData>,
     provider: &str,
@@ -637,11 +852,10 @@ pub(super) async fn drain_on_terminal_commit_with_applier(
                 // retries the ✅ (and can never degrade it to ⚠).
                 marker.covered_at_ms = Some(now_ms);
                 if let Err(error) = record(&marker) {
-                    // verify r1 fix #4: a swallowed stamp failure would let the
-                    // sweep ⚠ a COVERED anchor after the TTL. Surface it loudly;
-                    // the marker stays on disk un-stamped, so the next covering
-                    // drain pass retries the ✅ (idempotent — covers are not
-                    // TTL-bounded since verify r1 fix #1).
+                    // verify r1 fix #4: surface loudly — a swallowed stamp
+                    // failure would let the sweep ⚠ a COVERED anchor after the
+                    // TTL; un-stamped, the next covering drain pass retries
+                    // the ✅ (covers are not TTL-bounded since fix #1).
                     tracing::error!(
                         provider = %marker.provider,
                         channel_id = marker.channel_id,
@@ -658,8 +872,7 @@ pub(super) async fn drain_on_terminal_commit_with_applier(
 
 /// Placeholder-sweeper pass: retry `✅` for covered markers; apply the TTL'd
 /// `⏳ → ⚠` fallback for anchors no commit ever covered (held while a live
-/// inflight may still cover them — see [`inflight_defers_sweep`] — up to the
-/// absolute hard cap). Returns markers resolved.
+/// inflight may still cover them, up to the hard cap). Returns resolved.
 pub(super) async fn sweep_expired(
     shared: &Arc<SharedData>,
     provider: &super::ProviderKind,
@@ -708,13 +921,37 @@ pub(super) async fn sweep_expired_with_applier(
         let Some(_claim) = try_claim_marker(&marker) else {
             continue; // the drain owns this marker right now
         };
-        let Some(marker) = reload(&marker) else {
+        let Some(mut marker) = reload(&marker) else {
             continue; // drained while unclaimed
         };
+        // codex r2 ordering: live-inflight read FIRST, tombstone 대조 SECOND.
+        // The chokepoint writes the tombstone BEFORE clearing the row, so "no
+        // live row" here guarantees a commit-caused clear already made its
+        // tombstone visible to the 대조 — a sweep pass claiming the marker
+        // mid-commit can no longer beat the correct ✅ with a ⚠ (finding 1;
+        // the flock only serializes, it does not order the verdicts).
+        let live_inflight = live_inflight_for_session(&marker);
+        if marker.covered_at_ms.is_none()
+            && let Some(committed_at_ms) = post_abort_commit_tombstone(&marker)
+        {
+            marker.covered_at_ms = Some(committed_at_ms);
+            if let Err(error) = record(&marker) {
+                // Loud (verify-r1 fix #4): un-persisted, the stamp re-derives
+                // from the tombstone next pass — but a Discord outage outliving
+                // the tombstone retention would then ⚠ a covered anchor.
+                tracing::error!(
+                    provider = %marker.provider,
+                    channel_id = marker.channel_id,
+                    anchor_message_id = marker.anchor_message_id,
+                    error = %error,
+                    "tui_direct_abort_marker: failed to persist tombstone-covered stamp; next sweep pass re-derives (#3296 r2)"
+                );
+            }
+        }
         let disposition = decide_marker_disposition(
             now_ms,
             &marker,
-            live_inflight_for_session(&marker),
+            live_inflight,
             ABORT_MARKER_TTL,
             http_available,
         );
@@ -754,6 +991,9 @@ pub(super) async fn sweep_expired_with_applier(
             ReactionDelivery::Failed | ReactionDelivery::HttpUnavailable => {}
         }
     }
+    // GC AFTER the marker loop: the first pass after long downtime must 대조
+    // against evidence that aged past the retention cap before deleting it.
+    gc_expired_commit_tombstones(now_ms);
     resolved
 }
 
@@ -762,11 +1002,13 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// Injects a per-test tempdir as the durable root via the THREAD-LOCAL
-    /// override (never the process-global `AGENTDESK_ROOT_DIR` env — mutating
-    /// that races every test that reads the root without the crate env lock,
-    /// e.g. the `tui_direct_pending_start` worker tests' `persist()`). No lock
-    /// is needed: each test thread sees only its own override.
+    /// Injects a per-test tempdir as the durable BASE root (marker store +
+    /// commit-tombstone store are siblings under it — codex r2) via the
+    /// THREAD-LOCAL override (never the process-global `AGENTDESK_ROOT_DIR`
+    /// env — mutating that races every test that reads the root without the
+    /// crate env lock, e.g. the `tui_direct_pending_start` worker tests'
+    /// `persist()`). No lock is needed: each test thread sees only its own
+    /// override.
     struct TestRoot {
         _temp: tempfile::TempDir,
     }
@@ -779,8 +1021,10 @@ mod tests {
 
     fn test_root() -> TestRoot {
         let temp = tempfile::tempdir().unwrap();
-        set_test_root_override(Some(temp.path().join("discord_tui_direct_abort_marker")));
+        set_test_root_override(Some(temp.path().to_path_buf()));
         std::fs::create_dir_all(root().expect("durable root configured under temp")).unwrap();
+        std::fs::create_dir_all(tombstone_root().expect("tombstone root configured under temp"))
+            .unwrap();
         TestRoot { _temp: temp }
     }
 
@@ -1036,14 +1280,16 @@ mod tests {
         );
     }
 
-    /// codex r1: the ABORT constructor. A LIVE foreign prior inflight pins its
-    /// identity (marker uncovered); an ALREADY-GONE foreign row means the
-    /// prior owner committed in the µs race before the marker existed — its
-    /// drain chokepoint can never see this marker, so it is recorded
-    /// PRE-COVERED and the sweep delivers the `✅` (RED as a TTL'd false `⚠`
-    /// on an answered anchor otherwise).
+    /// codex r2 (reverses the r1 pre-covered semantics): the ABORT constructor
+    /// NEVER records a covered marker. Bare row-absence is not commit evidence
+    /// — a placeholder-sweeper/stop/recovery force-clear also deletes rows, so
+    /// the r1 `foreign: None ⇒ covered_at = aborted_at` promotion false-`✅`'d
+    /// unanswered anchors (RED on the r1 code: `raced.covered_at_ms` was
+    /// `Some(aborted_at)`). Coverage now requires positive evidence (the drain
+    /// or a commit-tombstone 대조 — see
+    /// `record_instant_tombstone_covers_when_row_vanished_for_commit`).
     #[test]
-    fn for_abort_pins_identity_or_records_pre_covered() {
+    fn for_abort_pins_identity_and_never_pre_covers() {
         let live = AbortedAnchorMarker::for_abort(
             "claude".into(),
             9,
@@ -1064,10 +1310,9 @@ mod tests {
         let raced =
             AbortedAnchorMarker::for_abort("claude".into(), 9, 902, "tmux-9".into(), 42_000, None);
         assert_eq!(
-            raced.covered_at_ms,
-            Some(42_000),
-            "foreign row gone at the record instant ⇒ its commit already \
-             happened ⇒ pre-covered (the drain can never see this marker)"
+            raced.covered_at_ms, None,
+            "row-absence alone must NOT cover (r2: the deletion may be a \
+             non-commit force-clear — only tombstone evidence may cover)"
         );
         assert_eq!(raced.foreign_user_msg_id, None);
         assert_eq!(raced.foreign_started_at, None);
@@ -1473,60 +1718,52 @@ mod tests {
         );
     }
 
-    /// #3296 verify r1 (TOCTOU): the drain and the sweep must never BOTH
-    /// react to one marker. Simulates the race by running the watcher drain
-    /// from INSIDE the sweep's delivery window (a terminal commit arriving
-    /// mid-`⚠`). RED pre-claim: both reconcilers loaded the marker
-    /// independently and an answered-looking anchor collected `✅` + `⚠`.
+    /// codex r2 finding 1 (RED ① — REVERSES the r1
+    /// `sweep_and_drain_cannot_both_react_to_one_marker` pin, which froze this
+    /// exact race as `FailureWarn`): a terminal commit by the recorded foreign
+    /// turn landing BETWEEN the sweep's claim and its verdict must end `✅`,
+    /// never `⚠` — the flock only serializes the reconcilers, it does not make
+    /// the RIGHT verdict win. The chokepoint's tombstone-before-clear write
+    /// plus the sweep's live-read-then-대조 ordering closes it: by the time the
+    /// sweep can observe "no live row", the commit's tombstone is durable.
+    /// Mutual exclusion stays intact (the racing drain still skips — exactly
+    /// ONE reaction lands, and it is the completion).
     #[test]
-    fn sweep_and_drain_cannot_both_react_to_one_marker() {
+    fn sweep_claim_racing_terminal_commit_resolves_completion_not_warn() {
         let _root = test_root();
         let m = marker("claude", 100, 562, 10_000);
         record(&m).unwrap();
-        let calls: RecordedOps = Arc::new(Mutex::new(Vec::new()));
-        let sweep_calls = calls.clone();
-        let sweep_applier: ReactionApplierFn = Box::new(move |marker, op| {
-            let calls = sweep_calls.clone();
-            let anchor = marker.anchor_message_id;
-            Box::pin(async move {
-                // A terminal commit races in while the sweep is delivering ⚠.
-                let drain_calls = calls.clone();
-                let drain_applier: ReactionApplierFn = Box::new(move |m, op| {
-                    let calls = drain_calls.clone();
-                    let anchor = m.anchor_message_id;
-                    Box::pin(async move {
-                        calls.lock().unwrap().push((anchor, op));
-                        ReactionDelivery::Delivered
-                    })
-                });
-                drain_on_terminal_commit_with_applier(
-                    "claude",
-                    "tmux-100",
-                    100,
-                    10_500,
-                    562 + 500_000, // the marker's recorded foreign turn
-                    FOREIGN_STARTED_AT,
-                    &drain_applier,
-                )
-                .await;
-                calls.lock().unwrap().push((anchor, op));
-                ReactionDelivery::Delivered
-            })
-        });
+        let (cid, cstart) = committed(&m);
+        let (applier, calls) = recording_applier(ReactionDelivery::Delivered);
+        let commit_at = 10_000 + TTL_MS + 5_000;
+        // The watcher chokepoint interleaves inside the sweep's live-inflight
+        // read (post-claim, pre-verdict): tombstone FIRST (durable before the
+        // row clear), then its drain pass — which must SKIP the sweep-claimed
+        // marker (try_claim is the drain's first step) — then the row clear
+        // (this closure returns false = no live row).
+        let live_inflight = move |marker: &AbortedAnchorMarker| -> bool {
+            record_commit_tombstone_at(commit_at, "claude", "tmux-100", 100, cid, &cstart);
+            assert!(
+                try_claim_marker(marker).is_none(),
+                "sweep holds the claim; the racing drain must skip (exclusion)"
+            );
+            false
+        };
         let resolved = test_rt().block_on(sweep_expired_with_applier(
             "claude",
-            10_000 + TTL_MS + 1,
+            commit_at + 1_000,
             true,
-            &|_| false,
-            &sweep_applier,
+            &live_inflight,
+            &applier,
         ));
         assert_eq!(resolved, 1);
         let calls = calls.lock().unwrap();
         assert_eq!(
             calls.as_slice(),
-            &[(562, ReactionOp::FailureWarn)],
-            "exactly ONE reconciler may react per marker — RED without the \
-             per-marker claim (✅ AND ⚠ both landed on the same anchor)"
+            &[(562, ReactionOp::Complete)],
+            "the committed turn's tombstone must decide the verdict: exactly \
+             ONE reaction and it is ✅ — RED pre-r2 (without the 대조 the sweep \
+             ⚠'d this ANSWERED anchor; the old test pinned that ⚠ as expected)"
         );
         assert!(load_for_channel("claude", 100).is_empty());
     }
@@ -1703,5 +1940,193 @@ mod tests {
         assert_eq!(resolved, 0);
         assert!(calls.lock().unwrap().is_empty());
         assert_eq!(load_for_channel("codex", 100).len(), 1);
+    }
+
+    /// codex r2: tombstone store roundtrip — durable, provider/channel scoped.
+    #[test]
+    fn commit_tombstone_roundtrip_is_provider_and_channel_scoped() {
+        let _root = test_root();
+        record_commit_tombstone_at(50_000, "claude", "tmux-100", 100, 777, FOREIGN_STARTED_AT);
+        record_commit_tombstone_at(50_001, "codex", "tmux-100", 100, 778, FOREIGN_STARTED_AT);
+        record_commit_tombstone_at(50_002, "claude", "tmux-200", 200, 779, FOREIGN_STARTED_AT);
+        let loaded = load_commit_tombstones("claude", 100);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].committed_user_msg_id, 777);
+        assert_eq!(loaded[0].committed_at_ms, 50_000);
+        assert_eq!(loaded[0].tmux_session_name, "tmux-100");
+        assert_eq!(load_commit_tombstones("codex", 100).len(), 1);
+        assert_eq!(load_commit_tombstones("claude", 200).len(), 1);
+    }
+
+    /// codex r2 (RED ② — replaces the pre-covered promotion): the ABORT record
+    /// path with the foreign row already GONE. With a matching tombstone the
+    /// deletion WAS the prior owner's terminal commit → the marker records
+    /// covered at the tombstone's commit instant (evidence-backed — note the
+    /// commit PRECEDES `aborted_at`, the case the sweep's strictly-post-abort
+    /// 대조 deliberately excludes). WITHOUT one (a placeholder-sweeper/stop/
+    /// recovery force-clear) it records UNCOVERED and the sweep bound delivers
+    /// the conservative `⚠` — RED pre-r2: bare row-absence pre-covered the
+    /// marker and a force-cleared, genuinely-unanswered anchor got a false ✅.
+    #[test]
+    fn record_instant_tombstone_evidence_decides_cover_for_vanished_row() {
+        let _root = test_root();
+        // (a) commit-caused deletion: tombstone for the foreign turn exists.
+        record_commit_tombstone_at(
+            60_000,
+            "claude",
+            "tmux-100",
+            100,
+            600_777,
+            FOREIGN_STARTED_AT,
+        );
+        let covered = record_for_abort(
+            "claude".into(),
+            100,
+            600,
+            "tmux-100".into(),
+            Some((600_777, FOREIGN_STARTED_AT.into())),
+        )
+        .unwrap();
+        assert_eq!(
+            covered.covered_at_ms,
+            Some(60_000),
+            "matching tombstone at record time ⇒ evidence-backed cover"
+        );
+        // (b) non-commit deletion (force-clear simulation): no tombstone for
+        // THIS identity ⇒ uncovered; the sweep bound then delivers ⚠.
+        let uncovered = record_for_abort(
+            "claude".into(),
+            100,
+            601,
+            "tmux-100".into(),
+            Some((601_888, FOREIGN_STARTED_AT.into())),
+        )
+        .unwrap();
+        assert_eq!(
+            uncovered.covered_at_ms, None,
+            "row-absence without commit evidence must stay uncovered (RED ②: \
+             the r1 pre-covered promotion ✅'d this force-clear case)"
+        );
+        let (applier, calls) = recording_applier(ReactionDelivery::Delivered);
+        let resolved = test_rt().block_on(sweep_expired_with_applier(
+            "claude",
+            uncovered.aborted_at_ms + TTL_MS * ABORT_MARKER_HARD_CAP_TTL_MULTIPLIER,
+            true,
+            &|_| false,
+            &applier,
+        ));
+        assert_eq!(resolved, 2);
+        let calls = calls.lock().unwrap();
+        assert!(
+            calls.contains(&(600, ReactionOp::Complete)),
+            "evidence-covered marker completes"
+        );
+        assert!(
+            calls.contains(&(601, ReactionOp::FailureWarn)),
+            "force-clear marker takes the conservative ⚠ in bounded time"
+        );
+        assert!(load_for_channel("claude", 100).is_empty());
+    }
+
+    /// codex r2 (RED ③): GC removes only RETAINED-out tombstones, and once the
+    /// matching evidence is gone an UNRELATED turn's fresh tombstone must never
+    /// cover the marker (positive identity correlation, exactly like the
+    /// drain) — the hard-capped `⚠` stays the terminator.
+    #[test]
+    fn expired_tombstone_gc_and_unrelated_commit_never_cover() {
+        let _root = test_root();
+        let m = marker("claude", 100, 564, 10_000);
+        record(&m).unwrap();
+        let (cid, cstart) = committed(&m);
+        // The foreign turn's own tombstone, but already past retention at the
+        // sweep instant below; plus a FRESH unrelated turn's tombstone.
+        record_commit_tombstone_at(11_000, "claude", "tmux-100", 100, cid, &cstart);
+        let now = 11_000 + COMMIT_TOMBSTONE_RETENTION_MS;
+        record_commit_tombstone_at(now - 1_000, "claude", "tmux-100", 100, cid + 7, &cstart);
+        // Pass 1: a sweep for a provider with NO markers — it runs only the
+        // end-of-pass GC. (A claude pass would 대조 BEFORE the GC and the
+        // still-present expired evidence would cover — deliberate
+        // post-restart semantics; this test targets the post-GC world.)
+        let (applier, _calls) = recording_applier(ReactionDelivery::Delivered);
+        let resolved = test_rt().block_on(sweep_expired_with_applier(
+            "gemini", // no gemini markers: this pass only runs the GC
+            now,
+            true,
+            &|_| false,
+            &applier,
+        ));
+        assert_eq!(resolved, 0);
+        let remaining = load_commit_tombstones("claude", 100);
+        assert_eq!(
+            remaining.len(),
+            1,
+            "GC must drop the retention-expired tombstone and keep the fresh one"
+        );
+        assert_eq!(remaining[0].committed_user_msg_id, cid + 7);
+        // Pass 2: only the unrelated tombstone remains — it must NOT cover;
+        // the hard cap delivers the conservative ⚠ (RED ③ if an unrelated
+        // commit covers or the expired evidence resurrects).
+        let (applier, calls) = recording_applier(ReactionDelivery::Delivered);
+        let resolved = test_rt().block_on(sweep_expired_with_applier(
+            "claude",
+            10_000 + TTL_MS * ABORT_MARKER_HARD_CAP_TTL_MULTIPLIER,
+            true,
+            &|_| false,
+            &applier,
+        ));
+        assert_eq!(resolved, 1);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(564, ReactionOp::FailureWarn)],
+            "an unrelated commit's tombstone must never ✅ a foreign marker"
+        );
+    }
+
+    /// codex r2: the sweep's tombstone-covered stamp is PERSISTED, so a ✅
+    /// delivery failure followed by the tombstone aging out of retention can
+    /// never degrade the covered anchor to `⚠` (the persisted `covered_at_ms`
+    /// outlives the evidence that produced it).
+    #[test]
+    fn tombstone_cover_stamp_survives_delivery_failure_and_evidence_gc() {
+        let _root = test_root();
+        let m = marker("claude", 100, 565, 10_000);
+        record(&m).unwrap();
+        let (cid, cstart) = committed(&m);
+        let commit_at = 20_000;
+        record_commit_tombstone_at(commit_at, "claude", "tmux-100", 100, cid, &cstart);
+        let rt = test_rt();
+        // Pass 1: 대조 covers, but the ✅ delivery fails transiently.
+        let (failing, _ops) = recording_applier(ReactionDelivery::Failed);
+        let resolved = rt.block_on(sweep_expired_with_applier(
+            "claude",
+            commit_at + 1_000,
+            true,
+            &|_| false,
+            &failing,
+        ));
+        assert_eq!(resolved, 0);
+        let kept = load_for_channel("claude", 100);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            kept[0].covered_at_ms,
+            Some(commit_at),
+            "the 대조 stamp must be durable, not in-memory only"
+        );
+        // Pass 2: far past tombstone retention (evidence GC'd) — the persisted
+        // stamp still drives the ✅ retry, never a ⚠.
+        let (applier, calls) = recording_applier(ReactionDelivery::Delivered);
+        let resolved = rt.block_on(sweep_expired_with_applier(
+            "claude",
+            commit_at + COMMIT_TOMBSTONE_RETENTION_MS * 2,
+            true,
+            &|_| false,
+            &applier,
+        ));
+        assert_eq!(resolved, 1);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(565, ReactionOp::Complete)]
+        );
+        assert!(load_commit_tombstones("claude", 100).is_empty());
     }
 }

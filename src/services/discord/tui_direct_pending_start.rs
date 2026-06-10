@@ -357,16 +357,29 @@ pub(super) type ClaimFn = Box<
         + Sync,
 >;
 
-/// Build the per-poll [`PriorTurnView`]. Provided by [`super::tui_prompt_relay`]
-/// (it owns inflight/mailbox/runtime-binding access). Returns `None` when the
-/// view cannot be computed yet (e.g. mailbox unavailable) — treated as "not
-/// finalized" so the worker keeps waiting.
+/// One worker poll's observation: the pure decision [`PriorTurnView`] plus the
+/// live FOREIGN prior inflight's identity at the read instant (`None` when no
+/// row exists or the row is our own anchor). The worker threads the LATEST
+/// observed identity into the ABORT cleanup as the marker's last-view identity
+/// (#3296 codex r2: when the row vanishes in the µs gap between the final
+/// backstop view and the cleanup's own read, the marker still pins WHICH turn
+/// it was waiting on, so commit-tombstone 대조 — not bare row-absence — decides
+/// `✅` vs `⚠`).
+pub(super) struct PriorTurnObservation {
+    pub view: PriorTurnView,
+    pub foreign_inflight_identity: Option<(u64, String)>,
+}
+
+/// Build the per-poll [`PriorTurnObservation`]. Provided by
+/// [`super::tui_prompt_relay`] (it owns inflight/mailbox/runtime-binding
+/// access). Returns `None` when the view cannot be computed yet (e.g. mailbox
+/// unavailable) — treated as "not finalized" so the worker keeps waiting.
 pub(super) type ViewFn = Box<
     dyn for<'a> Fn(
             &'a Arc<SharedData>,
             &'a TuiDirectPendingStart,
         ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Option<PriorTurnView>> + Send + 'a>,
+            Box<dyn std::future::Future<Output = Option<PriorTurnObservation>> + Send + 'a>,
         > + Send
         + Sync,
 >;
@@ -377,11 +390,14 @@ pub(super) type ViewFn = Box<
 /// hook records a durable aborted-anchor marker
 /// ([`super::tui_direct_abort_marker`]) so a later prior-owner terminal commit
 /// flips it `⏳ → ✅`, or the TTL'd sweep flips it `⏳ → ⚠` when nothing ever
-/// covered it. Provided by [`super::tui_prompt_relay`].
+/// covered it. The third argument is the worker's LAST-VIEW foreign inflight
+/// identity (codex r2 — see [`PriorTurnObservation`]). Provided by
+/// [`super::tui_prompt_relay`].
 pub(super) type AbortCleanupFn = Box<
     dyn for<'a> Fn(
             &'a Arc<SharedData>,
             &'a TuiDirectPendingStart,
+            Option<(u64, String)>,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
         + Send
         + Sync,
@@ -431,21 +447,36 @@ async fn run_worker(
     let mut backstop_cycles: u32 = 0;
     let mut claim_attempts: u32 = 0;
     let worker_start = tokio::time::Instant::now();
+    // codex r2: the most recent poll's live FOREIGN inflight identity. Handed
+    // to the ABORT cleanup so the aborted-anchor marker pins WHICH turn it was
+    // deferring on even when that row vanishes before the cleanup's own read.
+    let mut last_foreign_identity: Option<(u64, String)> = None;
 
     loop {
         // ---- Wait window: poll until finalized or backstop expiry. ----
         let cycle_start = tokio::time::Instant::now();
         let outcome = loop {
-            if let Some(view) = view_fn(&shared, &record).await
-                && prior_turn_finalized(view)
-            {
-                break WaitOutcome::Finalized;
+            if let Some(obs) = view_fn(&shared, &record).await {
+                if obs.foreign_inflight_identity.is_some() {
+                    last_foreign_identity = obs.foreign_inflight_identity;
+                }
+                if prior_turn_finalized(obs.view) {
+                    break WaitOutcome::Finalized;
+                }
             }
             if cycle_start.elapsed() >= PENDING_START_BACKSTOP {
-                let view = view_fn(&shared, &record).await;
-                break match view {
-                    Some(view) if backstop_claim_is_safe(view) => WaitOutcome::BackstopClaimSafe,
-                    _ => WaitOutcome::BackstopForeignInflightLive,
+                break match view_fn(&shared, &record).await {
+                    Some(obs) => {
+                        if obs.foreign_inflight_identity.is_some() {
+                            last_foreign_identity = obs.foreign_inflight_identity;
+                        }
+                        if backstop_claim_is_safe(obs.view) {
+                            WaitOutcome::BackstopClaimSafe
+                        } else {
+                            WaitOutcome::BackstopForeignInflightLive
+                        }
+                    }
+                    None => WaitOutcome::BackstopForeignInflightLive,
                 };
             }
             tokio::time::sleep(PENDING_START_POLL).await;
@@ -490,8 +521,9 @@ async fn run_worker(
                     // #3282/#3296: no claim will ever run for this anchor, so
                     // the normal `⏳ → ✅` completion never fires — record the
                     // durable aborted-anchor marker here (the anchor keeps its
-                    // ⏳; the watcher drain / TTL sweep own the reconcile).
-                    abort_cleanup_fn(&shared, &record).await;
+                    // ⏳; the watcher drain / TTL sweep own the reconcile),
+                    // pinning the last-view foreign identity (codex r2).
+                    abort_cleanup_fn(&shared, &record, last_foreign_identity.clone()).await;
                     delete(&record);
                     return;
                 }
@@ -573,6 +605,15 @@ mod tests {
     fn worker_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
         LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Wrap a pure view into the worker's per-poll observation (no foreign
+    /// identity — the common already-finalized case).
+    fn obs(view: PriorTurnView) -> PriorTurnObservation {
+        PriorTurnObservation {
+            view,
+            foreign_inflight_identity: None,
+        }
     }
 
     fn base_view() -> PriorTurnView {
@@ -693,21 +734,32 @@ mod tests {
     }
 
     /// #3282 test double for the ABORT-path anchor `⏳` cleanup, following the
-    /// `ViewFn`/`ClaimFn` boxed-closure convention. Records each invocation so a
-    /// test can pin WHEN the cleanup fires (terminal backstop ABORT only) and
-    /// when it must NOT (successful claim — the normal `⏳ → ✅` completion owns
-    /// the anchor; retry exhaustion — the record is retained for restart).
-    fn recording_abort_cleanup() -> (AbortCleanupFn, Arc<std::sync::atomic::AtomicU32>) {
+    /// `ViewFn`/`ClaimFn` boxed-closure convention. Records each invocation —
+    /// and the last-view foreign identity it received (codex r2) — so a test
+    /// can pin WHEN the cleanup fires (terminal backstop ABORT only) and what
+    /// identity the worker threaded, and when it must NOT fire (successful
+    /// claim — the normal `⏳ → ✅` completion owns the anchor; retry
+    /// exhaustion — the record is retained for restart).
+    type RecordedForeignIdentity = Arc<Mutex<Option<Option<(u64, String)>>>>;
+    fn recording_abort_cleanup() -> (
+        AbortCleanupFn,
+        Arc<std::sync::atomic::AtomicU32>,
+        RecordedForeignIdentity,
+    ) {
         use std::sync::atomic::{AtomicU32, Ordering};
         let calls = Arc::new(AtomicU32::new(0));
+        let identity: RecordedForeignIdentity = Arc::new(Mutex::new(None));
         let calls_for_fn = calls.clone();
-        let cleanup: AbortCleanupFn = Box::new(move |_shared, _record| {
+        let identity_for_fn = identity.clone();
+        let cleanup: AbortCleanupFn = Box::new(move |_shared, _record, foreign| {
             let calls = calls_for_fn.clone();
+            let identity = identity_for_fn.clone();
             Box::pin(async move {
                 calls.fetch_add(1, Ordering::SeqCst);
+                *identity.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(foreign);
             })
         });
-        (cleanup, calls)
+        (cleanup, calls, identity)
     }
 
     fn record(provider: &str, channel_id: u64, anchor: u64) -> TuiDirectPendingStart {
@@ -762,14 +814,14 @@ mod tests {
         let a_view: ViewFn = Box::new(move |_shared, _record| {
             let undrained = a_undrained_for_view.clone();
             Box::pin(async move {
-                Some(PriorTurnView {
+                Some(obs(PriorTurnView {
                     // turn1 inflight present until drained.
                     inflight_present: undrained.load(Ordering::SeqCst),
                     inflight_is_own_anchor: false,
                     mailbox_blocking_turn_present: false,
                     mailbox_turn_is_own_anchor: false,
                     runtime_binding_present: true,
-                })
+                }))
             })
         });
         let a_undrained_for_claim = a_prior_undrained.clone();
@@ -796,7 +848,7 @@ mod tests {
             pending_synthetic_start_present("claude", 1),
             "A's pending start gates the watcher/idle-queue immediately"
         );
-        let (a_cleanup, a_cleanup_calls) = recording_abort_cleanup();
+        let (a_cleanup, a_cleanup_calls, _) = recording_abort_cleanup();
         let a_handle = tokio::spawn(run_worker(
             shared.clone(),
             rec_a,
@@ -809,13 +861,13 @@ mod tests {
         let b_claimed = Arc::new(AtomicBool::new(false));
         let b_view: ViewFn = Box::new(move |_shared, _record| {
             Box::pin(async move {
-                Some(PriorTurnView {
+                Some(obs(PriorTurnView {
                     inflight_present: false,
                     inflight_is_own_anchor: false,
                     mailbox_blocking_turn_present: false,
                     mailbox_turn_is_own_anchor: false,
                     runtime_binding_present: true,
-                })
+                }))
             })
         });
         let b_claimed_for_claim = b_claimed.clone();
@@ -828,7 +880,7 @@ mod tests {
         });
         let rec_b = record("claude", 2, 22);
         persist(&rec_b).unwrap();
-        let (b_cleanup, b_cleanup_calls) = recording_abort_cleanup();
+        let (b_cleanup, b_cleanup_calls, _) = recording_abort_cleanup();
         let b_handle = tokio::spawn(run_worker(
             shared.clone(),
             rec_b,
@@ -943,14 +995,19 @@ mod tests {
         let shared = super::super::make_shared_data_for_tests();
 
         // A foreign prior inflight is live FOREVER (never drains, never ours).
+        // Every poll observes its identity — the worker must thread the
+        // LAST-VIEW identity into the abort cleanup (codex r2).
         let view: ViewFn = Box::new(move |_shared, _record| {
             Box::pin(async move {
-                Some(PriorTurnView {
-                    inflight_present: true,
-                    inflight_is_own_anchor: false,
-                    mailbox_blocking_turn_present: true,
-                    mailbox_turn_is_own_anchor: false,
-                    runtime_binding_present: true,
+                Some(PriorTurnObservation {
+                    view: PriorTurnView {
+                        inflight_present: true,
+                        inflight_is_own_anchor: false,
+                        mailbox_blocking_turn_present: true,
+                        mailbox_turn_is_own_anchor: false,
+                        runtime_binding_present: true,
+                    },
+                    foreign_inflight_identity: Some((777, "2026-06-10 12:00:00".to_string())),
                 })
             })
         });
@@ -969,7 +1026,8 @@ mod tests {
         persist(&rec).unwrap();
         assert!(pending_synthetic_start_present("claude", 10));
 
-        let (abort_cleanup, abort_cleanup_calls) = recording_abort_cleanup();
+        let (abort_cleanup, abort_cleanup_calls, abort_cleanup_identity) =
+            recording_abort_cleanup();
         let handle = tokio::spawn(run_worker(shared.clone(), rec, view, claim, abort_cleanup));
 
         // Advance through the full escalation budget of backstop windows.
@@ -1001,6 +1059,18 @@ mod tests {
              anchor). RED if the ABORT branch skips abort_cleanup_fn (the \
              hourglass would linger with no reconcile owner)."
         );
+        assert_eq!(
+            abort_cleanup_identity
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .clone(),
+            Some(Some((777, "2026-06-10 12:00:00".to_string()))),
+            "codex r2: the worker must thread the LAST-VIEW foreign inflight \
+             identity into the cleanup, so a row that vanishes before the \
+             cleanup's own read still yields an identity-pinned marker — RED \
+             if the hook receives None (the marker would be sweep-only and \
+             tombstone 대조 could never ✅ it)"
+        );
         reset_present_for_tests();
     }
 
@@ -1024,7 +1094,7 @@ mod tests {
 
         // Prior turn is finalized immediately — the wait window is not the point.
         let view: ViewFn =
-            Box::new(move |_shared, _record| Box::pin(async move { Some(base_view()) }));
+            Box::new(move |_shared, _record| Box::pin(async move { Some(obs(base_view())) }));
 
         // First two claims fail (transient), the third succeeds.
         let attempts = Arc::new(AtomicU32::new(0));
@@ -1039,7 +1109,7 @@ mod tests {
 
         let rec = record("claude", 11, 111);
         persist(&rec).unwrap();
-        let (abort_cleanup, abort_cleanup_calls) = recording_abort_cleanup();
+        let (abort_cleanup, abort_cleanup_calls, _) = recording_abort_cleanup();
         let handle = tokio::spawn(run_worker(shared.clone(), rec, view, claim, abort_cleanup));
 
         // Drive the retry backoffs. After the first false, assert the record is
@@ -1094,7 +1164,7 @@ mod tests {
         reset_present_for_tests();
         let shared = super::super::make_shared_data_for_tests();
         let view: ViewFn =
-            Box::new(move |_shared, _record| Box::pin(async move { Some(base_view()) }));
+            Box::new(move |_shared, _record| Box::pin(async move { Some(obs(base_view())) }));
 
         let attempts = Arc::new(AtomicU32::new(0));
         let attempts_for_fn = attempts.clone();
@@ -1108,7 +1178,7 @@ mod tests {
 
         let rec = record("claude", 12, 122);
         persist(&rec).unwrap();
-        let (abort_cleanup, abort_cleanup_calls) = recording_abort_cleanup();
+        let (abort_cleanup, abort_cleanup_calls, _) = recording_abort_cleanup();
         let handle = tokio::spawn(run_worker(shared.clone(), rec, view, claim, abort_cleanup));
 
         for _ in 0..(PENDING_START_MAX_CLAIM_ATTEMPTS + 2) {
