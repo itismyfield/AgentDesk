@@ -1009,7 +1009,10 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   lifting cluster C — the three queued-placeholder fields + their nine inherent
   methods — into `shared_state::QueuedPlaceholderState`, leaving a single
   `queued: QueuedPlaceholderState` group field on `SharedData` and re-exporting
-  the type for surface freeze),
+  the type for surface freeze; ±0 from #3293 — the +13 closed-retry rewires
+  (`mailbox_peek` + `*_with_closed_retry` routing for recovery kickoff and
+  intervention enqueue) are offset by queue-exit comment dedup in the same
+  root, no baseline raise),
   `src/services/discord_config_audit.rs` (1273).
 - `src/services/turn_orchestrator.rs` (3089; +3 from #3293 declaring the
   `registry_purge` child module — the non-creating `peek` lookup and the
