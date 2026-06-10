@@ -201,11 +201,39 @@ var mergeAutomation = {
   onTick5min: function() {
     if (!isEnabled()) return;
 
-    processCodexReviewSignals();
-    processManualMergeRequests();
-    processTrackedMergeQueue();
-    cleanupMergedWorktrees();
-    detectConflictingPrs();
+    // #3278: run the whole pass under a tick-local git fallback cache so
+    // repeated dispatch-row inspections against the same worktree cost at
+    // most one `git branch`/`git rev-parse` pair per tick.
+    withGitFallbackCache(function() {
+      var steps = [
+        { name: "processCodexReviewSignals", run: processCodexReviewSignals },
+        { name: "processManualMergeRequests", run: processManualMergeRequests },
+        { name: "processTrackedMergeQueue", run: processTrackedMergeQueue },
+        { name: "cleanupMergedWorktrees", run: cleanupMergedWorktrees },
+        { name: "detectConflictingPrs", run: detectConflictingPrs }
+      ];
+      for (var i = 0; i < steps.length; i++) {
+        try {
+          steps[i].run();
+        } catch (e) {
+          // #3278: the tick actor keeps executing this hook in a background
+          // queue after the 5s POLICY_TICK_HOOK_TIMEOUT, so deadline
+          // exhaustion mid-pass means "out of budget this tick", not a hook
+          // failure — every step is idempotent and retried on the next tick.
+          // Downgrade to WARN instead of letting the error escape as an
+          // ERROR-level "hook execution failed". Non-deadline errors still
+          // propagate.
+          if (isBridgeDeadlineError(e)) {
+            agentdesk.log.warn(
+              "[merge] onTick5min hit bridge deadline at step " + steps[i].name +
+              "; deferring remaining steps to next tick: " + e
+            );
+            return;
+          }
+          throw e;
+        }
+      }
+    });
   }
 };
 
@@ -326,7 +354,58 @@ function appendMergeCandidateReason(details, code, message) {
   });
 }
 
-function buildWorkTargetFromDispatchRow(row) {
+// #3278: bridge ops surface deadline exhaustion as thrown Errors
+// ("bridge deadline exceeded during async bridge operation" /
+// "bridge deadline passed before async bridge started" — see
+// src/utils/async_bridge.rs). Match both phrasings so onTick5min can treat
+// them as a retry-next-tick condition rather than a hook failure.
+function isBridgeDeadlineError(error) {
+  var message = error && error.message ? String(error.message) : String(error || "");
+  return message.indexOf("bridge deadline") !== -1
+    || message.indexOf("deadline exceeded") !== -1
+    || message.indexOf("deadline passed") !== -1;
+}
+
+// #3278: tick-local cache for git fallback lookups in
+// buildWorkTargetFromDispatchRow. inspectLatestCompletedWorkTarget walks up
+// to 16 dispatch rows per card and every row missing branch/head_sha
+// metadata used to cost two git child processes; across the tracked merge
+// queue the accumulated execs blew the 5s POLICY_TICK_HOOK_TIMEOUT even
+// though each individual exec is deadline-aware (#2378). The cache is only
+// armed inside withGitFallbackCache (onTick5min); everywhere else
+// _gitFallbackCache stays null and behavior is unchanged.
+var _gitFallbackCache = null;
+
+function withGitFallbackCache(fn) {
+  var created = false;
+  if (!_gitFallbackCache) {
+    _gitFallbackCache = {};
+    created = true;
+  }
+  try {
+    return fn();
+  } finally {
+    if (created) _gitFallbackCache = null;
+  }
+}
+
+function execGitFallback(op, worktreePath, args) {
+  var cacheKey = op + ":" + worktreePath;
+  if (_gitFallbackCache
+      && Object.prototype.hasOwnProperty.call(_gitFallbackCache, cacheKey)) {
+    return _gitFallbackCache[cacheKey];
+  }
+  var result = agentdesk.exec("git", args);
+  var value = result && result.indexOf("ERROR") !== 0 && result.trim()
+    ? result.trim()
+    : null;
+  if (_gitFallbackCache) {
+    _gitFallbackCache[cacheKey] = value;
+  }
+  return value;
+}
+
+function buildWorkTargetFromDispatchRow(row, options) {
   var result = parseJsonObject(row.result);
   var context = parseJsonObject(row.context);
   var dispatchStatus = row && row.status ? String(row.status) : null;
@@ -351,16 +430,24 @@ function buildWorkTargetFromDispatchRow(row) {
     context.reviewed_commit
   );
 
-  if (!branch && worktreePath) {
-    var branchResult = agentdesk.exec("git", ["-C", worktreePath, "branch", "--show-current"]);
-    if (branchResult && branchResult.indexOf("ERROR") !== 0 && branchResult.trim()) {
-      branch = branchResult.trim();
+  // #3278: git fallback only when the caller can actually consume the
+  // enriched target (selected completed rows / cancelled terminal fallback).
+  // Diagnostics-only rows skip it — see inspectLatestCompletedWorkTarget.
+  var allowGitFallback = !options || options.git_fallback !== false;
+  if (allowGitFallback) {
+    if (!branch && worktreePath) {
+      branch = execGitFallback(
+        "branch",
+        worktreePath,
+        ["-C", worktreePath, "branch", "--show-current"]
+      );
     }
-  }
-  if (!headSha && worktreePath) {
-    var headResult = agentdesk.exec("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
-    if (headResult && headResult.indexOf("ERROR") !== 0 && headResult.trim()) {
-      headSha = headResult.trim();
+    if (!headSha && worktreePath) {
+      headSha = execGitFallback(
+        "head",
+        worktreePath,
+        ["-C", worktreePath, "rev-parse", "HEAD"]
+      );
     }
   }
 
@@ -389,7 +476,16 @@ function inspectLatestCompletedWorkTarget(cardId) {
   );
   for (var i = 0; i < excludedRows.length; i++) {
     var excludedRow = excludedRows[i];
-    var excludedTarget = buildWorkTargetFromDispatchRow(excludedRow);
+    // #3278: pending/dispatched rows are inspected purely for diagnostics —
+    // their result payload is empty until completion, so the git fallback
+    // used to burn up to two child processes per row for data nobody
+    // consumes. Only the first cancelled row with a worktree_path can become
+    // the terminal fallback candidate, so enable the fallback only while
+    // that slot is still open (eligibility itself needs no git: it depends
+    // on row status + metadata worktree_path alone).
+    var excludedTarget = buildWorkTargetFromDispatchRow(excludedRow, {
+      git_fallback: excludedRow.status === "cancelled" && cancelledFallbackIndex === -1
+    });
     var fallbackEligible = excludedRow.status === "cancelled" && !!excludedTarget.worktree_path;
     inspected.push({
       dispatch_id: excludedRow.id,
@@ -2000,7 +2096,10 @@ if (typeof module !== "undefined" && module.exports) {
       loadRequiredPhaseKeysForCard: loadRequiredPhaseKeysForCard,
       verifyRequiredPhaseEvidence: verifyRequiredPhaseEvidence,
       verifyTrackedPrMergeReadiness: verifyTrackedPrMergeReadiness,
-      closeGithubIssueAfterDirectMerge: closeGithubIssueAfterDirectMerge
+      closeGithubIssueAfterDirectMerge: closeGithubIssueAfterDirectMerge,
+      inspectLatestCompletedWorkTarget: inspectLatestCompletedWorkTarget,
+      withGitFallbackCache: withGitFallbackCache,
+      isBridgeDeadlineError: isBridgeDeadlineError
     }
   };
 }
