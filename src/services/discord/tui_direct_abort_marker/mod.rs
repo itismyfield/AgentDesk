@@ -85,9 +85,32 @@ pub(super) const ABORT_MARKER_TTL: std::time::Duration = std::time::Duration::fr
 /// loses its hold — accepted; bounded convergence is the contract (#3282).
 pub(super) const ABORT_MARKER_HARD_CAP_TTL_MULTIPLIER: u64 = 6;
 
+/// Which lifecycle event recorded a marker — drives ONLY the sweep's
+/// disposition choice (#3303). `#[serde(default)]`'d on the marker so legacy
+/// on-disk JSON (and a version DOWNGRADE re-reading a `deferred_claim`
+/// marker, since the field round-trips as a plain string) deserializes as
+/// [`MarkerOrigin::Abort`] — the conservative pre-#3303 semantics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum MarkerOrigin {
+    /// The synthetic turn-start ABORTed on the backstop escalation budget
+    /// (#3296): the pinned identity is the FOREIGN prior turn the worker
+    /// deferred on.
+    #[default]
+    Abort,
+    /// The synthetic turn-start claim SUCCEEDED (#3303): the pinned identity
+    /// is the worker's OWN synthetic turn (`user_msg_id == anchor`, own row
+    /// `started_at`), so a relay failure / EOF-consumed commit path that never
+    /// flips the anchor's `⏳ → ✅` still converges (own commit → drain `✅`;
+    /// nothing ever commits → bounded sweep `⚠` instead of an eternal `⏳`).
+    DeferredClaim,
+}
+
 /// Durable record for an anchor whose synthetic turn-start ABORTed while the
-/// input was already provider-submitted. All fields are primitives so the JSON
-/// survives a dcserver version swap.
+/// input was already provider-submitted (`origin == Abort`, #3296), or whose
+/// deferred synthetic claim succeeded but whose own terminal commit must still
+/// be proven (`origin == DeferredClaim`, #3303). All fields are primitives so
+/// the JSON survives a dcserver version swap.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct AbortedAnchorMarker {
     pub provider: String,
@@ -95,7 +118,8 @@ pub(super) struct AbortedAnchorMarker {
     /// Identity pin (I4): the ONLY message any `✅`/`⚠` correction may target.
     pub anchor_message_id: u64,
     pub tmux_session_name: String,
-    /// Wall-clock ms of the ABORT. A covering commit must not be earlier (r3).
+    /// Wall-clock ms of the recording event (the ABORT, or the deferred-claim
+    /// success). A covering commit must not be earlier (r3).
     pub aborted_at_ms: u64,
     /// Stamped when a covering terminal commit was seen but the `✅` delivery
     /// failed (or http was unavailable) — the sweep retries the completion
@@ -103,15 +127,23 @@ pub(super) struct AbortedAnchorMarker {
     /// RECORD time on tombstone evidence ([`AbortedAnchorMarker::for_abort`]).
     #[serde(default)]
     pub covered_at_ms: Option<u64>,
-    /// Identity of the live FOREIGN prior inflight at the ABORT instant
-    /// (codex r1: positive correlation — `inflight.rs` `InflightTurnIdentity`
-    /// convention). The drain covers this marker ONLY on a terminal commit
-    /// whose turn identity matches BOTH fields. `None` on legacy (pre-r1)
-    /// markers: never drain-covered — the sweep bound alone resolves them.
+    /// Identity of the turn whose terminal commit COVERS this marker
+    /// (`inflight.rs` `InflightTurnIdentity` convention; codex r1: positive
+    /// correlation). For `Abort` markers this is the live FOREIGN prior
+    /// inflight at the ABORT instant; for `DeferredClaim` markers it is the
+    /// worker's OWN synthetic turn — NEVER the prior turn (the prior commit's
+    /// tombstone is definitionally already durable at claim time, so pinning
+    /// it would false-`✅` a still-streaming unanswered turn; #3303 SC1). The
+    /// drain covers this marker ONLY on a terminal commit whose turn identity
+    /// matches BOTH fields. `None` on legacy (pre-r1) markers: never
+    /// drain-covered — the sweep bound alone resolves them.
     #[serde(default)]
     pub foreign_user_msg_id: Option<u64>,
     #[serde(default)]
     pub foreign_started_at: Option<String>,
+    /// See [`MarkerOrigin`] (#3303). Legacy JSON defaults to `Abort`.
+    #[serde(default)]
+    pub origin: MarkerOrigin,
 }
 
 impl AbortedAnchorMarker {
@@ -152,6 +184,7 @@ impl AbortedAnchorMarker {
             covered_at_ms: None,
             foreign_user_msg_id,
             foreign_started_at,
+            origin: MarkerOrigin::Abort,
         }
     }
 
@@ -171,8 +204,12 @@ impl AbortedAnchorMarker {
 // caller path `tui_direct_abort_marker::*` is unchanged)
 // ---------------------------------------------------------------------------
 
+mod deferred_claim;
 mod store;
 
+pub(in crate::services::discord) use deferred_claim::{
+    LiveInflightProbe, record_for_deferred_claim,
+};
 use store::reload;
 #[cfg(test)]
 pub(in crate::services::discord) use store::{
@@ -526,7 +563,8 @@ pub(super) async fn drain_on_terminal_commit_with_applier(
                     channel_id = marker.channel_id,
                     tmux_session_name = %marker.tmux_session_name,
                     anchor_message_id = marker.anchor_message_id,
-                    "tui_direct_abort_marker: aborted anchor covered by prior-owner terminal commit; ⏳ → ✅ delivered and marker drained (#3296)"
+                    origin = ?marker.origin,
+                    "tui_direct_abort_marker: anchor covered by the pinned turn's terminal commit; ⏳ → ✅ delivered and marker drained (#3296/#3303)"
                 );
             }
             ReactionDelivery::FailedPermanent => {
@@ -571,15 +609,29 @@ pub(super) async fn sweep_expired(
 ) -> usize {
     let http_available = shared.serenity_http_or_token_fallback().is_some();
     let applier = shared_reaction_applier(shared.clone());
-    let live_inflight = |marker: &AbortedAnchorMarker| -> bool {
-        super::inflight::load_inflight_state(provider, marker.channel_id).is_some_and(|state| {
-            inflight_defers_sweep(
-                marker,
-                state.tmux_session_name.as_deref(),
-                state.user_msg_id,
-                &state.started_at,
-            )
-        })
+    // ONE inflight read feeds both kind predicates (#3303): `defers` is the
+    // Abort-kind hold; `is_pinned_turn` is the DeferredClaim-kind hold (the
+    // live row IS the marker's pinned own turn — user_msg_id / started_at /
+    // tmux session name all match).
+    let live_inflight = |marker: &AbortedAnchorMarker| -> LiveInflightProbe {
+        match super::inflight::load_inflight_state(provider, marker.channel_id) {
+            None => LiveInflightProbe {
+                defers: false,
+                is_pinned_turn: false,
+            },
+            Some(state) => LiveInflightProbe {
+                defers: inflight_defers_sweep(
+                    marker,
+                    state.tmux_session_name.as_deref(),
+                    state.user_msg_id,
+                    &state.started_at,
+                ),
+                is_pinned_turn: marker
+                    .matches_foreign_identity(state.user_msg_id, &state.started_at)
+                    && state.tmux_session_name.as_deref()
+                        == Some(marker.tmux_session_name.as_str()),
+            },
+        }
     };
     sweep_expired_with_applier(
         provider.as_str(),
@@ -591,11 +643,15 @@ pub(super) async fn sweep_expired(
     .await
 }
 
-pub(super) async fn sweep_expired_with_applier(
+/// Generic over the probe return (`Into<LiveInflightProbe>`) so the existing
+/// Abort-kind test closures keep their bare-bool form (`From<bool>` maps to a
+/// never-pinned probe) while the production sweep supplies the full #3303
+/// probe.
+pub(super) async fn sweep_expired_with_applier<P: Into<LiveInflightProbe>>(
     provider: &str,
     now_ms: u64,
     http_available: bool,
-    live_inflight_for_session: &(dyn Fn(&AbortedAnchorMarker) -> bool + Send + Sync),
+    live_inflight_for_session: &(dyn Fn(&AbortedAnchorMarker) -> P + Send + Sync),
     applier: &ReactionApplierFn,
 ) -> usize {
     let mut resolved = 0usize;
@@ -622,7 +678,7 @@ pub(super) async fn sweep_expired_with_applier(
         // tombstone visible to the 대조 — a sweep pass claiming the marker
         // mid-commit can no longer beat the correct ✅ with a ⚠ (finding 1;
         // the flock only serializes, it does not order the verdicts).
-        let live_inflight = live_inflight_for_session(&marker);
+        let probe: LiveInflightProbe = live_inflight_for_session(&marker).into();
         if marker.covered_at_ms.is_none()
             && let Some(committed_at_ms) = post_abort_commit_tombstone(&marker)
         {
@@ -640,13 +696,28 @@ pub(super) async fn sweep_expired_with_applier(
                 );
             }
         }
-        let disposition = decide_marker_disposition(
-            now_ms,
-            &marker,
-            live_inflight,
-            ABORT_MARKER_TTL,
-            http_available,
-        );
+        // #3303: ONLY the disposition branches on the marker kind. The Abort
+        // disposition (incl. its 6×TTL hard cap) is byte-for-byte untouched;
+        // the DeferredClaim disposition swaps the live-inflight hold for the
+        // pinned-own-turn hold (uncapped) and drops the name-only hold.
+        let disposition = match marker.origin {
+            MarkerOrigin::Abort => decide_marker_disposition(
+                now_ms,
+                &marker,
+                probe.defers,
+                ABORT_MARKER_TTL,
+                http_available,
+            ),
+            MarkerOrigin::DeferredClaim => {
+                deferred_claim::decide_deferred_claim_marker_disposition(
+                    now_ms,
+                    &marker,
+                    probe,
+                    ABORT_MARKER_TTL,
+                    http_available,
+                )
+            }
+        };
         let op = match disposition {
             MarkerDisposition::KeepWaiting | MarkerDisposition::LeftIntactHttpUnavailable => {
                 continue;
@@ -664,7 +735,8 @@ pub(super) async fn sweep_expired_with_applier(
                     tmux_session_name = %marker.tmux_session_name,
                     anchor_message_id = marker.anchor_message_id,
                     op = ?op,
-                    "tui_direct_abort_marker: sweep resolved aborted anchor (#3296)"
+                    origin = ?marker.origin,
+                    "tui_direct_abort_marker: sweep resolved marked anchor (#3296/#3303)"
                 );
             }
             ReactionDelivery::FailedPermanent => {
@@ -752,6 +824,7 @@ mod tests {
             // default (the ABORT path pins one whenever the prior row is live).
             foreign_user_msg_id: Some(anchor + 500_000),
             foreign_started_at: Some(FOREIGN_STARTED_AT.to_string()),
+            origin: MarkerOrigin::Abort,
         }
     }
 
@@ -1907,5 +1980,267 @@ mod tests {
             Some(50_000),
             "the first commit's retained tombstone must still cover its marker"
         );
+    }
+
+    // ====================================================================
+    // #3303 — DeferredClaim-kind markers (own-identity pin for SUCCESSFUL
+    // deferred claims). The pure disposition truth table lives in
+    // `deferred_claim.rs`; these drive the SHARED reconcilers (drain / sweep
+    // / record-instant 대조) against the new kind.
+    // ====================================================================
+
+    /// `started_at` of every test marker's OWN synthetic turn (#3303).
+    const OWN_STARTED_AT: &str = "2026-06-10 13:00:00";
+
+    fn deferred_marker(
+        provider: &str,
+        channel: u64,
+        anchor: u64,
+        claimed_at_ms: u64,
+    ) -> AbortedAnchorMarker {
+        AbortedAnchorMarker::for_deferred_claim(
+            provider.to_string(),
+            channel,
+            anchor,
+            format!("tmux-{channel}"),
+            claimed_at_ms,
+            (anchor, OWN_STARTED_AT.to_string()),
+        )
+    }
+
+    /// R2 (#3303 happy path): the watcher chokepoint's existing drain covers a
+    /// DeferredClaim marker when the OWN synthetic turn terminal-commits —
+    /// exactly one `⏳ → ✅` on the pinned anchor and the marker drains. The
+    /// drain is deliberately kind-agnostic (identity is the shared cover
+    /// test), so this needs ZERO watcher changes.
+    #[test]
+    fn deferred_claim_marker_drains_completion_on_own_commit() {
+        let _root = test_root();
+        let m = deferred_marker("claude", 100, 700, 10_000);
+        record(&m).unwrap();
+        let (applier, calls) = recording_applier(ReactionDelivery::Delivered);
+        let drained = test_rt().block_on(drain_on_terminal_commit_with_applier(
+            "claude",
+            "tmux-100",
+            100,
+            10_500,
+            700, // the OWN synthetic turn: user_msg_id == anchor
+            OWN_STARTED_AT,
+            &applier,
+        ));
+        assert_eq!(
+            drained, 1,
+            "the own turn's commit must cover the deferred-claim marker"
+        );
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(700, ReactionOp::Complete)],
+            "exactly one ⏳ → ✅ on the pinned anchor (I4)"
+        );
+        assert!(load_for_channel("claude", 100).is_empty());
+    }
+
+    /// R3 (#3303 SC1 regression guard, lens2-①): the FOREIGN prior turn's
+    /// commit tombstone is definitionally already durable at the claim
+    /// instant (the claim runs right after the prior finalize) — it must
+    /// cover NOTHING: not the record-instant 대조, not the sweep 대조, and the
+    /// sweep must converge the marker to the bounded `⚠`, never a `✅`. The
+    /// ONLY way to neutralize this test is to pin the foreign identity on the
+    /// marker — i.e. the exact false-✅-on-a-streaming-unanswered-turn
+    /// regression this guard exists to block.
+    #[test]
+    fn foreign_prior_tombstone_never_covers_deferred_claim_marker() {
+        let _root = test_root();
+        // The prior turn (999) committed just before the claim.
+        record_commit_tombstone_at(50_000, "claude", "tmux-100", 100, 999, FOREIGN_STARTED_AT);
+        let marker = record_for_deferred_claim(
+            "claude".into(),
+            100,
+            701,
+            "tmux-100".into(),
+            (701, OWN_STARTED_AT.into()),
+        )
+        .unwrap();
+        assert_eq!(
+            marker.covered_at_ms, None,
+            "the prior turn's tombstone must NOT cover at record time (SC1)"
+        );
+        assert_eq!(
+            post_abort_commit_tombstone(&marker),
+            None,
+            "the sweep 대조 must not match the prior turn either"
+        );
+        let (applier, calls) = recording_applier(ReactionDelivery::Delivered);
+        let resolved = test_rt().block_on(sweep_expired_with_applier(
+            "claude",
+            marker.aborted_at_ms + TTL_MS,
+            true,
+            &|_| false,
+            &applier,
+        ));
+        assert_eq!(resolved, 1);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(701, ReactionOp::FailureWarn)],
+            "Mode-1 (response delivered under the PRIOR turn's relay) converges \
+             to the bounded ⚠ by design — never a foreign-evidence ✅"
+        );
+    }
+
+    /// R4 (#3303 bounded convergence) + R9 (no verdict without evidence or
+    /// TTL): a DeferredClaim marker whose own turn never commits (relay
+    /// failure → watchdog row clear, or the EOF-seeded commit pass never ran)
+    /// holds before the TTL even with the row gone, then takes EXACTLY ONE
+    /// bounded `⚠`. RED pre-#3303 at the system level: no marker existed at
+    /// all, so the anchor's ⏳ was eternal.
+    #[test]
+    fn deferred_claim_marker_converges_to_bounded_warn_when_never_committed() {
+        let _root = test_root();
+        let m = deferred_marker("claude", 100, 702, 10_000);
+        record(&m).unwrap();
+        let (applier, calls) = recording_applier(ReactionDelivery::Delivered);
+        let rt = test_rt();
+        // R9: before the TTL, row absent → no ✅, no ⚠ (row-absence is never
+        // commit evidence; the ⚠ must wait for the bound).
+        let resolved = rt.block_on(sweep_expired_with_applier(
+            "claude",
+            10_000 + TTL_MS - 1,
+            true,
+            &|_| false,
+            &applier,
+        ));
+        assert_eq!(resolved, 0);
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "no verdict may land before the TTL without commit evidence (R9)"
+        );
+        assert_eq!(load_for_channel("claude", 100).len(), 1);
+        // R4: at the TTL the bounded ⚠ fires once and the marker drains.
+        let resolved = rt.block_on(sweep_expired_with_applier(
+            "claude",
+            10_000 + TTL_MS,
+            true,
+            &|_| false,
+            &applier,
+        ));
+        assert_eq!(resolved, 1);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(702, ReactionOp::FailureWarn)],
+            "the eternal-⏳ bug mode must converge to a bounded ⚠ (#3303)"
+        );
+        assert!(load_for_channel("claude", 100).is_empty());
+    }
+
+    /// #3303: the OWN turn's commit tombstone (chokepoint wrote it, but the
+    /// drain raced/failed — e.g. the ✅ delivery failed transiently) covers
+    /// the marker via the sweep 대조 → `✅`, never the TTL `⚠`.
+    #[test]
+    fn deferred_claim_marker_sweep_covers_from_own_commit_tombstone() {
+        let _root = test_root();
+        let m = deferred_marker("claude", 100, 703, 10_000);
+        record(&m).unwrap();
+        record_commit_tombstone_at(20_000, "claude", "tmux-100", 100, 703, OWN_STARTED_AT);
+        let (applier, calls) = recording_applier(ReactionDelivery::Delivered);
+        let resolved = test_rt().block_on(sweep_expired_with_applier(
+            "claude",
+            10_000 + TTL_MS + 1,
+            true,
+            &|_| false,
+            &applier,
+        ));
+        assert_eq!(resolved, 1);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(703, ReactionOp::Complete)],
+            "own-commit evidence must win over the TTL ⚠"
+        );
+        assert!(load_for_channel("claude", 100).is_empty());
+    }
+
+    /// R5 at the sweep level (#3303): while the live row IS the pinned own
+    /// turn the sweep holds UNCAPPED — even past the Abort kind's 6×TTL hard
+    /// cap (a 1h+ streaming own turn must never be false-`⚠`'d; the hold ends
+    /// naturally with the row's commit/clear/watchdog). RED if the sweep
+    /// routes DeferredClaim markers through the Abort disposition.
+    #[test]
+    fn sweep_holds_deferred_claim_marker_while_pinned_own_row_lives() {
+        let _root = test_root();
+        let m = deferred_marker("claude", 100, 704, 10_000);
+        record(&m).unwrap();
+        let pinned = |_: &AbortedAnchorMarker| LiveInflightProbe {
+            defers: true,
+            is_pinned_turn: true,
+        };
+        let (applier, calls) = recording_applier(ReactionDelivery::Delivered);
+        let resolved = test_rt().block_on(sweep_expired_with_applier(
+            "claude",
+            10_000 + TTL_MS * ABORT_MARKER_HARD_CAP_TTL_MULTIPLIER + 1,
+            true,
+            &pinned,
+            &applier,
+        ));
+        assert_eq!(resolved, 0);
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "the pinned own row holds the verdict without a cap (RED: Abort \
+             disposition would ⚠ here)"
+        );
+        assert_eq!(load_for_channel("claude", 100).len(), 1);
+    }
+
+    /// R8 store-level (#3303 SC2): a stale Abort marker left by an abnormal
+    /// restart shares the `(provider, channel, anchor)` stem — a successful
+    /// re-claim OVERWRITES it with the refreshed own-identity DeferredClaim
+    /// marker (the turn is adopted and live, so the own pin is the truth; no
+    /// double-marker is possible on one stem).
+    #[test]
+    fn record_for_deferred_claim_overwrites_stale_abort_marker() {
+        let _root = test_root();
+        let stale = record_for_abort(
+            "claude".into(),
+            100,
+            705,
+            "tmux-100".into(),
+            Some((999, FOREIGN_STARTED_AT.into())),
+        )
+        .unwrap();
+        assert_eq!(stale.origin, MarkerOrigin::Abort);
+        let refreshed = record_for_deferred_claim(
+            "claude".into(),
+            100,
+            705,
+            "tmux-100".into(),
+            (705, OWN_STARTED_AT.into()),
+        )
+        .unwrap();
+        let loaded = load_for_channel("claude", 100);
+        assert_eq!(
+            loaded,
+            vec![refreshed.clone()],
+            "one stem, one marker: the re-claim replaces the stale abort marker"
+        );
+        assert_eq!(refreshed.origin, MarkerOrigin::DeferredClaim);
+        assert_eq!(refreshed.foreign_user_msg_id, Some(705));
+        assert_eq!(
+            refreshed.foreign_started_at.as_deref(),
+            Some(OWN_STARTED_AT)
+        );
+    }
+
+    /// #3303 schema compat: legacy on-disk JSON (no `origin`) deserializes as
+    /// `Abort` (the conservative pre-#3303 semantics, also what a version
+    /// DOWNGRADE falls back to), and a DeferredClaim marker round-trips.
+    #[test]
+    fn marker_origin_serde_legacy_default_and_roundtrip() {
+        let legacy: AbortedAnchorMarker = serde_json::from_str(
+            r#"{"provider":"claude","channel_id":1,"anchor_message_id":2,"tmux_session_name":"tmux-1","aborted_at_ms":3}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.origin, MarkerOrigin::Abort);
+        let m = deferred_marker("claude", 1, 2, 3);
+        let back: AbortedAnchorMarker =
+            serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back, m, "DeferredClaim markers must round-trip losslessly");
     }
 }
