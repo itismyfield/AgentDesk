@@ -253,14 +253,30 @@ pub fn load_memory_backend(root: &Path) -> MemoryBackendConfig {
     for path in candidates {
         if let Ok(content) = fs::read_to_string(&path) {
             if let Ok(config) = serde_json::from_str::<MemoryBackendConfig>(&content) {
-                tracing::warn!(
-                    "memory backend config not found in YAML, falling back to memory-backend.json"
-                );
+                // #3280: this loader sits on hot paths (turn finalize, periodic
+                // ticks), and the json fallback is a supported config state — warn
+                // once per process instead of flooding the logs on every lookup.
+                static YAML_FALLBACK_WARN: std::sync::Once = std::sync::Once::new();
+                if once_should_fire(&YAML_FALLBACK_WARN) {
+                    tracing::warn!(
+                        "memory backend config not found in YAML, falling back to memory-backend.json"
+                    );
+                }
                 return config.normalized();
             }
         }
     }
     MemoryBackendConfig::default()
+}
+
+/// Returns `true` only for the first caller of the given [`std::sync::Once`]
+/// (process-global once guard, same pattern as
+/// `runtime_bootstrap::recover_orphan_pending_dispatches`). Used to bound a
+/// hot-path log statement to a single emission per process (#3280).
+fn once_should_fire(once: &std::sync::Once) -> bool {
+    let mut first = false;
+    once.call_once(|| first = true);
+    first
 }
 
 pub fn shared_agent_knowledge_path(root: &Path) -> PathBuf {
@@ -693,6 +709,38 @@ fn remove_dir_all_idempotent(path: &Path) -> Result<(), String> {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("Failed to remove '{}': {error}", path.display())),
+    }
+}
+
+#[cfg(test)]
+mod warn_once_tests {
+    use super::*;
+
+    #[test]
+    fn once_should_fire_only_for_first_caller() {
+        // #3280: the memory-backend YAML fallback WARN must fire exactly once
+        // per process; test the guard with a local Once (the process-global
+        // static at the call site shares this exact code path).
+        let once = std::sync::Once::new();
+        assert!(once_should_fire(&once));
+        assert!(!once_should_fire(&once));
+        assert!(!once_should_fire(&once));
+    }
+
+    #[test]
+    fn once_should_fire_fires_exactly_once_across_threads() {
+        let once = std::sync::Once::new();
+        let fired = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    if once_should_fire(&once) {
+                        fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+        assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }
 
