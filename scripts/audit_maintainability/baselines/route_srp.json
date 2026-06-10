@@ -3,7 +3,7 @@
   "rule": "route_srp_violations",
   "description": "No-regression baseline for route files that still mix raw SQL, json!() shaping, and crate::services calls.",
   "captured_at": "2026-05-12",
-  "total_count": 17,
+  "total_count": 15,
   "files": {
     "src/server/routes/agents.rs": {
       "count": 1
@@ -44,13 +44,7 @@
     "src/server/routes/queue_api.rs": {
       "count": 1
     },
-    "src/server/routes/review_verdict/decision_route.rs": {
-      "count": 1
-    },
     "src/server/routes/review_verdict/verdict_route.rs": {
-      "count": 1
-    },
-    "src/server/routes/routes_tests/common.rs": {
       "count": 1
     },
     "src/server/routes/stats.rs": {

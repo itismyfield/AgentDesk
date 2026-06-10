@@ -85,3 +85,18 @@
 "src/services/discord/router/message_handler/headless_turn.rs" = 1316
 "src/services/discord/commands/config.rs" = 1054
 "src/services/discord/commands/diagnostics.rs" = 1026
+
+# #3038 slice 1: decision_route.rs (4392 prod LoC) was decomposed into a 139-line
+# module root + 8 directory modules. Each split output is frozen at its landed
+# production LoC so the win is locked in — re-inflation past the giant threshold
+# AND the frozen value fails the ratchet. Lower these as the planned slice-2
+# services relocation lands.
+"src/server/routes/review_verdict/decision_route.rs" = 139
+"src/server/routes/review_verdict/decision_route/accept.rs" = 703
+"src/server/routes/review_verdict/decision_route/adapters.rs" = 227
+"src/server/routes/review_verdict/decision_route/dismiss_finalize.rs" = 182
+"src/server/routes/review_verdict/decision_route/dispute.rs" = 746
+"src/server/routes/review_verdict/decision_route/pending.rs" = 636
+"src/server/routes/review_verdict/decision_route/repo_card.rs" = 748
+"src/server/routes/review_verdict/decision_route/repo_dispatch.rs" = 650
+"src/server/routes/review_verdict/decision_route/worktree_stale.rs" = 553

@@ -559,14 +559,20 @@ mod tests {
 
     /// Create a temp dir initialized as a real git worktree so the
     /// `resolve_repo_dir_for_target` path checks succeed deterministically.
+    /// Uses the centralised `GitCommand` helper (audit: no direct git
+    /// subprocess callsites outside `services::git`).
     fn init_git_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let status = std::process::Command::new("git")
+        let output = crate::services::git::GitCommand::new()
+            .repo(dir.path())
             .args(["init", "--quiet"])
-            .current_dir(dir.path())
-            .status()
+            .run_output()
             .expect("spawn git init");
-        assert!(status.success(), "git init failed in {:?}", dir.path());
+        assert!(
+            output.status.success(),
+            "git init failed in {:?}",
+            dir.path()
+        );
         dir
     }
 
