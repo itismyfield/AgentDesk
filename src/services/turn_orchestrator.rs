@@ -1990,6 +1990,12 @@ enum ChannelMailboxMsg {
     ClearTimeoutOverride {
         reply: oneshot::Sender<()>,
     },
+    /// #3297 r2 (codex) — registry purge: verify idleness and set the `closed`
+    /// tombstone in ONE serialized actor step, closing the snapshot→unlink
+    /// TOCTOU race. Full rationale + verdict logic live in `registry_purge.rs`.
+    CloseIfIdle {
+        reply: oneshot::Sender<Result<(), &'static str>>,
+    },
 }
 
 /// #3167 — priority class of the mailbox active-turn slot. Lets the external-input
@@ -2051,6 +2057,8 @@ struct ChannelMailboxState {
     pending_user_dispatch_yield_count: u32,
     last_persistence: Option<QueuePersistenceContext>,
     recovery_started_at: Option<Instant>,
+    /// #3297 r2 — purge tombstone set by `CloseIfIdle`; see `registry_purge.rs`.
+    closed: bool,
     /// #1031: see `ChannelMailboxSnapshot::turn_started_at`. Mirrors the
     /// `cancel_token.is_some()` lifetime so the idle-detector freshness
     /// anchor is always source-of-truth from the mailbox actor itself.
@@ -2629,29 +2637,33 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             state.pending_user_dispatch_yield_count = 0;
                         }
                     }
-                    let started = if state.cancel_token.is_some() || background_yields {
-                        false
-                    } else {
-                        reset_turn_finished_signal(channel_id);
-                        state.cancel_token = Some(cancel_token);
-                        state.active_request_owner = Some(request_owner);
-                        state.active_user_message_id = Some(user_message_id);
-                        // #3167 — record the slot's priority class so the
-                        // dequeue gates can treat a background turn as
-                        // non-blocking.
-                        state.active_turn_kind = turn_kind;
-                        // #3167 BLOCKER-2 — a real (UserOrAgent) turn claiming the
-                        // slot satisfies any reserved dequeue→claim window: clear
-                        // the reservation and reset the valve counter.
-                        if turn_kind == ActiveTurnKind::UserOrAgent {
-                            state.pending_user_dispatch = None;
-                            state.pending_user_dispatch_yield_count = 0;
-                        }
-                        state.recovery_started_at = None;
-                        state.turn_started_at = Some(Utc::now());
-                        reset_watchdog_extension_state(&mut state);
-                        true
-                    };
+                    // #3297 r2 — a `closed` (purge-tombstoned) actor must never
+                    // activate a turn: it is (about to be) unlinked from the
+                    // registry, so a started turn would be unreachable.
+                    let started =
+                        if state.closed || state.cancel_token.is_some() || background_yields {
+                            false
+                        } else {
+                            reset_turn_finished_signal(channel_id);
+                            state.cancel_token = Some(cancel_token);
+                            state.active_request_owner = Some(request_owner);
+                            state.active_user_message_id = Some(user_message_id);
+                            // #3167 — record the slot's priority class so the
+                            // dequeue gates can treat a background turn as
+                            // non-blocking.
+                            state.active_turn_kind = turn_kind;
+                            // #3167 BLOCKER-2 — a real (UserOrAgent) turn claiming the
+                            // slot satisfies any reserved dequeue→claim window: clear
+                            // the reservation and reset the valve counter.
+                            if turn_kind == ActiveTurnKind::UserOrAgent {
+                                state.pending_user_dispatch = None;
+                                state.pending_user_dispatch_yield_count = 0;
+                            }
+                            state.recovery_started_at = None;
+                            state.turn_started_at = Some(Utc::now());
+                            reset_watchdog_extension_state(&mut state);
+                            true
+                        };
                     let _ = reply.send(started);
                 }
                 ChannelMailboxMsg::RestoreActiveTurn {
@@ -3117,6 +3129,9 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 ChannelMailboxMsg::ClearTimeoutOverride { reply } => {
                     state.watchdog_deadline_override = None;
                     let _ = reply.send(());
+                }
+                ChannelMailboxMsg::CloseIfIdle { reply } => {
+                    let _ = reply.send(registry_purge::close_if_idle_verdict(&mut state));
                 }
             }
         }

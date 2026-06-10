@@ -12,27 +12,69 @@
 //!   `recovery_done` / `turn_finished` + the three process-global mirrors).
 //!   No disk or DB state is touched; the actor task ends naturally once the
 //!   last `ChannelMailboxHandle` sender is dropped.
+//!
+//! #3297 round 2 (codex): the idle check is actor-mediated. The original
+//! `snapshot().await`-then-unlink sequence left a TOCTOU window — a
+//! `TryStartTurn` processed by the SAME actor between the idle snapshot and
+//! the unlink activated a turn, and the unlink then severed that LIVE actor
+//! from the registry/global mirrors. `CloseIfIdle` verifies idleness and sets
+//! the `closed` tombstone in one serialized actor step; because the actor
+//! processes its mailbox FIFO, every racing `TryStartTurn` lands either
+//! BEFORE the verdict (live token ⇒ purge refused) or AFTER it (tombstone ⇒
+//! start refused; the caller re-resolves a fresh actor via the registry).
 
 use std::sync::Arc;
 
 use poise::serenity_prelude::ChannelId;
 
 use super::{
-    ChannelMailboxHandle, ChannelMailboxRegistry, GLOBAL_CHANNEL_MAILBOXES,
-    GLOBAL_RECOVERY_DONE_SIGNALS, GLOBAL_TURN_FINISHED_SIGNALS,
+    ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxRegistry, ChannelMailboxState,
+    GLOBAL_CHANNEL_MAILBOXES, GLOBAL_RECOVERY_DONE_SIGNALS, GLOBAL_TURN_FINISHED_SIGNALS,
 };
+
+/// Actor-side verdict for [`ChannelMailboxMsg::CloseIfIdle`], invoked from the
+/// mailbox actor loop while it exclusively owns `state` — the idle decision
+/// and the tombstone write are therefore one atomic (actor-serialized) step.
+/// Kept here, out of the ratchet-frozen module root, with the rest of the
+/// purge logic. Gate order mirrors the original snapshot recheck.
+pub(super) fn close_if_idle_verdict(state: &mut ChannelMailboxState) -> Result<(), &'static str> {
+    if state.cancel_token.is_some() {
+        return Err("live_cancel_token");
+    }
+    if !state.intervention_queue.is_empty() {
+        return Err("queue_not_empty");
+    }
+    if state.recovery_started_at.is_some() {
+        return Err("recovery_in_progress");
+    }
+    state.closed = true;
+    Ok(())
+}
+
+impl ChannelMailboxHandle {
+    /// Ask the actor to verify it is idle and, if so, tombstone itself
+    /// (`Ok(())` ⇒ purgeable; `Err(reason)` ⇒ live work, purge refused).
+    /// A dead actor (mailbox closed / reply dropped) can never start work
+    /// again, so the request fallback treats it as trivially purgeable.
+    async fn close_if_idle(&self) -> Result<(), &'static str> {
+        self.request(|reply| ChannelMailboxMsg::CloseIfIdle { reply }, Ok(()))
+            .await
+    }
+}
 
 /// Outcome of [`ChannelMailboxRegistry::remove_idle_entry`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MailboxPurgeOutcome {
     /// No registry entry existed for the channel — nothing to unlink.
     NoEntry,
-    /// Entry existed, the final actor-snapshot recheck confirmed idle, and
-    /// the instance maps were unlinked. Global mirrors are unlinked only when
+    /// Entry existed, the actor-serialized `CloseIfIdle` verdict confirmed
+    /// idle (tombstoning the actor against post-verdict starts), and the
+    /// instance maps were unlinked. Global mirrors are unlinked only when
     /// they still point at the exact objects this instance verified idle
     /// (#3297 finding 5) — a mismatching mirror is skipped with a WARN.
     Removed,
-    /// Live-work evidence appeared on the final snapshot recheck — refused.
+    /// Live-work evidence appeared on the actor's `CloseIfIdle` verdict —
+    /// refused, and the actor is left un-tombstoned.
     RefusedLiveWork(&'static str),
 }
 
@@ -50,23 +92,20 @@ impl ChannelMailboxRegistry {
     /// is verifiably idle at the moment of removal: no cancel token, empty
     /// intervention queue, no recovery in progress. Callers (the repair API)
     /// have already passed the CAS `expected_has_cancel_token` +
-    /// `no_live_work_evidence` gate chain; this final snapshot recheck closes
-    /// the remaining race window. Removal is an in-memory unlink only — the
-    /// worst-case race outcome is a short-lived second actor for a channel,
-    /// never data loss.
+    /// `no_live_work_evidence` gate chain.
+    ///
+    /// #3297 round 2 (codex): the final idle recheck is performed by the
+    /// actor itself (`CloseIfIdle`), which tombstones the actor in the same
+    /// serialized step — a `TryStartTurn` racing the unlink can therefore
+    /// never activate the to-be-unlinked actor (see the module docs). Removal
+    /// is an in-memory unlink only — the worst-case race outcome is a
+    /// short-lived second actor for a channel, never data loss.
     pub(crate) async fn remove_idle_entry(&self, channel_id: ChannelId) -> MailboxPurgeOutcome {
         let Some(handle) = self.peek(channel_id) else {
             return MailboxPurgeOutcome::NoEntry;
         };
-        let snapshot = handle.snapshot().await;
-        if snapshot.cancel_token.is_some() {
-            return MailboxPurgeOutcome::RefusedLiveWork("live_cancel_token");
-        }
-        if !snapshot.intervention_queue.is_empty() {
-            return MailboxPurgeOutcome::RefusedLiveWork("queue_not_empty");
-        }
-        if snapshot.recovery_started_at.is_some() {
-            return MailboxPurgeOutcome::RefusedLiveWork("recovery_in_progress");
+        if let Err(refusal) = handle.close_if_idle().await {
+            return MailboxPurgeOutcome::RefusedLiveWork(refusal);
         }
         // Unlink the instance maps only when they still hold the exact
         // entries this purge verified: the handle that was snapshotted and
@@ -265,5 +304,108 @@ mod tests {
         GLOBAL_CHANNEL_MAILBOXES.remove(&channel);
         GLOBAL_RECOVERY_DONE_SIGNALS.remove(&channel);
         GLOBAL_TURN_FINISHED_SIGNALS.remove(&channel);
+    }
+
+    /// #3297 round-2 red-green (codex TOCTOU finding): a `TryStartTurn`
+    /// processed by the actor AFTER the purge's idle verdict — i.e. the
+    /// interleaving where, pre-fix, the start landed between the idle
+    /// `snapshot()` and the registry unlink — must be REFUSED. To the actor,
+    /// "between verdict and unlink" and "after unlink" are indistinguishable
+    /// (the unlink never touches the actor), so driving the start through a
+    /// retained handle clone after `remove_idle_entry` pins exactly the
+    /// post-snapshot interleaving deterministically. Pre-fix this test fails:
+    /// the start returned `true`, activating a turn on an actor that the
+    /// purge had just severed from the registry/global mirrors.
+    #[tokio::test]
+    async fn purged_actor_refuses_a_racing_try_start_turn() {
+        let registry = ChannelMailboxRegistry::default();
+        let channel = ChannelId::new(93_293_006);
+        // The racing starter's retained handle clone (in production: a task
+        // that resolved the handle before the purge, or a start already
+        // queued in the actor mailbox behind the idle verdict).
+        let stale_handle = registry.handle(channel);
+
+        assert_eq!(
+            registry.remove_idle_entry(channel).await,
+            MailboxPurgeOutcome::Removed
+        );
+
+        let started = stale_handle
+            .try_start_turn(
+                Arc::new(CancelToken::new()),
+                UserId::new(7),
+                MessageId::new(11),
+            )
+            .await;
+        assert!(
+            !started,
+            "a start racing the purge must be refused by the closed tombstone \
+             (pre-fix it activated a turn on the unlinked actor)"
+        );
+        assert!(
+            !stale_handle.has_active_turn().await,
+            "the tombstoned actor must remain idle"
+        );
+
+        // The channel itself stays serviceable: a fresh registry resolution
+        // mints a NEW actor that accepts work normally.
+        let fresh_handle = registry.handle(channel);
+        assert!(
+            fresh_handle
+                .try_start_turn(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(7),
+                    MessageId::new(12),
+                )
+                .await,
+            "a freshly minted actor must accept work after the purge"
+        );
+        let _ = fresh_handle.hard_stop().await;
+        GLOBAL_CHANNEL_MAILBOXES.remove(&channel);
+    }
+
+    /// Companion exhaustiveness check for the round-2 fix: the actor mailbox
+    /// is FIFO, so EVERY racing `TryStartTurn` is processed strictly before
+    /// or strictly after the `CloseIfIdle` verdict. Before ⇒ the verdict sees
+    /// the live token and the purge is refused (actor untouched, no
+    /// tombstone); after ⇒ the tombstone refuses the start (previous test).
+    /// Together the two orderings leave no interleaving in which an ACTIVE
+    /// actor is unlinked.
+    #[tokio::test]
+    async fn close_verdict_refuses_when_start_won_the_race() {
+        let registry = ChannelMailboxRegistry::default();
+        let channel = ChannelId::new(93_293_007);
+        let handle = registry.handle(channel);
+        assert!(
+            handle
+                .try_start_turn(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(7),
+                    MessageId::new(11),
+                )
+                .await
+        );
+
+        assert_eq!(handle.close_if_idle().await, Err("live_cancel_token"));
+        assert_eq!(
+            registry.remove_idle_entry(channel).await,
+            MailboxPurgeOutcome::RefusedLiveWork("live_cancel_token")
+        );
+
+        // The refused verdict must NOT have tombstoned the actor: after the
+        // live turn finishes, the same actor keeps serving starts.
+        let _ = handle.hard_stop().await;
+        assert!(
+            handle
+                .try_start_turn(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(7),
+                    MessageId::new(12),
+                )
+                .await,
+            "a refused purge must leave the actor fully operational"
+        );
+        let _ = handle.hard_stop().await;
+        GLOBAL_CHANNEL_MAILBOXES.remove(&channel);
     }
 }

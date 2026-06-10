@@ -56,7 +56,11 @@
 # #3293: +3 for the `registry_purge` child-module declaration (peek +
 # operator-gated idle-entry purge live outside the frozen root); lowered
 # 3090 -> 3089 to lock the net position.
-"src/services/turn_orchestrator.rs" = 3089
+# #3297 r2 (codex TOCTOU fix): +15 for the actor-root pieces of the purge
+# `CloseIfIdle` tombstone (msg variant + state flag + dispatch arm +
+# `TryStartTurn` guard) — the enum/state/loop can only live in the root;
+# the verdict logic + handle wrapper stay in `registry_purge.rs`.
+"src/services/turn_orchestrator.rs" = 3104
 # #3034 batch-8: +1 for a test-only `#[allow(dead_code)]` on
 # `thread_guard_inflight_is_stale` (#1446 Layer-2 classifier, pinned by tests).
 # #3038 S1: +2 (2958 -> 2960) for the two mechanical `.queued_placeholders` ->
