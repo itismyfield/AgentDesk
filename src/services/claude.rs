@@ -2327,6 +2327,34 @@ struct ClaudeTuiRecreateState {
     resume: bool,
 }
 
+/// Outcome of the stranded prompt-draft recovery probe that runs before a warm
+/// follow-up submit.
+///
+/// `Terminal` carries the original early-return `Result` verbatim — the warm
+/// follow-up orchestrator must surface it immediately (the recovery block's
+/// `return Ok(())` cancellation exits and `Err(..)` fresh-resolution failures
+/// short-circuit before any submit-phase side-effect). `Proceed` carries the
+/// (possibly recreated) session resolution plus the three submit-gating flags
+/// exactly as the inline locals held them at the original fall-through point.
+#[cfg(unix)]
+#[must_use]
+enum ClaudeTuiDraftRecoveryOutcome {
+    /// Recovery completed and the follow-up may continue to submit-plan
+    /// computation. `state` carries the session quartet (recreated when a
+    /// draft-recovery kill ladder ran), and the three flags reflect whether a
+    /// busy wait occurred, whether the session was recreated before submit, and
+    /// whether a stranded prompt draft was cleared before submit.
+    Proceed {
+        state: ClaudeTuiRecreateState,
+        busy_waited: bool,
+        recreate_before_submit: bool,
+        prompt_draft_cleared_before_submit: bool,
+    },
+    /// Recovery hit an original early return; `Result` is forwarded verbatim to
+    /// the orchestrator's caller.
+    Terminal(Result<(), String>),
+}
+
 /// Outcome of an attempted warm follow-up against a live Claude TUI session.
 #[cfg(unix)]
 enum ClaudeTuiWarmFollowupOutcome {
@@ -2338,37 +2366,33 @@ enum ClaudeTuiWarmFollowupOutcome {
     Recreate(ClaudeTuiRecreateState),
 }
 
-/// Attempt a warm follow-up against an existing live Claude TUI tmux session.
+/// Recover from a stranded prompt draft left in the composer before a warm
+/// follow-up submit.
 ///
-/// Mirrors the pre-refactor inline `if session_exists && has_live_pane && resume`
-/// block verbatim: stranded prompt-draft recovery, busy-wait, prompt submission,
-/// transcript read, and the follow-up result classification. Every original
-/// `return Ok(())` / `return Err(..)` / `?` short-circuit is preserved as a
-/// `Terminal(..)` outcome (so the orchestrator returns immediately with the same
-/// value, before any fresh-launch side-effect). When the block originally fell
-/// through to a fresh launch — `submit_existing_session == false`, the
-/// `RecreateSession` classification, or a draft-recovery recreate — this returns
-/// `Recreate(..)` carrying the session resolution exactly as the inline locals
-/// held it at that point.
+/// Verbatim extraction of the stranded prompt-draft recovery block from
+/// `try_claude_tui_warm_followup` (#3196/#3228 extraction convention): the
+/// session quartet enters via [`ClaudeTuiRecreateState`] and is destructured
+/// into the same mutable locals the inline block used, so the body is preserved
+/// token-for-token. Every original early return is forwarded as
+/// `ClaudeTuiDraftRecoveryOutcome::Terminal(..)` carrying the same `Result` (the
+/// draft-clear cancellation exit returns `Ok(())`; the two
+/// `fresh_claude_tui_session_resolution` failures return `Err(..)`). The
+/// original fall-through is `Proceed` carrying the (possibly recreated) quartet
+/// and the three submit-gating flags exactly as the inline locals held them.
 #[cfg(unix)]
-fn try_claude_tui_warm_followup(
-    mut resolved_session_id: String,
-    mut transcript_path: std::path::PathBuf,
-    mut transcript_path_string: String,
-    mut resume: bool,
+fn recover_claude_tui_stranded_prompt_draft(
+    state: ClaudeTuiRecreateState,
     working_dir_path: &std::path::Path,
-    prompt: &str,
-    sender: Sender<StreamMessage>,
-    cancel_token: Option<std::sync::Arc<CancelToken>>,
+    cancel_token: &Option<std::sync::Arc<CancelToken>>,
     tmux_session_name: &str,
     report_channel_id: Option<u64>,
-) -> ClaudeTuiWarmFollowupOutcome {
-    debug_log("Existing Claude TUI tmux session found — sending follow-up");
-    if let Some(ref token) = cancel_token {
-        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(tmux_session_name.to_string());
-    }
-    let hook_rx = crate::services::claude_tui::hook_server::subscribe_hook_events();
+) -> ClaudeTuiDraftRecoveryOutcome {
+    let ClaudeTuiRecreateState {
+        mut resolved_session_id,
+        mut transcript_path,
+        mut transcript_path_string,
+        mut resume,
+    } = state;
     // #2416: a single busy_waited flag tells the offset-capture site below
     // that we need to re-read transcript length after the wait succeeded,
     // because the previous TUI turn may have appended bytes while we were
@@ -2485,7 +2509,7 @@ fn try_claude_tui_warm_followup(
                             match fresh_claude_tui_session_resolution(working_dir_path, None) {
                                 Ok(resolution) => resolution,
                                 Err(error) => {
-                                    return ClaudeTuiWarmFollowupOutcome::Terminal(Err(error));
+                                    return ClaudeTuiDraftRecoveryOutcome::Terminal(Err(error));
                                 }
                             };
                         resolved_session_id = fresh_resolution.session_id;
@@ -2514,7 +2538,7 @@ fn try_claude_tui_warm_followup(
                             "transcript_path": transcript_path_string,
                         }),
                     );
-                    return ClaudeTuiWarmFollowupOutcome::Terminal(Ok(()));
+                    return ClaudeTuiDraftRecoveryOutcome::Terminal(Ok(()));
                 }
                 Err(error) => {
                     let recreate_after_clear_error = allow_recreate
@@ -2561,7 +2585,7 @@ fn try_claude_tui_warm_followup(
                             match fresh_claude_tui_session_resolution(working_dir_path, None) {
                                 Ok(resolution) => resolution,
                                 Err(error) => {
-                                    return ClaudeTuiWarmFollowupOutcome::Terminal(Err(error));
+                                    return ClaudeTuiDraftRecoveryOutcome::Terminal(Err(error));
                                 }
                             };
                         resolved_session_id = fresh_resolution.session_id;
@@ -2574,6 +2598,83 @@ fn try_claude_tui_warm_followup(
             }
         }
     }
+    ClaudeTuiDraftRecoveryOutcome::Proceed {
+        state: ClaudeTuiRecreateState {
+            resolved_session_id,
+            transcript_path,
+            transcript_path_string,
+            resume,
+        },
+        busy_waited,
+        recreate_before_submit,
+        prompt_draft_cleared_before_submit,
+    }
+}
+
+/// Attempt a warm follow-up against an existing live Claude TUI tmux session.
+///
+/// Mirrors the pre-refactor inline `if session_exists && has_live_pane && resume`
+/// block verbatim: stranded prompt-draft recovery, busy-wait, prompt submission,
+/// transcript read, and the follow-up result classification. Every original
+/// `return Ok(())` / `return Err(..)` / `?` short-circuit is preserved as a
+/// `Terminal(..)` outcome (so the orchestrator returns immediately with the same
+/// value, before any fresh-launch side-effect). When the block originally fell
+/// through to a fresh launch — `submit_existing_session == false`, the
+/// `RecreateSession` classification, or a draft-recovery recreate — this returns
+/// `Recreate(..)` carrying the session resolution exactly as the inline locals
+/// held it at that point.
+#[cfg(unix)]
+fn try_claude_tui_warm_followup(
+    mut resolved_session_id: String,
+    mut transcript_path: std::path::PathBuf,
+    mut transcript_path_string: String,
+    mut resume: bool,
+    working_dir_path: &std::path::Path,
+    prompt: &str,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<std::sync::Arc<CancelToken>>,
+    tmux_session_name: &str,
+    report_channel_id: Option<u64>,
+) -> ClaudeTuiWarmFollowupOutcome {
+    debug_log("Existing Claude TUI tmux session found — sending follow-up");
+    if let Some(ref token) = cancel_token {
+        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(tmux_session_name.to_string());
+    }
+    let hook_rx = crate::services::claude_tui::hook_server::subscribe_hook_events();
+    let (mut busy_waited, recreate_before_submit, prompt_draft_cleared_before_submit) =
+        match recover_claude_tui_stranded_prompt_draft(
+            ClaudeTuiRecreateState {
+                resolved_session_id,
+                transcript_path,
+                transcript_path_string,
+                resume,
+            },
+            working_dir_path,
+            &cancel_token,
+            tmux_session_name,
+            report_channel_id,
+        ) {
+            ClaudeTuiDraftRecoveryOutcome::Proceed {
+                state,
+                busy_waited,
+                recreate_before_submit,
+                prompt_draft_cleared_before_submit,
+            } => {
+                resolved_session_id = state.resolved_session_id;
+                transcript_path = state.transcript_path;
+                transcript_path_string = state.transcript_path_string;
+                resume = state.resume;
+                (
+                    busy_waited,
+                    recreate_before_submit,
+                    prompt_draft_cleared_before_submit,
+                )
+            }
+            ClaudeTuiDraftRecoveryOutcome::Terminal(r) => {
+                return ClaudeTuiWarmFollowupOutcome::Terminal(r);
+            }
+        };
     let submit_plan = claude_tui_warm_followup_submit_plan(
         recreate_before_submit,
         prompt_draft_cleared_before_submit,
@@ -4849,5 +4950,67 @@ mod claude_tui_session_resolution_tests {
         let recreate = claude_tui_warm_followup_submit_plan(true, false);
         assert!(!recreate.submit_existing_session);
         assert!(recreate.recheck_busy_before_submit);
+    }
+
+    /// Seed for the #3038 S1 extraction: the session quartet carried into and
+    /// back out of `recover_claude_tui_stranded_prompt_draft` via the `Proceed`
+    /// arm must be the identity on the no-op fall-through path (no recreate
+    /// ladder, all flags `false`). This guards the move-in/move-out contract the
+    /// orchestrator relies on to rebind its session locals.
+    #[test]
+    fn draft_recovery_proceed_round_trips_session_quartet() {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let transcript_path = std::path::PathBuf::from("/tmp/agentdesk-3038-seed.jsonl");
+        let transcript_path_string = transcript_path.display().to_string();
+        let outcome = ClaudeTuiDraftRecoveryOutcome::Proceed {
+            state: ClaudeTuiRecreateState {
+                resolved_session_id: session_id.clone(),
+                transcript_path: transcript_path.clone(),
+                transcript_path_string: transcript_path_string.clone(),
+                resume: true,
+            },
+            busy_waited: false,
+            recreate_before_submit: false,
+            prompt_draft_cleared_before_submit: false,
+        };
+
+        match outcome {
+            ClaudeTuiDraftRecoveryOutcome::Proceed {
+                state,
+                busy_waited,
+                recreate_before_submit,
+                prompt_draft_cleared_before_submit,
+            } => {
+                assert_eq!(state.resolved_session_id, session_id);
+                assert_eq!(state.transcript_path, transcript_path);
+                assert_eq!(state.transcript_path_string, transcript_path_string);
+                assert!(state.resume);
+                assert!(!busy_waited);
+                assert!(!recreate_before_submit);
+                assert!(!prompt_draft_cleared_before_submit);
+            }
+            ClaudeTuiDraftRecoveryOutcome::Terminal(_) => {
+                panic!("Proceed outcome must not destructure as Terminal");
+            }
+        }
+    }
+
+    /// The `Terminal` arm must forward the original early-return `Result`
+    /// verbatim (the recovery block's cancellation exit returns `Ok(())`, fresh
+    /// resolution failures return `Err(..)`). This pins the payload-passthrough
+    /// contract the orchestrator depends on to surface the same value its
+    /// inline early returns produced.
+    #[test]
+    fn draft_recovery_terminal_forwards_result_verbatim() {
+        match ClaudeTuiDraftRecoveryOutcome::Terminal(Ok(())) {
+            ClaudeTuiDraftRecoveryOutcome::Terminal(r) => assert_eq!(r, Ok(())),
+            ClaudeTuiDraftRecoveryOutcome::Proceed { .. } => panic!("expected Terminal(Ok)"),
+        }
+        match ClaudeTuiDraftRecoveryOutcome::Terminal(Err("boom".to_string())) {
+            ClaudeTuiDraftRecoveryOutcome::Terminal(r) => {
+                assert_eq!(r, Err("boom".to_string()));
+            }
+            ClaudeTuiDraftRecoveryOutcome::Proceed { .. } => panic!("expected Terminal(Err)"),
+        }
     }
 }
