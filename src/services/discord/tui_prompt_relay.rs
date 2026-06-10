@@ -1756,17 +1756,15 @@ fn pending_start_claim_fn() -> super::tui_direct_pending_start::ClaimFn {
 /// abort drops only the synthetic OWNERSHIP claim), so the anchor's `⏳` is
 /// still TRUE — the old `⚠` swap branded ANSWERED messages as failures. So:
 /// KEEP the `⏳` and record a durable aborted-anchor marker pinning the
-/// FOREIGN prior inflight's identity (codex r1) — the live row at the record
-/// instant, or the worker's last-view identity when that row just vanished
-/// (codex r2). The marker is ALWAYS uncovered unless a commit tombstone proves
-/// the prior owner committed (`record_for_abort`'s 대조 — bare row-absence is
-/// never promoted to a cover; a force-clear/stop/recovery deletion correctly
-/// leaves it uncovered). The watcher drain flips it `⏳ → ✅` ONLY when THAT
-/// turn commits; the sweeper flips it `⏳ → ⚠` after the TTL with no holding
-/// inflight (hard-cap bounded — no #3282 eternal-hourglass regression). The
-/// marker is recorded even when http is currently unavailable; every later
-/// reaction op resolves `shared.serenity_http_or_token_fallback()` INSIDE the
-/// marker module — the same bot identity that added the `⏳` (#3164).
+/// FOREIGN prior inflight's identity — the worker's LAST-VIEW identity first,
+/// the cleanup-instant row only as the no-view fallback (codex r3,
+/// `pin_abort_foreign_identity`). The marker stays uncovered unless a commit
+/// tombstone proves the prior owner committed (`record_for_abort`'s 대조;
+/// force-clear/stop/recovery deletions stay uncovered). The watcher drain
+/// flips it `⏳ → ✅` ONLY when THAT turn commits; the sweeper flips it
+/// `⏳ → ⚠` after the TTL with no holding inflight (hard-cap bounded).
+/// Recorded even when http is unavailable; every later reaction op resolves
+/// the shared http INSIDE the marker module — the add≡remove identity (#3164).
 fn pending_start_abort_cleanup_fn() -> super::tui_direct_pending_start::AbortCleanupFn {
     Box::new(|_shared, record, last_view_foreign| {
         Box::pin(async move {
@@ -1776,16 +1774,18 @@ fn pending_start_abort_cleanup_fn() -> super::tui_direct_pending_start::AbortCle
             if record.anchor_message_id == 0 {
                 return;
             }
-            // codex r2: prefer the row's identity AT the record instant; when
-            // the row is gone (it vanished in the µs gap since the final
-            // backstop view), fall back to the worker's last-view identity so
-            // the tombstone 대조 can still decide ✅ vs ⚠ for the marker.
-            let foreign = ProviderKind::from_str(&record.provider)
-                .and_then(|provider| {
-                    super::inflight::load_inflight_state(&provider, record.channel_id)
-                })
-                .map(|state| (state.user_msg_id, state.started_at))
-                .or(last_view_foreign);
+            // codex r3: LAST-VIEW first — a SUCCESSOR row may hold the slot by
+            // now (prior row committed); the row read is a lazy fallback only.
+            let foreign = super::tui_direct_pending_start::pin_abort_foreign_identity(
+                last_view_foreign,
+                || {
+                    ProviderKind::from_str(&record.provider)
+                        .and_then(|provider| {
+                            super::inflight::load_inflight_state(&provider, record.channel_id)
+                        })
+                        .map(|state| (state.user_msg_id, state.started_at))
+                },
+            );
             match super::tui_direct_abort_marker::record_for_abort(
                 record.provider.clone(),
                 record.channel_id,

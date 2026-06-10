@@ -361,10 +361,10 @@ pub(super) type ClaimFn = Box<
 /// live FOREIGN prior inflight's identity at the read instant (`None` when no
 /// row exists or the row is our own anchor). The worker threads the LATEST
 /// observed identity into the ABORT cleanup as the marker's last-view identity
-/// (#3296 codex r2: when the row vanishes in the µs gap between the final
-/// backstop view and the cleanup's own read, the marker still pins WHICH turn
-/// it was waiting on, so commit-tombstone 대조 — not bare row-absence — decides
-/// `✅` vs `⚠`).
+/// — the PRIMARY pin since #3296 codex r3 ([`pin_abort_foreign_identity`]):
+/// it survives the row vanishing before the cleanup's own read AND it cannot
+/// be repointed by a successor row that took the slot in that gap, so the
+/// commit-tombstone 대조 decides `✅` vs `⚠` for the RIGHT turn.
 pub(super) struct PriorTurnObservation {
     pub view: PriorTurnView,
     pub foreign_inflight_identity: Option<(u64, String)>,
@@ -402,6 +402,28 @@ pub(super) type AbortCleanupFn = Box<
         + Send
         + Sync,
 >;
+
+/// #3296 codex r3: choose the foreign identity an aborted-anchor marker pins.
+/// The worker's LAST-VIEW identity is PRIMARY — that row was observed LIVE
+/// during the backstop window, so it is definitionally the turn the ABORT
+/// deferred on. The cleanup-instant inflight row is read (lazily) ONLY when
+/// no poll ever captured an identity: between the final backstop view and the
+/// cleanup's read, the foreign row may terminal-commit (tombstone + clear)
+/// and a SUCCESSOR row may already hold the `(provider, channel)` slot —
+/// preferring the current row pinned that WRONG turn (the genuine prior
+/// commit's tombstone then never matched the marker, and the successor's own
+/// commit could false-`✅` a possibly-unanswered anchor). The no-view fallback
+/// is deliberately kept conservative-best-effort: with no observed identity
+/// the cleanup-instant row is the only evidence available (a successor there
+/// would need the never-observed prior row to clear AND a new claim to land
+/// inside the same µs window), while pinning nothing forfeits drain coverage
+/// outright — a guaranteed bounded `⚠` even on an answered anchor.
+pub(super) fn pin_abort_foreign_identity(
+    last_view_foreign: Option<(u64, String)>,
+    read_cleanup_instant_row: impl FnOnce() -> Option<(u64, String)>,
+) -> Option<(u64, String)> {
+    last_view_foreign.or_else(read_cleanup_instant_row)
+}
 
 /// Spawn the DETACHED per-channel worker. Acquires the channel lock (FIFO
 /// serialization), polls the wait predicate until the prior turn finalizes (or
@@ -656,6 +678,46 @@ mod tests {
             prior_turn_finalized(view),
             "a crash-restored inflight for OUR OWN anchor is adopted, not waited on"
         );
+    }
+
+    /// #3296 codex r3 (RED ③ — pure): the ABORT cleanup pins the worker's
+    /// LAST-VIEW identity, never the cleanup-instant row, when both exist.
+    /// RED pre-r3: the relay hook preferred the live row — when the final
+    /// poll's foreign row terminal-committed (tombstone + clear) and a
+    /// SUCCESSOR row appeared before the cleanup's read, the marker pinned
+    /// the successor: the genuine prior commit's tombstone never matched (no
+    /// `✅` from the real answer, bounded `⚠` instead) and the successor's own
+    /// commit could false-`✅` the possibly-unanswered anchor.
+    #[test]
+    fn abort_pin_prefers_last_view_identity_over_successor_row() {
+        let last_view = Some((777_u64, "2026-06-10 12:00:00".to_string()));
+        let successor = Some((888_u64, "2026-06-10 12:01:00".to_string()));
+        assert_eq!(
+            pin_abort_foreign_identity(last_view.clone(), || successor.clone()),
+            last_view,
+            "last-view is PRIMARY: a successor row must never repoint the pin (RED ③)"
+        );
+        // The primary path must not even READ the current row — the
+        // cleanup-instant read is exactly what races the successor.
+        let row_read = std::cell::Cell::new(false);
+        assert_eq!(
+            pin_abort_foreign_identity(last_view.clone(), || {
+                row_read.set(true);
+                successor.clone()
+            }),
+            last_view
+        );
+        assert!(
+            !row_read.get(),
+            "the row read must be skipped when a last-view identity exists"
+        );
+        // No-view fallback: the cleanup-instant row is the only evidence left
+        // (conservative best-effort — see `pin_abort_foreign_identity`).
+        assert_eq!(
+            pin_abort_foreign_identity(None, || successor.clone()),
+            successor
+        );
+        assert_eq!(pin_abort_foreign_identity(None, || None), None);
     }
 
     #[test]
