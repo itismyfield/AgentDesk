@@ -921,7 +921,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
 - `src/services/dispatches/outbox_route.rs` (1089) — dispatch outbox route
   support extracted from the route layer; split before adding non-bugfix
   behavior.
-- `src/services/claude.rs` (3739), `src/services/gemini.rs` (1358),
+- `src/services/claude.rs` (3847), `src/services/gemini.rs` (1358),
   `src/services/qwen.rs` (2196), `src/services/codex.rs` (3001),
   `src/services/opencode.rs` (1881), `src/services/provider.rs` (1796) —
   provider adapters. (#3034 removed dead non-cancel `execute_command_simple*`
@@ -930,7 +930,10 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   context-window fallback (now cache-first for both `Some(model)` and the
   provider-default `None` path — constant only on absent/unusable cache),
   documented per-provider context-window intent, and a
-  `codex_context_window_from_cache` unit-test module.)
+  `codex_context_window_from_cache` unit-test module. #3281 truthified the
+  Claude TUI producer-exit `lines=` count via `ReadHarvestStats` and added
+  `claude_tui_zero_harvest_*` observability events for delivered turns that
+  forwarded nothing.)
 - `src/services/codex_tui/rollout_tail.rs` (1639) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
   beyond the #2169 session identity fix.

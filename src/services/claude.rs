@@ -20,11 +20,11 @@ use crate::services::provider::{
 use crate::services::provider_hosting::ProviderSessionDriver;
 use crate::services::remote::RemoteProfile;
 use crate::services::session_backend::{
-    StreamLineState, emit_status_events_from_stream_json, insert_process_session,
+    ReadHarvestStats, StreamLineState, emit_status_events_from_stream_json, insert_process_session,
     observe_stream_context, parse_assistant_extra_tool_uses, parse_stream_message_with_state,
     process_session_is_alive, process_session_pid, process_session_probe,
-    read_output_file_until_result, remove_process_session, send_process_session_input,
-    terminate_process_handle,
+    read_output_file_until_result, read_output_file_until_result_with_harvest,
+    remove_process_session, send_process_session_input, terminate_process_handle,
 };
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{
@@ -1392,6 +1392,61 @@ fn classify_followup_result(
     }
 }
 
+/// Stable string tag for producer-exit / zero-harvest observability (#3281).
+#[cfg(unix)]
+fn read_output_result_kind(read_result: &ReadOutputResult) -> &'static str {
+    match read_result {
+        ReadOutputResult::Completed { .. } => "completed",
+        ReadOutputResult::SessionDied { .. } => "session_died",
+        ReadOutputResult::Cancelled { .. } => "cancelled",
+    }
+}
+
+/// #3281: a DELIVERED TUI turn that `Completed` without forwarding a single
+/// parsed `StreamMessage` harvested nothing from its transcript window — the
+/// turn's response text never entered the bridge. `Cancelled` is excluded:
+/// `classify_followup_result` maps it to `Delivered` too, and a cancelled turn
+/// legitimately forwards nothing.
+#[cfg(unix)]
+fn tui_delivered_zero_harvest(read_result: &ReadOutputResult, harvest: &ReadHarvestStats) -> bool {
+    matches!(read_result, ReadOutputResult::Completed { .. }) && harvest.forwarded_messages == 0
+}
+
+/// #3281 health signal: one observability event per zero-harvest delivered TUI
+/// turn, so the residual loss window (e.g. a fallback start offset pointing
+/// past the response bytes) is measured in production instead of inferred.
+#[cfg(unix)]
+fn emit_claude_tui_zero_harvest(
+    kind: &str,
+    report_channel_id: Option<u64>,
+    tmux_session_name: &str,
+    transcript_path: &str,
+    start_offset: u64,
+    transcript_len: u64,
+) {
+    tracing::warn!(
+        tmux_session_name,
+        transcript_path,
+        start_offset,
+        transcript_len,
+        "claude_tui delivered turn harvested ZERO stream messages — the turn's response text never entered the bridge ({kind})"
+    );
+    crate::services::observability::emit_inflight_lifecycle_event(
+        "claude",
+        report_channel_id.unwrap_or(0),
+        None,
+        None,
+        None,
+        kind,
+        serde_json::json!({
+            "tmux_session_name": tmux_session_name,
+            "transcript_path": transcript_path,
+            "start_offset": start_offset,
+            "transcript_len": transcript_len,
+        }),
+    );
+}
+
 fn emit_followup_restart_suppressed_notice(sender: &Sender<StreamMessage>, notice: &str) {
     let _ = sender.send(StreamMessage::Text {
         content: format!("\n\n{}", notice),
@@ -2182,7 +2237,7 @@ fn run_claude_tui_fresh_turn_and_finalize(
         resolved_session_id,
         prompt,
     );
-    let read_result = match fresh_turn_result {
+    let (read_result, harvest, turn_read_start_offset) = match fresh_turn_result {
         Ok(result) => result,
         Err(error) => {
             crate::services::termination_audit::record_termination_for_tmux(
@@ -2231,14 +2286,32 @@ fn run_claude_tui_fresh_turn_and_finalize(
         tmux_session_name,
         transcript_path,
     );
+    let transcript_len = std::fs::metadata(transcript_path)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    if tui_delivered_zero_harvest(&read_result, &harvest) {
+        emit_claude_tui_zero_harvest(
+            "claude_tui_zero_harvest_turn_delivered",
+            report_channel_id,
+            tmux_session_name,
+            transcript_path_string,
+            turn_read_start_offset,
+            transcript_len,
+        );
+    }
     log_producer_exit(
         "tui_turn_delivered",
         Some(resolved_session_id),
         report_channel_id,
-        0,
+        // #3281: real forwarded-message count (was a hardcoded 0).
+        usize::try_from(harvest.forwarded_messages).unwrap_or(usize::MAX),
         serde_json::json!({
             "tmux_session_name": tmux_session_name,
             "transcript_path": transcript_path_string,
+            "assistant_text_bytes": harvest.assistant_text_bytes,
+            "start_offset": turn_read_start_offset,
+            "transcript_len": transcript_len,
+            "read_result_kind": read_output_result_kind(&read_result),
         }),
     );
     Ok(())
@@ -2646,7 +2719,7 @@ fn try_claude_tui_warm_followup(
             turn_started_at,
             fallback_start_offset,
         );
-        let read_result = match read_claude_tui_transcript_until_done(
+        let (read_result, harvest) = match read_claude_tui_transcript_until_done(
             &transcript_path_string,
             start_offset,
             sender.clone(),
@@ -2661,6 +2734,12 @@ fn try_claude_tui_warm_followup(
                 return ClaudeTuiWarmFollowupOutcome::Terminal(Err(error));
             }
         };
+        // #3281: capture BEFORE `classify_followup_result` consumes the read
+        // result. The zero-harvest gate is `Completed`-only: classify maps
+        // `Cancelled` to `Delivered` too, and a cancelled turn legitimately
+        // forwards nothing.
+        let read_result_kind = read_output_result_kind(&read_result);
+        let delivered_zero_harvest = tui_delivered_zero_harvest(&read_result, &harvest);
         let zero_advance_terminal_result = match &read_result {
             ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
                 *offset <= start_offset
@@ -2693,14 +2772,32 @@ fn try_claude_tui_warm_followup(
                     tmux_session_name,
                     &transcript_path,
                 );
+                let transcript_len = std::fs::metadata(&transcript_path)
+                    .map(|meta| meta.len())
+                    .unwrap_or(0);
+                if delivered_zero_harvest {
+                    emit_claude_tui_zero_harvest(
+                        "claude_tui_zero_harvest_warm_followup_delivered",
+                        report_channel_id,
+                        tmux_session_name,
+                        &transcript_path_string,
+                        start_offset,
+                        transcript_len,
+                    );
+                }
                 log_producer_exit(
                     "tui_warm_followup_delivered",
                     Some(&resolved_session_id),
                     report_channel_id,
-                    0,
+                    // #3281: real forwarded-message count (was a hardcoded 0).
+                    usize::try_from(harvest.forwarded_messages).unwrap_or(usize::MAX),
                     serde_json::json!({
                         "tmux_session_name": tmux_session_name,
                         "transcript_path": transcript_path_string,
+                        "assistant_text_bytes": harvest.assistant_text_bytes,
+                        "start_offset": start_offset,
+                        "transcript_len": transcript_len,
+                        "read_result_kind": read_result_kind,
                     }),
                 );
                 return ClaudeTuiWarmFollowupOutcome::Terminal(Ok(()));
@@ -2875,6 +2972,9 @@ fn prepare_and_create_claude_tui_session(
     Ok(owner_path)
 }
 
+/// On success returns the read result, the harvest counters, and the actual
+/// turn-read start offset (the timestamp-scan adjusted offset, #3281) so the
+/// producer-exit log can report real values instead of a hardcoded `lines=0`.
 #[cfg(unix)]
 fn run_claude_tui_fresh_turn_with_ready_retry(
     transcript_path_string: &str,
@@ -2884,7 +2984,7 @@ fn run_claude_tui_fresh_turn_with_ready_retry(
     tmux_session_name: &str,
     resolved_session_id: &str,
     prompt: &str,
-) -> Result<ReadOutputResult, String> {
+) -> Result<(ReadOutputResult, ReadHarvestStats, u64), String> {
     for attempt in 1..=CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS {
         let hook_rx = crate::services::claude_tui::hook_server::subscribe_hook_events();
         let turn_started_at = chrono::Utc::now();
@@ -2909,7 +3009,8 @@ fn run_claude_tui_fresh_turn_with_ready_retry(
                     resolved_session_id,
                     hook_rx,
                     hook_events_after,
-                );
+                )
+                .map(|(read_result, harvest)| (read_result, harvest, start_offset));
             }
             Err(error) if should_retry_claude_tui_fresh_prompt_ready(&error, attempt) => {
                 let backoff = claude_tui_fresh_prompt_ready_backoff(attempt);
@@ -3000,7 +3101,7 @@ fn read_claude_tui_transcript_until_done(
     session_id: &str,
     hook_rx: tokio::sync::broadcast::Receiver<crate::services::claude_tui::hook_server::HookEvent>,
     hook_events_after: chrono::DateTime<chrono::Utc>,
-) -> Result<ReadOutputResult, String> {
+) -> Result<(ReadOutputResult, ReadHarvestStats), String> {
     let stop_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_seen_for_probe = stop_seen.clone();
     let hook_rx = std::sync::Arc::new(std::sync::Mutex::new(hook_rx));
@@ -3028,10 +3129,17 @@ fn read_claude_tui_transcript_until_done(
         cancel_token.as_deref(),
         tmux_session_name,
     )? {
-        return Ok(early_result);
+        // No transcript read happened — nothing was harvested (#3281).
+        return Ok((early_result, ReadHarvestStats::default()));
     }
-    let result =
-        read_output_file_until_result(transcript_path, start_offset, sender, cancel_token, probe);
+    let result = read_output_file_until_result_with_harvest(
+        transcript_path,
+        start_offset,
+        sender,
+        cancel_token,
+        probe,
+    )
+    .map_err(|failure| failure.error);
     log_claude_tui_hook_relay_failures(&expected_session_id_for_result);
     result
 }
@@ -3204,6 +3312,35 @@ mod claude_tui_ready_probe_tests {
             || true
         ));
         assert!(!stop_seen.load(Ordering::Relaxed));
+    }
+
+    /// #3281 truth table: zero-harvest fires ONLY for a `Completed` read that
+    /// forwarded nothing. Any forwarded message or a non-`Completed` read
+    /// (`Cancelled` is also classified `Delivered` by
+    /// `classify_followup_result`) must NOT fire.
+    #[test]
+    fn tui_delivered_zero_harvest_truth_table() {
+        let zero = ReadHarvestStats::default();
+        let harvested = ReadHarvestStats {
+            forwarded_messages: 3,
+            assistant_text_bytes: 42,
+        };
+        assert!(tui_delivered_zero_harvest(
+            &ReadOutputResult::Completed { offset: 100 },
+            &zero,
+        ));
+        assert!(!tui_delivered_zero_harvest(
+            &ReadOutputResult::Completed { offset: 100 },
+            &harvested,
+        ));
+        assert!(!tui_delivered_zero_harvest(
+            &ReadOutputResult::Cancelled { offset: 100 },
+            &zero,
+        ));
+        assert!(!tui_delivered_zero_harvest(
+            &ReadOutputResult::SessionDied { offset: 100 },
+            &zero,
+        ));
     }
 
     #[test]

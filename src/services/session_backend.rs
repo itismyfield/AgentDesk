@@ -284,6 +284,10 @@ pub struct StreamLineState {
     pub stdout_error: Option<(String, String)>,
     pub tool_use_names: HashMap<String, String>,
     pub task_starts: HashMap<String, TaskStartInfo>,
+    /// #3281 observability-only harvest counters (never gate delivery); see
+    /// [`ReadHarvestStats`] for the counting rules.
+    pub forwarded_message_count: u64,
+    pub forwarded_assistant_text_bytes: u64,
 }
 
 impl StreamLineState {
@@ -486,14 +490,24 @@ pub fn process_stream_line(
         _ => {}
     }
 
+    // #3281: harvest accounting, observation-only (counted on successful send).
+    // `StatusUpdate` (turn_duration housekeeping) is metadata, not content.
+    let (harvested, text_bytes) = match &message {
+        StreamMessage::Text { content } => (1, content.len() as u64),
+        StreamMessage::StatusUpdate { .. } => (0, 0),
+        _ => (1, 0),
+    };
     if sender.send(message).is_err() {
         return false;
     }
+    state.forwarded_message_count += harvested;
+    state.forwarded_assistant_text_bytes += text_bytes;
 
     for extra in parse_assistant_extra_tool_uses(&json) {
         if sender.send(extra).is_err() {
             return false;
         }
+        state.forwarded_message_count += 1;
     }
 
     true
@@ -878,6 +892,16 @@ pub fn parse_assistant_extra_tool_uses(json: &Value) -> Vec<StreamMessage> {
     extras
 }
 
+/// #3281 observability-only summary of what one transcript read forwarded to
+/// the bridge (status-only telemetry and synthetic idle-timeout `Done`s are
+/// NOT counted): `forwarded_messages == 0` on a `Completed` read means a
+/// zero-harvest transcript window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReadHarvestStats {
+    pub forwarded_messages: u64,
+    pub assistant_text_bytes: u64,
+}
+
 pub fn read_output_file_until_result(
     output_path: &str,
     start_offset: u64,
@@ -896,6 +920,25 @@ pub fn read_output_file_until_result_tracked(
     cancel_token: Option<Arc<CancelToken>>,
     probe: SessionProbe,
 ) -> Result<ReadOutputResult, ReadOutputFailure> {
+    read_output_file_until_result_with_harvest(
+        output_path,
+        start_offset,
+        sender,
+        cancel_token,
+        probe,
+    )
+    .map(|(result, _stats)| result)
+}
+
+/// #3281: full reader that also returns the harvest counters (truthful TUI
+/// producer-exit `lines=` logging).
+pub fn read_output_file_until_result_with_harvest(
+    output_path: &str,
+    start_offset: u64,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    probe: SessionProbe,
+) -> Result<(ReadOutputResult, ReadHarvestStats), ReadOutputFailure> {
     let mut state = StreamLineState::new();
     let SessionProbe {
         is_alive,
@@ -941,8 +984,12 @@ pub fn read_output_file_until_result_tracked(
         },
     );
 
+    let stats = ReadHarvestStats {
+        forwarded_messages: state.forwarded_message_count,
+        assistant_text_bytes: state.forwarded_assistant_text_bytes,
+    };
     match result {
-        Ok(result) => Ok(result),
+        Ok(result) => Ok((result, stats)),
         Err(error) => Err(ReadOutputFailure {
             error,
             last_offset: last_offset.load(Ordering::Relaxed),
@@ -1045,6 +1092,167 @@ mod stream_tail_guard_tests {
         assert_eq!(usage.cache_create_tokens, 0);
         assert_eq!(usage.output_tokens, 50);
         assert_eq!(usage.context_occupancy_input_tokens(), 1000);
+    }
+
+    /// #3281 forensics pinned as code: the 2026-06-10 incident transcript shape
+    /// (user → attachment → assistant thinking → assistant text → attachment
+    /// hook record → `system{stop_hook_summary}` → trailing housekeeping). The
+    /// producer MUST harvest the assistant text and the `Done` terminator via
+    /// the `has_final` fast path — i.e. in the incident scenario the producer
+    /// forwarded the response to the bridge; the loss was downstream.
+    #[test]
+    fn incident_shape_transcript_harvests_text_and_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("incident.jsonl");
+        std::fs::write(
+            &output_path,
+            concat!(
+                r#"{"type":"user","timestamp":"2026-06-10T01:34:29.797Z","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
+                "\n",
+                r#"{"type":"attachment","attachment":{"kind":"queued-prompt"}}"#,
+                "\n",
+                r#"{"type":"assistant","timestamp":"2026-06-10T01:34:35.000Z","message":{"content":[{"type":"thinking","thinking":"considering"}]}}"#,
+                "\n",
+                r#"{"type":"assistant","timestamp":"2026-06-10T01:34:39.943Z","message":{"model":"claude-x","content":[{"type":"text","text":"Hello! How can I help you today?"}],"usage":{"input_tokens":10,"output_tokens":9}}}"#,
+                "\n",
+                r#"{"type":"attachment","attachment":{"kind":"hook_success"}}"#,
+                "\n",
+                r#"{"type":"system","subtype":"stop_hook_summary","timestamp":"2026-06-10T01:34:40.095Z","session_id":"297e6f2f-test"}"#,
+                "\n",
+                r#"{"type":"system","subtype":"turn_duration","durationMs":10298}"#,
+                "\n",
+                r#"{"type":"last-prompt","prompt":"hi"}"#,
+                "\n",
+                r#"{"type":"ai-title","title":"greeting"}"#,
+                "\n",
+                r#"{"type":"mode","mode":"default"}"#,
+                "\n",
+                r#"{"type":"permission-mode","mode":"default"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let (sender, receiver) = mpsc::channel();
+        let (result, stats) = read_output_file_until_result_with_harvest(
+            output_path.to_string_lossy().as_ref(),
+            0,
+            sender,
+            None,
+            SessionProbe::process(|| true),
+        )
+        .unwrap();
+
+        assert!(
+            matches!(result, ReadOutputResult::Completed { .. }),
+            "stop_hook_summary must complete the read via has_final: {result:?}"
+        );
+        assert!(
+            stats.forwarded_messages > 0,
+            "incident-shape turn must forward harvested messages: {stats:?}"
+        );
+        assert!(
+            stats.assistant_text_bytes > 0,
+            "incident-shape turn must harvest assistant text bytes: {stats:?}"
+        );
+        let messages: Vec<_> = receiver.try_iter().collect();
+        let text_index = messages.iter().position(|message| {
+            matches!(message, StreamMessage::Text { content } if content == "Hello! How can I help you today?")
+        });
+        let done_index = messages
+            .iter()
+            .position(|message| matches!(message, StreamMessage::Done { .. }));
+        let (Some(text_index), Some(done_index)) = (text_index, done_index) else {
+            panic!("expected Text then Done, got: {messages:?}");
+        };
+        assert!(
+            text_index < done_index,
+            "response text must reach the bridge BEFORE the Done terminator: {messages:?}"
+        );
+    }
+
+    /// #3281: a tool_use-only turn forwards messages but zero assistant text
+    /// bytes — the zero-harvest health gate must therefore key on
+    /// `forwarded_messages`, not on `assistant_text_bytes`.
+    #[test]
+    fn tool_use_only_turn_forwards_messages_without_text_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("tool-only.jsonl");
+        std::fs::write(
+            &output_path,
+            concat!(
+                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu-1","name":"Bash","input":{"command":"ls"}}]}}"#,
+                "\n",
+                r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu-1","content":"ok"}]}}"#,
+                "\n",
+                r#"{"type":"result","subtype":"success","result":"","session_id":"sess-tool"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let (sender, _receiver) = mpsc::channel();
+        let (result, stats) = read_output_file_until_result_with_harvest(
+            output_path.to_string_lossy().as_ref(),
+            0,
+            sender,
+            None,
+            SessionProbe::process(|| true),
+        )
+        .unwrap();
+
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        assert!(
+            stats.forwarded_messages > 0,
+            "tool_use-only turn still forwards messages: {stats:?}"
+        );
+        assert_eq!(
+            stats.assistant_text_bytes, 0,
+            "tool_use-only turn has no assistant text bytes: {stats:?}"
+        );
+    }
+
+    /// #3281 zero side: a transcript window containing ONLY housekeeping lines
+    /// (queued-prompt attachment / last-prompt / ai-title / mode records /
+    /// `turn_duration` telemetry) harvests nothing — the counters stay 0 even
+    /// though `turn_duration` still reaches the bridge as a `StatusUpdate`.
+    /// This is the substrate of the `Completed`-only zero-harvest gate: such a
+    /// read can only complete via the synthetic idle-timeout `Done` (also
+    /// uncounted), and the producer-exit log must then report `lines=0` as a
+    /// REAL measurement.
+    #[test]
+    fn housekeeping_only_window_harvests_nothing() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut state = StreamLineState::new();
+        for line in [
+            r#"{"type":"attachment","attachment":{"kind":"queued-prompt"}}"#,
+            r#"{"type":"last-prompt","prompt":"hi"}"#,
+            r#"{"type":"ai-title","title":"greeting"}"#,
+            r#"{"type":"mode","mode":"default"}"#,
+            r#"{"type":"permission-mode","mode":"default"}"#,
+            r#"{"type":"system","subtype":"turn_duration","durationMs":10298}"#,
+        ] {
+            assert!(process_stream_line(line, &sender, &mut state));
+        }
+        assert_eq!(
+            state.forwarded_message_count, 0,
+            "housekeeping-only window must count zero harvested messages"
+        );
+        assert_eq!(
+            state.forwarded_assistant_text_bytes, 0,
+            "housekeeping-only window must harvest zero assistant text bytes"
+        );
+        let forwarded: Vec<_> = receiver.try_iter().collect();
+        assert!(
+            forwarded
+                .iter()
+                .all(|message| matches!(message, StreamMessage::StatusUpdate { .. })),
+            "only status telemetry may reach the bridge from housekeeping lines: {forwarded:?}"
+        );
+        assert!(
+            !forwarded.is_empty(),
+            "turn_duration must still reach the bridge as StatusUpdate telemetry"
+        );
     }
 
     #[test]
