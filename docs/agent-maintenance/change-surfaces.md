@@ -720,11 +720,12 @@
     helper signatures + ordering-guarantee doc comments since the moved bodies
     are net-zero. The poise framework-builder/setup closure (~580 lines) is left
     inline — its move-captured locals make a clean extraction risky and is
-    deferred); +2 from #3038 S1 wrapping the three cluster-C member inits in the
+    deferred); +4 from #3038 S1 — wrapping the three cluster-C member inits in the
     `queued: QueuedPlaceholderState { .. }` group literal (the member init
     expressions, including the `load_queue_exit_placeholder_clears` disk read,
     stay byte-identical so the run_bot_build_shared_data evaluation order is
-    preserved).
+    preserved) plus the mechanical `.queued.` path rewrite in
+    `run_bot_spawn_recovery_and_flush_restart_reports`.
   - `src/services/discord/session_runtime.rs` (1753 lines).
   - `src/services/discord/voice_barge_in.rs` (4657 lines; net +0 from #3034
     scoped dead-code allows on the test-only runtime API
@@ -995,7 +996,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `restore_owner_channel_for_tmux_session`/`clear_restored_owner_for_tmux_session`
   so a live thread-suffixed TUI session with no live watcher slot can be
   re-registered authoritatively instead of dropped forever; -201 from #3038 S1
-  lifting cluster C — the three queued-placeholder fields + their eight inherent
+  lifting cluster C — the three queued-placeholder fields + their nine inherent
   methods — into `shared_state::QueuedPlaceholderState`, leaving a single
   `queued: QueuedPlaceholderState` group field on `SharedData` and re-exporting
   the type for surface freeze),

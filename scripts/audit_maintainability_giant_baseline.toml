@@ -32,7 +32,7 @@
 # decompose lands separately after #3016 settles.
 "src/services/discord/turn_bridge/mod.rs" = 8417
 # #3038 S1: lowered 5188 -> 4987 (-201) as `QueuedPlaceholderState` (cluster C:
-# 3 fields + 8 inherent methods) moved to the `shared_state` sibling module.
+# 3 fields + 9 inherent methods) moved to the `shared_state` sibling module.
 # Locks in the shrink win (ratchet down only).
 "src/services/discord/mod.rs" = 4987
 "src/services/discord/tui_prompt_relay.rs" = 5438
@@ -61,9 +61,11 @@
 # the cluster-C extraction. Net program-wide: mod.rs -201.
 "src/services/discord/router/intake_gate.rs" = 2960
 "src/services/discord/formatting.rs" = 2802
-# #3038 S1: +2 (2800 -> 2802) for the `queued: QueuedPlaceholderState { .. }`
-# wrapper braces in `run_bot_build_shared_data`'s `SharedData` literal (the three
-# cluster-C member inits stay byte-identical inside). Net program-wide: mod.rs -201.
+# #3038 S1: +4 (2798 -> 2802) — wrapper braces for the `queued:
+# QueuedPlaceholderState { .. }` group in `run_bot_build_shared_data`'s
+# `SharedData` literal (the three cluster-C member inits stay byte-identical
+# inside) plus the mechanical `.queued.` path rewrite in
+# `run_bot_spawn_recovery_and_flush_restart_reports`. Net program-wide: mod.rs -201.
 "src/services/discord/runtime_bootstrap.rs" = 2802
 # #3034 batch-8: lowered 2655 -> 2645 (dead-code removal: `stop_provider_channel_runtime`).
 "src/services/discord/health/recovery.rs" = 2645
