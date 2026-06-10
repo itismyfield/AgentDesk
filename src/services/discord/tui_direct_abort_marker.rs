@@ -88,7 +88,29 @@ impl AbortedAnchorMarker {
 // Durable store (mirrors `tui_direct_pending_start`'s store + atomic writes)
 // ---------------------------------------------------------------------------
 
+// Thread-local test seam for the durable root (the `TEST_TMUX_ALIVE_OVERRIDE`
+// convention, inflight.rs). Tests inject a tempdir here instead of mutating
+// the process-global `AGENTDESK_ROOT_DIR` env: env mutation races every test
+// that READS the root without holding the crate env lock (e.g. the
+// `tui_direct_pending_start` worker tests' `persist()`), and a thread-local
+// needs no lock at all (each test thread sees only its own override; the
+// current-thread `block_on` runtimes the tests use stay on this thread).
+#[cfg(test)]
+thread_local! {
+    static TEST_ROOT_OVERRIDE: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn set_test_root_override(path: Option<std::path::PathBuf>) {
+    TEST_ROOT_OVERRIDE.with(|cell| *cell.borrow_mut() = path);
+}
+
 fn root() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = TEST_ROOT_OVERRIDE.with(|cell| cell.borrow().clone()) {
+        return Some(path);
+    }
     super::runtime_store::tui_direct_abort_marker_root()
 }
 
@@ -442,44 +464,32 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// Serializes env-root mutation + restores `AGENTDESK_ROOT_DIR` on drop
-    /// (the `durable_restore_roundtrip_loads_fifo_order` precedent in
-    /// `tui_direct_pending_start`). Field order matters: tempdir first, then
-    /// env restore, then the shared env lock releases.
+    /// Injects a per-test tempdir as the durable root via the THREAD-LOCAL
+    /// override (never the process-global `AGENTDESK_ROOT_DIR` env — mutating
+    /// that races every test that reads the root without the crate env lock,
+    /// e.g. the `tui_direct_pending_start` worker tests' `persist()`). No lock
+    /// is needed: each test thread sees only its own override.
     struct TestRoot {
         _temp: tempfile::TempDir,
-        _env: EnvReset,
-        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
-    struct EnvReset(Option<std::ffi::OsString>);
-    impl Drop for EnvReset {
+    impl Drop for TestRoot {
         fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-            }
+            set_test_root_override(None);
         }
     }
 
     fn test_root() -> TestRoot {
-        let lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let temp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        set_test_root_override(Some(temp.path().join("discord_tui_direct_abort_marker")));
         std::fs::create_dir_all(root().expect("durable root configured under temp")).unwrap();
-        TestRoot {
-            _temp: temp,
-            _env: env,
-            _lock: lock,
-        }
+        TestRoot { _temp: temp }
     }
 
-    /// Sync tests + an explicit current-thread runtime keep the env-lock guard
-    /// out of any async scope (no new `await_holding_lock` allow sites — the
-    /// repo ratchet is frozen at its baseline).
+    /// A current-thread runtime keeps the async drains on THIS thread so the
+    /// thread-local root override resolves inside them (and no
+    /// `await_holding_lock` allow sites are needed — the repo ratchet is
+    /// frozen at its baseline).
     fn test_rt() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()

@@ -5629,23 +5629,22 @@ mod tests {
     /// this hook performs Discord IO only through that module, never directly.)
     #[test]
     fn abort_cleanup_records_marker_and_keeps_hourglass() {
-        // Env-root setup mirrors `durable_restore_roundtrip_loads_fifo_order`;
-        // the guard stays in sync scope (block_on, no await_holding_lock site).
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        struct EnvReset(Option<std::ffi::OsString>);
-        impl Drop for EnvReset {
+        // Durable-root injection via the marker module's THREAD-LOCAL test
+        // seam (never the process-global `AGENTDESK_ROOT_DIR` env — mutating
+        // it races env-reading tests that hold no lock, e.g. the pending-start
+        // worker tests' `persist()`). The current-thread `block_on` below keeps
+        // the cleanup future on this thread so the override resolves inside it.
+        struct RootReset;
+        impl Drop for RootReset {
             fn drop(&mut self) {
-                match self.0.take() {
-                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-                }
+                super::super::tui_direct_abort_marker::set_test_root_override(None);
             }
         }
-        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let _root_reset = RootReset;
         let temp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        super::super::tui_direct_abort_marker::set_test_root_override(Some(
+            temp.path().join("discord_tui_direct_abort_marker"),
+        ));
 
         let shared = super::super::make_shared_data_for_tests();
         let record = super::super::tui_direct_pending_start::TuiDirectPendingStart {
