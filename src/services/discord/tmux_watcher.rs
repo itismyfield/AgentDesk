@@ -7837,51 +7837,31 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     FreshIdleFinalizeDecision::Finalize { user_msg_id } => {
                         // #3016 S3 (the A2 / phase-5 enabler): a structural JSONL
                         // terminator is PROVEN on disk for this turn (Done) AND no
-                        // follow-up took over — so finalize via the single-authority
-                        // path with `normal_completion = true`, FLAG-INDEPENDENT.
-                        // This is the whole point of S3: an EMPTY-but-terminated
-                        // completion now finalizes (the old flag-gated path could
-                        // not distinguish it from a paused-live turn). The finalizer
-                        // is idempotent — a turn already finalized by the bridge
-                        // resolves to `AlreadyFinalized` — so this cannot
-                        // over-finalize. `user_msg_id` is the id PINNED from the
-                        // pre-cleanup snapshot at this `current_offset` (never a
-                        // late re-read), so the ledger match is the CURRENT turn's
-                        // real, non-zero id.
+                        // follow-up took over — finalize via the single-authority
+                        // path with `normal_completion = true`, FLAG-INDEPENDENT,
+                        // so an EMPTY-but-terminated completion finalizes too (the
+                        // old flag-gated path could not tell it from a paused-live
+                        // turn). The finalizer is idempotent (`AlreadyFinalized`),
+                        // and `user_msg_id` is PINNED from the pre-cleanup snapshot
+                        // at this `current_offset` (never a late re-read), so the
+                        // ledger match is the CURRENT turn's real, non-zero id.
                         //
                         // #3016 S3 (Concern 2 — residual TOCTOU): the destructive
                         // on-disk clear must not wipe a FOLLOW-UP turn's inflight.
-                        // The earlier fix re-read on-disk inflight, ran
-                        // `committed_completion_is_stale_for_newer_turn`, and then
-                        // called the UNCONDITIONAL `clear_inflight_state` under a
-                        // SEPARATE lock — a check-then-act split across two locks.
-                        // On a multi-threaded tokio runtime a follow-up turn could
-                        // save a new inflight on another worker thread AFTER the
-                        // re-read but BEFORE the clear, so the unconditional delete
-                        // wiped the follow-up's inflight (the window was not
-                        // atomic). Replace that sequence with the EXISTING atomic
-                        // compare-and-clear helper
-                        // `clear_inflight_state_if_matches_identity` (inflight.rs
-                        // ~1666 / ~1822): it reads + validates + unlinks under a
-                        // SINGLE sidecar lock and deletes ONLY if the on-disk
-                        // identity (`user_msg_id` + `started_at` +
-                        // `tmux_session_name`) still equals the PINNED turn's. A
-                        // follow-up turn carries a different identity, so the helper
-                        // is a guaranteed no-op for it (`UserMsgMismatch`) — the
-                        // window is closed atomically, no re-read/recheck needed.
-                        //
-                        // The pinned identity comes from `pinned_pre_cleanup_inflight`
-                        // — the same snapshot the decision helper used to derive
-                        // `user_msg_id` above (when `Finalize` is reached, that id is
-                        // exactly `pinned_pre_cleanup_inflight.user_msg_id`, because
-                        // `pinned_finalize_user_msg_id` selected it). The
-                        // finalize-skip (a NEWER turn in the pinned snapshot) is a
-                        // SEPARATE decision already handled in
-                        // `watcher_fresh_idle_finalize_decision`; here we only swap
-                        // the destructive CLEAR — the one carrying the TOCTOU — to
-                        // the atomic identity-matched helper. Finalize below still
-                        // runs on the PINNED id (idempotent) regardless of the clear
-                        // outcome.
+                        // The earlier read→check→unconditional-clear spanned TWO
+                        // locks, so a follow-up saved on another worker thread in
+                        // the gap was wiped. `clear_inflight_state_if_matches_identity`
+                        // (inflight.rs) closes the window atomically: read +
+                        // validate + unlink under ONE sidecar lock, deleting only
+                        // while the on-disk identity (`user_msg_id` + `started_at`
+                        // + `tmux_session_name`) still equals the PINNED turn's
+                        // (`pinned_pre_cleanup_inflight`, the same snapshot that
+                        // derived `user_msg_id` above) — a follow-up's identity
+                        // differs (`UserMsgMismatch`), guaranteed no-op. The
+                        // finalize-skip for a NEWER pinned turn stays a SEPARATE
+                        // decision in `watcher_fresh_idle_finalize_decision`;
+                        // finalize below runs on the PINNED id (idempotent)
+                        // regardless of the clear outcome.
                         let pinned_clear_identity = pinned_pre_cleanup_inflight.as_ref().map(
                             crate::services::discord::inflight::InflightTurnIdentity::from_state,
                         );
