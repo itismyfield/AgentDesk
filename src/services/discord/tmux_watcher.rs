@@ -7837,51 +7837,31 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     FreshIdleFinalizeDecision::Finalize { user_msg_id } => {
                         // #3016 S3 (the A2 / phase-5 enabler): a structural JSONL
                         // terminator is PROVEN on disk for this turn (Done) AND no
-                        // follow-up took over — so finalize via the single-authority
-                        // path with `normal_completion = true`, FLAG-INDEPENDENT.
-                        // This is the whole point of S3: an EMPTY-but-terminated
-                        // completion now finalizes (the old flag-gated path could
-                        // not distinguish it from a paused-live turn). The finalizer
-                        // is idempotent — a turn already finalized by the bridge
-                        // resolves to `AlreadyFinalized` — so this cannot
-                        // over-finalize. `user_msg_id` is the id PINNED from the
-                        // pre-cleanup snapshot at this `current_offset` (never a
-                        // late re-read), so the ledger match is the CURRENT turn's
-                        // real, non-zero id.
+                        // follow-up took over — finalize via the single-authority
+                        // path with `normal_completion = true`, FLAG-INDEPENDENT,
+                        // so an EMPTY-but-terminated completion finalizes too (the
+                        // old flag-gated path could not tell it from a paused-live
+                        // turn). The finalizer is idempotent (`AlreadyFinalized`),
+                        // and `user_msg_id` is PINNED from the pre-cleanup snapshot
+                        // at this `current_offset` (never a late re-read), so the
+                        // ledger match is the CURRENT turn's real, non-zero id.
                         //
                         // #3016 S3 (Concern 2 — residual TOCTOU): the destructive
                         // on-disk clear must not wipe a FOLLOW-UP turn's inflight.
-                        // The earlier fix re-read on-disk inflight, ran
-                        // `committed_completion_is_stale_for_newer_turn`, and then
-                        // called the UNCONDITIONAL `clear_inflight_state` under a
-                        // SEPARATE lock — a check-then-act split across two locks.
-                        // On a multi-threaded tokio runtime a follow-up turn could
-                        // save a new inflight on another worker thread AFTER the
-                        // re-read but BEFORE the clear, so the unconditional delete
-                        // wiped the follow-up's inflight (the window was not
-                        // atomic). Replace that sequence with the EXISTING atomic
-                        // compare-and-clear helper
-                        // `clear_inflight_state_if_matches_identity` (inflight.rs
-                        // ~1666 / ~1822): it reads + validates + unlinks under a
-                        // SINGLE sidecar lock and deletes ONLY if the on-disk
-                        // identity (`user_msg_id` + `started_at` +
-                        // `tmux_session_name`) still equals the PINNED turn's. A
-                        // follow-up turn carries a different identity, so the helper
-                        // is a guaranteed no-op for it (`UserMsgMismatch`) — the
-                        // window is closed atomically, no re-read/recheck needed.
-                        //
-                        // The pinned identity comes from `pinned_pre_cleanup_inflight`
-                        // — the same snapshot the decision helper used to derive
-                        // `user_msg_id` above (when `Finalize` is reached, that id is
-                        // exactly `pinned_pre_cleanup_inflight.user_msg_id`, because
-                        // `pinned_finalize_user_msg_id` selected it). The
-                        // finalize-skip (a NEWER turn in the pinned snapshot) is a
-                        // SEPARATE decision already handled in
-                        // `watcher_fresh_idle_finalize_decision`; here we only swap
-                        // the destructive CLEAR — the one carrying the TOCTOU — to
-                        // the atomic identity-matched helper. Finalize below still
-                        // runs on the PINNED id (idempotent) regardless of the clear
-                        // outcome.
+                        // The earlier read→check→unconditional-clear spanned TWO
+                        // locks, so a follow-up saved on another worker thread in
+                        // the gap was wiped. `clear_inflight_state_if_matches_identity`
+                        // (inflight.rs) closes the window atomically: read +
+                        // validate + unlink under ONE sidecar lock, deleting only
+                        // while the on-disk identity (`user_msg_id` + `started_at`
+                        // + `tmux_session_name`) still equals the PINNED turn's
+                        // (`pinned_pre_cleanup_inflight`, the same snapshot that
+                        // derived `user_msg_id` above) — a follow-up's identity
+                        // differs (`UserMsgMismatch`), guaranteed no-op. The
+                        // finalize-skip for a NEWER pinned turn stays a SEPARATE
+                        // decision in `watcher_fresh_idle_finalize_decision`;
+                        // finalize below runs on the PINNED id (idempotent)
+                        // regardless of the clear outcome.
                         let pinned_clear_identity = pinned_pre_cleanup_inflight.as_ref().map(
                             crate::services::discord::inflight::InflightTurnIdentity::from_state,
                         );
@@ -11305,44 +11285,63 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             turn_result_relayed = true;
             // #1670/#1708: Always consume the handoff debt and clear inflight
             // when terminal output was committed — the bridge's
-            // `bridge_relay_delegated_to_watcher`
-            // arm in `turn_bridge/mod.rs` (the `else if` at ~line 4071) saves
-            // inflight and immediately returns, so the bridge will NOT come back
-            // to revoke the debt or clear the inflight even if dispatch
-            // finalization fails. Organic user turns (`dispatch_id = null`)
-            // surfaced this regression: when the streaming finalizer fell
-            // through to a stale fallback dispatch_id and reported
-            // `dispatch_ok = false`, the watcher used to leave the inflight and
-            // the channel mailbox cancel_token in place, orphaning them
-            // forever. The decoupling rule is:
-            //
-            //   * `clear_inflight_state` + `finish_restored_watcher_active_turn`
-            //     fire whenever the watcher committed terminal output
-            //     (delivered or intentionally suppressed) — both bridge and
-            //     watcher are now safe to call them concurrently because
-            //     `mailbox_finish_turn` is idempotent (the second caller
-            //     observes an empty active slot).
-            //   * Anything that genuinely depends on the dispatch lifecycle
-            //     having completed (queue kickoff, dispatch followup,
-            //     terminal-stop decision) remains gated on `dispatch_ok` further
-            //     below.
-            //
-            // #3016 phase-5b2: the legacy `mailbox_finalize_owed` flag is removed,
-            // so the `swap(false, AcqRel)` that read it here (whose value fed only
-            // the observability payload and the `watcher_handled_mailbox_finish`
-            // bookkeeping below) is gone. Exactly-once is the ledger's job; the
-            // cross-turn safety the Release reset provided is subsumed by the
-            // ledger phase gate.
+            // `bridge_relay_delegated_to_watcher` arm in `turn_bridge/mod.rs`
+            // (the `else if` at ~line 4071) saves inflight and returns, so it
+            // never comes back to revoke the debt / clear the inflight even if
+            // dispatch finalization fails (organic `dispatch_id = null` turns
+            // surfaced this: a stale fallback dispatch_id reporting
+            // `dispatch_ok = false` used to orphan the inflight + mailbox
+            // cancel_token forever). Decoupling rule: `clear_inflight_state` +
+            // `finish_restored_watcher_active_turn` fire whenever the watcher
+            // committed terminal output (delivered or intentionally
+            // suppressed; bridge + watcher may call them concurrently —
+            // `mailbox_finish_turn` is idempotent), while anything genuinely
+            // dependent on the dispatch lifecycle (queue kickoff, dispatch
+            // followup, terminal-stop decision) stays gated on `dispatch_ok`
+            // further below.
+            // #3016 phase-5b2: the legacy `mailbox_finalize_owed` flag (and its
+            // `swap(false, AcqRel)` read here) is removed — exactly-once is the
+            // ledger's job; the Release-reset cross-turn safety is subsumed by
+            // the ledger phase gate.
             // #3016 (codex R3): do NOT delete the on-disk inflight when it
             // belongs to a NEWER follow-up turn (same session, started AT/AFTER
-            // this committed range). The same offset decision that makes
-            // `pinned_finalize_user_msg_id` return 0 just below gates the clear
-            // here, so this stale-range pass cannot wipe the newer turn's
-            // inflight out from under it. Only the on-disk file is gated; the
-            // in-memory `inflight_state` used afterward (finalize id source,
-            // dispatch resolution, history push) is unaffected. The
-            // `cleared_by_watcher` observability event only fires when the clear
-            // actually ran (preserve existing semantics).
+            // this committed range) — the same offset decision that makes
+            // `pinned_finalize_user_msg_id` return 0 below gates the clear, so
+            // this stale-range pass cannot wipe the newer turn's inflight. Only
+            // the on-disk file is gated; the in-memory `inflight_state` used
+            // afterward is unaffected, and `cleared_by_watcher` fires only when
+            // the clear actually ran (preserve existing semantics).
+            // #3296 codex r2: aborted-anchor reconcile, sited BEFORE the row
+            // clear — commit-tombstone evidence (committed turn identity) lands
+            // first, then the drain covers any marker pinned to this turn, then
+            // the clear. A sweep pass claiming a marker mid-commit can thus
+            // observe "no live row" only AFTER the tombstone is durable, so its
+            // 대조 lands ✅ instead of ⚠ (r2 finding 1 — the flock alone only
+            // serialized the reconcilers, it never ordered the verdicts); an
+            // ABORT recording its marker after this drain pass still converges
+            // via the tombstone (record-instant or sweep 대조).
+            if tui_direct_anchor_terminal_body_visible
+                && !completion_is_stale_for_newer_turn
+                && let Some(committed) = inflight_state.as_ref()
+            {
+                crate::services::discord::tui_direct_abort_marker::record_commit_tombstone(
+                    watcher_provider.as_str(),
+                    &tmux_session_name,
+                    channel_id.get(),
+                    committed.user_msg_id,
+                    &committed.started_at,
+                );
+                let _ =
+                    crate::services::discord::tui_direct_abort_marker::drain_on_terminal_commit(
+                        &shared,
+                        watcher_provider.as_str(),
+                        &tmux_session_name,
+                        channel_id.get(),
+                        committed.user_msg_id,
+                        &committed.started_at,
+                    )
+                    .await;
+            }
             if !completion_is_stale_for_newer_turn {
                 crate::services::discord::inflight::clear_inflight_state(
                     &provider_kind,

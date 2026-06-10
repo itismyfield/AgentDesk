@@ -24,6 +24,16 @@
 # #3262/#3272, which extracted the inline completed-panel backfill block into
 # `adk_session::backfill_completed_panel_usage_and_maybe_inject_compact` (−16
 # prod lines), so the frozen true production LoC settles at 9583. KEPT surfaces.
+# #3296: the aborted-anchor reconcile chokepoint — one guarded block recording
+# the `tui_direct_abort_marker::record_commit_tombstone` commit evidence and
+# calling `drain_on_terminal_commit`, sited BEFORE `clear_inflight_state`
+# (codex r2: tombstone → drain → clear, so a racing sweep that observes "no
+# live row" always sees the commit evidence) and passing the committed turn's
+# identity (codex r1 positive correlation; the marker logic lives in the new
+# non-giant `tui_direct_abort_marker.rs`) — offset in the same change by
+# compressing the #3016-S3 finalize/TOCTOU and #1670/#1708 decoupling comment
+# blocks (issue references and rationale preserved), so the file lands at
+# 9580 under the unchanged frozen baseline (no raise).
 "src/services/discord/tmux_watcher.rs" = 9583
 # Frozen at its true production LoC once #3028 fixed the prod/test splitter
 # (lifetime/char-literal brace miscount): the first inline `#[cfg(test)] mod`

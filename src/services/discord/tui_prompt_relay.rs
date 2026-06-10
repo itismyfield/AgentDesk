@@ -826,7 +826,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                 anchor_message.id.get(),
             )
             .await;
-            if super::tui_direct_pending_start::should_defer_synthetic_turn_start(prior) {
+            if super::tui_direct_pending_start::should_defer_synthetic_turn_start(prior.view) {
                 deferred_synthetic_start = true;
                 defer_synthetic_turn_start(
                     shared,
@@ -1484,16 +1484,19 @@ async fn claim_tui_direct_synthetic_turn(
 // #3154 — deferred synthetic turn-start (off the observer loop)
 // ===========================================================================
 
-/// Build the [`PriorTurnView`](super::tui_direct_pending_start::PriorTurnView)
+/// Build the
+/// [`PriorTurnObservation`](super::tui_direct_pending_start::PriorTurnObservation)
 /// for the synthetic-start deferral decision: read inflight, mailbox, and the
-/// fresh runtime binding for this provider/channel/session.
+/// fresh runtime binding. Besides the pure decision view it carries the live
+/// FOREIGN inflight's identity (codex r2) so the worker can pin it on the
+/// aborted-anchor marker even when the row vanishes before the ABORT cleanup.
 async fn synthetic_start_prior_turn_view(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_session_name: &str,
     own_anchor_id: u64,
-) -> super::tui_direct_pending_start::PriorTurnView {
+) -> super::tui_direct_pending_start::PriorTurnObservation {
     let inflight = super::inflight::load_inflight_state(provider, channel_id.get());
     let inflight_present = inflight.is_some();
     let inflight_is_own_anchor = inflight
@@ -1504,6 +1507,10 @@ async fn synthetic_start_prior_turn_view(
                 && state.user_msg_id == own_anchor_id
         })
         .unwrap_or(false);
+    let foreign_inflight_identity = inflight
+        .as_ref()
+        .filter(|_| !inflight_is_own_anchor)
+        .map(|state| (state.user_msg_id, state.started_at.clone()));
 
     let snapshot = super::mailbox_snapshot(shared, channel_id).await;
     // A BACKGROUND turn (monitor relay / self-paced loop) does not block — only a
@@ -1518,12 +1525,15 @@ async fn synthetic_start_prior_turn_view(
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name)
             .is_some();
 
-    super::tui_direct_pending_start::PriorTurnView {
-        inflight_present,
-        inflight_is_own_anchor,
-        mailbox_blocking_turn_present,
-        mailbox_turn_is_own_anchor,
-        runtime_binding_present,
+    super::tui_direct_pending_start::PriorTurnObservation {
+        view: super::tui_direct_pending_start::PriorTurnView {
+            inflight_present,
+            inflight_is_own_anchor,
+            mailbox_blocking_turn_present,
+            mailbox_turn_is_own_anchor,
+            runtime_binding_present,
+        },
+        foreign_inflight_identity,
     }
 }
 
@@ -1741,54 +1751,65 @@ fn pending_start_claim_fn() -> super::tui_direct_pending_start::ClaimFn {
     })
 }
 
-/// #3282: the worker's terminal-ABORT reaction cleanup. When the backstop
-/// escalation budget is exhausted (`backstop_abort_foreign_inflight_live`) no
-/// claim ever saves an inflight for this anchor, so the normal watcher/recovery
-/// `⏳ → ✅` completion never fires — without this cleanup the anchor's `⏳`
-/// lingers forever (observed live on msg 1514080986529533972). Remove the `⏳`
-/// and swap in a `⚠` failure marker so the abort is visible rather than a
-/// silent eternal hourglass (precedent: the watcher's auth-expired `⏳ → ⚠`
-/// swap in tmux_watcher.rs).
-///
-/// Bot identity (#3164 invariant): the `⏳` was added with THIS relay's
-/// `shared.serenity_http_or_token_fallback()` (the provider/command bot —
-/// see the `command_http` add in `relay_observed_prompt`), and
-/// `remove_reaction_raw` only removes `@me`'s reaction. Resolving the SAME
-/// source here guarantees the identical `@me` identity, so the removal targets
-/// exactly the reaction the add created. On unavailability we skip with a
-/// warning — removing with a different bot identity would silently no-op.
+/// #3296 (supersedes the #3282 `⏳ → ⚠` swap): the worker's terminal-ABORT
+/// reconcile hook. The input was ALREADY provider-submitted by ABORT time (the
+/// abort drops only the synthetic OWNERSHIP claim), so the anchor's `⏳` is
+/// still TRUE — the old `⚠` swap branded ANSWERED messages as failures. So:
+/// KEEP the `⏳` and record a durable aborted-anchor marker pinning the
+/// FOREIGN prior inflight's identity — the worker's LAST-VIEW identity first,
+/// the cleanup-instant row only as the no-view fallback (codex r3,
+/// `pin_abort_foreign_identity`). The marker stays uncovered unless a commit
+/// tombstone proves the prior owner committed (`record_for_abort`'s 대조;
+/// force-clear/stop/recovery deletions stay uncovered). The watcher drain
+/// flips it `⏳ → ✅` ONLY when THAT turn commits; the sweeper flips it
+/// `⏳ → ⚠` after the TTL with no holding inflight (hard-cap bounded).
+/// Recorded even when http is unavailable; every later reaction op resolves
+/// the shared http INSIDE the marker module — the add≡remove identity (#3164).
 fn pending_start_abort_cleanup_fn() -> super::tui_direct_pending_start::AbortCleanupFn {
-    Box::new(|shared, record| {
+    Box::new(|_shared, record, last_view_foreign| {
         Box::pin(async move {
-            // Defensive: a corrupted durable record could carry a zero anchor id;
-            // `MessageId::new(0)` panics (mirrors the watcher's user_msg_id != 0
-            // guard before its reaction swaps).
+            // Defensive (I5): a corrupted durable record could carry a zero
+            // anchor id — `MessageId::new(0)` panics and a zero-id marker could
+            // never be reconciled. `record()` rejects it too; skip outright.
             if record.anchor_message_id == 0 {
                 return;
             }
-            let Some(http) = shared.serenity_http_or_token_fallback() else {
-                tracing::warn!(
+            // codex r3: LAST-VIEW first — a SUCCESSOR row may hold the slot by
+            // now (prior row committed); the row read is a lazy fallback only.
+            let foreign = super::tui_direct_pending_start::pin_abort_foreign_identity(
+                last_view_foreign,
+                || {
+                    ProviderKind::from_str(&record.provider)
+                        .and_then(|provider| {
+                            super::inflight::load_inflight_state(&provider, record.channel_id)
+                        })
+                        .map(|state| (state.user_msg_id, state.started_at))
+                },
+            );
+            match super::tui_direct_abort_marker::record_for_abort(
+                record.provider.clone(),
+                record.channel_id,
+                record.anchor_message_id,
+                record.tmux_session_name.clone(),
+                foreign,
+            ) {
+                Ok(marker) => tracing::info!(
                     provider = %record.provider,
                     channel_id = record.channel_id,
                     tmux_session_name = %record.tmux_session_name,
                     anchor_message_id = record.anchor_message_id,
-                    "tui_direct_pending_start: skipping anchor ⏳ abort cleanup; provider serenity \
-                     http unavailable (removing with a different bot identity would no-op — #3164)"
-                );
-                return;
-            };
-            let channel_id = ChannelId::new(record.channel_id);
-            let anchor_message_id = MessageId::new(record.anchor_message_id);
-            super::formatting::remove_reaction_raw(&http, channel_id, anchor_message_id, '⏳')
-                .await;
-            super::formatting::add_reaction_raw(&http, channel_id, anchor_message_id, '⚠').await;
-            tracing::info!(
-                provider = %record.provider,
-                channel_id = record.channel_id,
-                tmux_session_name = %record.tmux_session_name,
-                anchor_message_id = record.anchor_message_id,
-                "tui_direct_pending_start: removed the anchor ⏳ and marked ⚠ after the synthetic turn-start ABORT (#3282)"
-            );
+                    foreign_user_msg_id = ?marker.foreign_user_msg_id,
+                    tombstone_covered = marker.covered_at_ms.is_some(),
+                    "tui_direct_pending_start: synthetic turn-start ABORTed; anchor keeps ⏳ and a durable aborted-anchor marker was recorded — reconcile lands ✅ on the recorded foreign turn's commit (tombstone-covered when it already committed) or ⚠ via the sweep bound (#3296)"
+                ),
+                Err(error) => tracing::warn!(
+                    provider = %record.provider,
+                    channel_id = record.channel_id,
+                    anchor_message_id = record.anchor_message_id,
+                    error = %error,
+                    "tui_direct_pending_start: failed to persist the aborted-anchor marker; anchor ⏳ may linger until manual cleanup (#3296)"
+                ),
+            }
         })
     })
 }
@@ -5619,6 +5640,127 @@ mod tests {
             ExternalInputRelayOwner::TmuxWatcher,
             ExternalInputRelayOwner::TmuxWatcher,
         ));
+    }
+
+    /// #3296 (RED-3): the ABORT cleanup hook records a durable aborted-anchor
+    /// marker and NO LONGER applies any reaction itself — the old #3282 path
+    /// swapped `⏳ → ⚠` here, branding answered messages as failures. RED on
+    /// the pre-#3296 code: no marker module/store exists and a `⚠` is added.
+    /// codex r2 reverses the r1 tail: with the foreign row gone at the record
+    /// instant the marker must pin the worker's LAST-VIEW identity and stay
+    /// UNCOVERED unless a commit tombstone proves the deletion was a commit —
+    /// RED on the r1 code (row-absence alone pre-covered the marker, false-✅
+    /// ing force-cleared unanswered anchors).
+    /// (Reaction-op accounting lives in `tui_direct_abort_marker`'s own tests;
+    /// this hook performs Discord IO only through that module, never directly.)
+    #[test]
+    fn abort_cleanup_records_marker_and_keeps_hourglass() {
+        // Durable BASE-root injection via the marker module's THREAD-LOCAL
+        // test seam (never the process-global `AGENTDESK_ROOT_DIR` env —
+        // mutating it races env-reading tests that hold no lock, e.g. the
+        // pending-start worker tests' `persist()`). The current-thread
+        // `block_on` below keeps the cleanup future on this thread so the
+        // override resolves inside it.
+        struct RootReset;
+        impl Drop for RootReset {
+            fn drop(&mut self) {
+                super::super::tui_direct_abort_marker::set_test_root_override(None);
+            }
+        }
+        let _root_reset = RootReset;
+        let temp = tempfile::tempdir().unwrap();
+        super::super::tui_direct_abort_marker::set_test_root_override(Some(
+            temp.path().to_path_buf(),
+        ));
+
+        let shared = super::super::make_shared_data_for_tests();
+        let record = super::super::tui_direct_pending_start::TuiDirectPendingStart {
+            provider: "claude".to_string(),
+            channel_id: 4242,
+            tmux_session_name: "tmux-4242".to_string(),
+            prompt_text: "/loop tick".to_string(),
+            anchor_message_id: 777_001,
+            lease_relay_owner: "bridge_adapter".to_string(),
+            lease_runtime_kind: Some("claude_tui".to_string()),
+            lease_turn_id: None,
+            lease_session_key: None,
+            generation: 0,
+            created_at_ms: 0,
+            observed_at_ms: 0,
+            state: super::super::tui_direct_pending_start::PendingStartState::Waiting,
+            attempt_count: 0,
+        };
+        let cleanup = pending_start_abort_cleanup_fn();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // No inflight row exists for this channel in the test env (the row
+        // vanished post-final-view); the worker's last-view identity is what
+        // the marker must pin (codex r2).
+        let last_view = Some((888_777_u64, "2026-06-10 12:00:00".to_string()));
+        rt.block_on(cleanup(&shared, &record, last_view.clone()));
+
+        let markers = super::super::tui_direct_abort_marker::load_for_channel("claude", 4242);
+        assert_eq!(
+            markers.len(),
+            1,
+            "the ABORT hook must persist exactly one durable aborted-anchor \
+             marker — RED on the old ⚠-swap path (no marker store existed)"
+        );
+        assert_eq!(
+            markers[0].anchor_message_id, 777_001,
+            "identity-pinned (I4)"
+        );
+        assert_eq!(
+            markers[0].foreign_user_msg_id,
+            Some(888_777),
+            "row gone at the record instant ⇒ the LAST-VIEW identity is pinned \
+             (codex r2) — RED if None (the marker would be sweep-only)"
+        );
+        assert_eq!(
+            markers[0].covered_at_ms, None,
+            "no commit tombstone ⇒ UNCOVERED (codex r2 — RED on the r1 \
+             pre-covered promotion: bare row-absence is not commit evidence)"
+        );
+
+        // With a commit tombstone matching the last-view identity, the same
+        // row-gone abort records COVERED (evidence-backed — the deletion WAS
+        // the prior owner's terminal commit).
+        super::super::tui_direct_abort_marker::record_commit_tombstone_at(
+            55_000,
+            "claude",
+            "tmux-4242",
+            4242,
+            888_777,
+            "2026-06-10 12:00:00",
+        );
+        let record_b = super::super::tui_direct_pending_start::TuiDirectPendingStart {
+            anchor_message_id: 777_002,
+            ..record.clone()
+        };
+        rt.block_on(cleanup(&shared, &record_b, last_view));
+        let covered = super::super::tui_direct_abort_marker::load_for_channel("claude", 4242)
+            .into_iter()
+            .find(|m| m.anchor_message_id == 777_002)
+            .expect("second marker recorded");
+        assert_eq!(
+            covered.covered_at_ms,
+            Some(55_000),
+            "matching tombstone at record time ⇒ evidence-backed cover (r2)"
+        );
+
+        // Zero anchor id (I5): nothing recorded, nothing panics.
+        let zero = super::super::tui_direct_pending_start::TuiDirectPendingStart {
+            anchor_message_id: 0,
+            ..record
+        };
+        rt.block_on(cleanup(&shared, &zero, None));
+        assert_eq!(
+            super::super::tui_direct_abort_marker::load_for_channel("claude", 4242).len(),
+            2,
+            "a zero anchor id must never be recorded (I5)"
+        );
     }
 
     // #3018: the tmux_watchers registry is the SINGLE authority for

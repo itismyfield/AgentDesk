@@ -953,17 +953,28 @@ pub(super) fn spawn_placeholder_sweeper(
                 &shared.token_hash,
             )
             .await;
+            // #3296: reconcile durable aborted-anchor markers — retry the ✅ for
+            // markers a terminal commit already covered, and apply the TTL'd
+            // `⏳ → ⚠` fallback for anchors nothing ever covered (held while a
+            // live inflight for the session may still cover them). The sweeper
+            // owns this reclaim so an aborted anchor always converges (#3282).
+            let drained_abort_markers =
+                super::tui_direct_abort_marker::sweep_expired(&shared, &provider).await;
             sweeps_since_heartbeat = sweeps_since_heartbeat.saturating_add(1);
-            if should_log_sweep_report(report, sweeps_since_heartbeat) || drained > 0 {
+            if should_log_sweep_report(report, sweeps_since_heartbeat)
+                || drained > 0
+                || drained_abort_markers > 0
+            {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
-                    "  [{ts}] 🧹 placeholder sweeper ({}): scanned={} stalled={} abandoned={} reclaimed_panels={} drained_orphans={}",
+                    "  [{ts}] 🧹 placeholder sweeper ({}): scanned={} stalled={} abandoned={} reclaimed_panels={} drained_orphans={} drained_abort_markers={}",
                     provider.as_str(),
                     report.scanned,
                     report.stalled,
                     report.abandoned,
                     report.reclaimed_panels,
-                    drained
+                    drained,
+                    drained_abort_markers
                 );
                 sweeps_since_heartbeat = 0;
             }
