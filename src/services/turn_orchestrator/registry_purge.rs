@@ -22,15 +22,26 @@
 //! processes its mailbox FIFO, every racing `TryStartTurn` lands either
 //! BEFORE the verdict (live token ⇒ purge refused) or AFTER it (tombstone ⇒
 //! start refused; the caller re-resolves a fresh actor via the registry).
+//!
+//! #3297 round 3 (codex): the tombstone gate covers EVERY start-like arm, not
+//! just `TryStartTurn` — [`gate_closed_arm`] intercepts `RecoveryKickoff`,
+//! `Enqueue`, and `RestoreActiveTurn` too, so no arm in the verdict→unlink
+//! FIFO window can mint live work (or queue content) on an actor that is
+//! about to be severed from the registry. Refused callers recover through the
+//! `*_with_closed_retry` registry helpers below, which re-resolve a FRESH
+//! actor (the unlink runs right after the verdict) and replay the request.
 
 use std::sync::Arc;
 
-use poise::serenity_prelude::ChannelId;
+use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
 use super::{
     ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxRegistry, ChannelMailboxState,
-    GLOBAL_CHANNEL_MAILBOXES, GLOBAL_RECOVERY_DONE_SIGNALS, GLOBAL_TURN_FINISHED_SIGNALS,
+    EnqueueInterventionResult, EnqueueRefusalReason, GLOBAL_CHANNEL_MAILBOXES,
+    GLOBAL_RECOVERY_DONE_SIGNALS, GLOBAL_TURN_FINISHED_SIGNALS, Intervention,
+    QueuePersistenceContext, RecoveryKickoffResult,
 };
+use crate::services::provider::CancelToken;
 
 /// Actor-side verdict for [`ChannelMailboxMsg::CloseIfIdle`], invoked from the
 /// mailbox actor loop while it exclusively owns `state` — the idle decision
@@ -47,8 +58,139 @@ pub(super) fn close_if_idle_verdict(state: &mut ChannelMailboxState) -> Result<(
     if state.recovery_started_at.is_some() {
         return Err("recovery_in_progress");
     }
+    // #3297 r3 — a `TakeNextSoft` head handed out for dispatch but not yet
+    // claimed (`pending_user_dispatch`) IS live work: tombstoning during that
+    // window would force the in-flight user turn onto its requeue/retry
+    // fallbacks. Refuse, like any other live-work evidence.
+    if state.pending_user_dispatch.is_some() {
+        return Err("pending_user_dispatch");
+    }
     state.closed = true;
     Ok(())
+}
+
+/// #3297 r3 (codex) — single tombstone gate run by the actor loop BEFORE the
+/// arm match. When `state.closed` is set, every START-LIKE arm (class (a) in
+/// the `ChannelMailboxMsg` classification docs) is answered here with its
+/// arm's existing "cannot start" reply and `None` is returned so the loop
+/// skips the match; all other arms pass through untouched. Keeping the
+/// classification in ONE place (instead of per-arm `state.closed` checks)
+/// makes "new arm ⇒ classify it" reviewable at a glance.
+pub(super) fn gate_closed_arm(
+    state: &ChannelMailboxState,
+    msg: ChannelMailboxMsg,
+) -> Option<ChannelMailboxMsg> {
+    if !state.closed {
+        return Some(msg);
+    }
+    match msg {
+        // Mirrors the lost-race reply of a slot already held (#3297 r2).
+        ChannelMailboxMsg::TryStartTurn { reply, .. } => {
+            let _ = reply.send(false);
+            None
+        }
+        // Fire-and-forget restore: the only refusal shape is a no-op ack.
+        // (Dormant/test-only wrapper, but it binds a token — class (a).)
+        ChannelMailboxMsg::RestoreActiveTurn { reply, .. } => {
+            let _ = reply.send(());
+            None
+        }
+        // Pre-fix this arm unconditionally bound the cancel token, marked
+        // `recovery_started_at`, and (via the wrapper's `activated_turn`)
+        // incremented `global_active` — live work on a severed actor.
+        ChannelMailboxMsg::RecoveryKickoff { reply, .. } => {
+            let _ = reply.send(RecoveryKickoffResult {
+                activated_turn: false,
+                refused_closed: true,
+            });
+            None
+        }
+        // Pre-fix this arm accepted (and disk-persisted) queue content that
+        // the unlink then orphaned out of every registered-mailbox scan.
+        ChannelMailboxMsg::Enqueue { reply, .. } => {
+            let _ = reply.send(EnqueueInterventionResult {
+                enqueued: false,
+                merged: false,
+                refusal_reason: Some(EnqueueRefusalReason::MailboxClosed),
+                queue_exit_events: Vec::new(),
+                persistence_error: None,
+            });
+            None
+        }
+        other => Some(other),
+    }
+}
+
+/// Bounded attempts for the `*_with_closed_retry` helpers. A `MailboxClosed`
+/// refusal means the registry resolved a tombstoned actor inside the tiny
+/// verdict→unlink window of [`ChannelMailboxRegistry::remove_idle_entry`];
+/// the unlink lands without further awaits, so one yield is normally enough
+/// for `handle()` to mint a fresh actor. The bound only matters if a purge
+/// future is dropped mid-removal (tombstoned entry never unlinked).
+const CLOSED_RETRY_ATTEMPTS: usize = 3;
+
+impl ChannelMailboxRegistry {
+    /// #3297 r3 — enqueue that survives a purge-tombstone race: on a
+    /// [`EnqueueRefusalReason::MailboxClosed`] refusal, re-resolve the channel
+    /// through the registry (minting a fresh actor once the purge unlink
+    /// lands) and replay. Any other outcome — success, dedup refusal,
+    /// persistence error, actor-unreachable — is returned unchanged, so
+    /// callers keep their existing semantics.
+    pub(crate) async fn enqueue_with_closed_retry(
+        &self,
+        channel_id: ChannelId,
+        intervention: Intervention,
+        persistence: QueuePersistenceContext,
+    ) -> EnqueueInterventionResult {
+        for attempt in 1..=CLOSED_RETRY_ATTEMPTS {
+            let result = self
+                .handle(channel_id)
+                .enqueue(intervention.clone(), persistence.clone())
+                .await;
+            if result.refusal_reason != Some(EnqueueRefusalReason::MailboxClosed) {
+                return result;
+            }
+            if attempt == CLOSED_RETRY_ATTEMPTS {
+                tracing::error!(
+                    channel = channel_id.get(),
+                    "enqueue still refused by a purge-tombstoned mailbox after retries"
+                );
+                return result;
+            }
+            tokio::task::yield_now().await;
+        }
+        unreachable!("loop always returns by the final attempt");
+    }
+
+    /// #3297 r3 — recovery kickoff with the same tombstone-refusal retry as
+    /// [`Self::enqueue_with_closed_retry`], keyed on
+    /// `RecoveryKickoffResult::refused_closed`.
+    pub(crate) async fn recovery_kickoff_with_closed_retry(
+        &self,
+        channel_id: ChannelId,
+        cancel_token: Arc<CancelToken>,
+        request_owner: UserId,
+        user_message_id: Option<MessageId>,
+    ) -> RecoveryKickoffResult {
+        for attempt in 1..=CLOSED_RETRY_ATTEMPTS {
+            let result = self
+                .handle(channel_id)
+                .recovery_kickoff(cancel_token.clone(), request_owner, user_message_id)
+                .await;
+            if !result.refused_closed {
+                return result;
+            }
+            if attempt == CLOSED_RETRY_ATTEMPTS {
+                tracing::error!(
+                    channel = channel_id.get(),
+                    "recovery kickoff still refused by a purge-tombstoned mailbox after retries"
+                );
+                return result;
+            }
+            tokio::task::yield_now().await;
+        }
+        unreachable!("loop always returns by the final attempt");
+    }
 }
 
 impl ChannelMailboxHandle {
@@ -152,18 +294,50 @@ impl ChannelMailboxRegistry {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Instant;
 
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
+    use super::super::test_support::{AGENTDESK_ROOT_DIR_ENV, lock_test_env};
     use super::super::{
-        ChannelMailboxRegistry, GLOBAL_CHANNEL_MAILBOXES, GLOBAL_RECOVERY_DONE_SIGNALS,
-        GLOBAL_TURN_FINISHED_SIGNALS,
+        ChannelMailboxRegistry, ChannelMailboxState, EnqueueRefusalReason,
+        GLOBAL_CHANNEL_MAILBOXES, GLOBAL_RECOVERY_DONE_SIGNALS, GLOBAL_TURN_FINISHED_SIGNALS,
+        Intervention, InterventionMode, QueuePersistenceContext,
     };
     use super::MailboxPurgeOutcome;
-    use crate::services::provider::CancelToken;
+    use crate::services::provider::{CancelToken, ProviderKind};
 
     // The GLOBAL_* maps are process-wide; every test here uses a unique
     // channel id (93293xxx block) so parallel tests cannot collide.
+
+    struct EnvGuard;
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+        }
+    }
+
+    fn make_intervention(message_id: u64, text: &str) -> Intervention {
+        Intervention {
+            author_id: UserId::new(7),
+            author_is_bot: false,
+            message_id: MessageId::new(message_id),
+            source_message_ids: vec![MessageId::new(message_id)],
+            text: text.to_string(),
+            mode: InterventionMode::Soft,
+            created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            pending_uploads: Vec::new(),
+            voice_announcement: None,
+        }
+    }
+
+    fn test_persistence(token_hash: &str) -> QueuePersistenceContext {
+        QueuePersistenceContext::new(&ProviderKind::Claude, token_hash, None)
+    }
 
     #[tokio::test]
     async fn peek_never_creates_an_entry() {
@@ -407,5 +581,236 @@ mod tests {
         );
         let _ = handle.hard_stop().await;
         GLOBAL_CHANNEL_MAILBOXES.remove(&channel);
+    }
+
+    /// #3297 round-3 red-green (codex finding 1): a `RecoveryKickoff` that
+    /// lands in the actor FIFO AFTER the purge verdict must be refused by the
+    /// tombstone. Pre-fix the arm unconditionally bound the cancel token, set
+    /// `recovery_started_at`, and replied `activated_turn = true` (which made
+    /// the wrapper increment `global_active`) — live work on an actor the
+    /// purge had just severed from the registry/global mirrors.
+    #[tokio::test]
+    async fn purged_actor_refuses_a_racing_recovery_kickoff() {
+        let registry = ChannelMailboxRegistry::default();
+        let channel = ChannelId::new(93_293_101);
+        let stale_handle = registry.handle(channel);
+
+        assert_eq!(
+            registry.remove_idle_entry(channel).await,
+            MailboxPurgeOutcome::Removed
+        );
+
+        let result = stale_handle
+            .recovery_kickoff(
+                Arc::new(CancelToken::new()),
+                UserId::new(7),
+                Some(MessageId::new(11)),
+            )
+            .await;
+        assert!(
+            result.refused_closed,
+            "a kickoff racing the purge must be refused by the closed tombstone"
+        );
+        assert!(
+            !result.activated_turn,
+            "a refused kickoff must not report an activated turn \
+             (pre-fix this incremented global_active for an unreachable actor)"
+        );
+        assert!(
+            !stale_handle.has_active_turn().await,
+            "the tombstoned actor must remain idle"
+        );
+        let snapshot = stale_handle.snapshot().await;
+        assert!(
+            snapshot.recovery_started_at.is_none(),
+            "the tombstoned actor must not carry a recovery marker"
+        );
+        GLOBAL_CHANNEL_MAILBOXES.remove(&channel);
+    }
+
+    /// #3297 round-3 red-green (codex finding 2): an `Enqueue` that lands in
+    /// the actor FIFO AFTER the purge verdict must be refused by the
+    /// tombstone. Pre-fix the arm accepted the intervention into memory AND
+    /// persisted it to the disk queue; the unlink then dropped that queue out
+    /// of every registered-mailbox scan — orphaned until some later hydrate
+    /// path happened to touch the channel.
+    #[tokio::test]
+    async fn purged_actor_refuses_a_racing_enqueue() {
+        let registry = ChannelMailboxRegistry::default();
+        let channel = ChannelId::new(93_293_102);
+        let stale_handle = registry.handle(channel);
+
+        assert_eq!(
+            registry.remove_idle_entry(channel).await,
+            MailboxPurgeOutcome::Removed
+        );
+
+        let result = stale_handle
+            .enqueue(
+                make_intervention(11, "post-verdict enqueue"),
+                test_persistence("registry-purge-r3-refusal"),
+            )
+            .await;
+        assert!(
+            !result.enqueued,
+            "an enqueue racing the purge must be refused by the closed tombstone \
+             (pre-fix it was accepted and orphaned on the unlinked actor)"
+        );
+        assert_eq!(
+            result.refusal_reason,
+            Some(EnqueueRefusalReason::MailboxClosed)
+        );
+        assert!(
+            result.persistence_error.is_none(),
+            "the refusal happens before any disk write"
+        );
+        let snapshot = stale_handle.snapshot().await;
+        assert!(
+            snapshot.intervention_queue.is_empty(),
+            "the tombstoned actor must not hold queue content"
+        );
+        GLOBAL_CHANNEL_MAILBOXES.remove(&channel);
+    }
+
+    /// #3297 r3 — the registry-level retry helper turns a tombstone refusal
+    /// into a successful enqueue on a FRESHLY minted actor (the production
+    /// path for the verdict→unlink FIFO window). A sync `#[test]` holds the
+    /// shared env lock with no await in scope (the awaits run inside
+    /// `block_on`), so no `await_holding_lock` allow is needed.
+    #[test]
+    fn enqueue_closed_retry_lands_on_a_fresh_actor_after_purge() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let registry = ChannelMailboxRegistry::default();
+            let channel = ChannelId::new(93_293_103);
+            let stale_handle = registry.handle(channel);
+            assert_eq!(
+                registry.remove_idle_entry(channel).await,
+                MailboxPurgeOutcome::Removed
+            );
+
+            let result = registry
+                .enqueue_with_closed_retry(
+                    channel,
+                    make_intervention(12, "retry onto fresh actor"),
+                    test_persistence("registry-purge-r3-retry"),
+                )
+                .await;
+            assert!(
+                result.enqueued,
+                "the retry helper must land the enqueue on a fresh registry actor"
+            );
+            assert!(result.persistence_error.is_none());
+
+            // The intervention lives on the REGISTERED (fresh) actor — not on
+            // the tombstone the stale handle still points at.
+            let fresh_handle = registry.handle(channel);
+            assert_eq!(fresh_handle.snapshot().await.intervention_queue.len(), 1);
+            assert!(stale_handle.snapshot().await.intervention_queue.is_empty());
+
+            // Drain the durable queue file before the tempdir goes away.
+            let _ = fresh_handle
+                .purge_queue(test_persistence("registry-purge-r3-retry"), false)
+                .await;
+            GLOBAL_CHANNEL_MAILBOXES.remove(&channel);
+        });
+    }
+
+    /// #3297 r3 — the retry helpers are BOUNDED: when a tombstoned actor is
+    /// never unlinked (a purge future dropped between verdict and unlink),
+    /// the helper gives up after its fixed attempts and surfaces the refusal
+    /// instead of spinning. Tombstoning the actor directly (no unlink) pins
+    /// the registry to the tombstone for every retry deterministically.
+    #[tokio::test]
+    async fn closed_retry_helpers_give_up_when_tombstone_never_unlinks() {
+        let registry = ChannelMailboxRegistry::default();
+        let channel = ChannelId::new(93_293_104);
+        let handle = registry.handle(channel);
+        assert_eq!(handle.close_if_idle().await, Ok(()));
+
+        let enqueue = registry
+            .enqueue_with_closed_retry(
+                channel,
+                make_intervention(13, "never accepted"),
+                test_persistence("registry-purge-r3-bounded"),
+            )
+            .await;
+        assert!(!enqueue.enqueued);
+        assert_eq!(
+            enqueue.refusal_reason,
+            Some(EnqueueRefusalReason::MailboxClosed)
+        );
+
+        let kickoff = registry
+            .recovery_kickoff_with_closed_retry(
+                channel,
+                Arc::new(CancelToken::new()),
+                UserId::new(7),
+                None,
+            )
+            .await;
+        assert!(kickoff.refused_closed);
+        assert!(!kickoff.activated_turn);
+        assert!(!handle.has_active_turn().await);
+        GLOBAL_CHANNEL_MAILBOXES.remove(&channel);
+    }
+
+    /// #3297 r3 — kickoff twin of the enqueue retry test: after the purge
+    /// unlink, the retry helper resolves a fresh actor that ACCEPTS the
+    /// recovery kickoff (anchoring the recovery turn on the registered
+    /// mailbox, where cancel/dedup gates can see it).
+    #[tokio::test]
+    async fn recovery_kickoff_closed_retry_lands_on_a_fresh_actor() {
+        let registry = ChannelMailboxRegistry::default();
+        let channel = ChannelId::new(93_293_105);
+        let _ = registry.handle(channel);
+        assert_eq!(
+            registry.remove_idle_entry(channel).await,
+            MailboxPurgeOutcome::Removed
+        );
+
+        let result = registry
+            .recovery_kickoff_with_closed_retry(
+                channel,
+                Arc::new(CancelToken::new()),
+                UserId::new(7),
+                Some(MessageId::new(11)),
+            )
+            .await;
+        assert!(!result.refused_closed);
+        assert!(result.activated_turn);
+        let fresh_handle = registry.handle(channel);
+        assert!(fresh_handle.has_active_turn().await);
+
+        let _ = fresh_handle.hard_stop().await;
+        GLOBAL_CHANNEL_MAILBOXES.remove(&channel);
+    }
+
+    /// #3297 r3 — a `TakeNextSoft` head handed out for dispatch but not yet
+    /// claimed (`pending_user_dispatch` reservation) is live work: the idle
+    /// verdict must refuse to tombstone during that dequeue→claim window.
+    #[test]
+    fn close_verdict_refuses_during_dequeue_dispatch_window() {
+        let mut state = ChannelMailboxState {
+            pending_user_dispatch: Some(MessageId::new(11)),
+            ..ChannelMailboxState::default()
+        };
+        assert_eq!(
+            super::close_if_idle_verdict(&mut state),
+            Err("pending_user_dispatch")
+        );
+        assert!(!state.closed, "a refused verdict must not tombstone");
+
+        state.pending_user_dispatch = None;
+        assert_eq!(super::close_if_idle_verdict(&mut state), Ok(()));
+        assert!(state.closed);
     }
 }

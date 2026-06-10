@@ -3052,15 +3052,19 @@ async fn mailbox_recovery_kickoff(
     // (user_msg_id == 0, e.g. a TUI-direct turn).
     user_message_id: Option<MessageId>,
 ) -> RecoveryKickoffResult {
-    // #2443 — reset the per-channel `recovery_done` latch BEFORE the
-    // recovery actually starts. A stale "done" flag from a previous cycle
-    // would otherwise let `watchers/lifecycle.rs` (which selects on
-    // `recovery_done.wait()`) immediately graduate the skip and race the
-    // ongoing recovery. Reset is idempotent and cheap.
+    // #2443 — reset the per-channel `recovery_done` latch BEFORE recovery
+    // starts; a stale "done" flag would let `watchers/lifecycle.rs` graduate
+    // its skip early and race the ongoing recovery. Idempotent and cheap.
     shared.mailboxes.recovery_done(channel_id).reset();
+    // #3297 r3 — tombstone refusal ⇒ retry on a fresh registered actor.
     let result = shared
-        .mailbox(channel_id)
-        .recovery_kickoff(cancel_token, request_owner, user_message_id)
+        .mailboxes
+        .recovery_kickoff_with_closed_retry(
+            channel_id,
+            cancel_token,
+            request_owner,
+            user_message_id,
+        )
         .await;
     if result.activated_turn {
         increment_global_active(shared, "recovery_kickoff");
@@ -3157,9 +3161,12 @@ async fn mailbox_enqueue_intervention(
     channel_id: ChannelId,
     intervention: Intervention,
 ) -> MailboxEnqueueOutcome {
+    // #3297 r3 — tombstone refusal ⇒ retry on a fresh registered actor
+    // instead of orphaning the queue on a purged one.
     let result = shared
-        .mailbox(channel_id)
-        .enqueue(
+        .mailboxes
+        .enqueue_with_closed_retry(
+            channel_id,
             intervention,
             queue_persistence_context(shared, provider, channel_id),
         )

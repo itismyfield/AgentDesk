@@ -852,6 +852,8 @@ pub(crate) struct HasPendingSoftQueueResult {
 
 pub(crate) struct RecoveryKickoffResult {
     pub(crate) activated_turn: bool,
+    /// #3297 r3 — kickoff refused by a purge tombstone (`state.closed`).
+    pub(crate) refused_closed: bool,
 }
 
 pub(crate) struct RestartDrainResult {
@@ -888,6 +890,9 @@ pub(crate) enum EnqueueRefusalReason {
     /// The `ChannelMailboxHandle` could not reach the mailbox actor (mpsc
     /// closed or oneshot dropped). Surfaced only at the handle layer.
     ActorUnreachable,
+    /// #3297 r3 — the resolved actor is purge-tombstoned (`closed`). The
+    /// registry's `enqueue_with_closed_retry` re-resolves a fresh actor.
+    MailboxClosed,
 }
 
 impl EnqueueRefusalReason {
@@ -896,6 +901,7 @@ impl EnqueueRefusalReason {
             EnqueueRefusalReason::SourceIdAlreadyQueued => "source_id_already_queued",
             EnqueueRefusalReason::LastItemDedup => "last_item_dedup",
             EnqueueRefusalReason::ActorUnreachable => "actor_unreachable",
+            EnqueueRefusalReason::MailboxClosed => "mailbox_closed",
         }
     }
 }
@@ -1234,6 +1240,7 @@ impl ChannelMailboxHandle {
             },
             RecoveryKickoffResult {
                 activated_turn: false,
+                refused_closed: false,
             },
         )
         .await
@@ -1815,6 +1822,19 @@ impl ChannelMailboxRegistry {
     }
 }
 
+// #3297 r3 (codex) — tombstone classification, enforced for EVERY arm by
+// `registry_purge::gate_closed_arm` ahead of the actor's match. Once
+// `CloseIfIdle` sets `state.closed` (actor about to be unlinked):
+//  (a) START-LIKE arms — anything that binds an active turn / recovery marker
+//      or accepts NEW work (`TryStartTurn`, `RestoreActiveTurn`,
+//      `RecoveryKickoff`, `Enqueue`) — are REFUSED with that arm's existing
+//      "cannot start" reply (`TryStartTurn` ⇒ `false`); callers re-resolve a
+//      fresh actor via the registry `*_with_closed_retry` helpers and replay.
+//  (b) everything else stays ALLOWED — reads, cancels, finishes, drains, and
+//      queue RESTITUTION (`RequeueFront`/`ReplaceQueue`/hydrate, which
+//      re-persist already-accepted work to disk for a successor actor to
+//      hydrate — refusing those would drop user messages).
+// New arms must be classified here and (if start-like) gated there.
 enum ChannelMailboxMsg {
     Snapshot {
         reply: oneshot::Sender<ChannelMailboxSnapshot>,
@@ -2385,6 +2405,10 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
     tokio::spawn(async move {
         let mut state = ChannelMailboxState::default();
         while let Some(msg) = rx.recv().await {
+            // #3297 r3 — tombstoned actor refuses start-like arms (enum docs).
+            let Some(msg) = registry_purge::gate_closed_arm(&state, msg) else {
+                continue;
+            };
             match msg {
                 ChannelMailboxMsg::Snapshot { reply } => {
                     let _ = reply.send(ChannelMailboxSnapshot {
@@ -2524,35 +2548,13 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     });
                 }
                 ChannelMailboxMsg::CancelActiveBackgroundTurnIfCurrent { reply } => {
-                    // #3167 — atomic, kind-guarded supersede. ONLY cancel when
-                    // a background turn currently holds the slot; a real
-                    // user/agent turn (or an idle slot) is left untouched. This
-                    // closes the TOCTOU window the previous dequeue gate had: it
-                    // read `active_turn_kind()` and THEN sent a separate
-                    // unguarded `cancel_active_turn_with_reason()`, so between
-                    // the read and the cancel the background turn could finalize
-                    // and a real user turn start — and the cancel would abort
-                    // the real turn. Doing the `is_background` check and the
-                    // cancel flip in one serialized actor step removes that gap.
-                    //
-                    // Cancel semantics mirror `CancelActiveTurnWithReason`
-                    // exactly: set the reason, flip `cancelled`, and leave the
-                    // slot-release to the background turn's own
-                    // identity-guarded finalizer (the slot is NOT cleared here).
-                    //
-                    // #3167 BLOCKER-1 — reply `true` ONLY when this step performs
-                    // a NEW cancel: a background token is present AND it is not
-                    // already cancelled/stopping. If the background token is
-                    // ALREADY cancelling, this is a no-op and we reply `false`.
-                    // Rationale: the mod.rs caller schedules an immediate re-kick
-                    // on `true`. If we replied `true` for an already-cancelling
-                    // slot, each re-kick would re-observe the same already-
-                    // cancelled slot (the finalizer has not released it yet),
-                    // reply `true`, and spawn yet another immediate re-kick — a
-                    // HOT-LOOP/LIVELOCK. On `false` the caller spawns NO new
-                    // re-kick and falls through to the normal dequeue/await path;
-                    // the existing deferred-retry cadence (queue_io.rs, ~2s) waits
-                    // for the background finalizer to release the slot.
+                    // #3167 — atomic kind-guarded supersede: cancel ONLY a
+                    // background-held slot (reason+flip mirror
+                    // `CancelActiveTurnWithReason`; slot release stays with the
+                    // turn's own finalizer). #3167 BLOCKER-1: reply `true` only
+                    // for a NEW cancel — `true` on an already-cancelling slot
+                    // would hot-loop the caller's immediate re-kick. Full
+                    // rationale on the handle + enum variant docs.
                     let is_background_active =
                         state.cancel_token.is_some() && state.active_turn_kind.is_background();
                     let newly_cancelled = if is_background_active {
@@ -2620,33 +2622,29 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             state.pending_user_dispatch_yield_count = 0;
                         }
                     }
-                    // #3297 r2 — a `closed` (purge-tombstoned) actor must never
-                    // activate a turn: it is (about to be) unlinked from the
-                    // registry, so a started turn would be unreachable.
-                    let started =
-                        if state.closed || state.cancel_token.is_some() || background_yields {
-                            false
-                        } else {
-                            reset_turn_finished_signal(channel_id);
-                            state.cancel_token = Some(cancel_token);
-                            state.active_request_owner = Some(request_owner);
-                            state.active_user_message_id = Some(user_message_id);
-                            // #3167 — record the slot's priority class so the
-                            // dequeue gates can treat a background turn as
-                            // non-blocking.
-                            state.active_turn_kind = turn_kind;
-                            // #3167 BLOCKER-2 — a real (UserOrAgent) turn claiming the
-                            // slot satisfies any reserved dequeue→claim window: clear
-                            // the reservation and reset the valve counter.
-                            if turn_kind == ActiveTurnKind::UserOrAgent {
-                                state.pending_user_dispatch = None;
-                                state.pending_user_dispatch_yield_count = 0;
-                            }
-                            state.recovery_started_at = None;
-                            state.turn_started_at = Some(Utc::now());
-                            reset_watchdog_extension_state(&mut state);
-                            true
-                        };
+                    let started = if state.cancel_token.is_some() || background_yields {
+                        false
+                    } else {
+                        reset_turn_finished_signal(channel_id);
+                        state.cancel_token = Some(cancel_token);
+                        state.active_request_owner = Some(request_owner);
+                        state.active_user_message_id = Some(user_message_id);
+                        // #3167 — record the slot's priority class so the
+                        // dequeue gates can treat a background turn as
+                        // non-blocking.
+                        state.active_turn_kind = turn_kind;
+                        // #3167 BLOCKER-2 — a real (UserOrAgent) turn claiming the
+                        // slot satisfies any reserved dequeue→claim window: clear
+                        // the reservation and reset the valve counter.
+                        if turn_kind == ActiveTurnKind::UserOrAgent {
+                            state.pending_user_dispatch = None;
+                            state.pending_user_dispatch_yield_count = 0;
+                        }
+                        state.recovery_started_at = None;
+                        state.turn_started_at = Some(Utc::now());
+                        reset_watchdog_extension_state(&mut state);
+                        true
+                    };
                     let _ = reply.send(started);
                 }
                 ChannelMailboxMsg::RestoreActiveTurn {
@@ -2687,7 +2685,10 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         state.turn_started_at = Some(Utc::now());
                     }
                     reset_watchdog_extension_state(&mut state);
-                    let _ = reply.send(RecoveryKickoffResult { activated_turn });
+                    let _ = reply.send(RecoveryKickoffResult {
+                        activated_turn,
+                        refused_closed: false,
+                    });
                 }
                 ChannelMailboxMsg::ClearRecoveryMarker { reply } => {
                     state.recovery_started_at = None;
