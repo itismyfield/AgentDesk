@@ -91,7 +91,7 @@
 - do_not_edit_without_migration_plan (giant-file, awaiting split issue):
   - `src/dispatch/dispatch_context.rs` (2805 lines).
   - `src/dispatch/dispatch_create.rs` (1381 lines).
-  - `src/dispatch/dispatch_status.rs` (1517 lines).
+  - `src/dispatch/dispatch_status.rs` (1493 lines).
   - `src/services/dispatches/outbox_route.rs` (1089 lines; route extraction
     orchestration surface from #1722, split before adding non-bugfix behavior).
   - `src/services/dispatches/discord_delivery/orchestration.rs` (1490 lines;
@@ -921,7 +921,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
 - `src/services/dispatches/outbox_route.rs` (1089) — dispatch outbox route
   support extracted from the route layer; split before adding non-bugfix
   behavior.
-- `src/services/claude.rs` (3938), `src/services/gemini.rs` (1358),
+- `src/services/claude.rs` (3739), `src/services/gemini.rs` (1358),
   `src/services/qwen.rs` (2196), `src/services/codex.rs` (3001),
   `src/services/opencode.rs` (1881), `src/services/provider.rs` (1796) —
   provider adapters. (#3034 removed dead non-cancel `execute_command_simple*`

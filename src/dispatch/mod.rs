@@ -15,7 +15,7 @@ pub use dispatch_cancel::{
 pub(crate) use dispatch_channel::dispatch_destination_provider_override;
 #[allow(unused_imports)]
 pub use dispatch_channel::{
-    drain_unified_thread_kill_signals, extract_thread_channel_id, is_unified_thread_channel_active,
+    drain_unified_thread_kill_signals, is_unified_thread_channel_active,
     is_unified_thread_channel_name_active,
 };
 #[allow(unused_imports)]
@@ -44,10 +44,9 @@ pub(crate) use dispatch_status::set_dispatch_status_without_queue_sync_with_back
 pub(crate) use dispatch_status::{VALID_DISPATCH_STATUSES, is_valid_dispatch_status};
 #[allow(unused_imports)]
 pub use dispatch_status::{
-    complete_dispatch, finalize_dispatch, finalize_dispatch_with_backends,
-    load_dispatch_row_pg_first, load_dispatch_row_with_backends, mark_dispatch_completed_pg_first,
-    set_dispatch_status_on_pg_async, set_dispatch_status_pg_first,
-    set_dispatch_status_with_backends,
+    finalize_dispatch_with_backends, load_dispatch_row_pg_first, load_dispatch_row_with_backends,
+    mark_dispatch_completed_pg_first, set_dispatch_status_on_pg_async,
+    set_dispatch_status_pg_first, set_dispatch_status_with_backends,
 };
 pub(crate) use dispatch_summary::{summarize_dispatch_from_text, summarize_dispatch_result};
 pub use types::{DispatchCreateOptions, Source};

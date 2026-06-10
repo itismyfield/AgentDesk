@@ -1017,18 +1017,6 @@ async fn maybe_inject_phase_gate_verdict_pg(
 ///   3. Side-effect draining  (intents, transitions, follow-up dispatches)
 ///   4. Safety-net re-fire of OnReviewEnter (#139)
 // reason: pub dispatch-completion authority (#143) re-exported via dispatch::*;
-// lib-build callers are recovery/turn_bridge + cfg/test-gated paths. See #3034.
-#[allow(dead_code)]
-pub fn finalize_dispatch(
-    db: &Db,
-    engine: &PolicyEngine,
-    dispatch_id: &str,
-    completion_source: &str,
-    context: Option<&serde_json::Value>,
-) -> Result<serde_json::Value> {
-    finalize_dispatch_with_backends(Some(db), engine, dispatch_id, completion_source, context)
-}
-
 pub fn finalize_dispatch_with_backends(
     db: Option<&Db>,
     engine: &PolicyEngine,
@@ -1259,18 +1247,6 @@ pub fn load_dispatch_row_with_backends(
         }
         query_dispatch_row_pg(&pool, &dispatch_id).await.map(Some)
     })
-}
-
-/// Legacy wrapper — delegates to [`finalize_dispatch`] for callers that already
-/// have a fully-formed result JSON (e.g. API PATCH handler).
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn complete_dispatch(
-    db: &Db,
-    engine: &PolicyEngine,
-    dispatch_id: &str,
-    result: &serde_json::Value,
-) -> Result<serde_json::Value> {
-    complete_dispatch_inner_with_backends(Some(db), engine, dispatch_id, result)
 }
 
 fn complete_dispatch_inner_with_backends(

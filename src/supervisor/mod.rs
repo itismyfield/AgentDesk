@@ -473,11 +473,6 @@ impl RuntimeSupervisor {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn mark_dispatch_failed_for_test(&self, dispatch_id: &str) -> Result<usize, String> {
-        self.mark_dispatch_failed(dispatch_id)
-    }
-
     fn current_card_head(&self, card_id: &str) -> Result<Option<(String, Option<String>)>, String> {
         if let Some(pool) = self.pg_pool.as_ref() {
             let card_id = card_id.to_string();

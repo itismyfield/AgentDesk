@@ -75,13 +75,31 @@ impl MonitoringStore {
         self.entries.keys().copied().collect()
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn sweep_expired(&mut self, ttl: Duration) -> Vec<u64> {
-        self.sweep_expired_inner(ttl).emptied_channels
-    }
-
+    /// Sweep entries whose `last_refresh` is older than `ttl` and return the
+    /// channels whose entry set changed (including channels emptied by the
+    /// sweep, which are also removed from the store).
     pub(crate) fn sweep_expired_affected(&mut self, ttl: Duration) -> Vec<u64> {
-        self.sweep_expired_inner(ttl).affected_channels
+        let now = Utc::now();
+        let mut affected_channels = Vec::new();
+        let channel_ids = self.entries.keys().copied().collect::<Vec<_>>();
+
+        for channel_id in channel_ids {
+            let Some(entries) = self.entries.get_mut(&channel_id) else {
+                continue;
+            };
+            let before = entries.len();
+            entries.retain(|entry| now.signed_duration_since(entry.last_refresh) <= ttl);
+            if entries.len() == before {
+                continue;
+            }
+
+            affected_channels.push(channel_id);
+            if entries.is_empty() {
+                self.entries.remove(&channel_id);
+            }
+        }
+
+        affected_channels
     }
 
     pub fn set_rendered_msg(&mut self, channel_id: u64, msg_id: Option<u64>) {
@@ -112,42 +130,6 @@ impl MonitoringStore {
             .map_or(0, |value| value)
             == version
     }
-
-    fn sweep_expired_inner(&mut self, ttl: Duration) -> SweepResult {
-        let now = Utc::now();
-        let mut affected_channels = Vec::new();
-        let mut emptied_channels = Vec::new();
-        let channel_ids = self.entries.keys().copied().collect::<Vec<_>>();
-
-        for channel_id in channel_ids {
-            let Some(entries) = self.entries.get_mut(&channel_id) else {
-                continue;
-            };
-            let before = entries.len();
-            entries.retain(|entry| now.signed_duration_since(entry.last_refresh) <= ttl);
-            if entries.len() == before {
-                continue;
-            }
-
-            affected_channels.push(channel_id);
-            if entries.is_empty() {
-                self.entries.remove(&channel_id);
-                emptied_channels.push(channel_id);
-            }
-        }
-
-        SweepResult {
-            affected_channels,
-            emptied_channels,
-        }
-    }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-#[derive(Debug)]
-struct SweepResult {
-    affected_channels: Vec<u64>,
-    emptied_channels: Vec<u64>,
 }
 
 static GLOBAL_MONITORING_STORE: OnceLock<Arc<Mutex<MonitoringStore>>> = OnceLock::new();
