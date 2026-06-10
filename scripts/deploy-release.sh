@@ -1253,9 +1253,11 @@ rm -rf "$ADK_REL/policies.old"
 AGENTDESK_YAML="$ADK_REL/config/agentdesk.yaml"
 if [ -f "$AGENTDESK_YAML" ]; then
     POLICIES_DIR_MIGRATION=$(python3 - "$AGENTDESK_YAML" "$ADK_REL/policies" <<'PYEOF' 2>&1
+import os
 import re
 import shutil
 import sys
+import tempfile
 
 path, want = sys.argv[1], sys.argv[2]
 with open(path) as f:
@@ -1265,27 +1267,44 @@ out = []
 in_policies = False
 changed = False
 previous = None
+unsupported = None
 for line in lines:
     body = line.rstrip("\n")
-    if re.match(r"^policies:\s*(#.*)?$", body):
+    if re.match(r"^policies:\s*\{", body):
+        # Flow-style mapping (policies: {dir: ...}) — refuse to edit rather
+        # than risk a bad rewrite; surfaced as a WARN by the caller.
+        unsupported = "inline-map"
+        in_policies = False
+    elif re.match(r"^policies:\s*(#.*)?$", body):
         in_policies = True
     elif in_policies and body.strip() and not body[:1].isspace():
         in_policies = False
     if in_policies:
-        m = re.match(r"^(\s+dir:\s*)([\"']?)(.+?)\2\s*(#.*)?$", body)
+        m = re.match(r"^(\s+dir:\s*)([\"']?)(.+?)\2(\s*)(#.*)?$", body)
         if m:
             previous = m.group(3)
             if previous != want:
-                comment = f" {m.group(4)}" if m.group(4) else ""
-                line = f"{m.group(1)}{want}{comment}\n"
+                quote = m.group(2)
+                tail = f"{m.group(4)}{m.group(5)}" if m.group(5) else ""
+                line = f"{m.group(1)}{quote}{want}{quote}{tail}\n"
                 changed = True
     out.append(line)
 
 if changed:
     shutil.copy2(path, path + ".bak-policies-dir")
-    with open(path, "w") as f:
-        f.writelines(out)
-print(f"changed={changed} previous={previous}")
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".agentdesk.yaml.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.writelines(out)
+        shutil.copymode(path, tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+if unsupported:
+    print(f"changed=unsupported style={unsupported} previous={previous}")
+else:
+    print(f"changed={changed} previous={previous}")
 PYEOF
 ) || POLICIES_DIR_MIGRATION="error: python exited $?"
     case "$POLICIES_DIR_MIGRATION" in
