@@ -1280,13 +1280,21 @@ for line in lines:
     elif in_policies and body.strip() and not body[:1].isspace():
         in_policies = False
     if in_policies:
-        m = re.match(r"^(\s+dir:\s*)([\"']?)(.+?)\2(\s*)(#.*)?$", body)
-        if m:
-            previous = m.group(3)
+        # A '#' starts a comment only after whitespace (YAML); an unquoted
+        # value may itself contain '#'. Bare/comment-only dir is healed too.
+        empty = re.match(r"^(\s+dir:)((?:\s+#.*)|\s*)$", body)
+        value = None if empty else re.match(r"^(\s+dir:\s*)([\"']?)(.+?)\2(\s+#.*)?\s*$", body)
+        if empty:
+            previous = ""
+            comment = empty.group(2) if "#" in empty.group(2) else ""
+            line = f"{empty.group(1)} {want}{comment}\n"
+            changed = True
+        elif value:
+            previous = value.group(3)
             if previous != want:
-                quote = m.group(2)
-                tail = f"{m.group(4)}{m.group(5)}" if m.group(5) else ""
-                line = f"{m.group(1)}{quote}{want}{quote}{tail}\n"
+                quote = value.group(2)
+                tail = value.group(4) or ""
+                line = f"{value.group(1)}{quote}{want}{quote}{tail}\n"
                 changed = True
     out.append(line)
 
