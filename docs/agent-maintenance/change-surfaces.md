@@ -416,7 +416,7 @@
     helper additionally fires the claude-only AgentDesk-side `/compact` injection
     when live usage crosses `context_compact_percent_claude` (Claude Code ignores
     `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`); see `src/services/claude_compact_trigger.rs`.
-  - `src/services/discord/tui_prompt_relay.rs` (5438 lines; #3016 phase-5b2
+  - `src/services/discord/tui_prompt_relay.rs` (5417 lines; #3016 phase-5b2
     removed the dead `publish_tui_direct_watcher_finalize_debt` producer;
     SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
@@ -567,7 +567,18 @@
     without one (bridge finalizes EXACTLY ONCE, "first wins"). The committed
     runtime-binding offset still advances on successful delivery and the
     start-offset clamp to `committed_relay_offset` is untouched (no double-send).
-    The Codex idle path (`relay_tui_idle_response_through_bridge`) is unchanged.
+    The Codex idle path (`relay_tui_idle_response_through_bridge`) is unchanged;
+    +54 from #3282: the deferred pending-start worker's terminal backstop ABORT
+    (`backstop_abort_foreign_inflight_live`) now runs the injected
+    `pending_start_abort_cleanup_fn` — resolved from the SAME
+    `shared.serenity_http_or_token_fallback()` provider/command-bot identity that
+    added the anchor `⏳` (#3164 add≡remove invariant) — removing the stranded
+    `⏳` and marking `⚠` on the anchor message (precedent: the watcher's
+    auth-expired `⏳ → ⚠` swap), because no claim ever drives the normal
+    `⏳ → ✅` completion for an ABORTed synthetic start; -75 from #3282
+    follow-up: verbose multi-line comment blocks compressed (no semantic
+    change) to offset the +54 growth and keep prod LoC under the frozen
+    `giant_file_ratchet` baseline (5438, #3028).
   - `src/services/discord/idle_recap.rs` (1319 prod lines; idle-recap card
     compose/post/clear surface, registered giant-file (#3036) — bugfix only
     outside an extraction plan. Crossed 1000 prod LoC with #3146 Part 1: the

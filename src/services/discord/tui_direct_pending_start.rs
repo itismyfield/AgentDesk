@@ -371,18 +371,38 @@ pub(super) type ViewFn = Box<
         + Sync,
 >;
 
+/// #3282: Discord-side cleanup the worker runs on the terminal backstop ABORT
+/// (`backstop_abort_foreign_inflight_live`). The anchor message earned a `⏳`
+/// lifecycle reaction when the synthetic start was created; an ABORT means no
+/// claim ever saves an inflight for this anchor, so the normal watcher/recovery
+/// `⏳ → ✅` completion never fires — without explicit cleanup the hourglass
+/// lingers forever. Provided by [`super::tui_prompt_relay`] (it owns the
+/// provider/command bot http — the SAME bot identity that added the `⏳`, per
+/// the #3164 add≡remove invariant).
+pub(super) type AbortCleanupFn = Box<
+    dyn for<'a> Fn(
+            &'a Arc<SharedData>,
+            &'a TuiDirectPendingStart,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+        + Send
+        + Sync,
+>;
+
 /// Spawn the DETACHED per-channel worker. Acquires the channel lock (FIFO
 /// serialization), polls the wait predicate until the prior turn finalizes (or
-/// the 8s backstop fires), runs the claim, and deletes the record. Returns
-/// immediately so the observer loop is never blocked.
+/// the 8s backstop fires), runs the claim, and deletes the record. On the
+/// terminal backstop ABORT it runs `abort_cleanup_fn` (the anchor `⏳` cleanup —
+/// #3282) before dropping the record. Returns immediately so the observer loop
+/// is never blocked.
 pub(super) fn spawn_worker(
     shared: Arc<SharedData>,
     record: TuiDirectPendingStart,
     view_fn: ViewFn,
     claim_fn: ClaimFn,
+    abort_cleanup_fn: AbortCleanupFn,
 ) {
     super::task_supervisor::spawn_observed("tui_direct_pending_start_worker", async move {
-        run_worker(shared, record, view_fn, claim_fn).await;
+        run_worker(shared, record, view_fn, claim_fn, abort_cleanup_fn).await;
     });
 }
 
@@ -404,6 +424,7 @@ async fn run_worker(
     record: TuiDirectPendingStart,
     view_fn: ViewFn,
     claim_fn: ClaimFn,
+    abort_cleanup_fn: AbortCleanupFn,
 ) {
     let lock = channel_lock(&record.provider, record.channel_id);
     let _guard = lock.lock().await;
@@ -462,6 +483,11 @@ async fn run_worker(
                         event = "tui_direct_pending_start.backstop_abort_foreign_inflight_live",
                         "tui_direct_pending_start: prior inflight stayed LIVE across the backstop escalation budget; ABORTING the synthetic turn-start claim without overwriting the live prior turn (provider output still relays via the prior turn's owner)"
                     );
+                    // #3282: no claim will ever run for this anchor, so the
+                    // normal `⏳ → ✅` completion never fires — clean up the
+                    // anchor's `⏳` here (same bot identity as the add, #3164)
+                    // instead of leaving the hourglass stranded forever.
+                    abort_cleanup_fn(&shared, &record).await;
                     delete(&record);
                     return;
                 }
@@ -662,6 +688,24 @@ mod tests {
         assert_eq!(record, back);
     }
 
+    /// #3282 test double for the ABORT-path anchor `⏳` cleanup, following the
+    /// `ViewFn`/`ClaimFn` boxed-closure convention. Records each invocation so a
+    /// test can pin WHEN the cleanup fires (terminal backstop ABORT only) and
+    /// when it must NOT (successful claim — the normal `⏳ → ✅` completion owns
+    /// the anchor; retry exhaustion — the record is retained for restart).
+    fn recording_abort_cleanup() -> (AbortCleanupFn, Arc<std::sync::atomic::AtomicU32>) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_for_fn = calls.clone();
+        let cleanup: AbortCleanupFn = Box::new(move |_shared, _record| {
+            let calls = calls_for_fn.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+            })
+        });
+        (cleanup, calls)
+    }
+
     fn record(provider: &str, channel_id: u64, anchor: u64) -> TuiDirectPendingStart {
         TuiDirectPendingStart {
             provider: provider.to_string(),
@@ -748,7 +792,14 @@ mod tests {
             pending_synthetic_start_present("claude", 1),
             "A's pending start gates the watcher/idle-queue immediately"
         );
-        let a_handle = tokio::spawn(run_worker(shared.clone(), rec_a, a_view, a_claim));
+        let (a_cleanup, a_cleanup_calls) = recording_abort_cleanup();
+        let a_handle = tokio::spawn(run_worker(
+            shared.clone(),
+            rec_a,
+            a_view,
+            a_claim,
+            a_cleanup,
+        ));
 
         // ---- Channel B: prior turn already finalized → relays immediately. ----
         let b_claimed = Arc::new(AtomicBool::new(false));
@@ -773,7 +824,14 @@ mod tests {
         });
         let rec_b = record("claude", 2, 22);
         persist(&rec_b).unwrap();
-        let b_handle = tokio::spawn(run_worker(shared.clone(), rec_b, b_view, b_claim));
+        let (b_cleanup, b_cleanup_calls) = recording_abort_cleanup();
+        let b_handle = tokio::spawn(run_worker(
+            shared.clone(),
+            rec_b,
+            b_view,
+            b_claim,
+            b_cleanup,
+        ));
 
         // B is on a DIFFERENT channel lock; it must finish without waiting for A.
         b_handle.await.unwrap();
@@ -806,6 +864,12 @@ mod tests {
         assert!(
             !pending_synthetic_start_present("claude", 1),
             "A's pending start cleared after the claim (gate releases)"
+        );
+        assert_eq!(
+            a_cleanup_calls.load(Ordering::SeqCst) + b_cleanup_calls.load(Ordering::SeqCst),
+            0,
+            "#3282: a SUCCESSFUL claim must never run the abort reaction cleanup — \
+             the normal watcher/recovery ⏳ → ✅ completion owns these anchors"
         );
         reset_present_for_tests();
     }
@@ -901,7 +965,8 @@ mod tests {
         persist(&rec).unwrap();
         assert!(pending_synthetic_start_present("claude", 10));
 
-        let handle = tokio::spawn(run_worker(shared.clone(), rec, view, claim));
+        let (abort_cleanup, abort_cleanup_calls) = recording_abort_cleanup();
+        let handle = tokio::spawn(run_worker(shared.clone(), rec, view, claim, abort_cleanup));
 
         // Advance through the full escalation budget of backstop windows.
         for _ in 0..(PENDING_START_MAX_BACKSTOP_CYCLES + 1) {
@@ -922,6 +987,14 @@ mod tests {
             "after the escalation budget the worker ABORTS and drops only the \
              ownership record (no prompt resubmit). RED if abort leaks the record \
              or never fires."
+        );
+        assert_eq!(
+            abort_cleanup_calls.load(Ordering::SeqCst),
+            1,
+            "#3282: the terminal backstop ABORT must run the anchor reaction \
+             cleanup EXACTLY ONCE (removes the stranded ⏳ — no claim will ever \
+             drive the normal ⏳ → ✅ completion for this anchor). RED if the \
+             ABORT branch skips abort_cleanup_fn (the hourglass lingers forever)."
         );
         reset_present_for_tests();
     }
@@ -961,7 +1034,8 @@ mod tests {
 
         let rec = record("claude", 11, 111);
         persist(&rec).unwrap();
-        let handle = tokio::spawn(run_worker(shared.clone(), rec, view, claim));
+        let (abort_cleanup, abort_cleanup_calls) = recording_abort_cleanup();
+        let handle = tokio::spawn(run_worker(shared.clone(), rec, view, claim, abort_cleanup));
 
         // Drive the retry backoffs. After the first false, assert the record is
         // STILL present (RETAINED) before the eventual success deletes it.
@@ -988,6 +1062,12 @@ mod tests {
         assert!(
             !pending_synthetic_start_present("claude", 11),
             "after the claim finally succeeded the record is deleted (gate releases)"
+        );
+        assert_eq!(
+            abort_cleanup_calls.load(Ordering::SeqCst),
+            0,
+            "#3282: transient claim retries that eventually SUCCEED must not run \
+             the abort reaction cleanup — the anchor's ⏳ → ✅ completes normally"
         );
         reset_present_for_tests();
     }
@@ -1023,7 +1103,8 @@ mod tests {
 
         let rec = record("claude", 12, 122);
         persist(&rec).unwrap();
-        let handle = tokio::spawn(run_worker(shared.clone(), rec, view, claim));
+        let (abort_cleanup, abort_cleanup_calls) = recording_abort_cleanup();
+        let handle = tokio::spawn(run_worker(shared.clone(), rec, view, claim, abort_cleanup));
 
         for _ in 0..(PENDING_START_MAX_CLAIM_ATTEMPTS + 2) {
             tokio::time::advance(PENDING_START_CLAIM_RETRY_BACKOFF + PENDING_START_POLL).await;
@@ -1040,6 +1121,13 @@ mod tests {
             pending_synthetic_start_present("claude", 12),
             "on retry exhaustion the record is RETAINED for restart re-attempt — \
              RED if the worker deletes after exhausting claims (turn-loss)."
+        );
+        assert_eq!(
+            abort_cleanup_calls.load(Ordering::SeqCst),
+            0,
+            "#3282: claim-retry exhaustion RETAINS the record for a restart \
+             re-attempt — the anchor's ⏳ must stay (the restored worker may still \
+             claim and complete it normally), so the abort cleanup must NOT fire"
         );
         reset_present_for_tests();
     }
