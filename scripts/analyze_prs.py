@@ -77,3 +77,4 @@ for pr in prs:
 
 if inventory_refresh_count > 1:
     print("\n[!] WARNING: Multiple open inventory refresh PRs detected. Ensure strict duplicate-PR guard is followed.")
+    exit(1)
