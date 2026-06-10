@@ -643,7 +643,7 @@
     from #3126 stall-watchdog completed-idle false-positive guard tests; +88
     from #3169 stall-watchdog jsonl-mtime liveness guard + tests, closing the
     Death #1 force-clean false-positive on loop mid-write sessions).
-  - `src/services/discord/router/message_handler/intake_turn.rs` (3770 lines;
+  - `src/services/discord/router/message_handler/intake_turn.rs` (3771 lines;
     Discord message intake turn orchestration split from the router message
     handler; bugfix only outside a further extraction plan; +9 from #3082
     queued-only answer-flush gate (`is_queued_notice` on the two
@@ -651,7 +651,9 @@
     `false` for the active-turn placeholder); +57 from #3182 normal-dequeue
     queue-pending reaction cleanup (`queue_pending_reactions_to_clear` helper +
     `remove_reaction_raw` at the `started==true` promotion point, removing the
-    stranded `📬`/`➕` so a processed message no longer shows `📬`+`✅`)).
+    stranded `📬`/`➕` so a processed message no longer shows `📬`+`✅`); +1 from
+    #3038 S1 mechanical `.queued_placeholders` -> `.queued.queued_placeholders`
+    re-wire after lifting cluster C into `QueuedPlaceholderState`).
   - `src/services/discord/router/message_handler/headless_turn.rs` (1316 lines;
     headless Discord turn launch/terminal-response path split from the router
     message handler; bugfix only outside a further extraction plan).
@@ -699,7 +701,7 @@
     `finalize_stale_streaming_footer` / `text_ends_with_streaming_footer` shared
     terminal-idle reconciliation helpers + their unit tests).
   - `src/services/discord/prompt_builder/` (directory, refactored).
-  - `src/services/discord/runtime_bootstrap.rs` (2798 lines after #2558
+  - `src/services/discord/runtime_bootstrap.rs` (2802 lines after #2558
     thread-session GC loopback shim cleanup; +3 from #3082 answer-flush-barrier
     field in the SharedData constructor; +1 from #3037 cluster backflow path
     rewrite wrapping a longer `services::cluster::node_registry::*` call; -2 from
@@ -718,7 +720,11 @@
     helper signatures + ordering-guarantee doc comments since the moved bodies
     are net-zero. The poise framework-builder/setup closure (~580 lines) is left
     inline — its move-captured locals make a clean extraction risky and is
-    deferred).
+    deferred); +2 from #3038 S1 wrapping the three cluster-C member inits in the
+    `queued: QueuedPlaceholderState { .. }` group literal (the member init
+    expressions, including the `load_queue_exit_placeholder_clears` disk read,
+    stay byte-identical so the run_bot_build_shared_data evaluation order is
+    preserved).
   - `src/services/discord/session_runtime.rs` (1753 lines).
   - `src/services/discord/voice_barge_in.rs` (4657 lines; net +0 from #3034
     scoped dead-code allows on the test-only runtime API
@@ -980,7 +986,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   execution are the canonical scheduled JS routine surfaces. Split focused
   helper modules before growing these files again.
 - `src/services/platform/binary_resolver.rs` (1221).
-- `src/services/discord/mod.rs` (4465; +34 from #3019 added the
+- `src/services/discord/mod.rs` (4987; +34 from #3019 added the
   single-authority `increment_global_active` helper + doc mirroring the
   existing decrement helper — offset by removing 6 inline raw `fetch_add`
   blocks across the relay turn-start sites that now route through it; +12 from
@@ -988,7 +994,11 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `TmuxWatcherRegistry` gained a `restored_owner_by_tmux_session` map plus
   `restore_owner_channel_for_tmux_session`/`clear_restored_owner_for_tmux_session`
   so a live thread-suffixed TUI session with no live watcher slot can be
-  re-registered authoritatively instead of dropped forever),
+  re-registered authoritatively instead of dropped forever; -201 from #3038 S1
+  lifting cluster C — the three queued-placeholder fields + their eight inherent
+  methods — into `shared_state::QueuedPlaceholderState`, leaving a single
+  `queued: QueuedPlaceholderState` group field on `SharedData` and re-exporting
+  the type for surface freeze),
   `src/services/discord_config_audit.rs` (1273).
 - `src/services/turn_orchestrator.rs` (3086).
 

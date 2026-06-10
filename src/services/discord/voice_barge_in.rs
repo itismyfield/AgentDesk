@@ -4783,9 +4783,11 @@ mod tests {
             ),
             placeholder_live_events_enabled: false,
             status_panel_v2_enabled: false,
-            queued_placeholders: dashmap::DashMap::new(),
-            queue_exit_placeholder_clears: dashmap::DashMap::new(),
-            queued_placeholders_persist_locks: dashmap::DashMap::new(),
+            queued: super::super::QueuedPlaceholderState {
+                queued_placeholders: dashmap::DashMap::new(),
+                queue_exit_placeholder_clears: dashmap::DashMap::new(),
+                queued_placeholders_persist_locks: dashmap::DashMap::new(),
+            },
             answer_flush_barrier: std::sync::Arc::new(
                 super::super::answer_flush_barrier::AnswerFlushBarrier::default(),
             ),

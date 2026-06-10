@@ -382,6 +382,7 @@ pub(super) async fn drain_merged_queued_placeholders(
             continue;
         }
         if let Some((_, placeholder_msg_id)) = shared
+            .queued
             .queued_placeholders
             .remove(&(channel_id, *message_id))
         {
@@ -396,7 +397,7 @@ pub(super) async fn drain_merged_queued_placeholders(
     // drain so a restart sees the same state as memory.
     if mutated {
         super::queued_placeholders_store::persist_channel_from_map(
-            &shared.queued_placeholders,
+            &shared.queued.queued_placeholders,
             &shared.provider,
             &shared.token_hash,
             channel_id,

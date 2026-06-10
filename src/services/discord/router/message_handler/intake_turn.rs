@@ -1891,6 +1891,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         // through the fresh POST path.
         let existing_queued_card = if want_queued_card {
             shared
+                .queued
                 .queued_placeholders
                 .get(&(channel_id, user_msg_id))
                 .map(|entry| *entry.value())

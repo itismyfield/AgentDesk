@@ -1702,6 +1702,7 @@ fn run_bot_spawn_recovery_and_flush_restart_reports(
                 );
                 for (key, placeholder_msg_id) in &filter_outcome.live {
                     shared_for_tmux2
+                        .queued
                         .queued_placeholders
                         .insert(*key, *placeholder_msg_id);
                 }
@@ -1715,7 +1716,7 @@ fn run_bot_spawn_recovery_and_flush_restart_reports(
                 // leak would compound across restarts.
                 for channel_id in &filter_outcome.channels_with_stale {
                     super::queued_placeholders_store::persist_channel_from_map(
-                        &shared_for_tmux2.queued_placeholders,
+                        &shared_for_tmux2.queued.queued_placeholders,
                         &shared_for_tmux2.provider,
                         &shared_for_tmux2.token_hash,
                         *channel_id,
@@ -2055,19 +2056,22 @@ fn run_bot_build_shared_data(
         ),
         placeholder_live_events_enabled,
         status_panel_v2_enabled,
-        queued_placeholders: dashmap::DashMap::new(),
-        queue_exit_placeholder_clears: {
-            let map = dashmap::DashMap::new();
-            for (key, placeholder_msg_id) in
-                super::queued_placeholders_store::load_queue_exit_placeholder_clears(
-                    provider, token_hash,
-                )
-            {
-                map.insert(key, placeholder_msg_id);
-            }
-            map
+        // #3038 S1: wrapped verbatim at the first-member position (evaluation-order preserved).
+        queued: QueuedPlaceholderState {
+            queued_placeholders: dashmap::DashMap::new(),
+            queue_exit_placeholder_clears: {
+                let map = dashmap::DashMap::new();
+                for (key, placeholder_msg_id) in
+                    super::queued_placeholders_store::load_queue_exit_placeholder_clears(
+                        provider, token_hash,
+                    )
+                {
+                    map.insert(key, placeholder_msg_id);
+                }
+                map
+            },
+            queued_placeholders_persist_locks: dashmap::DashMap::new(),
         },
-        queued_placeholders_persist_locks: dashmap::DashMap::new(),
         answer_flush_barrier: std::sync::Arc::new(
             super::answer_flush_barrier::AnswerFlushBarrier::default(),
         ),
