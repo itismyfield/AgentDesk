@@ -699,13 +699,9 @@ pub async fn provider_channel_mailbox_state(
     let provider = ProviderKind::from_str(provider_name)?;
     let channel = ChannelId::new(channel_id);
     let shared = shared_for_provider(registry, &provider, channel).await?;
-    let snapshot = shared.mailbox(channel).snapshot().await;
-    Some(ProviderMailboxState {
-        channel_id,
-        has_cancel_token: snapshot.cancel_token.is_some(),
-        queue_depth: snapshot.intervention_queue.len(),
-        recovery_started: snapshot.recovery_started_at.is_some(),
-    })
+    // #3293 (c): peek, never create — the previous `shared.mailbox()` probe
+    // minted a permanent registry entry for every queried channel id.
+    Some(super::mailbox::peeked_provider_mailbox_state(&shared, channel_id).await)
 }
 
 pub async fn stop_runtime_turn_preserving_watcher(

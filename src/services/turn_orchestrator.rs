@@ -12,6 +12,9 @@ use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::services::provider::{CancelToken, ProviderKind};
 
+// #3293: non-creating registry lookup + operator-gated idle-entry purge.
+pub(crate) mod registry_purge;
+
 pub(crate) const MAX_INTERVENTIONS_PER_CHANNEL: usize = 30;
 pub(crate) const INTERVENTION_DEDUP_WINDOW: Duration = Duration::from_secs(10);
 const STALE_PENDING_QUEUE_TMP_AGE: Duration = Duration::from_secs(60);

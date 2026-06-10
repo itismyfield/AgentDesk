@@ -51,6 +51,11 @@ struct StaleMailboxRepairRequest {
     #[serde(default)]
     provider: Option<String>,
     expected_has_cancel_token: Option<bool>,
+    /// #3293 (c): when true AND the repair fully applied, also unlink the
+    /// channel's idle in-memory mailbox registry entry (no disk/DB mutation).
+    /// `#[serde(default)]` keeps existing clients compatible.
+    #[serde(default)]
+    purge: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -535,6 +540,30 @@ fn stale_mailbox_repair_applied(
     session_disconnected_count: usize,
 ) -> bool {
     removed_token || inflight_cleared || session_disconnected_count > 0
+}
+
+/// #3293 (c): whether the optional mailbox-registry purge may run after a
+/// stale-mailbox repair, and the skip reason to report when it may not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistryPurgeDecision {
+    /// `purge` was not requested — report nothing.
+    NotRequested,
+    /// Repair fully applied (no residual inflight/session/token evidence) —
+    /// the idle-entry purge may run.
+    Run,
+    /// Purge requested but the repair did not fully apply — refuse.
+    Skip(&'static str),
+}
+
+fn registry_purge_decision(purge_requested: bool, repair_status: &str) -> RegistryPurgeDecision {
+    if !purge_requested {
+        return RegistryPurgeDecision::NotRequested;
+    }
+    if repair_status == "applied" {
+        RegistryPurgeDecision::Run
+    } else {
+        RegistryPurgeDecision::Skip("repair_not_fully_applied")
+    }
 }
 
 async fn load_config_audit_report_pg(pg_pool: Option<&PgPool>) -> Option<serde_json::Value> {
@@ -1211,6 +1240,26 @@ pub async fn stale_mailbox_repair_handler(
         } else {
             "applied"
         };
+    // #3293 (c): optional registry purge — only after the full gate chain
+    // above passed AND the repair fully applied. `remove_idle_entry` re-checks
+    // actor idleness right before the in-memory unlink.
+    let (registry_entry_removed, registry_purge_skipped_reason) =
+        match registry_purge_decision(request.purge, status) {
+            RegistryPurgeDecision::NotRequested => (false, None),
+            RegistryPurgeDecision::Skip(reason) => (false, Some(reason)),
+            RegistryPurgeDecision::Run => match state.health_registry.as_deref() {
+                Some(registry) => {
+                    let purge = health::purge_idle_channel_mailbox_registry_entry(
+                        registry,
+                        provider_filter.as_ref().map(ProviderKind::as_str),
+                        request.channel_id,
+                    )
+                    .await;
+                    (purge.removed, purge.skipped_reason)
+                }
+                None => (false, Some("registry_unavailable")),
+            },
+        };
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -1230,6 +1279,8 @@ pub async fn stale_mailbox_repair_handler(
             "pre_repair_session": before_session_state,
             "post_repair_session": after_session_state,
             "delivery_completed": false,
+            "registry_entry_removed": registry_entry_removed,
+            "registry_purge_skipped_reason": registry_purge_skipped_reason,
             "post_repair_mailbox": after,
             "post_repair_watcher_inflight": after_watcher_inflight
         })),
@@ -1459,7 +1510,8 @@ pub async fn senddm_handler(
 #[cfg(test)]
 mod tests {
     use super::{
-        discord_control_endpoints_allowed, public_health_json, stale_mailbox_repair_applied,
+        RegistryPurgeDecision, discord_control_endpoints_allowed, public_health_json,
+        registry_purge_decision, stale_mailbox_repair_applied,
     };
     use axum::{
         body::Body,
@@ -1668,6 +1720,29 @@ mod tests {
         assert!(stale_mailbox_repair_applied(true, false, 0));
         assert!(stale_mailbox_repair_applied(false, true, 0));
         assert!(!stale_mailbox_repair_applied(false, false, 0));
+    }
+
+    /// #3293 (c): the registry purge runs ONLY when explicitly requested AND
+    /// the repair fully applied; a partial repair reports the skip reason that
+    /// surfaces as `registry_purge_skipped_reason` in the response.
+    #[test]
+    fn registry_purge_decision_gates_on_request_and_fully_applied_repair() {
+        assert_eq!(
+            registry_purge_decision(false, "applied"),
+            RegistryPurgeDecision::NotRequested
+        );
+        assert_eq!(
+            registry_purge_decision(false, "partial_repair"),
+            RegistryPurgeDecision::NotRequested
+        );
+        assert_eq!(
+            registry_purge_decision(true, "applied"),
+            RegistryPurgeDecision::Run
+        );
+        assert_eq!(
+            registry_purge_decision(true, "partial_repair"),
+            RegistryPurgeDecision::Skip("repair_not_fully_applied")
+        );
     }
 
     /// `fully_recovered` is the startup/recovery completion signal. Runtime

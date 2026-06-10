@@ -2425,6 +2425,12 @@ impl SharedData {
         self.mailboxes.handle(channel_id)
     }
 
+    /// #3293: non-creating mailbox lookup for probes — `mailbox()` mints a
+    /// permanent registry entry for any channel id it is asked about.
+    fn mailbox_peek(&self, channel_id: ChannelId) -> Option<ChannelMailboxHandle> {
+        self.mailboxes.peek(channel_id)
+    }
+
     fn health_registry(&self) -> Option<Arc<health::HealthRegistry>> {
         self.health_registry.upgrade()
     }

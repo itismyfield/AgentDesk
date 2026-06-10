@@ -1,5 +1,7 @@
 use super::gateway::DiscordGateway;
 use super::inflight::optional_message_id;
+use super::recovery_paths::restart::dispose_recovery_relay_outcome;
+use super::recovery_paths::shared::RecoveryRelayOutcome;
 use super::settings::{
     load_last_remote_profile, load_last_session_path, resolve_role_binding,
     validate_bot_channel_routing_with_provider_channel,
@@ -254,7 +256,7 @@ async fn relay_recovery_terminal_notice(
     shared: &Arc<SharedData>,
     state: &super::inflight::InflightTurnState,
     text: &str,
-) -> bool {
+) -> RecoveryRelayOutcome {
     relay_recovered_terminal_text_to_placeholder(
         http,
         shared,
@@ -265,31 +267,28 @@ async fn relay_recovery_terminal_notice(
     .await
 }
 
-/// Deliver the recovered terminal text to Discord. When the turn anchored a
-/// placeholder (`current_msg_id != 0`) the placeholder is edited in place;
-/// when it did NOT (a TUI-direct / recovery turn with `current_msg_id == 0`,
-/// surfaced here as `placeholder == None`) the text is delivered as a NEW
-/// channel message instead. Either way `true` means the assistant response
-/// actually reached Discord, so the caller can safely advance recovery
-/// (release mailbox/inflight, complete the dispatch). Reporting success
-/// WITHOUT delivering would silently drop the answer (Codex P1). `MessageId::new(0)`
-/// would panic, hence the `Option`.
+/// Deliver the recovered terminal text to Discord: edit the placeholder in
+/// place when one was anchored, else (`placeholder == None`, e.g. TUI-direct —
+/// `MessageId::new(0)` would panic) send a NEW message. Only `Delivered` lets
+/// callers advance recovery (Codex P1); #3293 classifies failures so a
+/// permanent Discord rejection (404/403/410) can end the retry loop.
 async fn relay_recovered_terminal_text_to_placeholder(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     placeholder: Option<MessageId>,
     text: &str,
-) -> bool {
-    match placeholder {
+) -> RecoveryRelayOutcome {
+    let delivery = match placeholder {
         Some(placeholder) => {
             super::formatting::replace_long_message_raw(http, channel_id, placeholder, text, shared)
                 .await
-                .is_ok()
         }
-        None => super::formatting::send_long_message_raw(http, channel_id, text, shared)
-            .await
-            .is_ok(),
+        None => super::formatting::send_long_message_raw(http, channel_id, text, shared).await,
+    };
+    match delivery {
+        Ok(()) => RecoveryRelayOutcome::Delivered,
+        Err(error) => super::recovery_paths::shared::classify_recovery_relay_error(error.as_ref()),
     }
 }
 
@@ -941,7 +940,7 @@ fn interrupted_recovery_message(
         .unwrap_or_else(|| stale_inflight_message(saved_response))
 }
 
-fn save_missing_session_handoff(
+pub(super) fn save_missing_session_handoff(
     provider: &ProviderKind,
     state: &inflight::InflightTurnState,
     best_response: &str,
@@ -1228,7 +1227,7 @@ fn recovery_spawn_adk_cwd(
     Ok(persisted_session_path)
 }
 
-async fn finish_recovered_turn_mailbox(
+pub(super) async fn finish_recovered_turn_mailbox(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -2150,7 +2149,8 @@ pub(super) async fn restore_inflight_turns(
                     optional_message_id(state.current_msg_id),
                     &final_text,
                 )
-                .await;
+                .await
+                .delivered();
                 if !should_advance_recovery_dispatch_after_relay(relay_ok) {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!(
@@ -2784,7 +2784,8 @@ pub(super) async fn restore_inflight_turns(
                 current_msg_id,
                 &final_text,
             )
-            .await;
+            .await
+            .delivered();
 
             if !should_advance_recovery_dispatch_after_relay(relay_ok) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -3036,7 +3037,8 @@ pub(super) async fn restore_inflight_turns(
                 current_msg_id,
                 &final_text,
             )
-            .await;
+            .await
+            .delivered();
 
             if !should_advance_recovery_dispatch_after_relay(relay_ok) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -3299,21 +3301,22 @@ pub(super) async fn restore_inflight_turns(
                     &state.full_response,
                     provider,
                 );
-                if relay_recovery_terminal_notice(http, shared, &state, &final_text).await {
-                    finish_recovered_turn_mailbox(
-                        shared,
-                        provider,
-                        channel_id,
-                        "recovery_ready_without_output",
-                    )
-                    .await;
-                    clear_inflight_state(provider, state.channel_id);
-                } else {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
-                        "  [{ts}] ⚠ recovery: ready-without-output notice failed — preserving inflight for retry"
-                    );
-                }
+                let outcome =
+                    relay_recovery_terminal_notice(http, shared, &state, &final_text).await;
+                // #3293: tmux_alive=true — budget force-clear forbidden here
+                // (pane-alive invariant); only a permanent verdict clears.
+                dispose_recovery_relay_outcome(
+                    shared,
+                    provider,
+                    &state,
+                    outcome,
+                    true,
+                    "recovery_ready_without_output",
+                    "ready_without_output",
+                    &state.full_response,
+                    false,
+                )
+                .await;
                 continue;
             }
             tracing::warn!(
@@ -3360,7 +3363,7 @@ pub(super) async fn restore_inflight_turns(
                     best_response.len()
                 );
             }
-            let relay_ok = relay_recovery_terminal_notice(http, shared, &state, &stale_text).await;
+            let outcome = relay_recovery_terminal_notice(http, shared, &state, &stale_text).await;
             if let Some(ref sk) = state.session_key {
                 crate::services::termination_audit::record_termination_with_handles(
                     None::<&crate::db::Db>,
@@ -3376,21 +3379,19 @@ pub(super) async fn restore_inflight_turns(
                 );
             }
             save_missing_session_handoff(provider, &state, &best_response);
-            if relay_ok {
-                finish_recovered_turn_mailbox(
-                    shared,
-                    provider,
-                    channel_id,
-                    "recovery_missing_tmux",
-                )
-                .await;
-                clear_inflight_state(provider, state.channel_id);
-            } else {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ recovery: missing-tmux notice failed — preserving inflight for retry"
-                );
-            }
+            // Handoff already saved above for every outcome (last arg).
+            dispose_recovery_relay_outcome(
+                shared,
+                provider,
+                &state,
+                outcome,
+                false,
+                "recovery_missing_tmux",
+                "missing_tmux",
+                &best_response,
+                true,
+            )
+            .await;
             continue;
         }
 
@@ -3401,20 +3402,19 @@ pub(super) async fn restore_inflight_turns(
                 state.channel_id
             );
             let text = stale_inflight_message("tmux session name missing during recovery");
-            if relay_recovery_terminal_notice(http, shared, &state, &text).await {
-                finish_recovered_turn_mailbox(
-                    shared,
-                    provider,
-                    channel_id,
-                    "recovery_missing_tmux_name",
-                )
-                .await;
-                clear_inflight_state(provider, state.channel_id);
-            } else {
-                tracing::warn!(
-                    "  [{ts}] ⚠ recovery: missing-tmux-name notice failed — preserving inflight for retry"
-                );
-            }
+            let outcome = relay_recovery_terminal_notice(http, shared, &state, &text).await;
+            dispose_recovery_relay_outcome(
+                shared,
+                provider,
+                &state,
+                outcome,
+                false,
+                "recovery_missing_tmux_name",
+                "missing_tmux_name",
+                &state.full_response,
+                false,
+            )
+            .await;
             continue;
         };
         let Some(output_path) = output_path else {
@@ -3424,20 +3424,19 @@ pub(super) async fn restore_inflight_turns(
                 state.channel_id
             );
             let text = stale_inflight_message("output path missing during recovery");
-            if relay_recovery_terminal_notice(http, shared, &state, &text).await {
-                finish_recovered_turn_mailbox(
-                    shared,
-                    provider,
-                    channel_id,
-                    "recovery_missing_output_path",
-                )
-                .await;
-                clear_inflight_state(provider, state.channel_id);
-            } else {
-                tracing::warn!(
-                    "  [{ts}] ⚠ recovery: missing-output-path notice failed — preserving inflight for retry"
-                );
-            }
+            let outcome = relay_recovery_terminal_notice(http, shared, &state, &text).await;
+            dispose_recovery_relay_outcome(
+                shared,
+                provider,
+                &state,
+                outcome,
+                false,
+                "recovery_missing_output_path",
+                "missing_output_path",
+                &state.full_response,
+                false,
+            )
+            .await;
             continue;
         };
         let input_fifo_path = match recovery_input_fifo_for_runtime(runtime_kind, input_fifo_path) {
@@ -3475,20 +3474,19 @@ pub(super) async fn restore_inflight_turns(
                     runtime_kind.as_str()
                 );
                 let text = stale_inflight_message(reason);
-                if relay_recovery_terminal_notice(http, shared, &state, &text).await {
-                    finish_recovered_turn_mailbox(
-                        shared,
-                        provider,
-                        channel_id,
-                        "recovery_missing_input_fifo",
-                    )
-                    .await;
-                    clear_inflight_state(provider, state.channel_id);
-                } else {
-                    tracing::warn!(
-                        "  [{ts}] ⚠ recovery: missing-input-fifo notice failed — preserving inflight for retry"
-                    );
-                }
+                let outcome = relay_recovery_terminal_notice(http, shared, &state, &text).await;
+                dispose_recovery_relay_outcome(
+                    shared,
+                    provider,
+                    &state,
+                    outcome,
+                    false,
+                    "recovery_missing_input_fifo",
+                    "missing_input_fifo",
+                    &state.full_response,
+                    false,
+                )
+                .await;
                 continue;
             }
         };
@@ -3571,7 +3569,8 @@ pub(super) async fn restore_inflight_turns(
                             current_msg_id,
                             &format!("❌ {error}\nmain workspace fallback blocked."),
                         )
-                        .await;
+                        .await
+                        .delivered();
                         if should_advance_recovery_dispatch_after_relay(relay_ok) {
                             super::turn_bridge::fail_dispatch_with_retry(
                                 shared.api_port,
@@ -3801,7 +3800,8 @@ pub(super) async fn restore_inflight_turns(
                     current_msg_id,
                     &format!("❌ {error}\nmain workspace fallback blocked."),
                 )
-                .await;
+                .await
+                .delivered();
                 if should_advance_recovery_dispatch_after_relay(relay_ok) {
                     super::turn_bridge::fail_dispatch_with_retry(
                         shared.api_port,

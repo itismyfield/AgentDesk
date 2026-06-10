@@ -437,6 +437,7 @@ src/
 │   │   │   └── section_dedupe.rs
 │   │   ├── recovery_paths/
 │   │   │   ├── mod.rs
+│   │   │   ├── restart.rs
 │   │   │   └── shared.rs
 │   │   ├── router/
 │   │   │   ├── message_handler/
@@ -650,6 +651,8 @@ src/
 │   │   └── store.rs
 │   ├── slo/
 │   │   └── mod.rs
+│   ├── turn_orchestrator/
+│   │   └── registry_purge.rs
 │   ├── agent_protocol.rs
 │   ├── analytics.rs
 │   ├── auto_queue.rs
