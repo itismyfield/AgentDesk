@@ -35,6 +35,7 @@ const WATCHER_DELIVERY_LEASE_DEADLINE_MS: u64 =
 /// #3041 P1-1 (§3, codex R2 Issue-1): how often the in-flight watcher send
 /// renews its delivery lease. Alias for the shared
 /// [`crate::services::discord::DELIVERY_LEASE_HEARTBEAT_MS`] (P1-2).
+#[allow(dead_code)] // #3034: test-only alias; live path reads the shared const.
 const WATCHER_DELIVERY_LEASE_HEARTBEAT_MS: u64 =
     crate::services::discord::DELIVERY_LEASE_HEARTBEAT_MS;
 
@@ -400,6 +401,7 @@ fn watcher_persisted_status_panel_msg_id(
 /// `TurnSource::ExternalInput`, but the watcher is NOT the panel owner. Without
 /// this guard the watcher would race `turn_bridge`'s own status-panel-v2
 /// creation and leave duplicate/orphan panels (codex P2 r25).
+#[allow(dead_code)] // #3034: pure external-input guard pinned by the watcher unit tests.
 fn watcher_inflight_is_external_input_for_session(
     inflight: Option<&InflightTurnState>,
     tmux_session_name: &str,
@@ -10852,7 +10854,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             .await
             {
                 Ok(_) => {
-                    last_edit_text = finalized;
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
                         "  [{ts}] 👁 #3104 reconciled stale '계속 처리 중' streaming footer on channel {} msg {} at idle",

@@ -250,6 +250,7 @@ fn should_discard_restored_seed_for_idle_direct_prompt(
     restored_turn_present && prompt_anchor_present
 }
 
+#[allow(dead_code)] // #3034: #826/#897/#898 bg-trigger notify-outbox subsystem (unwired).
 fn lifecycle_reason_code_for_tmux_exit(reason: &str) -> &'static str {
     let lower = reason.to_ascii_lowercase();
     if tmux_exit_reason_is_normal_completion(reason) {
@@ -267,6 +268,7 @@ fn lifecycle_reason_code_for_tmux_exit(reason: &str) -> &'static str {
     }
 }
 
+#[allow(dead_code)] // #3034: #826/#897 lifecycle-notify subsystem, see note above.
 fn tmux_death_lifecycle_notification_reason(reason: Option<&str>) -> Option<&str> {
     let reason = reason?.trim();
     if reason.is_empty() {
@@ -1541,12 +1543,14 @@ async fn drain_missing_inflight_dead_tmux_tail_to_eof(
 /// Pure function extracted for regression-test coverage of the offset-commit
 /// gate; the runtime version lives inline in the watcher loop because it is
 /// intertwined with other relay bookkeeping.
+#[allow(dead_code)] // #3034: notify-path bg-trigger offset gate (unwired; #826/#897/#898).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct OffsetAdvanceDecision {
     pub advance_relayed: bool,
     pub advance_enqueued: bool,
 }
 
+#[allow(dead_code)] // #3034: notify-path offset gate, see note above.
 #[inline]
 pub(super) fn notify_path_offset_advance_decision(
     has_current_response: bool,
@@ -1933,240 +1937,6 @@ mod lifecycle_stage_pause_matrix_tests {
                 "emit/pause complementarity violated for {outcome:?}",
             );
         }
-    }
-}
-
-/// #826: Build the dedupe session_key for a background-trigger outbox row.
-/// Includes the tmux output offset and a short content hash so distinct
-/// completions land as separate rows (different offsets ⇒ different keys)
-/// while a retry of the exact same range within the dedupe window (same
-/// offset + identical content) collapses into one. The resulting key is
-/// compact (≤~64 chars) and safe to use as a dedupe column.
-///
-/// Pure function so the #897 counter-model review P1 (dedupe reason_code
-/// AND session_key must BOTH be present for the lifecycle dedupe to arm)
-/// has a testable contract.
-#[inline]
-pub(super) fn build_bg_trigger_session_key(
-    channel_id: u64,
-    data_start_offset: u64,
-    content: &str,
-) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    content.hash(&mut hasher);
-    format!(
-        "bg_trigger:ch:{channel_id}:off:{data_start_offset}:h:{:016x}",
-        hasher.finish()
-    )
-}
-
-/// #826: Enqueue a background-trigger turn's terminal response on the
-/// notify-bot outbox so it reaches the channel without going through the
-/// command bot. The notify-bot is dropped at the intake gate, which is what
-/// keeps the auto-trigger path from feeding back into a new turn.
-///
-/// **Storage backend**: uses the Postgres message outbox when available.
-/// Without a PG pool the caller should direct-send, because no production
-/// worker drains a local legacy outbox for this path.
-///
-/// **Session identity** (#897 round 1 P1 #3): both `reason_code` and
-/// `session_key` are set so reconciliation and any future dedupe policy can
-/// identify the watcher range. `session_key` encodes
-/// `channel_id + data_start_offset + content hash`, so:
-///   * Distinct background completions in the same channel produce distinct
-///     session_keys (different offsets or different content) → each lands
-///     as its own outbox row.
-///   * Reconcile can parse failed rows back to the minimum tmux offset that
-///     needs re-staging.
-///
-/// The PG path currently does INSERT without a per-tick dedupe query (the
-/// SQLite-only `enqueue` helper lives in `message_outbox.rs`; porting it to a
-/// shared sqlx/rusqlite interface is tracked separately). Same-row dedupe on
-/// the PG side is still achievable via a `UNIQUE(reason_code, session_key,
-/// status) WHERE status != 'failed'` partial index, but that's a schema
-/// change outside this PR's scope. Follow-up tracked in #898-family.
-///
-/// Returns `false` when Postgres is unavailable or the insert fails — the
-/// caller falls back to a direct command-bot send in that case so the message
-/// is never silently lost.
-pub(super) async fn enqueue_background_trigger_response_to_notify_outbox(
-    pg_pool: Option<&sqlx::PgPool>,
-    channel_id: ChannelId,
-    content: &str,
-    data_start_offset: u64,
-) -> bool {
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
-        return true;
-    }
-    let target = format!("channel:{}", channel_id.get());
-    let session_key = build_bg_trigger_session_key(channel_id.get(), data_start_offset, content);
-
-    // #897 round-3 High: when `pg_pool` is configured, the outbox worker
-    // drains PG exclusively. On PG insert failure we return `false` so the
-    // caller falls back to a direct Discord send rather than papering over
-    // the failure with an undeliverable local row.
-    if let Some(pool) = pg_pool {
-        return match sqlx::query(
-            "INSERT INTO message_outbox
-             (target, content, bot, source, reason_code, session_key)
-             VALUES ($1, $2, 'notify', 'system', 'bg_trigger.auto_turn', $3)",
-        )
-        .bind(target.as_str())
-        .bind(content)
-        .bind(session_key.as_str())
-        .execute(pool)
-        .await
-        {
-            Ok(_) => true,
-            Err(error) => {
-                tracing::warn!(
-                    "background-trigger postgres outbox insert failed for channel {}: {}",
-                    channel_id,
-                    error
-                );
-                false
-            }
-        };
-    }
-
-    let _ = session_key;
-    false
-}
-
-/// #897 counter-model review P1 #2: Find permanently-failed notify-bot
-/// outbox rows that originated from this watcher's background-trigger
-/// enqueues, extract the tmux offsets that caused them, and delete the
-/// rows so they don't accumulate. Returns the MINIMUM observed
-/// `data_start_offset` encoded in `session_key`, which the caller uses to
-/// roll `last_enqueued_offset` back and re-stage the same tmux range on
-/// the next watcher tick.
-///
-/// **Storage backend**: reconciles Postgres only. Without a PG pool there is
-/// no authoritative outbox store for failed background-trigger rows.
-///
-/// Why this is safe to re-stage:
-/// * `message_outbox::enqueue`'s lifecycle dedupe filters out rows where
-///   `status='failed'`, so re-inserting at the same session_key produces a
-///   fresh pending row rather than collapsing into the dead one.
-/// * We delete the failed rows here so they don't pollute `SELECT *`
-///   queries or eat unbounded table space.
-///
-/// Without this reconciliation a single transient notify-bot or Discord
-/// failure permanently suppresses re-enqueue for the remainder of the
-/// watcher's lifetime — the exact P1 gap the counter-model reviewer
-/// flagged. See PR #897.
-async fn reconcile_failed_bg_trigger_enqueues_for_channel(
-    pg_pool: Option<&sqlx::PgPool>,
-    channel_id: ChannelId,
-) -> Option<u64> {
-    let target = format!("channel:{}", channel_id.get());
-
-    // #897 round-3 High: when `pg_pool` is configured it is the only
-    // authoritative store. Consulting a local legacy store on PG failure or
-    // on an empty PG result would surface rows that the outbox worker never
-    // produced, and worse could delete rows written by a prior run. On PG
-    // error we surface `None` so the next poll retries; there is no data-safe
-    // fallback.
-    if let Some(pool) = pg_pool {
-        let rows_res = sqlx::query_as::<_, (i64, Option<String>)>(
-            "SELECT id, session_key FROM message_outbox
-             WHERE target = $1
-               AND bot = 'notify'
-               AND source = 'system'
-               AND reason_code = 'bg_trigger.auto_turn'
-               AND status = 'failed'",
-        )
-        .bind(target.as_str())
-        .fetch_all(pool)
-        .await;
-
-        return match rows_res {
-            Ok(rows) if !rows.is_empty() => {
-                let mut min_offset: Option<u64> = None;
-                for (_, session_key) in &rows {
-                    if let Some(offset) = session_key
-                        .as_deref()
-                        .and_then(parse_bg_trigger_offset_from_session_key)
-                    {
-                        min_offset = Some(min_offset.map(|m| m.min(offset)).unwrap_or(offset));
-                    }
-                }
-                for (id, _) in &rows {
-                    if let Err(error) = sqlx::query("DELETE FROM message_outbox WHERE id = $1")
-                        .bind(id)
-                        .execute(pool)
-                        .await
-                    {
-                        tracing::warn!(
-                            "failed to delete reconciled bg_trigger row {}: {}",
-                            id,
-                            error
-                        );
-                    }
-                }
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ♻ reconciled {} failed bg_trigger outbox row(s) for channel {} (min offset: {:?}) [pg]",
-                    rows.len(),
-                    channel_id,
-                    min_offset,
-                );
-                min_offset
-            }
-            Ok(_) => None,
-            Err(error) => {
-                tracing::warn!(
-                    "postgres bg_trigger reconcile query failed for channel {}: {}",
-                    channel_id,
-                    error
-                );
-                None
-            }
-        };
-    }
-
-    None
-}
-
-/// Pure helper: extract the `data_start_offset` encoded in a
-/// background-trigger `session_key`. Format produced by
-/// `build_bg_trigger_session_key` is `bg_trigger:ch:{id}:off:{offset}:h:{hash16}`.
-/// Returns `None` for malformed keys so the caller can safely ignore
-/// outbox rows whose session_key no longer conforms to the expected shape
-/// (e.g. future schema changes or hand-written operator rows).
-#[inline]
-pub(super) fn parse_bg_trigger_offset_from_session_key(session_key: &str) -> Option<u64> {
-    let after_off = session_key.split(":off:").nth(1)?;
-    let off_str = after_off.split(':').next()?;
-    off_str.parse::<u64>().ok()
-}
-
-/// Pure helper for the watermark-rollback policy (#897 P1 #2). Given the
-/// watcher's current `last_enqueued_offset` and the minimum offset from a
-/// reconciled outbox failure, return the new watermark that allows
-/// re-emission of the failed range on the next watcher tick while
-/// preserving progress past other, unaffected ranges.
-///
-/// Rules:
-/// 1. `None → None`: nothing staged, nothing to roll back.
-/// 2. Current ≤ reconciled: the watermark is already at or below the
-///    failed offset, so the next visit will naturally re-emit that range.
-/// 3. Current > reconciled: pull back to `reconciled.saturating_sub(1)` so
-///    the dedupe floor `max(relayed, enqueued)` permits
-///    `data_start_offset < prev_offset` evaluation at the exact failed
-///    offset. Using `saturating_sub` guards against reconciled=0.
-#[inline]
-pub(super) fn rollback_enqueued_offset_for_reconciled_failures(
-    last_enqueued_offset: Option<u64>,
-    reconciled_min_offset: u64,
-) -> Option<u64> {
-    match last_enqueued_offset {
-        None => None,
-        Some(current) if current <= reconciled_min_offset => Some(current),
-        Some(_) => Some(reconciled_min_offset.saturating_sub(1)),
     }
 }
 

@@ -75,6 +75,9 @@ pub(super) fn summary_from_tool_use_result(
 /// individually and missing fields degrade to an empty/partial summary. Never
 /// panics. Kept reusable but intentionally off the live relay/status hot path —
 /// see the module docs (#3086 P1).
+// #3034: intentionally-retained parity parser (off the live hot path);
+// exercised by the unit tests below. Its private helpers below ride along.
+#[allow(dead_code)]
 pub(super) fn summary_from_rollout_str(contents: &str) -> SubagentSummary {
     let mut tool_count: u64 = 0;
     let mut last_usage_tokens: Option<u64> = None;
@@ -145,6 +148,7 @@ pub(super) fn summary_from_rollout_str(contents: &str) -> SubagentSummary {
     }
 }
 
+#[allow(dead_code)] // #3034: helper for the retained parity parser, see above.
 fn usage_total_tokens(usage: &Value) -> u64 {
     [
         "input_tokens",
@@ -157,6 +161,7 @@ fn usage_total_tokens(usage: &Value) -> u64 {
     .fold(0u64, u64::saturating_add)
 }
 
+#[allow(dead_code)] // #3034: helper for the retained parity parser, see above.
 fn parse_timestamp_secs(raw: &str) -> Option<i64> {
     DateTime::parse_from_rfc3339(raw.trim())
         .ok()

@@ -9,8 +9,14 @@ pub(super) struct DispatchInfo {
     pub(super) card_title: Option<String>,
     pub(super) dispatch_title: Option<String>,
     pub(super) github_issue_url: Option<String>,
+    // #3034: parsed from the card-thread API body for completeness but not yet
+    // read by the binding path (which consumes context/card_id/title). Kept as
+    // populated diagnostic DTO fields.
+    #[allow(dead_code)]
     pub(super) github_issue_number: Option<i64>,
+    #[allow(dead_code)]
     pub(super) issue_body: Option<String>,
+    #[allow(dead_code)]
     pub(super) deferred_dod: Option<serde_json::Value>,
     pub(super) active_thread_id: Option<String>,
     pub(super) dispatch_type: Option<String>,

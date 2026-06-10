@@ -458,20 +458,6 @@ async fn fetch_provider_session_id_once(
     selector
 }
 
-fn build_provider_session_payload(
-    session_key: &str,
-    session_id: &str,
-    raw_provider_session_id: Option<&str>,
-    provider: &ProviderKind,
-) -> serde_json::Value {
-    serde_json::json!({
-        "session_key": session_key,
-        "session_id": raw_provider_session_id,
-        "claude_session_id": session_id,
-        "provider": provider.as_str(),
-    })
-}
-
 fn normalize_user_task_summary(input: &str) -> Option<String> {
     let first_line = input
         .lines()

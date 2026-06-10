@@ -119,6 +119,7 @@ fn session_bound_terminal_delivery_route_or_skip(
     })
 }
 
+#[allow(dead_code)] // #3034: #3041 lease-free route-decision pinned by unit tests (prod uses `_with_lease`).
 fn session_bound_terminal_delivery_route_decision(
     inflight: Option<&InflightTurnState>,
     tmux_session_name: &str,
@@ -2425,6 +2426,7 @@ mod tests {
         );
     }
 
+    #[allow(dead_code)] // #3034: test helper superseded by `delivery_with_fence_offset`.
     fn delivery_with_fence(
         session_name: &str,
         consumed_end: Option<u64>,
@@ -2460,6 +2462,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)] // #3034: test helper superseded by `inflight_with_identity_offset`.
     fn inflight_with_identity(
         channel_id: u64,
         session_name: &str,

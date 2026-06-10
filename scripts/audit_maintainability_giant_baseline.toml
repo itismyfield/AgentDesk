@@ -17,7 +17,14 @@
 # documentation gate; extend this table to ratchet them too.
 
 [giant_file_ratchet]
-"src/services/discord/tmux_watcher.rs" = 9598
+# #3034 batch-8: the dead_code lint went live for the discord tree; the two
+# test-only `#[allow(dead_code)]` attributes on
+# `watcher_inflight_is_external_input_for_session` / the lease alias add +2 and
+# the dead `last_edit_text` assignment removal drops -1 (net +1). Rebased onto
+# #3262/#3272, which extracted the inline completed-panel backfill block into
+# `adk_session::backfill_completed_panel_usage_and_maybe_inject_compact` (−16
+# prod lines), so the frozen true production LoC settles at 9583. KEPT surfaces.
+"src/services/discord/tmux_watcher.rs" = 9583
 # Frozen at its true production LoC once #3028 fixed the prod/test splitter
 # (lifetime/char-literal brace miscount): the first inline `#[cfg(test)] mod`
 # block was over-extended to EOF, so `spawn_turn_bridge` and ~9000 lines of the
@@ -34,28 +41,47 @@
 # re-register the watcher-owned turn in the post-restart finalizer ledger (a P1
 # live-ops fix; the helper is the minimum surface, kept in-file beside its sole
 # caller `reregister_active_turn_from_inflight`).
-"src/services/discord/recovery_engine.rs" = 4094
-"src/services/discord/router/message_handler/intake_turn.rs" = 3771
+# #3034 batch-8: lowered 4094 -> 4090 (dead-code removal: dropped `assistant_turns`
+# construction sites).
+"src/services/discord/recovery_engine.rs" = 4090
+# #3034 batch-8: lowered 3771 -> 3770 (dead-code removal).
+"src/services/discord/router/message_handler/intake_turn.rs" = 3770
 "src/services/discord/meeting_orchestrator.rs" = 3227
 "src/services/turn_orchestrator.rs" = 3090
-"src/services/discord/router/intake_gate.rs" = 2957
+# #3034 batch-8: +1 for a test-only `#[allow(dead_code)]` on
+# `thread_guard_inflight_is_stale` (#1446 Layer-2 classifier, pinned by tests).
+"src/services/discord/router/intake_gate.rs" = 2958
 "src/services/discord/formatting.rs" = 2802
 "src/services/discord/runtime_bootstrap.rs" = 2800
-"src/services/discord/health/recovery.rs" = 2655
+# #3034 batch-8: lowered 2655 -> 2645 (dead-code removal: `stop_provider_channel_runtime`).
+"src/services/discord/health/recovery.rs" = 2645
 "src/services/discord/inflight.rs" = 2466
 "src/services/discord/health.rs" = 2293
-"src/services/discord/watchers/lifecycle.rs" = 2333
-"src/services/discord/idle_recap.rs" = 1319
-"src/services/discord/tmux.rs" = 2241
-"src/services/discord/turn_bridge/completion_guard.rs" = 1849
-"src/services/discord/session_runtime.rs" = 1781
-"src/services/discord/session_relay_sink.rs" = 1730
+# #3034 batch-8: lowered 2333 -> 2332 (dropped `assistant_turns` construction site).
+"src/services/discord/watchers/lifecycle.rs" = 2332
+# #3034 batch-8: +1 for a test-only `#[allow(dead_code)]` on
+# `clear_idle_recap_for_channel_with` (test seam; prod wrappers removed).
+"src/services/discord/idle_recap.rs" = 1320
+# #3034 batch-8: lowered 2241 -> 2011 (deleted the dead #826/#897/#898 bg-trigger
+# notify-outbox subsystem — build/enqueue/reconcile/parse/rollback).
+"src/services/discord/tmux.rs" = 2011
+# #3034 batch-8: lowered 1849 -> 1834 (deleted dead `build_verdict_payload`).
+"src/services/discord/turn_bridge/completion_guard.rs" = 1834
+# #3034 batch-8: lowered 1781 -> 1753 (deleted the dead `assistant_turns` turn-cap
+# tracker — field + 3 methods + construction sites).
+"src/services/discord/session_runtime.rs" = 1753
+# #3034 batch-8: +1 for a test-only `#[allow(dead_code)]` on
+# `session_bound_terminal_delivery_route_decision` (#3041 route decision, tested).
+"src/services/discord/session_relay_sink.rs" = 1731
 "src/services/discord/turn_bridge/tmux_runtime.rs" = 1545
 "src/services/discord/commands/text_commands.rs" = 1493
 # terminal_delivery.rs dropped to 504 prod LoC after the #3028 splitter fix
 # (its inline test mod was previously miscounted as production), so it is no
 # longer a giant and its ratchet/registry entries were removed.
-"src/services/discord/turn_finalizer.rs" = 1526
+# #3034 batch-8: +2 for the `#[allow(dead_code)]` on the `RelayMiss` terminal-event
+# variant + its reason comment (handled by the finalizer + tested, not yet emitted
+# in prod; rustfmt keeps the attribute and the comment on separate lines).
+"src/services/discord/turn_finalizer.rs" = 1528
 "src/services/discord/router/message_handler/headless_turn.rs" = 1316
 "src/services/discord/commands/config.rs" = 1054
 "src/services/discord/commands/diagnostics.rs" = 1026

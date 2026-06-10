@@ -2514,7 +2514,6 @@ pub(super) async fn restore_inflight_turns(
                                 last_active: tokio::time::Instant::now(),
                                 worktree: None,
                                 born_generation: super::runtime_store::load_generation(),
-                                assistant_turns: 0,
                             });
                     session.channel_id = Some(state.channel_id);
                     session.last_active = tokio::time::Instant::now();
@@ -3615,7 +3614,6 @@ pub(super) async fn restore_inflight_turns(
                         last_active: tokio::time::Instant::now(),
                         worktree: None,
                         born_generation: super::runtime_store::load_generation(),
-                        assistant_turns: 0,
                     });
                 session.channel_id = Some(channel_id.get());
                 session.last_active = tokio::time::Instant::now();
@@ -3857,7 +3855,6 @@ pub(super) async fn restore_inflight_turns(
                     worktree: None,
 
                     born_generation: super::runtime_store::load_generation(),
-                    assistant_turns: 0,
                 });
             session.channel_id = Some(channel_id.get());
             session.last_active = tokio::time::Instant::now();
@@ -4408,7 +4405,6 @@ pub(crate) async fn rebind_inflight_for_channel(
                 last_active: tokio::time::Instant::now(),
                 worktree: None,
                 born_generation: super::runtime_store::load_generation(),
-                assistant_turns: 0,
             });
         session.channel_id = Some(channel_id);
         session.last_active = tokio::time::Instant::now();

@@ -44,6 +44,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// fires when neither the broadcast (same-node) nor the on-disk inflight
 /// poll (cross-node) ever observe completion. 30 min comfortably covers
 /// any sane long-running turn.
+// #3034: canonical backstop value retained as documentation; current callers
+// pass an explicit `timeout`, so no live read of this default yet.
+#[allow(dead_code)]
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1800);
 const MAX_FILE_BYTES_PER_TICK: u64 = 1_048_576; // 1 MiB safety cap
 const INFLIGHT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);

@@ -40,7 +40,7 @@ pub use recovery::{
     handle_rebind_inflight, handle_relay_recovery, hard_stop_runtime_turn,
     provider_channel_mailbox_state, resolve_tmux_session_for_cancel,
     schedule_pending_queue_drain_after_cancel, snapshot_pending_queue_state, spawn_stall_watchdog,
-    spawn_watchdog, stop_provider_channel_runtime, stop_runtime_turn_preserving_watcher,
+    spawn_watchdog, stop_runtime_turn_preserving_watcher,
 };
 #[allow(unused_imports)]
 pub use snapshot::{

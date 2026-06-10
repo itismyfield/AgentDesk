@@ -1,5 +1,4 @@
 mod authorization;
-mod control_intent;
 mod dispatch_trigger;
 mod intake_gate;
 mod message_handler;

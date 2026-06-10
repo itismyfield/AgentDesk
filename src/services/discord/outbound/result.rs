@@ -57,6 +57,9 @@ pub(crate) struct DeliveredMessage {
 }
 
 impl DeliveredMessage {
+    // #3034: #1006 v3 outbound result constructors — serde-wire DTO helpers not
+    // yet used by every prod path (which builds via `single_raw`).
+    #[allow(dead_code)]
     pub(crate) fn single(channel_id: ChannelId, message_id: MessageId) -> Self {
         Self {
             channel_id,
@@ -78,6 +81,7 @@ impl DeliveredMessage {
         }
     }
 
+    #[allow(dead_code)] // #3034: #1006 v3 result constructor, see note above.
     pub(crate) fn chunk(
         channel_id: ChannelId,
         message_id: MessageId,

@@ -340,23 +340,6 @@ pub(in crate::services::discord) fn take_session_retry_context_for_turn_with_aud
     })
 }
 
-pub(in crate::services::discord) fn take_session_retry_context_for_turn(
-    db: Option<&crate::db::Db>,
-    pg_pool: Option<&sqlx::PgPool>,
-    channel_id: u64,
-    consumed_by_turn_id: Option<&str>,
-) -> Option<String> {
-    take_session_retry_context_for_turn_with_audit(db, pg_pool, channel_id, consumed_by_turn_id)
-        .map(|context| context.raw_context)
-}
-
-pub(in crate::services::discord) fn take_session_retry_context(
-    db: Option<&crate::db::Db>,
-    channel_id: u64,
-) -> Option<String> {
-    take_session_retry_context_for_turn(db, None, channel_id, None)
-}
-
 fn build_discord_recent_recovery_context_from_parts<'a>(
     messages: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> Option<(String, usize)> {

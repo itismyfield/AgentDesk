@@ -72,6 +72,7 @@ pub(crate) fn load_shared_knowledge() -> Option<String> {
 
 /// #2663: test-only helper to evict the SAK cache between scenarios.
 #[cfg(test)]
+#[allow(dead_code)] // #3034: test cache-reset helper; no active test caller currently.
 pub(crate) fn invalidate_shared_knowledge_cache_for_tests() {
     let mut guard = shared_knowledge_cache()
         .lock()

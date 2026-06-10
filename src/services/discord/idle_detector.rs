@@ -36,7 +36,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use poise::serenity_prelude::ChannelId;
 
 use super::SharedData;
@@ -165,22 +165,6 @@ pub(crate) fn should_register_system_detected_idle(inflight: Option<&InflightWai
         // behavior, no regression).
         _ => true,
     }
-}
-
-/// Parse `last_heartbeat` strings as written by either Postgres
-/// (`TIMESTAMPTZ` rendered to RFC3339) or SQLite (`datetime('now')` ⇒
-/// `YYYY-MM-DD HH:MM:SS` UTC). Returns `None` for empty / unrecognized values.
-pub(crate) fn parse_last_heartbeat(raw: &str) -> Option<DateTime<Utc>> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Ok(value) = DateTime::parse_from_rfc3339(trimmed) {
-        return Some(value.with_timezone(&Utc));
-    }
-    NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S")
-        .ok()
-        .map(|value| DateTime::<Utc>::from_naive_utc_and_offset(value, Utc))
 }
 
 /// Spawn the per-provider background task. Cheap to call multiple times

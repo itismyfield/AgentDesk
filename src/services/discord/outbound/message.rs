@@ -171,6 +171,9 @@ pub(crate) struct OutboundProducer {
     pub(crate) component: Option<String>,
 }
 
+// #3034: #1006 v3 outbound producer builder — serde-wire DTO API, not yet
+// adopted by every prod callsite. Kept as a coherent builder surface.
+#[allow(dead_code)]
 impl OutboundProducer {
     pub(crate) fn new(source: impl Into<String>) -> Self {
         Self {
@@ -243,6 +246,9 @@ impl OutboundReferenceContext {
         }
     }
 
+    // #3034: #1006 v3 serde-wire reference-context builders — not yet wired by
+    // every prod callsite; kept as a coherent builder surface.
+    #[allow(dead_code)]
     pub(crate) fn interaction(
         interaction_id: impl Into<String>,
         token_hint: Option<impl Into<String>>,
@@ -260,11 +266,13 @@ impl OutboundReferenceContext {
         }
     }
 
+    #[allow(dead_code)] // #3034: #1006 v3 builder, see note above.
     pub(crate) fn with_thread_name_hint(mut self, thread_name_hint: impl Into<String>) -> Self {
         self.thread_name_hint = Some(thread_name_hint.into());
         self
     }
 
+    #[allow(dead_code)] // #3034: #1006 v3 builder, see note above.
     pub(crate) fn with_metadata(
         mut self,
         key: impl Into<String>,
@@ -278,6 +286,9 @@ impl OutboundReferenceContext {
     }
 }
 
+// #3034: #1006 v3 outbound target accessors — serde-wire DTO helpers not yet
+// consumed by prod delivery (which matches on the target directly).
+#[allow(dead_code)]
 impl OutboundTarget {
     /// Channel id that should receive the actual HTTP POST. For
     /// [`OutboundTarget::Thread`] this is the thread id; threads are
@@ -352,11 +363,15 @@ impl DiscordOutboundMessage {
         self
     }
 
+    // #3034: #1006 v3 envelope builders not yet adopted by every prod callsite;
+    // kept as a coherent serde-wire builder API.
+    #[allow(dead_code)]
     pub(crate) fn with_producer(mut self, producer: OutboundProducer) -> Self {
         self.producer = Some(producer);
         self
     }
 
+    #[allow(dead_code)] // #3034: #1006 v3 builder, see note above.
     pub(crate) fn with_bot(mut self, bot: OutboundBotSelector) -> Self {
         self.bot = bot;
         self
@@ -374,6 +389,7 @@ impl DiscordOutboundMessage {
         self
     }
 
+    #[allow(dead_code)] // #3034: #1006 v3 builder, see note above.
     pub(crate) fn with_bytes_attachment(
         mut self,
         filename: impl Into<String>,
@@ -388,6 +404,7 @@ impl DiscordOutboundMessage {
         self
     }
 
+    #[allow(dead_code)] // #3034: #1006 v3 builder, see note above.
     pub(crate) fn with_path_attachment(
         mut self,
         filename: impl Into<String>,

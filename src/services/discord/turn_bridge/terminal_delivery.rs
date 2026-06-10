@@ -36,6 +36,9 @@ fn record_turn_bridge_terminal_replace_cleanup(
     );
 }
 
+// #3034: pure terminal-delivery commit predicate pinned by the unit tests; the
+// live path matches the outcome inline. Test contract.
+#[allow(dead_code)]
 fn replace_outcome_commits_terminal_delivery(outcome: &ReplaceLongMessageOutcome) -> bool {
     matches!(outcome, ReplaceLongMessageOutcome::EditedOriginal)
 }

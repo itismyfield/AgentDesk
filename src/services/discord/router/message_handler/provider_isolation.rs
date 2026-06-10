@@ -238,6 +238,7 @@ pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
 }
 
 #[cfg(test)]
+#[allow(dead_code)] // #3034: test-only runtime-kind mismatch classifier (no live caller).
 pub(super) fn runtime_kind_mismatch_requires_recreate(
     observed_runtime_kind: Option<RuntimeHandoffKind>,
     expected_runtime_kind: Option<RuntimeHandoffKind>,

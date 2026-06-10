@@ -62,7 +62,6 @@ fn seed_restart_handoff_session_metadata(
             last_active: tokio::time::Instant::now(),
             worktree: None,
             born_generation: super::runtime_store::load_generation(),
-            assistant_turns: 0,
         });
 
     let mut changed = false;

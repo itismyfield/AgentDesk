@@ -827,7 +827,6 @@ pub(in crate::services::discord) async fn handle_text_message(
 
                                         born_generation:
                                             super::super::super::runtime_store::load_generation(),
-                                        assistant_turns: 0,
                                     });
                             session.current_path = Some(eff_path.clone());
                             session.channel_name = ch_name;

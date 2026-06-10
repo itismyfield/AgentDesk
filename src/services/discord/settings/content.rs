@@ -192,6 +192,10 @@ pub(super) fn extract_first_heading(content: &str) -> Option<String> {
     None
 }
 
+// #3034: unwired-in-prod but real feature surface (profile-partitioned shared
+// prompt); kept live alongside the org_schema/agentdesk_config/role_map path
+// resolvers. Remove together if the profile loader is dropped.
+#[allow(dead_code)]
 pub(in crate::services::discord) fn load_shared_prompt() -> Option<String> {
     load_shared_prompt_for_profile("full")
 }
@@ -217,6 +221,7 @@ pub(in crate::services::discord) fn load_shared_prompt() -> Option<String> {
 /// ```
 ///
 /// Files without any markers behave exactly like before (whole content kept).
+#[allow(dead_code)] // #3034: unwired-in-prod profile loader feature surface.
 pub(in crate::services::discord) fn load_shared_prompt_for_profile(
     profile: &str,
 ) -> Option<String> {
@@ -244,6 +249,7 @@ pub(in crate::services::discord) fn load_shared_prompt_for_profile(
 /// match `profile` (case-insensitive). Blocks tagged `all`, untagged content, and
 /// matching blocks are preserved. Marker lines themselves are removed for clean
 /// output. Unbalanced markers degrade gracefully — the whole section is kept.
+#[allow(dead_code)] // #3034: helper for the unwired-in-prod profile loader.
 fn strip_non_matching_profile_sections(raw: &str, profile: &str) -> String {
     let target = profile.trim().to_ascii_lowercase();
     let mut out = String::with_capacity(raw.len());
@@ -385,6 +391,7 @@ fn current_peer_source_fingerprint() -> PeerSourceFingerprint {
 
 /// #2663: test-only helper to drop the peer guidance cache between scenarios.
 #[cfg(test)]
+#[allow(dead_code)] // #3034: test cache-reset helper; no active test caller currently.
 pub(in crate::services::discord) fn invalidate_peer_guidance_cache_for_tests() {
     let mut guard = peer_guidance_cache()
         .lock()

@@ -235,6 +235,8 @@ pub(in crate::services::discord) enum TerminalEvent {
     GateTimeout { pane_quiescent: Option<bool> },
     /// No output owner and an empty response — finalize once and emit the
     /// observability event from inside the finalizer.
+    #[allow(dead_code)]
+    // #3034: handled by the finalizer + tested, but not yet emitted in prod.
     RelayMiss,
 }
 

@@ -58,13 +58,19 @@ use super::turn_finalizer::{self, LedgerKey, TurnKey};
 pub(in crate::services::discord) enum PanelOwnerKind {
     /// The turn bridge (live relay through the bot's own dispatch).
     Bridge,
+    // #3034: EPIC #3078 owner kinds set only by the staged (shadow-phase)
+    // register path; prod currently records Bridge/Recovery. Kept with the
+    // controller surface.
     /// The tmux watcher (TUI-direct / external-input publish path).
+    #[allow(dead_code)]
     Watcher,
     /// The recovery engine (post-restart adoption of an orphaned panel).
     Recovery,
     /// The standby relay (channel with no live owner yet).
+    #[allow(dead_code)]
     Standby,
     /// A session-bound relay sink.
+    #[allow(dead_code)]
     SessionBound,
 }
 
@@ -185,28 +191,36 @@ enum PanelMsg {
     /// Idempotent registration: the ledger learns the turn exists (and its
     /// owner) before any create/stream/finalize. A second register for a live
     /// key only refreshes the owner; it never resurrects a terminal entry.
+    // #3034: EPIC #3078 mutating command variants — constructed only by the
+    // staged send methods (currently READ-ONLY shadow-parity phase). Kept with
+    // that actor surface.
+    #[allow(dead_code)]
     Register {
         key: TurnKey,
         provider: ProviderKind,
         owner: PanelOwnerKind,
     },
+    #[allow(dead_code)]
     EnsureCreated {
         key: TurnKey,
         req: PanelCreateRequest,
         shared: Arc<SharedData>,
         ack: oneshot::Sender<Option<MessageId>>,
     },
+    #[allow(dead_code)]
     StreamUpdate {
         key: TurnKey,
         panel_text: String,
         shared: Arc<SharedData>,
     },
+    #[allow(dead_code)]
     Finalize {
         key: TurnKey,
         terminal_text: Option<String>,
         shared: Arc<SharedData>,
         ack: oneshot::Sender<PanelCommitOutcome>,
     },
+    #[allow(dead_code)]
     Reclaim {
         key: TurnKey,
         reason: &'static str,
@@ -215,6 +229,7 @@ enum PanelMsg {
     },
     /// Compare-and-clear: clear the ledger id ONLY if it currently equals
     /// `msg_id`. The stale-cleanup TOCTOU guard.
+    #[allow(dead_code)]
     ClearIfCurrent {
         key: TurnKey,
         msg_id: MessageId,
@@ -285,6 +300,11 @@ impl StatusPanelController {
     /// Idempotent registration. A second `register` for a live key only
     /// refreshes the owner; it never resurrects a terminal entry. Mirrors
     /// `TurnFinalizer::register_start`.
+    // #3034: EPIC #3078 controller command surface — still in READ-ONLY shadow-
+    // parity phase; the mutating send methods (register/ensure_created/
+    // stream_update/finalize/reclaim/clear_if_current) and their `PanelMsg`
+    // variants are wired-but-not-yet-dispatched. Kept as the staged actor API.
+    #[allow(dead_code)]
     pub(in crate::services::discord) fn register(
         &self,
         key: TurnKey,
@@ -302,6 +322,7 @@ impl StatusPanelController {
     /// the durable mirror via #3077 `bind_status_panel`) if not. Returns the
     /// current panel id. Idempotent: a second call on a live entry returns the
     /// already-bound id without a duplicate send.
+    #[allow(dead_code)] // #3034: EPIC #3078 staged actor command, see note above.
     pub(in crate::services::discord) async fn ensure_created(
         &self,
         key: TurnKey,
@@ -326,6 +347,7 @@ impl StatusPanelController {
 
     /// Stream a new rendering into the live panel. Coalesced: a text identical
     /// to the last-rendered text is dropped. A no-op on a terminal entry.
+    #[allow(dead_code)] // #3034: EPIC #3078 staged actor command, see note above.
     pub(in crate::services::discord) fn stream_update(
         &self,
         key: TurnKey,
@@ -341,6 +363,7 @@ impl StatusPanelController {
 
     /// Finalize the panel to its terminal rendering, exactly once. A finalize
     /// after a finalize/reclaim returns `AlreadyTerminal`.
+    #[allow(dead_code)] // #3034: EPIC #3078 staged actor command, see note above.
     pub(in crate::services::discord) async fn finalize(
         &self,
         key: TurnKey,
@@ -367,6 +390,7 @@ impl StatusPanelController {
     /// idempotent with `finalize`. A reclaim after a finalize/reclaim returns
     /// `AlreadyTerminal`. Clears the durable mirror via #3077
     /// `clear_status_panel_if_current`.
+    #[allow(dead_code)] // #3034: EPIC #3078 staged actor command, see note above.
     pub(in crate::services::discord) async fn reclaim(
         &self,
         key: TurnKey,
@@ -392,6 +416,7 @@ impl StatusPanelController {
     /// Compare-and-clear the ledger panel id, ONLY when it currently equals
     /// `msg_id`. The stale-cleanup TOCTOU guard: an actor that loaded an older
     /// snapshot cannot wipe a panel a newer turn already rebound.
+    #[allow(dead_code)] // #3034: EPIC #3078 staged actor command, see note above.
     pub(in crate::services::discord) fn clear_if_current(
         &self,
         key: TurnKey,

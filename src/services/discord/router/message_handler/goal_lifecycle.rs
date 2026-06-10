@@ -93,10 +93,6 @@ pub(super) fn rewrite_fresh_goal_prompt(text: &str) -> String {
     }
 }
 
-pub(super) fn is_codex_goal_start_request(text: &str) -> bool {
-    !matches!(classify_codex_goal_command(text), GoalCommandKind::NotGoal)
-}
-
 pub(super) fn codex_goal_lifecycle_notice(
     command: GoalLifecycleCommand,
     active_turn: bool,
