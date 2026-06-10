@@ -5715,3 +5715,206 @@ mod idle_queue_background_supersede_tests {
         );
     }
 }
+
+// #3038 S0 — characterization tests for the queued-placeholder cluster (cluster
+// C) method surface. These fix the observable behaviour (map round-trips,
+// sidecar mirroring, ownership recheck branches, and per-channel persist-lock
+// identity) BEFORE the field group is extracted into `QueuedPlaceholderState`,
+// so the same tests passing unchanged after the move is the equivalence proof.
+// The tests call only the method surface (never the fields directly).
+#[cfg(test)]
+mod queued_placeholder_cluster_characterization_tests {
+    use super::*;
+
+    const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+
+    struct EnvGuard;
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+        }
+    }
+
+    fn sidecar_path(
+        root: &std::path::Path,
+        subdir: &str,
+        channel_id: ChannelId,
+    ) -> std::path::PathBuf {
+        // Mirrors queued_placeholders_store's
+        // `<AGENTDESK_ROOT>/runtime/<subdir>/<provider>/<token_hash>/<channel>.json`
+        // layout for the values `make_shared_data_for_tests` constructs
+        // (`ProviderKind::Claude`, `token_hash == "test-token-hash"`).
+        root.join("runtime")
+            .join(subdir)
+            .join("claude")
+            .join("test-token-hash")
+            .join(format!("{}.json", channel_id.get()))
+    }
+
+    // Build a current-thread tokio runtime so the async cluster methods can be
+    // driven from a synchronous `#[test]`. Keeping the test fn synchronous means
+    // the `test_support` env lock (a `std::sync::Mutex` guard) is never held
+    // across an `.await` in this scope, so it needs no
+    // `#[allow(clippy::await_holding_lock)]` and does not move the ratchet.
+    fn test_rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn insert_remove_queued_placeholder_round_trip_with_sidecar() {
+        // #3167 B3: serialize the process-global `AGENTDESK_ROOT_DIR` mutation via
+        // the single crate-wide `test_support` lock (no local per-module Mutex).
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        let shared = make_shared_data_for_tests();
+        let channel_id = ChannelId::new(3_038_100);
+        let user_msg_id = MessageId::new(11);
+        let placeholder_msg_id = MessageId::new(22);
+
+        let path = sidecar_path(tmp.path(), "discord_queued_placeholders", channel_id);
+        let removed = test_rt().block_on(async {
+            // The locked insert variant runs under a caller-held persist lock.
+            let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
+            {
+                let _guard = persist_lock.lock().await;
+                shared.insert_queued_placeholder_locked(
+                    channel_id,
+                    user_msg_id,
+                    placeholder_msg_id,
+                );
+            }
+
+            // Memory: the mapping is owned by exactly the placeholder we inserted.
+            assert!(shared.queued_placeholder_still_owned(
+                channel_id,
+                user_msg_id,
+                placeholder_msg_id
+            ));
+
+            // Sidecar: the channel file mirrors the mapping.
+            let contents = std::fs::read_to_string(&path).expect("sidecar must exist after insert");
+            assert!(contents.contains("\"user_message_id\": 11"));
+            assert!(contents.contains("\"placeholder_message_id\": 22"));
+
+            // Remove (write-through) returns the placeholder id and clears memory + sidecar.
+            shared
+                .remove_queued_placeholder(channel_id, user_msg_id)
+                .await
+        });
+        assert_eq!(removed, Some(placeholder_msg_id));
+        assert!(!shared.queued_placeholder_still_owned(
+            channel_id,
+            user_msg_id,
+            placeholder_msg_id
+        ));
+        assert!(!path.exists(), "empty channel sidecar must be removed");
+    }
+
+    #[test]
+    fn queued_placeholder_still_owned_branches() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        let shared = make_shared_data_for_tests();
+        let channel_id = ChannelId::new(3_038_200);
+        let user_msg_id = MessageId::new(31);
+        let placeholder_msg_id = MessageId::new(32);
+        let other_placeholder = MessageId::new(33);
+
+        // Absent mapping → not owned.
+        assert!(!shared.queued_placeholder_still_owned(
+            channel_id,
+            user_msg_id,
+            placeholder_msg_id
+        ));
+
+        test_rt().block_on(async {
+            let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
+            let _guard = persist_lock.lock().await;
+            shared.insert_queued_placeholder_locked(channel_id, user_msg_id, placeholder_msg_id);
+        });
+
+        // Owned by our placeholder, not by a different one.
+        assert!(shared.queued_placeholder_still_owned(channel_id, user_msg_id, placeholder_msg_id));
+        assert!(!shared.queued_placeholder_still_owned(channel_id, user_msg_id, other_placeholder));
+    }
+
+    #[test]
+    fn queue_exit_placeholder_clears_round_trip_with_sidecar() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        let shared = make_shared_data_for_tests();
+        let channel_id = ChannelId::new(3_038_300);
+        let user_msg_id = MessageId::new(41);
+        let placeholder_msg_id = MessageId::new(42);
+
+        let path = sidecar_path(
+            tmp.path(),
+            "discord_queue_exit_placeholder_clears",
+            channel_id,
+        );
+        test_rt().block_on(async {
+            shared
+                .add_pending_queue_exit_placeholder_clear_one(
+                    channel_id,
+                    user_msg_id,
+                    placeholder_msg_id,
+                )
+                .await;
+
+            let pending = shared.pending_queue_exit_placeholder_clears();
+            assert_eq!(pending, vec![(channel_id, user_msg_id, placeholder_msg_id)]);
+
+            let contents = std::fs::read_to_string(&path).expect("clears sidecar must exist");
+            assert!(contents.contains("\"user_message_id\": 41"));
+            assert!(contents.contains("\"placeholder_message_id\": 42"));
+
+            shared
+                .remove_pending_queue_exit_placeholder_clears(
+                    channel_id,
+                    &[(user_msg_id, placeholder_msg_id)],
+                )
+                .await;
+        });
+
+        assert!(shared.pending_queue_exit_placeholder_clears().is_empty());
+        assert!(!path.exists(), "empty clears sidecar must be removed");
+    }
+
+    #[test]
+    fn queued_placeholders_persist_lock_identity() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        let shared = make_shared_data_for_tests();
+        let channel_a = ChannelId::new(3_038_400);
+        let channel_b = ChannelId::new(3_038_401);
+
+        let lock_a1 = shared.queued_placeholders_persist_lock(channel_a);
+        let lock_a2 = shared.queued_placeholders_persist_lock(channel_a);
+        let lock_b = shared.queued_placeholders_persist_lock(channel_b);
+
+        assert!(
+            Arc::ptr_eq(&lock_a1, &lock_a2),
+            "same channel must reuse the same lock"
+        );
+        assert!(
+            !Arc::ptr_eq(&lock_a1, &lock_b),
+            "different channels must get distinct locks"
+        );
+    }
+}
