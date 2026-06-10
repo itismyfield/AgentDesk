@@ -575,9 +575,13 @@
     mailbox/inflight probe, and the `post_recheck_action` seam that skips/undoes
     a recap post when a turn raced the compose window. Split compose vs
     lifecycle/clear submodules before adding behavior).
-  - `src/services/codex_tmux_wrapper.rs` (1215 lines; Codex tmux wrapper JSON
+  - `src/services/codex_tmux_wrapper.rs` (1280 lines; Codex tmux wrapper JSON
     event parser and relay bridge for native Codex session events — bugfix only
-    outside an extraction plan).
+    outside an extraction plan; +65 from #3275: capture per-call
+    `token_count.info.last_token_usage` and re-emit it as a Claude-compatible
+    nested `usage` on the success result frame so watcher-owned codex turns
+    persist token telemetry — never the session-cumulative
+    `info.total_token_usage`).
   - `src/services/tui_prompt_dedupe.rs` (1294 lines; shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
     outside an extraction plan; +88 from #3041 P1-4 codex: a per-record

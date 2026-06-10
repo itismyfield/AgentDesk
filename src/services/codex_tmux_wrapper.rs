@@ -555,10 +555,35 @@ fn run_turn(
     Ok(())
 }
 
+/// #3275: one Codex API call's token usage, parsed from `token_count`
+/// (`info.last_token_usage`) or a terminal event's own per-turn `usage`.
+#[derive(Clone, Copy)]
+struct CodexCallTokenUsage {
+    input_tokens: u64,
+    cached_input_tokens: u64,
+    output_tokens: u64,
+}
+
+impl CodexCallTokenUsage {
+    fn from_value(value: &serde_json::Value) -> Option<Self> {
+        let field = |key: &str| value.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+        value.is_object().then(|| Self {
+            input_tokens: field("input_tokens"),
+            cached_input_tokens: field("cached_input_tokens"),
+            output_tokens: field("output_tokens"),
+        })
+    }
+}
+
 #[derive(Default)]
 struct CodexWrapperTurnState {
     final_text: String,
     saw_turn_completed: bool,
+    // #3275: per-call context occupancy from the latest `token_count` event
+    // (`info.last_token_usage` only — never the session-cumulative
+    // `info.total_token_usage`), re-emitted as the result frame's nested
+    // Claude-compatible `usage` so watcher/bridge token persistence fires.
+    last_token_usage: Option<CodexCallTokenUsage>,
     // Diagnostic-only count of every unrecognized event (top-level / event_msg /
     // response_item), benign or not, used for the ignored-event log.
     unknown_event_count: u64,
@@ -899,7 +924,11 @@ fn handle_event_msg(
     match payload.get("type").and_then(|v| v.as_str()).unwrap_or("") {
         "task_complete" => emit_success_result(output, payload, thread_id, state, start),
         "agent_reasoning" => emit_json_line(output, assistant_redacted_thinking_event()),
-        "token_count" | "composer_ready" => Ok(()),
+        "token_count" => {
+            capture_last_token_usage(payload, state);
+            Ok(())
+        }
+        "composer_ready" => Ok(()),
         event_type => record_unknown_codex_event(output, state, event_type, payload),
     }
 }
@@ -947,20 +976,56 @@ fn emit_success_result(
         .get("output_tokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    emit_json_line(
-        output,
-        serde_json::json!({
-            "type": "result",
-            "subtype": "success",
-            "result": state.final_text,
-            "session_id": thread_id.as_deref(),
-            "duration_ms": start.elapsed().as_millis() as u64,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-        }),
-    )?;
+    let mut result = serde_json::json!({
+        "type": "result",
+        "subtype": "success",
+        "result": state.final_text,
+        "session_id": thread_id.as_deref(),
+        "duration_ms": start.elapsed().as_millis() as u64,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    });
+    // #3275: the shared result-frame token parsers (watcher
+    // `process_watcher_lines`, bridge/recovery `process_stream_line`) read only
+    // a nested Claude-shaped `usage` object, so emitting tokens solely as the
+    // top-level fields above left watcher-owned codex turns with zero persisted
+    // telemetry and an idle recap of "context unknown". Re-emit the per-call
+    // occupancy via the receipt.rs subset convention (`input - cached` +
+    // `cache_read = cached`, so `context_occupancy_input_tokens()` reconstructs
+    // the original codex input). Sources, in order: the captured
+    // `token_count.info.last_token_usage`, then the terminal event's own
+    // per-turn `usage` (codex exec protocol). The session-cumulative
+    // `info.total_token_usage` is never used here, and with no usable source
+    // the nested object is omitted entirely (fail-safe: recap stays Unknown
+    // rather than fabricated). Top-level fields keep their legacy chain.
+    let call_usage = state
+        .last_token_usage
+        .or_else(|| json.get("usage").and_then(CodexCallTokenUsage::from_value));
+    if let Some(call) = call_usage.filter(|call| call.input_tokens > 0) {
+        result["usage"] = serde_json::json!({
+            "input_tokens": call.input_tokens.saturating_sub(call.cached_input_tokens),
+            "cache_read_input_tokens": call.cached_input_tokens,
+            "output_tokens": call.output_tokens,
+        });
+    }
+    emit_json_line(output, result)?;
     state.saw_turn_completed = true;
     Ok(())
+}
+
+/// #3275: record the per-call context occupancy from a `token_count` event.
+/// Only `info.last_token_usage` qualifies; the sibling `info.total_token_usage`
+/// is the session-cumulative count (8.3M in the issue report) and persisting it
+/// would render a wildly inflated context % in the idle recap. Absent payloads
+/// leave prior state untouched.
+fn capture_last_token_usage(payload: &serde_json::Value, state: &mut CodexWrapperTurnState) {
+    if let Some(usage) = payload
+        .get("info")
+        .and_then(|info| info.get("last_token_usage"))
+        .and_then(CodexCallTokenUsage::from_value)
+    {
+        state.last_token_usage = Some(usage);
+    }
 }
 
 /// Decide whether a turn is finalizing in a fail-open schema-drift state.
@@ -1288,6 +1353,203 @@ mod modern_event_tests {
         assert_eq!(lines[1]["result"], "legacy final");
         assert_eq!(lines[1]["input_tokens"], 10);
         assert_eq!(lines[1]["output_tokens"], 3);
+    }
+
+    // #3275: the result frame must carry a Claude-compatible nested `usage`
+    // built from the per-call `token_count.info.last_token_usage` (subset
+    // convention: input - cached / cache_read = cached), because the shared
+    // result-frame token parsers ignore the top-level fields. Top-level fields
+    // keep their legacy chain (no usage/info on task_complete → 0).
+    #[test]
+    fn token_count_last_usage_feeds_nested_result_usage() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut thread_id = Some("thread-tokens".to_string());
+        let mut state = CodexWrapperTurnState::default();
+        let start = std::time::Instant::now();
+
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 1000,
+                            "cached_input_tokens": 600,
+                            "output_tokens": 50
+                        }
+                    }
+                }
+            }),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "last_agent_message": "tokens final"
+                }
+            }),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+
+        let lines = read_jsonl(&path);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["type"], "result");
+        assert_eq!(lines[0]["subtype"], "success");
+        assert_eq!(lines[0]["usage"]["input_tokens"], 400);
+        assert_eq!(lines[0]["usage"]["cache_read_input_tokens"], 600);
+        assert_eq!(lines[0]["usage"]["output_tokens"], 50);
+        assert_eq!(lines[0]["input_tokens"], 0);
+        assert_eq!(lines[0]["output_tokens"], 0);
+    }
+
+    // #3275: when the terminal event also carries the session-cumulative
+    // `info.total_token_usage` (8.3M in the issue), the nested usage must stay
+    // per-call (last_token_usage) so the persisted context % is not inflated,
+    // while the top-level fields keep the legacy total chain unchanged.
+    #[test]
+    fn nested_result_usage_prefers_last_token_usage_over_cumulative_total() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut thread_id = Some("thread-total".to_string());
+        let mut state = CodexWrapperTurnState::default();
+        let start = std::time::Instant::now();
+
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 1000,
+                            "cached_input_tokens": 600,
+                            "output_tokens": 50
+                        },
+                        "total_token_usage": {
+                            "input_tokens": 8_325_687_u64,
+                            "cached_input_tokens": 8_000_000_u64,
+                            "output_tokens": 41_600
+                        }
+                    }
+                }
+            }),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "last_agent_message": "total final",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 8_325_687_u64,
+                            "output_tokens": 41_600
+                        }
+                    }
+                }
+            }),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+
+        let lines = read_jsonl(&path);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["type"], "result");
+        assert_eq!(lines[0]["usage"]["input_tokens"], 400);
+        assert_eq!(lines[0]["usage"]["cache_read_input_tokens"], 600);
+        assert_eq!(lines[0]["usage"]["output_tokens"], 50);
+        assert_eq!(lines[0]["input_tokens"], 8_325_687_u64);
+        assert_eq!(lines[0]["output_tokens"], 41_600);
+    }
+
+    // #3275: codex exec protocol — no token_count events, but `turn.completed`
+    // carries a per-turn usage object. It must map through the same subset
+    // convention while the top-level fields keep the legacy values.
+    #[test]
+    fn turn_completed_usage_maps_to_nested_result_usage() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut thread_id = Some("thread-exec".to_string());
+        let mut state = CodexWrapperTurnState::default();
+
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "turn.completed",
+                "last_agent_message": "exec final",
+                "usage": {"input_tokens": 10, "cached_input_tokens": 4, "output_tokens": 3}
+            }),
+            &mut thread_id,
+            &mut state,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+        let lines = read_jsonl(&path);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["type"], "result");
+        assert_eq!(lines[0]["usage"]["input_tokens"], 6);
+        assert_eq!(lines[0]["usage"]["cache_read_input_tokens"], 4);
+        assert_eq!(lines[0]["usage"]["output_tokens"], 3);
+        assert_eq!(lines[0]["input_tokens"], 10);
+        assert_eq!(lines[0]["output_tokens"], 3);
+    }
+
+    // #3275 fail-safe: with no token source at all the nested usage must be
+    // omitted (recap stays Unknown rather than fabricating values).
+    #[test]
+    fn result_omits_nested_usage_without_any_token_source() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut thread_id = Some("thread-none".to_string());
+        let mut state = CodexWrapperTurnState::default();
+
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "last_agent_message": "no tokens final"
+                }
+            }),
+            &mut thread_id,
+            &mut state,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+        let lines = read_jsonl(&path);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["type"], "result");
+        assert_eq!(lines[0]["subtype"], "success");
+        assert!(lines[0].get("usage").is_none());
+        assert_eq!(lines[0]["input_tokens"], 0);
+        assert_eq!(lines[0]["output_tokens"], 0);
     }
 
     #[test]

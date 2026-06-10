@@ -754,6 +754,46 @@ mod tests {
         assert!(full_response.is_empty());
     }
 
+    /// #3275 cross-module contract: the codex tmux wrapper emits its result
+    /// frame with tokens as top-level fields plus a Claude-compatible nested
+    /// `usage` (receipt.rs subset convention). This is the exact frame shape
+    /// `emit_success_result` produces; the watcher's result-usage fallback
+    /// must adopt it so `stream_line_state_token_usage` turns Some and
+    /// watcher-owned completion persists session/turn token telemetry
+    /// (idle recap context source) instead of falling to "context unknown".
+    #[test]
+    fn process_watcher_lines_adopts_codex_wrapper_result_usage() {
+        let mut buffer = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"codex reply\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"codex reply\",\"session_id\":\"sess-cdx\",\"duration_ms\":12,\"input_tokens\":8325687,\"output_tokens\":41600,\"usage\":{\"input_tokens\":400,\"cache_read_input_tokens\":600,\"output_tokens\":50}}\n",
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        // Codex wrapper assistant frames never carry per-message usage, so the
+        // result-frame fallback must engage.
+        assert!(!state.saw_per_message_usage);
+        assert_eq!(state.accum_input_tokens, 400);
+        assert_eq!(state.accum_cache_read_tokens, 600);
+        assert_eq!(state.accum_cache_create_tokens, 0);
+        assert_eq!(state.accum_output_tokens, 50);
+        // Occupancy reconstruction: input + cache_read == the original codex
+        // last_token_usage.input_tokens — NOT the cumulative top-level 8.3M.
+        let usage = crate::db::turns::TurnTokenUsage {
+            input_tokens: state.accum_input_tokens,
+            cache_create_tokens: state.accum_cache_create_tokens,
+            cache_read_tokens: state.accum_cache_read_tokens,
+            output_tokens: state.accum_output_tokens,
+        };
+        assert_eq!(usage.context_occupancy_input_tokens(), 1000);
+    }
+
     #[test]
     fn process_watcher_lines_strips_tui_no_response_before_stop_hook_summary() {
         let mut buffer = concat!(
