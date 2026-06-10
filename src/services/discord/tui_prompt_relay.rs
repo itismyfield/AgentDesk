@@ -1643,6 +1643,7 @@ fn defer_synthetic_turn_start(
         record,
         pending_start_view_fn(),
         pending_start_claim_fn(),
+        pending_start_abort_cleanup_fn(),
     );
 }
 
@@ -1815,6 +1816,58 @@ fn pending_start_claim_fn() -> super::tui_direct_pending_start::ClaimFn {
     })
 }
 
+/// #3282: the worker's terminal-ABORT reaction cleanup. When the backstop
+/// escalation budget is exhausted (`backstop_abort_foreign_inflight_live`) no
+/// claim ever saves an inflight for this anchor, so the normal watcher/recovery
+/// `⏳ → ✅` completion never fires — without this cleanup the anchor's `⏳`
+/// lingers forever (observed live on msg 1514080986529533972). Remove the `⏳`
+/// and swap in a `⚠` failure marker so the abort is visible rather than a
+/// silent eternal hourglass (precedent: the watcher's auth-expired `⏳ → ⚠`
+/// swap in tmux_watcher.rs).
+///
+/// Bot identity (#3164 invariant): the `⏳` was added with THIS relay's
+/// `shared.serenity_http_or_token_fallback()` (the provider/command bot —
+/// see the `command_http` add in `relay_observed_prompt`), and
+/// `remove_reaction_raw` only removes `@me`'s reaction. Resolving the SAME
+/// source here guarantees the identical `@me` identity, so the removal targets
+/// exactly the reaction the add created. On unavailability we skip with a
+/// warning — removing with a different bot identity would silently no-op.
+fn pending_start_abort_cleanup_fn() -> super::tui_direct_pending_start::AbortCleanupFn {
+    Box::new(|shared, record| {
+        Box::pin(async move {
+            // Defensive: a corrupted durable record could carry a zero anchor id;
+            // `MessageId::new(0)` panics (mirrors the watcher's user_msg_id != 0
+            // guard before its reaction swaps).
+            if record.anchor_message_id == 0 {
+                return;
+            }
+            let Some(http) = shared.serenity_http_or_token_fallback() else {
+                tracing::warn!(
+                    provider = %record.provider,
+                    channel_id = record.channel_id,
+                    tmux_session_name = %record.tmux_session_name,
+                    anchor_message_id = record.anchor_message_id,
+                    "tui_direct_pending_start: skipping anchor ⏳ abort cleanup; provider serenity \
+                     http unavailable (removing with a different bot identity would no-op — #3164)"
+                );
+                return;
+            };
+            let channel_id = ChannelId::new(record.channel_id);
+            let anchor_message_id = MessageId::new(record.anchor_message_id);
+            super::formatting::remove_reaction_raw(&http, channel_id, anchor_message_id, '⏳')
+                .await;
+            super::formatting::add_reaction_raw(&http, channel_id, anchor_message_id, '⚠').await;
+            tracing::info!(
+                provider = %record.provider,
+                channel_id = record.channel_id,
+                tmux_session_name = %record.tmux_session_name,
+                anchor_message_id = record.anchor_message_id,
+                "tui_direct_pending_start: removed the anchor ⏳ and marked ⚠ after the synthetic turn-start ABORT (#3282)"
+            );
+        })
+    })
+}
+
 fn parse_external_input_relay_owner(value: &str) -> ExternalInputRelayOwner {
     match value {
         "bridge_adapter" => ExternalInputRelayOwner::BridgeAdapter,
@@ -1852,6 +1905,7 @@ fn restore_pending_starts(shared: &Arc<SharedData>, provider: &ProviderKind) {
             record,
             pending_start_view_fn(),
             pending_start_claim_fn(),
+            pending_start_abort_cleanup_fn(),
         );
     }
 }
