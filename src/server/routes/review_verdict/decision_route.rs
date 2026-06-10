@@ -974,6 +974,29 @@ pub(super) async fn claim_review_decision_side_effects_resume_pg_first(
     Ok(rows == 1)
 }
 
+/// #3038 route_srp: named repo lookup extracted verbatim from the #229
+/// safety-net block in `decision_route_dispute_re_review`. True when the card
+/// has any live (`pending`/`dispatched`) `review` or `review-decision`
+/// dispatch; `false` on query failure or when no postgres pool is wired in —
+/// identical to the original inline expression.
+async fn has_pending_reviewish_dispatch_pg_first(state: &AppState, card_id: &str) -> bool {
+    if let Some(pool) = state.pg_pool_ref() {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT COUNT(*) > 0
+                         FROM task_dispatches
+                         WHERE kanban_card_id = $1
+                           AND dispatch_type IN ('review', 'review-decision')
+                           AND status IN ('pending', 'dispatched')",
+        )
+        .bind(card_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false)
+    } else {
+        false
+    }
+}
+
 async fn consume_pending_review_decision_or_response(
     state: &AppState,
     card_id: &str,
@@ -4024,21 +4047,8 @@ async fn decision_route_dispute_re_review(
     // due to lock contention or JS error), re-fire with blocking lock.
     {
         let card_ctx = load_review_decision_card_context_pg_first(state, &body.card_id).await;
-        let has_review_dispatch = if let Some(pool) = state.pg_pool_ref() {
-            sqlx::query_scalar::<_, bool>(
-                "SELECT COUNT(*) > 0
-                         FROM task_dispatches
-                         WHERE kanban_card_id = $1
-                           AND dispatch_type IN ('review', 'review-decision')
-                           AND status IN ('pending', 'dispatched')",
-            )
-            .bind(&body.card_id)
-            .fetch_one(pool)
-            .await
-            .unwrap_or(false)
-        } else {
-            false
-        };
+        let has_review_dispatch =
+            has_pending_reviewish_dispatch_pg_first(state, &body.card_id).await;
         let effective_pipeline = resolve_effective_pipeline_pg_first(
             state,
             card_ctx.repo_id.as_deref(),
