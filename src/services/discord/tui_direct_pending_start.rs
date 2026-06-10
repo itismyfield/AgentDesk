@@ -576,6 +576,11 @@ async fn run_worker(
                 claim_attempts,
                 "tui_direct_pending_start: deferred synthetic turn-start claimed after prior turn finalized"
             );
+            // #3303: record the own-identity DeferredClaim marker BEFORE the
+            // durable record delete (a crash between the two re-claims on
+            // restart and re-records idempotently — the marker stem
+            // overwrites). Fail-open: nothing in there can fail the claim.
+            record_deferred_claim_marker_if_watcher_owned(&record);
             // Delete only AFTER a successful claim (P1-2). A crash between the
             // inflight save and this delete is healed on restart: the worker
             // re-runs and the claim adopts the matching anchor's existing
@@ -612,6 +617,113 @@ async fn run_worker(
         );
         tokio::time::sleep(PENDING_START_CLAIM_RETRY_BACKOFF).await;
         // Loop back: re-confirm the prior turn is still finalized, then re-claim.
+    }
+}
+
+/// #3303 — after a SUCCESSFUL deferred claim, record a
+/// [`super::tui_direct_abort_marker`] marker of kind `DeferredClaim` pinned to
+/// the worker's OWN synthetic turn identity (`user_msg_id == anchor`, the
+/// freshly-claimed row's `started_at`).
+///
+/// Why: the claim hands the turn to the watcher, but the observed #3303
+/// failure modes (the claim seeded the relay cursor at EOF after a prior
+/// drain already consumed the response bytes, or the relay fails and a
+/// watchdog clears the row) mean NO terminal-commit pass ever flips the
+/// anchor's `⏳ → ✅` — an eternal hourglass with no reconcile owner. With the
+/// marker, the watcher chokepoint's drain covers it on the own turn's commit
+/// (`✅`, idempotent next to the normal completion), and the sweep bounds the
+/// never-committed case with the TTL `⚠`.
+///
+/// Guards (in order):
+/// * **SC3 scope gate** — record ONLY when the post-claim lease says the
+///   `TmuxWatcher` owns the relay: a BridgeAdapter-owned turn finalizes via
+///   the bridge WITHOUT the watcher chokepoint tombstone, so a marker would
+///   contradict its normal completion with a TTL `⚠`.
+/// * **Own-row guard** — the inflight row re-read at the record instant must
+///   BE this claim's synthetic turn (anchor + tmux session match); its
+///   `started_at` is the identity the marker pins (#3303 SC1: never the
+///   foreign prior turn — that tombstone is already durable at claim time and
+///   would false-`✅` instantly).
+/// * **Fail-open** — every miss above (and a failed marker write) only warns:
+///   the claim, the durable-record delete, and the turn proceed exactly as
+///   before #3303.
+fn record_deferred_claim_marker_if_watcher_owned(record: &TuiDirectPendingStart) {
+    if record.anchor_message_id == 0 {
+        return; // I5: a zero anchor id could never be reconciled (record() rejects it too)
+    }
+    let lease = crate::services::tui_prompt_dedupe::external_input_relay_lease(
+        &record.provider,
+        &record.tmux_session_name,
+        record.channel_id,
+    );
+    let relay_owner = lease.map(|lease| lease.relay_owner);
+    if relay_owner != Some(crate::services::tui_prompt_dedupe::ExternalInputRelayOwner::TmuxWatcher)
+    {
+        tracing::debug!(
+            provider = %record.provider,
+            channel_id = record.channel_id,
+            tmux_session_name = %record.tmux_session_name,
+            anchor_message_id = record.anchor_message_id,
+            relay_owner = ?relay_owner,
+            "tui_direct_pending_start: deferred-claim marker skipped — turn is not watcher-owned, the watcher chokepoint will never tombstone it (#3303 SC3)"
+        );
+        return;
+    }
+    let Some(provider) = crate::services::provider::ProviderKind::from_str(&record.provider) else {
+        tracing::warn!(
+            provider = %record.provider,
+            channel_id = record.channel_id,
+            anchor_message_id = record.anchor_message_id,
+            "tui_direct_pending_start: unparseable provider; deferred-claim marker skipped (fail-open, #3303)"
+        );
+        return;
+    };
+    let Some(row) = super::inflight::load_inflight_state(&provider, record.channel_id) else {
+        tracing::warn!(
+            provider = %record.provider,
+            channel_id = record.channel_id,
+            anchor_message_id = record.anchor_message_id,
+            "tui_direct_pending_start: no inflight row at the record instant after a successful claim; deferred-claim marker skipped (fail-open, #3303)"
+        );
+        return;
+    };
+    let row_is_own_turn = row.user_msg_id == record.anchor_message_id
+        && row.tmux_session_name.as_deref() == Some(record.tmux_session_name.as_str());
+    if !row_is_own_turn {
+        tracing::warn!(
+            provider = %record.provider,
+            channel_id = record.channel_id,
+            tmux_session_name = %record.tmux_session_name,
+            anchor_message_id = record.anchor_message_id,
+            row_user_msg_id = row.user_msg_id,
+            row_tmux_session_name = ?row.tmux_session_name,
+            "tui_direct_pending_start: inflight row is not this claim's own synthetic turn; deferred-claim marker skipped (fail-open, #3303)"
+        );
+        return;
+    }
+    match super::tui_direct_abort_marker::record_for_deferred_claim(
+        record.provider.clone(),
+        record.channel_id,
+        record.anchor_message_id,
+        record.tmux_session_name.clone(),
+        (record.anchor_message_id, row.started_at),
+    ) {
+        Ok(marker) => tracing::info!(
+            provider = %record.provider,
+            channel_id = record.channel_id,
+            tmux_session_name = %record.tmux_session_name,
+            anchor_message_id = record.anchor_message_id,
+            own_started_at = ?marker.foreign_started_at,
+            tombstone_covered = marker.covered_at_ms.is_some(),
+            "tui_direct_pending_start: deferred-claim marker recorded pinning the OWN synthetic turn — its commit drains ⏳ → ✅, a never-committed turn converges to the bounded sweep ⚠ (#3303)"
+        ),
+        Err(error) => tracing::warn!(
+            provider = %record.provider,
+            channel_id = record.channel_id,
+            anchor_message_id = record.anchor_message_id,
+            error = %error,
+            "tui_direct_pending_start: failed to persist the deferred-claim marker; claim proceeds without it (fail-open — pre-#3303 behavior, the anchor ⏳ may linger) (#3303)"
+        ),
     }
 }
 
@@ -1334,6 +1446,277 @@ mod tests {
         assert_eq!(restored_first.prompt_text, first.prompt_text);
         assert_eq!(restored_first.channel_id, 50);
 
+        reset_present_for_tests();
+    }
+
+    // ====================================================================
+    // #3303 — DeferredClaim marker hook on the SUCCESSFUL claim path.
+    // Each test drives the REAL `run_worker` on a current-thread runtime via
+    // `block_on` on THIS thread (so the marker store's thread-local test root
+    // resolves inside the worker, and no lock guard is held across an await
+    // point — the await_holding_lock ratchet stays frozen), against a REAL
+    // on-disk inflight row under a temp AGENTDESK_ROOT_DIR and a REAL
+    // in-memory relay lease.
+    // ====================================================================
+
+    /// RAII rig: AGENTDESK_ROOT_DIR → tempdir (real inflight store) + the
+    /// marker store's thread-local root override. Construct ONLY while
+    /// holding `worker_test_lock()` AND the crate env lock (in that order —
+    /// the `durable_restore_roundtrip_loads_fifo_order` convention).
+    struct DeferredClaimMarkerRig {
+        _temp: tempfile::TempDir,
+        prev_env: Option<std::ffi::OsString>,
+    }
+
+    impl DeferredClaimMarkerRig {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let prev_env = std::env::var_os("AGENTDESK_ROOT_DIR");
+            unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+            super::super::tui_direct_abort_marker::set_test_root_override(Some(
+                temp.path().to_path_buf(),
+            ));
+            Self {
+                _temp: temp,
+                prev_env,
+            }
+        }
+    }
+
+    impl Drop for DeferredClaimMarkerRig {
+        fn drop(&mut self) {
+            super::super::tui_direct_abort_marker::set_test_root_override(None);
+            match self.prev_env.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
+    fn finalized_view() -> ViewFn {
+        Box::new(|_shared, _record| Box::pin(async move { Some(obs(base_view())) }))
+    }
+
+    fn claim_succeeds() -> ClaimFn {
+        Box::new(|_shared, _record| Box::pin(async move { true }))
+    }
+
+    fn record_lease(
+        provider: &str,
+        tmux: &str,
+        channel_id: u64,
+        owner: crate::services::tui_prompt_dedupe::ExternalInputRelayOwner,
+    ) {
+        let mut lease = crate::services::tui_prompt_dedupe::ExternalInputRelayLease::unassigned(
+            Some(channel_id),
+        );
+        lease.relay_owner = owner;
+        let _ = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+            provider, tmux, lease,
+        );
+    }
+
+    /// Save the freshly-claimed OWN synthetic inflight row (the state the
+    /// claim leaves behind: `user_msg_id == anchor`). Returns its
+    /// `started_at` — the identity component the marker must pin.
+    fn save_own_inflight_row(channel_id: u64, anchor: u64, tmux: &str) -> String {
+        let state = super::super::inflight::InflightTurnState::new(
+            crate::services::provider::ProviderKind::Claude,
+            channel_id,
+            None,
+            0,
+            anchor,
+            0,
+            "/loop tick".to_string(),
+            None,
+            Some(tmux.to_string()),
+            None,
+            None,
+            0,
+        );
+        super::super::inflight::save_inflight_state(&state).unwrap();
+        state.started_at
+    }
+
+    fn current_thread_rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// #3303 R1 (the bug): a SUCCESSFUL watcher-owned deferred claim must
+    /// record a `DeferredClaim` marker pinned to the OWN synthetic turn
+    /// identity (anchor id + the claimed row's `started_at`) before the
+    /// durable record is deleted. RED pre-#3303: the success path recorded
+    /// NOTHING — a claimed turn whose commit pass never ran (EOF-seeded
+    /// cursor after a prior drain consumed the bytes, or relay failure +
+    /// watchdog clear) kept its `⏳` forever with no reconcile owner. The
+    /// success path must STILL never run the abort cleanup (#3282 contract).
+    #[test]
+    fn successful_watcher_owned_claim_records_own_identity_marker() {
+        use std::sync::atomic::Ordering;
+
+        let _guard = worker_test_lock();
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _rig = DeferredClaimMarkerRig::new();
+        reset_present_for_tests();
+        let shared = super::super::make_shared_data_for_tests();
+
+        let rec = record("claude", 21, 2100);
+        record_lease(
+            "claude",
+            &rec.tmux_session_name,
+            21,
+            crate::services::tui_prompt_dedupe::ExternalInputRelayOwner::TmuxWatcher,
+        );
+        let own_started_at = save_own_inflight_row(21, 2100, &rec.tmux_session_name);
+        persist(&rec).unwrap();
+
+        let (cleanup, cleanup_calls, _) = recording_abort_cleanup();
+        current_thread_rt().block_on(run_worker(
+            shared,
+            rec,
+            finalized_view(),
+            claim_succeeds(),
+            cleanup,
+        ));
+
+        let markers = super::super::tui_direct_abort_marker::load_for_channel("claude", 21);
+        assert_eq!(
+            markers.len(),
+            1,
+            "RED pre-#3303: the success path recorded no marker — the anchor's \
+             ⏳ had no reconcile owner when the commit pass never ran"
+        );
+        let marker = &markers[0];
+        assert_eq!(
+            marker.origin,
+            super::super::tui_direct_abort_marker::MarkerOrigin::DeferredClaim
+        );
+        assert_eq!(marker.anchor_message_id, 2100);
+        assert_eq!(
+            marker.foreign_user_msg_id,
+            Some(2100),
+            "the pin is the OWN synthetic turn — never the foreign prior (SC1)"
+        );
+        assert_eq!(
+            marker.foreign_started_at.as_deref(),
+            Some(own_started_at.as_str()),
+            "started_at must be re-read from the freshly-claimed row"
+        );
+        assert_eq!(marker.tmux_session_name, "tmux-21");
+        assert_eq!(marker.covered_at_ms, None);
+        assert_eq!(
+            cleanup_calls.load(Ordering::SeqCst),
+            0,
+            "#3282: a successful claim must never run the abort cleanup"
+        );
+        assert!(
+            !pending_synthetic_start_present("claude", 21),
+            "the durable record is still deleted after the marker hook (fail-open ordering)"
+        );
+        reset_present_for_tests();
+    }
+
+    /// #3303 R7 (SC3 scope gate): a successful claim whose post-claim lease
+    /// resolved to the BridgeAdapter records NO marker — bridge-owned turns
+    /// finalize via `turn_bridge` WITHOUT the watcher chokepoint tombstone,
+    /// so a marker would contradict a normally-completed turn with a TTL `⚠`.
+    /// RED if the hook records unconditionally.
+    #[test]
+    fn bridge_owned_claim_records_no_marker() {
+        let _guard = worker_test_lock();
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _rig = DeferredClaimMarkerRig::new();
+        reset_present_for_tests();
+        let shared = super::super::make_shared_data_for_tests();
+
+        let rec = record("claude", 22, 2200);
+        record_lease(
+            "claude",
+            &rec.tmux_session_name,
+            22,
+            crate::services::tui_prompt_dedupe::ExternalInputRelayOwner::BridgeAdapter,
+        );
+        // Even with a perfectly matching own row, the owner gate must win.
+        let _ = save_own_inflight_row(22, 2200, &rec.tmux_session_name);
+        persist(&rec).unwrap();
+
+        let (cleanup, _calls, _) = recording_abort_cleanup();
+        current_thread_rt().block_on(run_worker(
+            shared,
+            rec,
+            finalized_view(),
+            claim_succeeds(),
+            cleanup,
+        ));
+
+        assert!(
+            super::super::tui_direct_abort_marker::load_for_channel("claude", 22).is_empty(),
+            "bridge-owned turns must record no DeferredClaim marker (SC3)"
+        );
+        assert!(!pending_synthetic_start_present("claude", 22));
+        reset_present_for_tests();
+    }
+
+    /// #3303 R8 (restart idempotence, SC2): an abnormal restart can leave a
+    /// stale ABORT marker on this anchor's stem; the successful re-claim must
+    /// OVERWRITE it with the refreshed own-identity DeferredClaim marker (the
+    /// turn is adopted and live — one stem can never hold two markers).
+    #[test]
+    fn reclaim_overwrites_stale_abort_marker_with_own_identity() {
+        let _guard = worker_test_lock();
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _rig = DeferredClaimMarkerRig::new();
+        reset_present_for_tests();
+        let shared = super::super::make_shared_data_for_tests();
+
+        let rec = record("claude", 23, 2300);
+        super::super::tui_direct_abort_marker::record_for_abort(
+            "claude".into(),
+            23,
+            2300,
+            rec.tmux_session_name.clone(),
+            Some((999, "2026-06-10 12:00:00".into())),
+        )
+        .unwrap();
+        record_lease(
+            "claude",
+            &rec.tmux_session_name,
+            23,
+            crate::services::tui_prompt_dedupe::ExternalInputRelayOwner::TmuxWatcher,
+        );
+        let own_started_at = save_own_inflight_row(23, 2300, &rec.tmux_session_name);
+        persist(&rec).unwrap();
+
+        let (cleanup, _calls, _) = recording_abort_cleanup();
+        current_thread_rt().block_on(run_worker(
+            shared,
+            rec,
+            finalized_view(),
+            claim_succeeds(),
+            cleanup,
+        ));
+
+        let markers = super::super::tui_direct_abort_marker::load_for_channel("claude", 23);
+        assert_eq!(markers.len(), 1, "one stem, one marker (SC2)");
+        assert_eq!(
+            markers[0].origin,
+            super::super::tui_direct_abort_marker::MarkerOrigin::DeferredClaim,
+            "the re-claim must replace the stale abort marker"
+        );
+        assert_eq!(markers[0].foreign_user_msg_id, Some(2300));
+        assert_eq!(
+            markers[0].foreign_started_at.as_deref(),
+            Some(own_started_at.as_str())
+        );
         reset_present_for_tests();
     }
 }

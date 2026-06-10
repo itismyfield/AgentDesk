@@ -8,7 +8,7 @@
 > [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-06-07 (against #3216 resume-protection residual gaps on top of #3207 — session_runtime now adds a SAFE legacy NULL-channel_id fallback to the channel-scoped cwd resolves via resolve_cwd_for_session_key honored only for a single legacy row, plus a live-tmux recovery-cwd reconcile in auto_restore_session_force via reconcile_recovery_cwd and correct_session_cwd_to_tmux that adopts the live pane cwd over a divergent DB cwd and self-heals the row; #3207 comprehensive channel_id scoping of session-cwd DB resolves — auto_restore_session_force restart restore via restore_session_cwd_from_db and watcher recovery via load_restored_session_cwd require channel_id = $2; on top of #3105 dead/orphaned TUI-session mirror eviction made flake-resistant and run off the Tokio executor).
+> Last refreshed: 2026-06-11 (against #3303 deferred-claim anchor reconcile — the `tui_direct_abort_marker` module is decomposed into a directory module of `mod.rs` + `store.rs` + `deferred_claim.rs`, all non-giant, and a successful watcher-owned deferred claim now records an own-identity `DeferredClaim` marker so the anchor's `⏳` converges to `✅` on the own commit or a bounded sweep `⚠`; tmux_watcher / tui_prompt_relay / health recovery / placeholder_sweeper are 0-line changes; on top of #3216 resume-protection residual gaps on top of #3207 — session_runtime now adds a SAFE legacy NULL-channel_id fallback to the channel-scoped cwd resolves via resolve_cwd_for_session_key honored only for a single legacy row, plus a live-tmux recovery-cwd reconcile in auto_restore_session_force via reconcile_recovery_cwd and correct_session_cwd_to_tmux that adopts the live pane cwd over a divergent DB cwd and self-heals the row; #3207 comprehensive channel_id scoping of session-cwd DB resolves — auto_restore_session_force restart restore via restore_session_cwd_from_db and watcher recovery via load_restored_session_cwd require channel_id = $2; on top of #3105 dead/orphaned TUI-session mirror eviction made flake-resistant and run off the Tokio executor).
 
 ## Read This First
 
@@ -424,14 +424,20 @@
     identity — written FIRST, so any reconciler that observes "no live row"
     already sees the commit evidence) and then calls
     `tui_direct_abort_marker::drain_on_terminal_commit` with the COMMITTED
-    turn's identity (codex r1: positive correlation — only the foreign prior
-    inflight the ABORT pinned may cover), so an anchor whose synthetic
-    turn-start ABORTed (input already provider-submitted, `⏳` kept) flips
-    `⏳ → ✅` when that turn commits; the marker logic itself lives in the new
-    non-giant `tui_direct_abort_marker.rs` (sweeper TTL/hard-cap `⚠` fallback +
-    commit-tombstone 대조); the additions are offset in-file by compressing the
-    #3016-S3 finalize/TOCTOU and #1670/#1708 decoupling comment blocks, so the
-    9583 ratchet baseline is unchanged.
+    turn's identity (codex r1: positive correlation — only the turn identity
+    the marker pinned may cover: the foreign prior inflight for ABORT markers,
+    the worker's OWN synthetic turn for #3303 `DeferredClaim` markers), so an
+    anchor whose synthetic turn-start ABORTed (input already
+    provider-submitted, `⏳` kept) or whose deferred claim succeeded but never
+    saw its own commit pass flips `⏳ → ✅` when the pinned turn commits; the
+    marker logic itself lives in the non-giant `tui_direct_abort_marker/`
+    directory module (#3303 decomposition: `mod.rs` reconcilers + Abort
+    disposition, `store.rs` durable marker/tombstone I/O, `deferred_claim.rs`
+    own-identity pin + uncapped-while-pinned disposition; sweeper TTL/hard-cap
+    `⚠` fallback + commit-tombstone 대조 semantics unchanged); the #3296
+    additions are offset in-file by compressing the #3016-S3 finalize/TOCTOU
+    and #1670/#1708 decoupling comment blocks, so the 9583 ratchet baseline is
+    unchanged (#3303 itself is a 0-line watcher change).
   - `src/services/discord/tui_prompt_relay.rs` (5438 production lines; #3296
     codex r1+r2: the ABORT cleanup hook pins the foreign prior inflight's
     identity — the live row at the record instant, or the worker's LAST-VIEW

@@ -467,6 +467,10 @@ src/
 │   │   │   ├── read.rs
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
+│   │   ├── tui_direct_abort_marker/
+│   │   │   ├── deferred_claim.rs
+│   │   │   ├── mod.rs
+│   │   │   └── store.rs
 │   │   ├── turn_bridge/
 │   │   │   ├── completion_guard.rs
 │   │   │   ├── context_window.rs
@@ -551,7 +555,6 @@ src/
 │   │   ├── tmux_restart_handoff.rs
 │   │   ├── tmux_session_files.rs
 │   │   ├── tmux_watcher.rs
-│   │   ├── tui_direct_abort_marker.rs
 │   │   ├── tui_direct_pending_start.rs
 │   │   ├── tui_prompt_relay.rs
 │   │   ├── tui_task_card.rs
