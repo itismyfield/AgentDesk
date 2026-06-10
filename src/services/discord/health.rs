@@ -676,6 +676,75 @@ async fn resolve_direct_meeting_shared(
     .to_string())
 }
 
+#[cfg(test)]
+mod direct_meeting_candidate_tests {
+    //! #3038 Phase A characterization tests — pin the runtime-candidate
+    //! selection behavior of `select_direct_meeting_runtime_candidate`
+    //! before the health.rs directory decomposition.
+
+    use poise::serenity_prelude::ChannelId;
+
+    use super::{DirectMeetingRuntimeCandidate, select_direct_meeting_runtime_candidate};
+
+    fn candidate(index: usize, explicit: bool, live: bool) -> DirectMeetingRuntimeCandidate {
+        DirectMeetingRuntimeCandidate {
+            index,
+            explicit_channel_match: explicit,
+            live_channel_match: live,
+        }
+    }
+
+    #[test]
+    fn no_candidates_resolves_to_none() {
+        let selected = select_direct_meeting_runtime_candidate("claude", ChannelId::new(42), &[]);
+        assert_eq!(selected, Ok(None));
+    }
+
+    #[test]
+    fn single_explicit_match_wins_over_live_matches() {
+        let candidates = [candidate(0, false, true), candidate(3, true, true)];
+        let selected =
+            select_direct_meeting_runtime_candidate("claude", ChannelId::new(42), &candidates);
+        assert_eq!(selected, Ok(Some(3)));
+    }
+
+    #[test]
+    fn multiple_explicit_matches_are_ambiguous() {
+        let candidates = [candidate(0, true, false), candidate(1, true, false)];
+        let error =
+            select_direct_meeting_runtime_candidate("claude", ChannelId::new(42), &candidates)
+                .unwrap_err();
+        let body: serde_json::Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(body["ok"], false);
+        assert_eq!(
+            body["error"],
+            "multiple runtimes explicitly allow channel 42 for provider claude"
+        );
+    }
+
+    #[test]
+    fn single_live_match_is_selected_without_explicit_match() {
+        let candidates = [candidate(0, false, false), candidate(2, false, true)];
+        let selected =
+            select_direct_meeting_runtime_candidate("claude", ChannelId::new(42), &candidates);
+        assert_eq!(selected, Ok(Some(2)));
+    }
+
+    #[test]
+    fn multiple_live_matches_are_ambiguous() {
+        let candidates = [candidate(0, false, true), candidate(1, false, true)];
+        let error =
+            select_direct_meeting_runtime_candidate("claude", ChannelId::new(42), &candidates)
+                .unwrap_err();
+        let body: serde_json::Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(body["ok"], false);
+        assert_eq!(
+            body["error"],
+            "multiple runtimes can handle channel 42 for provider claude"
+        );
+    }
+}
+
 pub async fn start_headless_agent_turn(
     registry: &HealthRegistry,
     channel_id: ChannelId,
@@ -1097,6 +1166,56 @@ async fn resolve_send_target_channel_id_with_backends(
             }
         }
         None => resolve_channel_target(target),
+    }
+}
+
+#[cfg(test)]
+mod send_target_parse_tests {
+    //! #3038 Phase A characterization tests — pin the send-target parsing
+    //! branches (`parse_channel_target_value` / `parse_agent_target`) before
+    //! the health.rs directory decomposition.
+
+    use super::{SendTargetResolutionError, parse_agent_target, parse_channel_target_value};
+
+    #[test]
+    fn numeric_channel_target_parses_after_trimming() {
+        assert_eq!(parse_channel_target_value("123456789"), Some(123456789));
+        assert_eq!(parse_channel_target_value("  987654321  "), Some(987654321));
+    }
+
+    #[test]
+    fn non_numeric_channel_target_falls_back_to_alias_resolution() {
+        // The non-numeric branch consults the channel-alias config; a name no
+        // role map contains resolves to `None` (callers then surface the 400
+        // invalid-target error).
+        assert_eq!(
+            parse_channel_target_value("definitely-not-a-registered-alias-3038"),
+            None
+        );
+    }
+
+    #[test]
+    fn target_without_agent_prefix_is_not_an_agent_target() {
+        assert_eq!(parse_agent_target("channel:123"), Ok(None));
+        assert_eq!(parse_agent_target("123"), Ok(None));
+    }
+
+    #[test]
+    fn agent_target_with_empty_id_is_bad_request() {
+        assert_eq!(
+            parse_agent_target("agent:   "),
+            Err(SendTargetResolutionError::BadRequest(
+                "invalid target format (use channel:<id>, channel:<name>, or agent:<roleId>)",
+            ))
+        );
+    }
+
+    #[test]
+    fn agent_target_with_role_id_parses_after_trimming() {
+        assert_eq!(
+            parse_agent_target("agent: backend-dev "),
+            Ok(Some("backend-dev"))
+        );
     }
 }
 
@@ -2345,6 +2464,194 @@ fn parse_senddm_body(body: &str) -> Result<SendDmRequest, String> {
         semantic_event_id,
         idempotency_key,
     })
+}
+
+#[cfg(test)]
+mod senddm_parse_tests {
+    //! #3038 Phase A characterization tests — pin the `/api/discord/send-dm`
+    //! body parsing (`parse_senddm_body` / `normalize_senddm_key`) and the
+    //! `SendDmRequest::delivery_id` correlation assembly before the health.rs
+    //! directory decomposition.
+
+    use super::{SendDmRequest, normalize_senddm_key, parse_senddm_body};
+
+    #[test]
+    fn parse_senddm_body_accepts_string_or_numeric_user_id() {
+        let from_string = parse_senddm_body(r#"{"user_id":"42","content":"hello"}"#).unwrap();
+        assert_eq!(
+            from_string,
+            SendDmRequest {
+                user_id: 42,
+                content: "hello".to_string(),
+                bot: "announce".to_string(),
+                correlation_id: None,
+                semantic_event_id: None,
+                idempotency_key: None,
+            }
+        );
+
+        let from_number =
+            parse_senddm_body(r#"{"user_id":42,"content":"hello","bot":"notify"}"#).unwrap();
+        assert_eq!(from_number.user_id, 42);
+        assert_eq!(from_number.bot, "notify");
+    }
+
+    #[test]
+    fn parse_senddm_body_pins_required_field_error_strings() {
+        assert_eq!(
+            parse_senddm_body("not json"),
+            Err("invalid JSON".to_string())
+        );
+        assert_eq!(
+            parse_senddm_body(r#"{"content":"hello"}"#),
+            Err("user_id required (string or number)".to_string())
+        );
+        assert_eq!(
+            parse_senddm_body(r#"{"user_id":"0","content":"hello"}"#),
+            Err("user_id required (string or number)".to_string())
+        );
+        assert_eq!(
+            parse_senddm_body(r#"{"user_id":"42"}"#),
+            Err("content required".to_string())
+        );
+        assert_eq!(
+            parse_senddm_body(r#"{"user_id":"42","content":""}"#),
+            Err("content required".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_senddm_body_accepts_idempotency_id_alias() {
+        let request = parse_senddm_body(
+            r#"{"user_id":"42","content":"hello","idempotency_id":"morning-brief"}"#,
+        )
+        .unwrap();
+        assert_eq!(request.idempotency_key.as_deref(), Some("morning-brief"));
+    }
+
+    #[test]
+    fn normalize_senddm_key_sanitizes_and_truncates() {
+        assert_eq!(
+            normalize_senddm_key("camelCaseKey-09:ok_v1.2"),
+            "camelCaseKey-09:ok_v1.2"
+        );
+        assert_eq!(
+            normalize_senddm_key("snake_case key/with spaces"),
+            "snake_case_key_with_spaces"
+        );
+        assert_eq!(normalize_senddm_key(""), "message");
+        assert_eq!(normalize_senddm_key(&"x".repeat(200)).len(), 160);
+    }
+
+    #[test]
+    fn delivery_id_uses_explicit_correlation_and_semantic_ids() {
+        let request = parse_senddm_body(
+            r#"{"user_id":"42","content":"hello","correlation_id":" corr-1 ","semantic_event_id":" sem-1 "}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            request.delivery_id(),
+            Some(("corr-1".to_string(), "sem-1".to_string()))
+        );
+    }
+
+    #[test]
+    fn delivery_id_derives_semantic_id_from_idempotency_key() {
+        let request = parse_senddm_body(
+            r#"{"user_id":"42","content":"hello","idempotency_key":"daily briefing/morning"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            request.delivery_id(),
+            Some((
+                "senddm:42".to_string(),
+                "senddm:42:daily_briefing_morning".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn delivery_id_requires_a_semantic_source() {
+        let request =
+            parse_senddm_body(r#"{"user_id":"42","content":"hello","correlation_id":"corr-only"}"#)
+                .unwrap();
+        assert_eq!(request.delivery_id(), None);
+    }
+}
+
+#[cfg(test)]
+mod handle_send_contract_tests {
+    //! #3038 Phase A characterization tests — pin the `/api/discord/send`
+    //! body-parsing 400 responses and the legacy `channel_id` fallback /
+    //! `channel:` prefixing behavior of `handle_send` before the health.rs
+    //! directory decomposition. All expectations capture current behavior
+    //! as-is (no seam; empty `HealthRegistry`).
+
+    use crate::services::discord::health::HealthRegistry;
+
+    use super::handle_send;
+
+    #[tokio::test]
+    async fn invalid_json_body_is_a_400_with_pinned_body() {
+        let registry = HealthRegistry::new();
+        let (status, body) = handle_send(&registry, None, None, "not json").await;
+        assert_eq!(status, "400 Bad Request");
+        assert_eq!(body, r#"{"ok":false,"error":"invalid JSON"}"#);
+    }
+
+    #[tokio::test]
+    async fn missing_content_is_a_400_with_pinned_body() {
+        let registry = HealthRegistry::new();
+        let (status, body) =
+            handle_send(&registry, None, None, r#"{"target":"channel:123"}"#).await;
+        assert_eq!(status, "400 Bad Request");
+        assert_eq!(body, r#"{"ok":false,"error":"content is required"}"#);
+    }
+
+    #[tokio::test]
+    async fn missing_target_is_a_400_invalid_target() {
+        let registry = HealthRegistry::new();
+        let (status, body) = handle_send(&registry, None, None, r#"{"content":"hi"}"#).await;
+        assert_eq!(status, "400 Bad Request");
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["ok"], false);
+        assert_eq!(
+            body["error"],
+            "invalid target format (use channel:<id>, channel:<name>, or agent:<roleId>)"
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_id_fallback_reaches_target_resolution_like_explicit_target() {
+        let registry = HealthRegistry::new();
+        // Legacy `channel_id` (numeric, no `channel:` prefix) must be accepted
+        // via the fallback + prefixing path and produce the exact same
+        // downstream response as the explicit `target` spelling.
+        let (fallback_status, fallback_body) = handle_send(
+            &registry,
+            None,
+            None,
+            r#"{"channel_id":"999999999999999999","content":"hi","source":"system"}"#,
+        )
+        .await;
+        let (explicit_status, explicit_body) = handle_send(
+            &registry,
+            None,
+            None,
+            r#"{"target":"channel:999999999999999999","content":"hi","source":"system"}"#,
+        )
+        .await;
+        assert_eq!(fallback_status, explicit_status);
+        assert_eq!(fallback_body, explicit_body);
+        // Both spellings clear target parsing and reach the authorization
+        // ladder: on an empty registry the unmapped channel is rejected by
+        // the role-map gate, not by target parsing.
+        assert_eq!(fallback_status, "403 Forbidden");
+        assert_eq!(
+            fallback_body,
+            r#"{"ok":false,"error":"channel not in role-map"}"#
+        );
+    }
 }
 
 #[cfg(test)]
