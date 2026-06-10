@@ -1174,10 +1174,14 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "expected_has_cancel_token",
                 body_param("boolean", false, "Optional guard for the observed mailbox token state"),
             ),
+            (
+                "purge",
+                body_param("boolean", false, "Default false. After a fully applied repair, also unlink the channel's idle in-memory mailbox registry entry (no disk/DB mutation; refused while live work evidence exists)"),
+            ),
         ])
         .with_example(
-            json!({"body": {"channel_id": "1486017489027469493", "provider": "claude", "expected_has_cancel_token": true}}),
-            json!({"ok": true, "applied": true}),
+            json!({"body": {"channel_id": "1486017489027469493", "provider": "claude", "expected_has_cancel_token": true, "purge": true}}),
+            json!({"ok": true, "applied": true, "registry_entry_removed": true, "registry_purge_skipped_reason": null}),
         )
         .with_error_example(
             403,

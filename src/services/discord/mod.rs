@@ -2425,6 +2425,12 @@ impl SharedData {
         self.mailboxes.handle(channel_id)
     }
 
+    /// #3293: non-creating mailbox lookup for probes — `mailbox()` mints a
+    /// permanent registry entry for any channel id it is asked about.
+    fn mailbox_peek(&self, channel_id: ChannelId) -> Option<ChannelMailboxHandle> {
+        self.mailboxes.peek(channel_id)
+    }
+
     fn health_registry(&self) -> Option<Arc<health::HealthRegistry>> {
         self.health_registry.upgrade()
     }
@@ -3046,15 +3052,19 @@ async fn mailbox_recovery_kickoff(
     // (user_msg_id == 0, e.g. a TUI-direct turn).
     user_message_id: Option<MessageId>,
 ) -> RecoveryKickoffResult {
-    // #2443 — reset the per-channel `recovery_done` latch BEFORE the
-    // recovery actually starts. A stale "done" flag from a previous cycle
-    // would otherwise let `watchers/lifecycle.rs` (which selects on
-    // `recovery_done.wait()`) immediately graduate the skip and race the
-    // ongoing recovery. Reset is idempotent and cheap.
+    // #2443 — reset the per-channel `recovery_done` latch BEFORE recovery
+    // starts; a stale "done" flag would let `watchers/lifecycle.rs` graduate
+    // its skip early and race the ongoing recovery. Idempotent and cheap.
     shared.mailboxes.recovery_done(channel_id).reset();
+    // #3297 r3 — tombstone refusal ⇒ retry on a fresh registered actor.
     let result = shared
-        .mailbox(channel_id)
-        .recovery_kickoff(cancel_token, request_owner, user_message_id)
+        .mailboxes
+        .recovery_kickoff_with_closed_retry(
+            channel_id,
+            cancel_token,
+            request_owner,
+            user_message_id,
+        )
         .await;
     if result.activated_turn {
         increment_global_active(shared, "recovery_kickoff");
@@ -3151,9 +3161,12 @@ async fn mailbox_enqueue_intervention(
     channel_id: ChannelId,
     intervention: Intervention,
 ) -> MailboxEnqueueOutcome {
+    // #3297 r3 — tombstone refusal ⇒ retry on a fresh registered actor
+    // instead of orphaning the queue on a purged one.
     let result = shared
-        .mailbox(channel_id)
-        .enqueue(
+        .mailboxes
+        .enqueue_with_closed_retry(
+            channel_id,
             intervention,
             queue_persistence_context(shared, provider, channel_id),
         )
@@ -3216,13 +3229,10 @@ async fn queue_exit_drain_queued_placeholders(
     queue_exit_events: &[&QueueExitEvent],
 ) -> Vec<QueueExitVisibleCard> {
     // codex review round-4 P2 + round-5 P2: hold the channel's persistence
-    // mutex across the whole batch drain + snapshot write. Without this, a
-    // concurrent `insert_queued_placeholder` for the same channel could
-    // observe its mutation reflected in memory but lose the race to write
-    // the *post-drain* snapshot to disk — leaving a stale entry that
-    // resurrects on restart for an intervention that has already exited the
-    // queue. Round-5 promoted the lock to `tokio::sync::Mutex` so callers
-    // that span `.await` can still serialize against this drain.
+    // mutex (async since round-5 so `.await`-spanning callers serialize too)
+    // across the whole batch drain + snapshot write, or a concurrent
+    // `insert_queued_placeholder` could win the disk write with a pre-drain
+    // snapshot that resurrects already-exited entries on restart.
     let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
     let _persist_guard = persist_lock.lock().await;
     let mut visible_cards_to_clear: Vec<QueueExitVisibleCard> = Vec::new();
@@ -3274,22 +3284,14 @@ async fn apply_queue_exit_feedback(
         return;
     }
 
-    // #1332: drop any stale `📬 메시지 대기 중` placeholder mappings up front
-    // so a subsequent dispatch never wires a newly-started turn to a placeholder
-    // that belongs to a cancelled/expired intervention. Also detach the
-    // controller entry so the cap-bounded `placeholder_controller.entries`
-    // map does not retain a stale Queued row (Queued is not in the standard
-    // eviction sweep — it is meant to live until dispatch). The mapping/
-    // controller bookkeeping runs regardless of whether the cached serenity
-    // ctx is available so a missing ctx never silently misroutes the next
-    // turn.
-    //
-    // codex review P2 (#1332 follow-up): the visible Discord card edited to
-    // `📬 메시지 대기 중` must ALSO be cleaned up — leaving it behind would
-    // promise a turn that has been cancelled/expired/superseded. Collect the
-    // placeholder ids here and rewrite/delete them once we have a serenity
-    // ctx (best-effort: log on cache miss and leave the bookkeeping in place
-    // so a future ctx can still reach the same rows via `detach_by_message`).
+    // #1332: drop stale `📬 메시지 대기 중` placeholder mappings + controller
+    // entries up front (Queued rows are exempt from the standard eviction
+    // sweep) so a later dispatch never wires a new turn to a cancelled/expired
+    // intervention's placeholder; the bookkeeping runs even without a cached
+    // serenity ctx so a missing ctx never misroutes the next turn. codex
+    // review P2 (#1332 follow-up): also collect the visible card ids to
+    // rewrite/delete once a ctx exists (best-effort; drain rationale on the
+    // `queue_exit_drain_queued_placeholders` doc).
     let visible_cards_to_clear =
         queue_exit_drain_queued_placeholders(shared, channel_id, &queue_exit_events).await;
 
@@ -3330,18 +3332,14 @@ async fn apply_queue_exit_feedback(
     }
 
     for event in queue_exit_events {
-        // Clean up the queue-pending reactions on EVERY message that contributed
-        // to this intervention. After #1190 follow-up, merged messages carry ➕
-        // and standalone heads carry 📬; remove both unconditionally so cancel /
-        // expiry / supersede leaves only the exit-state reaction visible.
-        //
-        // #2044 F9: when the intervention has a single source message
-        // (standalone head, no merges), there was never a ➕ reaction
-        // to remove. Previously we called `remove_reaction_raw('➕')`
-        // anyway, doubling the channel-level rate-limited HTTP traffic
-        // per exit. Skip it for standalone messages — merged groups
-        // (`len() > 1`) still receive both removals because the merge
-        // path adds ➕ to every non-head source.
+        // Clean up the queue-pending reactions on EVERY contributing message:
+        // after #1190 follow-up, merged messages carry ➕ and standalone heads
+        // carry 📬 — remove both so cancel/expiry/supersede leaves only the
+        // exit-state reaction visible. #2044 F9: a standalone head (no merges)
+        // never had a ➕, so skip that removal instead of doubling the
+        // rate-limited HTTP traffic per exit; merged groups (`len() > 1`)
+        // still get both removals (the merge path adds ➕ to every non-head
+        // source).
         let is_standalone = event.intervention.source_message_ids.len() <= 1;
         for message_id in &event.intervention.source_message_ids {
             formatting::remove_reaction_raw(&http, channel_id, *message_id, '📬').await;

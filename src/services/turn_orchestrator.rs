@@ -12,6 +12,9 @@ use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::services::provider::{CancelToken, ProviderKind};
 
+// #3293: non-creating registry lookup + operator-gated idle-entry purge.
+pub(crate) mod registry_purge;
+
 pub(crate) const MAX_INTERVENTIONS_PER_CHANNEL: usize = 30;
 pub(crate) const INTERVENTION_DEDUP_WINDOW: Duration = Duration::from_secs(10);
 const STALE_PENDING_QUEUE_TMP_AGE: Duration = Duration::from_secs(60);
@@ -849,6 +852,8 @@ pub(crate) struct HasPendingSoftQueueResult {
 
 pub(crate) struct RecoveryKickoffResult {
     pub(crate) activated_turn: bool,
+    /// #3297 r3 — kickoff refused by a purge tombstone (`state.closed`).
+    pub(crate) refused_closed: bool,
 }
 
 pub(crate) struct RestartDrainResult {
@@ -885,6 +890,9 @@ pub(crate) enum EnqueueRefusalReason {
     /// The `ChannelMailboxHandle` could not reach the mailbox actor (mpsc
     /// closed or oneshot dropped). Surfaced only at the handle layer.
     ActorUnreachable,
+    /// #3297 r3 — the resolved actor is purge-tombstoned (`closed`). The
+    /// registry's `enqueue_with_closed_retry` re-resolves a fresh actor.
+    MailboxClosed,
 }
 
 impl EnqueueRefusalReason {
@@ -893,6 +901,7 @@ impl EnqueueRefusalReason {
             EnqueueRefusalReason::SourceIdAlreadyQueued => "source_id_already_queued",
             EnqueueRefusalReason::LastItemDedup => "last_item_dedup",
             EnqueueRefusalReason::ActorUnreachable => "actor_unreachable",
+            EnqueueRefusalReason::MailboxClosed => "mailbox_closed",
         }
     }
 }
@@ -1231,6 +1240,7 @@ impl ChannelMailboxHandle {
             },
             RecoveryKickoffResult {
                 activated_turn: false,
+                refused_closed: false,
             },
         )
         .await
@@ -1812,6 +1822,19 @@ impl ChannelMailboxRegistry {
     }
 }
 
+// #3297 r3 (codex) — tombstone classification, enforced for EVERY arm by
+// `registry_purge::gate_closed_arm` ahead of the actor's match. Once
+// `CloseIfIdle` sets `state.closed` (actor about to be unlinked):
+//  (a) START-LIKE arms — anything that binds an active turn / recovery marker
+//      or accepts NEW work (`TryStartTurn`, `RestoreActiveTurn`,
+//      `RecoveryKickoff`, `Enqueue`) — are REFUSED with that arm's existing
+//      "cannot start" reply (`TryStartTurn` ⇒ `false`); callers re-resolve a
+//      fresh actor via the registry `*_with_closed_retry` helpers and replay.
+//  (b) everything else stays ALLOWED — reads, cancels, finishes, drains, and
+//      queue RESTITUTION (`RequeueFront`/`ReplaceQueue`/hydrate, which
+//      re-persist already-accepted work to disk for a successor actor to
+//      hydrate — refusing those would drop user messages).
+// New arms must be classified here and (if start-like) gated there.
 enum ChannelMailboxMsg {
     Snapshot {
         reply: oneshot::Sender<ChannelMailboxSnapshot>,
@@ -1987,6 +2010,12 @@ enum ChannelMailboxMsg {
     ClearTimeoutOverride {
         reply: oneshot::Sender<()>,
     },
+    /// #3297 r2 (codex) — registry purge: verify idleness and set the `closed`
+    /// tombstone in ONE serialized actor step, closing the snapshot→unlink
+    /// TOCTOU race. Full rationale + verdict logic live in `registry_purge.rs`.
+    CloseIfIdle {
+        reply: oneshot::Sender<Result<(), &'static str>>,
+    },
 }
 
 /// #3167 — priority class of the mailbox active-turn slot. Lets the external-input
@@ -2048,6 +2077,8 @@ struct ChannelMailboxState {
     pending_user_dispatch_yield_count: u32,
     last_persistence: Option<QueuePersistenceContext>,
     recovery_started_at: Option<Instant>,
+    /// #3297 r2 — purge tombstone set by `CloseIfIdle`; see `registry_purge.rs`.
+    closed: bool,
     /// #1031: see `ChannelMailboxSnapshot::turn_started_at`. Mirrors the
     /// `cancel_token.is_some()` lifetime so the idle-detector freshness
     /// anchor is always source-of-truth from the mailbox actor itself.
@@ -2374,6 +2405,10 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
     tokio::spawn(async move {
         let mut state = ChannelMailboxState::default();
         while let Some(msg) = rx.recv().await {
+            // #3297 r3 — tombstoned actor refuses start-like arms (enum docs).
+            let Some(msg) = registry_purge::gate_closed_arm(&state, msg) else {
+                continue;
+            };
             match msg {
                 ChannelMailboxMsg::Snapshot { reply } => {
                     let _ = reply.send(ChannelMailboxSnapshot {
@@ -2406,21 +2441,10 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 }
                 ChannelMailboxMsg::CancelActiveTurnWithReason { reason, reply } => {
                     // #2374 — atomic, actor-serialized "reason then flip"
-                    // for the active turn. The previous design (#2373)
-                    // wrote `cancel_source` from the caller task BEFORE
-                    // sending the actor a `CancelActiveTurn`. That kept
-                    // the writes ordered for the common path but two
-                    // concurrent cancellers could both observe the same
-                    // pre-flip token, race on `set_cancel_source`, then
-                    // have the actor flip `cancelled` on whichever
-                    // message it dequeued first — losing one of the
-                    // reasons. By owning the reason write here, the
-                    // mailbox actor serializes both writes per channel.
-                    //
-                    // Existing-cancellation guard mirrors #2373: do NOT
-                    // overwrite a reason once `cancelled` is set so
-                    // earlier attribution (e.g. a watchdog timeout that
-                    // already fired) wins over a later voice cancel.
+                    // (full race rationale on the
+                    // `cancel_active_turn_with_reason` handle doc). Guard
+                    // mirrors #2373: never overwrite a reason once
+                    // `cancelled` is set — earlier attribution wins.
                     let token = state.cancel_token.clone();
                     let already_stopping = token.as_ref().is_some_and(|token| {
                         token.cancelled.load(std::sync::atomic::Ordering::Relaxed)
@@ -2494,17 +2518,11 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     reason,
                     reply,
                 } => {
-                    // #2374 Codex round-1 fix (HIGH-1): only cancel
-                    // when the active turn's `user_message_id` matches
-                    // the caller's expected handoff message id. The
-                    // tombstone retry path uses this so a still-later
-                    // cancel for the same handoff cannot accidentally
-                    // kill an unrelated turn that happened to start on
-                    // the same target channel after the original
-                    // handoff turn finalized. The actor performs the
-                    // identity check + cancel as a single serialized
-                    // step so no concurrent caller can swap the active
-                    // turn between the check and the flip.
+                    // #2374 Codex round-1 fix (HIGH-1): identity check +
+                    // cancel as one serialized step, keyed by
+                    // `user_message_id` (full rationale on the
+                    // `cancel_active_turn_if_user_message_with_reason`
+                    // handle doc).
                     let identity_matches = state
                         .active_user_message_id
                         .is_some_and(|id| id == expected_user_message_id);
@@ -2530,35 +2548,13 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     });
                 }
                 ChannelMailboxMsg::CancelActiveBackgroundTurnIfCurrent { reply } => {
-                    // #3167 — atomic, kind-guarded supersede. ONLY cancel when
-                    // a background turn currently holds the slot; a real
-                    // user/agent turn (or an idle slot) is left untouched. This
-                    // closes the TOCTOU window the previous dequeue gate had: it
-                    // read `active_turn_kind()` and THEN sent a separate
-                    // unguarded `cancel_active_turn_with_reason()`, so between
-                    // the read and the cancel the background turn could finalize
-                    // and a real user turn start — and the cancel would abort
-                    // the real turn. Doing the `is_background` check and the
-                    // cancel flip in one serialized actor step removes that gap.
-                    //
-                    // Cancel semantics mirror `CancelActiveTurnWithReason`
-                    // exactly: set the reason, flip `cancelled`, and leave the
-                    // slot-release to the background turn's own
-                    // identity-guarded finalizer (the slot is NOT cleared here).
-                    //
-                    // #3167 BLOCKER-1 — reply `true` ONLY when this step performs
-                    // a NEW cancel: a background token is present AND it is not
-                    // already cancelled/stopping. If the background token is
-                    // ALREADY cancelling, this is a no-op and we reply `false`.
-                    // Rationale: the mod.rs caller schedules an immediate re-kick
-                    // on `true`. If we replied `true` for an already-cancelling
-                    // slot, each re-kick would re-observe the same already-
-                    // cancelled slot (the finalizer has not released it yet),
-                    // reply `true`, and spawn yet another immediate re-kick — a
-                    // HOT-LOOP/LIVELOCK. On `false` the caller spawns NO new
-                    // re-kick and falls through to the normal dequeue/await path;
-                    // the existing deferred-retry cadence (queue_io.rs, ~2s) waits
-                    // for the background finalizer to release the slot.
+                    // #3167 — atomic kind-guarded supersede: cancel ONLY a
+                    // background-held slot (reason+flip mirror
+                    // `CancelActiveTurnWithReason`; slot release stays with the
+                    // turn's own finalizer). #3167 BLOCKER-1: reply `true` only
+                    // for a NEW cancel — `true` on an already-cancelling slot
+                    // would hot-loop the caller's immediate re-kick. Full
+                    // rationale on the handle + enum variant docs.
                     let is_background_active =
                         state.cancel_token.is_some() && state.active_turn_kind.is_background();
                     let newly_cancelled = if is_background_active {
@@ -2689,7 +2685,10 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         state.turn_started_at = Some(Utc::now());
                     }
                     reset_watchdog_extension_state(&mut state);
-                    let _ = reply.send(RecoveryKickoffResult { activated_turn });
+                    let _ = reply.send(RecoveryKickoffResult {
+                        activated_turn,
+                        refused_closed: false,
+                    });
                 }
                 ChannelMailboxMsg::ClearRecoveryMarker { reply } => {
                     state.recovery_started_at = None;
@@ -3114,6 +3113,9 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 ChannelMailboxMsg::ClearTimeoutOverride { reply } => {
                     state.watchdog_deadline_override = None;
                     let _ = reply.send(());
+                }
+                ChannelMailboxMsg::CloseIfIdle { reply } => {
+                    let _ = reply.send(registry_purge::close_if_idle_verdict(&mut state));
                 }
             }
         }

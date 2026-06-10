@@ -40,6 +40,7 @@ pub use headless_turn::{
     start_headless_agent_turn, start_headless_agent_turn_in_dm, start_reserved_headless_agent_turn,
     start_reserved_headless_agent_turn_in_dm,
 };
+pub use mailbox::purge_idle_channel_mailbox_registry_entry;
 pub(crate) use manual_delivery::ManualOutboundDeliveryId;
 pub(crate) use recovery::stop_provider_channel_runtime_with_policy;
 #[allow(unused_imports)]
@@ -250,6 +251,18 @@ impl HealthRegistry {
             .await
             .iter()
             .filter(|entry| entry.name.eq_ignore_ascii_case(provider.as_str()))
+            .map(|entry| entry.shared.clone())
+            .collect()
+    }
+
+    /// #3293: every registered runtime regardless of provider. Used by the
+    /// provider-unfiltered mailbox-registry purge, which must visit every
+    /// instance registry because a bogus entry may live in any of them.
+    pub(in crate::services::discord) async fn all_registered_shared(&self) -> Vec<Arc<SharedData>> {
+        self.providers
+            .lock()
+            .await
+            .iter()
             .map(|entry| entry.shared.clone())
             .collect()
     }

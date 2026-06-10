@@ -175,8 +175,9 @@ pub(in crate::services::discord) enum PlaceholderProbe {
 /// (5xx, 429 rate-limit, no status at all) is treated as transient.
 ///
 /// Split out so the classification can be unit-tested without constructing
-/// the `#[non_exhaustive]` `serenity::http::ErrorResponse`.
-fn is_permanent_message_gone_status(status: u16) -> bool {
+/// the `#[non_exhaustive]` `serenity::http::ErrorResponse`. #3293 reuses the
+/// same allowlist for the recovery terminal-relay outcome classifier.
+pub(in crate::services::discord) fn is_permanent_message_gone_status(status: u16) -> bool {
     matches!(status, 404 | 403 | 410)
 }
 

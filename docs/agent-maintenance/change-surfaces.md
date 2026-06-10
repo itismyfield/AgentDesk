@@ -628,7 +628,12 @@
     `mailbox_finish_turn`; +60 from #3248 gap-1 adding
     `reseed_watcher_owned_finalizer_ledger` + two guarded reattach call-sites that
     re-register the watcher-owned turn in the post-restart finalizer ledger so a
-    mid-turn deploy's live pane auto-reconciles without a new user turn).
+    mid-turn deploy's live pane auto-reconciles without a new user turn; net ±0
+    from #3293 promoting the recovery terminal relay from `bool` to the 3-state
+    `RecoveryRelayOutcome` — the five notice branches route through
+    `recovery_paths/restart.rs::dispose_recovery_relay_outcome` (permanent
+    Discord 404/403/410 force-clear + 3-restart transient budget); the pure
+    decision matrix lives in `recovery_paths/shared.rs`).
   - `src/services/discord/health.rs` (402 prod lines after the #3038 Phase A
     directory decomposition; module root keeps the `HealthRegistry` core +
     re-export surface, and the former monolith body lives in six flat
@@ -638,11 +643,14 @@
     the #3034 dead-code sweep, 2292 after #3038 send-to-agent dispatch
     extraction to `outbound/send_to_agent.rs`, #1879 snapshot/mailbox
     extraction, and #3082 answer-flush-barrier field).
-  - `src/services/discord/health/recovery.rs` (2645 lines; health recovery
+  - `src/services/discord/health/recovery.rs` (2641 lines; health recovery
     extraction surface, split further before adding non-bugfix behavior; +70
     from #3126 stall-watchdog completed-idle false-positive guard tests; +88
     from #3169 stall-watchdog jsonl-mtime liveness guard + tests, closing the
-    Death #1 force-clean false-positive on loop mid-write sessions).
+    Death #1 force-clean false-positive on loop mid-write sessions; -4 from
+    #3293 routing the mailbox probe through the non-creating
+    `health/mailbox.rs::peeked_provider_mailbox_state` so repair probes stop
+    minting permanent registry entries for non-existent channels).
   - `src/services/discord/router/message_handler/intake_turn.rs` (3771 lines;
     Discord message intake turn orchestration split from the router message
     handler; bugfix only outside a further extraction plan; +9 from #3082
@@ -800,7 +808,9 @@
     relocated the `require_explicit_bearer_token` /
     `resolve_requesting_agent_id_with_pg` auth/identity helpers to
     `crate::services::kanban`).
-  - `src/server/routes/docs.rs` (5880 lines).
+  - `src/server/routes/docs.rs` (5884 lines; +4 from #3293 documenting
+    the stale-mailbox repair `purge` body param + registry-purge response
+    fields).
   - `src/server/routes/escalation.rs` (1376 lines).
   - `src/server/routes/meetings.rs` (1675 lines).
   - `src/server/routes/review_verdict/decision_route.rs` was decomposed in
@@ -999,9 +1009,15 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   lifting cluster C — the three queued-placeholder fields + their nine inherent
   methods — into `shared_state::QueuedPlaceholderState`, leaving a single
   `queued: QueuedPlaceholderState` group field on `SharedData` and re-exporting
-  the type for surface freeze),
+  the type for surface freeze; ±0 from #3293 — the +13 closed-retry rewires
+  (`mailbox_peek` + `*_with_closed_retry` routing for recovery kickoff and
+  intervention enqueue) are offset by queue-exit comment dedup in the same
+  root, no baseline raise),
   `src/services/discord_config_audit.rs` (1273).
-- `src/services/turn_orchestrator.rs` (3086).
+- `src/services/turn_orchestrator.rs` (3089; +3 from #3293 declaring the
+  `registry_purge` child module — the non-creating `peek` lookup and the
+  operator-gated `remove_idle_entry` purge live in
+  `turn_orchestrator/registry_purge.rs`, outside the frozen module root).
 
 Decomposed below the giant-file threshold (no longer frozen; bugfix-scoped but
 normal test growth is allowed): `src/services/analytics.rs`,

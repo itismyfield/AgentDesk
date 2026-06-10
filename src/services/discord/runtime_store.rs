@@ -46,6 +46,14 @@ pub(super) fn discord_restart_reports_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_restart_reports"))
 }
 
+/// #3293 verify r1 (finding 3): durable preservation of the full assistant
+/// response + row metadata for every recovery force-clear. Kept OUT of
+/// `discord_restart_reports/` because that store is flushed-and-deleted on
+/// boot; these files are operator-recovery artifacts and are never GC'd.
+pub(super) fn discord_recovery_force_clear_root() -> Option<PathBuf> {
+    runtime_root().map(|root| root.join("discord_recovery_force_clear"))
+}
+
 pub(crate) fn discord_pending_queue_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_pending_queue"))
 }
