@@ -1245,6 +1245,64 @@ mv "$POLICIES_STAGED" "$ADK_REL/policies"
 POLICIES_STAGED=""
 rm -rf "$ADK_REL/policies.old"
 
+# #3288: self-heal policies.dir config drift. The release runtime must load
+# policies from the deployed snapshot ($ADK_REL/policies, staged above from the
+# deploy-time git shape) — never from a dev workspace working tree, whose
+# checked-out branch can silently diverge from the deployed binary. Runs while
+# dcserver is stopped, so the rewrite is picked up by the post-deploy start.
+AGENTDESK_YAML="$ADK_REL/config/agentdesk.yaml"
+if [ -f "$AGENTDESK_YAML" ]; then
+    POLICIES_DIR_MIGRATION=$(python3 - "$AGENTDESK_YAML" "$ADK_REL/policies" <<'PYEOF' 2>&1
+import re
+import shutil
+import sys
+
+path, want = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    lines = f.readlines()
+
+out = []
+in_policies = False
+changed = False
+previous = None
+for line in lines:
+    body = line.rstrip("\n")
+    if re.match(r"^policies:\s*(#.*)?$", body):
+        in_policies = True
+    elif in_policies and body.strip() and not body[:1].isspace():
+        in_policies = False
+    if in_policies:
+        m = re.match(r"^(\s+dir:\s*)([\"']?)(.+?)\2\s*(#.*)?$", body)
+        if m:
+            previous = m.group(3)
+            if previous != want:
+                comment = f" {m.group(4)}" if m.group(4) else ""
+                line = f"{m.group(1)}{want}{comment}\n"
+                changed = True
+    out.append(line)
+
+if changed:
+    shutil.copy2(path, path + ".bak-policies-dir")
+    with open(path, "w") as f:
+        f.writelines(out)
+print(f"changed={changed} previous={previous}")
+PYEOF
+) || POLICIES_DIR_MIGRATION="error: python exited $?"
+    case "$POLICIES_DIR_MIGRATION" in
+        changed=True*)
+            echo "▸ Migrated policies.dir → $ADK_REL/policies ($POLICIES_DIR_MIGRATION; backup: $AGENTDESK_YAML.bak-policies-dir) [#3288]"
+            ;;
+        changed=False*)
+            # Already aligned, or no explicit dir key (the binary's ./policies
+            # default resolves to $ADK_REL/policies under the launchd CWD).
+            ;;
+        *)
+            echo "⚠ policies.dir drift check failed (non-fatal): $POLICIES_DIR_MIGRATION"
+            echo "  Verify $AGENTDESK_YAML policies.dir points at $ADK_REL/policies [#3288]"
+            ;;
+    esac
+fi
+
 if [ -n "${ROUTINES_STAGED:-}" ] && [ -d "$ROUTINES_STAGED" ]; then
     rm -rf "$ADK_REL/routines.old"
     [ -d "$ADK_REL/routines" ] && mv "$ADK_REL/routines" "$ADK_REL/routines.old"
