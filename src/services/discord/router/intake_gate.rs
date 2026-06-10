@@ -3028,6 +3028,7 @@ mod thread_guard_stale_pure_tests {
             tmux_session: Some("stale-proof-tmux".to_string()),
             tmux_alive: tmux_session_alive,
             watcher_attached: attached,
+            watcher_attached_stale: false,
             watcher_owner_channel_id: attached.then_some(channel_id),
             watcher_owns_live_relay: false,
             bridge_inflight_present: true,

@@ -273,10 +273,16 @@ fn eligible_orphan_pending_token(snapshot: &RelayHealthSnapshot) -> bool {
 }
 
 fn eligible_reattach_watcher(snapshot: &RelayHealthSnapshot) -> bool {
+    // #3277 (Defect D): a watcher binding whose handle is provably DEAD
+    // (cancelled or heartbeat-stale — `watcher_attached_stale`) must not
+    // block the bounded reattach the way a genuinely-live watcher does. A
+    // fresh-heartbeat live watcher still makes this ineligible: auto-heal
+    // never replaces a live handle (that case is the finalizer far-backstop's
+    // job, #3277 Defect C).
     snapshot.tmux_alive == Some(true)
         && snapshot.bridge_inflight_present
         && snapshot.mailbox_has_cancel_token
-        && !snapshot.watcher_attached
+        && (!snapshot.watcher_attached || snapshot.watcher_attached_stale)
         && snapshot.desynced
         && is_agentdesk_tmux_session(snapshot.tmux_session.as_deref())
 }
@@ -716,6 +722,7 @@ mod tests {
             tmux_session: None,
             tmux_alive: None,
             watcher_attached: false,
+            watcher_attached_stale: false,
             watcher_owner_channel_id: None,
             watcher_owns_live_relay: false,
             bridge_inflight_present: false,
@@ -872,6 +879,65 @@ mod tests {
         );
         assert!(decision.evidence.watcher_owns_live_relay);
         assert_eq!(decision.evidence.active_turn, RelayActiveTurn::Foreground);
+    }
+
+    /// #3277 (Defect D) eligibility table: a DEAD attached watcher handle
+    /// (`watcher_attached_stale`) no longer blocks the bounded reattach, while
+    /// a genuinely-live attached watcher still does, and the legacy
+    /// detached-watcher case stays eligible.
+    #[test]
+    fn reattach_eligibility_distinguishes_stale_attached_watcher_from_live() {
+        let base = || RelayHealthSnapshot {
+            tmux_session: Some("AgentDesk-claude-adk-cc".to_string()),
+            tmux_alive: Some(true),
+            desynced: true,
+            bridge_inflight_present: true,
+            mailbox_has_cancel_token: true,
+            ..snapshot()
+        };
+
+        // attached + stale handle → dead-handle evidence → eligible.
+        let stale_attached = plan_relay_recovery(
+            &RelayHealthSnapshot {
+                watcher_attached: true,
+                watcher_attached_stale: true,
+                ..base()
+            },
+            RelayStallState::TmuxAliveRelayDead,
+            1_000,
+        );
+        assert_eq!(
+            stale_attached.action,
+            RelayRecoveryActionKind::ReattachWatcher
+        );
+        assert!(
+            stale_attached.auto_heal.eligible,
+            "a cancelled/heartbeat-stale attached watcher must not block reattach"
+        );
+        assert_eq!(stale_attached.auto_heal.skipped_reason, None);
+
+        // attached + LIVE handle → never auto-replace a live watcher.
+        let live_attached = plan_relay_recovery(
+            &RelayHealthSnapshot {
+                watcher_attached: true,
+                watcher_attached_stale: false,
+                ..base()
+            },
+            RelayStallState::TmuxAliveRelayDead,
+            1_000,
+        );
+        assert!(
+            !live_attached.auto_heal.eligible,
+            "a fresh-heartbeat live watcher must keep reattach operator-gated"
+        );
+        assert_eq!(
+            live_attached.auto_heal.skipped_reason,
+            Some("reattach_missing_required_live_evidence")
+        );
+
+        // detached (legacy case) → still eligible, unchanged.
+        let detached = plan_relay_recovery(&base(), RelayStallState::TmuxAliveRelayDead, 1_000);
+        assert!(detached.auto_heal.eligible);
     }
 
     #[test]

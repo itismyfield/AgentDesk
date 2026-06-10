@@ -10,6 +10,12 @@ pub(super) struct SessionEnrichment {
     pub inflight: Option<discord::inflight::InflightTurnState>,
     pub attached: bool,
     pub watcher_attached: bool,
+    /// #3277 (Defect D): the channel HAS a watcher binding, but the bound
+    /// handle is provably dead — cancelled or heartbeat-stale (the registry's
+    /// `tmux_session_is_stale` predicate, shared with the #3268 handoff gate
+    /// and the finalizer far-backstop). `watcher_attached` alone made such a
+    /// dead handle block the relay-recovery reattach auto-heal.
+    pub watcher_attached_stale: bool,
     pub has_relay_coord: bool,
     pub watcher_owner_channel_id: Option<u64>,
     pub tmux_session: Option<String>,
@@ -45,6 +51,9 @@ impl SessionEnrichment {
         let watcher_binding_tmux_session = watcher_binding
             .as_ref()
             .map(|binding| binding.tmux_session_name.clone());
+        let watcher_attached_stale = watcher_binding_tmux_session
+            .as_deref()
+            .is_some_and(|tmux| shared.tmux_watchers.tmux_session_is_stale(tmux) == Some(true));
         let relay_state_matches_inflight = match (
             inflight_tmux_session.as_deref(),
             watcher_binding_tmux_session.as_deref(),
@@ -123,6 +132,7 @@ impl SessionEnrichment {
             inflight,
             attached,
             watcher_attached,
+            watcher_attached_stale,
             has_relay_coord,
             watcher_owner_channel_id,
             tmux_session,

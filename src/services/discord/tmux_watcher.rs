@@ -2959,47 +2959,26 @@ fn watcher_should_direct_send_after_session_bound_ack(
 
 /// #3041 P1-3 (Part b, §3.2): the watcher's terminal re-send DECISION after a
 /// non-`Delivered` session-bound ACK, reconciled against the offset authority
-/// (`committed_relay_offset`) instead of BLINDLY re-sending. This is the
-/// watcher-terminal counterpart of the idle relay's `idle_relay_range_action`
-/// (skip / suffix / full), extended to the terminal re-send path so the 10s
-/// blind re-send (the `relay_terminal_ack_timeout` duplicate vector) is removed.
+/// (`committed_relay_offset`) instead of BLINDLY re-sending (removes the 10s
+/// `relay_terminal_ack_timeout` duplicate vector). `committed >= end` → already
+/// delivered (ACK merely lagged) → SKIP; `committed < end` → re-send the FULL
+/// response (no black-hole).
 ///
-/// Because Part (a) makes a confirmed sink delivery ADVANCE the authority to the
-/// watcher's own consumed-terminal `end`, this reconciliation is exact:
-///   * `committed >= end`           → the range was already delivered (by the
-///                                     sink, ACK merely lagged) → SKIP (no dup).
-///   * `committed < end`            → the range is NOT (fully) delivered → re-send
-///                                     the FULL response (no black-hole).
+/// codex BLOCKER 2 (no SendSuffix for the watcher path): the watcher delivers
+/// RESPONSE TEXT sliced by `response_sent_offset` — a DIFFERENT coordinate
+/// system from the JSONL byte `committed`/`start`/`end` — so a suffix slice
+/// cannot be mapped correctly. The sink-delegated terminal delivery is also
+/// ALL-OR-NOTHING (the sink advances to the FULL `end` only after one confirmed
+/// `replace_message_with_outcome`), so the partial-overlap middle case
+/// effectively does not occur and SendFull on `committed < end` is SAFE. Only
+/// the watcher response-text path is restricted to Skip/Full; the idle-relay
+/// path keeps its real JSONL suffix re-read.
 ///
-/// codex BLOCKER 2 (no SendSuffix for the watcher path): a partial-overlap
-/// `start < committed < end` case would in principle let us send only the
-/// uncommitted suffix — BUT the watcher delivers RESPONSE TEXT sliced by
-/// `response_sent_offset` (a streaming/render offset), which is a DIFFERENT
-/// coordinate system from the JSONL byte `committed`/`start`/`end`. There is no
-/// correct way to map `[committed, end)` JSONL bytes onto a `response_sent_offset`
-/// suffix, so a "SendSuffix" here would post an incoherent / mis-offset slice (or
-/// nothing while committed<end → black-hole). Crucially, the sink-delegated
-/// terminal delivery is ALL-OR-NOTHING: the sink advances `confirmed_end_offset`
-/// to the FULL `end` ONLY after one confirmed `replace_message_with_outcome`
-/// (`advance_offset_for_confirmed_delegated_terminal`, sink ~453/506), so for this
-/// path `committed` is either `>= end` (delivered → Skip) or `<= start` (not
-/// delivered → Full) — the partial-overlap middle case effectively does not occur.
-/// Therefore SendFull on `committed < end` is SAFE: no black-hole (the missing
-/// content is always re-delivered), and no incoherent mid-response tail. The
-/// idle-relay path still does a real JSONL `[committed,end)` re-read for its
-/// suffix; only the watcher response-text path is restricted to Skip/Full.
-///
-/// #3041 P1-3 (codex P1-3 issue 4 — DEFERRED, no regression, tracked by #3151):
-/// the watcher's 10s terminal-commit ACK wait can elapse while the sink's Discord
-/// POST is still IN FLIGHT (not failed). In that window `committed < end` (the sink
-/// has not advanced the authority yet because its POST has not returned), so this
-/// reconciliation chooses `SendFull` and the watcher re-sends — producing a
-/// duplicate when the in-flight sink POST later succeeds. This is NOT a regression:
-/// the pre-P1-3 path ALSO blind-re-sent on the 10s timeout, and `SendFull` IS the
-/// retry, so there is no black-hole (the content is always delivered). Fully closing
-/// the slow-sink-in-flight duplicate needs an in-flight/reclaimable sink-delivery
-/// marker (the sink signals "delivering this range" so the watcher waits/skips
-/// instead of re-sending) — OUT OF SCOPE for P1-3, tracked by #3151.
+/// #3041 P1-3 issue 4 (DEFERRED, #3151): the 10s ACK wait can elapse while the
+/// sink's POST is still IN FLIGHT → `committed < end` → SendFull → a duplicate
+/// when the in-flight POST later succeeds. Not a regression (the pre-P1-3 path
+/// also re-sent on timeout; SendFull IS the retry, no black-hole); the full fix
+/// is the in-flight sink-delivery marker tracked by #3151.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum WatcherTerminalResendAction {
     /// `committed >= end`: the whole range is already delivered. Do NOT re-send.
@@ -5468,15 +5447,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 ) {
     use std::io::{Read, Seek, SeekFrom};
 
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!(
-        "  [{ts}] 👁 tmux watcher started for #{tmux_session_name} at offset {initial_offset}"
-    );
-
     // #3041 P1-1: this watcher instance's delivery-lease holder id. Minted once
     // per spawn so a replacement watcher cannot release/commit (or be mistaken
-    // for) this instance's lease across a reattach (§5.2 B2).
+    // for) this instance's lease across a reattach (§5.2 B2). #3277 (Defect B):
+    // minted BEFORE the start log so start/stop pairs are attributable — in the
+    // incident two overlapping instances' unlabeled start/stop lines were
+    // misread as one watcher dying.
     let watcher_instance_id = next_watcher_instance_id();
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!(
+        "  [{ts}] 👁 tmux watcher started for #{tmux_session_name} at offset {initial_offset} (instance {watcher_instance_id})"
+    );
 
     // E5 (#2412): cache the supervisor-owned StreamRelay producer for this
     // tmux session, if the supervisor is running and has matched the
@@ -5666,8 +5647,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             turn_delivered.store(false, Ordering::Relaxed);
         }
 
-        // Check cancel or global shutdown (both exit quietly, no "session ended" message)
+        // Check cancel or global shutdown (no "session ended" message). #3277
+        // (Defect B): log the stop reason — a silent break here made a
+        // replaced incumbent's exit look like an unexplained watcher death.
         if cancel.load(Ordering::Relaxed) || shared.shutting_down.load(Ordering::Relaxed) {
+            tracing::info!(
+                instance = watcher_instance_id,
+                cancel = cancel.load(Ordering::Relaxed),
+                shutting_down = shared.shutting_down.load(Ordering::Relaxed),
+                "tmux watcher stopping for #{tmux_session_name}: cancelled/shutdown"
+            );
             break;
         }
 
@@ -8006,6 +7995,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
 
             if cancel.load(Ordering::Relaxed) || shared.shutting_down.load(Ordering::Relaxed) {
+                // #3277 (Defect B): same stop-reason visibility as the early break.
+                tracing::info!(
+                    instance = watcher_instance_id,
+                    cancel = cancel.load(Ordering::Relaxed),
+                    shutting_down = shared.shutting_down.load(Ordering::Relaxed),
+                    "tmux watcher stopping for #{tmux_session_name}: cancelled/shutdown"
+                );
                 break 'watcher_loop;
             }
 
@@ -12010,7 +12006,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!("  [{ts}] 👁 tmux watcher stopped for #{tmux_session_name}");
+    tracing::info!(
+        "  [{ts}] 👁 tmux watcher stopped for #{tmux_session_name} (instance {watcher_instance_id})"
+    );
 }
 
 #[cfg(test)]

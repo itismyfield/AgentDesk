@@ -40,19 +40,14 @@ fn codex_tui_rollout_fallback_for_session(
 }
 
 /// #2853 — for claude_tui sessions whose AgentDesk-side relay JSONL never lands
-/// on disk (claude TUI writes its rollout to `~/.claude/projects/<cwd>/<uuid>.jsonl`
-/// and tails it via the relay-offset, not the wrapper JSONL the codex/pipe path
-/// emits), fall back to the freshest Claude rollout transcript under the
-/// actual launched session cwd. Without this, restart recovery hits the
-/// `no output file` branch and never re-attaches a watcher to a live claude_tui
-/// pane, so direct-TUI (and any) output stops relaying after a dcserver restart.
-///
-/// Unlike the codex fallback, the Discord turn registers a claude_tui inflight
-/// with `session_id = None` (see `transcript_tail` #2843), so the rollout is
-/// resolved by cwd + freshest-transcript rather than by session_id. The restore
-/// path still has to honor #2843's anti-stealing constraints: use the tmux
-/// launch-script mtime as a session floor and exclude transcripts claimed by
-/// other live Claude TUI sessions.
+/// on disk (claude TUI writes its rollout to `~/.claude/projects/<cwd>/<uuid>.jsonl`),
+/// fall back to the freshest Claude rollout transcript under the launched
+/// session cwd; otherwise restart recovery hits the `no output file` branch and
+/// never re-attaches a watcher to a live claude_tui pane. The claude_tui
+/// inflight has `session_id = None` (#2843), so the rollout is resolved by
+/// cwd + freshest-transcript, honoring #2843's anti-stealing constraints
+/// (tmux launch-script mtime floor; exclude transcripts claimed by other live
+/// Claude TUI sessions).
 fn claude_tui_transcript_fallback_path(
     provider: &crate::services::provider::ProviderKind,
     tmux_session_name: &str,
@@ -700,16 +695,12 @@ pub(super) fn extract_result_error_text(value: &serde_json::Value) -> String {
 /// Resolve a restored session's persisted cwd (worktree) from the `sessions`
 /// table, scoped to the unique Discord `channel_id`.
 ///
-/// #3207 (part 2) P0-b: `session_key` is derived from the sanitized/truncated
-/// channel NAME, so two distinct channels whose names collide produce the SAME
-/// `session_key` and would resolve EACH OTHER's persisted cwd — this restored
-/// cwd is injected straight into the restored runtime state
-/// (`session.current_path` via `select_restored_session_path`), so a collision
-/// would silently recover one channel into another channel's working tree. The
-/// `channel_id = $2` predicate is the cross-channel guard. Legacy rows with a
-/// NULL `channel_id` (written before this column existed) are intentionally NOT
-/// reused: returning their cwd is exactly the cross-channel hazard we are
-/// closing, and reuse self-heals on the next turn once the row is stamped.
+/// #3207 (part 2) P0-b: `session_key` derives from the sanitized/truncated
+/// channel NAME, so name-colliding channels would resolve EACH OTHER's
+/// persisted cwd straight into the restored runtime state. The
+/// `channel_id = $2` predicate is the cross-channel guard; legacy NULL
+/// `channel_id` rows are intentionally NOT reused (that is exactly the hazard
+/// being closed — reuse self-heals on the next turn once the row is stamped).
 pub(super) fn load_restored_session_cwd(
     db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
@@ -1450,17 +1441,12 @@ pub(in crate::services::discord) fn refresh_session_heartbeat_from_tmux_output_d
 }
 
 /// Single auditable entry point for runtime-observed session activity (#3053).
-///
 /// Refreshes `sessions.last_heartbeat = NOW()` for the row idle-kill selects
-/// on (`COALESCE(last_heartbeat, created_at)`) and logs the resolved
-/// `session_key`, BOTH candidate keys (namespaced + legacy `host:tmux`),
-/// rows-affected, the caller-supplied `reason`/`source`, and whether the
-/// `thread_channel_id` fallback was used. The original failure mode (#3053)
-/// was a silent no-op: TUI/watcher activity refreshed a non-matching row or
-/// no row at all, and idle-kill later killed the live session. The structured
-/// log makes that branch observable.
-///
-/// Returns true when at least one row was touched.
+/// on and logs the resolved `session_key`, BOTH candidate keys (namespaced +
+/// legacy `host:tmux`), rows-affected, `reason`/`source`, and whether the
+/// `thread_channel_id` fallback was used — the original #3053 failure mode was
+/// a silent no-op refresh of a non-matching row, after which idle-kill killed
+/// the live session. Returns true when at least one row was touched.
 pub(in crate::services::discord) fn touch_session_activity(
     db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
@@ -1989,6 +1975,18 @@ pub(super) fn claim_watcher(
                 existing_handle
                     .cancel
                     .store(true, std::sync::atomic::Ordering::Relaxed);
+                // #3277 (Defect B): this cancel+remove was completely silent —
+                // in the incident the replaced incumbent's later "stopped" log
+                // was misattributed to the replacement watcher. Log the claim.
+                tracing::info!(
+                    source,
+                    tmux_session = %requested_tmux,
+                    existing_channel = existing_channel_id.get(),
+                    existing_cancelled,
+                    replace_paused_incumbent,
+                    output_path_changed = existing_output_path != requested_output_path,
+                    "watcher claim cancelled same-tmux incumbent before spawning replacement"
+                );
             }
             removed_stale_same_tmux = true;
         } else {
