@@ -492,29 +492,19 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         );
         return;
     };
-    // #3178 (codex fix — P1 lease-overwrite / the 'state tangle'): classify and
-    // run the slash-command-control DEDUPE check BEFORE recording ANY
-    // external-input lease. A machine slash-command control echo (/loop, /compact,
-    // the expanded `<command-*>` wrapper) now claims a FULL active turn (lease +
-    // ⏳ anchor + synthetic inflight, below). The #3153 double-post delivers the
-    // SAME injection as two independent observed prompts (raw echo + expanded
-    // wrapper) within ~tens-of-ms; the FIRST claims the active turn, but the
-    // SECOND must NOT — and critically must NOT record a lease, because the lease
-    // table is one-per-(provider,session): a second `record_external_input_turn_lease`
-    // would overwrite the first turn's lease and the duplicate's own guard would
-    // then clear that generation, stranding the first turn's bridge tail. So the
-    // duplicate half is dropped HERE, before the lease record on the next line, and
-    // never creates a lease/anchor/inflight at all. A genuine SECOND /loop or
-    // /compact seconds later falls outside the 2s window → fresh first sighting →
-    // its own active turn.
+    // #3178 (codex P1 lease-overwrite): run the slash-command-control dedupe BEFORE
+    // recording ANY external-input lease. The #3153 double-post (raw echo + expanded
+    // `<command-*>` wrapper, ~tens-of-ms apart) must not let the SECOND half record a
+    // lease: the table is one-per-(provider,session), so it would overwrite the first
+    // turn's lease and its guard would clear that generation, stranding the first
+    // bridge tail. Drop the duplicate here, before any lease/anchor/inflight exists;
+    // a genuine second /loop / /compact falls outside the 2s window → fresh turn.
     let injected_class = classify_injected_prompt(&prompt.prompt);
     if matches!(injected_class, InjectedPromptClass::SlashCommandControl) {
         let kind = slash_command_control_kind(&prompt.prompt);
         if !slash_command_control_turn_is_first_sighting(&prompt.tmux_session_name, &kind) {
-            // #3153 double-post second half within the 2s window: drop BEFORE any
-            // lease/anchor/inflight is created, so the first turn's lease is never
-            // overwritten and no guard/lease leaks (none was ever recorded). The
-            // first half already relays the assistant output via its own bridge tail.
+            // #3153 second half within the 2s window: drop before any lease/anchor/
+            // inflight exists; the first half already relays via its own bridge tail.
             tracing::info!(
                 provider = %prompt.provider,
                 channel_id = channel_id.get(),
@@ -527,13 +517,10 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     }
     let mut lease = record_observed_external_turn_lease(shared, &prompt, channel_id);
     // #3041 P1-4 codex: arm an early-return RAII guard the instant the lease is
-    // recorded & stored. Every FAILURE early-return below (registry None, notify
-    // resolve Err/503, task-card repeat, anchor POST failure) would otherwise leave
-    // this (possibly BridgeAdapter-owned) lease set for the full TTL, blocking the
-    // legitimate watcher/sink delivery for ~10 minutes. The guard clears EXACTLY the
-    // recorded generation on drop; it is DISARMED on the success path just before the
-    // bridge-tail ownership block, so a turn the bridge legitimately owns keeps its
-    // lease (no double-delivery).
+    // recorded — every failure early-return below would otherwise leave the lease set
+    // for the full TTL, blocking watcher/sink delivery ~10min. The guard clears
+    // EXACTLY the recorded generation on drop and is DISARMED on the success path
+    // before the bridge-tail ownership block (a bridge-owned turn keeps its lease).
     let mut observed_lease_early_return_guard = TuiDirectObservedLeaseEarlyReturnGuard::arm(
         &prompt.provider,
         &prompt.tmux_session_name,
@@ -569,34 +556,19 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             return;
         }
     };
-    // #3164: the `⏳` lifecycle reaction MUST be added by the SAME bot identity that
-    // later removes it. The completion path
-    // (`complete_tui_direct_prompt_anchor_lifecycle_if_present`) calls
-    // `remove_reaction_raw(http, ..., '⏳')` with the *provider/command* bot's
-    // `ctx.http` (the watcher parameter, ultimately the provider runtime's serenity
-    // ctx). `remove_reaction_raw` only removes `@me`'s reaction, so if `⏳` is added
-    // by a DIFFERENT bot (previously `notify`), removal silently no-ops and the
-    // hourglass lingers forever. #750 invariant: the command bot is the SINGLE source
-    // of the `⏳` lifecycle emoji (announce/notify bots never carry it). So resolve
-    // the provider/command bot here and use it for the add below. Note: the
-    // *notification body* itself is still posted by `notify_http` — a different bot
-    // reacting to a notify-posted message is fine (Discord lets any bot react to any
-    // message). We intentionally do NOT fall back to `notify_http` for the reaction:
-    // adding with the wrong identity reintroduces the un-removable residual, so on
-    // resolve failure we skip the `⏳` add (with a warning) rather than mis-attribute it.
-    // #3164 codex R2 issue-1: resolve the add-bot from the SAME source the
-    // completion path removes with — this relay's own `shared`
-    // `serenity_http_or_token_fallback()`, NOT a name-only registry lookup.
-    // The completion `complete_tui_direct_prompt_anchor_lifecycle_if_present`
-    // is driven by the watcher's `http`, which is exactly
-    // `shared.serenity_http_or_token_fallback()` (turn_bridge/mod.rs:2187 etc.).
-    // A name-based `resolve_bot_http(registry, provider)` returns the FIRST
-    // client matching the provider name; in a multi-runtime/same-provider
-    // deployment that can be a DIFFERENT bot account than this `shared`'s ctx
-    // http, reintroducing the add≠remove asymmetry. Using `shared`'s own http
-    // guarantees identical `@me` identity, so `remove_reaction_raw` later
-    // removes exactly this `⏳`. On unavailability we SKIP the add (warn) rather
-    // than mis-attribute it via `notify_http` (which would relinger forever).
+    // #3164: the `⏳` MUST be added by the SAME bot identity that later removes it —
+    // `remove_reaction_raw` only removes `@me`'s reaction, so an add by a different
+    // bot (previously `notify`) leaves the hourglass forever. #750 invariant: the
+    // command bot is the single source of the `⏳` lifecycle emoji. The notification
+    // BODY is still posted by `notify_http` (any bot may react to any message), but
+    // we never fall back to `notify_http` for the reaction: on resolve failure we
+    // skip the add (warn) rather than mis-attribute it.
+    // #3164 codex R2 issue-1: resolve the add-bot from the SAME source the completion
+    // (`complete_tui_direct_prompt_anchor_lifecycle_if_present`) removes with — this
+    // relay's own `shared.serenity_http_or_token_fallback()` (the watcher's `http`,
+    // turn_bridge/mod.rs:2187), NOT a name-only `resolve_bot_http` lookup, which in a
+    // multi-runtime/same-provider deployment can return a DIFFERENT bot account and
+    // reintroduce the add≠remove asymmetry.
     let command_http = shared.serenity_http_or_token_fallback();
     if command_http.is_none() {
         tracing::warn!(
@@ -610,27 +582,15 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
              (adding with a different bot would leave an un-removable hourglass)"
         );
     }
-    // #3099 / #3100: `injected_class` was classified at the top of this function
-    // (before the slash-command-control dedupe / lease record). A compact/system
-    // continuation prologue is NOT a human request — it is rendered as a neutral
-    // session note with no `⏳`, no prompt anchor, and no synthetic turn ownership.
-    //
-    // #3099 codex re-review (P1): SystemContinuation must NOT short-circuit the
-    // whole relay. The compact continuation IS fed to the provider and Claude
-    // produces assistant output; that output still has to reach Discord via the
-    // bridge tail. So a SystemContinuation suppresses ONLY the user-turn
-    // lifecycle (the `⏳` reaction, the prompt anchor, and the synthetic
-    // user-turn/inflight ownership) — the assistant-output delivery path (the
-    // Claude bridge tail below) still runs exactly as for any other injection.
-    //
-    // #3178 (codex fix): a SlashCommandControl is NO LONGER suppressed here — it
-    // takes the active-turn `else` block below (anchor + ⏳ + synthetic inflight)
-    // so a message injected mid-/loop queues cleanly (mailbox.has_active_turn()
-    // becomes true). Only SystemContinuation still suppresses the lifecycle.
-    // #3099 codex re-review (P1): suppressing the user-turn lifecycle (⏳ + anchor
-    // + synthetic ownership) is decoupled from output delivery. The bridge tail
-    // below runs regardless so the provider's assistant output still reaches
-    // Discord even for a SystemContinuation.
+    // #3099 / #3100: a compact/system continuation prologue is NOT a human request —
+    // it renders as a neutral session note with no `⏳`, no anchor, and no synthetic
+    // turn ownership. #3099 codex re-review (P1): it must NOT short-circuit the whole
+    // relay — only the user-turn lifecycle is suppressed; the bridge tail below still
+    // runs so the provider's assistant output reaches Discord.
+    // #3178 (codex fix): a SlashCommandControl is NO LONGER suppressed here — it takes
+    // the active-turn `else` block below (anchor + ⏳ + synthetic inflight) so a
+    // message injected mid-/loop queues cleanly (mailbox.has_active_turn() == true).
+    // Only SystemContinuation still suppresses the lifecycle.
     let is_system_continuation = injected_class.suppresses_user_turn_lifecycle();
     debug_assert!(
         injected_class.still_delivers_assistant_output(),
@@ -672,19 +632,14 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             }
         }
     } else {
-        // #3178 (codex fix): a SlashCommandControl (/loop, /compact, the expanded
-        // <command-*> wrapper, or the Compacted stdout) is a FULL active turn now,
-        // so it posts an anchor + ⏳ + synthetic inflight like HumanTuiDirect. Its
-        // anchor CONTENT carries the /loop directive body (the operator wants the
-        // recurring loop content visible — only the #3153 double-post is deduped,
-        // not the content) but NEVER the <command-*> wrapper boilerplate or the
-        // Compacted stdout body. (The #3153 duplicate half was already dropped
-        // before any lease record at the top of this function.)
-        // #3075: a `<task-notification>` auto-turn is a MACHINE event — render it
-        // as a compact structured card and DEDUPE repeats by task-id (a repeat
-        // edits its live card or drops as a no-op → no new ⏳/turn; the first
-        // sighting returns content to post as the #3099 anchor). HumanTuiDirect
-        // keeps the raw render; SystemContinuation is handled above (#3100).
+        // #3178 (codex fix): a SlashCommandControl is a FULL active turn now (anchor +
+        // ⏳ + synthetic inflight like HumanTuiDirect). Its anchor content carries the
+        // /loop directive body but never the <command-*> wrapper or Compacted stdout;
+        // the #3153 duplicate half was already dropped before the lease record above.
+        // #3075: a `<task-notification>` auto-turn is a MACHINE event — render a
+        // compact structured card and dedupe repeats by task-id (a repeat edits its
+        // live card or no-ops; the first sighting posts as the #3099 anchor).
+        // HumanTuiDirect keeps the raw render; SystemContinuation handled above (#3100).
         let content = if matches!(injected_class, InjectedPromptClass::SlashCommandControl) {
             let kind = slash_command_control_kind(&prompt.prompt);
             format_slash_command_control_note(&prompt.tmux_session_name, &kind, &prompt.prompt)
@@ -699,16 +654,11 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             {
                 super::tui_task_card::TaskCardOutcome::Post { content } => content,
                 super::tui_task_card::TaskCardOutcome::Repeat => {
-                    // #3075 codex P1 #2: a repeat edited the live card (or dropped
-                    // as a no-op) and early-returns BEFORE the bridge-tail /
-                    // lease-guard cleanup block below. But `record_observed_external_turn_lease`
-                    // (above) already recorded a fresh external-input turn lease for
-                    // THIS observation, overwriting any prior one. If we returned now
-                    // without clearing it, that dangling non-Unassigned lease would
-                    // make `session_bound_external_lease_blocks_delivery` skip a
-                    // legitimate session-bound / bridge-tail delivery. Clear exactly
-                    // the lease this observation recorded (exact-match, so a newer
-                    // turn that reused this provider/session/channel is preserved).
+                    // #3075 codex P1 #2: a repeat early-returns before the bridge-tail
+                    // lease-guard cleanup, but the lease recorded above would dangle and
+                    // make `session_bound_external_lease_blocks_delivery` skip legitimate
+                    // delivery. Clear exactly the lease THIS observation recorded
+                    // (exact-match preserves a newer turn's lease).
                     clear_observed_external_turn_lease_if_current(&prompt, channel_id, &lease);
                     return;
                 }
@@ -723,19 +673,13 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         let anchor_message = match channel_id.say(&*notify_http, content).await {
             Ok(message) => message,
             Err(error) => {
-                // #3075 codex P2: for a TaskNotificationEvent the `Post` outcome
-                // above reserved a placeholder card slot (message_id == 0) BEFORE
-                // this post. If the post fails we early-return without ever calling
-                // `record_posted_card`, so the placeholder would linger and force
-                // every later same-task notification to resolve to `Pending`
-                // (`TaskCardOutcome::Repeat` → no-op), silently suppressing that
-                // task-id until the 1h stale purge. Release the reservation we own
-                // (exact-match: only while message_id is still 0) so the NEXT
-                // same-task notification reserves fresh and reposts. A racing
-                // repeat that legitimately saw `Pending` is still a safe no-op:
-                // its slot read happened against this same placeholder, and clearing
-                // it only changes the *next* reservation's outcome — it never turns
-                // an already-dropped repeat into a double-post.
+                // #3075 codex P2: the `Post` outcome reserved a placeholder card slot
+                // (message_id == 0) before this post; on post failure release the
+                // reservation we own (exact-match while message_id is still 0) so the
+                // next same-task notification reserves fresh — otherwise the lingering
+                // placeholder forces every later one to `Pending`/no-op until the 1h
+                // stale purge. Clearing only changes the NEXT reservation's outcome,
+                // never turning an already-dropped repeat into a double-post.
                 if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
                     let task_id =
                         super::tui_task_card::parse_task_notification(&prompt.prompt).task_id;
@@ -762,10 +706,8 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         current_turn_anchor_id = Some(anchor_message.id.get());
         // #3075: remember this card so a repeat completion edits it. #3164 codex R3
         // issue-2: keep this IMMEDIATELY after the successful post (before the awaited
-        // `⏳` add) — `record_posted_card` is NOT used by lifecycle completion, and
-        // deferring it behind the reaction await widens the task-card `Pending` no-op
-        // window (a repeat `<task-notification>` arriving while message_id is still 0
-        // is dropped as `Pending`, losing the only repeat/update).
+        // `⏳` add) — deferring it behind the reaction await widens the task-card
+        // `Pending` no-op window and can drop the only repeat/update.
         if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
             super::tui_task_card::record_posted_card(
                 channel_id.get(),
@@ -774,17 +716,13 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             );
         }
         // #3164: add `⏳` with the command(provider) bot so it matches the bot that
-        // removes it in `complete_tui_direct_prompt_anchor_lifecycle_if_present`
-        // (watcher provider ctx.http via `shared.serenity_http_or_token_fallback()`).
-        // If that http was unavailable we skip the add entirely (warned above)
-        // rather than add with the wrong identity and strand the hourglass.
-        //
+        // removes it in `complete_tui_direct_prompt_anchor_lifecycle_if_present`; if
+        // that http was unavailable we skip the add (warned above) rather than strand
+        // the hourglass under the wrong identity.
         // #3164 codex R2 issue-2: add the `⏳` BEFORE the anchor becomes findable
-        // (`record_prompt_anchor` below). The completion path locates this turn via
-        // the dedupe anchor; if the anchor were recorded first, a fast watcher could
-        // complete (remove a not-yet-added `⏳`, post `✅`, clear the anchor) and THEN
-        // this delayed add would land — re-leaving `⏳ + ✅`. Adding first guarantees
-        // the `⏳` exists before any anchor-based completion can observe the turn.
+        // (`record_prompt_anchor` below) — anchor-first would let a fast watcher
+        // complete (remove a not-yet-added `⏳`, post `✅`, clear the anchor) and the
+        // delayed add then re-leaves `⏳ + ✅`.
         if let Some(command_http) = command_http.as_ref() {
             super::formatting::add_reaction_raw(command_http, channel_id, anchor_message.id, '⏳')
                 .await;
@@ -795,35 +733,22 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             channel_id.get(),
             anchor_message.id.get(),
         );
-        // #3174: turn-identity guard on the ⏳ lifecycle vs the watcher's
-        // lease-gated completion. If the provider committed terminal output
-        // inside the sub-second `notify-post + ⏳-add` window above, the watcher's
-        // lease-gated completion already fired BEFORE this `record_prompt_anchor`
-        // landed — it found no anchor, was a no-op, and recorded a deferred-
-        // completion marker (the lease it gated on is cleared after that
-        // delivery, so no later watcher pass would reconcile the ⏳). Now that
-        // THIS turn's anchor exists, drain that marker and finish the
-        // ⏳ → ✅ swap against the just-recorded anchor.
-        //
-        // #3174 codex P1 (turn identity): the marker is stamped with the
-        // `generation` of the lease the watcher completion gated on; drain ONLY
-        // the marker matching THIS relay invocation's lease generation
-        // (`lease.generation`), so a NEWER same-(provider,tmux) turn's marker is
-        // never cross-consumed and the wrong turn's ⏳ is never completed.
-        //
-        // #3174 codex P2 (HTTP fail-open): PEEK the marker first, then only
-        // consume (`take_...`) once we have a `command_http` to actually deliver
-        // the ⏳ → ✅ swap. If command_http is unavailable we leave the marker in
-        // place rather than silently dropping it — mirrors the #3164 ⏳-add
-        // fail-open (skip rather than strand worse than before); a later anchor
-        // record / watcher pass can still reconcile it within the marker TTL.
-        // No-op on the common path (no terminal output yet → no marker). The
-        // peek + consume/fail-open DECISION is in
-        // [`decide_deferred_anchor_completion_drain`] (pure, against the real
-        // dedupe state) so it is integration-testable: a test that records a
-        // matching marker and drives this block must see the marker consumed and
-        // the completion delivered; neutralizing the decision (or the consume)
-        // makes that test fail.
+        // #3174: turn-identity guard on the ⏳ lifecycle. If the provider committed
+        // terminal output inside the sub-second `notify-post + ⏳-add` window above,
+        // the watcher's lease-gated completion already fired before this
+        // `record_prompt_anchor` landed — no anchor found, no-op, and a deferred-
+        // completion marker was recorded (its lease is cleared after delivery, so no
+        // later watcher pass reconciles the ⏳). Now that THIS turn's anchor exists,
+        // drain that marker and finish the ⏳ → ✅ swap.
+        // #3174 codex P1 (turn identity): the marker is stamped with the gated lease's
+        // `generation`; drain ONLY the marker matching `lease.generation` so a newer
+        // same-(provider,tmux) turn's marker is never cross-consumed.
+        // #3174 codex P2 (HTTP fail-open): PEEK first, consume (`take_...`) only with a
+        // `command_http` to deliver the swap; otherwise leave the marker in place
+        // (mirrors the #3164 ⏳-add fail-open) for a later pass within the marker TTL.
+        // No-op on the common path (no marker). The peek + consume/fail-open decision
+        // lives in [`decide_deferred_anchor_completion_drain`] (pure) so it is
+        // integration-testable end-to-end.
         match decide_deferred_anchor_completion_drain(
             &prompt.provider,
             &prompt.tmux_session_name,

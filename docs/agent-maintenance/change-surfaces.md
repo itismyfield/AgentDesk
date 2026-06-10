@@ -416,7 +416,7 @@
     helper additionally fires the claude-only AgentDesk-side `/compact` injection
     when live usage crosses `context_compact_percent_claude` (Claude Code ignores
     `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`); see `src/services/claude_compact_trigger.rs`.
-  - `src/services/discord/tui_prompt_relay.rs` (5492 lines; #3016 phase-5b2
+  - `src/services/discord/tui_prompt_relay.rs` (5417 lines; #3016 phase-5b2
     removed the dead `publish_tui_direct_watcher_finalize_debt` producer;
     SSH-direct TUI
     prompt notification plus Codex rollout response relay surface, bugfix only
@@ -575,7 +575,10 @@
     added the anchor `⏳` (#3164 add≡remove invariant) — removing the stranded
     `⏳` and marking `⚠` on the anchor message (precedent: the watcher's
     auth-expired `⏳ → ⚠` swap), because no claim ever drives the normal
-    `⏳ → ✅` completion for an ABORTed synthetic start.
+    `⏳ → ✅` completion for an ABORTed synthetic start; -75 from #3282
+    follow-up: verbose multi-line comment blocks compressed (no semantic
+    change) to offset the +54 growth and keep prod LoC under the frozen
+    `giant_file_ratchet` baseline (5438, #3028).
   - `src/services/discord/idle_recap.rs` (1319 prod lines; idle-recap card
     compose/post/clear surface, registered giant-file (#3036) — bugfix only
     outside an extraction plan. Crossed 1000 prod LoC with #3146 Part 1: the
