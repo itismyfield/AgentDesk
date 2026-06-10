@@ -13,6 +13,8 @@
 //!   No disk or DB state is touched; the actor task ends naturally once the
 //!   last `ChannelMailboxHandle` sender is dropped.
 
+use std::sync::Arc;
+
 use poise::serenity_prelude::ChannelId;
 
 use super::{
@@ -26,7 +28,9 @@ pub(crate) enum MailboxPurgeOutcome {
     /// No registry entry existed for the channel — nothing to unlink.
     NoEntry,
     /// Entry existed, the final actor-snapshot recheck confirmed idle, and
-    /// every map was unlinked.
+    /// the instance maps were unlinked. Global mirrors are unlinked only when
+    /// they still point at the exact objects this instance verified idle
+    /// (#3297 finding 5) — a mismatching mirror is skipped with a WARN.
     Removed,
     /// Live-work evidence appeared on the final snapshot recheck — refused.
     RefusedLiveWork(&'static str),
@@ -64,14 +68,42 @@ impl ChannelMailboxRegistry {
         if snapshot.recovery_started_at.is_some() {
             return MailboxPurgeOutcome::RefusedLiveWork("recovery_in_progress");
         }
-        self.handles.remove(&channel_id);
-        self.recovery_done.remove(&channel_id);
-        self.turn_finished.remove(&channel_id);
-        GLOBAL_CHANNEL_MAILBOXES.remove(&channel_id);
-        GLOBAL_RECOVERY_DONE_SIGNALS.remove(&channel_id);
-        GLOBAL_TURN_FINISHED_SIGNALS.remove(&channel_id);
+        // Unlink the instance maps only when they still hold the exact
+        // entries this purge verified: the handle that was snapshotted and
+        // the signal Arcs the instance owns.
+        self.handles.remove_if(&channel_id, |_, current| {
+            current.sender.same_channel(&handle.sender)
+        });
+        let removed_recovery_done = self.recovery_done.remove(&channel_id);
+        let removed_turn_finished = self.turn_finished.remove(&channel_id);
+        // #3297 finding 5: the GLOBAL_* maps are process-wide single slots —
+        // another registry instance may have published a DIFFERENT (possibly
+        // busy) actor/signal for this channel after ours. The idle check above
+        // only proved OUR objects idle, so unlink a global mirror entry only
+        // when it still points at the exact object we verified; otherwise
+        // skip it and WARN.
+        let global_handle_removed = GLOBAL_CHANNEL_MAILBOXES
+            .remove_if(&channel_id, |_, mirrored| {
+                mirrored.sender.same_channel(&handle.sender)
+            })
+            .is_some();
+        if !global_handle_removed && GLOBAL_CHANNEL_MAILBOXES.contains_key(&channel_id) {
+            tracing::warn!(
+                channel = channel_id.get(),
+                "global mailbox mirror points at a different actor — mirror unlink skipped"
+            );
+        }
+        if let Some((_, signal)) = removed_recovery_done {
+            GLOBAL_RECOVERY_DONE_SIGNALS
+                .remove_if(&channel_id, |_, mirrored| Arc::ptr_eq(mirrored, &signal));
+        }
+        if let Some((_, signal)) = removed_turn_finished {
+            GLOBAL_TURN_FINISHED_SIGNALS
+                .remove_if(&channel_id, |_, mirrored| Arc::ptr_eq(mirrored, &signal));
+        }
         tracing::warn!(
             channel = channel_id.get(),
+            global_handle_removed,
             "mailbox registry entry purged (operator repair; in-memory unlink only)"
         );
         MailboxPurgeOutcome::Removed
@@ -174,5 +206,64 @@ mod tests {
         assert!(!GLOBAL_CHANNEL_MAILBOXES.contains_key(&channel));
         assert!(!GLOBAL_RECOVERY_DONE_SIGNALS.contains_key(&channel));
         assert!(!GLOBAL_TURN_FINISHED_SIGNALS.contains_key(&channel));
+    }
+
+    /// #3297 finding-5 red-green: the global mirrors are process-wide single
+    /// slots. When a SECOND registry instance has published a different
+    /// (busy) actor for the same channel, purging the FIRST instance's idle
+    /// entry must unlink only the instance maps — the global mirror pointing
+    /// at the busy foreign actor must survive (pre-fix code removed it
+    /// unconditionally on the instance-local idle verdict alone).
+    #[tokio::test]
+    async fn remove_idle_entry_skips_global_mirrors_owned_by_another_instance() {
+        let registry_a = ChannelMailboxRegistry::default();
+        let registry_b = ChannelMailboxRegistry::default();
+        let channel = ChannelId::new(93_293_005);
+
+        // A registers first (its actor briefly owns the global slot)...
+        let handle_a = registry_a.handle(channel);
+        let _signal_a = registry_a.recovery_done(channel);
+        // ...then B registers the same channel: B's actor + signal now own
+        // the global mirrors (last-writer-wins), and B's actor is BUSY.
+        let handle_b = registry_b.handle(channel);
+        let signal_b = registry_b.recovery_done(channel);
+        assert!(
+            handle_b
+                .try_start_turn(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(7),
+                    MessageId::new(11),
+                )
+                .await
+        );
+        assert!(
+            !handle_a.sender.same_channel(&handle_b.sender),
+            "test precondition: two distinct actors for the channel"
+        );
+
+        // Purging A's (idle) entry must NOT unlink B's busy global mirror.
+        assert_eq!(
+            registry_a.remove_idle_entry(channel).await,
+            MailboxPurgeOutcome::Removed
+        );
+        assert!(
+            registry_a.peek(channel).is_none(),
+            "A's instance entry must be unlinked"
+        );
+        let surviving = ChannelMailboxRegistry::global_handle(channel)
+            .expect("global mirror owned by B must survive A's purge");
+        assert!(
+            surviving.sender.same_channel(&handle_b.sender),
+            "the surviving global mirror must still be B's actor"
+        );
+        let surviving_signal = ChannelMailboxRegistry::global_recovery_done(channel)
+            .expect("global recovery-done signal owned by B must survive A's purge");
+        assert!(Arc::ptr_eq(&surviving_signal, &signal_b));
+
+        // Cleanup: direct global-map removal (same convention as the other
+        // tests in this module) to keep the process-global maps clean.
+        GLOBAL_CHANNEL_MAILBOXES.remove(&channel);
+        GLOBAL_RECOVERY_DONE_SIGNALS.remove(&channel);
+        GLOBAL_TURN_FINISHED_SIGNALS.remove(&channel);
     }
 }

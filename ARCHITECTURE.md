@@ -404,6 +404,8 @@ src/
 │   │   │   ├── send_target.rs
 │   │   │   ├── session_enrichment.rs
 │   │   │   └── snapshot.rs
+│   │   ├── inflight/
+│   │   │   └── budget.rs
 │   │   ├── outbound/
 │   │   │   ├── confirmation.rs
 │   │   │   ├── decision.rs

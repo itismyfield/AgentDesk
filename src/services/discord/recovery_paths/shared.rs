@@ -74,6 +74,61 @@ pub(in crate::services::discord) fn classify_recovery_relay_error(
     RecoveryRelayOutcome::TransientFailure
 }
 
+/// #3297 finding 2: verdict of the post-failure channel-liveness probe.
+///
+/// The placeholder-anchor relay path (`replace_long_message_raw` →
+/// `send_long_message_raw_with_rollback`) flattens its error chain into
+/// `String`s, so the typed-chain walk above classifies a dead channel's
+/// 404/403/410 as `TransientFailure` and the permanent verdict was
+/// unreachable on the common (anchored) path. Instead of rebuilding the
+/// formatting error chain, callers actively probe the channel with a direct
+/// Discord HTTP `get_channel` AFTER a transient-looking relay failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum ChannelProbeVerdict {
+    /// The probe itself got an authoritative 404/403/410 for the CHANNEL —
+    /// the destination is permanently gone.
+    Gone,
+    /// The channel exists, or the probe failed transiently (5xx / 429 /
+    /// transport). Conservative: never escalates a relay failure.
+    Inconclusive,
+}
+
+/// Status-code half of the channel probe, sharing the permanent allowlist
+/// with the relay classification so the two can never drift.
+pub(in crate::services::discord) fn classify_channel_probe_status(
+    status: Option<u16>,
+) -> ChannelProbeVerdict {
+    match classify_recovery_relay_status(status) {
+        RecoveryRelayOutcome::PermanentFailure => ChannelProbeVerdict::Gone,
+        _ => ChannelProbeVerdict::Inconclusive,
+    }
+}
+
+/// Second-opinion escalation for an already-classified relay failure. The
+/// probe runs ONLY for a transient classification (a typed permanent verdict
+/// needs no probe; `Delivered` never reaches here), and only an authoritative
+/// [`ChannelProbeVerdict::Gone`] upgrades the outcome — probe failures keep
+/// the conservative transient verdict. The probe is a closure so tests can
+/// inject verdicts without a live Discord client (the #3297 finding-2 test
+/// seam). Takes the pre-classified outcome (not the error) so callers'
+/// futures stay `Send` — `&dyn Error` is not `Sync`.
+pub(in crate::services::discord) async fn escalate_transient_relay_outcome_with_probe<F, Fut>(
+    classified: RecoveryRelayOutcome,
+    probe: F,
+) -> RecoveryRelayOutcome
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ChannelProbeVerdict>,
+{
+    match classified {
+        RecoveryRelayOutcome::TransientFailure => match probe().await {
+            ChannelProbeVerdict::Gone => RecoveryRelayOutcome::PermanentFailure,
+            ChannelProbeVerdict::Inconclusive => RecoveryRelayOutcome::TransientFailure,
+        },
+        verdict => verdict,
+    }
+}
+
 /// #3293: what the restart path should do with the on-disk inflight row after
 /// a terminal-relay attempt. Pure decision so the safety matrix is testable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,10 +136,11 @@ pub(in crate::services::discord) enum RowDisposition {
     /// Relay delivered — run the branch's normal finish + clear epilogue.
     FinishAndClear,
     /// Discord permanently rejected the destination — force-clear now (with
-    /// handoff + audit) regardless of the attempt counter.
+    /// on-disk force-clear report + audit) regardless of the attempt counter.
     ClearPermanent,
     /// Transient failures exhausted the restart budget on a row whose tmux is
-    /// already confirmed gone — force-clear (with handoff + audit).
+    /// already confirmed gone — force-clear (with on-disk force-clear report
+    /// + audit).
     ClearBudgetExhausted,
     /// Preserve the row for the next boot and persist `attempts + 1`.
     PreserveAndCount,
@@ -132,8 +188,9 @@ pub(in crate::services::discord) fn disposition_reason_code(
 #[cfg(test)]
 mod tests {
     use super::{
-        RecoveryRelayOutcome, RowDisposition, classify_recovery_relay_status,
-        disposition_reason_code, unrecoverable_relay_disposition,
+        ChannelProbeVerdict, RecoveryRelayOutcome, RowDisposition, classify_channel_probe_status,
+        classify_recovery_relay_error, classify_recovery_relay_status, disposition_reason_code,
+        escalate_transient_relay_outcome_with_probe, unrecoverable_relay_disposition,
     };
 
     const BUDGET: u32 = crate::services::discord::inflight::RECOVERY_RELAY_RESTART_ATTEMPT_BUDGET;
@@ -163,6 +220,86 @@ mod tests {
         assert_eq!(
             classify_recovery_relay_status(None),
             RecoveryRelayOutcome::TransientFailure
+        );
+    }
+
+    /// #3297 finding-2 red-green: the placeholder-anchor relay path
+    /// (`send_long_message_raw_with_rollback` & co.) flattens the serenity
+    /// 404 into a `String` (`format!(...).into()`), so the typed-chain walk
+    /// alone misclassifies a dead channel as transient (the RED half,
+    /// asserted explicitly). The active channel probe restores the permanent
+    /// verdict (GREEN) — with the probe injected through the test seam.
+    #[tokio::test]
+    async fn string_flattened_error_with_dead_channel_probe_is_permanent() {
+        let flattened: Box<dyn std::error::Error + Send + Sync> =
+            "failed to edit message for replace: 404 Not Found (Unknown Channel)"
+                .to_string()
+                .into();
+        let classified = classify_recovery_relay_error(flattened.as_ref());
+        assert_eq!(
+            classified,
+            RecoveryRelayOutcome::TransientFailure,
+            "RED: the String-flattened chain hides the typed 404 from the chain walk"
+        );
+        assert_eq!(
+            escalate_transient_relay_outcome_with_probe(classified, || async {
+                ChannelProbeVerdict::Gone
+            })
+            .await,
+            RecoveryRelayOutcome::PermanentFailure,
+            "GREEN: a dead-channel probe must upgrade the flattened failure to permanent"
+        );
+    }
+
+    /// Conservative direction: an inconclusive probe (alive channel, probe
+    /// transport error, 5xx, 429) must keep the transient verdict.
+    #[tokio::test]
+    async fn inconclusive_probe_keeps_transient_verdict() {
+        let flattened: Box<dyn std::error::Error + Send + Sync> =
+            "edit failed: connection reset by peer".to_string().into();
+        let classified = classify_recovery_relay_error(flattened.as_ref());
+        assert_eq!(
+            escalate_transient_relay_outcome_with_probe(classified, || async {
+                ChannelProbeVerdict::Inconclusive
+            })
+            .await,
+            RecoveryRelayOutcome::TransientFailure
+        );
+    }
+
+    /// A pre-classified permanent verdict passes through without consulting
+    /// the probe (the closure panics if invoked).
+    #[tokio::test]
+    async fn permanent_classification_skips_the_probe() {
+        assert_eq!(
+            escalate_transient_relay_outcome_with_probe(
+                RecoveryRelayOutcome::PermanentFailure,
+                || async { panic!("probe must not run for a typed permanent verdict") }
+            )
+            .await,
+            RecoveryRelayOutcome::PermanentFailure
+        );
+    }
+
+    #[test]
+    fn probe_status_shares_the_permanent_allowlist() {
+        for code in [404, 403, 410] {
+            assert_eq!(
+                classify_channel_probe_status(Some(code)),
+                ChannelProbeVerdict::Gone,
+                "channel-gone status {code} must be authoritative"
+            );
+        }
+        for code in [200, 400, 401, 408, 429, 500, 502, 503, 504] {
+            assert_eq!(
+                classify_channel_probe_status(Some(code)),
+                ChannelProbeVerdict::Inconclusive,
+                "status {code} must stay inconclusive"
+            );
+        }
+        assert_eq!(
+            classify_channel_probe_status(None),
+            ChannelProbeVerdict::Inconclusive
         );
     }
 

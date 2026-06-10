@@ -1,10 +1,11 @@
 //! Inflight turn state persistence.
 //!
-//! `response_sent_offset`, `current_msg_id`, and
-//! `last_watcher_relayed_offset` participate in the relay state contract
-//! documented in `docs/relay-state-contract.md` (#1222 / #1224).
-//! Any change that touches relay producers/consumers must keep the
-//! invariants enumerated there satisfied.
+//! `response_sent_offset`, `current_msg_id`, and `last_watcher_relayed_offset`
+//! participate in the relay state contract documented in
+//! `docs/relay-state-contract.md` (#1222 / #1224). Any change that touches
+//! relay producers/consumers must keep the invariants there satisfied.
+
+pub(in crate::services::discord) mod budget;
 
 use std::collections::HashMap;
 use std::fs;
@@ -20,13 +21,12 @@ use crate::services::agent_protocol::{RuntimeHandoffKind, TaskNotificationKind};
 use crate::services::provider::ProviderKind;
 
 // #2235 (follow-up to #2213): bump v7→v8. v7 added `runtime_kind` without a
-// version change, so rolling back from new→old binaries could read rows whose
-// FIFO synthesis was elided for ClaudeTui and reject recovery with a misleading
-// "input fifo path missing" notice. v8 marks the on-disk shape that ships the
-// compat-fixed `input_fifo_path` alongside ClaudeTui plus the silent-skip
-// recovery branch; old binaries continue to deserialize v8 rows via
-// `#[serde(default)]` and treat the new `runtime_kind` as legacy, so the
-// compat window is one release in each direction.
+// version change, so new→old rollbacks could read rows whose FIFO synthesis
+// was elided for ClaudeTui and reject recovery with a misleading "input fifo
+// path missing" notice. v8 marks the shape shipping the compat-fixed
+// `input_fifo_path` alongside ClaudeTui plus the silent-skip recovery branch;
+// old binaries deserialize v8 rows via `#[serde(default)]` (compat window:
+// one release each direction).
 const INFLIGHT_STATE_VERSION: u32 = 8;
 const INFLIGHT_MAX_AGE_SECS: u64 = 300; // 5 minutes
 const DRAIN_RESTART_MAX_AGE_SECS: u64 = 1800; // 30 minutes
