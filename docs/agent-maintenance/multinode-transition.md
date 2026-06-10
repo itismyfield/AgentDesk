@@ -381,6 +381,12 @@
 
 ### Audited touches
 
+- #3038 S1 (SharedData `QueuedPlaceholderState` extraction): `runtime_bootstrap.rs`
+  changed only in the `run_bot_build_shared_data` literal — three consecutive
+  queued-placeholder members are wrapped into the new `queued:` group field
+  (pure behavior-preserving extraction; initialization expressions and their
+  evaluation order byte-identical). **Worker-local**: no leader-only side
+  effect, no durable queue, no PG lease — multinode assumptions unchanged.
 - #3082 (queued-card / answer-flush barrier): `runtime_bootstrap.rs` changed
   only to initialize the new in-process `answer_flush_barrier` field on
   `SharedData`. The barrier is **worker-local** (a per-process, per-channel
