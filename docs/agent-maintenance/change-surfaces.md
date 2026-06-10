@@ -438,7 +438,7 @@
     additions are offset in-file by compressing the #3016-S3 finalize/TOCTOU
     and #1670/#1708 decoupling comment blocks, so the 9583 ratchet baseline is
     unchanged (#3303 itself is a 0-line watcher change).
-  - `src/services/discord/tui_prompt_relay.rs` (5438 production lines; #3296
+  - `src/services/discord/tui_prompt_relay.rs` (5429 production lines; #3296
     codex r1+r2: the ABORT cleanup hook pins the foreign prior inflight's
     identity — the live row at the record instant, or the worker's LAST-VIEW
     identity when that row just vanished — and persists the marker via
