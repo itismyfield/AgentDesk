@@ -371,14 +371,13 @@ pub(super) type ViewFn = Box<
         + Sync,
 >;
 
-/// #3282: Discord-side cleanup the worker runs on the terminal backstop ABORT
-/// (`backstop_abort_foreign_inflight_live`). The anchor message earned a `⏳`
-/// lifecycle reaction when the synthetic start was created; an ABORT means no
-/// claim ever saves an inflight for this anchor, so the normal watcher/recovery
-/// `⏳ → ✅` completion never fires — without explicit cleanup the hourglass
-/// lingers forever. Provided by [`super::tui_prompt_relay`] (it owns the
-/// provider/command bot http — the SAME bot identity that added the `⏳`, per
-/// the #3164 add≡remove invariant).
+/// #3282/#3296: Discord-side reconcile hook the worker runs on the terminal
+/// backstop ABORT (`backstop_abort_foreign_inflight_live`). The input was
+/// already provider-submitted by this point, so the anchor KEEPS its `⏳`; the
+/// hook records a durable aborted-anchor marker
+/// ([`super::tui_direct_abort_marker`]) so a later prior-owner terminal commit
+/// flips it `⏳ → ✅`, or the TTL'd sweep flips it `⏳ → ⚠` when nothing ever
+/// covered it. Provided by [`super::tui_prompt_relay`].
 pub(super) type AbortCleanupFn = Box<
     dyn for<'a> Fn(
             &'a Arc<SharedData>,
@@ -391,9 +390,9 @@ pub(super) type AbortCleanupFn = Box<
 /// Spawn the DETACHED per-channel worker. Acquires the channel lock (FIFO
 /// serialization), polls the wait predicate until the prior turn finalizes (or
 /// the 8s backstop fires), runs the claim, and deletes the record. On the
-/// terminal backstop ABORT it runs `abort_cleanup_fn` (the anchor `⏳` cleanup —
-/// #3282) before dropping the record. Returns immediately so the observer loop
-/// is never blocked.
+/// terminal backstop ABORT it runs `abort_cleanup_fn` (the aborted-anchor
+/// marker record — #3282/#3296) before dropping the record. Returns immediately
+/// so the observer loop is never blocked.
 pub(super) fn spawn_worker(
     shared: Arc<SharedData>,
     record: TuiDirectPendingStart,
@@ -473,7 +472,12 @@ async fn run_worker(
                     // Surface an observability event and drop only the synthetic
                     // OWNERSHIP claim (the provider prompt was already submitted;
                     // the watcher/bridge still relays its output).
-                    tracing::error!(
+                    // #3296: WARN, not ERROR — this branch fires by definition
+                    // only when a FOREIGN inflight is live on the SAME channel,
+                    // i.e. the input was already submitted and usually merges
+                    // into the prior owner's turn (a normal outcome, not a
+                    // failure). The event key is load-bearing — never change it.
+                    tracing::warn!(
                         provider = %record.provider,
                         channel_id = record.channel_id,
                         tmux_session_name = %record.tmux_session_name,
@@ -481,12 +485,12 @@ async fn run_worker(
                         backstop_cycles,
                         waited_ms = worker_start.elapsed().as_millis(),
                         event = "tui_direct_pending_start.backstop_abort_foreign_inflight_live",
-                        "tui_direct_pending_start: prior inflight stayed LIVE across the backstop escalation budget; ABORTING the synthetic turn-start claim without overwriting the live prior turn (provider output still relays via the prior turn's owner)"
+                        "tui_direct_pending_start: prior inflight stayed LIVE across the backstop escalation budget; ABORTING the synthetic turn-start claim without overwriting the live prior turn — input already submitted; abort marker recorded, reconcile lands ✅ via prior-owner completion or ⚠ via TTL fallback (#3296)"
                     );
-                    // #3282: no claim will ever run for this anchor, so the
-                    // normal `⏳ → ✅` completion never fires — clean up the
-                    // anchor's `⏳` here (same bot identity as the add, #3164)
-                    // instead of leaving the hourglass stranded forever.
+                    // #3282/#3296: no claim will ever run for this anchor, so
+                    // the normal `⏳ → ✅` completion never fires — record the
+                    // durable aborted-anchor marker here (the anchor keeps its
+                    // ⏳; the watcher drain / TTL sweep own the reconcile).
                     abort_cleanup_fn(&shared, &record).await;
                     delete(&record);
                     return;
@@ -991,10 +995,11 @@ mod tests {
         assert_eq!(
             abort_cleanup_calls.load(Ordering::SeqCst),
             1,
-            "#3282: the terminal backstop ABORT must run the anchor reaction \
-             cleanup EXACTLY ONCE (removes the stranded ⏳ — no claim will ever \
-             drive the normal ⏳ → ✅ completion for this anchor). RED if the \
-             ABORT branch skips abort_cleanup_fn (the hourglass lingers forever)."
+            "#3282/#3296: the terminal backstop ABORT must run the abort \
+             reconcile hook EXACTLY ONCE (records the aborted-anchor marker — \
+             no claim will ever drive the normal ⏳ → ✅ completion for this \
+             anchor). RED if the ABORT branch skips abort_cleanup_fn (the \
+             hourglass would linger with no reconcile owner)."
         );
         reset_present_for_tests();
     }

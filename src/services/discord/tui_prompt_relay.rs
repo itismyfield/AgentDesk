@@ -1741,54 +1741,54 @@ fn pending_start_claim_fn() -> super::tui_direct_pending_start::ClaimFn {
     })
 }
 
-/// #3282: the worker's terminal-ABORT reaction cleanup. When the backstop
-/// escalation budget is exhausted (`backstop_abort_foreign_inflight_live`) no
-/// claim ever saves an inflight for this anchor, so the normal watcher/recovery
-/// `⏳ → ✅` completion never fires — without this cleanup the anchor's `⏳`
-/// lingers forever (observed live on msg 1514080986529533972). Remove the `⏳`
-/// and swap in a `⚠` failure marker so the abort is visible rather than a
-/// silent eternal hourglass (precedent: the watcher's auth-expired `⏳ → ⚠`
-/// swap in tmux_watcher.rs).
-///
-/// Bot identity (#3164 invariant): the `⏳` was added with THIS relay's
-/// `shared.serenity_http_or_token_fallback()` (the provider/command bot —
-/// see the `command_http` add in `relay_observed_prompt`), and
-/// `remove_reaction_raw` only removes `@me`'s reaction. Resolving the SAME
-/// source here guarantees the identical `@me` identity, so the removal targets
-/// exactly the reaction the add created. On unavailability we skip with a
-/// warning — removing with a different bot identity would silently no-op.
+/// #3296 (supersedes the #3282 `⏳ → ⚠` swap): the worker's terminal-ABORT
+/// reconcile hook. By the time the backstop ABORT fires the input was ALREADY
+/// provider-submitted (the abort drops only the synthetic OWNERSHIP claim), so
+/// the anchor's `⏳` is still TRUE — and every live observation ended with the
+/// prior owner relaying the response, so the old `⚠` swap branded ANSWERED
+/// messages as failures. Instead: KEEP the `⏳` and record a durable
+/// aborted-anchor marker. The watcher terminal-commit drain flips it `⏳ → ✅`
+/// once a same-(provider,tmux,channel) commit covers it; the placeholder
+/// sweeper flips it `⏳ → ⚠` only after the TTL with no live inflight — a
+/// genuine failure still surfaces in bounded time (the sweeper owns the
+/// reclaim, so no #3282 eternal-hourglass regression). The marker is recorded
+/// even when http is currently unavailable (better than the old skip-entirely
+/// path); every later reaction op resolves
+/// `shared.serenity_http_or_token_fallback()` INSIDE the marker module — the
+/// same bot identity that added the `⏳` (#3164 add≡remove).
 fn pending_start_abort_cleanup_fn() -> super::tui_direct_pending_start::AbortCleanupFn {
-    Box::new(|shared, record| {
+    Box::new(|_shared, record| {
         Box::pin(async move {
-            // Defensive: a corrupted durable record could carry a zero anchor id;
-            // `MessageId::new(0)` panics (mirrors the watcher's user_msg_id != 0
-            // guard before its reaction swaps).
+            // Defensive (I5): a corrupted durable record could carry a zero
+            // anchor id — `MessageId::new(0)` panics and a zero-id marker could
+            // never be reconciled. `record()` rejects it too; skip outright.
             if record.anchor_message_id == 0 {
                 return;
             }
-            let Some(http) = shared.serenity_http_or_token_fallback() else {
-                tracing::warn!(
+            let marker = super::tui_direct_abort_marker::AbortedAnchorMarker {
+                provider: record.provider.clone(),
+                channel_id: record.channel_id,
+                anchor_message_id: record.anchor_message_id,
+                tmux_session_name: record.tmux_session_name.clone(),
+                aborted_at_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
+                covered_at_ms: None,
+            };
+            match super::tui_direct_abort_marker::record(&marker) {
+                Ok(()) => tracing::info!(
                     provider = %record.provider,
                     channel_id = record.channel_id,
                     tmux_session_name = %record.tmux_session_name,
                     anchor_message_id = record.anchor_message_id,
-                    "tui_direct_pending_start: skipping anchor ⏳ abort cleanup; provider serenity \
-                     http unavailable (removing with a different bot identity would no-op — #3164)"
-                );
-                return;
-            };
-            let channel_id = ChannelId::new(record.channel_id);
-            let anchor_message_id = MessageId::new(record.anchor_message_id);
-            super::formatting::remove_reaction_raw(&http, channel_id, anchor_message_id, '⏳')
-                .await;
-            super::formatting::add_reaction_raw(&http, channel_id, anchor_message_id, '⚠').await;
-            tracing::info!(
-                provider = %record.provider,
-                channel_id = record.channel_id,
-                tmux_session_name = %record.tmux_session_name,
-                anchor_message_id = record.anchor_message_id,
-                "tui_direct_pending_start: removed the anchor ⏳ and marked ⚠ after the synthetic turn-start ABORT (#3282)"
-            );
+                    "tui_direct_pending_start: synthetic turn-start ABORTed; anchor keeps ⏳ and a durable aborted-anchor marker was recorded — reconcile lands ✅ on prior-owner completion or ⚠ via TTL fallback (#3296)"
+                ),
+                Err(error) => tracing::warn!(
+                    provider = %record.provider,
+                    channel_id = record.channel_id,
+                    anchor_message_id = record.anchor_message_id,
+                    error = %error,
+                    "tui_direct_pending_start: failed to persist the aborted-anchor marker; anchor ⏳ may linger until manual cleanup (#3296)"
+                ),
+            }
         })
     })
 }
@@ -5619,6 +5619,85 @@ mod tests {
             ExternalInputRelayOwner::TmuxWatcher,
             ExternalInputRelayOwner::TmuxWatcher,
         ));
+    }
+
+    /// #3296 (RED-3): the ABORT cleanup hook records a durable aborted-anchor
+    /// marker and NO LONGER applies any reaction itself — the old #3282 path
+    /// swapped `⏳ → ⚠` here, branding answered messages as failures. RED on
+    /// the pre-#3296 code: no marker module/store exists and a `⚠` is added.
+    /// (Reaction-op accounting lives in `tui_direct_abort_marker`'s own tests;
+    /// this hook performs Discord IO only through that module, never directly.)
+    #[test]
+    fn abort_cleanup_records_marker_and_keeps_hourglass() {
+        // Env-root setup mirrors `durable_restore_roundtrip_loads_fifo_order`;
+        // the guard stays in sync scope (block_on, no await_holding_lock site).
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        struct EnvReset(Option<std::ffi::OsString>);
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+                }
+            }
+        }
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        let shared = super::super::make_shared_data_for_tests();
+        let record = super::super::tui_direct_pending_start::TuiDirectPendingStart {
+            provider: "claude".to_string(),
+            channel_id: 4242,
+            tmux_session_name: "tmux-4242".to_string(),
+            prompt_text: "/loop tick".to_string(),
+            anchor_message_id: 777_001,
+            lease_relay_owner: "bridge_adapter".to_string(),
+            lease_runtime_kind: Some("claude_tui".to_string()),
+            lease_turn_id: None,
+            lease_session_key: None,
+            generation: 0,
+            created_at_ms: 0,
+            observed_at_ms: 0,
+            state: super::super::tui_direct_pending_start::PendingStartState::Waiting,
+            attempt_count: 0,
+        };
+        let cleanup = pending_start_abort_cleanup_fn();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(cleanup(&shared, &record));
+
+        let markers = super::super::tui_direct_abort_marker::load_for_channel("claude", 4242);
+        assert_eq!(
+            markers.len(),
+            1,
+            "the ABORT hook must persist exactly one durable aborted-anchor \
+             marker — RED on the old ⚠-swap path (no marker store existed)"
+        );
+        assert_eq!(
+            markers[0].anchor_message_id, 777_001,
+            "identity-pinned (I4)"
+        );
+        assert_eq!(
+            markers[0].covered_at_ms, None,
+            "freshly-aborted anchors are uncovered until a terminal commit lands"
+        );
+
+        // Zero anchor id (I5): nothing recorded, nothing panics.
+        let zero = super::super::tui_direct_pending_start::TuiDirectPendingStart {
+            anchor_message_id: 0,
+            ..record
+        };
+        rt.block_on(cleanup(&shared, &zero));
+        assert_eq!(
+            super::super::tui_direct_abort_marker::load_for_channel("claude", 4242).len(),
+            1,
+            "a zero anchor id must never be recorded (I5)"
+        );
     }
 
     // #3018: the tmux_watchers registry is the SINGLE authority for

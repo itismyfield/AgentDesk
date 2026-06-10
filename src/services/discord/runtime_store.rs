@@ -67,6 +67,15 @@ pub(crate) fn tui_direct_pending_start_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_tui_direct_pending_start"))
 }
 
+/// #3296: durable aborted-anchor markers for TUI-direct synthetic turn-starts
+/// that ABORTed after the input was already provider-submitted. The anchor
+/// keeps its `⏳`; the watcher terminal-commit drain flips it to `✅` when the
+/// prior owner covers it, and the placeholder sweeper flips it to `⚠` after
+/// the TTL when nothing did. See `tui_direct_abort_marker`.
+pub(crate) fn tui_direct_abort_marker_root() -> Option<PathBuf> {
+    runtime_root().map(|root| root.join("discord_tui_direct_abort_marker"))
+}
+
 /// #3003: durable retry store for orphaned status-panel-v2 message deletes that
 /// failed transiently when no per-turn inflight handle survived (e.g. a
 /// stopped/cancelled TUI-direct turn). Drained by the placeholder sweeper.

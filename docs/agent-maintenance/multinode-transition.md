@@ -609,3 +609,16 @@
   (`~/.codex/models_cache.json`) on the node that owns the session — it owns no
   global state, no durable queue, and no lease, and touches no PG-lease/leader
   path. No new multinode ownership, singleton, or lease assumption is introduced.
+- #3296 (aborted-anchor reaction reconcile): the synthetic turn-start ABORT path
+  (`tui_prompt_relay.rs` / `tui_direct_pending_start.rs`) now records a durable
+  `AbortedAnchorMarker` under the new node-local
+  `runtime/discord_tui_direct_abort_marker/` root instead of swapping `⏳ → ⚠`;
+  the watcher terminal-commit chokepoint (`tmux_watcher.rs`) drains it `⏳ → ✅`
+  on a covering commit and the placeholder sweeper applies the TTL'd `⏳ → ⚠`
+  fallback (`tui_direct_abort_marker.rs`). **Worker-local**: the store lives on
+  the SAME node's filesystem as the pending-start store it mirrors, is written
+  and drained only by that node's own relay worker / watcher loop / sweeper task
+  (all already worker-local surfaces), and the reaction ops resolve the
+  process-local `serenity_http_or_token_fallback()` bot identity — no PG lease,
+  no cross-node reads, no leader-only side effect. No new multinode
+  ownership/singleton/lease assumption is introduced.
