@@ -2417,21 +2417,10 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 }
                 ChannelMailboxMsg::CancelActiveTurnWithReason { reason, reply } => {
                     // #2374 — atomic, actor-serialized "reason then flip"
-                    // for the active turn. The previous design (#2373)
-                    // wrote `cancel_source` from the caller task BEFORE
-                    // sending the actor a `CancelActiveTurn`. That kept
-                    // the writes ordered for the common path but two
-                    // concurrent cancellers could both observe the same
-                    // pre-flip token, race on `set_cancel_source`, then
-                    // have the actor flip `cancelled` on whichever
-                    // message it dequeued first — losing one of the
-                    // reasons. By owning the reason write here, the
-                    // mailbox actor serializes both writes per channel.
-                    //
-                    // Existing-cancellation guard mirrors #2373: do NOT
-                    // overwrite a reason once `cancelled` is set so
-                    // earlier attribution (e.g. a watchdog timeout that
-                    // already fired) wins over a later voice cancel.
+                    // (full race rationale on the
+                    // `cancel_active_turn_with_reason` handle doc). Guard
+                    // mirrors #2373: never overwrite a reason once
+                    // `cancelled` is set — earlier attribution wins.
                     let token = state.cancel_token.clone();
                     let already_stopping = token.as_ref().is_some_and(|token| {
                         token.cancelled.load(std::sync::atomic::Ordering::Relaxed)
@@ -2505,17 +2494,11 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     reason,
                     reply,
                 } => {
-                    // #2374 Codex round-1 fix (HIGH-1): only cancel
-                    // when the active turn's `user_message_id` matches
-                    // the caller's expected handoff message id. The
-                    // tombstone retry path uses this so a still-later
-                    // cancel for the same handoff cannot accidentally
-                    // kill an unrelated turn that happened to start on
-                    // the same target channel after the original
-                    // handoff turn finalized. The actor performs the
-                    // identity check + cancel as a single serialized
-                    // step so no concurrent caller can swap the active
-                    // turn between the check and the flip.
+                    // #2374 Codex round-1 fix (HIGH-1): identity check +
+                    // cancel as one serialized step, keyed by
+                    // `user_message_id` (full rationale on the
+                    // `cancel_active_turn_if_user_message_with_reason`
+                    // handle doc).
                     let identity_matches = state
                         .active_user_message_id
                         .is_some_and(|id| id == expected_user_message_id);
