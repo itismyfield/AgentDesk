@@ -1012,6 +1012,41 @@ mod stream_tail_guard_tests {
         ));
     }
 
+    /// #3275 cross-module contract: the codex tmux wrapper's result frame now
+    /// carries a Claude-compatible nested `usage` next to the legacy top-level
+    /// token fields. The result-usage fallback in `process_stream_line` must
+    /// adopt it so bridge analytics reparsing and recovery backfill
+    /// (`extract_turn_analytics_from_output_range`) return Some usage with the
+    /// per-call occupancy — not the cumulative top-level counters.
+    #[test]
+    fn extract_turn_analytics_adopts_codex_wrapper_result_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("codex-wrapper.jsonl");
+        std::fs::write(
+            &output_path,
+            concat!(
+                "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-cdx\"}\n",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"codex reply\"}]}}\n",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"codex reply\",\"session_id\":\"sess-cdx\",\"duration_ms\":12,\"input_tokens\":8325687,\"output_tokens\":41600,\"usage\":{\"input_tokens\":400,\"cache_read_input_tokens\":600,\"output_tokens\":50}}\n",
+            ),
+        )
+        .unwrap();
+
+        let (session_id, usage) = super::extract_turn_analytics_from_output_range(
+            output_path.to_string_lossy().as_ref(),
+            0,
+            None,
+        );
+
+        assert_eq!(session_id.as_deref(), Some("sess-cdx"));
+        let usage = usage.expect("codex wrapper result usage must be recoverable");
+        assert_eq!(usage.input_tokens, 400);
+        assert_eq!(usage.cache_read_tokens, 600);
+        assert_eq!(usage.cache_create_tokens, 0);
+        assert_eq!(usage.output_tokens, 50);
+        assert_eq!(usage.context_occupancy_input_tokens(), 1000);
+    }
+
     #[test]
     fn process_stream_line_emits_workflow_status_events() {
         let (sender, receiver) = std::sync::mpsc::channel();
