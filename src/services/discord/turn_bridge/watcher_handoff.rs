@@ -13,7 +13,7 @@
 //! watcher-delegation machinery.
 
 use super::super::inflight::RelayOwnerKind;
-use super::super::turn_finalizer::TurnKey;
+use super::super::turn_finalizer::{CompletionSignal, TurnKey, completion_signal_from_transcript};
 use super::super::*;
 use super::output_lifecycle::BridgeOutputOwner;
 use crate::services::provider::ProviderKind;
@@ -99,6 +99,31 @@ pub(super) fn genuinely_live_watcher_for_relay(
         .unwrap_or(false)
 }
 
+/// #3277 (Defect A): is this "still-busy" turn actually ALREADY PROVEN
+/// delivered? The #3268 handoff gates on watcher LIVENESS, but in #3277 the
+/// genuinely-live watcher was parked at transcript EOF over a turn whose JSONL
+/// terminator was already on disk — it could never relay another byte nor
+/// finalize the turn, so handing off stranded the channel for the full 1800s
+/// far-backstop horizon. A handoff target must still be ABLE to finish the
+/// turn, not merely be alive.
+///
+/// True ONLY when the transcript completion signal is `Done` (terminator
+/// PROVEN on disk) AND the bridge's confirmed relay offset advanced past the
+/// turn's start offset (so the terminator belongs to THIS turn, not a stale
+/// one from before the turn's user line was appended). Everything else —
+/// `PausedLive`, `Unknown` (non-JSONL runtimes), or missing/unadvanced
+/// offsets — returns `false` and keeps the #3268 handoff byte-for-byte
+/// (fail-open). In the proven case the bridge finalizing is not premature:
+/// it is the CORRECT completion handling.
+pub(super) fn busy_turn_already_proven_delivered(
+    signal: CompletionSignal,
+    tmux_last_offset: Option<u64>,
+    turn_start_offset: u64,
+) -> bool {
+    signal == CompletionSignal::Done
+        && tmux_last_offset.is_some_and(|last| last > turn_start_offset)
+}
+
 /// #3268 (Defect B): the self-healing watcher handoff itself. When the gate
 /// fires, registers the watcher in the single-authority finalizer ledger,
 /// unpauses it at the bridge's confirmed offset with `turn_delivered = false`,
@@ -131,6 +156,40 @@ pub(super) fn maybe_hand_off_busy_turn_to_watcher(
         genuinely_live_watcher_for_relay(&shared_owned.tmux_watchers, watcher_owner_channel_id),
     ) && let Some(watcher) = shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
     {
+        // #3277 (Defect A): a turn whose JSONL terminator is ALREADY on disk
+        // (and whose relay offset advanced past the turn start) has nothing
+        // left for the watcher to relay — handing it off parks the watcher at
+        // EOF and strands the channel until the far-backstop. Keep the bridge
+        // finalize instead (the pre-#3268 path; correct, not premature, for a
+        // proven-complete turn). Read failures / Unknown / PausedLive /
+        // missing offsets all fall through to the #3268 handoff (fail-open);
+        // this gate-timeout path already spent 3s, so one transcript tail
+        // read is negligible.
+        if let (Some(output_path), Some(turn_start_offset)) = (
+            inflight_state.output_path.as_deref(),
+            inflight_state.turn_start_offset,
+        ) && busy_turn_already_proven_delivered(
+            completion_signal_from_transcript(
+                provider,
+                inflight_state.runtime_kind,
+                std::path::Path::new(output_path),
+            ),
+            tmux_last_offset,
+            turn_start_offset,
+        ) {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                watcher_owner_channel = watcher_owner_channel_id.get(),
+                turn_start_offset,
+                tmux_last_offset = tmux_last_offset.unwrap_or(0),
+                "  [{ts}] 👁 #3277: quiescence timeout but the turn is PROVEN delivered \
+                 (JSONL terminator on disk past turn start) — bridge finalizes instead of \
+                 handing a finished turn to the watcher"
+            );
+            return;
+        }
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
             provider = %provider.as_str(),
@@ -181,5 +240,55 @@ pub(super) fn maybe_hand_off_busy_turn_to_watcher(
         *bridge_relay_delegated_to_watcher = true;
         *bridge_output_owner = Some(BridgeOutputOwner::WatcherRelay);
         *should_complete_work_dispatch_after_delivery = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #3277 (Defect A) truth table: ONLY a `Done` signal with the relay offset
+    /// advanced PAST the turn start proves the turn delivered (and suppresses
+    /// the #3268 handoff). Every other combination fails open — the handoff to
+    /// a genuinely-live watcher proceeds exactly as before #3277.
+    #[test]
+    fn busy_turn_proven_delivered_truth_table() {
+        // Done + offset advanced past turn start → PROVEN: no handoff.
+        assert!(busy_turn_already_proven_delivered(
+            CompletionSignal::Done,
+            Some(37_154),
+            17_737,
+        ));
+        // Done but offset did NOT advance (== start): the terminator could be
+        // the PRIOR turn's — not proven, hand off (fail-open).
+        assert!(!busy_turn_already_proven_delivered(
+            CompletionSignal::Done,
+            Some(17_737),
+            17_737,
+        ));
+        // Done but no confirmed offset at all → not proven.
+        assert!(!busy_turn_already_proven_delivered(
+            CompletionSignal::Done,
+            None,
+            17_737,
+        ));
+        // Still live (no terminator) → never proven, regardless of offsets.
+        assert!(!busy_turn_already_proven_delivered(
+            CompletionSignal::PausedLive,
+            Some(37_154),
+            17_737,
+        ));
+        // Non-JSONL runtime (no structured signal) → never proven.
+        assert!(!busy_turn_already_proven_delivered(
+            CompletionSignal::Unknown,
+            Some(37_154),
+            17_737,
+        ));
+        // Done but offset BEHIND turn start (stale/rotated transcript) → not proven.
+        assert!(!busy_turn_already_proven_delivered(
+            CompletionSignal::Done,
+            Some(100),
+            17_737,
+        ));
     }
 }

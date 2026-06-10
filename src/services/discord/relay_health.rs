@@ -61,6 +61,10 @@ pub(in crate::services::discord) struct RelayHealthSnapshot {
     pub tmux_session: Option<String>,
     pub tmux_alive: Option<bool>,
     pub watcher_attached: bool,
+    /// #3277 (Defect D): the attached watcher handle is provably dead
+    /// (cancelled or heartbeat-stale). `false` whenever `watcher_attached`
+    /// is `false`.
+    pub watcher_attached_stale: bool,
     pub watcher_owner_channel_id: Option<u64>,
     pub watcher_owns_live_relay: bool,
     pub bridge_inflight_present: bool,
@@ -91,6 +95,7 @@ impl RelayHealthSnapshot {
             tmux_session: None,
             tmux_alive: None,
             watcher_attached: false,
+            watcher_attached_stale: false,
             watcher_owner_channel_id: None,
             watcher_owns_live_relay: false,
             bridge_inflight_present: false,

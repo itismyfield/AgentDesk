@@ -273,10 +273,16 @@ fn eligible_orphan_pending_token(snapshot: &RelayHealthSnapshot) -> bool {
 }
 
 fn eligible_reattach_watcher(snapshot: &RelayHealthSnapshot) -> bool {
+    // #3277 (Defect D): a watcher binding whose handle is provably DEAD
+    // (cancelled or heartbeat-stale — `watcher_attached_stale`) must not
+    // block the bounded reattach the way a genuinely-live watcher does. A
+    // fresh-heartbeat live watcher still makes this ineligible: auto-heal
+    // never replaces a live handle (that case is the finalizer far-backstop's
+    // job, #3277 Defect C).
     snapshot.tmux_alive == Some(true)
         && snapshot.bridge_inflight_present
         && snapshot.mailbox_has_cancel_token
-        && !snapshot.watcher_attached
+        && (!snapshot.watcher_attached || snapshot.watcher_attached_stale)
         && snapshot.desynced
         && is_agentdesk_tmux_session(snapshot.tmux_session.as_deref())
 }
@@ -468,9 +474,15 @@ pub(in crate::services::discord) async fn run_relay_recovery(
     }
 
     let apply_result = apply_relay_recovery_decision(registry, &shared, &provider, &decision).await;
+    // `reuse_existing_live_watcher` still counts as applied: the rebind
+    // succeeded and the restored inflight is picked up by the live watcher —
+    // only the status string is honest about not spawning one (#3277 verify-2).
     let applied = matches!(
         apply_result.status,
-        "applied" | "reattached_watcher" | "cleared_idle_tmux_stale_turn"
+        "applied"
+            | "reattached_watcher"
+            | "reuse_existing_live_watcher"
+            | "cleared_idle_tmux_stale_turn"
     );
     tracing::info!(
         target: "agentdesk::discord::relay_recovery",
@@ -490,6 +502,25 @@ pub(in crate::services::discord) async fn run_relay_recovery(
         decision,
         apply_result: Some(apply_result),
     })
+}
+
+/// #3277 verify-2 (Defect D follow-up): report the reattach apply HONESTLY.
+/// `rebind_inflight_for_channel` routes through the single-watcher claim
+/// (`claim_or_reuse_watcher`, source `"recovery_restore_inflight"`), which
+/// REPLACES a cancelled / heartbeat-stale / paused / output-path-changed
+/// same-session incumbent (`find_watcher_by_tmux_session` folds
+/// `heartbeat_stale()` into its replace predicate — see the lifecycle
+/// truth-table test) but NEVER a genuinely-live fresh-heartbeat handle (no
+/// duplicate-relay vector). When the claim reused such a live incumbent
+/// (`watcher_spawned == false` — e.g. the heartbeat recovered between the
+/// stale-handle decision and the apply, or a reused watcher owns the session
+/// under another channel), say so instead of claiming "reattached_watcher".
+fn reattach_apply_status(watcher_spawned: bool) -> &'static str {
+    if watcher_spawned {
+        "reattached_watcher"
+    } else {
+        "reuse_existing_live_watcher"
+    }
 }
 
 fn idle_tmux_repair_ready_for_input(
@@ -618,7 +649,7 @@ async fn apply_relay_recovery_decision(
                 .await
             {
                 Some(Ok(outcome)) => RelayRecoveryApplyResult {
-                    status: "reattached_watcher",
+                    status: reattach_apply_status(outcome.watcher_spawned),
                     removed_thread_proofs: 0,
                     removed_mailbox_token: false,
                     post_mailbox_has_cancel_token: None,
@@ -716,6 +747,7 @@ mod tests {
             tmux_session: None,
             tmux_alive: None,
             watcher_attached: false,
+            watcher_attached_stale: false,
             watcher_owner_channel_id: None,
             watcher_owns_live_relay: false,
             bridge_inflight_present: false,
@@ -872,6 +904,75 @@ mod tests {
         );
         assert!(decision.evidence.watcher_owns_live_relay);
         assert_eq!(decision.evidence.active_turn, RelayActiveTurn::Foreground);
+    }
+
+    /// #3277 (Defect D) eligibility table: a DEAD attached watcher handle
+    /// (`watcher_attached_stale`) no longer blocks the bounded reattach, while
+    /// a genuinely-live attached watcher still does, and the legacy
+    /// detached-watcher case stays eligible.
+    #[test]
+    fn reattach_eligibility_distinguishes_stale_attached_watcher_from_live() {
+        let base = || RelayHealthSnapshot {
+            tmux_session: Some("AgentDesk-claude-adk-cc".to_string()),
+            tmux_alive: Some(true),
+            desynced: true,
+            bridge_inflight_present: true,
+            mailbox_has_cancel_token: true,
+            ..snapshot()
+        };
+
+        // attached + stale handle → dead-handle evidence → eligible.
+        let stale_attached = plan_relay_recovery(
+            &RelayHealthSnapshot {
+                watcher_attached: true,
+                watcher_attached_stale: true,
+                ..base()
+            },
+            RelayStallState::TmuxAliveRelayDead,
+            1_000,
+        );
+        assert_eq!(
+            stale_attached.action,
+            RelayRecoveryActionKind::ReattachWatcher
+        );
+        assert!(
+            stale_attached.auto_heal.eligible,
+            "a cancelled/heartbeat-stale attached watcher must not block reattach"
+        );
+        assert_eq!(stale_attached.auto_heal.skipped_reason, None);
+
+        // attached + LIVE handle → never auto-replace a live watcher.
+        let live_attached = plan_relay_recovery(
+            &RelayHealthSnapshot {
+                watcher_attached: true,
+                watcher_attached_stale: false,
+                ..base()
+            },
+            RelayStallState::TmuxAliveRelayDead,
+            1_000,
+        );
+        assert!(
+            !live_attached.auto_heal.eligible,
+            "a fresh-heartbeat live watcher must keep reattach operator-gated"
+        );
+        assert_eq!(
+            live_attached.auto_heal.skipped_reason,
+            Some("reattach_missing_required_live_evidence")
+        );
+
+        // detached (legacy case) → still eligible, unchanged.
+        let detached = plan_relay_recovery(&base(), RelayStallState::TmuxAliveRelayDead, 1_000);
+        assert!(detached.auto_heal.eligible);
+    }
+
+    /// #3277 verify-2: the reattach apply reports HONESTLY whether a watcher
+    /// was actually spawned (dead incumbent replaced / fresh claim) or a live
+    /// same-session incumbent was reused untouched — the latter must not be
+    /// labelled "reattached_watcher".
+    #[test]
+    fn reattach_status_reports_live_incumbent_reuse_honestly() {
+        assert_eq!(reattach_apply_status(true), "reattached_watcher");
+        assert_eq!(reattach_apply_status(false), "reuse_existing_live_watcher");
     }
 
     #[test]
