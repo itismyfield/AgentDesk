@@ -1,0 +1,483 @@
+//! Extracted from `services::discord::health` (#3038 Phase A) — verbatim
+//! move; behavior unchanged. The `/api/discord/send` authorization ladder
+//! (content → target → source label → role-map binding → bot resolution;
+//! #2047 Findings 7/9/10) and the caller-class source-label gate.
+
+use poise::serenity_prelude as serenity;
+use serenity::ChannelId;
+use sqlx::PgPool;
+
+use super::HealthRegistry;
+use super::manual_delivery::{
+    ManualOutboundDeliveryId, SerenityManualOutboundClient,
+    send_resolved_manual_message_with_client,
+};
+use super::runtime_resolve::resolve_bot_http;
+use super::send_target::{
+    SendTargetResolutionError, resolve_send_target_channel_id_with_backends,
+    routine_thread_parent_hint,
+};
+use crate::db::Db;
+use crate::services::discord::outbound::shared_outbound_deduper;
+use crate::services::provider::ProviderKind;
+
+/// Handle POST /api/discord/send — agent-to-agent native routing.
+/// Accepts JSON: {"target":"channel:<id>|channel:<name>|agent:<roleId>", "content":"...", "source":"role-id", "bot":"announce|notify", "summary":"..."}
+///
+/// `summary` is optional minimal fallback content if Discord rejects the
+/// length-truncated primary send.
+pub(crate) async fn send_message_with_backends(
+    registry: &HealthRegistry,
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    target: &str,
+    content: &str,
+    source: &str,
+    bot: &str,
+    summary: Option<&str>,
+) -> (&'static str, String) {
+    send_message_with_backends_and_delivery_id(
+        registry, db, pg_pool, target, content, source, bot, summary, None,
+    )
+    .await
+}
+
+pub(crate) async fn send_message_with_backends_and_delivery_id(
+    registry: &HealthRegistry,
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    target: &str,
+    content: &str,
+    source: &str,
+    bot: &str,
+    summary: Option<&str>,
+    delivery_id: Option<ManualOutboundDeliveryId<'_>>,
+) -> (&'static str, String) {
+    send_message_with_backends_and_delivery_options(
+        registry,
+        db,
+        pg_pool,
+        target,
+        content,
+        source,
+        bot,
+        summary,
+        delivery_id,
+        ManualOutboundOptions::default(),
+    )
+    .await
+}
+
+const HEADLESS_TURN_OUTBOX_SOURCE: &str = "headless_turn";
+
+pub(super) fn dm_default_agent_authorizes_unmapped_private_channel(
+    is_private_channel: bool,
+    source: &str,
+    provider: &ProviderKind,
+    session_bound_to_provider: bool,
+) -> bool {
+    if !is_private_channel {
+        return false;
+    }
+
+    let source = source.trim();
+    crate::services::discord::agentdesk_config::dm_default_agent_allows_outbound_source(
+        provider, source,
+    ) || (source == HEADLESS_TURN_OUTBOX_SOURCE
+        && session_bound_to_provider
+        && crate::services::discord::agentdesk_config::resolve_dm_default_agent(provider).is_some())
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ManualOutboundOptions {
+    pub(crate) allow_unbound_internal_channel: bool,
+}
+
+pub(crate) async fn send_message_with_backends_and_delivery_options(
+    registry: &HealthRegistry,
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    target: &str,
+    content: &str,
+    source: &str,
+    bot: &str,
+    summary: Option<&str>,
+    delivery_id: Option<ManualOutboundDeliveryId<'_>>,
+    options: ManualOutboundOptions,
+) -> (&'static str, String) {
+    if content.is_empty() {
+        return (
+            "400 Bad Request",
+            r#"{"ok":false,"error":"content is required"}"#.to_string(),
+        );
+    }
+
+    let channel_id_raw =
+        match resolve_send_target_channel_id_with_backends(db, pg_pool, target).await {
+            Ok(id) => id,
+            Err(SendTargetResolutionError::BadRequest(message)) => {
+                return (
+                    "400 Bad Request",
+                    serde_json::json!({"ok": false, "error": message}).to_string(),
+                );
+            }
+            Err(SendTargetResolutionError::NotFound(message)) => {
+                return (
+                    "404 Not Found",
+                    serde_json::json!({"ok": false, "error": message}).to_string(),
+                );
+            }
+            Err(SendTargetResolutionError::Internal(message)) => {
+                return (
+                    "500 Internal Server Error",
+                    serde_json::json!({"ok": false, "error": message}).to_string(),
+                );
+            }
+        };
+
+    let channel_id = ChannelId::new(channel_id_raw);
+
+    // Validate source is a known agent role_id or internal system source.
+    // Issue #2047 Finding 9 — don't echo the caller-supplied label back in the
+    // response body. That made enumerating the whitelist trivial and gave a
+    // log-injection assist. The full label is preserved in `tracing::warn!`
+    // for operators.
+    if !is_allowed_send_source(source) {
+        tracing::warn!(
+            source,
+            bot,
+            "/api/discord/send rejected: source label not allowed for caller class"
+        );
+        return (
+            "403 Forbidden",
+            r#"{"ok":false,"error":"source not allowed for this caller"}"#.to_string(),
+        );
+    }
+
+    // Verify target channel exists in role-map (authorization check).
+    // If the target is a thread, resolve its parent channel and check that instead.
+    // Pass channel name so byChannelName-style configs can match.
+    if crate::services::discord::settings::resolve_role_binding(channel_id, None).is_none() {
+        let routine_parent_hint = routine_thread_parent_hint(pg_pool, channel_id).await;
+        let mut authorized = false;
+        let mut target_channel_accessible = false;
+        // Try resolving as a thread: fetch channel info and check parent_id.
+        //
+        // Issue #2047 Finding 10 — also use the fetched channel name to retry
+        // the byChannelName fallback for the target channel itself. The first
+        // `resolve_role_binding(channel_id, None)` above can only match
+        // `byChannelId` entries; a channel registered with `byChannelName`
+        // only was previously blocked even though it is legitimately mapped.
+        if let Ok(http) = resolve_bot_http(registry, bot).await {
+            if let Ok(channel) = channel_id.to_channel(&*http).await {
+                target_channel_accessible = true;
+                let is_private_channel = matches!(&channel, serenity::Channel::Private(_));
+                if !authorized
+                    && registry
+                        .dm_default_agent_authorizes_private_channel(
+                            channel_id,
+                            is_private_channel,
+                            source,
+                        )
+                        .await
+                {
+                    authorized = true;
+                    tracing::info!(
+                        target_channel_id = channel_id.get(),
+                        source,
+                        bot,
+                        "allowing outbound delivery to dm_default_agent-bound private channel"
+                    );
+                }
+                // `Channel::guild` consumes the value, so derive the target
+                // channel name first via `clone()`; the original `channel`
+                // is then consumed by the thread/parent walk below.
+                let target_name = channel.clone().guild().map(|gc| gc.name.clone());
+                // First: byChannelName retry on the *target* channel itself.
+                if !authorized
+                    && crate::services::discord::settings::resolve_role_binding(
+                        channel_id,
+                        target_name.as_deref(),
+                    )
+                    .is_some()
+                {
+                    authorized = true;
+                }
+                if let Some(guild_channel) = channel.guild() {
+                    if let Some(parent_id) = guild_channel.parent_id {
+                        if let Some(expected_parent) = routine_parent_hint {
+                            if expected_parent != parent_id {
+                                tracing::warn!(
+                                    target_channel_id = channel_id.get(),
+                                    actual_parent_id = parent_id.get(),
+                                    expected_parent_id = expected_parent.get(),
+                                    "routine thread parent hint did not match Discord parent"
+                                );
+                            }
+                        }
+                        // Resolve parent channel name for byChannelName configs
+                        let parent_name = if let Ok(parent_ch) = parent_id.to_channel(&*http).await
+                        {
+                            parent_ch.guild().map(|pg| pg.name.clone())
+                        } else {
+                            None
+                        };
+                        if crate::services::discord::settings::resolve_role_binding(
+                            parent_id,
+                            parent_name.as_deref(),
+                        )
+                        .is_some()
+                        {
+                            authorized = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !authorized
+            && options.allow_unbound_internal_channel
+            && is_allowed_send_source(source)
+            && target.trim_start().starts_with("channel:")
+            && target_channel_accessible
+        {
+            authorized = true;
+            tracing::warn!(
+                target_channel_id = channel_id.get(),
+                source,
+                bot,
+                "allowing trusted internal Discord relay to unbound but accessible channel"
+            );
+        }
+        if !authorized {
+            return (
+                "403 Forbidden",
+                r#"{"ok":false,"error":"channel not in role-map"}"#.to_string(),
+            );
+        }
+    }
+
+    // Select bot: "announce" (default, agents respond) or "notify" (info-only, agents ignore)
+    let http = match resolve_bot_http(registry, bot).await {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+
+    let outbound_client = SerenityManualOutboundClient { http };
+    send_resolved_manual_message_with_client(
+        &outbound_client,
+        shared_outbound_deduper(),
+        channel_id_raw,
+        target,
+        content,
+        source,
+        bot,
+        summary,
+        delivery_id,
+    )
+    .await
+}
+
+/// Caller-class for `/api/discord/send` and friends.
+///
+/// Issue #2047 Finding 7 — the `source` JSON label was previously a free-form
+/// string that any authenticated caller could set to e.g. `"system"` and have
+/// observability dashboards treat the message as if it were emitted by the
+/// internal automation plane. We now require callers to attest their class via
+/// the `X-AgentDesk-Source` header (or, for backwards compat, by being on the
+/// loopback interface) and only honour `source` labels that match that class.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SendCallerClass {
+    /// In-process dcserver call (loopback peer + matching bearer, or no
+    /// bearer when auth is disabled). Allowed to use any internal label.
+    LoopbackInternal,
+    // #3034: header-attested caller classes (#2047). The `from_header` path
+    // that constructs these is wired through tests today; the HTTP send route
+    // still infers `LoopbackInternal` from the peer. Keep the class taxonomy
+    // and the parser live as the header-attestation contract surface.
+    /// External CLI/agent presenting `X-AgentDesk-Source: cli` and a valid
+    /// bearer token. Restricted to a small set of labels.
+    #[allow(dead_code)]
+    Cli,
+    /// Browser dashboard with same-origin loopback. Can only attribute
+    /// messages to `dashboard` or to a known agent role id.
+    #[allow(dead_code)]
+    Dashboard,
+    /// Fallback when no header is provided and the request isn't loopback —
+    /// most restrictive bucket.
+    #[allow(dead_code)]
+    Unknown,
+}
+
+impl SendCallerClass {
+    /// Parse the `X-AgentDesk-Source` header value (case-insensitive). Returns
+    /// `None` for unknown / empty values so the caller can fall back to
+    /// peer-based inference.
+    // #3034: header-attestation parser; exercised by tests, route wiring pending.
+    #[allow(dead_code)]
+    pub fn from_header(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "loopback" | "dcserver" | "internal" => Some(Self::LoopbackInternal),
+            "cli" | "agentdesk-cli" => Some(Self::Cli),
+            "dashboard" | "browser" => Some(Self::Dashboard),
+            _ => None,
+        }
+    }
+
+    fn allowed_internal_labels(self) -> &'static [&'static str] {
+        // The 강력 라벨 (`system`, `headless_turn`, …) are loopback-only —
+        // dashboard/cli must not be able to impersonate them.
+        const LOOPBACK_ONLY: &[&str] = &[
+            "kanban-rules",
+            "triage-rules",
+            "review-automation",
+            "auto-queue",
+            "pipeline",
+            "system",
+            "timeouts",
+            "merge-automation",
+            "lifecycle_notifier",
+            "routine-runtime",
+            "headless_turn",
+            "slo_alerter",
+            "quality_regression_alerter",
+            "auto-queue-monitor",
+            "inventory",
+            "voice",
+        ];
+        const CLI_ALLOWED: &[&str] = &["agentdesk-cli", "operator"];
+        const DASHBOARD_ALLOWED: &[&str] = &["dashboard"];
+        match self {
+            SendCallerClass::LoopbackInternal => LOOPBACK_ONLY,
+            SendCallerClass::Cli => CLI_ALLOWED,
+            SendCallerClass::Dashboard => DASHBOARD_ALLOWED,
+            SendCallerClass::Unknown => &[],
+        }
+    }
+}
+
+/// Backward-compatible label gate. New code paths should call
+/// [`is_allowed_send_source_for`] with an explicit caller-class. This wrapper
+/// behaves as if the call came from `LoopbackInternal` so existing in-process
+/// publishers (lifecycle notifier, headless turn, …) keep working without
+/// surface-level rewrites.
+fn is_allowed_send_source(source: &str) -> bool {
+    is_allowed_send_source_for(source, SendCallerClass::LoopbackInternal)
+}
+
+/// Issue #2047 Finding 7 — gate the `source` label by caller-class.
+pub fn is_allowed_send_source_for(source: &str, caller: SendCallerClass) -> bool {
+    if crate::services::discord::settings::is_known_agent(source) {
+        return true;
+    }
+    caller.allowed_internal_labels().contains(&source)
+}
+
+#[cfg(test)]
+mod send_source_tests {
+    use super::{SendCallerClass, is_allowed_send_source, is_allowed_send_source_for};
+
+    #[test]
+    fn headless_turn_is_allowed_internal_send_source() {
+        assert!(is_allowed_send_source("headless_turn"));
+        assert!(is_allowed_send_source("lifecycle_notifier"));
+        assert!(is_allowed_send_source("routine-runtime"));
+        assert!(is_allowed_send_source("slo_alerter"));
+        assert!(is_allowed_send_source("quality_regression_alerter"));
+        assert!(is_allowed_send_source("auto-queue-monitor"));
+        assert!(is_allowed_send_source("inventory"));
+        assert!(is_allowed_send_source("voice"));
+        assert!(!is_allowed_send_source("not-a-real-source"));
+    }
+
+    #[test]
+    fn dashboard_cannot_impersonate_system_or_headless_turn() {
+        // Issue #2047 Finding 7 — dashboards / browser callers must not be
+        // able to claim 강력 internal labels.
+        assert!(!is_allowed_send_source_for(
+            "system",
+            SendCallerClass::Dashboard
+        ));
+        assert!(!is_allowed_send_source_for(
+            "headless_turn",
+            SendCallerClass::Dashboard
+        ));
+        assert!(!is_allowed_send_source_for(
+            "auto-queue",
+            SendCallerClass::Dashboard
+        ));
+    }
+
+    #[test]
+    fn cli_cannot_impersonate_loopback_only_labels() {
+        assert!(!is_allowed_send_source_for("system", SendCallerClass::Cli));
+        assert!(!is_allowed_send_source_for(
+            "kanban-rules",
+            SendCallerClass::Cli
+        ));
+        assert!(is_allowed_send_source_for(
+            "agentdesk-cli",
+            SendCallerClass::Cli
+        ));
+        assert!(is_allowed_send_source_for("operator", SendCallerClass::Cli));
+    }
+
+    #[test]
+    fn unknown_caller_class_only_allows_known_agents() {
+        // Without a verified caller class we still let messages through when
+        // the source matches a registered agent role id (the agent identity
+        // itself is the attestation). Strong internal labels are denied.
+        assert!(!is_allowed_send_source_for(
+            "system",
+            SendCallerClass::Unknown
+        ));
+        assert!(!is_allowed_send_source_for(
+            "dashboard",
+            SendCallerClass::Unknown
+        ));
+    }
+
+    #[test]
+    fn loopback_internal_keeps_existing_internal_label_acceptance() {
+        for label in [
+            "kanban-rules",
+            "triage-rules",
+            "review-automation",
+            "auto-queue",
+            "system",
+            "headless_turn",
+            "lifecycle_notifier",
+            "routine-runtime",
+        ] {
+            assert!(
+                is_allowed_send_source_for(label, SendCallerClass::LoopbackInternal),
+                "loopback caller must keep accepting `{label}`"
+            );
+        }
+    }
+
+    #[test]
+    fn from_header_parses_known_caller_classes() {
+        assert_eq!(
+            SendCallerClass::from_header("cli"),
+            Some(SendCallerClass::Cli)
+        );
+        assert_eq!(
+            SendCallerClass::from_header("AgentDesk-CLI"),
+            Some(SendCallerClass::Cli)
+        );
+        assert_eq!(
+            SendCallerClass::from_header("dashboard"),
+            Some(SendCallerClass::Dashboard)
+        );
+        assert_eq!(
+            SendCallerClass::from_header("loopback"),
+            Some(SendCallerClass::LoopbackInternal)
+        );
+        assert_eq!(
+            SendCallerClass::from_header("dcserver"),
+            Some(SendCallerClass::LoopbackInternal)
+        );
+        assert_eq!(SendCallerClass::from_header(""), None);
+        assert_eq!(SendCallerClass::from_header("attacker"), None);
+    }
+}
