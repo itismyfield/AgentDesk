@@ -11,13 +11,10 @@ pub struct PgTransitionCleanupCounts {
     pub skipped_auto_queue_entries: usize,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllowedOnConnMutation {
     ForceTransitionRevertCleanup,
     ForceTransitionTerminalCleanup,
-    TestOnlyRollbackGuard,
-    TestOnlyManualInterventionCleanup,
 }
 
 impl AllowedOnConnMutation {
@@ -25,8 +22,6 @@ impl AllowedOnConnMutation {
         match self {
             Self::ForceTransitionRevertCleanup => "force_transition_revert_cleanup",
             Self::ForceTransitionTerminalCleanup => "force_transition_terminal_cleanup",
-            Self::TestOnlyRollbackGuard => "test_only_rollback_guard",
-            Self::TestOnlyManualInterventionCleanup => "test_only_manual_intervention_cleanup",
         }
     }
 
@@ -37,12 +32,6 @@ impl AllowedOnConnMutation {
             }
             Self::ForceTransitionTerminalCleanup => {
                 "same transaction required to cancel stale dispatches before terminal status commits"
-            }
-            Self::TestOnlyRollbackGuard => {
-                "test-only rollback probe for transition + cleanup atomicity"
-            }
-            Self::TestOnlyManualInterventionCleanup => {
-                "test-only cleanup for escalation-cooldown clearing assertions"
             }
         }
     }
@@ -345,12 +334,6 @@ pub(super) async fn execute_allowed_cleanup_on_pg_tx(
                 )
                 .await
                 .map_err(|error| anyhow::anyhow!("{error}"))?;
-        }
-        AllowedOnConnMutation::TestOnlyRollbackGuard => {
-            return Err(anyhow::anyhow!("cleanup failed"));
-        }
-        AllowedOnConnMutation::TestOnlyManualInterventionCleanup => {
-            clear_escalation_alert_state_on_pg_tx(tx, card_id).await?;
         }
     }
 
