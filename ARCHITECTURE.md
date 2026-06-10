@@ -392,10 +392,16 @@ src/
 │   │   │   ├── tui_passthrough.rs
 │   │   │   └── voice.rs
 │   │   ├── health/
+│   │   │   ├── headless_turn.rs
 │   │   │   ├── mailbox.rs
+│   │   │   ├── manual_delivery.rs
 │   │   │   ├── provider_probe.rs
 │   │   │   ├── recovery.rs
 │   │   │   ├── redaction.rs
+│   │   │   ├── runtime_resolve.rs
+│   │   │   ├── send_api.rs
+│   │   │   ├── send_gate.rs
+│   │   │   ├── send_target.rs
 │   │   │   ├── session_enrichment.rs
 │   │   │   └── snapshot.rs
 │   │   ├── outbound/

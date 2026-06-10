@@ -56,7 +56,9 @@
 # #3034 batch-8: lowered 2655 -> 2645 (dead-code removal: `stop_provider_channel_runtime`).
 "src/services/discord/health/recovery.rs" = 2645
 "src/services/discord/inflight.rs" = 2466
-"src/services/discord/health.rs" = 2293
+# #3038 Phase A: health.rs decomposed into health/ directory modules (root 402
+# prod LoC + 6 sub-1000-LoC submodules) — dropped below the giant threshold, so
+# its ratchet entry is deleted (win; no baseline raises).
 # #3034 batch-8: lowered 2333 -> 2332 (dropped `assistant_turns` construction site).
 "src/services/discord/watchers/lifecycle.rs" = 2332
 # #3034 batch-8: +1 for a test-only `#[allow(dead_code)]` on

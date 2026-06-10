@@ -629,11 +629,15 @@
     `reseed_watcher_owned_finalizer_ledger` + two guarded reattach call-sites that
     re-register the watcher-owned turn in the post-restart finalizer ledger so a
     mid-turn deploy's live pane auto-reconciles without a new user turn).
-  - `src/services/discord/health.rs` (2240 lines after #3034 dead-code sweep
-    removed `notify_http_clone`/`send_message`/`parse_send_body`; previously
-    2292 after #3038 send-to-agent dispatch extraction to
-    `outbound/send_to_agent.rs`, #1879 snapshot/mailbox extraction, and #3082
-    answer-flush-barrier field).
+  - `src/services/discord/health.rs` (402 prod lines after the #3038 Phase A
+    directory decomposition; module root keeps the `HealthRegistry` core +
+    re-export surface, and the former monolith body lives in six flat
+    `health/` submodules, all sub-1000 prod LoC: `runtime_resolve.rs` (321),
+    `headless_turn.rs` (297), `send_target.rs` (150), `send_gate.rs` (374),
+    `manual_delivery.rs` (580), `send_api.rs` (259). Previously 2240 after
+    the #3034 dead-code sweep, 2292 after #3038 send-to-agent dispatch
+    extraction to `outbound/send_to_agent.rs`, #1879 snapshot/mailbox
+    extraction, and #3082 answer-flush-barrier field).
   - `src/services/discord/health/recovery.rs` (2645 lines; health recovery
     extraction surface, split further before adding non-bugfix behavior; +70
     from #3126 stall-watchdog completed-idle false-positive guard tests; +88

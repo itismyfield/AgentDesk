@@ -87,7 +87,12 @@ grandfathered_baseline_paths = [
   "src/services/discord/commands/diagnostics.rs",
   "src/services/discord/commands/text_commands.rs",
   "src/services/discord/formatting.rs",
-  "src/services/discord/health.rs",
+  # health.rs was decomposed in #3038 Phase A (2293 prod LoC -> 402-line module
+  # root + 6 sub-1000-LoC directory modules under health/); no longer a
+  # prod-giant. Removed from the frozen baseline as well as `grandfathered`
+  # below so a re-expansion can never be re-grandfathered — it would have to
+  # land as a full [[entry]] (owner + deadline + decompose_issue) or fail the
+  # generation gate.
   "src/services/discord/health/recovery.rs",
   "src/services/discord/inflight.rs",
   "src/services/discord/meeting_orchestrator.rs",
@@ -185,7 +190,11 @@ grandfathered = [
   "src/services/discord/commands/diagnostics.rs",
   "src/services/discord/commands/text_commands.rs",
   "src/services/discord/formatting.rs",
-  "src/services/discord/health.rs",
+  # health.rs was decomposed in #3038 Phase A (2293 prod LoC -> 402-line
+  # module root + 6 sub-1000-LoC directory modules under health/); no longer
+  # a prod-giant, so it is removed here AND from the frozen baseline above
+  # (win-locked: a re-expanded health.rs cannot be re-grandfathered). The
+  # split outputs stay sub-threshold and are not ratcheted.
   "src/services/discord/health/recovery.rs",
   "src/services/discord/inflight.rs",
   "src/services/discord/meeting_orchestrator.rs",
