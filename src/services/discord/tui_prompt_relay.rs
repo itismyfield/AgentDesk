@@ -500,8 +500,15 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     // bridge tail. Drop the duplicate here, before any lease/anchor/inflight exists;
     // a genuine second /loop / /compact falls outside the 2s window → fresh turn.
     let injected_class = classify_injected_prompt(&prompt.prompt);
+    // #3305: hoist the slash-command kind so the first-sighting gate AND the
+    // local-only lifecycle-skip below share one computation. `local_only_slash`
+    // is true ONLY for a LOCAL-completing pass-through (/effort /compact /cost
+    // /context) — it posts a guidance note but mints no turn (an allow-list, so
+    // /loop and any unknown command keep full lifecycle, fail-safe).
+    let mut local_only_slash = false;
     if matches!(injected_class, InjectedPromptClass::SlashCommandControl) {
         let kind = slash_command_control_kind(&prompt.prompt);
+        local_only_slash = super::commands::is_local_only_slash_command_kind(&kind);
         if !slash_command_control_turn_is_first_sighting(&prompt.tmux_session_name, &kind) {
             // #3153 second half within the 2s window: drop before any lease/anchor/
             // inflight exists; the first half already relays via its own bridge tail.
@@ -556,19 +563,14 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             return;
         }
     };
-    // #3164: the `⏳` MUST be added by the SAME bot identity that later removes it —
-    // `remove_reaction_raw` only removes `@me`'s reaction, so an add by a different
-    // bot (previously `notify`) leaves the hourglass forever. #750 invariant: the
-    // command bot is the single source of the `⏳` lifecycle emoji. The notification
-    // BODY is still posted by `notify_http` (any bot may react to any message), but
-    // we never fall back to `notify_http` for the reaction: on resolve failure we
-    // skip the add (warn) rather than mis-attribute it.
-    // #3164 codex R2 issue-1: resolve the add-bot from the SAME source the completion
-    // (`complete_tui_direct_prompt_anchor_lifecycle_if_present`) removes with — this
-    // relay's own `shared.serenity_http_or_token_fallback()` (the watcher's `http`,
-    // turn_bridge/mod.rs:2187), NOT a name-only `resolve_bot_http` lookup, which in a
-    // multi-runtime/same-provider deployment can return a DIFFERENT bot account and
-    // reintroduce the add≠remove asymmetry.
+    // #3164 / #750 invariant: the `⏳` MUST be added by the SAME bot identity that
+    // later removes it (`remove_reaction_raw` only removes `@me`'s reaction; a
+    // different bot leaves the hourglass forever). The note BODY may be any bot
+    // (`notify_http`), but the reaction never falls back to it — on resolve failure
+    // we skip the add (warn). R2 issue-1: resolve the add-bot from the SAME source
+    // the completion removes with (this relay's `serenity_http_or_token_fallback()`,
+    // the watcher's `http`), NOT a name-only `resolve_bot_http` (which in a multi-
+    // runtime/same-provider deployment can pick a DIFFERENT account and re-break add≡remove).
     let command_http = shared.serenity_http_or_token_fallback();
     if command_http.is_none() {
         tracing::warn!(
@@ -583,29 +585,57 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         );
     }
     // #3099 / #3100: a compact/system continuation prologue is NOT a human request —
-    // it renders as a neutral session note with no `⏳`, no anchor, and no synthetic
-    // turn ownership. #3099 codex re-review (P1): it must NOT short-circuit the whole
-    // relay — only the user-turn lifecycle is suppressed; the bridge tail below still
-    // runs so the provider's assistant output reaches Discord.
-    // #3178 (codex fix): a SlashCommandControl is NO LONGER suppressed here — it takes
-    // the active-turn `else` block below (anchor + ⏳ + synthetic inflight) so a
-    // message injected mid-/loop queues cleanly (mailbox.has_active_turn() == true).
-    // Only SystemContinuation still suppresses the lifecycle.
+    // it renders as a neutral note (no ⏳/anchor/synthetic turn) but must NOT short-
+    // circuit the whole relay (P1): the bridge tail below still relays its assistant
+    // output. #3178: a SlashCommandControl is NO LONGER suppressed — it takes the
+    // active-turn `else` block (anchor + ⏳ + synthetic inflight) so mid-/loop input
+    // queues cleanly. Only SystemContinuation suppresses the lifecycle here.
     let is_system_continuation = injected_class.suppresses_user_turn_lifecycle();
     debug_assert!(
         injected_class.still_delivers_assistant_output(),
         "every injected class must still deliver assistant output via the bridge tail",
     );
-    // #3176: the anchor message id of THIS turn's TUI-direct synthetic inflight, set
-    // only on the branch that actually posts an anchor + creates the synthetic. Used
-    // by the idle-tail drain-wait to identity-pin our own inflight (so it does not
-    // self-deadlock) while still waiting on any genuinely distinct previous turn.
+    // #3176: anchor id of THIS turn's synthetic inflight (set only on the anchor-
+    // posting branch); the idle-tail drain-wait uses it to identity-pin our own row
+    // (no self-deadlock) while still waiting on a genuinely distinct previous turn.
     let mut current_turn_anchor_id: Option<u64> = None;
-    // #3154 P1-3: declared at function scope so the post-block bridge-tail guard
-    // can read it. Set true when the synthetic turn-start is deferred to the
-    // detached worker (see the active-turn block below); the observer then skips
-    // its own BridgeAdapter idle-response tail to avoid duplicate relay.
+    // #3154 P1-3: function-scope so the post-block bridge-tail guard reads it; set
+    // true when the synthetic turn-start is deferred to the detached worker, so the
+    // observer skips its own BridgeAdapter tail (no duplicate relay).
     let mut deferred_synthetic_start = false;
+    if local_only_slash {
+        // #3305: a LOCAL-completing pass-through (/effort /compact /cost /context)
+        // renders in the TUI but starts no model turn. Post ONLY the kind-only
+        // guidance note (the operator still sees the command ran) and RETURN —
+        // before the `disarm()` below — so the armed `observed_lease_early_return
+        // _guard` clears EXACTLY the lease this observation recorded (generation-
+        // exact, #3041 infra, no new cleanup path). No anchor → no ⏳ (so the #3164
+        // add≡remove invariant holds trivially: no add, no asymmetry); no
+        // `claim_tui_direct_synthetic_turn` → no synthetic inflight → the next
+        // injection is not FOREIGN-ABORTed and the #3302 sweeper sees no fake row.
+        let kind = slash_command_control_kind(&prompt.prompt);
+        let note =
+            format_slash_command_control_note(&prompt.tmux_session_name, &kind, &prompt.prompt);
+        match channel_id.say(&*notify_http, note).await {
+            Ok(message) => tracing::info!(
+                provider = %prompt.provider,
+                channel_id = channel_id.get(),
+                tmux_session_name = %prompt.tmux_session_name,
+                slash_command_kind = %kind,
+                note_message_id = message.id.get(),
+                "rendered local-only pass-through slash command as a kind-only note; no active-turn lifecycle (no ⏳/anchor/synthetic inflight), no model turn to relay"
+            ),
+            Err(error) => tracing::warn!(
+                provider = %prompt.provider,
+                channel_id = channel_id.get(),
+                tmux_session_name = %prompt.tmux_session_name,
+                slash_command_kind = %kind,
+                error = %error,
+                "failed to send local-only pass-through slash command note"
+            ),
+        }
+        return;
+    }
     if is_system_continuation {
         // #3178 (codex fix): only SystemContinuation reaches here now —
         // SlashCommandControl was removed from `suppresses_user_turn_lifecycle`
@@ -733,22 +763,14 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             channel_id.get(),
             anchor_message.id.get(),
         );
-        // #3174: turn-identity guard on the ⏳ lifecycle. If the provider committed
-        // terminal output inside the sub-second `notify-post + ⏳-add` window above,
-        // the watcher's lease-gated completion already fired before this
-        // `record_prompt_anchor` landed — no anchor found, no-op, and a deferred-
-        // completion marker was recorded (its lease is cleared after delivery, so no
-        // later watcher pass reconciles the ⏳). Now that THIS turn's anchor exists,
-        // drain that marker and finish the ⏳ → ✅ swap.
-        // #3174 codex P1 (turn identity): the marker is stamped with the gated lease's
-        // `generation`; drain ONLY the marker matching `lease.generation` so a newer
-        // same-(provider,tmux) turn's marker is never cross-consumed.
-        // #3174 codex P2 (HTTP fail-open): PEEK first, consume (`take_...`) only with a
-        // `command_http` to deliver the swap; otherwise leave the marker in place
-        // (mirrors the #3164 ⏳-add fail-open) for a later pass within the marker TTL.
-        // No-op on the common path (no marker). The peek + consume/fail-open decision
-        // lives in [`decide_deferred_anchor_completion_drain`] (pure) so it is
-        // integration-testable end-to-end.
+        // #3174: turn-identity guard on the ⏳ lifecycle. If the watcher's lease-gated
+        // completion fired inside the sub-second notify+⏳-add window (before this
+        // `record_prompt_anchor`), it left a deferred-completion marker; now that THIS
+        // turn's anchor exists, drain it and finish the ⏳ → ✅ swap. P1: drain ONLY the
+        // marker matching `lease.generation` (never cross-consume a newer turn). P2
+        // (HTTP fail-open): PEEK first, consume only with `command_http`, else leave it
+        // for a later pass within its TTL. Decision is pure in
+        // [`decide_deferred_anchor_completion_drain`]. No-op on the common (no-marker) path.
         match decide_deferred_anchor_completion_drain(
             &prompt.provider,
             &prompt.tmux_session_name,
@@ -783,41 +805,29 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             }
             DeferredAnchorCompletionDrain::NoMarker => {}
         }
-        // #3099: a `<task-notification>` auto-turn is still a real provider turn
-        // that earns the same synthetic ownership as human direct input — the
-        // difference is purely that its `⏳` completion cleanup must be anchored on
-        // this injected message's own id (handled in the watcher/recovery
-        // completion paths), so it does NOT short-circuit here. Only
-        // SystemContinuation skips this active-turn block (but still relays output
-        // via the bridge tail below).
+        // #3099: a `<task-notification>` auto-turn earns the same synthetic ownership
+        // as human direct input (its ⏳ cleanup is anchored on its own id in the
+        // watcher/recovery paths), so it does NOT short-circuit here. Only
+        // SystemContinuation skips this active-turn block (still relaying via the tail).
         debug_assert!(
             injected_class.is_human_active_turn()
                 || matches!(injected_class, InjectedPromptClass::TaskNotificationEvent),
             "system-continuation injections must not reach active-turn handling",
         );
-        // #3154 P1-3: set when the synthetic turn-start is DEFERRED to the
-        // detached per-channel worker. In that case the observer must NOT spawn
-        // its own BridgeAdapter idle-response tail below: the deferred worker
-        // claims the turn (often as the WATCHER owner) only after the prior turn
-        // drains, and re-records the lease accordingly. Letting the observer
-        // spawn a bridge tail here on the (stale, pre-claim) BridgeAdapter lease
-        // would run a second relay of the SAME output once the watcher claims →
-        // duplicate relay (the original bug). The deferred worker owns the
-        // relay-owner handoff end-to-end.
+        // #3154 P1-3: set when the synthetic turn-start is DEFERRED to the detached
+        // per-channel worker; the observer then must NOT spawn its own BridgeAdapter
+        // tail below (the worker claims as WATCHER owner after the prior turn drains
+        // and re-records the lease — a second observer tail would relay the SAME
+        // output twice, the original bug). The worker owns the relay-owner handoff.
         if let Some(provider) = ProviderKind::from_str(&prompt.provider) {
-            // #3154 — TEMPORAL fix for turn-interleaving. If the PRIOR turn on
-            // this channel has not finalized (its relay tail is still draining),
-            // claiming the synthetic turn-start INLINE here (on the shared
-            // per-provider observer loop) seeds `turn_start_offset` from the
-            // prior relay cursor while that tail is undrained → the
-            // `response_sent_offset_monotonic` collision / duplicate relay this
-            // issue tracks. AND any inline wait here starves OTHER channels'
-            // relays (single observer loop). So: when the prior turn is not
-            // finalized, persist a DURABLE pending-start record and hand the
-            // claim to a DETACHED per-channel worker, then return to the loop.
-            // The worker waits for the prior turn to finalize, then claims with
-            // a FRESH EOF `turn_start_offset`. The common no-interleave case
-            // (prior turn already finalized) stays on the inline fast path.
+            // #3154 — TEMPORAL fix for turn-interleaving. Claiming the synthetic
+            // turn-start INLINE while the PRIOR turn's tail is still draining seeds
+            // `turn_start_offset` from the prior cursor → `response_sent_offset_
+            // monotonic` collision / duplicate relay; an inline wait also starves
+            // OTHER channels (single observer loop). So when the prior turn is not
+            // finalized, persist a DURABLE pending-start and hand the claim to a
+            // DETACHED per-channel worker (it waits, then claims a FRESH EOF offset).
+            // The common no-interleave case stays on the inline fast path.
             let prior = synthetic_start_prior_turn_view(
                 shared,
                 &provider,
@@ -1175,29 +1185,14 @@ fn bridge_adapter_owns_external_turn(owner: ExternalInputRelayOwner) -> bool {
     matches!(owner, ExternalInputRelayOwner::BridgeAdapter)
 }
 
-/// #3154 P1-3 no-relay-GAP guard. Decides whether the OBSERVER loop may spawn its
-/// own BridgeAdapter idle-response tail for this turn.
-///
-/// The relay of a turn's output must come from EXACTLY ONE owner — never zero (a
-/// GAP: the output is silently dropped) and never two (a DUPLICATE relay).
-///
-/// * When the synthetic turn-start was DEFERRED, the OBSERVER cannot yet know the
-///   RESOLVED relay owner: the claim runs LATER in the detached worker (it reads
-///   the runtime binding FRESH, post-drain, and only then resolves TmuxWatcher vs
-///   BridgeAdapter — see `claim_tui_direct_synthetic_turn`). Spawning here on the
-///   stale, pre-claim lease would either double-relay (watcher case) or relay the
-///   wrong (undrained) offset. So the observer STANDS DOWN unconditionally on the
-///   deferred path and hands the bridge-tail decision to the worker, which re-runs
-///   the OWNER-KIND-AWARE [`deferred_claim_requires_bridge_tail_relayer`] against
-///   the RESOLVED owner.
-/// * When NOT deferred, the observer spawns the bridge tail iff the lease's owner
-///   is still the BridgeAdapter (the inline claim already adopted any watcher
-///   handoff into `lease.relay_owner`, so a watcher-owned lease means the watcher
-///   relays and the observer stands down).
-///
-/// Pairing this with the deferred worker's owner-kind-aware bridge-tail spawn
-/// (which guarantees EXACTLY ONE relayer for EITHER resolved owner) is what proves
-/// there is no GAP and no duplicate on the deferred path.
+/// #3154 P1-3 no-relay-GAP guard: may the OBSERVER loop spawn its own BridgeAdapter
+/// idle-response tail? The output must come from EXACTLY ONE owner (never a GAP, never
+/// a DUPLICATE). DEFERRED ⇒ the observer cannot yet know the RESOLVED owner (the claim
+/// runs later in the detached worker), so it STANDS DOWN unconditionally and the worker
+/// re-runs [`deferred_claim_requires_bridge_tail_relayer`] against the resolved owner.
+/// NOT deferred ⇒ spawn iff the lease still owns as BridgeAdapter (the inline claim
+/// already adopted any watcher handoff, so a watcher-owned lease means the observer
+/// stands down). Pairing this with the worker's owner-kind-aware spawn is the proof.
 fn observer_should_spawn_bridge_tail(
     deferred_synthetic_start: bool,
     lease_owner: ExternalInputRelayOwner,
@@ -1206,33 +1201,22 @@ fn observer_should_spawn_bridge_tail(
 }
 
 /// #3154 P1 (BridgeAdapter-GAP fix). The OWNER-KIND-AWARE decision the deferred
-/// worker runs AFTER its claim resolves the relay owner. It mirrors the inline
-/// (non-deferred) observer path exactly:
-///
-/// * Resolved owner == TmuxWatcher ⇒ the watcher relays the turn's output, so the
-///   bridge tail must STAND DOWN (else DUPLICATE relay — the original P1-3 bug).
-/// * Resolved owner == BridgeAdapter ⇒ NO watcher will relay this turn, and the
-///   observer already stood down (deferred). The bridge tail MUST run exactly once
-///   here, or the synthetic turn's output is never relayed (the BridgeAdapter-GAP:
-///   `relayer_count == 0`). The observer's unconditional deferred skip in
-///   [`observer_should_spawn_bridge_tail`] is only correct BECAUSE this worker-side
-///   fallback closes the BridgeAdapter case.
-///
-/// The downstream [`maybe_spawn_claude_idle_response_tail`] independently re-checks
-/// `bridge_adapter_owns_external_turn` before spawning, so a stale/watcher lease can
-/// never produce a second relayer even if this predicate were called too eagerly.
+/// worker runs AFTER its claim resolves the relay owner, mirroring the inline path:
+/// TmuxWatcher ⇒ the watcher relays so the bridge tail STANDS DOWN (else DUPLICATE);
+/// BridgeAdapter ⇒ no watcher relays and the observer already stood down, so the
+/// bridge tail MUST run exactly once here (else `relayer_count == 0`, the GAP). The
+/// downstream [`maybe_spawn_claude_idle_response_tail`] re-checks
+/// `bridge_adapter_owns_external_turn`, so a stale/watcher lease can never spawn a
+/// second relayer even if this predicate were called too eagerly.
 fn deferred_claim_requires_bridge_tail_relayer(resolved_owner: ExternalInputRelayOwner) -> bool {
     bridge_adapter_owns_external_turn(resolved_owner)
 }
 
-/// #3154 P1-3 relay-owner adoption decision. After a synthetic claim resolves,
-/// the in-memory lease must adopt the claim's `relay_owner` iff the claim
-/// SUCCEEDED and the owner actually changed. Re-recording the lease with the
-/// claimed (watcher) owner is what makes [`observer_should_spawn_bridge_tail`]
-/// (and the bridge-tail guard) read a watcher-owned lease and stand down — so
-/// the deferred worker's claimed owner is the SINGLE relayer (no GAP, no dup).
-/// Shared by the inline (non-deferred) path and the deferred worker so both
-/// adopt identically.
+/// #3154 P1-3 relay-owner adoption decision. The in-memory lease adopts the claim's
+/// `relay_owner` iff the claim SUCCEEDED and the owner changed; re-recording with
+/// the claimed (watcher) owner makes [`observer_should_spawn_bridge_tail`] read a
+/// watcher-owned lease and stand down (the claimed owner is the SINGLE relayer, no
+/// GAP/dup). Shared by the inline and deferred paths so both adopt identically.
 fn claim_should_adopt_relay_owner(
     claimed: bool,
     current_owner: ExternalInputRelayOwner,
@@ -1245,12 +1229,10 @@ fn claim_should_adopt_relay_owner(
 struct TuiDirectSyntheticTurnClaim {
     relay_owner: ExternalInputRelayOwner,
     claimed: bool,
-    // #3154 P1 (timestamp-anchor output loss): the post-drain EOF offset
-    // (`relay_last_offset()`) the claim seeded into this turn's inflight
-    // `turn_start_offset`. The deferred-BridgeAdapter worker must anchor its
-    // bridge tail to THIS offset (the authoritative byte boundary for this
-    // synthetic turn) instead of a `Utc::now()` timestamp scan, which can skip
-    // bytes written to the transcript during the deferred-claim wait window.
+    // #3154 P1 (timestamp-anchor output loss): the post-drain EOF offset the claim
+    // seeded into this turn's inflight `turn_start_offset`. The deferred-BridgeAdapter
+    // worker anchors its bridge tail to THIS byte boundary instead of a `Utc::now()`
+    // scan, which can skip bytes written during the deferred-claim wait window.
     turn_start_offset: u64,
 }
 
@@ -2379,16 +2361,11 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
             let now = tokio::time::Instant::now();
             if now >= next_rehydrate {
                 // #3105 (codex P2): `rehydrate_existing_claude_tui_bindings` is a
-                // fully BLOCKING pass — it issues synchronous `tmux` subprocess
-                // calls (`list-sessions`, `has-session`, `has-live-pane`) and, via
-                // `pane_is_confirmed_dead_orphaned`, a `std::thread::sleep` between
-                // multi-sample pane probes. Running it inline on this Tokio worker
-                // would stall the executor (and every other async task scheduled on
-                // the same worker) for samples×delay PLUS the tmux subprocess
-                // latency on each pass. Move ALL of that blocking work onto the
-                // blocking pool with `spawn_blocking` so the executor stays free;
-                // the sync core (and its unit-testable multi-sample logic) is
-                // unchanged.
+                // fully BLOCKING pass (synchronous `tmux` subprocess calls + a
+                // `std::thread::sleep` between multi-sample pane probes); running it
+                // inline would stall the executor for samples×delay plus tmux latency.
+                // Move it onto the blocking pool via `spawn_blocking` (the sync core
+                // and its unit-testable logic are unchanged).
                 let shared_for_rehydrate = shared.clone();
                 let rehydrate_result = tokio::task::spawn_blocking(move || {
                     rehydrate_existing_claude_tui_bindings(&shared_for_rehydrate);
@@ -2509,6 +2486,24 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                             &transcript_path,
                             line_end_offset,
                         );
+                        // #3305: a LOCAL-completing pass-through command's
+                        // `<command-*>` transcript echo (/effort /compact /cost
+                        // /context) never starts a model turn, so do NOT select an
+                        // external turn owner / wait for a synthetic claim / spawn a
+                        // response tail for it. Skipping here (after advancing the
+                        // offset so it is not re-scanned) keeps the inflight table
+                        // empty so the next injection is not FOREIGN-ABORTed; the
+                        // broadcast relay still posts the kind-only guidance note. A
+                        // /loop echo is off the allow-list and keeps full lifecycle.
+                        if is_local_only_slash_command_prompt(&prompt) {
+                            tracing::info!(
+                                tmux_session_name = %tmux_session_name,
+                                channel_id = channel_id.get(),
+                                slash_command_kind = %slash_command_control_kind(&prompt),
+                                "Claude idle transcript relay skipped local-only pass-through slash command (no external turn owner / synthetic claim / response tail)"
+                            );
+                            continue;
+                        }
                         if !claude_idle_prompt_observation_should_tail_response(observation) {
                             continue;
                         }
@@ -2604,27 +2599,16 @@ const DEAD_ORPHANED_PANE_PROBE_SAMPLES: usize = 3;
 const DEAD_ORPHANED_PANE_PROBE_DELAY: Duration = Duration::from_millis(75);
 
 /// #3105 (codex P1 sub-case B): a tmux session whose dedupe mirror still holds a
-/// stale ClaudeTui binding but which is genuinely dead/orphaned — its pane is
-/// gone AND no LIVE watcher handle owns it. This is the precise gate under which
-/// it is safe to drop any leftover restored-owner binding and tombstone the
-/// mirror; it deliberately EXCLUDES a live session whose authoritative registry
-/// entry was transiently evicted (sub-case A — pane is still live there, so this
-/// returns false and that path self-heals via
-/// `restore_owner_channel_for_tmux_session`).
-///
-/// The pane-liveness check is what distinguishes "pane dead/gone" (evict) from
-/// "pane alive but registry missing" (self-heal). A `restored_owner_by_tmux_session`
-/// entry is NOT treated as proof of life here, because that map is precisely the
-/// stale residue we must reclaim for a session that has since died; it is
-/// cleared as part of the eviction.
-///
-/// #3105 (codex P2): because eviction is destructive, the dead verdict is made
-/// resistant to a transient pane-probe flake (sub-case A false-positive risk for a
-/// LIVE thread-suffixed session that has not yet been claimed): the pane must read
-/// dead across `DEAD_ORPHANED_PANE_PROBE_SAMPLES` consecutive samples, AND — since
-/// "no watcher handle" is the weakest possible signal — the hard
-/// `tmux_session_exists` (`tmux has-session`) check must confirm the session truly
-/// does not exist on this host. A single soft "no live pane" read can NEVER evict.
+/// stale ClaudeTui binding but which is genuinely dead/orphaned — pane gone AND no
+/// LIVE watcher handle owns it — under which it is safe to drop the restored-owner
+/// binding and tombstone the mirror. EXCLUDES sub-case A (a live session whose
+/// registry entry was transiently evicted: pane still live → returns false →
+/// self-heals via `restore_owner_channel_for_tmux_session`). A
+/// `restored_owner_by_tmux_session` entry is NOT proof of life — it is the stale
+/// residue this eviction reclaims. P2: eviction is destructive, so the dead verdict
+/// resists a flake — the pane must read dead across `DEAD_ORPHANED_PANE_PROBE_
+/// SAMPLES` consecutive samples AND the hard `tmux_session_exists` must confirm the
+/// session is gone (a single soft "no live pane" read can NEVER evict).
 #[cfg(unix)]
 fn claude_tui_session_is_dead_orphaned(shared: &Arc<SharedData>, tmux_session_name: &str) -> bool {
     // A live watcher handle is conclusive proof of life: never evict, never probe.
@@ -2642,22 +2626,13 @@ fn claude_tui_session_is_dead_orphaned(shared: &Arc<SharedData>, tmux_session_na
     )
 }
 
-/// #3105 (codex P2): pure, testable core of the dead/orphaned pane decision (no
-/// watcher-handle dependency — the caller short-circuits on a live handle first).
-///
-/// Conservative by construction so a LIVE session is NEVER classified dead from a
-/// transient flake:
-///   1. `has_live_pane` is sampled up to `samples` times; the moment ANY sample
-///      reports a live pane the session is declared NOT dead (self-heal preserved).
-///      Only if ALL `samples` agree the pane is dead do we proceed.
-///   2. Even then, the hard `session_exists` (`tmux has-session`) check must
-///      confirm the session is truly gone from this host. "No watcher handle" is
-///      the weakest signal, so a soft "no live pane" alone never evicts; the
-///      session must be confirmed absent.
-///
-/// Sub-case B (the production `AgentDesk-claude-adk-cc-t1504468805772902471` case)
-/// still evicts: a genuinely-gone session reports no live pane on every sample AND
-/// `session_exists` is false, so this returns true and the WARN spam stops.
+/// #3105 (codex P2): pure, testable core of the dead/orphaned pane decision (the
+/// caller short-circuits on a live watcher handle first). Conservative so a LIVE
+/// session is NEVER classified dead from a flake: (1) ANY of up to `samples`
+/// `has_live_pane` reads being live ⇒ NOT dead (self-heal preserved); only all-dead
+/// proceeds. (2) Even then the hard `session_exists` (`tmux has-session`) must
+/// confirm the session is gone. Sub-case B (a genuinely-gone session) reads dead on
+/// every sample AND `session_exists` is false ⇒ true ⇒ the WARN spam stops.
 #[cfg(unix)]
 fn pane_is_confirmed_dead_orphaned(
     mut has_live_pane: impl FnMut() -> bool,
@@ -5344,6 +5319,22 @@ fn format_slash_command_control_note(
     header
 }
 
+/// #3305: whether an observed prompt is a machine slash-command control echo for a
+/// LOCAL-completing pass-through command (`/effort` `/compact` `/cost` `/context`,
+/// the [`commands::is_local_only_slash_command_kind`] allow-list). Such commands
+/// render in the TUI but never start a model turn, so the idle relay must post the
+/// guidance note WITHOUT minting an external/synthetic turn — otherwise the ⏳ never
+/// finalizes and the stale inflight FOREIGN-ABORTs the next injection (#3302). A
+/// `/loop`-shaped command (which DOES start a turn) is off the allow-list, so this
+/// returns false and the full #3178 lifecycle is preserved (fail-safe default).
+/// Pure composition of the existing classifiers — no new parsing. The same
+/// `slash_command_control_kind` normalization is also reusable by #3304's
+/// pending-vs-command-XML dedupe, but that is a separate change.
+fn is_local_only_slash_command_prompt(prompt: &str) -> bool {
+    is_slash_command_control_prompt(prompt)
+        && super::commands::is_local_only_slash_command_kind(&slash_command_control_kind(prompt))
+}
+
 /// Pull the human-facing `/loop` directive body from either injection half — the
 /// raw echo (`/loop <body>`) or the expanded Claude Code wrapper
 /// (`<command-args>…</command-args>`). Returns `None` when no body is recoverable
@@ -6272,6 +6263,107 @@ mod tests {
             classify_injected_prompt(wrapped_human),
             InjectedPromptClass::HumanTuiDirect,
         );
+    }
+
+    // #3305: a local-completing pass-through command's `<command-*>` echo (or its
+    // raw `/compact` echo) must be detected as local-only so the idle relay skips
+    // the synthetic-turn lifecycle (no ⏳ anchor, no inflight) while still posting
+    // the kind-only guidance note. Covers all four pass-throughs across the
+    // wrapper, the SSH-direct envelope round-trip, the leading terminal-control
+    // prefix, the `/compact` raw echo, and the `Compacted` stdout.
+    #[test]
+    fn local_only_slash_prompt_detects_passthrough_command_xml() {
+        for name in ["/effort", "/compact", "/cost", "/context"] {
+            let wrapper = format!(
+                "<command-message>{name} is running…</command-message>\n\
+                 <command-name>{name}</command-name>\n<command-args></command-args>"
+            );
+            assert!(
+                is_local_only_slash_command_prompt(&wrapper),
+                "expanded wrapper for {name} must be local-only",
+            );
+            // SSH-direct envelope round-trip of the wrapper.
+            let wrapped =
+                format!("터미널에 직접 주입된 입력 (tmux : `s`):\n```text\n{wrapper}\n```");
+            assert!(
+                is_local_only_slash_command_prompt(&wrapped),
+                "envelope-wrapped {name} wrapper must still be local-only",
+            );
+            // Leading terminal-control prefix before the wrapper.
+            let with_controls = format!("\u{1b}[2K\r{wrapper}");
+            assert!(
+                is_local_only_slash_command_prompt(&with_controls),
+                "terminal-control-prefixed {name} wrapper must still be local-only",
+            );
+        }
+        // `<command-name>` with an argument body — the first token (`/effort`) is
+        // the canonical kind, so it still matches the allow-list.
+        let effort_with_args =
+            "<command-message>x</command-message>\n<command-name>/effort high</command-name>";
+        assert!(is_local_only_slash_command_prompt(effort_with_args));
+        // Raw `/compact` echo (no wrapper) and the `Compacted` stdout line.
+        assert!(is_local_only_slash_command_prompt("/compact"));
+        assert!(is_local_only_slash_command_prompt(
+            "/compact focus on the relay"
+        ));
+        assert!(is_local_only_slash_command_prompt(
+            "<local-command-stdout>Compacted (12.3k tokens)"
+        ));
+    }
+
+    // #3305 (REQUIRED REGRESSION GUARD): `/loop` STARTS a real model turn, so it
+    // must remain a full active turn (#3178) — classified as SlashCommandControl
+    // yet NOT local-only. This double-assertion pins /loop on the anchor+⏳+
+    // synthetic-inflight path at the classification level so the local-only skip
+    // can never over-suppress it.
+    #[test]
+    fn local_only_slash_prompt_preserves_loop_wakeup_lifecycle() {
+        let raw = "/loop 5m /foo";
+        let wrapper = "<command-message>loop is running…</command-message>\n\
+                       <command-name>/loop</command-name>\n<command-args>5m /foo</command-args>";
+        for form in [raw, wrapper] {
+            assert_eq!(
+                classify_injected_prompt(form),
+                InjectedPromptClass::SlashCommandControl,
+                "/loop stays a SlashCommandControl active turn",
+            );
+            assert!(
+                !is_local_only_slash_command_prompt(form),
+                "/loop must NOT be local-only (it starts a model turn) — over-suppression guard",
+            );
+        }
+    }
+
+    // #3305: non-command text, the system-continuation banner, task notifications,
+    // a token-boundary near-miss, and an UNLISTED command must all be rejected so
+    // the local-only skip never fires for a real turn (fail-safe = lifecycle kept).
+    #[test]
+    fn local_only_slash_prompt_rejects_non_command_text() {
+        // A plain human prompt.
+        assert!(!is_local_only_slash_command_prompt(
+            "please summarize the relay design"
+        ));
+        // SystemContinuation banner wins (handled by its own neutral-note path).
+        assert!(!is_local_only_slash_command_prompt(
+            "This session is being continued from a previous conversation…"
+        ));
+        // Task-notification tag is not a slash control echo.
+        assert!(!is_local_only_slash_command_prompt(
+            "<task-notification>done</task-notification>"
+        ));
+        // Token-boundary near-miss: `/compactX` is not the whole `/compact` token.
+        assert!(!is_local_only_slash_command_prompt(
+            "/compactX do the thing"
+        ));
+        // An UNLISTED command's wrapper — `/model` is a SlashCommandControl but is
+        // NOT on the allow-list, so lifecycle is preserved (fail-safe default).
+        let model_wrapper =
+            "<command-message>x</command-message>\n<command-name>/model</command-name>";
+        assert!(matches!(
+            classify_injected_prompt(model_wrapper),
+            InjectedPromptClass::SlashCommandControl
+        ));
+        assert!(!is_local_only_slash_command_prompt(model_wrapper));
     }
 
     // #3178: the machine slash-command control trigger now resolves to a stable

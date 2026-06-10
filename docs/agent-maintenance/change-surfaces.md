@@ -608,7 +608,22 @@
     aborted-anchor marker — see the entry head); -75 from #3282
     follow-up: verbose multi-line comment blocks compressed (no semantic
     change) to offset the +54 growth and keep prod LoC under the frozen
-    `giant_file_ratchet` baseline (5438, #3028).
+    `giant_file_ratchet` baseline (5438, #3028); #3305: a LOCAL-completing
+    pass-through slash command (`/effort` `/compact` `/cost` `/context`, the
+    `commands::is_local_only_slash_command_kind` allow-list) renders in the TUI
+    but starts NO model turn, so its `<command-*>` transcript echo must NOT mint a
+    synthetic external turn. `relay_observed_prompt` hoists the
+    `slash_command_control_kind`, and when it is local-only posts ONLY the
+    kind-only `format_slash_command_control_note` and RETURNS before `disarm()` —
+    the armed `observed_lease_early_return_guard` clears the recorded lease
+    (generation-exact, no anchor/⏳/synthetic inflight), and the Claude idle
+    transcript loop `continue`s past such a prompt (no external-owner lease / no
+    synthetic-claim wait / no response tail) — so the next injection is not
+    FOREIGN-ABORTed and the #3302 sweeper sees no fake row. `/loop` (a model-turn
+    command) is OFF the allow-list and keeps the full #3178 lifecycle (fail-safe
+    allow-list; an anti-drift test pins the list to the `ClaudeSlashPassthrough`
+    variant set). Comment dedup in the same root offsets the new lines, lowering
+    the frozen baseline 5438 -> 5429 (-9, locks in the win).
   - `src/services/discord/idle_recap.rs` (1319 prod lines; idle-recap card
     compose/post/clear surface, registered giant-file (#3036) — bugfix only
     outside an extraction plan. Crossed 1000 prod LoC with #3146 Part 1: the

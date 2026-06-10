@@ -50,7 +50,10 @@
 # queue-exit comment dedup in the same root, so the frozen baseline stays at
 # 4987 (no raise; #3028 ratchet).
 "src/services/discord/mod.rs" = 4987
-"src/services/discord/tui_prompt_relay.rs" = 5438
+# #3305: the local-only pass-through lifecycle-skip (kind hoist + note-only return
+# branch + idle-loop skip) is offset by comment dedup in the same root, lowering the
+# frozen baseline 5438 -> 5429 (-9). Locks in the shrink win (#3028 ratchet).
+"src/services/discord/tui_prompt_relay.rs" = 5429
 # #3038: lowered 4728 -> 4657 (-71) as `SensitivityState` (definition + impl)
 # moved to the `voice_sensitivity` sibling module. Locks in the shrink win.
 "src/services/discord/voice_barge_in.rs" = 4657

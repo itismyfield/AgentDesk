@@ -115,6 +115,28 @@ impl ClaudeSlashPassthrough {
     }
 }
 
+/// #3305 SSOT: the slash commands AgentDesk passes through to the Claude TUI that
+/// complete LOCALLY (they render in the TUI but never start a model turn). Their
+/// transcript `<command-*>` echo otherwise tricks the idle relay into minting a
+/// synthetic external turn (⏳ anchor + inflight) that never finalizes — stranding
+/// the hourglass and FOREIGN-ABORTing the next injection (#3302 marker pollution).
+///
+/// The relay (`tui_prompt_relay`) consults this list to skip lifecycle (NOT the
+/// guidance note) for exactly these kinds, an ALLOW-list so any unknown / future
+/// command keeps full lifecycle by default (fail-safe). ONLY add a command here if
+/// it is genuinely local-completing: a pass-through that DOES start a model turn
+/// (e.g. anything `/loop`-shaped) MUST stay off this list or its turn loses its
+/// `⏳`→`✅` lifecycle. The `local_only_whitelist_matches_passthrough_command_set`
+/// anti-drift test pins this against the [`ClaudeSlashPassthrough`] variant set.
+pub(in crate::services::discord) const LOCAL_ONLY_SLASH_COMMANDS: [&str; 4] =
+    ["/effort", "/compact", "/cost", "/context"];
+
+/// #3305: whether `kind` (a canonical `slash_command_control_kind`, e.g. `/compact`)
+/// is a local-completing pass-through command — see [`LOCAL_ONLY_SLASH_COMMANDS`].
+pub(in crate::services::discord) fn is_local_only_slash_command_kind(kind: &str) -> bool {
+    LOCAL_ONLY_SLASH_COMMANDS.contains(&kind)
+}
+
 fn ultracode_notice() -> &'static str {
     "`/effort ultracode`는 live Claude 세션에 안전하게 passthrough하지 않습니다. \
 현재 범위에서는 세션 재시작/별도 설정 연동 없이 보장되는 경로만 열었고, 안정 경로는 \
@@ -314,4 +336,44 @@ pub(in crate::services::discord) async fn cmd_cost(ctx: Context<'_>) -> Result<(
 #[poise::command(slash_command, rename = "context")]
 pub(in crate::services::discord) async fn cmd_context(ctx: Context<'_>) -> Result<(), Error> {
     run_claude_passthrough(ctx, ClaudeSlashPassthrough::Context).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    /// Every `ClaudeSlashPassthrough` variant in this file is a LOCAL-completing
+    /// command (none of them start a model turn), so the relay's lifecycle-skip
+    /// allow-list MUST equal the variant set exactly. This anti-drift guard fails
+    /// the build whenever a new pass-through is added without a deliberate decision
+    /// about its lifecycle: add it to `LOCAL_ONLY_SLASH_COMMANDS` only if it is
+    /// genuinely local-completing, otherwise this test stays RED until the author
+    /// confirms the lifecycle classification (see the const doc on `/loop`-shaped
+    /// commands, #3305).
+    #[test]
+    fn local_only_whitelist_matches_passthrough_command_set() {
+        // The full ClaudeSlashPassthrough surface. `Effort` carries a level but its
+        // slash_name() is level-independent, so a single representative suffices.
+        let variants = [
+            ClaudeSlashPassthrough::Effort(EffortLevel::High),
+            ClaudeSlashPassthrough::Compact,
+            ClaudeSlashPassthrough::Cost,
+            ClaudeSlashPassthrough::Context,
+        ];
+        let variant_names: BTreeSet<&str> = variants.iter().map(|cmd| cmd.slash_name()).collect();
+        let whitelist: BTreeSet<&str> = LOCAL_ONLY_SLASH_COMMANDS.iter().copied().collect();
+        assert_eq!(
+            variant_names, whitelist,
+            "LOCAL_ONLY_SLASH_COMMANDS must equal the ClaudeSlashPassthrough variant set; \
+             a new pass-through needs an explicit local-vs-model-turn lifecycle decision",
+        );
+        // Sanity: the kind predicate agrees with the const for both members and
+        // a non-member (e.g. /loop is a model-turn command and must be excluded).
+        for name in &whitelist {
+            assert!(is_local_only_slash_command_kind(name));
+        }
+        assert!(!is_local_only_slash_command_kind("/loop"));
+        assert!(!is_local_only_slash_command_kind("/model"));
+    }
 }
