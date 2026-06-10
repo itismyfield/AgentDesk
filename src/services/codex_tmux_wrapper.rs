@@ -566,8 +566,17 @@ struct CodexCallTokenUsage {
 
 impl CodexCallTokenUsage {
     fn from_value(value: &serde_json::Value) -> Option<Self> {
+        // Guard: at least one known token field must actually be present. An
+        // empty/unrelated object (e.g. a protocol variant sending
+        // `last_token_usage: {}`) parses to None so it cannot clobber a
+        // previously captured real usage with all zeros, and the result-frame
+        // `or_else` fallback chain keeps working.
+        const KNOWN_FIELDS: [&str; 3] = ["input_tokens", "cached_input_tokens", "output_tokens"];
+        if !KNOWN_FIELDS.iter().any(|key| value.get(key).is_some()) {
+            return None;
+        }
         let field = |key: &str| value.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
-        value.is_object().then(|| Self {
+        Some(Self {
             input_tokens: field("input_tokens"),
             cached_input_tokens: field("cached_input_tokens"),
             output_tokens: field("output_tokens"),
@@ -1413,6 +1422,77 @@ mod modern_event_tests {
         assert_eq!(lines[0]["usage"]["output_tokens"], 50);
         assert_eq!(lines[0]["input_tokens"], 0);
         assert_eq!(lines[0]["output_tokens"], 0);
+    }
+
+    // #3275: a protocol variant sending `token_count` with an empty
+    // `info.last_token_usage: {}` must not clobber a previously captured real
+    // per-call usage with all zeros — the empty object parses to None, the
+    // earlier capture is preserved, and the nested result usage still emits.
+    #[test]
+    fn empty_last_token_usage_object_preserves_prior_capture() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut thread_id = Some("thread-empty-usage".to_string());
+        let mut state = CodexWrapperTurnState::default();
+        let start = std::time::Instant::now();
+
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 1000,
+                            "cached_input_tokens": 600,
+                            "output_tokens": 50
+                        }
+                    }
+                }
+            }),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": { "last_token_usage": {} }
+                }
+            }),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "last_agent_message": "empty-variant final"
+                }
+            }),
+            &mut thread_id,
+            &mut state,
+            start,
+        )
+        .unwrap();
+
+        let lines = read_jsonl(&path);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["type"], "result");
+        assert_eq!(lines[0]["subtype"], "success");
+        assert_eq!(lines[0]["usage"]["input_tokens"], 400);
+        assert_eq!(lines[0]["usage"]["cache_read_input_tokens"], 600);
+        assert_eq!(lines[0]["usage"]["output_tokens"], 50);
     }
 
     // #3275: when the terminal event also carries the session-cumulative
