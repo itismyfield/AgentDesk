@@ -28,6 +28,8 @@ export default function KanbanAssignIssueModal({ ctx }: KanbanAssignIssueModalPr
       {assignIssue && (
         <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center p-0 sm:p-4" style={{ backgroundColor: "var(--th-modal-overlay)" }}>
           <SurfaceCard
+            role="dialog"
+            aria-label={assignIssue.title}
             className="w-full max-w-lg rounded-t-3xl p-5 sm:rounded-3xl sm:p-6 space-y-4"
             style={{
               ...SURFACE_MODAL_CARD_STYLE,

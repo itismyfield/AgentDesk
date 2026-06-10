@@ -30,6 +30,8 @@ export default function KanbanStatusModals({ ctx }: KanbanStatusModalsProps) {
       {assignBeforeReady && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: "var(--th-modal-overlay)" }} onClick={() => setAssignBeforeReady(null)}>
           <SurfaceCard
+            role="dialog"
+            aria-label={tr("담당자 할당", "Assign Agent")}
             onClick={(e) => e.stopPropagation()}
             className="w-full max-w-sm space-y-4 rounded-[28px] p-5"
             style={{
@@ -87,6 +89,8 @@ export default function KanbanStatusModals({ ctx }: KanbanStatusModalsProps) {
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: "var(--th-modal-overlay)" }}>
             <SurfaceCard
+              role="dialog"
+              aria-label={tr("카드 취소 확인", "Cancel cards")}
               onClick={(e) => e.stopPropagation()}
               className="w-full max-w-md space-y-4 rounded-[28px] p-5"
               style={{
