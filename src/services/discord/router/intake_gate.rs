@@ -924,6 +924,7 @@ async fn reuse_merged_queued_placeholder(
     let existing =
         pick_reusable_merged_placeholder(&merged_head.source_message_ids, user_msg_id, |id| {
             data.shared
+                .queued
                 .queued_placeholders
                 .get(&(channel_id, id))
                 .map(|entry| *entry.value())
@@ -1104,6 +1105,7 @@ async fn reuse_any_queued_placeholder_for_channel(
 
     let channel_cards: Vec<(serenity::MessageId, serenity::MessageId)> = data
         .shared
+        .queued
         .queued_placeholders
         .iter()
         .filter_map(|entry| {

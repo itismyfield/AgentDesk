@@ -31,7 +31,10 @@
 # turn-lifecycle surface were mislabeled test. This is the actual #3028 guard;
 # decompose lands separately after #3016 settles.
 "src/services/discord/turn_bridge/mod.rs" = 8417
-"src/services/discord/mod.rs" = 5188
+# #3038 S1: lowered 5188 -> 4987 (-201) as `QueuedPlaceholderState` (cluster C:
+# 3 fields + 9 inherent methods) moved to the `shared_state` sibling module.
+# Locks in the shrink win (ratchet down only).
+"src/services/discord/mod.rs" = 4987
 "src/services/discord/tui_prompt_relay.rs" = 5438
 # #3038: lowered 4728 -> 4657 (-71) as `SensitivityState` (definition + impl)
 # moved to the `voice_sensitivity` sibling module. Locks in the shrink win.
@@ -45,14 +48,25 @@
 # construction sites).
 "src/services/discord/recovery_engine.rs" = 4090
 # #3034 batch-8: lowered 3771 -> 3770 (dead-code removal).
-"src/services/discord/router/message_handler/intake_turn.rs" = 3770
+# #3038 S1: +1 (3770 -> 3771) for the mechanical `shared.queued_placeholders` ->
+# `shared.queued.queued_placeholders` re-wire (one extra method-chain line) forced
+# by lifting cluster C into `QueuedPlaceholderState`. Net program-wide: mod.rs -201.
+"src/services/discord/router/message_handler/intake_turn.rs" = 3771
 "src/services/discord/meeting_orchestrator.rs" = 3227
 "src/services/turn_orchestrator.rs" = 3090
 # #3034 batch-8: +1 for a test-only `#[allow(dead_code)]` on
 # `thread_guard_inflight_is_stale` (#1446 Layer-2 classifier, pinned by tests).
-"src/services/discord/router/intake_gate.rs" = 2958
+# #3038 S1: +2 (2958 -> 2960) for the two mechanical `.queued_placeholders` ->
+# `.queued.queued_placeholders` re-wires (two extra method-chain lines) forced by
+# the cluster-C extraction. Net program-wide: mod.rs -201.
+"src/services/discord/router/intake_gate.rs" = 2960
 "src/services/discord/formatting.rs" = 2802
-"src/services/discord/runtime_bootstrap.rs" = 2800
+# #3038 S1: +4 (2798 -> 2802) — wrapper braces for the `queued:
+# QueuedPlaceholderState { .. }` group in `run_bot_build_shared_data`'s
+# `SharedData` literal (the three cluster-C member inits stay byte-identical
+# inside) plus the mechanical `.queued.` path rewrite in
+# `run_bot_spawn_recovery_and_flush_restart_reports`. Net program-wide: mod.rs -201.
+"src/services/discord/runtime_bootstrap.rs" = 2802
 # #3034 batch-8: lowered 2655 -> 2645 (dead-code removal: `stop_provider_channel_runtime`).
 "src/services/discord/health/recovery.rs" = 2645
 "src/services/discord/inflight.rs" = 2466
