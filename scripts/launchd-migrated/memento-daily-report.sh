@@ -15,8 +15,18 @@ Memento 일일 리포트를 생성한다. 현재 시각: $NOW_KST
 
 ## 수집할 데이터
 
-1. memory_stats 호출 → 전체 현황
+1. memory_stats 호출 → 전체 현황 + searchObservability.path_relevance
 2. search_traces로 어제(KST 기준) 생성된 파편 조회 (limit=100)
+
+## tool_feedback 지표 계산 규칙
+
+memory_stats의 searchObservability.path_relevance를 query_type별로 집계한다:
+- 모델 주도 검색(nudge-eligible) = query_type이 mixed 또는 text인 행의 search_count 합
+- 자동 검색 = query_type이 keywords 또는 topic인 행의 search_count 합
+  (세션 시작 context 주입·백그라운드 잡 경로 — nudge가 도달할 수 없는 검색)
+- 제출 건수 = 모든 행의 feedback_count 합
+- 회수율 = (mixed·text 행의 feedback_count 합) ÷ 모델 주도 검색 × 100, 소수 1자리
+주의: 총 검색 대비 비율은 자동 검색이 분모를 도배해 왜곡되므로 사용하지 않는다.
 
 ## 리포트 포맷 (한국어, Discord 메시지)
 
@@ -33,11 +43,11 @@ Memento 일일 리포트를 생성한다. 현재 시각: $NOW_KST
 - 주요 토픽: (상위 5개 나열)
 
 검색 품질 (30일):
-- 총 검색: N회
+- 총 검색: N회 (자동 N / 모델 주도 N)
 - L1 미스율: XX%
 - L3 사용률: XX%
 - 평균 지연: NNms
-- tool_feedback 제출: N건
+- tool_feedback: 제출 N건 · 회수율 X.X% (모델 주도 검색 기준)
 
 미해결 에러: N건 (있으면 토픽 나열)
 
