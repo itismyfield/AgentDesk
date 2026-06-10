@@ -4375,3 +4375,266 @@ async fn decision_route_finalize(
         })),
     )
 }
+
+// #3038 characterization tests: pin the observable behavior of the pure
+// helpers (input normalization + dispatch-context parsing) BEFORE the file
+// decomposition so the move can be verified against a green baseline. These
+// tests travel with their functions when the module is split.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── normalize_optional_commit_sha ────────────────────────────────────
+
+    #[test]
+    fn normalize_commit_sha_absent_is_ok_none() {
+        assert_eq!(normalize_optional_commit_sha(None), Ok(None));
+    }
+
+    #[test]
+    fn normalize_commit_sha_empty_is_rejected() {
+        let error = normalize_optional_commit_sha(Some("")).unwrap_err();
+        assert_eq!(error, "commit_sha must not be empty when provided");
+    }
+
+    #[test]
+    fn normalize_commit_sha_whitespace_only_is_rejected() {
+        let error = normalize_optional_commit_sha(Some("   \t ")).unwrap_err();
+        assert_eq!(error, "commit_sha must not be empty when provided");
+    }
+
+    #[test]
+    fn normalize_commit_sha_too_short_is_rejected() {
+        let error = normalize_optional_commit_sha(Some("abc123")).unwrap_err();
+        assert_eq!(
+            error,
+            "commit_sha must be a 7-64 character hex git commit SHA"
+        );
+    }
+
+    #[test]
+    fn normalize_commit_sha_minimum_seven_hex_is_accepted() {
+        assert_eq!(
+            normalize_optional_commit_sha(Some("abc1234")),
+            Ok(Some("abc1234".to_string()))
+        );
+    }
+
+    #[test]
+    fn normalize_commit_sha_full_forty_hex_is_lowercased() {
+        let upper = "A".repeat(40);
+        assert_eq!(
+            normalize_optional_commit_sha(Some(upper.as_str())),
+            Ok(Some("a".repeat(40)))
+        );
+    }
+
+    #[test]
+    fn normalize_commit_sha_sixty_four_hex_is_accepted() {
+        let sha = "f".repeat(64);
+        assert_eq!(
+            normalize_optional_commit_sha(Some(sha.as_str())),
+            Ok(Some(sha.clone()))
+        );
+    }
+
+    #[test]
+    fn normalize_commit_sha_sixty_five_hex_is_rejected() {
+        let sha = "f".repeat(65);
+        let error = normalize_optional_commit_sha(Some(sha.as_str())).unwrap_err();
+        assert_eq!(
+            error,
+            "commit_sha must be a 7-64 character hex git commit SHA"
+        );
+    }
+
+    #[test]
+    fn normalize_commit_sha_non_hex_is_rejected() {
+        let error = normalize_optional_commit_sha(Some("xyz1234")).unwrap_err();
+        assert_eq!(
+            error,
+            "commit_sha must be a 7-64 character hex git commit SHA"
+        );
+    }
+
+    #[test]
+    fn normalize_commit_sha_is_trimmed_before_validation() {
+        assert_eq!(
+            normalize_optional_commit_sha(Some("  ABC1234  ")),
+            Ok(Some("abc1234".to_string()))
+        );
+    }
+
+    // ── commit_sha_differs ───────────────────────────────────────────────
+
+    #[test]
+    fn commit_sha_differs_identical_is_false() {
+        assert!(!commit_sha_differs("abc1234", "abc1234"));
+    }
+
+    #[test]
+    fn commit_sha_differs_is_case_insensitive() {
+        assert!(!commit_sha_differs("ABC1234", "abc1234"));
+        assert!(!commit_sha_differs("abc1234", "ABC1234"));
+    }
+
+    #[test]
+    fn commit_sha_differs_distinct_is_true() {
+        assert!(commit_sha_differs("abc1234", "def5678"));
+    }
+
+    #[test]
+    fn commit_sha_differs_prefix_is_true() {
+        // Full equality only — a short/long prefix pair counts as different.
+        assert!(commit_sha_differs("abc1234", "abc1234def5678"));
+    }
+
+    // ── context_repo_dir / build_active_review_dispatch fixtures ─────────
+
+    /// Create a temp dir initialized as a real git worktree so the
+    /// `resolve_repo_dir_for_target` path checks succeed deterministically.
+    fn init_git_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(dir.path())
+            .status()
+            .expect("spawn git init");
+        assert!(status.success(), "git init failed in {:?}", dir.path());
+        dir
+    }
+
+    fn canonical(path: &std::path::Path) -> String {
+        std::fs::canonicalize(path)
+            .expect("canonicalize")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn parse_context(raw: &str) -> serde_json::Value {
+        serde_json::from_str(raw).expect("valid test context json")
+    }
+
+    // ── context_repo_dir ─────────────────────────────────────────────────
+
+    #[test]
+    fn context_repo_dir_none_context_is_none() {
+        assert_eq!(context_repo_dir(None), None);
+    }
+
+    #[test]
+    fn context_repo_dir_without_recognized_keys_is_none() {
+        let context = parse_context(r#"{"unrelated": "value"}"#);
+        assert_eq!(context_repo_dir(Some(&context)), None);
+    }
+
+    #[test]
+    fn context_repo_dir_nonexistent_target_repo_is_none() {
+        let context = parse_context(r#"{"target_repo": "/definitely/missing/adk-3038-test-path"}"#);
+        assert_eq!(context_repo_dir(Some(&context)), None);
+    }
+
+    #[test]
+    fn context_repo_dir_resolves_git_worktree_target_repo() {
+        let dir = init_git_dir();
+        let context = parse_context(&format!(
+            r#"{{"target_repo": "{}"}}"#,
+            dir.path().to_string_lossy()
+        ));
+        assert_eq!(
+            context_repo_dir(Some(&context)),
+            Some(canonical(dir.path()))
+        );
+    }
+
+    #[test]
+    fn context_repo_dir_prefers_target_repo_over_worktree_path() {
+        let target = init_git_dir();
+        let worktree = init_git_dir();
+        let context = parse_context(&format!(
+            r#"{{"target_repo": "{}", "worktree_path": "{}"}}"#,
+            target.path().to_string_lossy(),
+            worktree.path().to_string_lossy()
+        ));
+        assert_eq!(
+            context_repo_dir(Some(&context)),
+            Some(canonical(target.path()))
+        );
+    }
+
+    #[test]
+    fn context_repo_dir_falls_back_to_worktree_path() {
+        let worktree = init_git_dir();
+        let context = parse_context(&format!(
+            r#"{{"worktree_path": "{}"}}"#,
+            worktree.path().to_string_lossy()
+        ));
+        assert_eq!(
+            context_repo_dir(Some(&context)),
+            Some(canonical(worktree.path()))
+        );
+    }
+
+    // ── build_active_review_dispatch ─────────────────────────────────────
+
+    #[test]
+    fn build_active_review_dispatch_without_context_keeps_id_only() {
+        let dispatch = build_active_review_dispatch("dispatch-1".to_string(), None);
+        assert_eq!(dispatch.id, "dispatch-1");
+        assert_eq!(dispatch.reviewed_commit, None);
+        assert_eq!(dispatch.target_repo, None);
+    }
+
+    #[test]
+    fn build_active_review_dispatch_invalid_json_context_keeps_id_only() {
+        let dispatch =
+            build_active_review_dispatch("dispatch-2".to_string(), Some("{not json".to_string()));
+        assert_eq!(dispatch.id, "dispatch-2");
+        assert_eq!(dispatch.reviewed_commit, None);
+        assert_eq!(dispatch.target_repo, None);
+    }
+
+    #[test]
+    fn build_active_review_dispatch_target_repo_passes_through_unresolved() {
+        // `target_repo` is taken verbatim from the context — no filesystem
+        // resolution happens on this branch.
+        let dispatch = build_active_review_dispatch(
+            "dispatch-3".to_string(),
+            Some(r#"{"target_repo": "/srv/some-repo", "reviewed_commit": "abc1234"}"#.to_string()),
+        );
+        assert_eq!(dispatch.id, "dispatch-3");
+        assert_eq!(dispatch.reviewed_commit, Some("abc1234".to_string()));
+        assert_eq!(dispatch.target_repo, Some("/srv/some-repo".to_string()));
+    }
+
+    #[test]
+    fn build_active_review_dispatch_worktree_path_fallback_resolves_git_dir() {
+        let worktree = init_git_dir();
+        let dispatch = build_active_review_dispatch(
+            "dispatch-4".to_string(),
+            Some(format!(
+                r#"{{"worktree_path": "{}"}}"#,
+                worktree.path().to_string_lossy()
+            )),
+        );
+        assert_eq!(dispatch.target_repo, Some(canonical(worktree.path())));
+    }
+
+    #[test]
+    fn build_active_review_dispatch_nonexistent_worktree_path_is_none() {
+        let dispatch = build_active_review_dispatch(
+            "dispatch-5".to_string(),
+            Some(r#"{"worktree_path": "/definitely/missing/adk-3038-test-path"}"#.to_string()),
+        );
+        assert_eq!(dispatch.target_repo, None);
+    }
+
+    #[test]
+    fn build_active_review_dispatch_non_string_reviewed_commit_is_none() {
+        let dispatch = build_active_review_dispatch(
+            "dispatch-6".to_string(),
+            Some(r#"{"reviewed_commit": 42}"#.to_string()),
+        );
+        assert_eq!(dispatch.reviewed_commit, None);
+    }
+}
