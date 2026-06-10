@@ -42,19 +42,15 @@ const RECONCILE_INTERVAL: Duration = Duration::from_millis(1000);
 /// Bounded backstop for a gate-timeout whose pane is still busy and whose
 /// relay owner is still alive. The reconciler finalizes once the pane
 /// quiesces, the owner dies, OR this deadline elapses — seconds, NOT the
-/// 1800s placeholder-sweeper horizon the old silent SKIP deferred to. The
-/// hosted-TUI pre-submit busy guard remains the correctness floor that stops
-/// follow-up input from being injected into a still-busy pane, so this only
-/// guarantees finalize eventually fires.
+/// 1800s placeholder-sweeper horizon the old silent SKIP deferred to (the
+/// hosted-TUI pre-submit busy guard remains the correctness floor).
 const GATE_BACKSTOP: Duration = Duration::from_secs(8);
 
 /// #3016 phase-5a — the FAR backstop for a watcher-owned `register_start`
 /// Pending that never received a terminal (the under-finalize gap the legacy
-/// `placeholder_sweeper` SKIPS once content was delivered, ~393). The legacy
-/// 1800s abandon horizon is GENEROUS on purpose: it must NOT prematurely
-/// finalize a legitimately long paused-live turn (selector / permission
-/// prompt / subagent / long silent tool call can idle for minutes). At the
-/// deadline the reconciler re-checks liveness
+/// `placeholder_sweeper` SKIPS once content was delivered, ~393). The 1800s
+/// horizon is GENEROUS on purpose — never prematurely finalize a legitimately
+/// long paused-live turn; at the deadline the reconciler re-checks liveness
 /// (`watcher_backstop_turn_is_terminal`) so a still-live turn is deferred.
 const WATCHER_REGISTER_BACKSTOP: Duration =
     Duration::from_secs(super::placeholder_sweeper::ABANDON_THRESHOLD_SECS);
@@ -64,8 +60,9 @@ const WATCHER_REGISTER_BACKSTOP: Duration =
 /// (JSONL terminator on disk) while its watcher owner sat parked at transcript
 /// EOF, so no data-driven finalize ever fired and the channel stayed stranded
 /// for the full 1800s. The reconciler therefore PROBES watcher-owned Pending
-/// entries with the SAME `watcher_backstop_turn_is_terminal` predicate the
-/// deadline re-check uses (never weaker, only earlier): after
+/// entries with a STRICTLY STRONGER form of the at-deadline
+/// `watcher_backstop_turn_is_terminal` predicate (`allow_pane_probe = false`:
+/// transcript-proven only, never the pane fallback): after
 /// `WATCHER_BACKSTOP_TERMINAL_STREAK` consecutive terminal probes this
 /// interval apart, the far deadline is pulled in to `GATE_BACKSTOP`, where the
 /// at-deadline re-check confirms a THIRD time before finalizing. A single
@@ -84,14 +81,9 @@ const FINALIZED_TTL: Duration = Duration::from_secs(60);
 /// Identity carried by a submission. The ledger key is the FULL identity
 /// (`channel_id`, `generation`, `user_msg_id`) so two SEQUENTIAL turns in the
 /// same channel are distinct entries — a finalized turn-1 must NOT swallow
-/// turn-2's terminal as `AlreadyFinalized` (that would strand turn-2's mailbox
-/// token and re-introduce the stuck-channel bug this EPIC fixes).
-///
-/// A terminal that only knows the channel (`user_msg_id == 0`, recovery/orphan
-/// paths) is resolved separately: because the mailbox is channel-scoped with a
-/// single active turn, there is at most one non-`Finalized` entry per
-/// `(channel, generation)` at a time, and an id-0 terminal collapses onto THAT
-/// live entry (see `resolve_ledger_key`) rather than keying on the literal 0.
+/// turn-2's terminal as `AlreadyFinalized` (stuck-channel bug). A channel-only
+/// terminal (`user_msg_id == 0`, recovery/orphan paths) collapses onto the
+/// channel's single live entry (see `resolve_ledger_key`), never a literal 0.
 #[derive(Clone, Copy, Debug)]
 pub(in crate::services::discord) struct TurnKey {
     pub(in crate::services::discord) channel_id: ChannelId,
@@ -138,14 +130,10 @@ pub(in crate::services::discord) struct LedgerKey {
 }
 
 /// Resolve a submission to the ledger entry it acts on. A real `user_msg_id`
-/// uses its exact key (a stale terminal of an already-finalized turn matches
-/// the retained `Finalized` entry → `AlreadyFinalized`). A channel-only
-/// terminal (`user_msg_id == 0`, recovery/orphan path) collapses onto the
-/// channel's single live entry for this generation ONLY when no `Finalized`
-/// entry exists for the same channel/generation — with a recent finalize the
-/// orphan is most likely a STALE terminal of THAT turn, so it routes to the
-/// literal id-0 key instead (a no-op: idempotent `mailbox_finish_turn` returns
-/// `None`), never prematurely finalizing a queued follow-up.
+/// uses its exact key (a stale terminal of a finalized turn matches the
+/// retained `Finalized` entry → `AlreadyFinalized`); a channel-only id-0
+/// terminal collapses per `resolve_channel_only` (never prematurely finalizing
+/// a queued follow-up).
 fn resolve_ledger_key(ledger: &HashMap<LedgerKey, LedgerEntry>, key: TurnKey) -> LedgerKey {
     resolve_channel_only(
         key,
@@ -354,20 +342,14 @@ pub(in crate::services::discord) enum FinalizeOutcome {
     Deferred,
 }
 
-/// #3016 S1 (read-only, additive): the structural completion signal derived
-/// from the provider's JSONL transcript, independent of the ledger. Stage 3/4
-/// wires the finalizer to consult this as a turn-lifecycle authority alongside
-/// the ledger; it is dead until then.
-///
-/// - `Done` — the transcript's strict reverse-scan found a definitive
-///   terminator (Claude `result` / `system{turn_duration,stop_hook_summary,
-///   init}`, Codex `turn.completed`), so the turn is structurally over.
-/// - `PausedLive` — the transcript shows in-flight or inconclusive evidence (a
-///   `user`/`assistant`/streaming envelope, a partial/selector line, or no
-///   terminator at all); conservatively treated as a live, paused turn.
-/// - `Unknown` — the runtime does not expose a structured on-disk JSONL turn
-///   state (LegacyTmuxWrapper / ProcessBackend / ClaudeEAdapter, or a non-JSONL
-///   provider), so the transcript probe cannot speak to completion.
+/// #3016 S1: the structural completion signal from the provider's JSONL
+/// transcript, independent of the ledger.
+/// - `Done` — strict reverse-scan found a definitive terminator (Claude
+///   `result`/`system{...}`, Codex `turn.completed`): structurally over.
+/// - `PausedLive` — in-flight or inconclusive evidence; conservatively a live,
+///   paused turn.
+/// - `Unknown` — no structured on-disk JSONL turn state (LegacyTmuxWrapper /
+///   ProcessBackend / ClaudeEAdapter, or a non-JSONL provider).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 // #3016 S3: wired into the watcher fresh-idle finalize decision.
 pub(in crate::services::discord) enum CompletionSignal {
@@ -417,14 +399,12 @@ struct LedgerEntry {
 /// a `Weak<SharedData>` back-reference (which would re-introduce an Arc cycle
 /// and ordering ambiguity).
 enum FinalizeMsg {
-    /// #3018 register: the bridge submits this synchronously at intake/handoff
-    /// before the watcher can submit a terminal, so the ledger knows the turn
-    /// exists (message arrival order replaces the deleted Release/AcqRel
-    /// `mailbox_finalize_owed.store` ordering). #3016 phase-5a: carries a
-    /// `Weak<SharedData>` (NOT `Arc`, avoiding the SharedData → finalizer →
-    /// actor → SharedData cycle) so the actor primes `cached_shared` from the
-    /// very FIRST `Start` — otherwise a FRESH actor whose first watcher-owned
-    /// turn never submits a terminal would never run the far-backstop tick.
+    /// #3018 register: submitted synchronously at intake/handoff BEFORE the
+    /// watcher can submit a terminal (arrival order replaces the deleted
+    /// Release/AcqRel `mailbox_finalize_owed.store` ordering). #3016 phase-5a:
+    /// carries a `Weak<SharedData>` (NOT `Arc` — no cycle) so the actor primes
+    /// `cached_shared` from the very FIRST `Start` and the far-backstop tick
+    /// runs even when no terminal ever arrives.
     Start {
         key: TurnKey,
         provider: ProviderKind,
@@ -1179,15 +1159,12 @@ async fn do_finalize(
 }
 
 // #3041 §2-§3 — delivery-lease handlers: thin wrappers over the
-// `DeliveryLeaseCell` state machine (mod.rs), run in the actor task. After the
-// R2 revert the watcher acquires/commits/releases the cell INLINE on its own
-// task, so these actor handlers (and the public `commit_delivery` /
-// `release_delivery` methods) are DORMANT — retained and unit-tested for the
-// sink/bridge wiring (P1-2..), reached only by tests today.
+// `DeliveryLeaseCell` state machine (mod.rs), run in the actor task. DORMANT
+// after the R2 revert (the watcher works the cell INLINE); kept + unit-tested
+// for the sink/bridge wiring (P1-2..).
 
-/// CAS-acquire for `(key, [start,end))` on behalf of `holder`. #3041. Still
-/// dormant in the non-test build: the watcher acquires the cell directly
-/// (B4 fast-path) and no other holder routes `AcquireDelivery` yet (P1-2..).
+/// CAS-acquire for `(key, [start,end))` on behalf of `holder`. #3041, dormant
+/// in the non-test build (the watcher acquires the cell directly, B4).
 #[allow(dead_code)] // #3041: AcquireDelivery actor arm dormant until sink/bridge wiring.
 fn handle_acquire_delivery(
     lease: &DeliveryLeaseCell,
@@ -1201,15 +1178,12 @@ fn handle_acquire_delivery(
 }
 
 /// Three-way commit; full `(holder, key, [start,end))` mismatch = no-op. #3041
-/// P1-1: on a successful `Delivered` commit, advance the channel's
-/// `confirmed_end_offset` watermark to `end` (§5.2). The advance is gated on the
-/// `lease.commit` having actually committed (identity matched AND state was
-/// `Leased`), so a stale/duplicate commit that the lease rejects does NOT touch
-/// the offset. The advance itself reuses `advance_watcher_confirmed_end`'s
-/// monotonic CAS, so even if the lease somehow let a same-range commit through
-/// twice the watermark only ever moves forward — no double-advance
-/// (`tmux_confirmed_end_monotonic` holds). `NotDelivered`/`Unknown` never
-/// advance: an ambiguous terminal must not claim bytes as delivered.
+/// P1-1: a successful `Delivered` commit advances the channel's
+/// `confirmed_end_offset` watermark to `end` (§5.2), gated on the lease having
+/// actually committed (so a rejected stale/duplicate commit never touches the
+/// offset) and via `advance_watcher_confirmed_end`'s monotonic CAS (never a
+/// double-advance). `NotDelivered`/`Unknown` never advance: an ambiguous
+/// terminal must not claim bytes as delivered.
 fn handle_commit_delivery(
     lease: &DeliveryLeaseCell,
     key: TurnKey,
@@ -1222,10 +1196,8 @@ fn handle_commit_delivery(
     shared: &SharedData,
 ) -> bool {
     let committed = lease.commit(holder, key, start, end, outcome);
-    // `mod tmux` (and `advance_watcher_confirmed_end`) is `#[cfg(unix)]` — the
-    // tmux relay only runs on unix. Gate the watermark advance accordingly; on
-    // non-unix this dormant handler commits the lease without an advance and
-    // consumes the otherwise-unused unix-only params.
+    // `mod tmux` is `#[cfg(unix)]`; non-unix commits the lease without an
+    // advance and consumes the otherwise-unused unix-only params.
     #[cfg(unix)]
     if committed && outcome == LeaseOutcome::Delivered {
         super::tmux::advance_watcher_confirmed_end(
@@ -1255,11 +1227,9 @@ fn handle_release_delivery(
 }
 
 /// #3016 S1 (PURE) — the structural completion signal derived solely from the
-/// provider's on-disk JSONL transcript. Free-function core shared by the public
-/// `TurnFinalizer::completion_signal_state` (caller-task read) and the
-/// reconciler's watcher-backstop liveness re-check, which has no `&self`
-/// `TurnFinalizer` to call the method on. See `completion_signal_state` for the
-/// full Done/PausedLive/Unknown rationale.
+/// provider's on-disk JSONL transcript. Shared by the public
+/// `completion_signal_state` (see it for the Done/PausedLive/Unknown
+/// rationale) and the reconciler's watcher-backstop liveness re-check.
 pub(in crate::services::discord) fn completion_signal_from_transcript(
     provider: &ProviderKind,
     runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
@@ -1279,29 +1249,41 @@ pub(in crate::services::discord) fn completion_signal_from_transcript(
 }
 
 /// #3016 phase-5a — the reconciler's liveness re-check at a watcher-owned
-/// `register_start` far-backstop deadline. Returns `true` ONLY when the turn is
+/// `register_start` far-backstop deadline, and (with `allow_pane_probe ==
+/// false`) the #3277 fast-path probe. Returns `true` ONLY when the turn is
 /// genuinely terminal, so a legitimately long paused-live turn is NEVER
 /// finalized at the deadline (the over-finalize hazard the EPIC must avoid):
 ///   * NO LIVE watcher handle — absent, OR present-but-DEAD (`cancel` set or
-///     `heartbeat_stale()`: the `tmux_session_is_stale` predicate; #3268 — a
-///     hung watcher the sweeper only marked `cancel` and left registered) →
-///     terminal: nothing will drive the pane to quiescence or submit a terminal,
-///     so finalizing is the only way the mailbox/inflight is released (mirrors
-///     the no-owner gate-timeout in `handle_terminal`). Only a genuinely-live
-///     handle keeps the `paused` / transcript deferral below.
+///     `heartbeat_stale()`; #3268) → terminal: nothing will drive the pane to
+///     quiescence or submit a terminal, so finalizing is the only release.
+///     Only a genuinely-live handle keeps the deferrals below. #3277 verify-1:
+///     a dispatched turn can run on a tmux session whose watcher is registered
+///     under ANOTHER owner channel (`claim_or_reuse_watcher` ReuseExisting,
+///     #3041 P1-2 `resolve_bridge_owner_channel`) and the registry's channel
+///     index keys OWNER channels only — so the handle lookup is re-keyed on
+///     the turn's own inflight `tmux_session_name` when it names one, and
+///     absent ⇒ terminal only when the handle is missing under THAT key too.
 ///   * `paused` (a Discord turn took the session over) → NOT terminal: defer,
 ///     like the fresh-idle `AbortFollowupTookOver` guard.
-///   * `PausedLive` (JSONL terminator absent: selector / prompt / subagent /
-///     long tool call) → defer. `Done` (terminator PROVEN) → terminal.
-///   * `Unknown` (non-JSONL Gemini / OpenCode / Qwen / legacy wrapper) → terminal
-///     ONLY when the pane is idle (the live watcher's ready-for-input probe).
+///   * Transcript signal → `watcher_backstop_signal_is_terminal`: `Done` is
+///     terminal, `PausedLive` defers, `Unknown` (non-JSONL runtime) consults
+///     the pane-ready fallback ONLY at-deadline, never on the fast path.
 fn watcher_backstop_turn_is_terminal(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     provider: &ProviderKind,
+    allow_pane_probe: bool,
 ) -> bool {
+    let inflight_tmux = super::inflight::load_inflight_state(provider, channel_id.get())
+        .and_then(|state| state.tmux_session_name);
     let (tmux_session_name, output_path, paused) = {
-        let Some(handle) = shared.tmux_watchers.get(&channel_id) else {
+        let handle = match inflight_tmux.as_deref() {
+            // #3277 verify-1: session-keyed — authoritative even when a reused
+            // watcher's owner channel differs from this turn's dispatch channel.
+            Some(tmux) => shared.tmux_watchers.by_tmux_session.get(tmux),
+            None => shared.tmux_watchers.get(&channel_id),
+        };
+        let Some(handle) = handle else {
             return true;
         };
         // #3268: a registered-but-DEAD watcher (cancel/stale) has no authority — treat as absent.
@@ -1324,20 +1306,40 @@ fn watcher_backstop_turn_is_terminal(
             .or_else(|| {
                 crate::services::tmux_common::resolve_tmux_runtime_kind_marker(&tmux_session_name)
             });
-    match completion_signal_from_transcript(
-        provider,
-        runtime_kind,
-        std::path::Path::new(&output_path),
-    ) {
-        CompletionSignal::PausedLive => false,
-        CompletionSignal::Done => true,
-        CompletionSignal::Unknown => {
+    watcher_backstop_signal_is_terminal(
+        completion_signal_from_transcript(
+            provider,
+            runtime_kind,
+            std::path::Path::new(&output_path),
+        ),
+        allow_pane_probe,
+        || {
             crate::services::tui_turn_state::pane_ready_fallback_allowed(provider, runtime_kind)
                 && crate::services::provider::tmux_session_ready_for_input(
                     &tmux_session_name,
                     provider,
                 )
-        }
+        },
+    )
+}
+
+/// #3277 verify-3 — the verdict over the transcript completion signal. The 15s
+/// fast-path probe (`allow_pane_probe == false`) treats `Unknown` (non-JSONL
+/// Gemini / OpenCode / Qwen / legacy wrapper: no provable terminator) as
+/// NON-terminal: the synchronous pane-capture fallback can misread an
+/// interactive dialog or a long silent stretch as idle, and probing it every
+/// 15s would amplify the old once-per-1800s exposure ~120× (and put a blocking
+/// capture on the actor task). Only the at-deadline re-check (`true`) consults
+/// `pane_ready` — lazily, so the capture runs only for an `Unknown` signal.
+fn watcher_backstop_signal_is_terminal(
+    signal: CompletionSignal,
+    allow_pane_probe: bool,
+    pane_ready: impl FnOnce() -> bool,
+) -> bool {
+    match signal {
+        CompletionSignal::PausedLive => false,
+        CompletionSignal::Done => true,
+        CompletionSignal::Unknown => allow_pane_probe && pane_ready(),
     }
 }
 
@@ -1372,12 +1374,9 @@ async fn run_backstop_finalize(
         shared,
     )
     .await;
-    // #3016 phase-5b2: the legacy `mailbox_finalize_owed` flag that was revoked
-    // here (the watcher skipped its cleanup block while lifecycle-paused, leaving
-    // the flag set; the backstop revoked it so a later watcher swap could not run
-    // stale cleanup against the NEXT active turn) has been removed. The ledger's
-    // exactly-once phase gate is now the sole arbiter, so there is no stale flag a
-    // surviving watcher could swap.
+    // #3016 phase-5b2: the legacy `mailbox_finalize_owed` revoke that ran here
+    // is gone — the ledger's exactly-once phase gate is the sole arbiter, so
+    // there is no stale flag a surviving watcher could swap.
     if let Some(entry) = ledger.get_mut(&ledger_key) {
         entry.phase = Phase::Finalized;
         entry.finalized_at = Some(now);
@@ -1427,13 +1426,14 @@ async fn reconcile(ledger: &mut HashMap<LedgerKey, LedgerEntry>, shared: &Arc<Sh
     }
 
     // #3277 (Defect C) — proven-terminal fast-path probe. For watcher-owned
-    // Pending entries whose far deadline is still distant, run the SAME
-    // `watcher_backstop_turn_is_terminal` predicate the at-deadline re-check
-    // uses; after WATCHER_BACKSTOP_TERMINAL_STREAK consecutive terminal probes
-    // (interval-spaced) pull the deadline in to GATE_BACKSTOP so the deadline
-    // arm below confirms a third time and finalizes within seconds instead of
-    // 1800s. Any non-terminal probe resets the streak (paused/PausedLive turns
-    // keep the generous horizon untouched). No await in this pass.
+    // Pending entries whose far deadline is still distant, run the at-deadline
+    // predicate STRICTLY STRONGER (`allow_pane_probe = false`: transcript-
+    // PROVEN only — non-JSONL runtimes keep the 1800s at-deadline behavior,
+    // #3277 verify-3); after WATCHER_BACKSTOP_TERMINAL_STREAK consecutive
+    // interval-spaced terminal probes pull the deadline in to GATE_BACKSTOP so
+    // the deadline arm below confirms a third time and finalizes within
+    // seconds instead of 1800s. Any non-terminal probe resets the streak
+    // (paused/PausedLive turns keep the horizon). No await in this pass.
     let probe_due: Vec<(LedgerKey, ChannelId, ProviderKind)> = ledger
         .iter()
         .filter_map(|(ledger_key, entry)| {
@@ -1457,7 +1457,7 @@ async fn reconcile(ledger: &mut HashMap<LedgerKey, LedgerEntry>, shared: &Arc<Sh
         })
         .collect();
     for (ledger_key, channel_id, provider) in probe_due {
-        let terminal = watcher_backstop_turn_is_terminal(shared, channel_id, &provider);
+        let terminal = watcher_backstop_turn_is_terminal(shared, channel_id, &provider, false);
         let Some(entry) = ledger.get_mut(&ledger_key) else {
             continue;
         };
@@ -1505,7 +1505,7 @@ async fn reconcile(ledger: &mut HashMap<LedgerKey, LedgerEntry>, shared: &Arc<Sh
         // Liveness re-check: NEVER finalize a paused-live / still-busy turn at
         // the deadline. Only a genuinely terminal turn is finalized; a still-live
         // one EXTENDS its backstop and is re-checked next horizon.
-        if watcher_backstop_turn_is_terminal(shared, turn_key.channel_id, &provider) {
+        if watcher_backstop_turn_is_terminal(shared, turn_key.channel_id, &provider, true) {
             run_backstop_finalize(ledger, ledger_key, turn_key, provider, shared, now).await;
         } else if let Some(entry) = ledger.get_mut(&ledger_key) {
             if entry.phase == Phase::Pending {
@@ -4670,7 +4670,7 @@ mod tests {
             .tmux_watchers
             .insert(ch_live, backstop_watcher_handle(&session, &transcript_str));
         assert!(
-            !watcher_backstop_turn_is_terminal(&shared, ch_live, &ProviderKind::Claude),
+            !watcher_backstop_turn_is_terminal(&shared, ch_live, &ProviderKind::Claude, true),
             "a live (present, not cancelled, fresh-heartbeat) watcher over a busy \
              transcript must DEFER — live-watcher PausedLive semantics are unchanged"
         );
@@ -4685,7 +4685,7 @@ mod tests {
             .store(true, std::sync::atomic::Ordering::Relaxed);
         shared.tmux_watchers.insert(ch_cancelled, cancelled);
         assert!(
-            watcher_backstop_turn_is_terminal(&shared, ch_cancelled, &ProviderKind::Claude),
+            watcher_backstop_turn_is_terminal(&shared, ch_cancelled, &ProviderKind::Claude, true),
             "a present-but-cancelled watcher has no authority to drive the pane to \
              quiescence — the far-backstop must finalize (terminal), not defer forever"
         );
@@ -4704,7 +4704,7 @@ mod tests {
         );
         shared.tmux_watchers.insert(ch_stale, stale);
         assert!(
-            watcher_backstop_turn_is_terminal(&shared, ch_stale, &ProviderKind::Claude),
+            watcher_backstop_turn_is_terminal(&shared, ch_stale, &ProviderKind::Claude, true),
             "a present-but-heartbeat-stale watcher must be treated as terminal too"
         );
 
@@ -5036,6 +5036,200 @@ mod tests {
                 shared.global_active.load(Ordering::Relaxed),
                 0,
                 "the pulled-in backstop must not double-finalize after the real terminal"
+            );
+        })
+        .await;
+    }
+
+    /// #3277 verify-1 (MAJOR): a dispatched turn whose live watcher is
+    /// registered under a DIFFERENT owner channel (`claim_or_reuse_watcher`
+    /// ReuseExisting — the registry's channel index keys OWNER channels only)
+    /// must NOT be mis-finalized as "handle absent → terminal". The probe and
+    /// the at-deadline re-check resolve the handle via the turn's inflight
+    /// `tmux_session_name`, find the live PausedLive watcher on the owner
+    /// channel, and DEFER. Pre-fix, the dispatch-channel lookup missed the
+    /// handle and the fast path finalized the live turn within ~40s.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn watcher_backstop_probe_resolves_owner_keyed_watcher_for_dispatched_turn() {
+        use serenity::model::id::{MessageId, UserId};
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            shared.global_active.store(1, Ordering::Relaxed);
+            let owner_ch = ChannelId::new(6601);
+            let dispatch_ch = ChannelId::new(6602);
+            let active_token = Arc::new(CancelToken::new());
+            shared
+                .mailbox(dispatch_ch)
+                .restore_active_turn(active_token, UserId::new(7), MessageId::new(150))
+                .await;
+
+            // Live watcher on the OWNER channel over a busy (PausedLive)
+            // transcript — exactly the #3041 P1-2 reused-watcher shape.
+            let session = format!("3277-owner-keyed-{}", std::process::id());
+            let transcript = std::env::temp_dir().join(format!("{session}.jsonl"));
+            std::fs::write(
+                &transcript,
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"working…\"}]}}\n",
+            )
+            .unwrap();
+            shared.tmux_watchers.insert(
+                owner_ch,
+                backstop_watcher_handle(&session, transcript.to_str().unwrap()),
+            );
+
+            // The dispatched turn's inflight names the reused tmux session, so
+            // the probe can re-key its handle lookup off the dispatch channel.
+            let state = super::super::inflight::InflightTurnState::new(
+                ProviderKind::Claude,
+                dispatch_ch.get(),
+                None,
+                7,
+                150,
+                151,
+                "dispatched".to_string(),
+                None,
+                Some(session.clone()),
+                Some(transcript.to_str().unwrap().to_string()),
+                None,
+                0,
+            );
+            super::super::inflight::save_inflight_state(&state).unwrap();
+
+            let fin = TurnFinalizer::spawn();
+            let k = TurnKey::new(dispatch_ch, 150, 0);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
+
+            // Through the whole fast-path window AND past the far horizon: the
+            // owner-keyed live PausedLive watcher must defer both checks.
+            tokio::time::sleep(FAST_PATH_WINDOW).await;
+            tokio::task::yield_now().await;
+            assert_eq!(
+                shared.global_active.load(Ordering::Relaxed),
+                1,
+                "the fast path must find the live owner-keyed watcher and defer \
+                 (pre-fix: dispatch-channel lookup missed it → early finalize)"
+            );
+            tokio::time::sleep(WATCHER_REGISTER_BACKSTOP + RECONCILE_INTERVAL * 3).await;
+            tokio::task::yield_now().await;
+            assert_eq!(
+                shared.global_active.load(Ordering::Relaxed),
+                1,
+                "the at-deadline re-check must also resolve the owner-keyed watcher and defer"
+            );
+            let outcome = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(
+                matches!(outcome, FinalizeOutcome::Finalized { .. }),
+                "the deferred dispatched turn must still be live for its real terminal"
+            );
+            let _ = std::fs::remove_file(&transcript);
+        })
+        .await;
+    }
+
+    /// #3277 verify-3 (MINOR) truth table: the fast-path probe
+    /// (`allow_pane_probe == false`) must NEVER report `Unknown` (non-JSONL
+    /// runtime) as terminal — and must not even RUN the pane capture — while
+    /// the at-deadline re-check keeps the pane-ready fallback. `Done` /
+    /// `PausedLive` verdicts are identical in both modes.
+    #[test]
+    fn non_jsonl_signal_never_terminal_on_fast_path_probe() {
+        use std::cell::Cell;
+        // Unknown + fast path: non-terminal AND the pane capture must not run.
+        let captured = Cell::new(false);
+        assert!(!watcher_backstop_signal_is_terminal(
+            CompletionSignal::Unknown,
+            false,
+            || {
+                captured.set(true);
+                true
+            }
+        ));
+        assert!(
+            !captured.get(),
+            "the 15s fast-path probe must never run a blocking pane capture"
+        );
+        // Unknown + at-deadline: pane fallback decides (both directions).
+        assert!(watcher_backstop_signal_is_terminal(
+            CompletionSignal::Unknown,
+            true,
+            || true
+        ));
+        assert!(!watcher_backstop_signal_is_terminal(
+            CompletionSignal::Unknown,
+            true,
+            || false
+        ));
+        // Done / PausedLive: identical in both modes, pane never consulted.
+        for probe in [false, true] {
+            assert!(watcher_backstop_signal_is_terminal(
+                CompletionSignal::Done,
+                probe,
+                || unreachable!("Done must not consult the pane")
+            ));
+            assert!(!watcher_backstop_signal_is_terminal(
+                CompletionSignal::PausedLive,
+                probe,
+                || unreachable!("PausedLive must not consult the pane")
+            ));
+        }
+    }
+
+    /// #3277 verify-3 (MINOR): a watcher-owned turn on a non-JSONL runtime
+    /// (Gemini → `CompletionSignal::Unknown`) keeps the generous 1800s
+    /// at-deadline behavior — the fast path never pulls its deadline in, so it
+    /// stays Pending through the whole fast-path window.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn non_jsonl_runtime_turn_does_not_take_fast_path() {
+        use serenity::model::id::{MessageId, UserId};
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            shared.global_active.store(1, Ordering::Relaxed);
+            let ch = ChannelId::new(6603);
+            let active_token = Arc::new(CancelToken::new());
+            shared
+                .mailbox(ch)
+                .restore_active_turn(active_token, UserId::new(7), MessageId::new(160))
+                .await;
+
+            // Live watcher; Gemini has no structured JSONL turn state, so the
+            // transcript path is never read (signal = Unknown immediately).
+            let session = format!("3277-nonjsonl-{}", std::process::id());
+            shared.tmux_watchers.insert(
+                ch,
+                backstop_watcher_handle(&session, "/nonexistent/3277-nonjsonl.jsonl"),
+            );
+
+            let fin = TurnFinalizer::spawn();
+            let k = TurnKey::new(ch, 160, 0);
+            fin.register_start(k, ProviderKind::Gemini, RelayOwnerKind::Watcher, &shared);
+
+            tokio::time::sleep(FAST_PATH_WINDOW).await;
+            tokio::task::yield_now().await;
+            assert_eq!(
+                shared.global_active.load(Ordering::Relaxed),
+                1,
+                "a non-JSONL runtime turn must never be finalized by the fast path"
+            );
+            let outcome = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Gemini,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(
+                matches!(outcome, FinalizeOutcome::Finalized { .. }),
+                "the non-JSONL turn must still be live for its real terminal"
             );
         })
         .await;

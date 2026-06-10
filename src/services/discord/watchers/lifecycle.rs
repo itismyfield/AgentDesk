@@ -906,6 +906,64 @@ mod tests {
         assert!(!watchers.contains_key(&channel_a));
     }
 
+    /// #3277 verify-2 truth table for the `recovery_restore_inflight` claim: a
+    /// same-session incumbent is REPLACED only when it provably cannot own the
+    /// relay — cancelled, heartbeat-stale (the Defect D hung-watcher subcase;
+    /// `find_watcher_by_tmux_session` folds `heartbeat_stale()` into its
+    /// replace predicate), paused, or bound to a different output path. A
+    /// genuinely-live fresh-heartbeat unpaused same-output incumbent is REUSED
+    /// untouched (never a duplicate-relay vector) and keeps the EXISTING owner
+    /// channel (owner ≠ dispatch).
+    #[test]
+    fn recovery_restore_claim_replaces_dead_incumbent_only() {
+        let tmux_name = "AgentDesk-claude-adk-cc-recovery-claim";
+        let output = "/tmp/recovery-claim.jsonl";
+        let owner = ChannelId::new(1_500_000_000_000_000_001);
+        let dispatch = ChannelId::new(2_600_000_000_000_000_002);
+        let claim = |incumbent: TmuxWatcherHandle, requested_output: &str| {
+            let watchers = TmuxWatcherRegistry::new();
+            assert!(try_claim_watcher(&watchers, owner, incumbent));
+            claim_or_reuse_watcher(
+                &watchers,
+                dispatch,
+                test_watcher_handle(tmux_name, requested_output),
+                &ProviderKind::Claude,
+                "recovery_restore_inflight",
+            )
+        };
+
+        // Live fresh unpaused same-output → REUSED, owner channel preserved.
+        let reused = claim(test_watcher_handle(tmux_name, output), output);
+        assert_eq!(reused.as_str(), "reuse_existing");
+        assert!(!reused.should_spawn());
+        assert_eq!(reused.owner_channel_id(), owner);
+
+        // Heartbeat-stale (NOT cancelled) → replaced: the Defect D hung watcher.
+        let stale = test_watcher_handle(tmux_name, output);
+        stale.last_heartbeat_ts_ms.store(1, Ordering::Release);
+        let outcome = claim(stale, output);
+        assert!(outcome.should_spawn() && outcome.replaced_existing());
+
+        // Cancelled → replaced.
+        let cancelled = test_watcher_handle(tmux_name, output);
+        cancelled.cancel.store(true, Ordering::Relaxed);
+        let outcome = claim(cancelled, output);
+        assert!(outcome.should_spawn() && outcome.replaced_existing());
+
+        // Paused (recovery source is not a turn-start) → replaced.
+        let paused = test_watcher_handle(tmux_name, output);
+        paused.paused.store(true, Ordering::Release);
+        let outcome = claim(paused, output);
+        assert!(outcome.should_spawn() && outcome.replaced_existing());
+
+        // Different output path → replaced.
+        let outcome = claim(
+            test_watcher_handle(tmux_name, output),
+            "/tmp/recovery-claim-other.jsonl",
+        );
+        assert!(outcome.should_spawn() && outcome.replaced_existing());
+    }
+
     #[test]
     fn liveness_probe_clears_stale_marker_when_pane_alive() {
         assert_eq!(
