@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use sqlx::{Postgres, Row as SqlxRow, Transaction};
 
 use super::diagnostics::wait_reason_from_routing_diagnostics;
@@ -63,21 +64,22 @@ pub(crate) async fn mark_dispatch_outbox_claimed_pg(
     tx: &mut Transaction<'_, Postgres>,
     outbox_id: i64,
     claim_owner: &str,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
+) -> Result<DateTime<Utc>, sqlx::Error> {
+    let claimed_at = sqlx::query_scalar(
         "UPDATE dispatch_outbox
             SET status = 'processing',
                 claimed_at = NOW(),
                 claim_owner = $2,
                 wait_reason = NULL,
                 wait_started_at = NULL
-          WHERE id = $1",
+          WHERE id = $1
+          RETURNING claimed_at",
     )
     .bind(outbox_id)
     .bind(claim_owner)
-    .execute(&mut **tx)
+    .fetch_one(&mut **tx)
     .await?;
-    Ok(())
+    Ok(claimed_at)
 }
 
 pub(crate) async fn select_stale_dispatch_outbox_claim_owner_candidates_pg(

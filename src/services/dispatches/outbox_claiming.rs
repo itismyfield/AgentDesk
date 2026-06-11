@@ -200,19 +200,21 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_with_cluster_config_pg(
             }
         }
 
-        if let Err(error) =
-            mark_dispatch_outbox_claimed_pg(&mut tx, candidate.id, claim_owner).await
-        {
-            tracing::warn!(
-                outbox_id = candidate.id,
-                dispatch_id = candidate.dispatch_id,
-                error = %error,
-                "[dispatch-outbox] failed to claim postgres outbox row"
-            );
-            continue;
-        }
+        let claimed_at =
+            match mark_dispatch_outbox_claimed_pg(&mut tx, candidate.id, claim_owner).await {
+                Ok(claimed_at) => claimed_at,
+                Err(error) => {
+                    tracing::warn!(
+                        outbox_id = candidate.id,
+                        dispatch_id = candidate.dispatch_id,
+                        error = %error,
+                        "[dispatch-outbox] failed to claim postgres outbox row"
+                    );
+                    continue;
+                }
+            };
 
-        pending.push(candidate.into_outbox_row());
+        pending.push(candidate.into_outbox_row(claim_owner.to_string(), claimed_at));
         increment_active_dispatch_count(&mut worker_nodes, claim_owner);
         if pending.len() >= 5 {
             break;
@@ -755,12 +757,15 @@ mod tests {
             required_capabilities: Some(json!({"providers": ["codex"]})),
         };
 
-        let row = candidate.into_outbox_row();
+        let claimed_at = chrono::Utc::now();
+        let row = candidate.into_outbox_row("worker-a".to_string(), claimed_at);
         assert_eq!(row.0, 7);
         assert_eq!(row.1, "dispatch-7");
         assert_eq!(row.2, "notify");
         assert_eq!(row.6, 2);
         assert_eq!(row.7, Some(json!({"providers": ["codex"]})));
+        assert_eq!(row.8, "worker-a");
+        assert_eq!(row.9, claimed_at);
     }
 
     #[test]

@@ -351,6 +351,7 @@ pub(crate) async fn run(
         None,
         boot_reconcile_engine.as_ref().unwrap_or(&engine),
         startup_pool,
+        &cluster_instance_id,
     )
     .await?;
     drop(boot_reconcile_engine);
@@ -1722,12 +1723,29 @@ struct PendingMessageOutboxRow {
     reason_code: Option<String>,
     session_key: Option<String>,
     retry_count: i64,
+    claim_owner: String,
+    claimed_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MessageOutboxFailureAction {
     Retry { retry_count: i64, backoff_secs: i64 },
     Fail { retry_count: i64 },
+}
+
+// reason: the `Db` payload and `StaleLeaseLost` fields are retained for
+// `Debug` diagnostics and future structured logging; callers currently branch
+// on the variant (`is_ok`/`matches!`) without reading the fields, so the lib
+// build sees them as dead. See #3312.
+#[allow(dead_code)]
+#[derive(Debug)]
+enum MessageOutboxLeaseUpdateError {
+    Db(sqlx::Error),
+    StaleLeaseLost {
+        outbox_id: i64,
+        claim_owner: String,
+        claimed_at: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 fn is_terminal_turn_delivery_outbox_source(source: &str) -> bool {
@@ -1811,9 +1829,11 @@ fn message_outbox_failure_action(retry_count: i64) -> MessageOutboxFailureAction
 #[cfg(test)]
 mod message_outbox_retry_tests {
     use super::{
-        MessageOutboxFailureAction, is_terminal_turn_delivery_outbox_source,
+        MessageOutboxFailureAction, MessageOutboxLeaseUpdateError,
+        is_terminal_turn_delivery_outbox_source, mark_message_outbox_sent_pg,
         message_outbox_failure_action, session_can_be_released_for_terminal_outbox_failure,
     };
+    use sqlx::Row as _;
 
     #[test]
     fn message_outbox_failure_action_retries_then_fails() {
@@ -1900,6 +1920,76 @@ mod message_outbox_retry_tests {
             42,
         ));
     }
+
+    #[tokio::test]
+    async fn old_owner_completion_after_stale_reclaim_is_noop_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_message_outbox_lease",
+            "message outbox lease fencing tests",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+
+        let row = sqlx::query(
+            "INSERT INTO message_outbox (
+                target, content, bot, source, status, retry_count, claimed_at, claim_owner
+             ) VALUES (
+                'channel:123', 'hello', 'notify', 'system', 'processing', 0,
+                NOW() - INTERVAL '10 minutes', 'old-owner'
+             )
+             RETURNING id, claimed_at",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("seed claimed message outbox row");
+        let outbox_id: i64 = row.try_get("id").unwrap();
+        let old_claimed_at: chrono::DateTime<chrono::Utc> = row.try_get("claimed_at").unwrap();
+
+        sqlx::query(
+            "UPDATE message_outbox
+                SET claim_owner = 'new-owner',
+                    claimed_at = NOW()
+              WHERE id = $1",
+        )
+        .bind(outbox_id)
+        .execute(&pool)
+        .await
+        .expect("reclaim message outbox row");
+
+        let result =
+            mark_message_outbox_sent_pg(&pool, outbox_id, "old-owner", old_claimed_at).await;
+        assert!(matches!(
+            result,
+            Err(MessageOutboxLeaseUpdateError::StaleLeaseLost { .. })
+        ));
+
+        let state = sqlx::query(
+            "SELECT status, claim_owner, sent_at
+               FROM message_outbox
+              WHERE id = $1",
+        )
+        .bind(outbox_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(state.try_get::<String, _>("status").unwrap(), "processing");
+        assert_eq!(
+            state.try_get::<String, _>("claim_owner").unwrap(),
+            "new-owner"
+        );
+        assert!(
+            state
+                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("sent_at")
+                .unwrap()
+                .is_none()
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
 }
 
 impl PendingMessageOutboxRow {
@@ -1921,6 +2011,164 @@ impl PendingMessageOutboxRow {
             format!("message_outbox:{}:deliver", self.id),
         )
     }
+}
+
+async fn mark_message_outbox_sent_pg(
+    pool: &PgPool,
+    outbox_id: i64,
+    claim_owner: &str,
+    claimed_at: chrono::DateTime<chrono::Utc>,
+) -> std::result::Result<(), MessageOutboxLeaseUpdateError> {
+    let result = sqlx::query(
+        "UPDATE message_outbox
+            SET status = 'sent',
+                sent_at = NOW(),
+                error = NULL,
+                retry_count = 0,
+                next_attempt_at = NULL,
+                claimed_at = NULL,
+                claim_owner = NULL
+          WHERE id = $1
+            AND claim_owner = $2
+            AND claimed_at = $3",
+    )
+    .bind(outbox_id)
+    .bind(claim_owner)
+    .bind(claimed_at)
+    .execute(pool)
+    .await
+    .map_err(|error| {
+        tracing::warn!(
+            outbox_id,
+            claim_owner,
+            %claimed_at,
+            %error,
+            "[outbox] db failure while marking message_outbox row sent"
+        );
+        MessageOutboxLeaseUpdateError::Db(error)
+    })?;
+    if result.rows_affected() == 0 {
+        tracing::warn!(
+            outbox_id,
+            claim_owner,
+            %claimed_at,
+            "[outbox] stale lease no-op while marking message_outbox row sent"
+        );
+        return Err(MessageOutboxLeaseUpdateError::StaleLeaseLost {
+            outbox_id,
+            claim_owner: claim_owner.to_string(),
+            claimed_at,
+        });
+    }
+    Ok(())
+}
+
+async fn mark_message_outbox_failed_pg(
+    pool: &PgPool,
+    outbox_id: i64,
+    error_text: &str,
+    retry_count: i64,
+    claim_owner: &str,
+    claimed_at: chrono::DateTime<chrono::Utc>,
+) -> std::result::Result<(), MessageOutboxLeaseUpdateError> {
+    let result = sqlx::query(
+        "UPDATE message_outbox
+            SET status = 'failed',
+                error = $1,
+                retry_count = $2,
+                next_attempt_at = NULL,
+                claimed_at = NULL,
+                claim_owner = NULL
+          WHERE id = $3
+            AND claim_owner = $4
+            AND claimed_at = $5",
+    )
+    .bind(error_text)
+    .bind(retry_count)
+    .bind(outbox_id)
+    .bind(claim_owner)
+    .bind(claimed_at)
+    .execute(pool)
+    .await
+    .map_err(|error| {
+        tracing::warn!(
+            outbox_id,
+            claim_owner,
+            %claimed_at,
+            %error,
+            "[outbox] db failure while marking message_outbox row failed"
+        );
+        MessageOutboxLeaseUpdateError::Db(error)
+    })?;
+    if result.rows_affected() == 0 {
+        tracing::warn!(
+            outbox_id,
+            claim_owner,
+            %claimed_at,
+            "[outbox] stale lease no-op while marking message_outbox row failed"
+        );
+        return Err(MessageOutboxLeaseUpdateError::StaleLeaseLost {
+            outbox_id,
+            claim_owner: claim_owner.to_string(),
+            claimed_at,
+        });
+    }
+    Ok(())
+}
+
+async fn schedule_message_outbox_retry_pg(
+    pool: &PgPool,
+    outbox_id: i64,
+    error_text: &str,
+    retry_count: i64,
+    backoff_secs: i64,
+    claim_owner: &str,
+    claimed_at: chrono::DateTime<chrono::Utc>,
+) -> std::result::Result<(), MessageOutboxLeaseUpdateError> {
+    let result = sqlx::query(
+        "UPDATE message_outbox
+            SET status = 'pending',
+                error = $1,
+                retry_count = $2,
+                next_attempt_at = NOW() + ($3::bigint * INTERVAL '1 second'),
+                claimed_at = NULL,
+                claim_owner = NULL
+          WHERE id = $4
+            AND claim_owner = $5
+            AND claimed_at = $6",
+    )
+    .bind(error_text)
+    .bind(retry_count)
+    .bind(backoff_secs)
+    .bind(outbox_id)
+    .bind(claim_owner)
+    .bind(claimed_at)
+    .execute(pool)
+    .await
+    .map_err(|error| {
+        tracing::warn!(
+            outbox_id,
+            claim_owner,
+            %claimed_at,
+            %error,
+            "[outbox] db failure while scheduling message_outbox row retry"
+        );
+        MessageOutboxLeaseUpdateError::Db(error)
+    })?;
+    if result.rows_affected() == 0 {
+        tracing::warn!(
+            outbox_id,
+            claim_owner,
+            %claimed_at,
+            "[outbox] stale lease no-op while scheduling message_outbox row retry"
+        );
+        return Err(MessageOutboxLeaseUpdateError::StaleLeaseLost {
+            outbox_id,
+            claim_owner: claim_owner.to_string(),
+            claimed_at,
+        });
+    }
+    Ok(())
 }
 
 async fn claim_pending_message_outbox_batch_pg(
@@ -1956,7 +2204,7 @@ async fn claim_pending_message_outbox_batch_pg(
                error = NULL
           FROM claimed
          WHERE mo.id = claimed.id
-        RETURNING mo.id, mo.target, mo.content, mo.bot, mo.source, mo.reason_code, mo.session_key, mo.retry_count",
+        RETURNING mo.id, mo.target, mo.content, mo.bot, mo.source, mo.reason_code, mo.session_key, mo.retry_count, mo.claim_owner, mo.claimed_at",
     )
     .bind(MESSAGE_OUTBOX_CLAIM_STALE_SECS)
     .bind(claim_owner)
@@ -1982,6 +2230,10 @@ async fn claim_pending_message_outbox_batch_pg(
                 reason_code: row.try_get::<Option<String>, _>("reason_code").ok()?,
                 session_key: row.try_get::<Option<String>, _>("session_key").ok()?,
                 retry_count: row.try_get::<i64, _>("retry_count").unwrap_or(0),
+                claim_owner: row.try_get::<String, _>("claim_owner").ok()?,
+                claimed_at: row
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>("claimed_at")
+                    .ok()?,
             })
         })
         .collect::<Vec<_>>();
@@ -2008,65 +2260,35 @@ where
     for row in &pending {
         let (status, err_text) = deliver(row.clone()).await;
         if status == "200 OK" {
-            sqlx::query(
-                "UPDATE message_outbox
-                    SET status = 'sent',
-                        sent_at = NOW(),
-                        error = NULL,
-                        retry_count = 0,
-                        next_attempt_at = NULL,
-                        claimed_at = NULL,
-                        claim_owner = NULL
-                  WHERE id = $1",
-            )
-            .bind(row.id)
-            .execute(pg_pool)
-            .await
-            .ok();
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::debug!(
-                "[{ts}] [outbox] ✅ delivered msg {} → {}",
-                row.id,
-                row.target
-            );
+            if mark_message_outbox_sent_pg(pg_pool, row.id, &row.claim_owner, row.claimed_at)
+                .await
+                .is_ok()
+            {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::debug!(
+                    "[{ts}] [outbox] ✅ delivered msg {} → {}",
+                    row.id,
+                    row.target
+                );
+            }
         } else {
             let error_text = format!("{status}: {err_text}");
             let action = message_outbox_failure_action(row.retry_count);
             match action {
                 MessageOutboxFailureAction::Fail { retry_count } => {
-                    let failed_update = sqlx::query(
-                        "UPDATE message_outbox
-                            SET status = 'failed',
-                                error = $1,
-                                retry_count = $2,
-                                next_attempt_at = NULL,
-                                claimed_at = NULL,
-                                claim_owner = NULL
-                          WHERE id = $3",
+                    let failed_update = mark_message_outbox_failed_pg(
+                        pg_pool,
+                        row.id,
+                        &error_text,
+                        retry_count,
+                        &row.claim_owner,
+                        row.claimed_at,
                     )
-                    .bind(&error_text)
-                    .bind(retry_count)
-                    .bind(row.id)
-                    .execute(pg_pool)
                     .await;
                     // Release only terminal turn-delivery rows, and only if no newer
                     // session heartbeat proves another turn has since taken the channel.
-                    if let Err(error) = &failed_update {
-                        tracing::warn!(
-                            "[outbox] failed to mark msg {} failed; skipping terminal session release: {}",
-                            row.id,
-                            error
-                        );
-                    } else if failed_update
-                        .as_ref()
-                        .map(|result| result.rows_affected() == 0)
-                        .unwrap_or(true)
+                    if failed_update.is_ok() && is_terminal_turn_delivery_outbox_source(&row.source)
                     {
-                        tracing::warn!(
-                            "[outbox] failed-state update affected no rows for msg {}; skipping terminal session release",
-                            row.id
-                        );
-                    } else if is_terminal_turn_delivery_outbox_source(&row.source) {
                         if let Some(channel_id_str) = row.target.strip_prefix("channel:") {
                             let released_sessions =
                                 match release_session_for_terminal_outbox_failure(
@@ -2101,23 +2323,16 @@ where
                     retry_count,
                     backoff_secs,
                 } => {
-                    sqlx::query(
-                        "UPDATE message_outbox
-                            SET status = 'pending',
-                                error = $1,
-                                retry_count = $2,
-                                next_attempt_at = NOW() + ($3::bigint * INTERVAL '1 second'),
-                                claimed_at = NULL,
-                                claim_owner = NULL
-                          WHERE id = $4",
+                    let _ = schedule_message_outbox_retry_pg(
+                        pg_pool,
+                        row.id,
+                        &error_text,
+                        retry_count,
+                        backoff_secs,
+                        &row.claim_owner,
+                        row.claimed_at,
                     )
-                    .bind(error_text)
-                    .bind(retry_count)
-                    .bind(backoff_secs)
-                    .bind(row.id)
-                    .execute(pg_pool)
-                    .await
-                    .ok();
+                    .await;
                 }
             }
             tracing::warn!(

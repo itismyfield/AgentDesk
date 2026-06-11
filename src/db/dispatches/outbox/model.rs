@@ -3,7 +3,8 @@ use serde_json::Value;
 
 /// Tuple shape returned by `claim_pending_dispatch_outbox_batch_pg`.
 /// Mirrors the (id, dispatch_id, action, agent_id, card_id, title,
-/// retry_count, required_capabilities) column layout of `dispatch_outbox`.
+/// retry_count, required_capabilities, claim_owner, claimed_at) column layout
+/// of `dispatch_outbox`.
 pub(crate) type DispatchOutboxRow = (
     i64,
     String,
@@ -13,6 +14,8 @@ pub(crate) type DispatchOutboxRow = (
     Option<String>,
     i64,
     Option<Value>,
+    String,
+    DateTime<Utc>,
 );
 
 #[derive(Clone, Debug)]
@@ -28,7 +31,11 @@ pub(crate) struct DispatchOutboxClaimCandidate {
 }
 
 impl DispatchOutboxClaimCandidate {
-    pub(crate) fn into_outbox_row(self) -> DispatchOutboxRow {
+    pub(crate) fn into_outbox_row(
+        self,
+        claim_owner: String,
+        claimed_at: DateTime<Utc>,
+    ) -> DispatchOutboxRow {
         (
             self.id,
             self.dispatch_id,
@@ -38,6 +45,8 @@ impl DispatchOutboxClaimCandidate {
             self.title,
             self.retry_count,
             self.required_capabilities,
+            claim_owner,
+            claimed_at,
         )
     }
 }

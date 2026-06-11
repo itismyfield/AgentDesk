@@ -27,6 +27,7 @@ const COMPLETED_QUEUE_REVIEW_DRIFT_BATCH_LIMIT: i64 = 50;
 const AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_GRACE: Duration = Duration::from_secs(2 * 60);
 const AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_STALE_CLAIM: Duration = Duration::from_secs(5 * 60);
 const AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_BATCH_LIMIT: i64 = 50;
+const BOOT_RECONCILE_OUTBOX_LEASE_TIMEOUT_SECS: i64 = 300;
 const DISPATCH_DELIVERY_EVENT_RECONCILE_BATCH_LIMIT: i64 = 500;
 
 const DISPATCH_DELIVERY_MISMATCH_MISSING_TYPED: &str = "missing_typed";
@@ -297,7 +298,10 @@ impl BootReconcileStats {
     }
 }
 
-pub(crate) async fn reconcile_boot_db_pg(pool: &PgPool) -> Result<BootReconcileStats> {
+pub(crate) async fn reconcile_boot_db_pg(
+    pool: &PgPool,
+    current_instance_id: &str,
+) -> Result<BootReconcileStats> {
     // Touch next_attempt_at so oldest_pending_age reflects "re-queued at boot",
     // not the original created_at. Without this, rows that were stuck in
     // 'processing' across a restart show up as multi-minute-aged pending rows
@@ -309,8 +313,15 @@ pub(crate) async fn reconcile_boot_db_pg(pool: &PgPool) -> Result<BootReconcileS
                 claimed_at = NULL,
                 claim_owner = NULL,
                 next_attempt_at = NOW()
-          WHERE status = 'processing'",
+          WHERE status = 'processing'
+            AND (
+                claimed_at IS NULL
+                OR claimed_at < NOW() - ($2::BIGINT * INTERVAL '1 second')
+                OR claim_owner = $1
+            )",
     )
+    .bind(current_instance_id)
+    .bind(BOOT_RECONCILE_OUTBOX_LEASE_TIMEOUT_SECS)
     .execute(pool)
     .await
     .map(|r| r.rows_affected() as usize)
@@ -354,9 +365,10 @@ pub(crate) async fn reconcile_boot_runtime(
     db: Option<&Db>,
     engine: &PolicyEngine,
     pg_pool: Option<&PgPool>,
+    current_instance_id: &str,
 ) -> Result<BootReconcileStats> {
     let mut stats = if let Some(pool) = pg_pool {
-        reconcile_boot_db_pg(pool).await?
+        reconcile_boot_db_pg(pool, current_instance_id).await?
     } else {
         {
             return Err(anyhow!("Postgres pool required for boot reconcile"));
@@ -2012,6 +2024,52 @@ mod dispatch_delivery_reconcile_tests {
             .await
             .unwrap()
             > 0
+    }
+
+    #[tokio::test]
+    async fn boot_reconcile_keeps_non_expired_processing_row_owned_by_peer_pg() {
+        let Some(pg_db) = TestPostgresDb::try_create().await else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO dispatch_outbox (
+                dispatch_id, action, status, claimed_at, claim_owner
+             ) VALUES (
+                'dispatch-live-peer-lease', 'notify', 'processing', NOW(), 'peer-instance'
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed peer-owned processing outbox row");
+
+        let stats = reconcile_boot_db_pg(&pool, "current-instance")
+            .await
+            .expect("boot reconcile succeeds");
+        assert_eq!(stats.stale_processing_outbox_reset, 0);
+
+        let row = sqlx::query(
+            "SELECT status, claim_owner, claimed_at
+               FROM dispatch_outbox
+              WHERE dispatch_id = 'dispatch-live-peer-lease'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.try_get::<String, _>("status").unwrap(), "processing");
+        assert_eq!(
+            row.try_get::<String, _>("claim_owner").unwrap(),
+            "peer-instance"
+        );
+        assert!(
+            row.try_get::<Option<DateTime<Utc>>, _>("claimed_at")
+                .unwrap()
+                .is_some()
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[test]
