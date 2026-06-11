@@ -457,48 +457,51 @@ fn run_bot_build_shared_data(
         dispatch_thread_parents: dashmap::DashMap::new(),
         bot_connected: std::sync::atomic::AtomicBool::new(false),
         last_turn_at: std::sync::Mutex::new(None),
-        model_overrides: {
-            let map = dashmap::DashMap::new();
-            for (channel_id, model) in restored_model_overrides {
-                map.insert(*channel_id, model.clone());
-            }
-            map
+        // #3038 S2: wrapped verbatim at the first-member position (evaluation-order preserved).
+        overrides: SessionOverrideState {
+            model_overrides: {
+                let map = dashmap::DashMap::new();
+                for (channel_id, model) in restored_model_overrides {
+                    map.insert(*channel_id, model.clone());
+                }
+                map
+            },
+            fast_mode_channels: {
+                let set = dashmap::DashSet::new();
+                for channel_id in restored_fast_mode_channels {
+                    set.insert(*channel_id);
+                }
+                set
+            },
+            fast_mode_session_reset_pending: {
+                let set = dashmap::DashSet::new();
+                for entry in restored_fast_mode_reset_entries {
+                    set.insert(entry.clone());
+                }
+                set
+            },
+            codex_goals_channels: {
+                let set = dashmap::DashSet::new();
+                for channel_id in restored_codex_goals_channels {
+                    set.insert(*channel_id);
+                }
+                set
+            },
+            codex_goals_session_reset_pending: {
+                let set = dashmap::DashSet::new();
+                for channel_id in restored_codex_goals_reset_channels {
+                    set.insert(*channel_id);
+                }
+                set
+            },
+            model_session_reset_pending: dashmap::DashSet::new(),
+            session_reset_pending: bootstrap_session_reset_pending_channels(
+                restored_model_overrides,
+                restored_fast_mode_reset_channels,
+                restored_codex_goals_reset_channels,
+            ),
+            model_picker_pending: dashmap::DashMap::new(),
         },
-        fast_mode_channels: {
-            let set = dashmap::DashSet::new();
-            for channel_id in restored_fast_mode_channels {
-                set.insert(*channel_id);
-            }
-            set
-        },
-        fast_mode_session_reset_pending: {
-            let set = dashmap::DashSet::new();
-            for entry in restored_fast_mode_reset_entries {
-                set.insert(entry.clone());
-            }
-            set
-        },
-        codex_goals_channels: {
-            let set = dashmap::DashSet::new();
-            for channel_id in restored_codex_goals_channels {
-                set.insert(*channel_id);
-            }
-            set
-        },
-        codex_goals_session_reset_pending: {
-            let set = dashmap::DashSet::new();
-            for channel_id in restored_codex_goals_reset_channels {
-                set.insert(*channel_id);
-            }
-            set
-        },
-        model_session_reset_pending: dashmap::DashSet::new(),
-        session_reset_pending: bootstrap_session_reset_pending_channels(
-            restored_model_overrides,
-            restored_fast_mode_reset_channels,
-            restored_codex_goals_reset_channels,
-        ),
-        model_picker_pending: dashmap::DashMap::new(),
         dispatch_role_overrides: dashmap::DashMap::new(),
         voice_barge_in: voice_barge_in.clone(),
         voice_pairings: Arc::new(voice_routing::VoiceChannelPairingStore::load_default()),

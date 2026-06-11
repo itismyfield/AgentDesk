@@ -83,7 +83,11 @@ grandfathered_baseline_paths = [
   "src/services/codex_tmux_wrapper.rs",
   "src/services/codex_tui/input.rs",
   "src/services/codex_tui/rollout_tail.rs",
-  "src/services/discord/commands/config.rs",
+  # commands/config.rs dropped to 954 prod LoC in #3038 S2 (session-override
+  # bookkeeping helpers moved to discord/shared_state.rs); no longer a
+  # prod-giant, so it is removed from `grandfathered` and from the baseline
+  # guard here (win-locked: a re-expanded config.rs cannot be
+  # re-grandfathered — it would have to land as a full [[entry]] or shrink).
   "src/services/discord/commands/diagnostics.rs",
   "src/services/discord/commands/text_commands.rs",
   "src/services/discord/formatting.rs",
@@ -185,7 +189,11 @@ grandfathered = [
   "src/services/codex_tmux_wrapper.rs",
   "src/services/codex_tui/input.rs",
   "src/services/codex_tui/rollout_tail.rs",
-  "src/services/discord/commands/config.rs",
+  # commands/config.rs dropped to 954 prod LoC in #3038 S2 (session-override
+  # bookkeeping helpers moved to discord/shared_state.rs); no longer a
+  # prod-giant, so it is removed from `grandfathered` and from the baseline
+  # guard here (win-locked: a re-expanded config.rs cannot be
+  # re-grandfathered — it would have to land as a full [[entry]] or shrink).
   "src/services/discord/commands/diagnostics.rs",
   "src/services/discord/commands/text_commands.rs",
   "src/services/discord/formatting.rs",

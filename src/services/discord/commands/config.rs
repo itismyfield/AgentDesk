@@ -201,126 +201,34 @@ pub(in crate::services::discord) async fn channel_codex_goals_setting(
         .copied()
 }
 
-pub(in crate::services::discord) fn fast_mode_reset_pending_key(
-    channel_id: serenity::ChannelId,
-    provider: &ProviderKind,
-) -> String {
-    format!("{}:{}", provider.as_str(), channel_id.get())
-}
-
-pub(in crate::services::discord) fn parse_fast_mode_reset_pending_entry(
-    entry: &str,
-) -> Option<(Option<&str>, serenity::ChannelId)> {
-    if let Some((provider_id, raw_channel_id)) = entry.split_once(':') {
-        let channel_id = raw_channel_id
-            .parse::<u64>()
-            .ok()
-            .map(serenity::ChannelId::new)?;
-        return Some((Some(provider_id), channel_id));
-    }
-
-    entry
-        .parse::<u64>()
-        .ok()
-        .map(serenity::ChannelId::new)
-        .map(|channel_id| (None, channel_id))
-}
-
-fn fast_mode_reset_entry_matches_channel(entry: &str, channel_id: serenity::ChannelId) -> bool {
-    parse_fast_mode_reset_pending_entry(entry)
-        .map(|(_, entry_channel_id)| entry_channel_id == channel_id)
-        .unwrap_or(false)
-}
-
-fn fast_mode_reset_entry_matches_provider(
-    entry: &str,
-    channel_id: serenity::ChannelId,
-    provider: &ProviderKind,
-) -> bool {
-    parse_fast_mode_reset_pending_entry(entry)
-        .map(|(provider_id, entry_channel_id)| {
-            entry_channel_id == channel_id
-                && provider_id
-                    .map(|entry_provider| entry_provider.eq_ignore_ascii_case(provider.as_str()))
-                    .unwrap_or(true)
-        })
-        .unwrap_or(false)
-}
-
-pub(in crate::services::discord) fn fast_mode_reset_pending_for_provider(
-    shared: &Arc<SharedData>,
-    channel_id: serenity::ChannelId,
-    provider: &ProviderKind,
-) -> bool {
-    shared
-        .fast_mode_session_reset_pending
-        .iter()
-        .any(|entry| fast_mode_reset_entry_matches_provider(entry.key(), channel_id, provider))
-}
-
-pub(in crate::services::discord) fn any_fast_mode_reset_pending(
-    shared: &Arc<SharedData>,
-    channel_id: serenity::ChannelId,
-) -> bool {
-    shared
-        .fast_mode_session_reset_pending
-        .iter()
-        .any(|entry| fast_mode_reset_entry_matches_channel(entry.key(), channel_id))
-}
-
-pub(in crate::services::discord) fn clear_fast_mode_reset_pending_for_provider(
-    shared: &Arc<SharedData>,
-    channel_id: serenity::ChannelId,
-    provider: &ProviderKind,
-) -> bool {
-    let provider_key = fast_mode_reset_pending_key(channel_id, provider);
-    shared
-        .fast_mode_session_reset_pending
-        .remove(&provider_key)
-        .is_some()
-}
-
-pub(in crate::services::discord) fn clear_fast_mode_reset_pending_for_channel(
-    shared: &Arc<SharedData>,
-    channel_id: serenity::ChannelId,
-) -> bool {
-    let keys: Vec<String> = shared
-        .fast_mode_session_reset_pending
-        .iter()
-        .filter_map(|entry| {
-            fast_mode_reset_entry_matches_channel(entry.key(), channel_id)
-                .then(|| entry.key().clone())
-        })
-        .collect();
-
-    let had_entries = !keys.is_empty();
-    for key in keys {
-        shared.fast_mode_session_reset_pending.remove(&key);
-    }
-    had_entries
-}
-
-pub(in crate::services::discord) fn sync_session_reset_pending(
-    shared: &Arc<SharedData>,
-    channel_id: serenity::ChannelId,
-) {
-    if any_fast_mode_reset_pending(shared, channel_id)
-        || shared
-            .codex_goals_session_reset_pending
-            .contains(&channel_id)
-        || shared.model_session_reset_pending.contains(&channel_id)
-    {
-        shared.session_reset_pending.insert(channel_id);
-    } else {
-        shared.session_reset_pending.remove(&channel_id);
-    }
-}
+// #3038 S2: the session-override bookkeeping helpers (the fast-mode
+// reset-entry codec, the reset-pending probes/clears, the fast-mode /
+// Codex-goals enablement probes, and `sync_session_reset_pending`) moved
+// verbatim to the `shared_state` sibling module alongside
+// `SessionOverrideState` — they are the free-function surface that
+// exclusively owns that cluster. Re-exported here so every existing
+// `super::config::*` importer (control.rs / fast_mode.rs / goals.rs) and
+// every unqualified call site in this module stays frozen.
+pub(in crate::services::discord) use super::super::shared_state::{
+    channel_codex_goals_enabled, channel_fast_mode_enabled,
+    clear_codex_goals_reset_pending_for_channel, clear_fast_mode_reset_pending_for_channel,
+    clear_fast_mode_reset_pending_for_provider, fast_mode_reset_entry_matches_provider,
+    fast_mode_reset_pending_for_provider, fast_mode_reset_pending_key, sync_session_reset_pending,
+};
+// #3038 S2: `any_fast_mode_reset_pending`'s only caller outside `shared_state`
+// is the S2-0 characterization test module below (which resolves it through
+// `use super::*`), so its path-freezing re-export is test-gated to keep the
+// production build warning-free. `parse_fast_mode_reset_pending_entry` has no
+// caller outside `shared_state` at all and is intentionally not re-exported.
+#[cfg(test)]
+pub(in crate::services::discord) use super::super::shared_state::any_fast_mode_reset_pending;
 
 pub(in crate::services::discord) async fn effective_model_snapshot(
     shared: &Arc<SharedData>,
     channel_id: serenity::ChannelId,
 ) -> EffectiveModelSnapshot {
     let override_model = shared
+        .overrides
         .model_overrides
         .get(&channel_id)
         .map(|value| value.clone());
@@ -399,6 +307,7 @@ pub(in crate::services::discord) async fn update_channel_model_override(
     }
 
     let current_override = shared
+        .overrides
         .model_overrides
         .get(&channel_id)
         .map(|value| value.clone());
@@ -410,7 +319,10 @@ pub(in crate::services::discord) async fn update_channel_model_override(
 
     match next_override {
         Some(model) => {
-            shared.model_overrides.insert(channel_id, model.clone());
+            shared
+                .overrides
+                .model_overrides
+                .insert(channel_id, model.clone());
             let mut settings = shared.settings.write().await;
             settings
                 .channel_model_overrides
@@ -418,7 +330,7 @@ pub(in crate::services::discord) async fn update_channel_model_override(
             save_bot_settings(token, &settings);
         }
         None => {
-            shared.model_overrides.remove(&channel_id);
+            shared.overrides.model_overrides.remove(&channel_id);
             let mut settings = shared.settings.write().await;
             settings
                 .channel_model_overrides
@@ -428,27 +340,19 @@ pub(in crate::services::discord) async fn update_channel_model_override(
     }
 
     if reset_required {
-        shared.model_session_reset_pending.insert(channel_id);
+        shared
+            .overrides
+            .model_session_reset_pending
+            .insert(channel_id);
     } else {
-        shared.model_session_reset_pending.remove(&channel_id);
+        shared
+            .overrides
+            .model_session_reset_pending
+            .remove(&channel_id);
     }
     sync_session_reset_pending(shared, channel_id);
 
     true
-}
-
-pub(in crate::services::discord) fn channel_fast_mode_enabled(
-    shared: &Arc<SharedData>,
-    channel_id: serenity::ChannelId,
-) -> bool {
-    shared.fast_mode_channels.contains(&channel_id)
-}
-
-pub(in crate::services::discord) fn channel_codex_goals_enabled(
-    shared: &Arc<SharedData>,
-    channel_id: serenity::ChannelId,
-) -> bool {
-    shared.codex_goals_channels.contains(&channel_id)
 }
 
 pub(in crate::services::discord) async fn update_channel_fast_mode(
@@ -464,9 +368,9 @@ pub(in crate::services::discord) async fn update_channel_fast_mode(
     }
 
     if enabled {
-        shared.fast_mode_channels.insert(channel_id);
+        shared.overrides.fast_mode_channels.insert(channel_id);
     } else {
-        shared.fast_mode_channels.remove(&channel_id);
+        shared.overrides.fast_mode_channels.remove(&channel_id);
     }
 
     let mut settings = shared.settings.write().await;
@@ -489,20 +393,11 @@ pub(in crate::services::discord) async fn update_channel_fast_mode(
 
     clear_fast_mode_reset_pending_for_provider(shared, channel_id, provider);
     shared
+        .overrides
         .fast_mode_session_reset_pending
         .insert(fast_mode_reset_pending_key(channel_id, provider));
     sync_session_reset_pending(shared, channel_id);
     true
-}
-
-pub(in crate::services::discord) fn clear_codex_goals_reset_pending_for_channel(
-    shared: &Arc<SharedData>,
-    channel_id: serenity::ChannelId,
-) -> bool {
-    shared
-        .codex_goals_session_reset_pending
-        .remove(&channel_id)
-        .is_some()
 }
 
 pub(in crate::services::discord) async fn update_channel_codex_goals(
@@ -517,9 +412,9 @@ pub(in crate::services::discord) async fn update_channel_codex_goals(
     }
 
     if enabled {
-        shared.codex_goals_channels.insert(channel_id);
+        shared.overrides.codex_goals_channels.insert(channel_id);
     } else {
-        shared.codex_goals_channels.remove(&channel_id);
+        shared.overrides.codex_goals_channels.remove(&channel_id);
     }
 
     let channel_key = channel_id.get().to_string();
@@ -532,7 +427,10 @@ pub(in crate::services::discord) async fn update_channel_codex_goals(
         .insert(channel_key);
     save_bot_settings(token, &settings);
 
-    shared.codex_goals_session_reset_pending.insert(channel_id);
+    shared
+        .overrides
+        .codex_goals_session_reset_pending
+        .insert(channel_id);
     sync_session_reset_pending(shared, channel_id);
     true
 }
@@ -543,6 +441,7 @@ pub(in crate::services::discord) fn would_channel_model_override_change(
     next_override: Option<&str>,
 ) -> bool {
     let current_override = shared
+        .overrides
         .model_overrides
         .get(&channel_id)
         .map(|value| value.clone());
@@ -561,6 +460,7 @@ pub(in crate::services::discord) async fn resolve_model_for_turn(
 fn prune_model_picker_pending(shared: &Arc<SharedData>) {
     let now = Instant::now();
     let expired: Vec<_> = shared
+        .overrides
         .model_picker_pending
         .iter()
         .filter_map(|entry| {
@@ -573,7 +473,7 @@ fn prune_model_picker_pending(shared: &Arc<SharedData>) {
         .collect();
 
     for message_id in expired {
-        shared.model_picker_pending.remove(&message_id);
+        shared.overrides.model_picker_pending.remove(&message_id);
     }
 }
 
@@ -585,7 +485,7 @@ pub(in crate::services::discord) fn remember_model_picker_pending(
     pending_model: Option<String>,
 ) {
     prune_model_picker_pending(shared);
-    shared.model_picker_pending.insert(
+    shared.overrides.model_picker_pending.insert(
         message_id,
         super::super::ModelPickerPendingState {
             owner_user_id,
@@ -600,7 +500,7 @@ pub(in crate::services::discord) fn clear_model_picker_pending(
     shared: &Arc<SharedData>,
     message_id: serenity::MessageId,
 ) {
-    shared.model_picker_pending.remove(&message_id);
+    shared.overrides.model_picker_pending.remove(&message_id);
 }
 
 pub(in crate::services::discord) fn model_picker_pending_to_override(
