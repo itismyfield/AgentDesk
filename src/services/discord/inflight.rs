@@ -1577,13 +1577,9 @@ fn clear_status_panel_if_current_in_root(
     .is_ok()
 }
 
-/// #3351: compare-and-clear for the persisted relay-placeholder id
-/// (`current_msg_id`), mirroring `clear_status_panel_if_current` (#3077): only
-/// the exact `msg_id` is cleared, a placeholderless Discord turn
-/// (`current_msg_id == user_msg_id`) is never touched, and the optional tmux
-/// guard restricts the clear to the caller's own session row. `current_msg_id
-/// == 0` is a legitimate "no anchored placeholder" state, so clearing to 0 is
-/// safe.
+/// #3351: compare-and-clear for the persisted relay-placeholder id, mirroring
+/// `clear_status_panel_if_current` (#3077): exact `msg_id` only, placeholderless
+/// turns (`current_msg_id == user_msg_id`) untouched, optional tmux-session guard.
 pub(in crate::services::discord) fn clear_current_msg_if_matches(
     provider: &ProviderKind,
     channel_id: u64,
@@ -1617,13 +1613,11 @@ fn clear_current_msg_if_matches_in_root(
         return false;
     };
     if msg_id == 0 || state.current_msg_id != msg_id {
-        // A newer turn already advanced `current_msg_id` (or there is nothing
-        // to compare) — never wipe another turn's anchor.
+        // A newer turn already advanced the anchor — never wipe it.
         return false;
     }
     if state.user_msg_id != 0 && state.current_msg_id == state.user_msg_id {
-        // Placeholderless Discord turn: `current_msg_id` mirrors the user's own
-        // message id (adopt-guard mirror) — not a relay placeholder.
+        // Placeholderless turn: anchor mirrors the user's own message id.
         return false;
     }
     if let Some(expected) = require_tmux_session_name

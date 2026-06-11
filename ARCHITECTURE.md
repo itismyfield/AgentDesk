@@ -488,6 +488,7 @@ src/
 │   │   │   ├── completion_gate_tests.rs
 │   │   │   ├── liveness.rs
 │   │   │   ├── panel_decisions.rs
+│   │   │   ├── placeholder_reclaim.rs
 │   │   │   ├── prompt_observe.rs
 │   │   │   ├── turn_identity.rs
 │   │   │   └── turn_identity_tests.rs

@@ -38,12 +38,16 @@
 # #3038 tmux_watcher S1: lowered 9583 -> 8122 by moving top-level decision
 # clusters A/B/C/E/F/I/J/K into tmux_watcher/ child modules. The relay loop,
 # D/H clusters, and relay path remain in the root.
-"src/services/discord/tmux_watcher.rs" = 8122
+# #3351: +101 for placeholder-reclaim wiring in the relay loop (tick/terminal/
+# fresh-idle reclaim sites + r21 durable-record drops); the helper bodies live
+# in tmux_watcher/placeholder_reclaim.rs. tmux_watcher S2 re-lowers this root.
+"src/services/discord/tmux_watcher.rs" = 8223
 # #3038 tmux_watcher S1 child modules, frozen at landed production LoC.
 "src/services/discord/tmux_watcher/commit_decisions.rs" = 140
 "src/services/discord/tmux_watcher/completion_gate.rs" = 275
 "src/services/discord/tmux_watcher/liveness.rs" = 301
 "src/services/discord/tmux_watcher/panel_decisions.rs" = 372
+"src/services/discord/tmux_watcher/placeholder_reclaim.rs" = 106
 "src/services/discord/tmux_watcher/prompt_observe.rs" = 109
 "src/services/discord/tmux_watcher/turn_identity.rs" = 327
 # Frozen at its true production LoC once #3028 fixed the prod/test splitter
@@ -118,7 +122,10 @@
 # #3293: +11 for the additive `recovery_relay_attempts` restart-budget counter
 # (field + `RECOVERY_RELAY_RESTART_ATTEMPT_BUDGET`), lowered 2466 -> 2465 to
 # lock the net position.
-"src/services/discord/inflight.rs" = 2465
+# #3351: +58 for `clear_current_msg_if_matches(_in_root)` — the relay-placeholder
+# compare-and-clear needs the file-private lock/load/persist internals, so it
+# lives here until the inflight split.
+"src/services/discord/inflight.rs" = 2523
 # #3038 Phase A: health.rs decomposed into health/ directory modules (root 402
 # prod LoC + 6 sub-1000-LoC submodules) — dropped below the giant threshold, so
 # its ratchet entry is deleted (win; no baseline raises).
