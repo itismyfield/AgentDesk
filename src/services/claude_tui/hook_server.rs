@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{Notify, broadcast};
 
+use crate::services::claude_tui::memento_feedback::PendingMementoFeedbackTracker;
+
 const EVENT_BUFFER_CAPACITY: usize = 256;
 
 static HOOK_ENDPOINT: LazyLock<RwLock<Option<String>>> = LazyLock::new(|| RwLock::new(None));
@@ -107,12 +109,16 @@ pub struct HookEvent {
 #[derive(Clone)]
 pub struct HookServerState {
     event_tx: broadcast::Sender<HookEvent>,
+    memento_feedback: PendingMementoFeedbackTracker,
 }
 
 impl HookServerState {
     pub fn new() -> Self {
         let (event_tx, _) = broadcast::channel(EVENT_BUFFER_CAPACITY);
-        Self { event_tx }
+        Self {
+            event_tx,
+            memento_feedback: PendingMementoFeedbackTracker::default(),
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<HookEvent> {
@@ -215,6 +221,22 @@ async fn receive_hook(
         payload,
     };
     let event_name = event.kind.as_str().to_string();
+    let memento_stop_flush = match event.kind {
+        HookEventKind::PostToolUse => {
+            let _ = state
+                .memento_feedback
+                .observe_post_tool_use(&event.session_id, &event.payload);
+            None
+        }
+        HookEventKind::Stop if event.provider == "claude" => state
+            .memento_feedback
+            .take_stop_flush(&event.session_id, &event.payload),
+        HookEventKind::Stop | HookEventKind::SubagentStop => {
+            state.memento_feedback.clear_session(&event.session_id);
+            None
+        }
+        _ => None,
+    };
     if matches!(event.kind, HookEventKind::Unknown(_)) {
         tracing::warn!(
             provider,
@@ -223,7 +245,8 @@ async fn receive_hook(
             "unknown tui hook event accepted for provider-scoped telemetry"
         );
     }
-    if should_signal_prompt_ready(&event.provider, &event.kind) {
+    let stop_flush_injected = memento_stop_flush.is_some();
+    if should_signal_prompt_ready(&event.provider, &event.kind) && !stop_flush_injected {
         // Wake any task currently awaiting prompt readiness. `notify_waiters`
         // is edge-triggered: signals fired with no current waiters are
         // intentionally dropped so `wait_for_prompt_ready` cannot latch onto
@@ -284,17 +307,18 @@ async fn receive_hook(
     // * Every other event kind with `is_informational_empty_payload(payload) == true`
     //   is dropped at the broadcast boundary. The HTTP response stays 202
     //   so the relay CLI cannot tell — that contract is one-way fire-and-forget.
-    let should_drop_broadcast = payload_is_noise
-        && !matches!(
-            event.kind,
-            HookEventKind::Stop | HookEventKind::SubagentStop
-        );
+    let should_drop_broadcast = stop_flush_injected
+        || (payload_is_noise
+            && !matches!(
+                event.kind,
+                HookEventKind::Stop | HookEventKind::SubagentStop
+            ));
     if should_drop_broadcast {
         tracing::debug!(
             provider,
             event = event_name,
             session_id,
-            "tui hook event has empty payload; dropping broadcast (#2665)"
+            "tui hook event has empty payload or pending memento feedback flush; dropping broadcast"
         );
     } else if state.event_tx.send(event).is_err() {
         tracing::debug!(
@@ -305,15 +329,17 @@ async fn receive_hook(
         );
     }
 
-    (
-        StatusCode::ACCEPTED,
-        Json(json!({
-            "ok": true,
-            "provider": provider,
-            "event": event_name,
-            "session_id": session_id
-        })),
-    )
+    let mut body = json!({
+        "ok": true,
+        "provider": provider,
+        "event": event_name,
+        "session_id": session_id
+    });
+    if let Some(flush) = memento_stop_flush {
+        body["memento_tool_feedback_flush"] = flush.to_json();
+    }
+
+    (StatusCode::ACCEPTED, Json(body))
 }
 
 /// #2655: classification of the memento tool surface invoked in a hook
