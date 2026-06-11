@@ -507,6 +507,13 @@ pub(super) fn reset_drift_state_for_tests() {
 mod tests {
     use super::*;
 
+    // Serializes tests that touch the process-global `DRIFT_STATE` so parallel
+    // execution can't clear another test's state mid-assertion (#3306 codex r1:
+    // `repair_cooldown_and_single_flight_gate` raced a peer's
+    // `reset_drift_state_for_tests`). Tests that only use a LOCAL `DriftState`
+    // or the IO-free `evaluate_drift_repair` core do not need it.
+    static DRIFT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[cfg(unix)]
     fn inputs() -> RepairInputs {
         RepairInputs {
@@ -561,6 +568,7 @@ mod tests {
 
     #[test]
     fn drift_warn_sessions_are_independent() {
+        let _serial = DRIFT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_drift_state_for_tests();
         // Two distinct sessions each get their own immediate first emit.
         assert!(should_emit_drift_warn("tmux-a").emit);
@@ -695,6 +703,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn repair_cooldown_and_single_flight_gate() {
+        let _serial = DRIFT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_drift_state_for_tests();
         let start = Instant::now();
 
