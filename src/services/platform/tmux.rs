@@ -1008,11 +1008,15 @@ mod live_pane_tests {
             Some(value) => unsafe { std::env::set_var("HOSTNAME", value) },
             None => unsafe { std::env::remove_var("HOSTNAME") },
         }
+        // CI keeps the strict assertion (this is the regression signal); only
+        // local hosts where the pane-exit hook is environment-dependent skip.
         if !marker_exists {
+            if std::env::var_os("CI").is_some() {
+                panic!("tmux pane-exit hook did not create dead marker at {marker_path}");
+            }
             eprintln!(
                 "skipping dead marker hook assertion: tmux hook did not create marker at {marker_path}"
             );
-            return;
         }
     }
 }
