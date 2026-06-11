@@ -2872,6 +2872,284 @@ async fn gc_stale_fixed_working_sessions(shared: &Arc<SharedData>) {
 #[cfg(test)]
 mod bootstrap_tests {
     use super::*;
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    fn sorted_channel_ids(channels: Vec<ChannelId>) -> Vec<u64> {
+        channels
+            .into_iter()
+            .map(|channel_id| channel_id.get())
+            .collect()
+    }
+
+    fn sorted_placeholder_pairs(
+        pairs: Vec<((ChannelId, MessageId), MessageId)>,
+    ) -> Vec<(u64, u64, u64)> {
+        let mut pairs: Vec<(u64, u64, u64)> = pairs
+            .into_iter()
+            .map(|((channel_id, user_msg_id), placeholder_msg_id)| {
+                (
+                    channel_id.get(),
+                    user_msg_id.get(),
+                    placeholder_msg_id.get(),
+                )
+            })
+            .collect();
+        pairs.sort_unstable();
+        pairs
+    }
+
+    fn sorted_stale_cards(cards: Vec<(ChannelId, MessageId, MessageId)>) -> Vec<(u64, u64, u64)> {
+        let mut cards: Vec<(u64, u64, u64)> = cards
+            .into_iter()
+            .map(|(channel_id, user_msg_id, placeholder_msg_id)| {
+                (
+                    channel_id.get(),
+                    user_msg_id.get(),
+                    placeholder_msg_id.get(),
+                )
+            })
+            .collect();
+        cards.sort_unstable();
+        cards
+    }
+
+    #[test]
+    fn startup_doctor_barrier_arrive_decrements_once_until_release() {
+        let remaining = std::sync::atomic::AtomicUsize::new(2);
+        let started = std::sync::atomic::AtomicBool::new(false);
+
+        assert_eq!(
+            startup_doctor_barrier_arrive(&remaining, &started),
+            StartupDoctorBarrier::Waiting(1)
+        );
+        assert_eq!(remaining.load(std::sync::atomic::Ordering::Acquire), 1);
+        assert!(!started.load(std::sync::atomic::Ordering::Acquire));
+
+        assert_eq!(
+            startup_doctor_barrier_arrive(&remaining, &started),
+            StartupDoctorBarrier::Released
+        );
+        assert_eq!(remaining.load(std::sync::atomic::Ordering::Acquire), 0);
+        assert!(started.load(std::sync::atomic::Ordering::Acquire));
+
+        assert_eq!(
+            startup_doctor_barrier_arrive(&remaining, &started),
+            StartupDoctorBarrier::AlreadyReleased
+        );
+        assert_eq!(
+            remaining.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "arriving after release must not decrement below zero"
+        );
+    }
+
+    #[test]
+    fn startup_doctor_barrier_arrive_handles_prestarted_release_once() {
+        let remaining = std::sync::atomic::AtomicUsize::new(1);
+        let started = std::sync::atomic::AtomicBool::new(true);
+
+        assert_eq!(
+            startup_doctor_barrier_arrive(&remaining, &started),
+            StartupDoctorBarrier::AlreadyReleased
+        );
+        assert_eq!(
+            remaining.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "the final waiter still consumes exactly one remaining slot"
+        );
+
+        assert_eq!(
+            startup_doctor_barrier_arrive(&remaining, &started),
+            StartupDoctorBarrier::AlreadyReleased
+        );
+        assert_eq!(remaining.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn restored_settings_filters_sort_parse_and_drop_disabled_entries() {
+        let mut settings = DiscordBotSettings::default();
+        settings.channel_fast_modes.insert("300".to_string(), true);
+        settings.channel_fast_modes.insert("100".to_string(), true);
+        settings.channel_fast_modes.insert("200".to_string(), false);
+        settings
+            .channel_fast_modes
+            .insert("not-a-channel".to_string(), true);
+        settings
+            .channel_fast_mode_reset_pending
+            .insert("codex:500".to_string());
+        settings
+            .channel_fast_mode_reset_pending
+            .insert("400".to_string());
+        settings
+            .channel_fast_mode_reset_pending
+            .insert("claude:400".to_string());
+        settings
+            .channel_fast_mode_reset_pending
+            .insert("bad-reset-entry".to_string());
+        settings.channel_codex_goals.insert("700".to_string(), true);
+        settings.channel_codex_goals.insert("600".to_string(), true);
+        settings
+            .channel_codex_goals
+            .insert("800".to_string(), false);
+        settings
+            .channel_codex_goals
+            .insert("bad-goals".to_string(), true);
+        settings
+            .channel_codex_goals_reset_pending
+            .insert("900".to_string());
+        settings
+            .channel_codex_goals_reset_pending
+            .insert("850".to_string());
+        settings
+            .channel_codex_goals_reset_pending
+            .insert("bad-reset".to_string());
+
+        assert_eq!(
+            sorted_channel_ids(restored_fast_mode_enabled_channels_for_provider(
+                &settings,
+                &ProviderKind::Codex,
+            )),
+            vec![100, 300]
+        );
+        assert_eq!(
+            restored_fast_mode_reset_entries(&settings),
+            vec![
+                "400".to_string(),
+                "bad-reset-entry".to_string(),
+                "claude:400".to_string(),
+                "codex:500".to_string(),
+            ]
+        );
+        assert_eq!(
+            sorted_channel_ids(restored_fast_mode_reset_channels(&settings)),
+            vec![400, 500]
+        );
+        assert_eq!(
+            sorted_channel_ids(restored_codex_goals_enabled_channels(&settings)),
+            vec![600, 700]
+        );
+        assert_eq!(
+            sorted_channel_ids(restored_codex_goals_reset_channels(&settings)),
+            vec![850, 900]
+        );
+    }
+
+    #[test]
+    fn filter_restored_queued_placeholders_preserves_live_and_reports_stale() {
+        let channel_live = ChannelId::new(10);
+        let channel_stale = ChannelId::new(20);
+        let mut loaded = HashMap::new();
+        loaded.insert((channel_live, MessageId::new(100)), MessageId::new(1_000));
+        loaded.insert((channel_live, MessageId::new(101)), MessageId::new(1_001));
+        loaded.insert((channel_stale, MessageId::new(200)), MessageId::new(2_000));
+
+        let mut live_queue_ids = HashMap::new();
+        live_queue_ids.insert(channel_live, HashSet::from([100_u64]));
+
+        let outcome = filter_restored_queued_placeholders(loaded, &live_queue_ids);
+
+        assert_eq!(outcome.stale_count, 2);
+        assert_eq!(
+            outcome
+                .channels_with_stale
+                .iter()
+                .map(|channel_id| channel_id.get())
+                .collect::<HashSet<_>>(),
+            HashSet::from([10, 20])
+        );
+        assert_eq!(
+            sorted_placeholder_pairs(outcome.live),
+            vec![(10, 100, 1_000)]
+        );
+        assert_eq!(
+            sorted_stale_cards(outcome.stale_cards),
+            vec![(10, 101, 1_001), (20, 200, 2_000)]
+        );
+    }
+
+    #[test]
+    fn discord_gateway_intents_snapshot_matches_bootstrap_contract() {
+        let intents = discord_gateway_intents();
+        let expected = serenity::GatewayIntents::GUILDS
+            | serenity::GatewayIntents::GUILD_MESSAGES
+            | serenity::GatewayIntents::GUILD_MESSAGE_REACTIONS
+            | serenity::GatewayIntents::GUILD_VOICE_STATES
+            | serenity::GatewayIntents::DIRECT_MESSAGES
+            | serenity::GatewayIntents::DIRECT_MESSAGE_REACTIONS
+            | serenity::GatewayIntents::MESSAGE_CONTENT;
+
+        assert_eq!(intents, expected);
+    }
+
+    struct RecordingStalePlaceholderDeleter {
+        calls: std::sync::Mutex<Vec<(u64, u64)>>,
+        results: std::sync::Mutex<VecDeque<Result<(), String>>>,
+    }
+
+    impl RecordingStalePlaceholderDeleter {
+        fn new(results: impl IntoIterator<Item = Result<(), String>>) -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+                results: std::sync::Mutex::new(results.into_iter().collect()),
+            }
+        }
+
+        fn calls(&self) -> Vec<(u64, u64)> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .clone()
+        }
+    }
+
+    impl StalePlaceholderDeleter for RecordingStalePlaceholderDeleter {
+        fn delete<'a>(
+            &'a self,
+            channel_id: ChannelId,
+            placeholder_msg_id: MessageId,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .push((channel_id.get(), placeholder_msg_id.get()));
+                self.results
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .pop_front()
+                    .unwrap_or(Ok(()))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_stale_queued_placeholder_cards_with_deletes_only_supplied_stale_cards() {
+        let deleter = RecordingStalePlaceholderDeleter::new([Ok(()), Err("gone".to_string())]);
+        let stale_cards = vec![
+            (
+                ChannelId::new(10),
+                MessageId::new(100),
+                MessageId::new(1_000),
+            ),
+            (
+                ChannelId::new(20),
+                MessageId::new(200),
+                MessageId::new(2_000),
+            ),
+        ];
+
+        delete_stale_queued_placeholder_cards_with(&deleter, &stale_cards).await;
+
+        assert_eq!(deleter.calls(), vec![(10, 1_000), (20, 2_000)]);
+
+        let empty_deleter = RecordingStalePlaceholderDeleter::new([]);
+        delete_stale_queued_placeholder_cards_with(&empty_deleter, &[]).await;
+        assert!(
+            empty_deleter.calls().is_empty(),
+            "empty stale-card input must preserve all visible cards"
+        );
+    }
 
     #[tokio::test(flavor = "current_thread", start_paused = false)]
     async fn wait_for_local_http_bind_returns_quickly_when_port_is_bound() {
