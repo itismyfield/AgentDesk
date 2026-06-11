@@ -335,7 +335,9 @@ src/
 │   │   ├── hook_bundle.rs
 │   │   ├── hook_relay.rs
 │   │   ├── hook_server.rs
+│   │   ├── hook_server_memento_tests.rs
 │   │   ├── input.rs
+│   │   ├── memento_feedback.rs
 │   │   ├── mod.rs
 │   │   ├── session.rs
 │   │   ├── transcript_tail.rs

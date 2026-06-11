@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use url::Url;
 
+use crate::services::claude_tui::memento_feedback;
+
 const RELAY_TIMEOUT: Duration = Duration::from_secs(2);
+const STOP_RELAY_TIMEOUT: Duration = Duration::from_millis(750);
 const FAILURE_MARKER_TTL_SECS: i64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +56,19 @@ fn run_cli_with_name(
     };
 
     let effective_session_id = relay_event_session_id(provider, session_id, &payload);
+    if should_wait_for_stop_response(provider, event) {
+        let stdout = claude_stop_stdout_after_relay(
+            endpoint,
+            provider,
+            event,
+            &effective_session_id,
+            payload,
+            relay_name,
+        );
+        println!("{stdout}");
+        return Ok(());
+    }
+
     // Compute the hook stdout (which may carry a tool_feedback nudge for memento
     // searches) before `payload` is moved into the relay POST below.
     let stdout = hook_stdout(provider, event, &payload);
@@ -70,6 +86,62 @@ fn run_cli_with_name(
     }
     println!("{stdout}");
     Ok(())
+}
+
+fn should_wait_for_stop_response(provider: &str, event: &str) -> bool {
+    provider.trim().eq_ignore_ascii_case("claude") && event.trim().eq_ignore_ascii_case("Stop")
+}
+
+fn claude_stop_stdout_after_relay(
+    endpoint: &str,
+    provider: &str,
+    event: &str,
+    session_id: &str,
+    payload: Value,
+    relay_name: &str,
+) -> String {
+    let relay_result = relay_hook_event_response_with_timeout(
+        endpoint,
+        provider,
+        event,
+        session_id,
+        payload,
+        STOP_RELAY_TIMEOUT,
+    );
+    let stdout = stop_stdout_from_relay_result(provider, event, &relay_result);
+    if let Err(error) = relay_result {
+        eprintln!("agentdesk {relay_name} warning: {error}");
+        if let Err(marker_error) =
+            record_hook_relay_failure(endpoint, provider, event, session_id, &error)
+        {
+            eprintln!("agentdesk {relay_name} marker warning: {marker_error}");
+        }
+    }
+    stdout
+}
+
+fn stop_stdout_from_relay_result(
+    provider: &str,
+    event: &str,
+    relay_result: &Result<Value, String>,
+) -> String {
+    let Ok(response) = relay_result else {
+        return hook_success_stdout(provider).to_string();
+    };
+    stop_stdout_from_receiver_response(provider, event, response)
+}
+
+fn stop_stdout_from_receiver_response(provider: &str, event: &str, response: &Value) -> String {
+    if !should_wait_for_stop_response(provider, event) {
+        return hook_success_stdout(provider).to_string();
+    }
+    response
+        .get("memento_tool_feedback_flush")
+        .and_then(|flush| flush.get("additional_context"))
+        .and_then(Value::as_str)
+        .filter(|context| !context.trim().is_empty())
+        .map(|context| hook_specific_stdout("claude", "Stop", context.to_string()))
+        .unwrap_or_else(|| hook_success_stdout(provider).to_string())
 }
 
 fn relay_event_session_id(provider: &str, command_session_id: &str, payload: &Value) -> String {
@@ -167,21 +239,7 @@ fn hook_specific_stdout(
 /// `_meta.searchEventId` eligible for `tool_feedback`). `remember`, `forget`,
 /// and the rest are excluded.
 fn memento_search_tool_name(payload: &Value) -> Option<String> {
-    let tool_name = payload
-        .get("tool_name")
-        .and_then(Value::as_str)
-        .map(|name| name.trim().to_ascii_lowercase())?;
-    if !tool_name.contains("memento") {
-        return None;
-    }
-    // Match the trailing tool segment exactly so both `mcp__memento__recall` and
-    // the dotted `memento.recall` form qualify, while `recall_context_combined`
-    // or a non-memento server's `recall` do not.
-    let leaf = tool_name
-        .rsplit(|c| c == '_' || c == '.')
-        .next()
-        .unwrap_or("");
-    matches!(leaf, "recall" | "context").then_some(tool_name)
+    memento_feedback::memento_search_tool_name(payload)
 }
 
 /// Best-effort extraction of `searchEventId` from the PostToolUse payload.
@@ -193,62 +251,16 @@ fn memento_search_tool_name(payload: &Value) -> Option<String> {
 /// marker. Returns `None` when absent — the nudge still fires, just without an
 /// explicit id (the model has the id in its own recall result).
 fn extract_search_event_id(payload: &Value) -> Option<String> {
-    for hay in [payload.get("tool_response"), Some(payload)]
-        .into_iter()
-        .flatten()
-    {
-        if let Some(id) = scan_search_event_id(&hay.to_string()) {
-            return Some(id);
-        }
-    }
-    None
+    memento_feedback::extract_search_event_id(payload)
 }
 
+#[cfg(test)]
 fn scan_search_event_id(serialized: &str) -> Option<String> {
-    // Anchor on `searchEventId` as a JSON *key*: the marker must be followed by
-    // an (optionally backslash-escaped) closing quote and a `:`, then the value
-    // digits. This rejects longer keys (`searchEventIdHash`), bare-word mentions
-    // inside fragment text, and `null`/empty values — each of which would
-    // otherwise let a greedy digit scan capture an unrelated number. Multiple
-    // occurrences are tried so a non-matching first hit doesn't abort the scan.
-    let marker = "searchEventId";
-    let mut haystack = serialized;
-    loop {
-        let rel = haystack.find(marker)?;
-        let after = &haystack[rel + marker.len()..];
-        let key_tail = after
-            .strip_prefix("\\\"")
-            .or_else(|| after.strip_prefix('"'))
-            .unwrap_or(after)
-            .trim_start();
-        if let Some(value_part) = key_tail.strip_prefix(':') {
-            let value = value_part.trim_start();
-            let value = value
-                .strip_prefix("\\\"")
-                .or_else(|| value.strip_prefix('"'))
-                .unwrap_or(value);
-            let digits: String = value.chars().take_while(char::is_ascii_digit).collect();
-            if !digits.is_empty() {
-                return Some(digits);
-            }
-        }
-        haystack = after;
-    }
+    memento_feedback::scan_search_event_id(serialized)
 }
 
 fn memento_feedback_instruction(search_event_id: Option<String>) -> String {
-    let target = match search_event_id {
-        Some(id) => format!("search_event_id={id}"),
-        None => "the search_event_id shown under `_meta.searchEventId` in that result".to_string(),
-    };
-    format!(
-        "Action required: you just received a memento search result. Submit one \
-`mcp__memento__tool_feedback` call immediately for THIS result with \
-{target}, `relevant` = whether any returned fragment was on-topic, and `sufficient` = whether the \
-results were enough to proceed. If `mcp__memento__tool_feedback` is not in your active tools \
-(memento tools are deferred), first load it with ToolSearch query \
-`select:mcp__memento__tool_feedback`, then make the call. Do this now, then continue."
-    )
+    memento_feedback::immediate_feedback_instruction(search_event_id)
 }
 
 pub fn relay_hook_event(
@@ -258,15 +270,49 @@ pub fn relay_hook_event(
     session_id: &str,
     payload: Value,
 ) -> Result<(), String> {
+    post_hook_event_with_timeout(
+        endpoint,
+        provider,
+        event,
+        session_id,
+        payload,
+        RELAY_TIMEOUT,
+    )
+    .map(|_| ())
+}
+
+fn relay_hook_event_response_with_timeout(
+    endpoint: &str,
+    provider: &str,
+    event: &str,
+    session_id: &str,
+    payload: Value,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let response =
+        post_hook_event_with_timeout(endpoint, provider, event, session_id, payload, timeout)?;
+    response
+        .into_json()
+        .map_err(|error| format!("parse hook receiver response: {error}"))
+}
+
+fn post_hook_event_with_timeout(
+    endpoint: &str,
+    provider: &str,
+    event: &str,
+    session_id: &str,
+    payload: Value,
+    timeout: Duration,
+) -> Result<ureq::Response, String> {
     let url = hook_url(endpoint, provider, event, session_id)?;
-    let agent = ureq::AgentBuilder::new().timeout(RELAY_TIMEOUT).build();
+    let agent = ureq::AgentBuilder::new().timeout(timeout).build();
     let response = agent
         .post(url.as_str())
         .set("Content-Type", "application/json")
         .send_json(payload)
         .map_err(|error| format!("post hook event: {error}"))?;
     if (200..300).contains(&response.status()) {
-        Ok(())
+        Ok(response)
     } else {
         Err(format!("hook receiver returned HTTP {}", response.status()))
     }
@@ -576,6 +622,54 @@ mod tests {
     }
 
     #[test]
+    fn claude_stop_uses_server_flush_response_when_present() {
+        let out = stop_stdout_from_receiver_response(
+            "claude",
+            "Stop",
+            &serde_json::json!({
+                "ok": true,
+                "memento_tool_feedback_flush": {
+                    "additional_context": "submit memento feedback for [42]"
+                }
+            }),
+        );
+        let value: Value = serde_json::from_str(&out).unwrap();
+
+        assert_eq!(value["suppressOutput"], true);
+        assert_eq!(value["hookSpecificOutput"]["hookEventName"], "Stop");
+        assert_eq!(
+            value["hookSpecificOutput"]["additionalContext"],
+            "submit memento feedback for [42]"
+        );
+    }
+
+    #[test]
+    fn claude_stop_relay_error_fails_open_observational() {
+        let out = stop_stdout_from_relay_result(
+            "claude",
+            "Stop",
+            &Err("post hook event: connection refused".to_string()),
+        );
+
+        assert_eq!(out, r#"{"suppressOutput":true}"#);
+    }
+
+    #[test]
+    fn codex_stop_ignores_server_flush_response() {
+        let out = stop_stdout_from_receiver_response(
+            "codex",
+            "Stop",
+            &serde_json::json!({
+                "memento_tool_feedback_flush": {
+                    "additional_context": "must not be surfaced to codex"
+                }
+            }),
+        );
+
+        assert_eq!(out, "{}");
+    }
+
+    #[test]
     fn non_search_and_non_posttooluse_stay_observational() {
         // Wrong event.
         let recall = serde_json::json!({ "tool_name": "mcp__memento__recall" });
@@ -642,6 +736,7 @@ mod tests {
         assert!(target("mcp__memento__recall_context_combined").is_none());
         assert!(target("mcp__memento__forget").is_none());
         assert!(target("mcp__other__recall").is_none());
+        assert!(target("recall").is_none());
     }
 
     #[test]
