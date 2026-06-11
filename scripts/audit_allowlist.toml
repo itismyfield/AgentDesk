@@ -54,9 +54,6 @@ direct_discord_sends = [
   # HTTP status / Discord error code into a string on edit failures.
   "src/services/issue_announcements.rs#direct_discord_sends:c953e696eec38deb",
   "src/services/discord/router/intake_gate.rs#direct_discord_sends:0a2beaabe9619b4f",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:403e086784912951",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:360a790ca3e3dbc3",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:7abf8711963b3515",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:2bf7e5b93d0fda6b",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:07b7e52940af8eab",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:1cc530214eb6c5d6",
@@ -64,11 +61,11 @@ direct_discord_sends = [
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:edafac97f164fd68",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:b4849c24f5cb7d09",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:1c6f6dcd93167903",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:f950efca7abd900a",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:26d4f3ea346a4c7b",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:d2a63e6f1c91c479",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:c4f1e0c4fddb4380",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:9b9526b38f0691a8",
+  # #3038 turn_bridge S1: status-panel completion direct gateway calls moved
+  # verbatim from turn_bridge/mod.rs to turn_bridge/status_panel.rs.
+  "src/services/discord/turn_bridge/status_panel.rs#direct_discord_sends:8806b21b9432ae8a",
+  "src/services/discord/turn_bridge/status_panel.rs#direct_discord_sends:c4f1e0c4fddb4380",
   # #3016 msg_id==0 recovery: bridge creates a fresh placeholder / posts a recovery
   # notice for turns with no anchored Discord message. Consistent with the bridge's
   # existing pre-migration direct sends; retire with the #1436 outbound v3 extraction.

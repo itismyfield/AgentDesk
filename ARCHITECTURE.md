@@ -498,6 +498,7 @@ src/
 │   │   ├── turn_bridge/
 │   │   │   ├── completion_guard.rs
 │   │   │   ├── context_window.rs
+│   │   │   ├── headless_delivery.rs
 │   │   │   ├── memory_lifecycle.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── output_lifecycle.rs
@@ -506,9 +507,13 @@ src/
 │   │   │   ├── retry_state.rs
 │   │   │   ├── skill_usage.rs
 │   │   │   ├── stale_resume.rs
+│   │   │   ├── status_panel.rs
+│   │   │   ├── status_panel_tests.rs
 │   │   │   ├── terminal_delivery.rs
 │   │   │   ├── tmux_runtime.rs
 │   │   │   ├── turn_analytics.rs
+│   │   │   ├── voice_completion.rs
+│   │   │   ├── voice_completion_tests.rs
 │   │   │   └── watcher_handoff.rs
 │   │   ├── turn_finalizer/
 │   │   │   └── cleanup.rs

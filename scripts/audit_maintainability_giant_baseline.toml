@@ -49,9 +49,16 @@
 # Frozen at its true production LoC once #3028 fixed the prod/test splitter
 # (lifetime/char-literal brace miscount): the first inline `#[cfg(test)] mod`
 # block was over-extended to EOF, so `spawn_turn_bridge` and ~9000 lines of the
-# turn-lifecycle surface were mislabeled test. This is the actual #3028 guard;
-# decompose lands separately after #3016 settles.
-"src/services/discord/turn_bridge/mod.rs" = 8417
+# turn-lifecycle surface were mislabeled test. This is the actual #3028 guard.
+# #3038 turn_bridge S1: lowered 8417 -> 6778 by moving the helper-zone
+# status-panel, voice-completion, headless-delivery, memory-observation,
+# analytics, and confirmed-end clusters out of the root while leaving the
+# `spawn_turn_bridge` async body byte-identical.
+"src/services/discord/turn_bridge/mod.rs" = 6778
+# #3038 turn_bridge S1 child modules, frozen at landed production LoC.
+"src/services/discord/turn_bridge/headless_delivery.rs" = 415
+"src/services/discord/turn_bridge/status_panel.rs" = 437
+"src/services/discord/turn_bridge/voice_completion.rs" = 385
 # #3038 S1: lowered 5188 -> 4987 (-201) as `QueuedPlaceholderState` (cluster C:
 # 3 fields + 9 inherent methods) moved to the `shared_state` sibling module.
 # Locks in the shrink win (ratchet down only).

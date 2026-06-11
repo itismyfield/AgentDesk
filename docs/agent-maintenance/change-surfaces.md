@@ -724,22 +724,30 @@
     stop-token/tmux binding runtime + PID-exit observation helper (#2426),
     split before adding non-bugfix behavior. #3169: added the
     claude-anonymous-teardown SIGINT suppression guard (death #3)).
-  - `src/services/discord/turn_bridge/mod.rs` (8417 prod lines; the BRIDGE
+  - `src/services/discord/turn_bridge/mod.rs` (6778 prod lines; the BRIDGE
     spawn/turn-lifecycle surface — `spawn_turn_bridge` and the per-channel
-    turn loop. Registered giant-file (#3016 decompose target — see
+    turn loop. Registered giant-file (#3038 decompose target — see
     `giant-file-registry.md`, owner `discord-relay`, deadline 2026-08-31).
     It surfaced as a giant only after #3028 fixed the prod/test splitter: an
     unterminated char-literal scan on a Rust lifetime (`&'a self`) inside the
     first inline `#[cfg(test)] mod` block over-extended the block to EOF, so
     most of the production code was mislabeled test and the file reported only
-    626 prod LoC. Hotfile — bugfix only outside the #3016/#3028 decompose plan).
+    626 prod LoC. #3038 turn_bridge S1 moved six helper-zone clusters out of
+    the root while leaving the `spawn_turn_bridge` async body byte-identical:
+    `status_panel.rs` (437 prod; tests split to `status_panel_tests.rs`),
+    `voice_completion.rs` (385 prod; tests split to
+    `voice_completion_tests.rs`), `headless_delivery.rs` (415 prod),
+    `memory_lifecycle.rs` background-memory observation, `turn_analytics.rs`
+    analytics persistence, and `terminal_delivery.rs` confirmed-end advance.
+    Hotfile — bugfix only outside the #3038 decompose plan).
   - `src/services/discord/turn_bridge/completion_guard.rs` (1834 lines).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (1545 lines).
-  - `src/services/discord/turn_bridge/terminal_delivery.rs` (504 prod lines;
+  - `src/services/discord/turn_bridge/terminal_delivery.rs` (604 prod lines;
     no longer a giant-file after the #3028 splitter fix corrected its inline
     `#[cfg(test)] mod` accounting (previously miscounted as 1341 prod). Its
-    giant-file-registry [[entry]] was removed. Split the lease wiring vs the
-    delivery helpers before adding behavior).
+    giant-file-registry [[entry]] was removed. #3038 turn_bridge S1 moved
+    `advance_tmux_relay_confirmed_end` here; split the remaining lease wiring
+    vs delivery helpers before adding behavior).
   - `src/services/discord/turn_finalizer.rs` (1526 prod lines; single-authority
     turn-finalize state machine — ledger/actor-loop/reconciler. Crossed the
     giant-file threshold when #3041 P1-0 added the dormant `DeliveryLeaseCell`
