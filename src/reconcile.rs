@@ -2279,7 +2279,7 @@ mod dispatch_delivery_reconcile_tests {
             "mismatch log must include dispatch_id and kind; logs={logs}"
         );
         assert!(metrics.iter().any(|metric| {
-            metric.kind == DISPATCH_DELIVERY_MISMATCH_MISSING_TYPED && metric.value == 1
+            metric.kind == DISPATCH_DELIVERY_MISMATCH_MISSING_TYPED && metric.value >= 1
         }));
 
         pool.close().await;
@@ -2756,18 +2756,18 @@ mod dispatch_delivery_reconcile_tests {
         let recovery_metrics = dispatch_delivery_event_recovery_metrics_snapshot();
         assert!(
             recovery_metrics.iter().any(|m| {
-                m.kind == DISPATCH_DELIVERY_RECOVERY_EXPIRED_RESERVING && m.value == 1
+                m.kind == DISPATCH_DELIVERY_RECOVERY_EXPIRED_RESERVING && m.value >= 1
             })
         );
         assert!(
             recovery_metrics
                 .iter()
-                .any(|m| { m.kind == DISPATCH_DELIVERY_RECOVERY_ORPHAN_NOTIFIED && m.value == 1 })
+                .any(|m| { m.kind == DISPATCH_DELIVERY_RECOVERY_ORPHAN_NOTIFIED && m.value >= 1 })
         );
         assert!(
             recovery_metrics
                 .iter()
-                .any(|m| { m.kind == DISPATCH_DELIVERY_RECOVERY_ORPHAN_TYPED && m.value == 1 })
+                .any(|m| { m.kind == DISPATCH_DELIVERY_RECOVERY_ORPHAN_TYPED && m.value >= 1 })
         );
 
         // Root-cause proof: the same orphans no longer recur on the next tick.

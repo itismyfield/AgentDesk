@@ -4360,7 +4360,7 @@ mod no_ttl_evict_tests {
 
 #[cfg(test)]
 mod persistence_tests {
-    use super::test_support::TEST_ENV_LOCK;
+    use super::test_support::lock_test_env;
     use super::*;
     use std::path::{Path, PathBuf};
 
@@ -4457,7 +4457,7 @@ mod persistence_tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn enqueue_rolls_back_when_pending_queue_persistence_fails() {
-        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         let _env_guard = EnvGuard::set_root(tmp.path());
         std::fs::write(tmp.path().join("runtime"), "not-a-directory").unwrap();
@@ -4499,7 +4499,7 @@ mod persistence_tests {
 
     #[test]
     fn pending_queue_roundtrip_preserves_author_is_bot() {
-        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         let _env_guard = EnvGuard::set_root(tmp.path());
 
@@ -4541,7 +4541,7 @@ mod persistence_tests {
 
     #[test]
     fn pending_queue_roundtrip_preserves_voice_announcement_payload() {
-        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         let _env_guard = EnvGuard::set_root(tmp.path());
 
@@ -4578,7 +4578,7 @@ mod persistence_tests {
 
     #[test]
     fn pending_queue_roundtrip_preserves_upload_context() {
-        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         let _env_guard = EnvGuard::set_root(tmp.path());
 
@@ -4615,7 +4615,7 @@ mod persistence_tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn actor_hydrate_from_disk_preserves_voice_announcement_payload() {
-        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         let _env_guard = EnvGuard::set_root(tmp.path());
 
@@ -4662,7 +4662,7 @@ mod persistence_tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn restart_drain_persists_voice_announcement_payload() {
-        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         let _env_guard = EnvGuard::set_root(tmp.path());
 
@@ -4699,7 +4699,7 @@ mod persistence_tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn restart_drain_all_reports_pending_queue_persistence_errors() {
-        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         let _env_guard = EnvGuard::set_root(tmp.path());
 

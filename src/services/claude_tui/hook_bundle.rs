@@ -735,6 +735,13 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn launch_self_check_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
     fn sample_config() -> HookBundleConfig {
         HookBundleConfig {
             endpoint: "http://127.0.0.1:49152".to_string(),
@@ -886,6 +893,7 @@ mod tests {
 
     #[test]
     fn run_codex_hook_launch_self_check_dedupes_repeated_calls() {
+        let _lock = launch_self_check_test_lock();
         // Per-launch check warns once per (canonical_path, version-or-mtime)
         // combo and returns true on subsequent invocations for the same binary
         // identity.
@@ -905,6 +913,7 @@ mod tests {
 
     #[test]
     fn run_codex_hook_launch_self_check_redetects_after_in_place_upgrade() {
+        let _lock = launch_self_check_test_lock();
         // Same path, different mtime → different cache key → fresh warning.
         reset_launch_self_check_cache_for_tests();
         let dir = tempfile::tempdir().unwrap();

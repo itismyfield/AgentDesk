@@ -2123,9 +2123,10 @@ mod tests {
     /// Process-wide mutex: `inflight_has_active_turn` resolves the inflight
     /// root from the PROCESS-WIDE `AGENTDESK_ROOT_DIR`, so the env-mutating
     /// tests must not race the rest of the suite.
-    fn active_turn_env_test_mutex() -> &'static std::sync::Mutex<()> {
-        static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        M.get_or_init(|| std::sync::Mutex::new(()))
+    fn lock_active_turn_env_test() -> std::sync::MutexGuard<'static, ()> {
+        crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
     }
 
     struct RootEnvGuard(Option<std::ffi::OsString>);
@@ -2160,9 +2161,7 @@ mod tests {
     /// as an ACTIVE turn, so the post job will skip.
     #[test]
     fn channel_has_active_turn_true_for_fresh_inflight() {
-        let _guard = active_turn_env_test_mutex()
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = lock_active_turn_env_test();
         let temp = tempfile::TempDir::new().unwrap();
         let _env = RootEnvGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
@@ -2182,9 +2181,7 @@ mod tests {
     /// post job must still post the recap. This is the no-false-skip guard.
     #[test]
     fn channel_has_active_turn_false_when_no_inflight() {
-        let _guard = active_turn_env_test_mutex()
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = lock_active_turn_env_test();
         let temp = tempfile::TempDir::new().unwrap();
         let _env = RootEnvGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
@@ -2205,9 +2202,7 @@ mod tests {
     /// watchdog treat such rows.
     #[test]
     fn channel_has_active_turn_false_for_stale_inflight() {
-        let _guard = active_turn_env_test_mutex()
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = lock_active_turn_env_test();
         let temp = tempfile::TempDir::new().unwrap();
         let _env = RootEnvGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
@@ -2247,7 +2242,8 @@ mod tests {
     /// `save_inflight_state` in `claim_tui_direct_synthetic_turn`. We simulate
     /// it by starting a mailbox turn through the global registry WITHOUT writing
     /// any inflight sidecar, then asserting the channel reads as active.
-    // SAFETY (await_holding_lock): `active_turn_env_test_mutex()` is a std Mutex
+    // SAFETY (await_holding_lock): `lock_active_turn_env_test()` holds the
+    // crate-wide std Mutex
     // held across awaits to serialize tests that mutate the process-global
     // `AGENTDESK_ROOT_DIR`; the hold must span the awaits so a concurrent test
     // cannot clobber the env mid-flight. Test-only.
@@ -2256,9 +2252,7 @@ mod tests {
     async fn channel_has_active_turn_true_for_mailbox_active_without_inflight() {
         // Isolate the inflight root so no stray sidecar leaks in — the mailbox
         // signal alone must carry the detection.
-        let _guard = active_turn_env_test_mutex()
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = lock_active_turn_env_test();
         let temp = tempfile::TempDir::new().unwrap();
         let _env = RootEnvGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
