@@ -241,6 +241,103 @@ pub(super) fn tui_quiescence_timeout_requires_inflight_retry(
     !terminal_delivery_committed
 }
 
+fn advance_tmux_relay_confirmed_end(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    confirmed_end_offset: Option<u64>,
+    tmux_session_name: Option<&str>,
+) {
+    let Some(target_end) = confirmed_end_offset.filter(|offset| *offset > 0) else {
+        return;
+    };
+
+    let relay_coord = shared.tmux_relay_coord(channel_id);
+
+    // #1270 codex P2 (round 4): capture the `.generation` mtime BEFORE
+    // attempting the CAS so the stored mtime is the one that was on disk
+    // when we decided to label `target_end` as delivered. Reading after
+    // the CAS opens a TOCTOU window where a fresh respawn writes a new
+    // `.generation` between our advance and our marker store, then the
+    // new mtime ends up paired with the OLD offset and the next
+    // regression check mis-classifies the next fresh respawn as
+    // same-wrapper rotation. There is still a residual race between this
+    // read and any advance that happens earlier in the watcher pipeline
+    // (the bytes labelled `target_end` were produced by some prior
+    // wrapper, which may already have been replaced before we got here);
+    // the fully race-free fix would carry the mtime from byte-read time
+    // through the delivery pipeline, but that's a bigger refactor and
+    // the typical timeline (cancel → multi-second wait → respawn) keeps
+    // this read aligned with the wrapper that produced the bytes.
+    let mtime_at_attempt = tmux_session_name
+        .map(tmux_generation_file_mtime_ns)
+        .filter(|m| *m != 0);
+
+    let mut current = relay_coord
+        .confirmed_end_offset
+        .load(std::sync::atomic::Ordering::Acquire);
+    let mut won_advance = false;
+
+    while current < target_end {
+        match relay_coord.confirmed_end_offset.compare_exchange(
+            current,
+            target_end,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                won_advance = true;
+                break;
+            }
+            Err(observed) => current = observed,
+        }
+    }
+
+    // #964: observability timestamp — updated whenever the watermark advances
+    // (including the CAS-loser path, since that still proves a peer completed
+    // a relay) so `GET /api/channels/:id/watcher-state` can surface the most
+    // recent relay activity without blocking on disk state.
+    relay_coord.last_relay_ts_ms.store(
+        chrono::Utc::now().timestamp_millis(),
+        std::sync::atomic::Ordering::Release,
+    );
+
+    // Pair the pre-CAS mtime with the offset only when we actually won
+    // the advance. Losers and no-ops leave the mtime baseline alone so
+    // the legitimate winner's snapshot remains the one that labels the
+    // watermark (PR #1271 round 3).
+    if won_advance && let Some(mtime) = mtime_at_attempt {
+        relay_coord
+            .confirmed_end_generation_mtime_ns
+            .store(mtime, std::sync::atomic::Ordering::Release);
+    }
+
+    let confirmed_end = relay_coord
+        .confirmed_end_offset
+        .load(std::sync::atomic::Ordering::Acquire);
+    let confirmed_reached_target = confirmed_end >= target_end;
+    crate::services::observability::record_invariant_check(
+        confirmed_reached_target,
+        crate::services::observability::InvariantViolation {
+            provider: None,
+            channel_id: Some(channel_id.get()),
+            dispatch_id: None,
+            session_key: None,
+            turn_id: None,
+            invariant: "tmux_confirmed_end_monotonic",
+            code_location: "src/services/discord/turn_bridge/terminal_delivery.rs:advance_tmux_relay_confirmed_end",
+            message: "tmux relay confirmed_end_offset must reach the delivered output end",
+            details: serde_json::json!({
+                "target_end": target_end,
+                "confirmed_end": confirmed_end,
+            }),
+        },
+    );
+    debug_assert!(
+        confirmed_reached_target,
+        "tmux relay confirmed_end_offset must reach target end"
+    );
+}
+
 /// #3041 P1-2: per-channel global counter that mints a unique `instance_id` for
 /// each bridge delivery-lease attempt. `LeaseHolder::Bridge` has no `instance_id`
 /// field today (only the watcher's holder kind carries one), so the bridge holder
@@ -471,7 +568,7 @@ impl BridgeDeliveryLease {
         if committed && outcome == crate::services::discord::LeaseOutcome::Delivered {
             // B6: the ONLY confirmed_end advance on the bridge terminal path now
             // flows through this successful lease commit.
-            super::advance_tmux_relay_confirmed_end(
+            advance_tmux_relay_confirmed_end(
                 shared,
                 watcher_owner_channel_id,
                 Some(self.end),
