@@ -18,9 +18,7 @@
 //! `removed_token.is_some()`, a double-finalize is a harmless no-op — never an
 //! underflow, never a double Discord notice.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use serenity::model::id::ChannelId;
 // `tokio::time::Instant` (not `std::time::Instant`) so deadlines respect the
@@ -34,6 +32,8 @@ use crate::services::provider::{CancelToken, ProviderKind};
 use super::SharedData;
 // #3041 P1-0: dormant lease types for the *Delivery messages below (mod.rs §2-§3).
 use super::{DeliveryLeaseCell, LeaseHolder, LeaseOutcome};
+
+mod cleanup;
 
 /// How often the reconciler `Tick` fires to re-check deadline-armed
 /// gate-timeout entries and garbage-collect the ledger.
@@ -214,12 +214,6 @@ pub(in crate::services::discord) enum TerminalEvent {
     #[allow(dead_code)]
     // #3034: handled by the finalizer + tested, but not yet emitted in prod.
     RelayMiss,
-}
-
-impl TerminalEvent {
-    fn is_cancel(&self) -> bool {
-        matches!(self, TerminalEvent::Cancel)
-    }
 }
 
 /// Per-submission knobs that keep each routed call-site behaviourally
@@ -537,10 +531,10 @@ impl TurnFinalizer {
             .tx
             .send(FinalizeMsg::Terminal {
                 key,
-                provider,
-                event,
+                provider: provider.clone(),
+                event: event.clone(),
                 ctx,
-                shared,
+                shared: shared.clone(),
                 ack,
             })
             .is_err()
@@ -549,7 +543,13 @@ impl TurnFinalizer {
             // submitter does no further bookkeeping.
             return FinalizeOutcome::AlreadyFinalized;
         }
-        rx.await.unwrap_or(FinalizeOutcome::AlreadyFinalized)
+        let Ok(out) = rx.await else {
+            return FinalizeOutcome::AlreadyFinalized;
+        };
+        if matches!(out, FinalizeOutcome::AlreadyFinalized) {
+            cleanup::already_finalized_active_state(key, &provider, &event, ctx, &shared).await;
+        }
+        out
     }
 
     /// #3041: route a three-way `CommitDelivery` through the actor so the lease
@@ -1055,7 +1055,7 @@ async fn do_finalize(
         // post-terminal `cancelled` flip as a live mid-stream cancel. A real
         // cancel must NOT mark completion-cleanup; nor does the watcher path
         // (it historically only set `cancelled`).
-        if ctx.allow_completion_cleanup && !event.is_cancel() {
+        if ctx.allow_completion_cleanup && !matches!(event, TerminalEvent::Cancel) {
             token.mark_completion_cleanup();
         }
         // Stop any lingering watchdog timer from firing on a newer turn's
@@ -1617,6 +1617,190 @@ mod tests {
                 )
                 .await;
             assert!(matches!(second, FinalizeOutcome::AlreadyFinalized));
+        })
+        .await;
+    }
+
+    /// #3274 residual: a terminal loser that receives `AlreadyFinalized` must
+    /// still perform identity-guarded active-state cleanup. This models the
+    /// bridge/watcher migration gap where the ledger says "done" but the same
+    /// turn's mailbox token and durable inflight row survived the winner path.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn already_finalized_loser_cleans_same_turn_mailbox_and_inflight() {
+        use crate::services::discord::inflight::{InflightTurnState, save_inflight_state};
+        use serenity::model::id::{MessageId, UserId};
+
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            let fin = TurnFinalizer::spawn();
+            let ch = ChannelId::new(3274);
+            let turn_id = 3274_1001u64;
+            let key = TurnKey::new(ch, turn_id, 0);
+
+            fin.register_start(key, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
+            let first = fin
+                .submit_terminal(
+                    key,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(matches!(first, FinalizeOutcome::Finalized { .. }));
+
+            let token = Arc::new(CancelToken::new());
+            shared.global_active.store(1, Ordering::Relaxed);
+            shared
+                .mailbox(ch)
+                .restore_active_turn(token.clone(), UserId::new(7), MessageId::new(turn_id))
+                .await;
+            let inflight = InflightTurnState::new(
+                ProviderKind::Claude,
+                ch.get(),
+                None,
+                7,
+                turn_id,
+                turn_id + 1,
+                "prompt".to_string(),
+                None,
+                Some("AgentDesk-claude-adk-cc-3274".to_string()),
+                None,
+                None,
+                0,
+            );
+            save_inflight_state(&inflight).expect("persist same-turn inflight");
+
+            let late = fin
+                .submit_terminal(
+                    key,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+
+            assert!(matches!(late, FinalizeOutcome::AlreadyFinalized));
+            assert!(
+                crate::services::discord::inflight::load_inflight_state(
+                    &ProviderKind::Claude,
+                    ch.get(),
+                )
+                .is_none(),
+                "AlreadyFinalized loser must clear the matching stale inflight row"
+            );
+            assert!(
+                shared.mailbox(ch).snapshot().await.cancel_token.is_none(),
+                "AlreadyFinalized loser must release the matching stale mailbox token"
+            );
+            assert!(
+                token.cancelled.load(Ordering::Relaxed),
+                "removed token must be marked cancelled so watchdog observers stop"
+            );
+            assert_eq!(
+                shared.global_active.load(Ordering::Relaxed),
+                0,
+                "cleanup decrements the active counter exactly when it removes a token"
+            );
+        })
+        .await;
+    }
+
+    /// #3274 residual safety: the `AlreadyFinalized` cleanup is keyed to the
+    /// terminal's turn id. A stale turn-1 loser must not clear turn-2's active
+    /// mailbox token or durable inflight row.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn already_finalized_loser_preserves_newer_turn_active_state() {
+        use crate::services::discord::inflight::{InflightTurnState, save_inflight_state};
+        use serenity::model::id::{MessageId, UserId};
+
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            let fin = TurnFinalizer::spawn();
+            let ch = ChannelId::new(3275);
+            let turn1_id = 3275_1001u64;
+            let turn2_id = 3275_1002u64;
+            let turn1 = TurnKey::new(ch, turn1_id, 0);
+
+            fin.register_start(
+                turn1,
+                ProviderKind::Claude,
+                RelayOwnerKind::Watcher,
+                &shared,
+            );
+            let _ = fin
+                .submit_terminal(
+                    turn1,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+
+            let turn2_token = Arc::new(CancelToken::new());
+            shared.global_active.store(1, Ordering::Relaxed);
+            shared
+                .mailbox(ch)
+                .restore_active_turn(
+                    turn2_token.clone(),
+                    UserId::new(7),
+                    MessageId::new(turn2_id),
+                )
+                .await;
+            let turn2_inflight = InflightTurnState::new(
+                ProviderKind::Claude,
+                ch.get(),
+                None,
+                7,
+                turn2_id,
+                turn2_id + 1,
+                "turn-2 prompt".to_string(),
+                None,
+                Some("AgentDesk-claude-adk-cc-3275".to_string()),
+                None,
+                None,
+                0,
+            );
+            save_inflight_state(&turn2_inflight).expect("persist turn-2 inflight");
+
+            let late = fin
+                .submit_terminal(
+                    turn1,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+
+            assert!(matches!(late, FinalizeOutcome::AlreadyFinalized));
+            let snapshot = shared.mailbox(ch).snapshot().await;
+            assert!(
+                snapshot.cancel_token.is_some(),
+                "stale AlreadyFinalized cleanup must not release turn-2's token"
+            );
+            assert_eq!(
+                snapshot.active_user_message_id,
+                Some(MessageId::new(turn2_id)),
+                "turn-2 must remain the active mailbox owner"
+            );
+            assert!(
+                !turn2_token.cancelled.load(Ordering::Relaxed),
+                "turn-2 token must not be marked cancelled by turn-1 cleanup"
+            );
+            let persisted = crate::services::discord::inflight::load_inflight_state(
+                &ProviderKind::Claude,
+                ch.get(),
+            )
+            .expect("turn-2 inflight must survive stale cleanup");
+            assert_eq!(persisted.user_msg_id, turn2_id);
+            assert_eq!(
+                shared.global_active.load(Ordering::Relaxed),
+                1,
+                "stale cleanup must not decrement the newer live turn"
+            );
         })
         .await;
     }

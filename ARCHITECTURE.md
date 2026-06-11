@@ -486,6 +486,8 @@ src/
 │   │   │   ├── tmux_runtime.rs
 │   │   │   ├── turn_analytics.rs
 │   │   │   └── watcher_handoff.rs
+│   │   ├── turn_finalizer/
+│   │   │   └── cleanup.rs
 │   │   ├── watchers/
 │   │   │   ├── lifecycle.rs
 │   │   │   └── lifecycle_decision.rs
