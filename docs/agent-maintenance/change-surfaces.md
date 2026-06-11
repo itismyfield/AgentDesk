@@ -131,8 +131,12 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (9580 lines after #2558
-    dead-code sweep; #3016 phase-5b2 removed the `mailbox_finalize_owed`
+  - `src/services/discord/tmux_watcher.rs` (8122 production lines after
+    #3038 tmux_watcher S1 moved top-level decision clusters A/B/C/E/F/I/J/K
+    into `tmux_watcher/` child modules: `liveness.rs` (301),
+    `panel_decisions.rs` (372), `prompt_observe.rs` (109),
+    `turn_identity.rs` (327), `completion_gate.rs` (275), and
+    `commit_decisions.rs` (140). #3016 phase-5b2 removed the `mailbox_finalize_owed`
     swap reads, the watcher-fn flag params, and the `LegacyFlagGated`
     decision variant; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
@@ -377,8 +381,9 @@
     no-op → its inflight survives. The window is closed atomically (no separate
     re-read). The finalize-skip stays a SEPARATE pinned-snapshot decision in
     `watcher_fresh_idle_finalize_decision`; only the destructive CLEAR moved to the
-    atomic helper. The CANONICAL normal-completion clear (tmux_watcher.rs ~11251)
-    still uses the weaker non-atomic re-read+clear pattern — left UNCHANGED (out of
+    atomic helper. The CANONICAL normal-completion clear in the
+    `tmux_watcher.rs` root loop still uses the weaker non-atomic re-read+clear
+    pattern — left UNCHANGED (out of
     scope; the S3 arm is now strictly safer). Test
     `fresh_idle_clear_gate_skips_when_late_reread_is_newer_turn` rewritten to drive
     the REAL atomic helper against REAL on-disk inflight: a follow-up's inflight on
@@ -400,7 +405,7 @@
     kill the turn mid-work. Deferring on emptiness reconstructs the OLD
     `delegated_finalize_owed && empty → defer` gate without the flag (`owed` was
     ~always true for a delegated `Unknown`), and the 5a 1800s far-backstop remains its
-    finalizer. The defer gate (tmux_watcher.rs ~7657) likewise defers `PausedLive` and
+    finalizer. The defer gate in the `tmux_watcher.rs` root loop likewise defers `PausedLive` and
     EMPTY `Unknown`; `Done` (JSONL terminator) finalizes even when empty; the
     paused/epoch abort + stale-for-newer-turn skip race guards are kept exactly on
     both finalize arms. The now-unreachable `LegacyFlagGated` exec arm is a defensive
@@ -436,8 +441,9 @@
     own-identity pin + uncapped-while-pinned disposition; sweeper TTL/hard-cap
     `⚠` fallback + commit-tombstone 대조 semantics unchanged); the #3296
     additions are offset in-file by compressing the #3016-S3 finalize/TOCTOU
-    and #1670/#1708 decoupling comment blocks, so the 9583 ratchet baseline is
-    unchanged (#3303 itself is a 0-line watcher change).
+    and #1670/#1708 decoupling comment blocks. #3038 tmux_watcher S1 then lowered
+    the ratchet baseline to 8122 by moving pure decision clusters into the
+    capped `tmux_watcher/` child modules.
   - `src/services/discord/tui_prompt_relay.rs` (5429 production lines; #3296
     codex r1+r2: the ABORT cleanup hook pins the foreign prior inflight's
     identity — the live row at the record instant, or the worker's LAST-VIEW
