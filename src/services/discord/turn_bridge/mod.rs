@@ -23,7 +23,7 @@ use crate::db::session_observability::{
     mark_session_tool_use_pg,
 };
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
-use crate::db::turns::{PersistTurnOwned, TurnTokenUsage};
+use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::{
     RuntimeHandoff, RuntimeHandoffKind, StatusEvent, TaskNotificationKind,
 };
@@ -220,9 +220,11 @@ use terminal_delivery::{
     turn_bridge_replace_outcome_committed,
 };
 use tmux_runtime::is_dcserver_restart_command;
+pub(super) use turn_analytics::persist_turn_analytics_row_with_handles;
 use turn_analytics::{
     assert_response_sent_offset_progress, discord_turn_id, emit_turn_quality_event,
-    record_turn_bridge_invariant, turn_duration_ms,
+    record_turn_bridge_invariant, resolve_exact_completion_usage, total_model_input_tokens,
+    turn_duration_ms,
 };
 use voice_completion::{
     json_any_true_flag, resolve_voice_turn_link_for_playback, voice_background_completion_target,
@@ -1773,179 +1775,6 @@ fn maybe_refresh_active_turn_activity_heartbeat_at(
     _last_heartbeat_at: &mut Option<std::time::Instant>,
     _now: std::time::Instant,
 ) {
-}
-
-fn total_model_input_tokens(
-    input_tokens: u64,
-    cache_create_tokens: u64,
-    cache_read_tokens: u64,
-) -> u64 {
-    input_tokens
-        .saturating_add(cache_create_tokens)
-        .saturating_add(cache_read_tokens)
-}
-
-struct TurnAnalyticsSnapshot {
-    output_path: Option<String>,
-    output_start_offset: u64,
-    output_end_offset: Option<u64>,
-    fallback_session_id: Option<String>,
-    fallback_token_usage: TurnTokenUsage,
-    inflight_session_id: Option<String>,
-}
-
-impl TurnAnalyticsSnapshot {
-    fn capture(
-        inflight_state: &InflightTurnState,
-        fallback_session_id: Option<&str>,
-        fallback_token_usage: TurnTokenUsage,
-    ) -> Self {
-        Self {
-            output_path: inflight_state.output_path.clone(),
-            output_start_offset: inflight_state
-                .turn_start_offset
-                .unwrap_or(inflight_state.last_offset),
-            output_end_offset: inflight_state
-                .output_path
-                .as_ref()
-                .map(|_| inflight_state.last_offset),
-            fallback_session_id: fallback_session_id.map(str::to_string),
-            fallback_token_usage,
-            inflight_session_id: inflight_state.session_id.clone(),
-        }
-    }
-}
-
-fn resolve_output_analytics_snapshot(
-    snapshot: &TurnAnalyticsSnapshot,
-) -> (Option<String>, TurnTokenUsage) {
-    let (output_session_id, output_token_usage) = snapshot
-        .output_path
-        .as_deref()
-        .map(|path| {
-            crate::services::session_backend::extract_turn_analytics_from_output_range(
-                path,
-                snapshot.output_start_offset,
-                snapshot.output_end_offset,
-            )
-        })
-        .unwrap_or((None, None));
-
-    (
-        output_session_id
-            .or_else(|| snapshot.fallback_session_id.clone())
-            .or_else(|| snapshot.inflight_session_id.clone()),
-        output_token_usage.unwrap_or(snapshot.fallback_token_usage),
-    )
-}
-
-/// #2849: resolve the EXACT final context-occupancy token usage for the
-/// completed status panel, or `None` if no exact usage exists anywhere.
-///
-/// Prefers the live accumulated snapshot (occupancy > 0). If the live
-/// `StatusUpdate`s never carried token data — common for silent/background
-/// turns — it re-parses the output JSONL range exactly as persisted analytics
-/// does via [`resolve_output_analytics_snapshot`]. Returns `None` when neither
-/// source yields non-zero occupancy, so callers never fabricate numbers and
-/// never reuse stale prior-turn usage.
-fn resolve_exact_completion_usage(
-    inflight_state: &InflightTurnState,
-    fallback_session_id: Option<&str>,
-    accumulated: TurnTokenUsage,
-) -> Option<TurnTokenUsage> {
-    if accumulated.context_occupancy_input_tokens() > 0 {
-        return Some(accumulated);
-    }
-    let snapshot = TurnAnalyticsSnapshot::capture(inflight_state, fallback_session_id, accumulated);
-    let (_session_id, usage) = resolve_output_analytics_snapshot(&snapshot);
-    (usage.context_occupancy_input_tokens() > 0).then_some(usage)
-}
-
-pub(super) fn persist_turn_analytics_row_with_handles(
-    _db: Option<&crate::db::Db>,
-    pg_pool: Option<&sqlx::PgPool>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    user_msg_id: MessageId,
-    role_binding: Option<&RoleBinding>,
-    dispatch_id: Option<&str>,
-    session_key: Option<&str>,
-    session_id: Option<&str>,
-    inflight_state: &InflightTurnState,
-    token_usage: TurnTokenUsage,
-    duration_ms: i64,
-) {
-    let thread_id = inflight_state
-        .thread_id
-        .map(|value| value.to_string())
-        .or_else(|| {
-            inflight_state
-                .channel_name
-                .as_deref()
-                .and_then(crate::services::discord::adk_session::parse_thread_channel_id_from_name)
-                .map(|value| value.to_string())
-        });
-    let turn_id = discord_turn_id(provider, channel_id, Some(user_msg_id), session_key, None);
-    let session_key = session_key.map(str::to_string);
-    let thread_title = inflight_state.thread_title.clone();
-    let persisted_channel_id = inflight_state
-        .logical_channel_id
-        .unwrap_or(channel_id.get())
-        .to_string();
-    let agent_id = role_binding.map(|binding| binding.role_id.clone());
-    let provider_name = provider.as_str().to_string();
-    let dispatch_id = dispatch_id
-        .map(str::to_string)
-        .or_else(|| inflight_state.dispatch_id.clone());
-    let started_at = inflight_state.started_at.clone();
-    let analytics_snapshot =
-        TurnAnalyticsSnapshot::capture(inflight_state, session_id, token_usage);
-    let (resolved_session_id, resolved_token_usage) =
-        resolve_output_analytics_snapshot(&analytics_snapshot);
-    let entry = PersistTurnOwned {
-        turn_id,
-        session_key,
-        thread_id,
-        thread_title,
-        channel_id: persisted_channel_id,
-        agent_id,
-        provider: Some(provider_name),
-        session_id: resolved_session_id,
-        dispatch_id,
-        started_at: Some(started_at),
-        finished_at: Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
-        duration_ms: Some(duration_ms),
-        token_usage: resolved_token_usage,
-    };
-    let pg_pool = pg_pool.cloned();
-    let persist_pg = move |pg_pool: sqlx::PgPool, entry: PersistTurnOwned| async move {
-        if let Err(error) = crate::db::turns::upsert_turn_owned_db(Some(&pg_pool), &entry).await {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!("  [{ts}] ⚠ failed to persist turn analytics row: {error}");
-        }
-    };
-
-    let Some(pg_pool) = pg_pool else {
-        return;
-    };
-    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-        let _ = runtime.spawn(persist_pg(pg_pool, entry));
-        return;
-    }
-    match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => {
-            runtime.block_on(persist_pg(pg_pool, entry));
-        }
-        Err(error) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                "  [{ts}] ⚠ failed to create runtime for turn analytics persistence: {error}"
-            );
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
