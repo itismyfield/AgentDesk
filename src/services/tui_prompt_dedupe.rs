@@ -1187,6 +1187,14 @@ pub(crate) fn prompts_match(expected: &str, observed: &str) -> bool {
     if expected_trimmed == observed_trimmed {
         return true;
     }
+    if let (Some(expected_command), Some(observed_command)) = (
+        slash_command_prompt_key(&expected_trimmed),
+        slash_command_prompt_key(&observed_trimmed),
+    ) {
+        if expected_command == observed_command {
+            return true;
+        }
+    }
     let expected_fuzzy = fuzzy_prompt_key(&expected_trimmed);
     let observed_fuzzy = fuzzy_prompt_key(&observed_trimmed);
     if expected_fuzzy == observed_fuzzy {
@@ -1205,6 +1213,60 @@ fn fuzzy_prompt_key(value: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SlashCommandPromptKey {
+    name: String,
+    args: String,
+}
+
+fn slash_command_prompt_key(value: &str) -> Option<SlashCommandPromptKey> {
+    slash_command_xml_prompt_key(value).or_else(|| slash_command_invocation_prompt_key(value))
+}
+
+fn slash_command_xml_prompt_key(value: &str) -> Option<SlashCommandPromptKey> {
+    let trimmed = value.trim();
+    if !(trimmed.starts_with("<command-message>") || trimmed.starts_with("<command-name>")) {
+        return None;
+    }
+    let command_name = extract_xml_tag(trimmed, "command-name")?;
+    let (name, name_args) = parse_slash_command_invocation(command_name)?;
+    let args = extract_xml_tag(trimmed, "command-args")
+        .and_then(non_empty)
+        .unwrap_or(name_args);
+    Some(SlashCommandPromptKey {
+        name,
+        args: fuzzy_prompt_key(&args),
+    })
+}
+
+fn slash_command_invocation_prompt_key(value: &str) -> Option<SlashCommandPromptKey> {
+    let (name, args) = parse_slash_command_invocation(value)?;
+    Some(SlashCommandPromptKey {
+        name,
+        args: fuzzy_prompt_key(&args),
+    })
+}
+
+fn parse_slash_command_invocation(value: &str) -> Option<(String, String)> {
+    let trimmed = value.trim();
+    let (name, args) = match trimmed.split_once(char::is_whitespace) {
+        Some((name, args)) => (name, args),
+        None => (trimmed, ""),
+    };
+    if !name.starts_with('/') || name.len() <= 1 {
+        return None;
+    }
+    Some((name.to_ascii_lowercase(), args.trim().to_string()))
+}
+
+fn extract_xml_tag<'a>(value: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let after_open = value.split_once(&open)?.1;
+    let (body, _) = after_open.split_once(&close)?;
+    Some(body.trim())
 }
 
 fn normalize_provider(provider: &str) -> String {
@@ -2346,6 +2408,48 @@ mod tests {
     }
 
     #[test]
+    fn suppresses_recent_slash_command_xml_and_invocation_forms() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        let wrapper = "<command-message>loop</command-message>\n\
+                       <command-name>/loop</command-name>\n\
+                       <command-args>check relay gaps every 30m</command-args>";
+
+        assert_eq!(
+            observe_prompt_by_tmux("claude", "tmux-loop", wrapper),
+            PromptObservation::PublishedSshDirect
+        );
+        assert_eq!(
+            observe_prompt_by_tmux("claude", "tmux-loop", "/loop  check relay gaps every 30m"),
+            PromptObservation::SuppressedRecentDuplicate
+        );
+    }
+
+    #[test]
+    fn slash_command_dedupe_does_not_collapse_raw_args_or_other_commands() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        let wrapper = "<command-message>loop</command-message>\n\
+                       <command-name>/loop</command-name>\n\
+                       <command-args>check relay gaps every 30m</command-args>";
+
+        assert_eq!(
+            observe_prompt_by_tmux("claude", "tmux-loop", wrapper),
+            PromptObservation::PublishedSshDirect
+        );
+        assert_eq!(
+            observe_prompt_by_tmux("claude", "tmux-loop", "check relay gaps every 30m"),
+            PromptObservation::PublishedSshDirect,
+            "a real raw prompt matching only command args must not be dropped"
+        );
+        assert_eq!(
+            observe_prompt_by_tmux("claude", "tmux-loop", "/model check relay gaps every 30m"),
+            PromptObservation::PublishedSshDirect,
+            "a different slash command with the same args is a new submission"
+        );
+    }
+
+    #[test]
     fn pending_match_leaves_recent_tombstone_for_second_observer() {
         let _guard = TEST_LOCK.lock().unwrap();
         reset_state();
@@ -2421,6 +2525,58 @@ mod tests {
     }
 
     #[test]
+    fn ignores_live_loop_skill_expansion_meta_entry_after_command_xml_prompt() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        let command_args = "매 주기마다: (1) sonnet 모델 서브에이전트를 스폰해 \
+            **adk-cc 채널(1479671298497183835)만** 조사시키고 보고받는다";
+        let wrapper = format!(
+            "<command-message>loop</command-message>\n\
+             <command-name>/loop</command-name>\n\
+             <command-args>{command_args}</command-args>"
+        );
+        let command_json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": wrapper,
+            },
+            "timestamp": "2026-06-10T20:15:20.334Z",
+        });
+        let skill_expansion_json = serde_json::json!({
+            "type": "user",
+            "isMeta": true,
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": format!(
+                        "# /loop — schedule a recurring or self-paced prompt\n\n\
+                         Parse the input below into `[interval] <prompt…>` and schedule it.\n\n\
+                         ## Input\n\n{command_args}"
+                    ),
+                }],
+            },
+            "timestamp": "2026-06-10T20:15:20.334Z",
+        });
+
+        let prompt = extract_claude_transcript_user_prompt(&command_json).expect("command prompt");
+        assert_eq!(
+            observe_prompt_by_tmux("claude", "tmux-loop", &prompt),
+            PromptObservation::PublishedSshDirect
+        );
+        assert_eq!(
+            extract_claude_transcript_user_prompt(&skill_expansion_json),
+            None,
+            "Claude records slash-command skill expansion as isMeta=true machine context"
+        );
+        assert_eq!(
+            observe_prompt_by_tmux("claude", "tmux-loop", &prompt),
+            PromptObservation::SuppressedRecentDuplicate
+        );
+    }
+
+    #[test]
     fn ignores_claude_transcript_meta_user_message_text() {
         let json = serde_json::json!({
             "type": "user",
@@ -2435,6 +2591,39 @@ mod tests {
         });
 
         assert_eq!(extract_claude_transcript_user_prompt(&json), None);
+    }
+
+    #[test]
+    fn extracts_non_meta_claude_array_user_message_after_slash_command() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        let wrapper = "<command-message>loop</command-message>\n\
+                       <command-name>/loop</command-name>\n\
+                       <command-args>check relay gaps every 30m</command-args>";
+        assert_eq!(
+            observe_prompt_by_tmux("claude", "tmux-loop", wrapper),
+            PromptObservation::PublishedSshDirect
+        );
+
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "fresh array prompt" },
+                    { "type": "text", "text": "with attachment context" }
+                ],
+            },
+            "sessionId": "sess-tui",
+        });
+        let prompt = extract_claude_transcript_user_prompt(&json).expect("array prompt");
+
+        assert_eq!(prompt, "fresh array prompt\nwith attachment context");
+        assert_eq!(
+            observe_prompt_by_tmux("claude", "tmux-loop", &prompt),
+            PromptObservation::PublishedSshDirect,
+            "non-command array user content remains a real user submission"
+        );
     }
 
     #[test]

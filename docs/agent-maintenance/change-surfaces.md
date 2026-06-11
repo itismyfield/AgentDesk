@@ -638,7 +638,7 @@
     nested `usage` on the success result frame so watcher-owned codex turns
     persist token telemetry — never the session-cumulative
     `info.total_token_usage`).
-  - `src/services/tui_prompt_dedupe.rs` (1294 lines; shared TUI prompt
+  - `src/services/tui_prompt_dedupe.rs` (1356 lines; shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
     outside an extraction plan; +88 from #3041 P1-4 codex: a per-record
     `generation: u64` nonce on `ExternalInputRelayLease` (process-global
@@ -656,7 +656,9 @@
     `external_input_relay_lease` and derives both presence + generation from that one
     atomic read, closing the present/generation TOCTOU) plus its dedicated accessor unit
     test; the watcher-snapshot no-clobber regression test is retained, rewritten to take
-    its G1/G2 snapshots from `external_input_relay_lease(...).map(|l| l.generation)`).
+    its G1/G2 snapshots from `external_input_relay_lease(...).map(|l| l.generation)`;
+    +62 from #3304: slash-command canonical prompt keys for `<command-*>` XML vs
+    `/command args` dedupe, plus focused loop skill-expansion regressions).
   - `src/services/discord/recovery_engine.rs` (4090 lines; #3016 phase-5b2
     dropped the `mailbox_finalize_owed` construction from the three recovery
     watcher-spawn handles; +9 from #3166
