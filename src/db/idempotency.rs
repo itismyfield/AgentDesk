@@ -11,6 +11,18 @@
 //! [`record_response`] call stamps the row with the final status/body so
 //! later callers replay verbatim. [`gc_expired`] removes rows past their
 //! TTL and is intended to run on the existing tick loop.
+//!
+//! Current table-backed mutation inventory:
+//!
+//! - `phase-gate-repair` protects
+//!   `POST /api/queue/runs/{id}/phase-gates/repair`. The underlying repair
+//!   mutation is replay-safe: it locks candidate dispatch/gate rows and only
+//!   changes gates that are still pending/failed, so a second execution after
+//!   an unrecorded idempotency slot expires sees cleared gates as no-ops.
+//!   Crash window semantics are therefore explicit: retrying the same key
+//!   before expiry returns [`IdempotencyOutcome::InFlight`]; retrying after
+//!   expiry may re-execute the repair and returns a freshly generated response
+//!   rather than a replayed body.
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -27,7 +39,13 @@ pub const DEFAULT_IDEMPOTENCY_TTL: Duration = Duration::from_secs(60 * 60 * 24);
 pub enum IdempotencyOutcome {
     /// Row was just inserted — caller owns the lifecycle and must call
     /// [`record_response`] once the business logic resolves.
-    Created,
+    Created {
+        /// True when an expired slot was reclaimed inline by [`claim`].
+        /// Operators can use this to distinguish a fresh key from a
+        /// post-expiry re-execution after an earlier request never recorded
+        /// a response.
+        reclaimed_expired: bool,
+    },
     /// A prior call already finished — replay the cached response.
     Replay {
         status: u16,
@@ -54,8 +72,11 @@ pub enum IdempotencyOutcome {
 ///
 /// On a fresh key the function inserts a row with `response_status = NULL`
 /// (the "in-flight" sentinel) and returns [`IdempotencyOutcome::Created`].
-/// The caller MUST eventually call [`record_response`] — otherwise the row
-/// sits "in-flight" until its `expires_at` and the GC sweep removes it.
+/// The caller MUST eventually call [`record_response`] — otherwise retries
+/// see [`IdempotencyOutcome::InFlight`] until expiry. Once expired, [`claim`]
+/// reclaims the row in the same transaction and reports
+/// `Created { reclaimed_expired: true }`; this intentionally permits
+/// re-execution only for mutation paths that document replay-safety.
 ///
 /// The function performs the insert + lookup in a single short tx so two
 /// concurrent callers cannot both see an empty slot.
@@ -87,47 +108,113 @@ pub async fn claim(
 
     if inserted.is_some() {
         tx.commit().await?;
-        return Ok(IdempotencyOutcome::Created);
+        return Ok(IdempotencyOutcome::Created {
+            reclaimed_expired: false,
+        });
     }
 
     // Conflict path: load the existing row so we can decide between
-    // replay / in-flight / mismatch.
+    // expired re-execution / replay / in-flight / mismatch. FOR UPDATE
+    // serializes two contenders that both arrive after the slot has expired.
     let row = sqlx::query(
-        "SELECT request_fingerprint, response_status, response_body, completed_at
+        "SELECT request_fingerprint,
+                response_status,
+                response_body,
+                completed_at,
+                expires_at < NOW() AS is_expired
          FROM idempotency_keys
-         WHERE scope = $1 AND key = $2",
+         WHERE scope = $1 AND key = $2
+         FOR UPDATE",
     )
     .bind(scope)
     .bind(key)
     .fetch_optional(&mut *tx)
     .await?;
 
-    tx.commit().await?;
-
     let Some(row) = row else {
         // Row vanished between the INSERT conflict and the SELECT (likely
-        // GC-deleted). Treat the slot as free; caller will retry.
-        return Ok(IdempotencyOutcome::InFlight);
+        // GC-deleted). Try once to claim it as an expired re-execution.
+        let inserted = sqlx::query(
+            "INSERT INTO idempotency_keys (scope, key, request_fingerprint, caller, expires_at)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (scope, key) DO NOTHING
+             RETURNING scope",
+        )
+        .bind(scope)
+        .bind(key)
+        .bind(request_fingerprint)
+        .bind(caller)
+        .bind(expires_at)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        return if inserted.is_some() {
+            Ok(IdempotencyOutcome::Created {
+                reclaimed_expired: true,
+            })
+        } else {
+            Ok(IdempotencyOutcome::InFlight)
+        };
     };
+
+    let is_expired: bool = row.try_get("is_expired")?;
+    if is_expired {
+        sqlx::query(
+            "DELETE FROM idempotency_keys
+              WHERE scope = $1 AND key = $2",
+        )
+        .bind(scope)
+        .bind(key)
+        .execute(&mut *tx)
+        .await?;
+
+        let inserted = sqlx::query(
+            "INSERT INTO idempotency_keys (scope, key, request_fingerprint, caller, expires_at)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (scope, key) DO NOTHING
+             RETURNING scope",
+        )
+        .bind(scope)
+        .bind(key)
+        .bind(request_fingerprint)
+        .bind(caller)
+        .bind(expires_at)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        return if inserted.is_some() {
+            Ok(IdempotencyOutcome::Created {
+                reclaimed_expired: true,
+            })
+        } else {
+            Ok(IdempotencyOutcome::InFlight)
+        };
+    }
 
     let stored_fingerprint: String = row.try_get("request_fingerprint")?;
     if stored_fingerprint != request_fingerprint {
+        tx.commit().await?;
         return Ok(IdempotencyOutcome::FingerprintMismatch { stored_fingerprint });
     }
 
     let response_status: Option<i16> = row.try_get("response_status")?;
-    match response_status {
-        None => Ok(IdempotencyOutcome::InFlight),
+    let outcome = match response_status {
+        None => IdempotencyOutcome::InFlight,
         Some(status) => {
             let body: Option<Value> = row.try_get("response_body")?;
             let completed_at: Option<DateTime<Utc>> = row.try_get("completed_at")?;
-            Ok(IdempotencyOutcome::Replay {
+            IdempotencyOutcome::Replay {
                 status: status as u16,
                 body: body.unwrap_or(Value::Null),
                 completed_at: completed_at.unwrap_or_else(Utc::now),
-            })
+            }
         }
-    }
+    };
+
+    tx.commit().await?;
+    Ok(outcome)
 }
 
 /// Stamp the slot with the final response. Must be called for any slot
@@ -267,7 +354,12 @@ mod tests {
             )
             .await
             .expect("first claim");
-            assert!(matches!(first, IdempotencyOutcome::Created));
+            assert!(matches!(
+                first,
+                IdempotencyOutcome::Created {
+                    reclaimed_expired: false
+                }
+            ));
 
             // Record the response so subsequent claims replay.
             record_response(&pool, "test-scope", "key-1", 200, &json!({"ok": true}))
@@ -314,7 +406,12 @@ mod tests {
             )
             .await
             .expect("first claim");
-            assert!(matches!(first, IdempotencyOutcome::Created));
+            assert!(matches!(
+                first,
+                IdempotencyOutcome::Created {
+                    reclaimed_expired: false
+                }
+            ));
 
             // Slot 2: same key, same fingerprint, no response yet → InFlight.
             let second = claim(
@@ -328,6 +425,143 @@ mod tests {
             .await
             .expect("second claim");
             assert!(matches!(second, IdempotencyOutcome::InFlight));
+
+            pool.close().await;
+            pg_db.drop().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn crash_window_retry_blocks_until_expiry_then_reexecutes_replay_safe_mutation() {
+            let pg_db = TestPostgresDb::create().await;
+            let pool = pg_db.connect_and_migrate().await;
+
+            sqlx::query(
+                "CREATE TABLE idempotency_crash_window_effects (
+                    effect_key TEXT PRIMARY KEY,
+                    applied_count INTEGER NOT NULL DEFAULT 1
+                 )",
+            )
+            .execute(&pool)
+            .await
+            .expect("create effect table");
+
+            let first = claim(
+                &pool,
+                "test-scope",
+                "key-crash-window",
+                "fingerprint-A",
+                Some("agent:operator-1"),
+                DEFAULT_IDEMPOTENCY_TTL,
+            )
+            .await
+            .expect("first claim");
+            assert!(matches!(
+                first,
+                IdempotencyOutcome::Created {
+                    reclaimed_expired: false
+                }
+            ));
+
+            // Simulate the protected mutation committing, followed by a
+            // process crash before record_response. The mutation shape mirrors
+            // replay-safe repair paths: re-running after expiry is a no-op for
+            // an already-applied effect.
+            sqlx::query(
+                "INSERT INTO idempotency_crash_window_effects (effect_key)
+                 VALUES ('phase-gate-repair')
+                 ON CONFLICT (effect_key) DO NOTHING",
+            )
+            .execute(&pool)
+            .await
+            .expect("apply replay-safe mutation");
+
+            let retry_before_expiry = claim(
+                &pool,
+                "test-scope",
+                "key-crash-window",
+                "fingerprint-A",
+                Some("agent:operator-2"),
+                DEFAULT_IDEMPOTENCY_TTL,
+            )
+            .await
+            .expect("retry before expiry");
+            assert!(matches!(retry_before_expiry, IdempotencyOutcome::InFlight));
+
+            sqlx::query(
+                "UPDATE idempotency_keys
+                 SET expires_at = NOW() - INTERVAL '1 second'
+                 WHERE scope = 'test-scope' AND key = 'key-crash-window'",
+            )
+            .execute(&pool)
+            .await
+            .expect("expire unrecorded slot");
+
+            let retry_after_expiry = claim(
+                &pool,
+                "test-scope",
+                "key-crash-window",
+                "fingerprint-A",
+                Some("agent:operator-3"),
+                DEFAULT_IDEMPOTENCY_TTL,
+            )
+            .await
+            .expect("retry after expiry");
+            assert!(matches!(
+                retry_after_expiry,
+                IdempotencyOutcome::Created {
+                    reclaimed_expired: true
+                }
+            ));
+
+            sqlx::query(
+                "INSERT INTO idempotency_crash_window_effects (effect_key)
+                 VALUES ('phase-gate-repair')
+                 ON CONFLICT (effect_key) DO NOTHING",
+            )
+            .execute(&pool)
+            .await
+            .expect("re-run replay-safe mutation");
+
+            let applied_count = sqlx::query_scalar::<_, i32>(
+                "SELECT applied_count
+                 FROM idempotency_crash_window_effects
+                 WHERE effect_key = 'phase-gate-repair'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("effect count");
+            assert_eq!(
+                applied_count, 1,
+                "expired-key re-execution must not duplicate replay-safe effects"
+            );
+
+            record_response(
+                &pool,
+                "test-scope",
+                "key-crash-window",
+                200,
+                &json!({"ok": true, "reexecuted_after_expiry": true}),
+            )
+            .await
+            .expect("record response after re-execution");
+
+            let replay = claim(
+                &pool,
+                "test-scope",
+                "key-crash-window",
+                "fingerprint-A",
+                Some("agent:operator-4"),
+                DEFAULT_IDEMPOTENCY_TTL,
+            )
+            .await
+            .expect("claim after recorded re-execution");
+            match replay {
+                IdempotencyOutcome::Replay { status, body, .. } => {
+                    assert_eq!(status, 200);
+                    assert_eq!(body, json!({"ok": true, "reexecuted_after_expiry": true}));
+                }
+                other => panic!("expected Replay after recorded re-execution, got {other:?}"),
+            }
 
             pool.close().await;
             pg_db.drop().await;
@@ -348,7 +582,12 @@ mod tests {
             )
             .await
             .expect("first claim");
-            assert!(matches!(first, IdempotencyOutcome::Created));
+            assert!(matches!(
+                first,
+                IdempotencyOutcome::Created {
+                    reclaimed_expired: false
+                }
+            ));
 
             let second = claim(
                 &pool,

@@ -470,11 +470,17 @@ pub async fn repair_phase_gates(
     caller
         .verify(crate::services::kanban::resolve_requesting_agent_id_with_pg(pool, &headers).await);
 
-    // #2257 concern 5: Stripe-style idempotency-key handling. When the
-    // caller passes an `Idempotency-Key` header we claim the slot and
-    // either run the work fresh, replay a prior response, or reject the
-    // request because the key is either mid-flight or being reused with
-    // a different body. Behavior without the header is unchanged.
+    // #2257 concern 5 / #3318: Stripe-style idempotency-key handling.
+    // Inventory: this is currently the only route using the table-backed
+    // `idempotency_keys` claim/record helper. Full transaction coupling is
+    // not practical here without moving the phase-gate repair transaction
+    // boundary out of the DB module, so this route relies on the repair
+    // mutation's independent replay-safety: after a committed repair clears
+    // a gate, a later re-execution sees no pending/failed candidate to clear.
+    // Crash-window semantics are therefore:
+    // - crash before `record_response`, retry before expiry: 409 in-flight;
+    // - retry after expiry: repair re-executes and logs expired re-execution;
+    // - completed slot: response is replayed verbatim.
     let idempotency_slot = if let (Some(key), Some(fingerprint)) =
         (idempotency_key.as_ref(), request_fingerprint.as_ref())
     {
@@ -488,7 +494,10 @@ pub async fn repair_phase_gates(
         )
         .await
         {
-            Ok(crate::db::idempotency::IdempotencyOutcome::Created) => Some(key.clone()),
+            Ok(crate::db::idempotency::IdempotencyOutcome::Created { reclaimed_expired }) => {
+                audit_phase_gate_repair_idempotency_claimed(&id, &caller, key, reclaimed_expired);
+                Some(key.clone())
+            }
             Ok(crate::db::idempotency::IdempotencyOutcome::Replay { status, body, .. }) => {
                 audit_phase_gate_repair_rejected(
                     &id,
@@ -710,6 +719,31 @@ fn audit_phase_gate_repair_rejected(
         outcome = %outcome,
         error = %error,
         "[auto-queue] phase-gate repair rejected"
+    );
+}
+
+fn audit_phase_gate_repair_idempotency_claimed(
+    run_id: &str,
+    caller: &RepairCaller,
+    key: &str,
+    reclaimed_expired: bool,
+) {
+    let ctx = AutoQueueLogContext::new().run(run_id);
+    let span = crate::services::auto_queue::auto_queue_trace_span("phase_gate_repair", &ctx);
+    let _guard = span.enter();
+    let outcome = if reclaimed_expired {
+        "idempotency_expired_reexecution"
+    } else {
+        "idempotency_claimed"
+    };
+    tracing::info!(
+        caller = %caller.audit_label(),
+        caller_verified = caller.verified.is_some(),
+        caller_claimed = %caller.claimed,
+        idempotency_key = %key,
+        idempotency_reclaimed_expired = reclaimed_expired,
+        outcome = outcome,
+        "[auto-queue] phase-gate repair idempotency slot claimed"
     );
 }
 
