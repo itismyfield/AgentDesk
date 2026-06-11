@@ -29,8 +29,49 @@ jobs:
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
 
-      - name: dashboard build/test
+      # PR-required gate: build + Vitest only (verify-dashboard.sh).
+      # Playwright smoke is intentionally nightly-only — see issue #3316.
+      - name: dashboard build/test (PR gate path)
         run: ./scripts/verify-dashboard.sh
+
+  # Playwright smoke is a nightly-only lane: it requires a headed Chromium
+  # browser and takes longer than the fast PR gate allows.  Kept separate so
+  # PR-required branch protection is never affected by E2E flakiness.
+  dashboard_playwright:
+    name: Dashboard Playwright smoke (nightly)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+        working-directory: dashboard
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+        working-directory: dashboard
+
+      - name: Dashboard Playwright smoke
+        id: playwright
+        run: npm run test:e2e
+        working-directory: dashboard
+
+      - name: Upload Playwright report on failure
+        if: failure() && steps.playwright.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ github.run_id }}
+          path: |
+            dashboard/playwright-report/
+            dashboard/test-results/
+          retention-days: 14
 
   full_macos:
     name: Full tests (macos-latest)
