@@ -616,7 +616,7 @@ async fn apply_relay_recovery_decision(
                 shared
                     .dispatch_thread_parents
                     .retain(|_, thread| *thread != channel);
-                shared.recovering_channels.remove(&channel);
+                shared.restart.recovering_channels.remove(&channel);
                 shared.turn_start_times.remove(&channel);
                 if !finish.has_pending {
                     shared.dispatch_role_overrides.remove(&channel);

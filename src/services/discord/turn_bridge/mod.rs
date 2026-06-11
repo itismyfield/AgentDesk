@@ -1963,7 +1963,7 @@ fn handle_watcher_runtime_handoff(
                 super::turn_finalizer::TurnKey::new(
                     channel_id,
                     inflight_state.user_msg_id,
-                    shared_owned.current_generation,
+                    shared_owned.restart.current_generation,
                 ),
                 provider.clone(),
                 super::inflight::RelayOwnerKind::Watcher,
@@ -3876,7 +3876,7 @@ pub(super) fn spawn_turn_bridge(
                                         super::turn_finalizer::TurnKey::new(
                                             channel_id,
                                             inflight_state.user_msg_id,
-                                            shared_owned.current_generation,
+                                            shared_owned.restart.current_generation,
                                         ),
                                         provider.clone(),
                                         super::inflight::RelayOwnerKind::Watcher,
@@ -4752,10 +4752,10 @@ pub(super) fn spawn_turn_bridge(
         // Mark this turn as finalizing — deferred restart must wait until we finish
         // sending the Discord response and cleaning up state.
         shared_owned
-            .finalizing_turns
+            .restart.finalizing_turns
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         shared_owned
-            .global_finalizing
+            .restart.global_finalizing
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // #2293/#2780 — hoist the TUI completion gate BEFORE the visible
         // completion/status cleanup so we can still suppress `응답 완료` when
@@ -4856,7 +4856,7 @@ pub(super) fn spawn_turn_bridge(
             // phase-5b2).
             let handoff_recorded = shared_owned
                 .turn_finalizer
-                .has_live_watcher_pending(channel_id, shared_owned.current_generation)
+                .has_live_watcher_pending(channel_id, shared_owned.restart.current_generation)
                 .await;
             record_turn_bridge_invariant(
                 handoff_recorded,
@@ -4900,7 +4900,7 @@ pub(super) fn spawn_turn_bridge(
                             // terminal that `turn_finalizer` already supports
                             // (recovery/orphan path) instead of panicking.
                             user_msg_id.map(|id| id.get()).unwrap_or(0),
-                            shared_owned.current_generation,
+                            shared_owned.restart.current_generation,
                         ),
                         provider.clone(),
                         if cancelled {
@@ -4991,7 +4991,7 @@ pub(super) fn spawn_turn_bridge(
                         // user_msg_id == 0 → channel-only terminal key, which
                         // turn_finalizer already supports (recovery/orphan path).
                         user_msg_id.map(|id| id.get()).unwrap_or(0),
-                        shared_owned.current_generation,
+                        shared_owned.restart.current_generation,
                     ),
                     provider.clone(),
                     if cancelled {
@@ -5301,7 +5301,7 @@ pub(super) fn spawn_turn_bridge(
                 super::turn_finalizer::TurnKey::new(
                     watcher_owner_channel_id,
                     inflight_state.user_msg_id,
-                    shared_owned.current_generation,
+                    shared_owned.restart.current_generation,
                 ),
                 inflight_state.turn_start_offset.unwrap_or(0),
                 tmux_last_offset,
@@ -5400,7 +5400,7 @@ pub(super) fn spawn_turn_bridge(
                 super::turn_finalizer::TurnKey::new(
                     watcher_owner_channel_id,
                     inflight_state.user_msg_id,
-                    shared_owned.current_generation,
+                    shared_owned.restart.current_generation,
                 ),
                 inflight_state.turn_start_offset.unwrap_or(0),
                 tmux_last_offset,
@@ -5831,7 +5831,7 @@ pub(super) fn spawn_turn_bridge(
                     super::turn_finalizer::TurnKey::new(
                         watcher_owner_channel_id,
                         inflight_state.user_msg_id,
-                        shared_owned.current_generation,
+                        shared_owned.restart.current_generation,
                     ),
                     inflight_state.turn_start_offset.unwrap_or(0),
                     tmux_last_offset,
@@ -5923,7 +5923,7 @@ pub(super) fn spawn_turn_bridge(
                             super::turn_finalizer::TurnKey::new(
                                 watcher_owner_channel_id,
                                 inflight_state.user_msg_id,
-                                shared_owned.current_generation,
+                                shared_owned.restart.current_generation,
                             ),
                             inflight_state.turn_start_offset.unwrap_or(0),
                             tmux_last_offset,
@@ -6016,7 +6016,7 @@ pub(super) fn spawn_turn_bridge(
                             super::turn_finalizer::TurnKey::new(
                                 watcher_owner_channel_id,
                                 inflight_state.user_msg_id,
-                                shared_owned.current_generation,
+                                shared_owned.restart.current_generation,
                             ),
                             inflight_state.turn_start_offset.unwrap_or(0),
                             tmux_last_offset,
@@ -7284,10 +7284,10 @@ pub(super) fn spawn_turn_bridge(
 
         // Finalization complete — decrement counters
         shared_owned
-            .finalizing_turns
+            .restart.finalizing_turns
             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         shared_owned
-            .global_finalizing
+            .restart.global_finalizing
             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         // Note: deferred restart exit is handled by the 5-second poll loop in mod.rs,
         // which saves pending queues before calling check_deferred_restart.
@@ -7303,7 +7303,7 @@ pub(super) fn spawn_turn_bridge(
                     channel_id
                 );
             } else if shared_owned
-                .restart_pending
+                .restart.restart_pending
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
                 let ts = chrono::Local::now().format("%H:%M:%S");

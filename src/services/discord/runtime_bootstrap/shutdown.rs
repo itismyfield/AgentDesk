@@ -20,12 +20,14 @@ pub(super) fn run_bot_spawn_sigterm_handler(
 
                 // Set global shutdown flag
                 shared_for_signal
+                    .restart
                     .shutting_down
                     .store(true, std::sync::atomic::Ordering::SeqCst);
 
                 // Block dequeue and put router into drain mode so no new
                 // queue/checkpoint mutations occur during shutdown.
                 shared_for_signal
+                    .restart
                     .restart_pending
                     .store(true, std::sync::atomic::Ordering::SeqCst);
 
@@ -119,6 +121,7 @@ pub(super) fn run_bot_spawn_sigterm_handler(
                 // Wait for all providers to finish saving before exiting.
                 // CAS guard: skip if this provider already decremented via deferred restart path.
                 if shared_for_signal
+                    .restart
                     .shutdown_counted
                     .compare_exchange(
                         false,
@@ -129,6 +132,7 @@ pub(super) fn run_bot_spawn_sigterm_handler(
                     .is_ok()
                 {
                     if shared_for_signal
+                        .restart
                         .shutdown_remaining
                         .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
                         == 1

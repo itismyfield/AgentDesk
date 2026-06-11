@@ -206,7 +206,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // only touches `shared.{core, settings, pg_pool, dispatch_thread_parents}`,
     // none of which depend on a live gateway shard.
     //
-    // Cancellation rides on `shared.shutting_down`. On the leader, the
+    // Cancellation rides on `shared.restart.shutting_down`. On the leader, the
     // gateway-lease loss handler and SIGTERM handler flip that flag.
     // On standby today no signal handler is wired; the worker exits
     // when launchd kills the process during deploy. A follow-up could
@@ -241,7 +241,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
             "  [{ts}] 🔑 dcserver generation: {}",
-            shared.current_generation
+            shared.restart.current_generation
         );
         if !restored_model_overrides.is_empty() {
             tracing::info!(
@@ -436,23 +436,36 @@ fn run_bot_build_shared_data(
         answer_flush_barrier: std::sync::Arc::new(
             super::answer_flush_barrier::AnswerFlushBarrier::default(),
         ),
-        recovering_channels: dashmap::DashMap::new(),
-        shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        current_generation: runtime_store::load_generation(),
-        restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),
-        recovery_started_at: std::time::Instant::now(),
-        recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
-        global_active,
+        // #3038 S3: wrapped at the first-member position with member
+        // expressions byte-identical. The three trailing members
+        // (`global_finalizing` / `shutdown_remaining` / `shutdown_counted`)
+        // move textually above the TurnFinalizer/StatusPanelController spawn
+        // calls, but all three are side-effect-free initializers (parameter
+        // move, `Arc::clone`, const constructor), so the relative order of
+        // every side-effecting initializer
+        // (`load_queue_exit_placeholder_clears` ↔ `load_generation` ↔
+        // `Instant::now` ↔ `TurnFinalizer::spawn` ↔
+        // `StatusPanelController::spawn` ↔ `broadcast::channel`) is
+        // preserved.
+        restart: RestartLifecycle {
+            recovering_channels: dashmap::DashMap::new(),
+            shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            current_generation: runtime_store::load_generation(),
+            restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),
+            recovery_started_at: std::time::Instant::now(),
+            recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
+            global_active,
+            global_finalizing,
+            shutdown_remaining: shutdown_remaining.clone(),
+            shutdown_counted: std::sync::atomic::AtomicBool::new(false),
+        },
         turn_finalizer: super::turn_finalizer::TurnFinalizer::spawn(),
         status_panel_controller: super::status_panel_controller::StatusPanelController::spawn(
             status_panel_v2_enabled,
         ),
-        global_finalizing,
-        shutdown_remaining: shutdown_remaining.clone(),
-        shutdown_counted: std::sync::atomic::AtomicBool::new(false),
         intake_dedup: dashmap::DashMap::new(),
         dispatch_thread_parents: dashmap::DashMap::new(),
         bot_connected: std::sync::atomic::AtomicBool::new(false),

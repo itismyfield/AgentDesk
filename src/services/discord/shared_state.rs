@@ -1,4 +1,4 @@
-//! #3038 S1/S2 — extracted field clusters of [`SharedData`].
+//! #3038 S1/S2/S3 — extracted field clusters of [`SharedData`].
 //!
 //! This module hosts named sub-structs that group cohesive `SharedData` fields
 //! together with the inherent `impl SharedData` methods that exclusively own
@@ -485,4 +485,136 @@ pub(in crate::services::discord) fn clear_codex_goals_reset_pending_for_channel(
         .codex_goals_session_reset_pending
         .remove(&channel_id)
         .is_some()
+}
+
+/// #3038 cluster E — restart-lifecycle state.
+///
+/// Groups the thirteen fields that together implement the
+/// boot-to-shutdown lifecycle of one provider runtime: the per-channel
+/// recovery markers and reconcile bookkeeping for the current boot, the
+/// restart/shutdown drain flags and restart generation, and the
+/// process-global active / finalizing / shutdown counters. Field
+/// declarations, docs, and types moved verbatim from `discord/mod.rs`;
+/// the members' original `pub(super)` annotations (declared in
+/// `discord/mod.rs`, i.e. visible up to `crate::services`) are re-spelled
+/// per-field as the semantically identical `pub(in crate::services)`
+/// because `pub(super)` written *here* would shrink the scope to
+/// `crate::services::discord` — a compile-time-only re-annotation with
+/// zero runtime effect.
+///
+/// INVARIANT (#3038 S3, HANDOFF design): `global_active`,
+/// `global_finalizing`, and `shutdown_remaining` are *injected* `Arc`
+/// handles shared across every provider's `SharedData` (see
+/// `RunBotContext` / `run_bot_build_shared_data`). They MUST stay
+/// `Arc`-typed — flattening any of them into a plain atomic would
+/// silently fork the process-global counter per provider and break the
+/// deferred-restart / shutdown barrier arithmetic.
+pub(in crate::services) struct RestartLifecycle {
+    /// Per-channel in-flight turn recovery marker (restart resume in progress)
+    /// Value is the Instant when recovery started, used for stale-recovery timeout.
+    pub(in crate::services) recovering_channels: dashmap::DashMap<ChannelId, std::time::Instant>,
+    /// Global shutdown flag — when set, watchers exit quietly via cancel path
+    pub(in crate::services) shutting_down: Arc<std::sync::atomic::AtomicBool>,
+    /// Number of turns currently in finalization phase (response sending + cleanup).
+    /// Deferred restart must wait until this reaches 0 to avoid killing mid-send turns.
+    pub(in crate::services) finalizing_turns: Arc<std::sync::atomic::AtomicUsize>,
+    /// Current restart generation — incremented on each --restart-dcserver.
+    /// Used to distinguish old (pre-restart) sessions from fresh ones.
+    pub(in crate::services) current_generation: u64,
+    /// Set when a `restart_pending` marker is detected. While true, the router
+    /// queues new messages instead of starting new turns (drain mode).
+    pub(in crate::services) restart_pending: Arc<std::sync::atomic::AtomicBool>,
+    /// Set to true after startup reconciliation + recovery is complete (#122).
+    /// Until true, the router queues all incoming messages.
+    pub(in crate::services) reconcile_done: Arc<std::sync::atomic::AtomicBool>,
+    /// Number of queued deferred idle-queue kickoffs waiting to run.
+    pub(in crate::services) deferred_hook_backlog: std::sync::atomic::AtomicUsize,
+    /// When this provider started reconcile/recovery for the current boot.
+    pub(in crate::services) recovery_started_at: std::time::Instant,
+    /// Captured reconcile/recovery duration for the current boot in milliseconds.
+    /// Remains 0 until reconcile completes, at which point it is frozen.
+    pub(in crate::services) recovery_duration_ms: std::sync::atomic::AtomicU64,
+    /// Process-global active turn counter shared across all providers.
+    /// Deferred restart checks this instead of provider-local cancel_tokens.len().
+    pub(in crate::services) global_active: Arc<std::sync::atomic::AtomicUsize>,
+    /// Process-global finalizing turn counter shared across all providers.
+    pub(in crate::services) global_finalizing: Arc<std::sync::atomic::AtomicUsize>,
+    /// Number of providers still needing to complete shutdown.
+    /// The last provider to decrement this to 0 calls `exit(0)`.
+    pub(in crate::services) shutdown_remaining: Arc<std::sync::atomic::AtomicUsize>,
+    /// Per-provider flag: ensures this provider decrements `shutdown_remaining` at most once,
+    /// even if both the deferred restart poll loop and SIGTERM handler run.
+    pub(in crate::services) shutdown_counted: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(test)]
+mod restart_lifecycle_tests {
+    //! #3038 S3 — post-extraction regression pin for the
+    //! `check_deferred_restart` fresh-token branch. This branch needs
+    //! `restart_pending == true` while `shutdown_counted == false`, a state
+    //! only the (unseedable in-process) SIGTERM handler produces without
+    //! writing fields directly, so the pre-move characterization suite
+    //! (`runtime_bootstrap::restart_lifecycle_characterization_tests`) could
+    //! not cover it through the function surface alone. Post-move tests may
+    //! seed the group fields freely; together with the unmodified
+    //! characterization tests this completes the check_deferred_restart
+    //! decision matrix (the final-provider `exit(0)` arm stays untestable —
+    //! `shutdown_remaining` is kept above 1 here).
+
+    use std::sync::atomic::Ordering;
+
+    const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+
+    struct EnvGuard;
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var(AGENTDESK_ROOT_DIR_ENV);
+            }
+        }
+    }
+
+    #[test]
+    fn check_deferred_restart_fresh_token_decrements_once_without_exit() {
+        // #3167 B3: crate-wide env serialization (no local Mutex).
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap());
+        }
+        let _env_guard = EnvGuard;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let shared = super::super::make_shared_data_for_tests();
+            // Two providers outstanding → the fetch_sub observes 2 (!= 1)
+            // and returns without reaching the final-provider exit arm.
+            shared.restart.shutdown_remaining.store(2, Ordering::SeqCst);
+            shared.restart.restart_pending.store(true, Ordering::SeqCst);
+
+            super::super::check_deferred_restart(&shared);
+            assert!(
+                shared.restart.shutdown_counted.load(Ordering::Acquire),
+                "fresh token must be consumed by the CAS guard"
+            );
+            assert_eq!(
+                shared.restart.shutdown_remaining.load(Ordering::Acquire),
+                1,
+                "fresh-token branch must decrement shutdown_remaining exactly once"
+            );
+
+            // Second poll tick: the consumed token short-circuits before the
+            // barrier — remaining must NOT reach the exit threshold again.
+            super::super::check_deferred_restart(&shared);
+            assert_eq!(
+                shared.restart.shutdown_remaining.load(Ordering::Acquire),
+                1,
+                "consumed token must block any further decrement"
+            );
+        });
+    }
 }

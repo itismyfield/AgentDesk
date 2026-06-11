@@ -651,6 +651,7 @@ async fn build_health_snapshot_with_options(
 
     let global_active = if let Some(p) = providers.first() {
         p.shared
+            .restart
             .global_active
             .load(std::sync::atomic::Ordering::Relaxed)
     } else {
@@ -658,6 +659,7 @@ async fn build_health_snapshot_with_options(
     };
     let global_finalizing = if let Some(p) = providers.first() {
         p.shared
+            .restart
             .global_finalizing
             .load(std::sync::atomic::Ordering::Relaxed)
     } else {

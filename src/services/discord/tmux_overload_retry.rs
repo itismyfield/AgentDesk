@@ -162,7 +162,7 @@ pub(super) fn schedule_provider_overload_retry(
     tokio::spawn(async move {
         tokio::time::sleep(delay).await;
 
-        if shared.shutting_down.load(Ordering::Relaxed) {
+        if shared.restart.shutting_down.load(Ordering::Relaxed) {
             return;
         }
 

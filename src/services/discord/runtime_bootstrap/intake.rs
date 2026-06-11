@@ -19,7 +19,7 @@ pub(super) fn run_bot_maybe_spawn_intake_worker(
             let intake_worker_shared = shared.clone();
             let intake_worker_token = token.to_string();
             let intake_worker_provider = provider.as_str().to_string();
-            let intake_worker_cancel = shared.shutting_down.clone();
+            let intake_worker_cancel = shared.restart.shutting_down.clone();
             // The intake_worker spawn runs concurrently with `cluster::bootstrap`
             // which is the writer of `SELF_INSTANCE_ID`. Resolving
             // `target_instance_id` eagerly here would race and pick up the

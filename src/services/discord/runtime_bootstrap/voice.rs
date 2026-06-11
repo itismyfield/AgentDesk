@@ -87,8 +87,8 @@ pub(super) fn run_bot_init_voice_workers(
         });
     let voice_receiver =
         crate::voice::VoiceReceiver::from_voice_config_with_hook(voice_config, voice_hook);
-    voice_barge_in.spawn_sensitivity_ttl_reset(shared.shutting_down.clone());
-    voice_barge_in.spawn_progress_worker(shared.clone(), shared.shutting_down.clone());
+    voice_barge_in.spawn_sensitivity_ttl_reset(shared.restart.shutting_down.clone());
+    voice_barge_in.spawn_progress_worker(shared.clone(), shared.restart.shutting_down.clone());
     voice_receiver
 }
 

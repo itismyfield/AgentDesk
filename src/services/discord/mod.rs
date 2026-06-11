@@ -119,6 +119,9 @@ pub(in crate::services::discord) use shared_state::QueuedPlaceholderState;
 // #3038 S2: the cluster-D members were `pub(super)` on `SharedData` (visible up
 // to `crate::services`), so the group type is re-exported with that same scope.
 pub(in crate::services) use shared_state::SessionOverrideState;
+// #3038 S3: same scope rationale as S2 — the cluster-E members were
+// `pub(super)` on `SharedData` (visible up to `crate::services`).
+pub(in crate::services) use shared_state::RestartLifecycle;
 // Phase 2-pre.3 of intake-node-routing: worker entry point. Phase 3 will
 // add the worker polling loop that imports these names; until then they
 // are intentionally exposed but unused at the crate boundary.
@@ -850,6 +853,7 @@ pub(crate) async fn should_defer_thread_archive_pg(
 /// queue/checkpoint state before invoking it.
 pub(super) fn check_deferred_restart(shared: &SharedData) {
     if !shared
+        .restart
         .restart_pending
         .load(std::sync::atomic::Ordering::Relaxed)
     {
@@ -857,6 +861,7 @@ pub(super) fn check_deferred_restart(shared: &SharedData) {
     }
     // CAS: ensure this provider only decrements once
     if shared
+        .restart
         .shutdown_counted
         .compare_exchange(
             false,
@@ -869,6 +874,7 @@ pub(super) fn check_deferred_restart(shared: &SharedData) {
         return;
     }
     if shared
+        .restart
         .shutdown_remaining
         .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
         != 1
@@ -902,7 +908,7 @@ pub(in crate::services::discord) fn saturating_decrement_counter(counter: &Atomi
 pub(in crate::services::discord) fn saturating_decrement_global_active(
     shared: &SharedData,
 ) -> bool {
-    saturating_decrement_counter(shared.global_active.as_ref())
+    saturating_decrement_counter(shared.restart.global_active.as_ref())
 }
 
 /// Single authoritative writer for the INCREMENT side of `global_active`,
@@ -925,7 +931,7 @@ pub(in crate::services::discord) fn increment_global_active(
     shared: &SharedData,
     reason: &str,
 ) -> usize {
-    increment_counter(shared.global_active.as_ref(), reason)
+    increment_counter(shared.restart.global_active.as_ref(), reason)
 }
 
 fn increment_counter(counter: &AtomicUsize, reason: &str) -> usize {
@@ -2252,33 +2258,14 @@ pub(crate) struct SharedData {
     /// it never strands set.
     pub(in crate::services::discord) answer_flush_barrier:
         Arc<answer_flush_barrier::AnswerFlushBarrier>,
-    /// Per-channel in-flight turn recovery marker (restart resume in progress)
-    /// Value is the Instant when recovery started, used for stale-recovery timeout.
-    pub(super) recovering_channels: dashmap::DashMap<ChannelId, std::time::Instant>,
-    /// Global shutdown flag — when set, watchers exit quietly via cancel path
-    pub(super) shutting_down: Arc<std::sync::atomic::AtomicBool>,
-    /// Number of turns currently in finalization phase (response sending + cleanup).
-    /// Deferred restart must wait until this reaches 0 to avoid killing mid-send turns.
-    pub(super) finalizing_turns: Arc<std::sync::atomic::AtomicUsize>,
-    /// Current restart generation — incremented on each --restart-dcserver.
-    /// Used to distinguish old (pre-restart) sessions from fresh ones.
-    pub(super) current_generation: u64,
-    /// Set when a `restart_pending` marker is detected. While true, the router
-    /// queues new messages instead of starting new turns (drain mode).
-    pub(super) restart_pending: Arc<std::sync::atomic::AtomicBool>,
-    /// Set to true after startup reconciliation + recovery is complete (#122).
-    /// Until true, the router queues all incoming messages.
-    pub(super) reconcile_done: Arc<std::sync::atomic::AtomicBool>,
-    /// Number of queued deferred idle-queue kickoffs waiting to run.
-    pub(super) deferred_hook_backlog: std::sync::atomic::AtomicUsize,
-    /// When this provider started reconcile/recovery for the current boot.
-    pub(super) recovery_started_at: std::time::Instant,
-    /// Captured reconcile/recovery duration for the current boot in milliseconds.
-    /// Remains 0 until reconcile completes, at which point it is frozen.
-    pub(super) recovery_duration_ms: std::sync::atomic::AtomicU64,
-    /// Process-global active turn counter shared across all providers.
-    /// Deferred restart checks this instead of provider-local cancel_tokens.len().
-    pub(super) global_active: Arc<std::sync::atomic::AtomicUsize>,
+    /// #3038 cluster E — restart-lifecycle state (the per-channel recovery
+    /// markers and reconcile bookkeeping for the current boot, the
+    /// restart/shutdown drain flags and restart generation, and the
+    /// process-global active/finalizing/shutdown counters shared across all
+    /// providers as injected `Arc` handles). Field declarations and docs live
+    /// on `shared_state::RestartLifecycle`; call sites access the members via
+    /// `shared.restart.<original field name>`.
+    pub(super) restart: RestartLifecycle,
     /// EPIC #3016 — single-authority turn finalizer. The only code path that
     /// owns the four finalize side-effects (inflight clear, mailbox
     /// cancel_token release, `global_active` decrement, trailing terminal
@@ -2293,14 +2280,6 @@ pub(crate) struct SharedData {
     /// `finalize`/`reclaim`. The actor task is gated on `status_panel_v2_enabled`.
     pub(in crate::services::discord) status_panel_controller:
         Arc<status_panel_controller::StatusPanelController>,
-    /// Process-global finalizing turn counter shared across all providers.
-    pub(super) global_finalizing: Arc<std::sync::atomic::AtomicUsize>,
-    /// Number of providers still needing to complete shutdown.
-    /// The last provider to decrement this to 0 calls `exit(0)`.
-    pub(super) shutdown_remaining: Arc<std::sync::atomic::AtomicUsize>,
-    /// Per-provider flag: ensures this provider decrements `shutdown_remaining` at most once,
-    /// even if both the deferred restart poll loop and SIGTERM handler run.
-    pub(super) shutdown_counted: std::sync::atomic::AtomicBool,
     /// Intake-level dedup cache: prevents the same message from starting two turns
     /// when duplicate bot dispatches arrive nearly simultaneously.
     /// Key: dedup key (dispatch_id or channel+author+text hash).
@@ -2613,21 +2592,26 @@ pub(super) fn make_shared_data_for_tests_with_storage(
             queued_placeholders_persist_locks: dashmap::DashMap::new(),
         },
         answer_flush_barrier: Arc::new(answer_flush_barrier::AnswerFlushBarrier::default()),
-        recovering_channels: dashmap::DashMap::new(),
-        shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        current_generation: 0,
-        restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),
-        recovery_started_at: std::time::Instant::now(),
-        recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
-        global_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        // #3038 S3: wrapped at the first-member position (evaluation-order
+        // preserved — the three members hoisted above the spawn calls are
+        // side-effect-free constructors; see run_bot_build_shared_data).
+        restart: RestartLifecycle {
+            recovering_channels: dashmap::DashMap::new(),
+            shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            current_generation: 0,
+            restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),
+            recovery_started_at: std::time::Instant::now(),
+            recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
+            global_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            global_finalizing: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            shutdown_remaining: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            shutdown_counted: std::sync::atomic::AtomicBool::new(false),
+        },
         turn_finalizer: turn_finalizer::TurnFinalizer::spawn(),
         status_panel_controller: status_panel_controller::StatusPanelController::spawn(false),
-        global_finalizing: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        shutdown_remaining: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        shutdown_counted: std::sync::atomic::AtomicBool::new(false),
         intake_dedup: dashmap::DashMap::new(),
         dispatch_thread_parents: dashmap::DashMap::new(),
         voice_barge_in: Arc::new(voice_barge_in::VoiceBargeInRuntime::disabled()),
@@ -3866,15 +3850,16 @@ pub(super) struct Data {
 }
 
 pub(super) fn mark_reconcile_complete(shared: &SharedData) {
-    let duration_ms = shared.recovery_started_at.elapsed().as_millis();
+    let duration_ms = shared.restart.recovery_started_at.elapsed().as_millis();
     let duration_ms = duration_ms.min(u64::MAX as u128) as u64;
-    let _ = shared.recovery_duration_ms.compare_exchange(
+    let _ = shared.restart.recovery_duration_ms.compare_exchange(
         0,
         duration_ms,
         std::sync::atomic::Ordering::AcqRel,
         std::sync::atomic::Ordering::Relaxed,
     );
     shared
+        .restart
         .reconcile_done
         .store(true, std::sync::atomic::Ordering::Release);
 }

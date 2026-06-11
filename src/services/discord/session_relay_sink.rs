@@ -785,7 +785,7 @@ impl SessionBoundDiscordRelaySink {
                 let sink_turn = super::turn_finalizer::TurnKey::new(
                     channel,
                     delivery.frame_turn_user_msg_id,
-                    shared.current_generation,
+                    shared.restart.current_generation,
                 );
                 let cell = shared.delivery_lease(channel);
                 SinkDeliveryLeaseGuard::acquire(&cell, sink_turn, start, end)

@@ -63,6 +63,7 @@ pub(super) async fn probe_provider(entry: &ProviderEntry) -> ProviderProbe {
 
     let restart_pending = entry
         .shared
+        .restart
         .restart_pending
         .load(std::sync::atomic::Ordering::Relaxed);
     let connected = entry
@@ -71,10 +72,12 @@ pub(super) async fn probe_provider(entry: &ProviderEntry) -> ProviderProbe {
         .load(std::sync::atomic::Ordering::Relaxed);
     let reconcile_done = entry
         .shared
+        .restart
         .reconcile_done
         .load(std::sync::atomic::Ordering::Relaxed);
     let deferred_hooks = entry
         .shared
+        .restart
         .deferred_hook_backlog
         .load(std::sync::atomic::Ordering::Relaxed);
     let watcher_count = entry.shared.tmux_watchers.len();
@@ -176,12 +179,13 @@ fn classify_provider(
 
 fn recovery_duration_secs(shared: &super::super::SharedData) -> f64 {
     let recorded_ms = shared
+        .restart
         .recovery_duration_ms
         .load(std::sync::atomic::Ordering::Relaxed);
     let duration_ms = if recorded_ms > 0 {
         recorded_ms
     } else {
-        let elapsed_ms = shared.recovery_started_at.elapsed().as_millis();
+        let elapsed_ms = shared.restart.recovery_started_at.elapsed().as_millis();
         elapsed_ms.min(u64::MAX as u128) as u64
     };
     duration_ms as f64 / 1000.0

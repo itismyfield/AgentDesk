@@ -1765,11 +1765,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // Check cancel or global shutdown (no "session ended" message). #3277
         // (Defect B): log the stop reason — a silent break here made a
         // replaced incumbent's exit look like an unexplained watcher death.
-        if cancel.load(Ordering::Relaxed) || shared.shutting_down.load(Ordering::Relaxed) {
+        if cancel.load(Ordering::Relaxed) || shared.restart.shutting_down.load(Ordering::Relaxed) {
             tracing::info!(
                 instance = watcher_instance_id,
                 cancel = cancel.load(Ordering::Relaxed),
-                shutting_down = shared.shutting_down.load(Ordering::Relaxed),
+                shutting_down = shared.restart.shutting_down.load(Ordering::Relaxed),
                 "tmux watcher stopping for #{tmux_session_name}: cancelled/shutdown"
             );
             break;
@@ -1787,7 +1787,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         if paused.load(Ordering::Relaxed) {
             match tmux_liveness_decision(
                 cancel.load(Ordering::Relaxed),
-                shared.shutting_down.load(Ordering::Relaxed),
+                shared.restart.shutting_down.load(Ordering::Relaxed),
                 probe_tmux_session_liveness(&tmux_session_name).await,
             ) {
                 TmuxLivenessDecision::Continue => {
@@ -1917,7 +1917,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             _ => {
                 match tmux_liveness_decision(
                     cancel.load(Ordering::Relaxed),
-                    shared.shutting_down.load(Ordering::Relaxed),
+                    shared.restart.shutting_down.load(Ordering::Relaxed),
                     probe_tmux_session_liveness(&tmux_session_name).await,
                 ) {
                     TmuxLivenessDecision::Continue => {
@@ -1965,7 +1965,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 bytes_available,
                 Some(tmux_liveness_decision(
                     cancel.load(Ordering::Relaxed),
-                    shared.shutting_down.load(Ordering::Relaxed),
+                    shared.restart.shutting_down.load(Ordering::Relaxed),
                     probe_tmux_session_liveness(&tmux_session_name).await,
                 )),
             )
@@ -2566,15 +2566,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             let mut fresh_ready_for_input_idle = false;
 
             while !found_result && turn_start.elapsed() < turn_timeout {
-                // The inner loop can wait for minutes while a long tool/test
-                // produces no provider JSONL result. Keep the registry
-                // heartbeat fresh so the heartbeat sweeper does not mistake a
-                // healthy streaming watcher for a dead task and cancel relay.
+                // The inner loop can wait for minutes while a long tool/test produces no
+                // provider JSONL result. Keep the registry heartbeat fresh so the heartbeat sweeper
+                // does not mistake a healthy streaming watcher for a dead task and cancel relay.
                 last_heartbeat_ts_ms.store(
                     crate::services::discord::tmux_watcher_now_ms(),
                     std::sync::atomic::Ordering::Release,
                 );
-                if cancel.load(Ordering::Relaxed) || shared.shutting_down.load(Ordering::Relaxed) {
+                if cancel.load(Ordering::Relaxed)
+                    || shared.restart.shutting_down.load(Ordering::Relaxed)
+                {
                     break;
                 }
                 if paused.load(Ordering::Relaxed) {
@@ -2811,7 +2812,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 0,
                                 Some(tmux_liveness_decision(
                                     cancel.load(Ordering::Relaxed),
-                                    shared.shutting_down.load(Ordering::Relaxed),
+                                    shared.restart.shutting_down.load(Ordering::Relaxed),
                                     probe_tmux_session_liveness(&tmux_session_name).await,
                                 )),
                             ) {
@@ -4136,12 +4137,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 break 'watcher_loop;
             }
 
-            if cancel.load(Ordering::Relaxed) || shared.shutting_down.load(Ordering::Relaxed) {
+            if cancel.load(Ordering::Relaxed)
+                || shared.restart.shutting_down.load(Ordering::Relaxed)
+            {
                 // #3277 (Defect B): same stop-reason visibility as the early break.
                 tracing::info!(
                     instance = watcher_instance_id,
                     cancel = cancel.load(Ordering::Relaxed),
-                    shutting_down = shared.shutting_down.load(Ordering::Relaxed),
+                    shutting_down = shared.restart.shutting_down.load(Ordering::Relaxed),
                     "tmux watcher stopping for #{tmux_session_name}: cancelled/shutdown"
                 );
                 break 'watcher_loop;
@@ -5841,7 +5844,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &tmux_session_name,
                 current_offset,
             ),
-            shared.current_generation,
+            shared.restart.current_generation,
         );
         let watcher_lease_holder = crate::services::discord::LeaseHolder::Watcher {
             instance_id: watcher_instance_id,
@@ -6711,11 +6714,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // committed (a real turn end whose visible completion is gated),
             // matching the committed-output precondition of the skipped block.
             if terminal_output_committed {
-                // Prefer the real `user_msg_id` from inflight so this resolves
-                // to the exact ledger entry the bridge registered at handoff
-                // (with the Watcher owner) and thus DEFERS to the backstop. A
-                // channel-only id-0 here would risk resolving onto a different
-                // live entry; the real id keys exactly.
+                // Prefer the real `user_msg_id` from inflight so this resolves to the exact
+                // ledger entry the bridge registered at handoff (with the Watcher owner) and
+                // thus DEFERS to the backstop. A channel-only id-0 here would risk resolving
+                // onto a different live entry; the real id keys exactly.
                 let gate_user_msg_id = crate::services::discord::inflight::load_inflight_state(
                     &watcher_provider,
                     channel_id.get(),
@@ -6728,7 +6730,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         crate::services::discord::turn_finalizer::TurnKey::new(
                             channel_id,
                             gate_user_msg_id,
-                            shared.current_generation,
+                            shared.restart.current_generation,
                         ),
                         watcher_provider.clone(),
                         crate::services::discord::turn_finalizer::TerminalEvent::GateTimeout {

@@ -72,7 +72,10 @@
 # 4987 (no raise; #3028 ratchet).
 # #3038 S2: lowered 4987 -> 4980 (-7) as the cluster-D field block (8 fields)
 # moved into `shared_state::SessionOverrideState`. Locks in the shrink win.
-"src/services/discord/mod.rs" = 4980
+# #3038 S3: lowered 4980 -> 4965 (-15) as the cluster-E field block (13
+# restart-lifecycle fields) moved into `shared_state::RestartLifecycle`.
+# Locks in the shrink win (ratchet down only).
+"src/services/discord/mod.rs" = 4965
 # #3305: the local-only pass-through lifecycle-skip (kind hoist + note-only return
 # branch + idle-loop skip) is offset by comment dedup in the same root, lowering the
 # frozen baseline 5438 -> 5429 (-9). Locks in the shrink win (#3028 ratchet).

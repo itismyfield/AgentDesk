@@ -123,6 +123,7 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
             interval.tick().await;
 
             if shared_for_lease
+                .restart
                 .shutting_down
                 .load(std::sync::atomic::Ordering::SeqCst)
             {
@@ -142,9 +143,11 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                     .bot_connected
                     .store(false, std::sync::atomic::Ordering::SeqCst);
                 shared_for_lease
+                    .restart
                     .shutting_down
                     .store(true, std::sync::atomic::Ordering::SeqCst);
                 shared_for_lease
+                    .restart
                     .restart_pending
                     .store(true, std::sync::atomic::Ordering::SeqCst);
 

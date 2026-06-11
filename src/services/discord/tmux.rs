@@ -1147,7 +1147,7 @@ async fn start_monitor_auto_turn_when_available(
     let synthetic_message_id = MessageId::new(data_start_offset.max(1));
 
     loop {
-        if cancel.load(Ordering::Relaxed) || shared.shutting_down.load(Ordering::Relaxed) {
+        if cancel.load(Ordering::Relaxed) || shared.restart.shutting_down.load(Ordering::Relaxed) {
             return MonitorAutoTurnStart {
                 acquired: false,
                 deferred,
@@ -1248,7 +1248,7 @@ async fn finish_monitor_auto_turn(
     // reproduces the inline side-effect set: no inflight clear, no
     // completion-cleanup, no voice drain, but kick off any queued backlog.
     let user_msg_id = synthetic_message_id.map(|id| id.get()).unwrap_or(0);
-    let generation = ledger_generation.unwrap_or(shared.current_generation);
+    let generation = ledger_generation.unwrap_or(shared.restart.current_generation);
     let _ = shared
         .turn_finalizer
         .submit_terminal(
@@ -2170,27 +2170,27 @@ async fn finish_restored_watcher_active_turn(
         return false;
     }
 
-    // #3016 phase 3: route the watcher terminal through the single-authority
-    // finalizer instead of calling mailbox_finish_turn + counter + side-effects
-    // inline. The ledger phase gate makes this exactly-once across bridge and
-    // watcher: whichever submits first finalizes; the loser gets
-    // `AlreadyFinalized` and the watcher simply skips the queue kickoff (the
-    // winner already owns it).
-    //
-    // Use the REAL `user_msg_id` the caller captured BEFORE clearing inflight
-    // (reloading inflight here returns `None` because the watcher already wiped
-    // it). The exact id makes the ledger match precise: a stale terminal from an
-    // already-finalized turn resolves to that turn's `Finalized` entry
-    // (→ AlreadyFinalized) instead of accidentally finalizing a queued follow-up.
-    //
-    // The watcher cleared inflight inline before calling this helper, and never
-    // marked completion-cleanup or drained voice, so `FinalizeContext::watcher`
-    // reproduces exactly that side-effect set; the kickoff stays gated on the
-    // caller's `kickoff_queue`.
+    // #3016 phase 3: route the watcher terminal through the single-authority finalizer
+    // instead of calling mailbox_finish_turn + counter + side-effects inline. The ledger
+    // phase gate makes this exactly-once across bridge and watcher: whichever submits
+    // first finalizes; the loser gets `AlreadyFinalized` and the watcher simply skips
+    // the queue kickoff (the winner already owns it). Use the REAL `user_msg_id` the
+    // caller captured BEFORE clearing inflight (reloading inflight here returns `None`
+    // because the watcher already wiped it). The exact id makes the ledger match
+    // precise: a stale terminal from an already-finalized turn resolves to that turn's
+    // `Finalized` entry (→ AlreadyFinalized) instead of accidentally finalizing a
+    // queued follow-up. The watcher cleared inflight inline before calling this helper,
+    // and never marked completion-cleanup or drained voice, so `FinalizeContext::watcher`
+    // reproduces exactly that side-effect set; the kickoff stays gated on the caller's
+    // `kickoff_queue`.
     let outcome = shared
         .turn_finalizer
         .submit_terminal_with_claim_snapshot(
-            super::turn_finalizer::TurnKey::new(channel_id, user_msg_id, shared.current_generation),
+            super::turn_finalizer::TurnKey::new(
+                channel_id,
+                user_msg_id,
+                shared.restart.current_generation,
+            ),
             provider.clone(),
             super::turn_finalizer::TerminalEvent::Complete,
             super::turn_finalizer::FinalizeContext::watcher(),

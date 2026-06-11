@@ -189,7 +189,7 @@ pub(crate) async fn run_intake_worker_tick(
 ///   rather than relying on cancel-mid-tick.
 ///
 /// What flips the cancel flag (codex Phase 5 P1 #3): the bootstrap
-/// passes `SharedData.shutting_down`, which the SIGTERM/SIGINT path
+/// passes `SharedData.restart.shutting_down`, which the SIGTERM/SIGINT path
 /// flips early in `setup_signal_handlers`. The marker-based DEFERRED
 /// restart flow only sets `restart_pending`, so the worker keeps
 /// polling during a deferred drain — by design, since the leader

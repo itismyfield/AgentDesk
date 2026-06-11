@@ -1540,7 +1540,7 @@ fn defer_synthetic_turn_start(
         lease_runtime_kind: lease.runtime_kind.map(|k| k.as_str().to_string()),
         lease_turn_id: lease.turn_id.clone(),
         lease_session_key: lease.session_key.clone(),
-        generation: shared.current_generation,
+        generation: shared.restart.current_generation,
         created_at_ms: now_ms,
         observed_at_ms: prompt.observed_at.timestamp_millis().max(0) as u64,
         state: super::tui_direct_pending_start::PendingStartState::Waiting,
@@ -1622,7 +1622,7 @@ fn pending_start_claim_fn() -> super::tui_direct_pending_start::ClaimFn {
                 super::turn_finalizer::TurnKey::new(
                     channel_id,
                     record.anchor_message_id,
-                    shared.current_generation,
+                    shared.restart.current_generation,
                 ),
                 provider.clone(),
                 super::inflight::RelayOwnerKind::Watcher,
@@ -7856,11 +7856,11 @@ mod tests {
         .await;
         assert!(started, "test precondition: synthetic mailbox turn starts");
 
-        shared.global_active.store(3, Ordering::Relaxed);
+        shared.restart.global_active.store(3, Ordering::Relaxed);
         finish_tui_direct_synthetic_pre_save_failure(&shared, &provider, channel_id).await;
 
         assert_eq!(
-            shared.global_active.load(Ordering::Relaxed),
+            shared.restart.global_active.load(Ordering::Relaxed),
             3,
             "pre-save cleanup must not decrement a counter it has not incremented"
         );
