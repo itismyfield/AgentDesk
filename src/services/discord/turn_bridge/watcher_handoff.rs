@@ -147,12 +147,16 @@ pub(super) fn empty_terminal_response_visibility_kind(
     }
 }
 
+// "Handoff occurred" is positional, not a parameter: the only emit site runs
+// inside `maybe_hand_off_busy_turn_to_watcher` after the
+// `bridge_should_hand_off_busy_turn_to_watcher` gate and past the
+// proven-delivered early-return, so a pre-gate delegated turn can never reach
+// this kind (no per-turn noise).
 pub(super) fn post_gate_handoff_pending_response_visibility_kind(
-    handoff_occurred: bool,
     response_pending_bytes: usize,
     response_pending_trimmed_empty: bool,
 ) -> Option<&'static str> {
-    (handoff_occurred && response_pending_bytes > 0 && !response_pending_trimmed_empty)
+    (response_pending_bytes > 0 && !response_pending_trimmed_empty)
         .then_some("bridge_post_gate_handoff_pending_response")
 }
 
@@ -245,7 +249,6 @@ fn emit_post_gate_handoff_pending_response_visibility(
 ) {
     let response_pending_bytes = response_unsent.len();
     let Some(kind) = post_gate_handoff_pending_response_visibility_kind(
-        true,
         response_pending_bytes,
         response_unsent.trim().is_empty(),
     ) else {
@@ -522,20 +525,16 @@ mod tests {
     #[test]
     fn post_gate_handoff_pending_response_visibility_kind_truth_table() {
         assert_eq!(
-            post_gate_handoff_pending_response_visibility_kind(true, 12, false),
+            post_gate_handoff_pending_response_visibility_kind(12, false),
             Some("bridge_post_gate_handoff_pending_response"),
         );
         assert_eq!(
-            post_gate_handoff_pending_response_visibility_kind(false, 12, false),
-            None,
+            post_gate_handoff_pending_response_visibility_kind(0, false),
+            None
         );
         assert_eq!(
-            post_gate_handoff_pending_response_visibility_kind(true, 0, false),
-            None,
-        );
-        assert_eq!(
-            post_gate_handoff_pending_response_visibility_kind(true, 12, true),
-            None,
+            post_gate_handoff_pending_response_visibility_kind(12, true),
+            None
         );
     }
 }
