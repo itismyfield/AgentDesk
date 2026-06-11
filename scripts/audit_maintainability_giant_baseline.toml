@@ -87,12 +87,10 @@
 # the cluster-C extraction. Net program-wide: mod.rs -201.
 "src/services/discord/router/intake_gate.rs" = 2960
 "src/services/discord/formatting.rs" = 2802
-# #3038 S1: +4 (2798 -> 2802) — wrapper braces for the `queued:
-# QueuedPlaceholderState { .. }` group in `run_bot_build_shared_data`'s
-# `SharedData` literal (the three cluster-C member inits stay byte-identical
-# inside) plus the mechanical `.queued.` path rewrite in
-# `run_bot_spawn_recovery_and_flush_restart_reports`. Net program-wide: mod.rs -201.
-"src/services/discord/runtime_bootstrap.rs" = 2802
+# #3038 run_bot S0/S1: lowered 2802 -> 1918 by adding characterization tests and
+# moving restored_state, queued_placeholders, startup_doctor, orphan_recovery,
+# and session_gc into sub-700 `runtime_bootstrap/` modules.
+"src/services/discord/runtime_bootstrap.rs" = 1918
 # #3034 batch-8: lowered 2655 -> 2645 (dead-code removal: `stop_provider_channel_runtime`).
 # #3293: lowered 2645 -> 2641 (mailbox probe routed through the non-creating
 # `health/mailbox.rs::peeked_provider_mailbox_state`).

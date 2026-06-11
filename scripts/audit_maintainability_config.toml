@@ -8,3 +8,4 @@
 "src/db/prompt_manifests/**" = 700
 "src/services/discord/placeholder_live_events/**" = 700
 "src/services/discord/prompt_builder/**" = 700
+"src/services/discord/runtime_bootstrap/**" = 700

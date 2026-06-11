@@ -756,31 +756,15 @@
     `finalize_stale_streaming_footer` / `text_ends_with_streaming_footer` shared
     terminal-idle reconciliation helpers + their unit tests).
   - `src/services/discord/prompt_builder/` (directory, refactored).
-  - `src/services/discord/runtime_bootstrap.rs` (2802 lines after #2558
-    thread-session GC loopback shim cleanup; +3 from #3082 answer-flush-barrier
-    field in the SharedData constructor; +1 from #3037 cluster backflow path
-    rewrite wrapping a longer `services::cluster::node_registry::*` call; -2 from
-    #3037 backflow batch rewriting the stale-facade
-    `crate::db::dispatched_sessions::gc_stale_fixed_working_sessions_db_pg` call
-    on one line; +3 from
-    #3078 PR-1 spawning the dormant `StatusPanelController` next to the finalizer
-    in the SharedData constructor; +194 from #3038 behavior-preserving
-    decomposition of the `run_bot` god-function — `run_bot`'s own body dropped
-    from ~1515 to ~1028 lines by extracting eight ordered startup-phase helpers
-    (`run_bot_rehydrate_voice_handoffs`, `run_bot_build_shared_data`,
-    `run_bot_init_voice_workers`, `run_bot_maybe_spawn_intake_worker`,
-    `run_bot_acquire_gateway_lease`, `run_bot_build_slash_commands`,
-    `run_bot_spawn_gateway_lease_keepalive`, `run_bot_spawn_sigterm_handler`,
-    `run_bot_run_gateway_backend`); the file-level count rose only from the
-    helper signatures + ordering-guarantee doc comments since the moved bodies
-    are net-zero. The poise framework-builder/setup closure (~580 lines) is left
-    inline — its move-captured locals make a clean extraction risky and is
-    deferred); +4 from #3038 S1 — wrapping the three cluster-C member inits in the
-    `queued: QueuedPlaceholderState { .. }` group literal (the member init
-    expressions, including the `load_queue_exit_placeholder_clears` disk read,
-    stay byte-identical so the run_bot_build_shared_data evaluation order is
-    preserved) plus the mechanical `.queued.` path rewrite in
-    `run_bot_spawn_recovery_and_flush_restart_reports`.
+  - `src/services/discord/runtime_bootstrap.rs` (1918 production lines after
+    #3038 run_bot S0/S1; characterization tests pin the startup-doctor barrier,
+    restored settings filters, queued-placeholder filtering/deletion, and
+    gateway intents, then the low-risk clusters moved verbatim into
+    `runtime_bootstrap/`: `restored_state.rs` (124), `queued_placeholders.rs`
+    (193), `startup_doctor.rs` (156), `orphan_recovery.rs` (337), and
+    `session_gc.rs` (102 prod / 69 test). The namespace is capped at 700 prod
+    lines per child module in `audit_maintainability_config.toml`; the root
+    remains a registered giant until the later S2-S5 slices finish).
   - `src/services/discord/session_runtime.rs` (1753 lines).
   - `src/services/discord/voice_barge_in.rs` (4657 lines; net +0 from #3034
     scoped dead-code allows on the test-only runtime API

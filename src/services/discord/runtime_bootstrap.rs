@@ -1,5 +1,19 @@
 use super::*;
-use sqlx::Row as SqlxRow;
+
+mod orphan_recovery;
+mod queued_placeholders;
+mod restored_state;
+mod session_gc;
+mod startup_doctor;
+
+#[allow(unused_imports)]
+pub(in crate::services::discord) use self::queued_placeholders::{
+    FilteredQueuedPlaceholders, StalePlaceholderDeleter, collect_live_queue_message_ids,
+    delete_stale_queued_placeholder_cards, delete_stale_queued_placeholder_cards_with,
+    filter_restored_queued_placeholders,
+};
+#[allow(unused_imports)]
+use self::{orphan_recovery::*, restored_state::*, session_gc::*, startup_doctor::*};
 
 pub(crate) struct RunBotContext {
     pub(crate) global_active: Arc<std::sync::atomic::AtomicUsize>,
@@ -17,9 +31,6 @@ pub(crate) struct RunBotContext {
 
 const DISCORD_GATEWAY_LEASE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const DISCORD_GATEWAY_LOCK_PREFIX: u64 = 0x0443_0000_0000_0000;
-static STARTUP_THREAD_MAP_VALIDATION_STARTED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 fn voice_auto_join_provider_map(
     cfg: &crate::config::Config,
 ) -> std::collections::HashMap<String, (String, Option<String>)> {
@@ -59,92 +70,6 @@ fn voice_auto_join_provider_map(
     map
 }
 
-fn restored_fast_mode_enabled_channels_for_provider(
-    bot_settings: &DiscordBotSettings,
-    _provider: &ProviderKind,
-) -> Vec<ChannelId> {
-    let mut channels: Vec<ChannelId> = bot_settings
-        .channel_fast_modes
-        .iter()
-        .filter_map(|(channel_id, enabled)| {
-            if !*enabled {
-                return None;
-            }
-            channel_id.parse::<u64>().ok().map(ChannelId::new)
-        })
-        .collect();
-    channels.sort_unstable_by_key(|channel_id| channel_id.get());
-    channels
-}
-
-fn restored_fast_mode_reset_entries(bot_settings: &DiscordBotSettings) -> Vec<String> {
-    let mut entries: Vec<String> = bot_settings
-        .channel_fast_mode_reset_pending
-        .iter()
-        .cloned()
-        .collect();
-    entries.sort_unstable();
-    entries
-}
-
-fn restored_fast_mode_reset_channels(bot_settings: &DiscordBotSettings) -> Vec<ChannelId> {
-    let mut channels: Vec<ChannelId> = bot_settings
-        .channel_fast_mode_reset_pending
-        .iter()
-        .filter_map(|entry| {
-            let raw_channel_id = entry
-                .split_once(':')
-                .map(|(_, channel_id)| channel_id)
-                .unwrap_or(entry.as_str());
-            raw_channel_id.parse::<u64>().ok().map(ChannelId::new)
-        })
-        .collect();
-    channels.sort_unstable_by_key(|channel_id| channel_id.get());
-    channels.dedup_by_key(|channel_id| channel_id.get());
-    channels
-}
-
-fn restored_codex_goals_enabled_channels(bot_settings: &DiscordBotSettings) -> Vec<ChannelId> {
-    let mut channels: Vec<ChannelId> = bot_settings
-        .channel_codex_goals
-        .iter()
-        .filter_map(|(channel_id, enabled)| {
-            if !*enabled {
-                return None;
-            }
-            channel_id.parse::<u64>().ok().map(ChannelId::new)
-        })
-        .collect();
-    channels.sort_unstable_by_key(|channel_id| channel_id.get());
-    channels
-}
-
-fn restored_codex_goals_reset_channels(bot_settings: &DiscordBotSettings) -> Vec<ChannelId> {
-    let mut channels: Vec<ChannelId> = bot_settings
-        .channel_codex_goals_reset_pending
-        .iter()
-        .filter_map(|channel_id| channel_id.parse::<u64>().ok().map(ChannelId::new))
-        .collect();
-    channels.sort_unstable_by_key(|channel_id| channel_id.get());
-    channels
-}
-
-fn bootstrap_session_reset_pending_channels(
-    restored_model_overrides: &[(ChannelId, String)],
-    restored_fast_mode_reset_channels: &[ChannelId],
-    restored_codex_goals_reset_channels: &[ChannelId],
-) -> dashmap::DashSet<ChannelId> {
-    let _ = restored_model_overrides;
-    let set = dashmap::DashSet::new();
-    for channel_id in restored_fast_mode_reset_channels {
-        set.insert(*channel_id);
-    }
-    for channel_id in restored_codex_goals_reset_channels {
-        set.insert(*channel_id);
-    }
-    set
-}
-
 fn discord_gateway_lock_id(token_hash: &str) -> i64 {
     // `discord_token_hash()` returns "discord_<16hex>". Strip the literal prefix
     // so the first 16 chars we sample are actual hex; otherwise the `is_ascii_hexdigit`
@@ -173,550 +98,6 @@ async fn try_acquire_discord_gateway_lease(
     .await
 }
 
-fn restored_intervention_message_ids(item: &Intervention) -> Vec<u64> {
-    let mut item_ids: Vec<u64> = item.source_message_ids.iter().map(|id| id.get()).collect();
-    if item_ids.is_empty() {
-        item_ids.push(item.message_id.get());
-    } else if !item_ids.contains(&item.message_id.get()) {
-        item_ids.push(item.message_id.get());
-    }
-    item_ids
-}
-
-fn enqueue_restored_intervention(
-    existing_ids: &mut std::collections::HashSet<u64>,
-    queue: &mut Vec<Intervention>,
-    item: Intervention,
-) -> bool {
-    let item_ids = restored_intervention_message_ids(&item);
-    // Persisted merged queue items may represent multiple source messages. If startup
-    // catch-up already recovered only some of them, dropping the whole item would lose
-    // the unseen messages because the merged text is no longer separable.
-    if item_ids
-        .iter()
-        .all(|message_id| existing_ids.contains(message_id))
-    {
-        return false;
-    }
-
-    existing_ids.extend(item_ids);
-    queue.push(item);
-    true
-}
-
-/// codex review round-6 P2 (#1332): outcome of filtering loaded
-/// queued-placeholder mappings against the live mailbox queue.
-///
-/// `live` is the surviving set ready to be inserted into
-/// `SharedData::queued_placeholders`. `channels_with_stale` is the unique
-/// channel ids that had at least one mapping pruned — the bootstrap path
-/// rewrites their on-disk snapshot so the next restart does not resurrect
-/// the stale rows. `stale_count` is purely informational for the FLUSH
-/// log line.
-///
-/// codex review round-7 P2 (#1332): `stale_cards` carries the
-/// `(channel_id, user_msg_id, placeholder_msg_id)` tuples for every
-/// mapping the filter pruned. The bootstrap caller, after rewriting the
-/// disk snapshot, walks these tuples and best-effort calls
-/// `delete_message` on Discord — without this, the visible
-/// `📬 메시지 대기 중` cards would stay forever (the mapping that owned
-/// them was just pruned, so no future dispatch / queue-exit event can
-/// reach them). Per-message failures are logged and otherwise tolerated:
-/// the bot may not have a fully-initialised gateway at the exact
-/// startup moment, in which case the unreachable cards remain visible
-/// until the user dismisses them — strictly less severe than the bug
-/// report (`📬` cards stuck forever even when the bot has been online
-/// for hours).
-pub(in crate::services::discord) struct FilteredQueuedPlaceholders {
-    pub(in crate::services::discord) live: Vec<((ChannelId, MessageId), MessageId)>,
-    pub(in crate::services::discord) channels_with_stale: std::collections::HashSet<ChannelId>,
-    pub(in crate::services::discord) stale_count: usize,
-    pub(in crate::services::discord) stale_cards: Vec<(ChannelId, MessageId, MessageId)>,
-}
-
-/// codex review round-6 P2 (#1332): drop any restored queued-placeholder
-/// mapping whose `(channel_id, user_msg_id)` is no longer present in the
-/// live mailbox queue snapshot. This runs AFTER the restart pending-queue
-/// restore (which rebuilds `intervention_queue` from disk) and BEFORE
-/// `kickoff_idle_queues`, so the live set captures both pending-queue
-/// restored items and any catch-up message that landed earlier in the
-/// startup pipeline.
-///
-/// A mapping is "stale" when startup skipped or superseded its source
-/// message before placeholder restoration ran — for instance, the channel
-/// is no longer owned, the sender is no longer allowed, the item was
-/// pruned as a duplicate, or it overflowed the queue cap. Without this
-/// filter, the `📬 메시지 대기 중` card and its sidecar row would never
-/// reach a dispatch or queue-exit event, leaving them stale forever.
-pub(in crate::services::discord) fn filter_restored_queued_placeholders(
-    loaded: std::collections::HashMap<(ChannelId, MessageId), MessageId>,
-    live_queue_ids: &std::collections::HashMap<ChannelId, std::collections::HashSet<u64>>,
-) -> FilteredQueuedPlaceholders {
-    let mut live: Vec<((ChannelId, MessageId), MessageId)> = Vec::new();
-    let mut channels_with_stale: std::collections::HashSet<ChannelId> =
-        std::collections::HashSet::new();
-    let mut stale_count = 0usize;
-    let mut stale_cards: Vec<(ChannelId, MessageId, MessageId)> = Vec::new();
-    for ((channel_id, user_msg_id), placeholder_msg_id) in loaded {
-        let in_live_queue = live_queue_ids
-            .get(&channel_id)
-            .map(|ids| ids.contains(&user_msg_id.get()))
-            .unwrap_or(false);
-        if in_live_queue {
-            live.push(((channel_id, user_msg_id), placeholder_msg_id));
-        } else {
-            stale_count += 1;
-            channels_with_stale.insert(channel_id);
-            // codex review round-7 P2 (#1332): retain the tuple so the
-            // bootstrap caller can issue a best-effort
-            // `delete_message` after the disk rewrite. Round-6 dropped
-            // the placeholder id at this point, which left every
-            // pruned `📬` card visible forever.
-            stale_cards.push((channel_id, user_msg_id, placeholder_msg_id));
-            tracing::debug!(
-                channel_id = channel_id.get(),
-                user_msg_id = user_msg_id.get(),
-                placeholder_msg_id = placeholder_msg_id.get(),
-                "queued_placeholder restore: pruning stale mapping with no live queue entry"
-            );
-        }
-    }
-    FilteredQueuedPlaceholders {
-        live,
-        channels_with_stale,
-        stale_count,
-        stale_cards,
-    }
-}
-
-/// codex review round-7 P2 (#1332): best-effort cleanup of the visible
-/// `📬 메시지 대기 중` Discord cards whose persisted mapping the round-6
-/// filter pruned. Runs AFTER `kickoff_idle_queues` so the gateway-driven
-/// HTTP path has had a chance to settle. Per-message failures are logged
-/// (including 404 / 403, e.g. the channel has been deleted or the bot
-/// can no longer see it) and otherwise tolerated — leaving a card
-/// undismissed is strictly better than crashing bootstrap.
-///
-/// The deletion is dispatched through the small
-/// `StalePlaceholderDeleter` indirection so unit tests can substitute a
-/// recorder without spinning up a real serenity HTTP client.
-pub(in crate::services::discord) async fn delete_stale_queued_placeholder_cards(
-    http: &Arc<serenity::Http>,
-    stale_cards: &[(ChannelId, MessageId, MessageId)],
-) {
-    let deleter = SerenityStalePlaceholderDeleter { http: http.clone() };
-    delete_stale_queued_placeholder_cards_with(&deleter, stale_cards).await;
-}
-
-pub(in crate::services::discord) trait StalePlaceholderDeleter:
-    Send + Sync
-{
-    fn delete<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        placeholder_msg_id: MessageId,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>;
-}
-
-struct SerenityStalePlaceholderDeleter {
-    http: Arc<serenity::Http>,
-}
-
-impl StalePlaceholderDeleter for SerenityStalePlaceholderDeleter {
-    fn delete<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        placeholder_msg_id: MessageId,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
-        Box::pin(async move {
-            channel_id
-                .delete_message(&self.http, placeholder_msg_id)
-                .await
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-        })
-    }
-}
-
-pub(in crate::services::discord) async fn delete_stale_queued_placeholder_cards_with(
-    deleter: &dyn StalePlaceholderDeleter,
-    stale_cards: &[(ChannelId, MessageId, MessageId)],
-) {
-    if stale_cards.is_empty() {
-        return;
-    }
-    let mut deleted = 0usize;
-    let mut failed = 0usize;
-    for (channel_id, user_msg_id, placeholder_msg_id) in stale_cards {
-        match deleter.delete(*channel_id, *placeholder_msg_id).await {
-            Ok(_) => {
-                deleted += 1;
-                tracing::debug!(
-                    channel_id = channel_id.get(),
-                    user_msg_id = user_msg_id.get(),
-                    placeholder_msg_id = placeholder_msg_id.get(),
-                    "queued_placeholder restore: deleted stale 📬 card",
-                );
-            }
-            Err(error) => {
-                failed += 1;
-                tracing::warn!(
-                    channel_id = channel_id.get(),
-                    user_msg_id = user_msg_id.get(),
-                    placeholder_msg_id = placeholder_msg_id.get(),
-                    "queued_placeholder restore: failed to delete stale 📬 card ({error}); leaving in place",
-                );
-            }
-        }
-    }
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!(
-        "  [{ts}] 🧹 STALE-PLACEHOLDER: deleted {deleted}/{} stale 📬 card(s) on bootstrap (failed {failed})",
-        stale_cards.len(),
-    );
-}
-
-/// codex review round-6 P2 (#1332): snapshot every mailbox in `shared` and
-/// collect the union of `intervention.message_id` + every
-/// `intervention.source_message_ids` entry per channel. The result is the
-/// set of user message ids the queued-placeholder filter accepts as
-/// "still live" on this channel.
-pub(in crate::services::discord) async fn collect_live_queue_message_ids(
-    shared: &SharedData,
-) -> std::collections::HashMap<ChannelId, std::collections::HashSet<u64>> {
-    let mut by_channel: std::collections::HashMap<ChannelId, std::collections::HashSet<u64>> =
-        std::collections::HashMap::new();
-    let snapshots = shared.mailboxes.snapshot_all().await;
-    for (channel_id, snapshot) in snapshots {
-        let ids = super::queued_message_ids(&snapshot);
-        if !ids.is_empty() {
-            by_channel.insert(channel_id, ids);
-        }
-    }
-    by_channel
-}
-
-fn spawn_startup_thread_map_validation(pg_pool: Option<sqlx::PgPool>, token: String) {
-    tokio::spawn(async move {
-        let (checked, cleared) =
-            crate::services::dispatches::discord_delivery::validate_channel_thread_maps_on_startup_with_backends(
-                None,
-                pg_pool.as_ref(),
-                &token,
-            )
-            .await;
-        if checked > 0 || cleared > 0 {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] 🧹 THREAD-MAP: validated {checked} mapping(s), cleared {cleared} stale binding(s)"
-            );
-        }
-    });
-}
-
-/// Remove the retired durable handoff tree without parsing or executing it.
-/// Current recovery paths no longer write these JSON records, so any files here
-/// are legacy residue and must not affect boot behavior.
-fn purge_legacy_durable_handoffs() {
-    let Some(root) = super::runtime_store::legacy_discord_handoff_root() else {
-        return;
-    };
-    if !root.exists() {
-        return;
-    }
-    match std::fs::remove_dir_all(&root) {
-        Ok(()) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] 🧹 Removed retired durable handoff directory: {}",
-                root.display()
-            );
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                "  [{ts}] ⚠ Failed to remove retired durable handoff directory {}: {error}",
-                root.display()
-            );
-        }
-    }
-}
-
-/// #164: Re-deliver orphan pending dispatches after dcserver restart.
-///
-/// After a restart, dispatches in `pending` status may have been Discord-notified
-/// but the in-memory intervention_queue was lost. Or the notification was interrupted
-/// mid-flight. This function identifies truly orphan dispatches and re-delivers them.
-///
-/// **Safety**:
-/// - Process-global once guard via `std::sync::Once` — safe across multiple provider instances
-/// - Startup boot timestamp from dcserver.pid mtime — not wall clock
-/// - Newer-dispatch check uses rowid (monotonic) instead of created_at (second-granularity)
-/// - Five AND conditions must ALL be met before re-delivery (see issue #164)
-async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
-    // Process-global once guard: prevents duplicate execution when multiple
-    // provider instances (Claude + Codex) call this from their own setup paths.
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    let mut should_run = false;
-    ONCE.call_once(|| should_run = true);
-    if !should_run {
-        return;
-    }
-
-    let pg_pool = shared.pg_pool.as_ref();
-    clear_stale_session_dispatch_links(pg_pool).await;
-
-    // Boot timestamp from dcserver.pid mtime — represents actual process start,
-    // not a wall-clock offset that could mis-classify old pending dispatches.
-    let boot_time: String = {
-        let pid_path =
-            crate::cli::agentdesk_runtime_root().map(|r| r.join("runtime").join("dcserver.pid"));
-        let mtime = pid_path
-            .as_ref()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .and_then(|m| m.modified().ok());
-        match mtime {
-            Some(t) => {
-                let dt: chrono::DateTime<chrono::Utc> = t.into();
-                dt.format("%Y-%m-%d %H:%M:%S").to_string()
-            }
-            None => {
-                // No pid file — cannot determine boot time safely, skip recovery
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] ⚠ #164: No dcserver.pid — skipping orphan dispatch recovery"
-                );
-                return;
-            }
-        }
-    };
-
-    // Query orphan pending dispatches with all 5 safety conditions:
-    // 1. status = 'pending'
-    // 2. card is assigned to the dispatch target agent
-    // 3. agent has NO working session (idle)
-    // 4. created_at < boot_time (pre-restart, using pid mtime)
-    // 5. no newer dispatch for the same card (using rowid for monotonic ordering,
-    //    avoids same-second ambiguity with created_at)
-    let orphans: Vec<(String, String, String, String, String)> = if let Some(pool) = pg_pool {
-        match sqlx::query(
-            "SELECT d.id, d.to_agent_id, d.kanban_card_id, d.title, d.dispatch_type
-               FROM task_dispatches d
-               JOIN kanban_cards kc ON kc.id = d.kanban_card_id
-              WHERE d.status = 'pending'
-                AND d.created_at < $1::timestamptz
-                AND kc.assigned_agent_id = d.to_agent_id
-                AND NOT EXISTS (
-                    SELECT 1 FROM sessions s
-                     WHERE s.agent_id = d.to_agent_id
-                       AND s.status IN ('turn_active', 'working')
-                )
-                AND NOT EXISTS (
-                    SELECT 1 FROM task_dispatches d2
-                     WHERE d2.kanban_card_id = d.kanban_card_id
-                       AND d2.status NOT IN ('cancelled', 'failed')
-                       AND d2.created_at > d.created_at
-                )",
-        )
-        .bind(&boot_time)
-        .fetch_all(pool)
-        .await
-        {
-            Ok(rows) => rows
-                .into_iter()
-                .filter_map(|row| {
-                    Some((
-                        row.try_get::<String, _>("id").ok()?,
-                        row.try_get::<String, _>("to_agent_id").ok()?,
-                        row.try_get::<String, _>("kanban_card_id").ok()?,
-                        row.try_get::<String, _>("title").ok()?,
-                        row.try_get::<String, _>("dispatch_type").ok()?,
-                    ))
-                })
-                .collect(),
-            Err(error) => {
-                tracing::warn!(
-                    "[dispatch-recovery] failed to query postgres orphan dispatches: {error}"
-                );
-                return;
-            }
-        }
-    } else {
-        return;
-    };
-
-    if orphans.is_empty() {
-        return;
-    }
-
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!(
-        "  [{ts}] 🔄 #164: Found {} orphan pending dispatch(es) to re-deliver",
-        orphans.len()
-    );
-
-    let mut delivered = 0usize;
-    for (dispatch_id, agent_id, card_id, _title, dtype) in &orphans {
-        // Clear any existing dispatch_notified marker — the 5-condition query already
-        // validated this dispatch is truly orphan, so the marker (if any) is stale.
-        {
-            let dispatch_notified_key = format!("dispatch_notified:{dispatch_id}");
-            if super::internal_api::delete_kv_value(&dispatch_notified_key).is_err() {
-                if let Some(pool) = pg_pool {
-                    sqlx::query("DELETE FROM kv_meta WHERE key = $1")
-                        .bind(&dispatch_notified_key)
-                        .execute(pool)
-                        .await
-                        .ok();
-                }
-            }
-        }
-
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}]   ↻ Recovering {dtype} dispatch {id} → {agent} (card {card})",
-            id = &dispatch_id[..8],
-            agent = agent_id,
-            card = &card_id[..8.min(card_id.len())],
-        );
-
-        let recovery_result = if let Some(pool) = pg_pool {
-            crate::db::dispatches::outbox::requeue_dispatch_notify_pg(pool, dispatch_id)
-                .await
-                .map(|queued| {
-                    if !queued {
-                        tracing::info!(
-                            "  [{}]   · Skipped orphan recovery for {id} (dispatch not requeueable)",
-                            chrono::Local::now().format("%H:%M:%S"),
-                            id = &dispatch_id[..8],
-                        );
-                    }
-                    queued
-                })
-        } else {
-            continue;
-        };
-        match recovery_result {
-            Ok(true) => {
-                delivered += 1;
-            }
-            Ok(false) => {}
-            Err(e) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}]   ⚠ Recovery delivery failed for {id}: {e}",
-                    id = &dispatch_id[..8],
-                );
-            }
-        }
-    }
-
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!(
-        "  [{ts}] ✓ #164: Re-delivered {delivered}/{} orphan dispatch(es)",
-        orphans.len()
-    );
-}
-
-async fn clear_stale_session_dispatch_links(pg_pool: Option<&sqlx::PgPool>) {
-    let Some(pool) = pg_pool else {
-        return;
-    };
-
-    match sqlx::query(
-        "UPDATE sessions s
-            SET status = CASE
-                    WHEN s.status IN ('turn_active', 'awaiting_bg', 'awaiting_user', 'working') THEN 'idle'
-                    ELSE s.status
-                END,
-                active_dispatch_id = NULL,
-                session_info = 'Cleared stale terminal dispatch link',
-                last_heartbeat = NOW()
-           FROM task_dispatches d
-          WHERE s.active_dispatch_id = d.id
-            AND d.status IN ('completed', 'failed', 'cancelled')
-      RETURNING s.session_key, d.id AS dispatch_id, d.status AS dispatch_status",
-    )
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => {
-            if !rows.is_empty() {
-                let sample = rows
-                    .iter()
-                    .take(5)
-                    .filter_map(|row| {
-                        let session_key = row.try_get::<String, _>("session_key").ok()?;
-                        let dispatch_id = row.try_get::<String, _>("dispatch_id").ok()?;
-                        let dispatch_status = row.try_get::<String, _>("dispatch_status").ok()?;
-                        Some(format!("{session_key}:{dispatch_id}:{dispatch_status}"))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                tracing::warn!(
-                    cleared = rows.len(),
-                    sample = %sample,
-                    "cleared stale terminal active_dispatch_id links during startup recovery"
-                );
-            }
-        }
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "failed to clear stale terminal active_dispatch_id links during startup recovery"
-            );
-        }
-    }
-
-    match sqlx::query(
-        "WITH stale AS (
-             SELECT s.session_key
-               FROM sessions s
-              WHERE s.active_dispatch_id IS NOT NULL
-                AND NOT EXISTS (
-                    SELECT 1 FROM task_dispatches d WHERE d.id = s.active_dispatch_id
-                )
-         )
-         UPDATE sessions s
-            SET status = CASE
-                    WHEN s.status IN ('turn_active', 'awaiting_bg', 'awaiting_user', 'working') THEN 'idle'
-                    ELSE s.status
-                END,
-                active_dispatch_id = NULL,
-                session_info = 'Cleared missing dispatch link',
-                last_heartbeat = NOW()
-           FROM stale
-          WHERE s.session_key = stale.session_key
-      RETURNING s.session_key",
-    )
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => {
-            if !rows.is_empty() {
-                let sample = rows
-                    .iter()
-                    .take(5)
-                    .filter_map(|row| row.try_get::<String, _>("session_key").ok())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                tracing::warn!(
-                    cleared = rows.len(),
-                    sample = %sample,
-                    "cleared missing active_dispatch_id links during startup recovery"
-                );
-            }
-        }
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "failed to clear missing active_dispatch_id links during startup recovery"
-            );
-        }
-    }
-}
-
 pub(super) fn discord_gateway_intents() -> serenity::GatewayIntents {
     serenity::GatewayIntents::GUILDS
         | serenity::GatewayIntents::GUILD_MESSAGES
@@ -725,170 +106,6 @@ pub(super) fn discord_gateway_intents() -> serenity::GatewayIntents {
         | serenity::GatewayIntents::DIRECT_MESSAGES
         | serenity::GatewayIntents::DIRECT_MESSAGE_REACTIONS
         | serenity::GatewayIntents::MESSAGE_CONTENT
-}
-
-fn should_skip_agent_runtime_launch(token: &str) -> Option<String> {
-    let bot = agentdesk_config::find_discord_bot_by_token(token)?;
-    let agent_bot_names = agentdesk_config::collect_agent_bot_names();
-    if !agent_bot_names.is_empty() && !agent_bot_names.contains(&bot.name) {
-        return Some(bot.name);
-    }
-    None
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum StartupDoctorBarrier {
-    Waiting(usize),
-    Released,
-    AlreadyReleased,
-}
-
-fn startup_doctor_barrier_arrive(
-    remaining: &std::sync::atomic::AtomicUsize,
-    started: &std::sync::atomic::AtomicBool,
-) -> StartupDoctorBarrier {
-    let mut current = remaining.load(Ordering::Acquire);
-    loop {
-        if current == 0 {
-            return StartupDoctorBarrier::AlreadyReleased;
-        }
-        let next = current - 1;
-        match remaining.compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) if next > 0 => return StartupDoctorBarrier::Waiting(next),
-            Ok(_) => {
-                return match started.compare_exchange(
-                    false,
-                    true,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => StartupDoctorBarrier::Released,
-                    Err(_) => StartupDoctorBarrier::AlreadyReleased,
-                };
-            }
-            Err(observed) => current = observed,
-        }
-    }
-}
-
-/// Maximum time the startup_doctor will wait for the local HTTP server to
-/// finish binding before it begins running self-probe checks. Without this
-/// gate, every fresh boot races the doctor against axum's `bind` call and
-/// latches a permanent `unhealthy` artifact via cascading Connection-refused
-/// failures (see issue #2096).
-const STARTUP_DOCTOR_HTTP_BIND_TIMEOUT: Duration = Duration::from_secs(30);
-const STARTUP_DOCTOR_HTTP_BIND_POLL_INTERVAL: Duration = Duration::from_millis(200);
-const STARTUP_DOCTOR_HTTP_BIND_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
-
-/// Poll the loopback HTTP server until it accepts a TCP connection or the
-/// deadline expires. We deliberately probe the raw TCP bind rather than an
-/// HTTP route so this gate is independent of which routes are mounted by the
-/// time the doctor wants to run.
-async fn wait_for_local_http_bind(api_port: u16) {
-    let start = tokio::time::Instant::now();
-    let addr = format!("127.0.0.1:{api_port}");
-    loop {
-        if let Ok(Ok(_stream)) = tokio::time::timeout(
-            STARTUP_DOCTOR_HTTP_BIND_PROBE_TIMEOUT,
-            tokio::net::TcpStream::connect(&addr),
-        )
-        .await
-        {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            let elapsed_ms = start.elapsed().as_millis();
-            tracing::info!("  [{ts}] ✓ startup_doctor http bind ready ({addr}, {elapsed_ms}ms)");
-            return;
-        }
-        if start.elapsed() >= STARTUP_DOCTOR_HTTP_BIND_TIMEOUT {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                "  [{ts}] ⚠ startup_doctor http bind not observed within {:?} ({addr}) — running anyway",
-                STARTUP_DOCTOR_HTTP_BIND_TIMEOUT
-            );
-            return;
-        }
-        tokio::time::sleep(STARTUP_DOCTOR_HTTP_BIND_POLL_INTERVAL).await;
-    }
-}
-
-async fn run_startup_diagnostic_after_reconcile_barrier(
-    remaining: Arc<std::sync::atomic::AtomicUsize>,
-    started: Arc<std::sync::atomic::AtomicBool>,
-    health_registry: Arc<health::HealthRegistry>,
-    api_port: u16,
-) {
-    match startup_doctor_barrier_arrive(&remaining, &started) {
-        StartupDoctorBarrier::Waiting(waiting) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ⏳ startup_doctor waiting for {waiting} provider reconcile(s)"
-            );
-            return;
-        }
-        StartupDoctorBarrier::AlreadyReleased => return,
-        StartupDoctorBarrier::Released => {}
-    }
-
-    if health_registry.registered_provider_count().await == 0 {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        let startup_doctor = tokio::task::spawn_blocking(|| {
-            crate::cli::doctor::startup::record_startup_diagnostic_skipped(
-                "no_provider_runtimes_registered",
-            )
-        })
-        .await;
-        match startup_doctor {
-            Ok(Ok(Some(path))) => {
-                tracing::info!(
-                    "  [{ts}] ⏭ startup_doctor skipped — no provider runtimes registered; wrote {}",
-                    path.display()
-                );
-            }
-            Ok(Ok(None)) => {
-                tracing::info!(
-                    "  [{ts}] ⏭ startup_doctor skipped — no provider runtimes registered; already recorded for this boot"
-                );
-            }
-            Ok(Err(error)) => {
-                tracing::warn!(
-                    "  [{ts}] ⚠ startup_doctor skipped but artifact write failed: {error}"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    "  [{ts}] ⚠ startup_doctor skipped but artifact task failed: {error}"
-                );
-            }
-        }
-        return;
-    }
-
-    // #2096: the doctor's `server` / `discord_bot` / `health_*` checks all
-    // hit the loopback HTTP server. If we run before axum binds the port we
-    // latch six cascading Connection-refused failures into the artifact and
-    // every subsequent `/api/health` call returns 503 until the next boot.
-    wait_for_local_http_bind(api_port).await;
-
-    let startup_doctor =
-        tokio::task::spawn_blocking(crate::cli::doctor::startup::run_startup_diagnostic_once).await;
-    match startup_doctor {
-        Ok(Ok(Some(path))) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] ✓ startup_doctor wrote {}", path.display());
-        }
-        Ok(Ok(None)) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] ✓ startup_doctor already recorded for this boot");
-        }
-        Ok(Err(error)) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!("  [{ts}] ⚠ startup_doctor_failed: {error}");
-        }
-        Err(error) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!("  [{ts}] ⚠ startup_doctor_failed: {error}");
-        }
-    }
 }
 
 /// Entry point: start the Discord bot
@@ -2699,179 +1916,287 @@ async fn audit_or_prune_global_slash_commands(
     }
 }
 
-/// Periodic GC: delete stale idle/disconnected thread sessions from DB.
-async fn gc_stale_thread_sessions(shared: &Arc<SharedData>) {
-    let Some(pool) = shared.pg_pool.as_ref() else {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!("  [{ts}] ⚠ Thread session GC skipped: postgres pool unavailable");
-        return;
-    };
-    let deleted_keys = crate::db::dispatched_sessions::gc_stale_thread_sessions_pg(pool).await;
-    if deleted_keys.is_empty() {
-        return;
-    }
-    // Option A: kill the orphan thread tmux sessions whose DB rows we just
-    // removed. Their inner CLI commonly stays at an interactive prompt (pane
-    // never dies), so the dead-pane reaper skips them, and with the row gone
-    // the 8h idle-kill policy can never reach them either — they would leak
-    // forever. The effective grace becomes the GC TTL (1h no-dispatch / 3h).
-    let killed = reap_orphan_thread_tmux(&deleted_keys).await;
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!(
-        "  [{ts}] 🧹 GC: removed {} stale thread session(s) from DB, killed {} orphan tmux",
-        deleted_keys.len(),
-        killed
-    );
-}
-
-/// Kill the tmux sessions whose stale thread rows were just GC'd. Only touches
-/// sessions this runtime owns (owner marker) and that still exist locally, so a
-/// co-located dev/release instance can't kill the other's sessions.
-async fn reap_orphan_thread_tmux(deleted_keys: &[String]) -> usize {
-    #[cfg(unix)]
-    {
-        let marker = crate::services::tmux_common::current_tmux_owner_marker();
-        let keys = deleted_keys.to_vec();
-        tokio::task::spawn_blocking(move || {
-            let mut killed = 0usize;
-            for key in &keys {
-                let Some(tmux_name) = deleted_thread_tmux_reap_candidate(
-                    key,
-                    &marker,
-                    super::tmux::session_belongs_to_current_runtime,
-                    crate::services::platform::tmux::has_session,
-                ) else {
-                    continue;
-                };
-                if crate::services::platform::tmux::kill_session(
-                    tmux_name,
-                    "stale thread session GC — DB row removed",
-                ) {
-                    killed += 1;
-                }
-            }
-            killed
-        })
-        .await
-        .unwrap_or(0)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = deleted_keys;
-        0
-    }
-}
-
-#[cfg(unix)]
-fn deleted_thread_tmux_reap_candidate<'a>(
-    session_key: &'a str,
-    current_owner_marker: &str,
-    belongs_to_current_runtime: impl Fn(&str, &str) -> bool,
-    has_session: impl Fn(&str) -> bool,
-) -> Option<&'a str> {
-    // session_key format is `hostname:tmux_name`.
-    let (_, tmux_name) = session_key.split_once(':')?;
-    let (_, channel_name) =
-        crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_name)?;
-    super::adk_session::parse_thread_channel_id_from_name(&channel_name)?;
-    if !belongs_to_current_runtime(tmux_name, current_owner_marker) {
-        return None;
-    }
-    if !has_session(tmux_name) {
-        return None;
-    }
-    Some(tmux_name)
-}
-
-#[cfg(all(test, unix))]
-mod thread_session_gc_tests {
-    use super::deleted_thread_tmux_reap_candidate;
-    use std::collections::HashSet;
-
-    #[test]
-    fn thread_gc_reap_candidate_requires_thread_owner_marker_and_existing_tmux() {
-        let marker = "runtime-a";
-        let owned_thread = "AgentDesk-codex-adk-cdx-t1500628371829428350";
-        let foreign_thread = "AgentDesk-codex-adk-cdx-t1500628371829428351";
-        let main_channel = "AgentDesk-codex-adk-cdx";
-        let missing_thread = "AgentDesk-codex-adk-cdx-t1500628371829428352";
-        let existing: HashSet<&str> = [owned_thread, foreign_thread, main_channel].into();
-        let owned: HashSet<&str> = [owned_thread, main_channel].into();
-
-        let belongs_to_current_runtime =
-            |name: &str, owner_marker: &str| owner_marker == marker && owned.contains(name);
-        let has_session = |name: &str| existing.contains(name);
-
-        assert_eq!(
-            deleted_thread_tmux_reap_candidate(
-                &format!("host:{owned_thread}"),
-                marker,
-                &belongs_to_current_runtime,
-                &has_session,
-            ),
-            Some(owned_thread)
-        );
-        assert_eq!(
-            deleted_thread_tmux_reap_candidate(
-                &format!("host:{foreign_thread}"),
-                marker,
-                &belongs_to_current_runtime,
-                &has_session,
-            ),
-            None,
-            "foreign owner marker must prevent killing another runtime's thread tmux"
-        );
-        assert_eq!(
-            deleted_thread_tmux_reap_candidate(
-                &format!("host:{main_channel}"),
-                marker,
-                &belongs_to_current_runtime,
-                &has_session,
-            ),
-            None,
-            "thread GC must not kill fixed-channel tmux names"
-        );
-        assert_eq!(
-            deleted_thread_tmux_reap_candidate(
-                &format!("host:{missing_thread}"),
-                marker,
-                &belongs_to_current_runtime,
-                &has_session,
-            ),
-            None,
-            "missing local tmux session is not a reap target"
-        );
-        assert_eq!(
-            deleted_thread_tmux_reap_candidate(
-                "malformed-session-key",
-                marker,
-                &belongs_to_current_runtime,
-                &has_session,
-            ),
-            None
-        );
-    }
-}
-
-/// Periodic GC: disconnect stale fixed-channel working sessions from the DB so
-/// restart recovery cannot restore dead provider session IDs.
-async fn gc_stale_fixed_working_sessions(shared: &Arc<SharedData>) {
-    let Some(pool) = shared.pg_pool.as_ref() else {
-        return;
-    };
-    let cleared = crate::db::dispatched_sessions::gc_stale_fixed_working_sessions_db_pg(pool).await;
-
-    if cleared > 0 {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] 🧹 GC: disconnected {cleared} stale fixed-channel working session(s)"
-        );
-    }
-}
-
 #[cfg(test)]
 mod bootstrap_tests {
     use super::*;
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    fn sorted_channel_ids(channels: Vec<ChannelId>) -> Vec<u64> {
+        channels
+            .into_iter()
+            .map(|channel_id| channel_id.get())
+            .collect()
+    }
+
+    fn sorted_placeholder_pairs(
+        pairs: Vec<((ChannelId, MessageId), MessageId)>,
+    ) -> Vec<(u64, u64, u64)> {
+        let mut pairs: Vec<(u64, u64, u64)> = pairs
+            .into_iter()
+            .map(|((channel_id, user_msg_id), placeholder_msg_id)| {
+                (
+                    channel_id.get(),
+                    user_msg_id.get(),
+                    placeholder_msg_id.get(),
+                )
+            })
+            .collect();
+        pairs.sort_unstable();
+        pairs
+    }
+
+    fn sorted_stale_cards(cards: Vec<(ChannelId, MessageId, MessageId)>) -> Vec<(u64, u64, u64)> {
+        let mut cards: Vec<(u64, u64, u64)> = cards
+            .into_iter()
+            .map(|(channel_id, user_msg_id, placeholder_msg_id)| {
+                (
+                    channel_id.get(),
+                    user_msg_id.get(),
+                    placeholder_msg_id.get(),
+                )
+            })
+            .collect();
+        cards.sort_unstable();
+        cards
+    }
+
+    #[test]
+    fn startup_doctor_barrier_arrive_decrements_once_until_release() {
+        let remaining = std::sync::atomic::AtomicUsize::new(2);
+        let started = std::sync::atomic::AtomicBool::new(false);
+
+        assert_eq!(
+            startup_doctor_barrier_arrive(&remaining, &started),
+            StartupDoctorBarrier::Waiting(1)
+        );
+        assert_eq!(remaining.load(std::sync::atomic::Ordering::Acquire), 1);
+        assert!(!started.load(std::sync::atomic::Ordering::Acquire));
+
+        assert_eq!(
+            startup_doctor_barrier_arrive(&remaining, &started),
+            StartupDoctorBarrier::Released
+        );
+        assert_eq!(remaining.load(std::sync::atomic::Ordering::Acquire), 0);
+        assert!(started.load(std::sync::atomic::Ordering::Acquire));
+
+        assert_eq!(
+            startup_doctor_barrier_arrive(&remaining, &started),
+            StartupDoctorBarrier::AlreadyReleased
+        );
+        assert_eq!(
+            remaining.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "arriving after release must not decrement below zero"
+        );
+    }
+
+    #[test]
+    fn startup_doctor_barrier_arrive_handles_prestarted_release_once() {
+        let remaining = std::sync::atomic::AtomicUsize::new(1);
+        let started = std::sync::atomic::AtomicBool::new(true);
+
+        assert_eq!(
+            startup_doctor_barrier_arrive(&remaining, &started),
+            StartupDoctorBarrier::AlreadyReleased
+        );
+        assert_eq!(
+            remaining.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "the final waiter still consumes exactly one remaining slot"
+        );
+
+        assert_eq!(
+            startup_doctor_barrier_arrive(&remaining, &started),
+            StartupDoctorBarrier::AlreadyReleased
+        );
+        assert_eq!(remaining.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn restored_settings_filters_sort_parse_and_drop_disabled_entries() {
+        let mut settings = DiscordBotSettings::default();
+        settings.channel_fast_modes.insert("300".to_string(), true);
+        settings.channel_fast_modes.insert("100".to_string(), true);
+        settings.channel_fast_modes.insert("200".to_string(), false);
+        settings
+            .channel_fast_modes
+            .insert("not-a-channel".to_string(), true);
+        settings
+            .channel_fast_mode_reset_pending
+            .insert("codex:500".to_string());
+        settings
+            .channel_fast_mode_reset_pending
+            .insert("400".to_string());
+        settings
+            .channel_fast_mode_reset_pending
+            .insert("claude:400".to_string());
+        settings
+            .channel_fast_mode_reset_pending
+            .insert("bad-reset-entry".to_string());
+        settings.channel_codex_goals.insert("700".to_string(), true);
+        settings.channel_codex_goals.insert("600".to_string(), true);
+        settings
+            .channel_codex_goals
+            .insert("800".to_string(), false);
+        settings
+            .channel_codex_goals
+            .insert("bad-goals".to_string(), true);
+        settings
+            .channel_codex_goals_reset_pending
+            .insert("900".to_string());
+        settings
+            .channel_codex_goals_reset_pending
+            .insert("850".to_string());
+        settings
+            .channel_codex_goals_reset_pending
+            .insert("bad-reset".to_string());
+
+        assert_eq!(
+            sorted_channel_ids(restored_fast_mode_enabled_channels_for_provider(
+                &settings,
+                &ProviderKind::Codex,
+            )),
+            vec![100, 300]
+        );
+        assert_eq!(
+            restored_fast_mode_reset_entries(&settings),
+            vec![
+                "400".to_string(),
+                "bad-reset-entry".to_string(),
+                "claude:400".to_string(),
+                "codex:500".to_string(),
+            ]
+        );
+        assert_eq!(
+            sorted_channel_ids(restored_fast_mode_reset_channels(&settings)),
+            vec![400, 500]
+        );
+        assert_eq!(
+            sorted_channel_ids(restored_codex_goals_enabled_channels(&settings)),
+            vec![600, 700]
+        );
+        assert_eq!(
+            sorted_channel_ids(restored_codex_goals_reset_channels(&settings)),
+            vec![850, 900]
+        );
+    }
+
+    #[test]
+    fn filter_restored_queued_placeholders_preserves_live_and_reports_stale() {
+        let channel_live = ChannelId::new(10);
+        let channel_stale = ChannelId::new(20);
+        let mut loaded = HashMap::new();
+        loaded.insert((channel_live, MessageId::new(100)), MessageId::new(1_000));
+        loaded.insert((channel_live, MessageId::new(101)), MessageId::new(1_001));
+        loaded.insert((channel_stale, MessageId::new(200)), MessageId::new(2_000));
+
+        let mut live_queue_ids = HashMap::new();
+        live_queue_ids.insert(channel_live, HashSet::from([100_u64]));
+
+        let outcome = filter_restored_queued_placeholders(loaded, &live_queue_ids);
+
+        assert_eq!(outcome.stale_count, 2);
+        assert_eq!(
+            outcome
+                .channels_with_stale
+                .iter()
+                .map(|channel_id| channel_id.get())
+                .collect::<HashSet<_>>(),
+            HashSet::from([10, 20])
+        );
+        assert_eq!(
+            sorted_placeholder_pairs(outcome.live),
+            vec![(10, 100, 1_000)]
+        );
+        assert_eq!(
+            sorted_stale_cards(outcome.stale_cards),
+            vec![(10, 101, 1_001), (20, 200, 2_000)]
+        );
+    }
+
+    #[test]
+    fn discord_gateway_intents_snapshot_matches_bootstrap_contract() {
+        let intents = discord_gateway_intents();
+        let expected = serenity::GatewayIntents::GUILDS
+            | serenity::GatewayIntents::GUILD_MESSAGES
+            | serenity::GatewayIntents::GUILD_MESSAGE_REACTIONS
+            | serenity::GatewayIntents::GUILD_VOICE_STATES
+            | serenity::GatewayIntents::DIRECT_MESSAGES
+            | serenity::GatewayIntents::DIRECT_MESSAGE_REACTIONS
+            | serenity::GatewayIntents::MESSAGE_CONTENT;
+
+        assert_eq!(intents, expected);
+    }
+
+    struct RecordingStalePlaceholderDeleter {
+        calls: std::sync::Mutex<Vec<(u64, u64)>>,
+        results: std::sync::Mutex<VecDeque<Result<(), String>>>,
+    }
+
+    impl RecordingStalePlaceholderDeleter {
+        fn new(results: impl IntoIterator<Item = Result<(), String>>) -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+                results: std::sync::Mutex::new(results.into_iter().collect()),
+            }
+        }
+
+        fn calls(&self) -> Vec<(u64, u64)> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .clone()
+        }
+    }
+
+    impl StalePlaceholderDeleter for RecordingStalePlaceholderDeleter {
+        fn delete<'a>(
+            &'a self,
+            channel_id: ChannelId,
+            placeholder_msg_id: MessageId,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .push((channel_id.get(), placeholder_msg_id.get()));
+                self.results
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .pop_front()
+                    .unwrap_or(Ok(()))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_stale_queued_placeholder_cards_with_deletes_only_supplied_stale_cards() {
+        let deleter = RecordingStalePlaceholderDeleter::new([Ok(()), Err("gone".to_string())]);
+        let stale_cards = vec![
+            (
+                ChannelId::new(10),
+                MessageId::new(100),
+                MessageId::new(1_000),
+            ),
+            (
+                ChannelId::new(20),
+                MessageId::new(200),
+                MessageId::new(2_000),
+            ),
+        ];
+
+        delete_stale_queued_placeholder_cards_with(&deleter, &stale_cards).await;
+
+        assert_eq!(deleter.calls(), vec![(10, 1_000), (20, 2_000)]);
+
+        let empty_deleter = RecordingStalePlaceholderDeleter::new([]);
+        delete_stale_queued_placeholder_cards_with(&empty_deleter, &[]).await;
+        assert!(
+            empty_deleter.calls().is_empty(),
+            "empty stale-card input must preserve all visible cards"
+        );
+    }
 
     #[tokio::test(flavor = "current_thread", start_paused = false)]
     async fn wait_for_local_http_bind_returns_quickly_when_port_is_bound() {
