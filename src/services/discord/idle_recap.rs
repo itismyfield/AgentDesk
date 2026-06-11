@@ -549,7 +549,11 @@ fn select_recap_context(snapshot: &RecapSnapshot, now: DateTime<Utc>) -> RecapCo
     if let Some(live) = snapshot.live_context_usage {
         if live.used_tokens > 0 && live.context_window_tokens > 0 {
             return RecapContextDisplay::Known {
-                used: live.used_tokens,
+                used: display_context_tokens(
+                    snapshot,
+                    live.used_tokens,
+                    live.context_window_tokens,
+                ),
                 window: live.context_window_tokens,
             };
         }
@@ -557,7 +561,10 @@ fn select_recap_context(snapshot: &RecapSnapshot, now: DateTime<Utc>) -> RecapCo
 
     let window = context_window_for(snapshot);
     if let Some(used) = latest_turn_context_tokens(snapshot) {
-        return RecapContextDisplay::Known { used, window };
+        return RecapContextDisplay::Known {
+            used: display_context_tokens(snapshot, used, window),
+            window,
+        };
     }
 
     if session_tokens_are_stale_or_incompatible(snapshot, now) {
@@ -565,10 +572,24 @@ fn select_recap_context(snapshot: &RecapSnapshot, now: DateTime<Utc>) -> RecapCo
     }
 
     if let Some(used) = fresh_session_tokens(snapshot, now) {
-        return RecapContextDisplay::Known { used, window };
+        return RecapContextDisplay::Known {
+            used: display_context_tokens(snapshot, used, window),
+            window,
+        };
     }
 
     RecapContextDisplay::Unknown
+}
+
+fn display_context_tokens(snapshot: &RecapSnapshot, used: u64, window: u64) -> u64 {
+    if window > 0
+        && ProviderKind::from_str(&snapshot.provider)
+            .is_some_and(|provider| provider == ProviderKind::Codex)
+    {
+        used.min(window)
+    } else {
+        used
+    }
 }
 
 fn latest_turn_context_tokens(snapshot: &RecapSnapshot) -> Option<u64> {
@@ -1739,8 +1760,9 @@ mod tests {
     }
 
     #[test]
-    fn recap_over_window_usage_is_capped_and_flagged() {
-        let mut snapshot = snapshot_with_sessions(None, Some("raw-1"));
+    fn recap_keeps_claude_over_window_usage_flagged() {
+        let mut snapshot = snapshot_with_sessions(Some("claude-session-1"), None);
+        snapshot.provider = "claude".to_string();
         snapshot.live_context_usage = Some(RecapLiveContextUsage {
             used_tokens: 303_000,
             context_window_tokens: 272_000,
@@ -1749,6 +1771,27 @@ mod tests {
         let header = compose_recap_header(&snapshot);
         assert!(header.contains("303.0k / 272.0k tokens (100%+, over limit)"));
         assert!(!header.contains("(111%)"));
+    }
+
+    #[test]
+    fn recap_clamps_codex_context_display_to_window() {
+        let mut snapshot = snapshot_with_sessions(None, Some("raw-1"));
+        snapshot.live_context_usage = Some(RecapLiveContextUsage {
+            used_tokens: 2_300_000,
+            context_window_tokens: 272_000,
+        });
+
+        assert_eq!(
+            select_recap_context(&snapshot, Utc::now()),
+            RecapContextDisplay::Known {
+                used: 272_000,
+                window: 272_000
+            }
+        );
+        let header = compose_recap_header(&snapshot);
+        assert!(header.contains("272.0k / 272.0k tokens (100%)"));
+        assert!(!header.contains("2.3M"));
+        assert!(!header.contains("over limit"));
     }
 
     #[test]

@@ -1501,6 +1501,18 @@ fn status_panel_caps_context_usage_display_at_100_percent() {
 }
 
 #[test]
+fn status_panel_clamps_codex_context_usage_display_to_window() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(189);
+    assert!(events.set_context_panel_usage(channel_id, None, 2_300_000, 0, 0, 272_000, 60));
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Codex, 1_700_000_000);
+
+    assert!(rendered.contains("Context   ⚠️ 272.0k / 272.0k tokens (100%) · auto-compact 60%"));
+    assert!(!rendered.contains("2.3M"));
+}
+
+#[test]
 fn status_panel_tracks_todowrite_plan() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(78);

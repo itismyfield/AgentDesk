@@ -1614,19 +1614,43 @@ fn maybe_observe_synthetic_composer_ready(state: &mut RolloutParseState) {
 
 fn token_count_status(payload: &Value) -> Option<StreamMessage> {
     let info = payload.get("info")?;
-    let usage = info
-        .get("last_token_usage")
-        .or_else(|| info.get("total_token_usage"))?;
+    let last_usage = info.get("last_token_usage");
+    let total_usage = info.get("total_token_usage");
+    let output_usage = last_usage.or(total_usage);
+    // `total_token_usage` is session-cumulative in modern Codex and can be
+    // millions of tokens. Context display must only use the per-call
+    // `last_token_usage`; if it is absent, leave input/cache empty so the panel
+    // stays unknown instead of fabricating occupancy.
+    let (input_tokens, cache_read_tokens) = match last_usage {
+        Some(usage) => {
+            let total_input = usage.get("input_tokens").and_then(Value::as_u64);
+            let cached_input = usage
+                .get("cached_input_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            (
+                total_input.map(|tokens| tokens.saturating_sub(cached_input)),
+                (cached_input > 0).then_some(cached_input),
+            )
+        }
+        None => (None, None),
+    };
+    let output_tokens = output_usage
+        .and_then(|usage| usage.get("output_tokens"))
+        .and_then(Value::as_u64);
+    if input_tokens.is_none() && cache_read_tokens.is_none() && output_tokens.is_none() {
+        return None;
+    }
     Some(StreamMessage::StatusUpdate {
         model: None,
         cost_usd: None,
         total_cost_usd: None,
         duration_ms: None,
         num_turns: None,
-        input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
+        input_tokens,
         cache_create_tokens: None,
-        cache_read_tokens: usage.get("cached_input_tokens").and_then(Value::as_u64),
-        output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
+        cache_read_tokens,
+        output_tokens,
     })
 }
 
@@ -1824,18 +1848,85 @@ mod tests {
         assert!(matches!(
             &messages[4],
             StreamMessage::StatusUpdate {
-                input_tokens: Some(7),
+                input_tokens: Some(4),
                 cache_read_tokens: Some(3),
                 output_tokens: Some(2),
                 ..
             }
         ));
-        assert!(matches!(
-            messages.last(),
-            Some(StreamMessage::Done { result, session_id })
-                if result == "hello from rollout"
-                    && session_id.as_deref() == Some("rollout-session")
-        ));
+        match messages.last().expect("done message") {
+            StreamMessage::Done { result, session_id } => {
+                assert_eq!(result, "hello from rollout");
+                assert_eq!(session_id.as_deref(), Some("rollout-session"));
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn codex_token_count_context_uses_last_usage_not_total_usage() {
+        let payload = serde_json::json!({
+            "info": {
+                "last_token_usage": {
+                    "input_tokens": 117_600_u64,
+                    "cached_input_tokens": 100_000_u64,
+                    "output_tokens": 50_u64
+                },
+                "total_token_usage": {
+                    "input_tokens": 2_300_000_u64,
+                    "cached_input_tokens": 2_200_000_u64,
+                    "output_tokens": 41_600_u64
+                }
+            }
+        });
+
+        match token_count_status(&payload).expect("last_token_usage should emit status") {
+            StreamMessage::StatusUpdate {
+                input_tokens,
+                cache_read_tokens,
+                output_tokens,
+                ..
+            } => {
+                assert_eq!(input_tokens, Some(17_600));
+                assert_eq!(cache_read_tokens, Some(100_000));
+                assert_eq!(output_tokens, Some(50));
+                let usage = crate::db::turns::TurnTokenUsage {
+                    input_tokens: input_tokens.unwrap_or(0),
+                    cache_create_tokens: 0,
+                    cache_read_tokens: cache_read_tokens.unwrap_or(0),
+                    output_tokens: output_tokens.unwrap_or(0),
+                };
+                assert_eq!(usage.context_occupancy_input_tokens(), 117_600);
+            }
+            other => panic!("expected StatusUpdate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn codex_token_count_total_only_keeps_context_unknown() {
+        let payload = serde_json::json!({
+            "info": {
+                "total_token_usage": {
+                    "input_tokens": 2_300_000_u64,
+                    "cached_input_tokens": 2_200_000_u64,
+                    "output_tokens": 41_600_u64
+                }
+            }
+        });
+
+        match token_count_status(&payload).expect("total output can still emit telemetry") {
+            StreamMessage::StatusUpdate {
+                input_tokens,
+                cache_read_tokens,
+                output_tokens,
+                ..
+            } => {
+                assert_eq!(input_tokens, None);
+                assert_eq!(cache_read_tokens, None);
+                assert_eq!(output_tokens, Some(41_600));
+            }
+            other => panic!("expected StatusUpdate, got {other:?}"),
+        }
     }
 
     // U-8 fixture-level: a rollout with 5 paired tool_call / tool_result

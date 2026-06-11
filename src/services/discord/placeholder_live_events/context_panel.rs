@@ -1,4 +1,5 @@
 use super::common::{CONTEXT_PANEL_LINE_MAX_CHARS, truncate_chars};
+use crate::services::provider::ProviderKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ContextPanelSnapshot {
@@ -17,12 +18,21 @@ impl ContextPanelSnapshot {
             .saturating_add(self.cache_read_tokens)
     }
 
-    fn usage_percent(&self) -> Option<u64> {
+    fn display_used_tokens(&self, provider: &ProviderKind) -> u64 {
+        let used = self.used_tokens();
+        if matches!(provider, ProviderKind::Codex) {
+            used.min(self.context_window_tokens)
+        } else {
+            used
+        }
+    }
+
+    fn usage_percent(&self, provider: &ProviderKind) -> Option<u64> {
         if self.context_window_tokens == 0 {
             return None;
         }
-        let percent =
-            (u128::from(self.used_tokens()) * 100) / u128::from(self.context_window_tokens);
+        let percent = (u128::from(self.display_used_tokens(provider)) * 100)
+            / u128::from(self.context_window_tokens);
         Some(percent.min(100) as u64)
     }
 }
@@ -37,14 +47,17 @@ fn format_token_count(tokens: u64) -> String {
     }
 }
 
-pub(super) fn render_context_panel_line(context: &ContextPanelSnapshot) -> Option<String> {
-    let usage_percent = context.usage_percent()?;
+pub(super) fn render_context_panel_line(
+    context: &ContextPanelSnapshot,
+    provider: &ProviderKind,
+) -> Option<String> {
+    let usage_percent = context.usage_percent(provider)?;
     let icon = if usage_percent >= 85 {
         "⚠️"
     } else {
         "📦"
     };
-    let used = format_token_count(context.used_tokens());
+    let used = format_token_count(context.display_used_tokens(provider));
     let window = format_token_count(context.context_window_tokens);
     let mut line = format!(
         "Context   {icon} {used} / {window} tokens ({usage_percent}%) · auto-compact {}%",

@@ -457,7 +457,7 @@ pub(super) fn render_status_panel(
     if let Some(context_line) = snapshot
         .context
         .as_ref()
-        .and_then(render_context_panel_line)
+        .and_then(|context| render_context_panel_line(context, provider))
     {
         sections.push(context_line);
     }
