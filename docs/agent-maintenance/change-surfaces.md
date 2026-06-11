@@ -1016,7 +1016,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   freshness-annotation sync, not a baseline raise. Slice S3 relocates the
   hosting cluster to a directory and drives claude.rs back under the giant
   threshold.)
-- `src/services/codex_tui/rollout_tail.rs` (1639) — Codex TUI rollout tail
+- `src/services/codex_tui/rollout_tail.rs` (1663) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
   beyond the #2169 session identity fix.
 - `src/services/codex_tui/input.rs` (1350) — Codex TUI input readiness
