@@ -37,6 +37,9 @@ cd "$DASHBOARD_DIR"
 echo "==> Dashboard dependency install (npm ci)"
 npm ci --no-audit --no-fund
 
+echo "==> Dashboard security audit (high+)"
+npm audit --audit-level=high
+
 echo "==> Dashboard build"
 npm run build
 
