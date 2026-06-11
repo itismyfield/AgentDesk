@@ -2344,50 +2344,32 @@ struct ClaudeTuiRecreateState {
     resume: bool,
 }
 
-/// Outcome of the stranded prompt-draft recovery probe that runs before a warm
-/// follow-up submit.
-///
-/// `Terminal` carries the original early-return `Result` verbatim — the warm
-/// follow-up orchestrator must surface it immediately (the recovery block's
-/// `return Ok(())` cancellation exits and `Err(..)` fresh-resolution failures
-/// short-circuit before any submit-phase side-effect). `Proceed` carries the
-/// (possibly recreated) session resolution plus the three submit-gating flags
-/// exactly as the inline locals held them at the original fall-through point.
+/// Outcome of stranded prompt-draft recovery; `Terminal` forwards original Ok/Err exits before submit side effects, and `Proceed` carries the fall-through quartet/flags.
 #[cfg(unix)]
 #[must_use]
 enum ClaudeTuiDraftRecoveryOutcome {
-    /// Recovery completed and the follow-up may continue to submit-plan
-    /// computation. `state` carries the session quartet (recreated when a
-    /// draft-recovery kill ladder ran), and the three flags reflect whether a
-    /// busy wait occurred, whether the session was recreated before submit, and
-    /// whether a stranded prompt draft was cleared before submit.
+    /// Continue to submit-plan computation with the possibly recreated quartet plus busy/recreate/draft-cleared flags.
     Proceed {
         state: ClaudeTuiRecreateState,
         busy_waited: bool,
         recreate_before_submit: bool,
         prompt_draft_cleared_before_submit: bool,
     },
-    /// Recovery hit an original early return; `Result` is forwarded verbatim to
-    /// the orchestrator's caller.
+    /// Recovery hit an original early return; forward the `Result` verbatim.
     Terminal(Result<(), String>),
 }
 
 /// Outcome of an attempted warm follow-up against a live Claude TUI session.
 #[cfg(unix)]
 enum ClaudeTuiWarmFollowupOutcome {
-    /// The follow-up turn was handled (delivered, aborted, or errored); the
-    /// orchestrator returns this `Result` directly without a fresh launch.
+    /// Handled (delivered, aborted, or errored); return this without launch.
     Terminal(Result<(), String>),
-    /// The follow-up could not proceed; the orchestrator must fall through to a
-    /// fresh launch using the (possibly updated) session resolution.
+    /// Could not proceed; fall through to fresh launch with this resolution.
     Recreate(ClaudeTuiRecreateState),
 }
 
-/// Verbatim extraction of the warm-followup submit-and-stream block.
-///
-/// `Terminal` carries the original early-return `Result` unchanged.
-/// `FallThroughRecreate` preserves the original fall-through-to-fresh-launch,
-/// including the `RecreateSession` arm's kill-then-fall-through behavior.
+/// Verbatim extraction of the warm-followup submit-and-stream block; `Terminal` carries the original early-return `Result` unchanged.
+/// `FallThroughRecreate` preserves `submit_existing_session == false` and `RecreateSession` kill-then-fresh-launch fall-through.
 #[cfg(unix)]
 #[must_use]
 enum ClaudeTuiWarmFollowupSubmitOutcome {
@@ -2395,19 +2377,8 @@ enum ClaudeTuiWarmFollowupSubmitOutcome {
     FallThroughRecreate,
 }
 
-/// Recover from a stranded prompt draft left in the composer before a warm
-/// follow-up submit.
-///
-/// Verbatim extraction of the stranded prompt-draft recovery block from
-/// `try_claude_tui_warm_followup` (#3196/#3228 extraction convention): the
-/// session quartet enters via [`ClaudeTuiRecreateState`] and is destructured
-/// into the same mutable locals the inline block used, so the body is preserved
-/// token-for-token. Every original early return is forwarded as
-/// `ClaudeTuiDraftRecoveryOutcome::Terminal(..)` carrying the same `Result` (the
-/// draft-clear cancellation exit returns `Ok(())`; the two
-/// `fresh_claude_tui_session_resolution` failures return `Err(..)`). The
-/// original fall-through is `Proceed` carrying the (possibly recreated) quartet
-/// and the three submit-gating flags exactly as the inline locals held them.
+/// Recover from a stranded prompt draft left in the composer before submit.
+/// Verbatim extraction: destructures state into the original mutable locals; cancellation returns `Ok(())`, fresh-resolution failures return `Err(..)`, and fall-through returns `Proceed` with quartet/flags.
 #[cfg(unix)]
 fn recover_claude_tui_stranded_prompt_draft(
     state: ClaudeTuiRecreateState,
@@ -2932,17 +2903,7 @@ fn run_claude_tui_warm_followup_submit_and_stream(
 }
 
 /// Attempt a warm follow-up against an existing live Claude TUI tmux session.
-///
-/// Mirrors the pre-refactor inline `if session_exists && has_live_pane && resume`
-/// block verbatim: stranded prompt-draft recovery, busy-wait, prompt submission,
-/// transcript read, and the follow-up result classification. Every original
-/// `return Ok(())` / `return Err(..)` / `?` short-circuit is preserved as a
-/// `Terminal(..)` outcome (so the orchestrator returns immediately with the same
-/// value, before any fresh-launch side-effect). When the block originally fell
-/// through to a fresh launch — `submit_existing_session == false`, the
-/// `RecreateSession` classification, or a draft-recovery recreate — this returns
-/// `Recreate(..)` carrying the session resolution exactly as the inline locals
-/// held it at that point.
+/// Mirrors the pre-refactor live-session branch: recovery, busy wait, submit/read/classify; `Terminal` returns before fresh-launch side effects, `Recreate` carries fall-through resolution.
 #[cfg(unix)]
 fn try_claude_tui_warm_followup(
     mut resolved_session_id: String,
@@ -3051,16 +3012,8 @@ fn cleanup_stale_claude_tui_session(tmux_session_name: &str) {
     );
 }
 
-/// Prepare the Claude TUI launch script and create the hosted tmux session.
-///
-/// Verbatim extraction of the pre-refactor fresh-launch prep/create block: temp
-/// cleanup, owner + runtime-kind markers, launch-script preparation, and the
-/// `create_session` call, with the identical on-failure cleanup (best-effort
-/// session-file cleanup + owner-marker removal) on every error path. Returns the
-/// owner-marker path on success so the caller can remove it on a later fresh-turn
-/// failure. The owner-marker / runtime-kind-marker `?` short-circuits preserve
-/// their original semantics: they return `Err` before any session-file or
-/// owner-marker cleanup, exactly as the inline `?` did.
+/// Prepare the Claude TUI launch script and hosted tmux session.
+/// Verbatim prep/create extraction: temp cleanup, owner/runtime markers, launch script, create_session; marker `?` exits precede cleanup, later failures keep original cleanup, success returns owner path.
 #[cfg(unix)]
 fn prepare_and_create_claude_tui_session(
     tmux_session_name: &str,
