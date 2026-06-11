@@ -472,6 +472,7 @@ src/
 │   │   │   ├── recovery_flush.rs
 │   │   │   ├── restored_state.rs
 │   │   │   ├── session_gc.rs
+│   │   │   ├── shared_data.rs
 │   │   │   ├── shutdown.rs
 │   │   │   ├── spawns.rs
 │   │   │   ├── startup_doctor.rs

@@ -4,7 +4,7 @@
 > moving any AgentDesk runtime, worker, dispatch, provider, MCP, merge, or test
 > execution path from one dcserver node to multiple nodes.
 >
-> Last refreshed: 2026-06-11 (against #3038 run_bot S2/S3 runtime_bootstrap directory split).
+> Last refreshed: 2026-06-12 (against #3038 run_bot S4 shared-data builder move).
 
 ## Read This First
 
@@ -383,6 +383,18 @@
 
 ### Audited touches
 
+- #3038 run_bot S4: `run_bot_build_shared_data` (and its side-effect-order
+  doc comment) moved verbatim from `runtime_bootstrap.rs` into
+  `runtime_bootstrap/shared_data.rs`, unblocked by the merged SharedData
+  S1-S3 slices. This is a **behavior-preserving module split**: the builder
+  body is token-identical apart from the documented `super::` →
+  `crate::services::discord::` path substitutions (8) and the `pub(super)`
+  visibility needed by the root re-import; the `run_bot` body, the builder's
+  side-effecting initializer order (`load_queue_exit_placeholder_clears` ↔
+  `load_generation` ↔ `TurnFinalizer::spawn` ↔ `StatusPanelController::spawn`
+  ↔ `broadcast::channel`), and the standby-before-lease call order are
+  unchanged. Worker-local module move only: no multinode ownership,
+  singleton, or lease assumption changes.
 - #3038 SharedData S3: `runtime_bootstrap.rs` gained restart-lifecycle
   characterization tests that pin the deferred-restart marker quick-exit path
   (`run_bot_spawn_deferred_restart_poller`) and the

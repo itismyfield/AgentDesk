@@ -119,7 +119,11 @@
 # #3038 run_bot S2/S3: lowered 1918 -> 524 by moving framework_setup,
 # spawns, recovery_flush, voice, gateway_lease, shutdown, and intake into
 # sub-700 `runtime_bootstrap/` modules. S4 shared-data builder remains gated.
-"src/services/discord/runtime_bootstrap.rs" = 524
+# #3038 run_bot S4: lowered 524 -> 369 by moving `run_bot_build_shared_data`
+# into `runtime_bootstrap/shared_data.rs` (gated on the SharedData S1-S3
+# slices, now merged). The root keeps only RunBotContext + run_bot +
+# mod/re-export plumbing; final registry/baseline cleanup is the S5 slice.
+"src/services/discord/runtime_bootstrap.rs" = 369
 # #3034 batch-8: lowered 2655 -> 2645 (dead-code removal: `stop_provider_channel_runtime`).
 # #3293: lowered 2645 -> 2641 (mailbox probe routed through the non-creating
 # `health/mailbox.rs::peeked_provider_mailbox_state`).
