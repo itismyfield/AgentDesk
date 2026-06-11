@@ -995,20 +995,22 @@ async fn do_finalize(
 ) -> FinalizeOutcome {
     let channel_id = key.channel_id;
 
+    // #3350 ②: ensure the #3303 DeferredClaim marker for a watcher-owned TUI-direct
+    // synthetic turn BEFORE (A) erases the row evidence (gates/rationale: cleanup.rs).
+    cleanup::ensure_synthetic_claim_marker_before_clear(key, &provider);
+
     // (A) inflight clear. Only the deadline-armed gate-timeout backstop and the
     //     immediate no-owner restored-watcher path set `clear_inflight` (every
     //     live-caller bridge/watcher site clears inflight inline and passes
     //     `false`). Those two paths CONSOLIDATE the pre-#3016 1800s placeholder
-    //     sweeper, which was IDENTITY-GUARDED: it re-checked the on-disk
-    //     `user_msg_id` still named the same turn and refused to delete a
-    //     different (newer) turn's inflight, and never wiped a planned-restart /
-    //     rebind-origin marker. So when this finalize carries a real identity
-    //     (`user_msg_id != 0`) we reproduce that guard via
-    //     `clear_inflight_state_if_matches` — finalize NEVER deletes a newer
-    //     turn's inflight and preserves `PlannedRestartSkipped` /
-    //     `RebindOriginSkipped`. A true orphan (`user_msg_id == 0`, no identity
-    //     to authenticate against) falls back to the unguarded clear, exactly as
-    //     the orphan paths always had to.
+    //     sweeper, which was IDENTITY-GUARDED: it refused to delete a different
+    //     (newer) turn's inflight and never wiped a planned-restart /
+    //     rebind-origin marker. So a real identity (`user_msg_id != 0`)
+    //     reproduces that guard via `clear_inflight_state_if_matches` —
+    //     finalize NEVER deletes a newer turn's inflight and preserves
+    //     `PlannedRestartSkipped` / `RebindOriginSkipped`. A true orphan
+    //     (`user_msg_id == 0`, nothing to authenticate against) falls back to
+    //     the unguarded clear, exactly as the orphan paths always had to.
     if ctx.clear_inflight {
         if key.user_msg_id != 0 {
             let _ = super::inflight::clear_inflight_state_if_matches(
@@ -1028,12 +1030,11 @@ async fn do_finalize(
     //
     //     #3016 root-cause: when the terminal carries a real identity, use the
     //     IDENTITY-GUARDED finish so finalize only releases the token of the
-    //     turn it actually owns. This closes the wrong-turn race where a stale
-    //     channel-scoped terminal arriving after this turn finalized but before
-    //     the next turn registered (or after ledger GC) would otherwise release
-    //     the NEWER turn's token and decrement `global_active`. An ambiguous
-    //     id-0 (recovery/orphan) terminal keeps the channel-scoped finish — the
-    //     ledger gate + id-0 no-op guard already bound those.
+    //     turn it actually owns — closes the wrong-turn race where a stale
+    //     channel-scoped terminal arriving post-finalize (or after ledger GC)
+    //     would release the NEWER turn's token and decrement `global_active`.
+    //     An ambiguous id-0 (recovery/orphan) terminal keeps the channel-scoped
+    //     finish — the ledger gate + id-0 no-op guard already bound those.
     let finish = if key.user_msg_id != 0 {
         super::mailbox_finish_turn_if_matches(
             shared,

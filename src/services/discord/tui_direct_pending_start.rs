@@ -829,54 +829,66 @@ async fn run_worker_inner(
 /// * **Fail-open** — every miss above (and a failed marker write) only warns:
 ///   the claim, the durable-record delete, and the turn proceed exactly as
 ///   before #3303.
-fn record_deferred_claim_marker_if_watcher_owned(record: &TuiDirectPendingStart) {
-    if record.anchor_message_id == 0 {
+/// #3350: the marker-record chokepoint SHARED by the deferred worker (#3303,
+/// via the thin [`record_deferred_claim_marker_if_watcher_owned`] wrapper) and
+/// the INLINE synthetic claim (`tui_prompt_relay`). Both claim paths must
+/// leave the same durable `DeferredClaim` marker, or an inline-claimed turn
+/// whose output is never committed (e.g. stale input right after `/clear`)
+/// keeps an eternal anchor `⏳`. Body unchanged from the #3303 helper — every
+/// guard above applies verbatim.
+pub(in crate::services::discord) fn record_claim_marker_if_watcher_owned(
+    provider: &str,
+    channel_id: u64,
+    anchor_message_id: u64,
+    tmux_session_name: &str,
+) {
+    if anchor_message_id == 0 {
         return; // I5: a zero anchor id could never be reconciled (record() rejects it too)
     }
     let lease = crate::services::tui_prompt_dedupe::external_input_relay_lease(
-        &record.provider,
-        &record.tmux_session_name,
-        record.channel_id,
+        provider,
+        tmux_session_name,
+        channel_id,
     );
     let relay_owner = lease.map(|lease| lease.relay_owner);
     if relay_owner != Some(crate::services::tui_prompt_dedupe::ExternalInputRelayOwner::TmuxWatcher)
     {
         tracing::debug!(
-            provider = %record.provider,
-            channel_id = record.channel_id,
-            tmux_session_name = %record.tmux_session_name,
-            anchor_message_id = record.anchor_message_id,
+            provider = %provider,
+            channel_id,
+            tmux_session_name = %tmux_session_name,
+            anchor_message_id,
             relay_owner = ?relay_owner,
             "tui_direct_pending_start: deferred-claim marker skipped — turn is not watcher-owned, the watcher chokepoint will never tombstone it (#3303 SC3)"
         );
         return;
     }
-    let Some(provider) = crate::services::provider::ProviderKind::from_str(&record.provider) else {
+    let Some(provider_kind) = crate::services::provider::ProviderKind::from_str(provider) else {
         tracing::warn!(
-            provider = %record.provider,
-            channel_id = record.channel_id,
-            anchor_message_id = record.anchor_message_id,
+            provider = %provider,
+            channel_id,
+            anchor_message_id,
             "tui_direct_pending_start: unparseable provider; deferred-claim marker skipped (fail-open, #3303)"
         );
         return;
     };
-    let Some(row) = super::inflight::load_inflight_state(&provider, record.channel_id) else {
+    let Some(row) = super::inflight::load_inflight_state(&provider_kind, channel_id) else {
         tracing::warn!(
-            provider = %record.provider,
-            channel_id = record.channel_id,
-            anchor_message_id = record.anchor_message_id,
+            provider = %provider,
+            channel_id,
+            anchor_message_id,
             "tui_direct_pending_start: no inflight row at the record instant after a successful claim; deferred-claim marker skipped (fail-open, #3303)"
         );
         return;
     };
-    let row_is_own_turn = row.user_msg_id == record.anchor_message_id
-        && row.tmux_session_name.as_deref() == Some(record.tmux_session_name.as_str());
+    let row_is_own_turn = row.user_msg_id == anchor_message_id
+        && row.tmux_session_name.as_deref() == Some(tmux_session_name);
     if !row_is_own_turn {
         tracing::warn!(
-            provider = %record.provider,
-            channel_id = record.channel_id,
-            tmux_session_name = %record.tmux_session_name,
-            anchor_message_id = record.anchor_message_id,
+            provider = %provider,
+            channel_id,
+            tmux_session_name = %tmux_session_name,
+            anchor_message_id,
             row_user_msg_id = row.user_msg_id,
             row_tmux_session_name = ?row.tmux_session_name,
             "tui_direct_pending_start: inflight row is not this claim's own synthetic turn; deferred-claim marker skipped (fail-open, #3303)"
@@ -884,29 +896,38 @@ fn record_deferred_claim_marker_if_watcher_owned(record: &TuiDirectPendingStart)
         return;
     }
     match super::tui_direct_abort_marker::record_for_deferred_claim(
-        record.provider.clone(),
-        record.channel_id,
-        record.anchor_message_id,
-        record.tmux_session_name.clone(),
-        (record.anchor_message_id, row.started_at),
+        provider.to_string(),
+        channel_id,
+        anchor_message_id,
+        tmux_session_name.to_string(),
+        (anchor_message_id, row.started_at),
     ) {
         Ok(marker) => tracing::info!(
-            provider = %record.provider,
-            channel_id = record.channel_id,
-            tmux_session_name = %record.tmux_session_name,
-            anchor_message_id = record.anchor_message_id,
+            provider = %provider,
+            channel_id,
+            tmux_session_name = %tmux_session_name,
+            anchor_message_id,
             own_started_at = ?marker.foreign_started_at,
             tombstone_covered = marker.covered_at_ms.is_some(),
             "tui_direct_pending_start: deferred-claim marker recorded pinning the OWN synthetic turn — its commit drains ⏳ → ✅, a never-committed turn converges to the bounded sweep ⚠ (#3303)"
         ),
         Err(error) => tracing::warn!(
-            provider = %record.provider,
-            channel_id = record.channel_id,
-            anchor_message_id = record.anchor_message_id,
+            provider = %provider,
+            channel_id,
+            anchor_message_id,
             error = %error,
             "tui_direct_pending_start: failed to persist the deferred-claim marker; claim proceeds without it (fail-open — pre-#3303 behavior, the anchor ⏳ may linger) (#3303)"
         ),
     }
+}
+
+fn record_deferred_claim_marker_if_watcher_owned(record: &TuiDirectPendingStart) {
+    record_claim_marker_if_watcher_owned(
+        &record.provider,
+        record.channel_id,
+        record.anchor_message_id,
+        &record.tmux_session_name,
+    );
 }
 
 #[cfg(test)]
@@ -2042,5 +2063,79 @@ mod tests {
             Some(own_started_at.as_str())
         );
         reset_present_for_tests();
+    }
+
+    /// #3350 (SC3 via the GENERALIZED helper): the relay's INLINE claim path
+    /// calls `record_claim_marker_if_watcher_owned` directly — a non-watcher
+    /// lease records nothing even with a perfectly matching own row (a
+    /// bridge-owned turn completes its own ⏳, so a marker would contradict
+    /// it with a TTL ⚠).
+    #[test]
+    fn generalized_helper_skips_non_watcher_lease() {
+        let _guard = worker_test_lock();
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _rig = DeferredClaimMarkerRig::new();
+
+        let tmux = "tmux-3350-24";
+        record_lease(
+            "claude",
+            tmux,
+            24,
+            crate::services::tui_prompt_dedupe::ExternalInputRelayOwner::BridgeAdapter,
+        );
+        let _ = save_own_inflight_row(24, 2400, tmux);
+
+        record_claim_marker_if_watcher_owned("claude", 24, 2400, tmux);
+
+        assert!(
+            super::super::tui_direct_abort_marker::load_for_channel("claude", 24).is_empty(),
+            "non-watcher lease must record no marker (SC3 — inline path)"
+        );
+    }
+
+    /// #3350: the generalized helper with a watcher lease + matching own row
+    /// records the SAME own-identity DeferredClaim marker the deferred worker
+    /// records — the inline claim path inherits #3303's guards verbatim (the
+    /// existing worker tests stay green through the thin delegation wrapper).
+    #[test]
+    fn generalized_helper_records_marker_for_watcher_lease_and_own_row() {
+        let _guard = worker_test_lock();
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _rig = DeferredClaimMarkerRig::new();
+
+        let tmux = "tmux-3350-25";
+        record_lease(
+            "claude",
+            tmux,
+            25,
+            crate::services::tui_prompt_dedupe::ExternalInputRelayOwner::TmuxWatcher,
+        );
+        let own_started_at = save_own_inflight_row(25, 2500, tmux);
+
+        record_claim_marker_if_watcher_owned("claude", 25, 2500, tmux);
+
+        let markers = super::super::tui_direct_abort_marker::load_for_channel("claude", 25);
+        assert_eq!(
+            markers.len(),
+            1,
+            "RED pre-#3350: the inline claim recorded nothing — a turn whose \
+             output never commits kept an eternal anchor ⏳"
+        );
+        assert_eq!(
+            markers[0].origin,
+            super::super::tui_direct_abort_marker::MarkerOrigin::DeferredClaim
+        );
+        assert_eq!(markers[0].anchor_message_id, 2500);
+        assert_eq!(markers[0].foreign_user_msg_id, Some(2500));
+        assert_eq!(
+            markers[0].foreign_started_at.as_deref(),
+            Some(own_started_at.as_str()),
+            "the pin is the freshly-claimed row's identity (SC1)"
+        );
+        assert_eq!(markers[0].covered_at_ms, None);
     }
 }

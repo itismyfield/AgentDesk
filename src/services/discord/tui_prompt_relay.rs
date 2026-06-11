@@ -705,11 +705,9 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             Err(error) => {
                 // #3075 codex P2: the `Post` outcome reserved a placeholder card slot
                 // (message_id == 0) before this post; on post failure release the
-                // reservation we own (exact-match while message_id is still 0) so the
-                // next same-task notification reserves fresh — otherwise the lingering
-                // placeholder forces every later one to `Pending`/no-op until the 1h
-                // stale purge. Clearing only changes the NEXT reservation's outcome,
-                // never turning an already-dropped repeat into a double-post.
+                // reservation we own so the next same-task notification reserves fresh
+                // (a lingering placeholder would force later ones to `Pending` no-ops
+                // until the 1h stale purge; the NEXT reservation alone is affected).
                 if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
                     let task_id =
                         super::tui_task_card::parse_task_notification(&prompt.prompt).task_id;
@@ -746,13 +744,10 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             );
         }
         // #3164: add `⏳` with the command(provider) bot so it matches the bot that
-        // removes it in `complete_tui_direct_prompt_anchor_lifecycle_if_present`; if
-        // that http was unavailable we skip the add (warned above) rather than strand
-        // the hourglass under the wrong identity.
-        // #3164 codex R2 issue-2: add the `⏳` BEFORE the anchor becomes findable
-        // (`record_prompt_anchor` below) — anchor-first would let a fast watcher
-        // complete (remove a not-yet-added `⏳`, post `✅`, clear the anchor) and the
-        // delayed add then re-leaves `⏳ + ✅`.
+        // removes it in `complete_tui_direct_prompt_anchor_lifecycle_if_present`; on
+        // unavailable http skip the add (warned above). codex R2 issue-2: add BEFORE
+        // the anchor becomes findable (`record_prompt_anchor`) — anchor-first lets a
+        // fast watcher complete first and the delayed add re-leaves `⏳ + ✅`.
         if let Some(command_http) = command_http.as_ref() {
             super::formatting::add_reaction_raw(command_http, channel_id, anchor_message.id, '⏳')
                 .await;
@@ -763,14 +758,12 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             channel_id.get(),
             anchor_message.id.get(),
         );
-        // #3174: turn-identity guard on the ⏳ lifecycle. If the watcher's lease-gated
-        // completion fired inside the sub-second notify+⏳-add window (before this
-        // `record_prompt_anchor`), it left a deferred-completion marker; now that THIS
-        // turn's anchor exists, drain it and finish the ⏳ → ✅ swap. P1: drain ONLY the
-        // marker matching `lease.generation` (never cross-consume a newer turn). P2
-        // (HTTP fail-open): PEEK first, consume only with `command_http`, else leave it
-        // for a later pass within its TTL. Decision is pure in
-        // [`decide_deferred_anchor_completion_drain`]. No-op on the common (no-marker) path.
+        // #3174: turn-identity guard on the ⏳ lifecycle. A lease-gated completion
+        // firing inside the sub-second notify+⏳-add window left a deferred marker;
+        // now that THIS turn's anchor exists, drain it (⏳ → ✅ swap). P1: drain ONLY
+        // the `lease.generation` match (never cross-consume a newer turn). P2: PEEK
+        // first, consume only with `command_http`, else leave it within its TTL.
+        // Pure decision: [`decide_deferred_anchor_completion_drain`]; no-marker no-op.
         match decide_deferred_anchor_completion_drain(
             &prompt.provider,
             &prompt.tmux_session_name,
@@ -806,9 +799,8 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             DeferredAnchorCompletionDrain::NoMarker => {}
         }
         // #3099: a `<task-notification>` auto-turn earns the same synthetic ownership
-        // as human direct input (its ⏳ cleanup is anchored on its own id in the
-        // watcher/recovery paths), so it does NOT short-circuit here. Only
-        // SystemContinuation skips this active-turn block (still relaying via the tail).
+        // as human direct input (its ⏳ cleanup anchors on its own id), so it does NOT
+        // short-circuit here. Only SystemContinuation skips this active-turn block.
         debug_assert!(
             injected_class.is_human_active_turn()
                 || matches!(injected_class, InjectedPromptClass::TaskNotificationEvent),
@@ -816,18 +808,15 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         );
         // #3154 P1-3: set when the synthetic turn-start is DEFERRED to the detached
         // per-channel worker; the observer then must NOT spawn its own BridgeAdapter
-        // tail below (the worker claims as WATCHER owner after the prior turn drains
-        // and re-records the lease — a second observer tail would relay the SAME
-        // output twice, the original bug). The worker owns the relay-owner handoff.
+        // tail below (a second observer tail would relay the SAME output twice — the
+        // original bug). The worker owns the relay-owner handoff.
         if let Some(provider) = ProviderKind::from_str(&prompt.provider) {
-            // #3154 — TEMPORAL fix for turn-interleaving. Claiming the synthetic
-            // turn-start INLINE while the PRIOR turn's tail is still draining seeds
-            // `turn_start_offset` from the prior cursor → `response_sent_offset_
-            // monotonic` collision / duplicate relay; an inline wait also starves
-            // OTHER channels (single observer loop). So when the prior turn is not
-            // finalized, persist a DURABLE pending-start and hand the claim to a
-            // DETACHED per-channel worker (it waits, then claims a FRESH EOF offset).
-            // The common no-interleave case stays on the inline fast path.
+            // #3154 — TEMPORAL fix for turn-interleaving. An INLINE claim while the
+            // PRIOR turn's tail still drains seeds `turn_start_offset` from the prior
+            // cursor (duplicate relay), and an inline wait starves OTHER channels. So
+            // an un-finalized prior turn persists a DURABLE pending-start and hands
+            // the claim to a DETACHED per-channel worker (fresh EOF offset); the
+            // common no-interleave case stays on the inline fast path.
             let prior = synthetic_start_prior_turn_view(
                 shared,
                 &provider,
@@ -872,12 +861,23 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                     lease.relay_owner = claim.relay_owner;
                     // Re-record overwrites the lease with a FRESH generation; adopt it
                     // back into `lease` so the bridge-tail guard below captures the
-                    // exact stored identity (otherwise the guard would hold the stale
-                    // generation and its Drop would clear nothing / the wrong lease).
+                    // exact stored identity (a stale generation's Drop would clear
+                    // nothing / the wrong lease).
                     lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
                         provider.as_str(),
                         &prompt.tmux_session_name,
                         lease,
+                    );
+                }
+                // #3350: the INLINE claim records the same #3303 DeferredClaim marker
+                // as the deferred worker, bounding a never-committed turn's anchor ⏳
+                // (drain ✅ / sweep TTL ⚠). SC3/own-row/I5 gates live in the helper.
+                if claim.claimed {
+                    super::tui_direct_pending_start::record_claim_marker_if_watcher_owned(
+                        &prompt.provider,
+                        channel_id.get(),
+                        anchor_message.id.get(),
+                        &prompt.tmux_session_name,
                     );
                 }
             }

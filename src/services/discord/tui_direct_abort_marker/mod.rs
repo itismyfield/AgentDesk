@@ -208,7 +208,7 @@ mod deferred_claim;
 mod store;
 
 pub(in crate::services::discord) use deferred_claim::{
-    LiveInflightProbe, record_for_deferred_claim,
+    LiveInflightProbe, ensure_marker_for_own_synthetic_turn, record_for_deferred_claim,
 };
 use store::reload;
 #[cfg(test)]
