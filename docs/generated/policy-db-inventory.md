@@ -1,5 +1,5 @@
-# Policy raw-DB inventory (#1007)
-Generated: inventory of `agentdesk.db.query/execute` usage under `policies/`.
+# Policy raw-DB inventory (manually maintained)
+Manual inventory of `agentdesk.db.query/execute` usage under `policies/`.
 Classification key:
 - **read**: SELECT via `agentdesk.db.query` on non-`kv_meta` tables.
 - **mutation**: `agentdesk.db.execute` on non-`kv_meta` tables (UPDATE/INSERT/DELETE).
@@ -46,9 +46,8 @@ Already migrated via this slice: **8** (see `ci-recovery.js` via `agentdesk.ciRe
 
 | file:line | category | sql kind |
 |---|---|---|
-| `policies/pipeline.js:25` | read | select |
-| `policies/pipeline.js:31` | read | select |
-| `policies/pipeline.js:36` | mutation | update |
+| `policies/pipeline.js:44` | read | select |
+| `policies/pipeline.js:74` | mutation | update |
 | `policies/00-pr-tracking.js:19` | read | select |
 | `policies/00-pr-tracking.js:28` | read | select |
 | `policies/00-pr-tracking.js:38` | mutation | insert |
