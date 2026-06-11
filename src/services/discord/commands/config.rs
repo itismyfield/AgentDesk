@@ -1052,3 +1052,271 @@ pub(in crate::services::discord) fn build_allowall_policy_note() -> String {
          • credential/system (`!allowall`/`!adduser`/`!removeuser`/`!escalation`, `/allowall`/`/adduser`/`/removeuser`) — owner-only"
     )
 }
+#[cfg(test)]
+mod session_override_cluster_characterization_tests {
+    //! #3038 S2-0 — characterization tests for the session-override cluster
+    //! (cluster D) function surface. These fix the observable behaviour of the
+    //! fast-mode / Codex-goals / model-override toggle round-trips BEFORE the
+    //! field group is extracted into `SessionOverrideState`, so the same tests
+    //! passing unchanged after the move is the behaviour-equivalence proof (the
+    //! S1 `QueuedPlaceholderState` characterization standard). The tests call
+    //! only the function surface of this module — never the `SharedData` fields
+    //! directly — so the extraction's field-path rewiring cannot require a test
+    //! edit. (`model_picker_pending` and `session_reset_pending` have no pure
+    //! read surface — their rewiring is enforced by the compiler alone; the
+    //! bootstrap literal behaviour is pinned separately by
+    //! `bootstrap_session_reset_pending_excludes_restored_model_overrides`.)
+
+    use super::*;
+
+    use crate::services::discord::make_shared_data_for_tests;
+
+    const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+    const AGENTDESK_CONFIG_ENV: &str = "AGENTDESK_CONFIG";
+
+    struct EnvGuard;
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var(AGENTDESK_ROOT_DIR_ENV);
+                std::env::remove_var(AGENTDESK_CONFIG_ENV);
+            }
+        }
+    }
+
+    /// Pin BOTH the runtime root AND the explicit config path to the temp dir
+    /// so `save_bot_settings` (called by the `update_channel_*` helpers under
+    /// test) can never fall back to the developer's real cwd/home config.
+    fn isolate_persistence(tmp: &std::path::Path) -> EnvGuard {
+        unsafe {
+            std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.to_str().unwrap());
+            std::env::set_var(
+                AGENTDESK_CONFIG_ENV,
+                tmp.join("config").join("agentdesk.yaml"),
+            );
+        }
+        EnvGuard
+    }
+
+    // Current-thread runtime so the async update helpers can be driven from a
+    // synchronous `#[test]`: the `test_support` env-lock guard is then never
+    // held across an `.await`, keeping the await_holding_lock ratchet flat
+    // (same pattern as the S1/S0 queued-placeholder characterization tests).
+    fn test_rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn fast_mode_toggle_round_trip_marks_and_clears_provider_reset() {
+        // #3167 B3: serialize process-global env mutation via the single
+        // crate-wide `test_support` lock (no local per-module Mutex).
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = isolate_persistence(tmp.path());
+
+        let shared = make_shared_data_for_tests();
+        let channel_id = serenity::ChannelId::new(3_038_400);
+        let provider = ProviderKind::Claude;
+        let rt = test_rt();
+
+        assert!(!channel_fast_mode_enabled(&shared, channel_id));
+        assert!(!any_fast_mode_reset_pending(&shared, channel_id));
+
+        // Enabling reports a change, flips the enablement set, and marks the
+        // provider-scoped session reset as pending.
+        assert!(rt.block_on(update_channel_fast_mode(
+            &shared,
+            "test-token",
+            channel_id,
+            &provider,
+            true,
+        )));
+        assert!(channel_fast_mode_enabled(&shared, channel_id));
+        assert!(fast_mode_reset_pending_for_provider(
+            &shared, channel_id, &provider
+        ));
+        assert!(any_fast_mode_reset_pending(&shared, channel_id));
+
+        // Re-enabling is a no-op: no change is reported.
+        assert!(!rt.block_on(update_channel_fast_mode(
+            &shared,
+            "test-token",
+            channel_id,
+            &provider,
+            true,
+        )));
+
+        // The provider-scoped clear reports the pending entry exactly once.
+        assert!(clear_fast_mode_reset_pending_for_provider(
+            &shared, channel_id, &provider
+        ));
+        assert!(!clear_fast_mode_reset_pending_for_provider(
+            &shared, channel_id, &provider
+        ));
+        assert!(!any_fast_mode_reset_pending(&shared, channel_id));
+
+        // Disabling re-marks the provider reset; the channel-wide clear
+        // sweeps it (and is a no-op the second time).
+        assert!(rt.block_on(update_channel_fast_mode(
+            &shared,
+            "test-token",
+            channel_id,
+            &provider,
+            false,
+        )));
+        assert!(!channel_fast_mode_enabled(&shared, channel_id));
+        assert!(any_fast_mode_reset_pending(&shared, channel_id));
+        assert!(clear_fast_mode_reset_pending_for_channel(
+            &shared, channel_id
+        ));
+        assert!(!clear_fast_mode_reset_pending_for_channel(
+            &shared, channel_id
+        ));
+        assert!(!any_fast_mode_reset_pending(&shared, channel_id));
+    }
+
+    #[test]
+    fn fast_mode_reset_entries_stay_provider_scoped() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = isolate_persistence(tmp.path());
+
+        let shared = make_shared_data_for_tests();
+        let channel_id = serenity::ChannelId::new(3_038_410);
+        let rt = test_rt();
+
+        assert!(rt.block_on(update_channel_fast_mode(
+            &shared,
+            "test-token",
+            channel_id,
+            &ProviderKind::Claude,
+            true,
+        )));
+
+        // The pending entry is keyed `provider:channel`, so the other
+        // provider neither observes nor clears it...
+        assert!(!fast_mode_reset_pending_for_provider(
+            &shared,
+            channel_id,
+            &ProviderKind::Codex
+        ));
+        assert!(!clear_fast_mode_reset_pending_for_provider(
+            &shared,
+            channel_id,
+            &ProviderKind::Codex
+        ));
+        // ...while the channel-wide probe still sees it for the channel.
+        assert!(any_fast_mode_reset_pending(&shared, channel_id));
+        assert!(fast_mode_reset_pending_for_provider(
+            &shared,
+            channel_id,
+            &ProviderKind::Claude
+        ));
+    }
+
+    #[test]
+    fn codex_goals_toggle_round_trip_marks_and_clears_reset() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = isolate_persistence(tmp.path());
+
+        let shared = make_shared_data_for_tests();
+        let channel_id = serenity::ChannelId::new(3_038_420);
+        let rt = test_rt();
+
+        assert!(!channel_codex_goals_enabled(&shared, channel_id));
+        assert!(rt.block_on(update_channel_codex_goals(
+            &shared,
+            "test-token",
+            channel_id,
+            true,
+        )));
+        assert!(channel_codex_goals_enabled(&shared, channel_id));
+
+        // Re-enabling is a no-op.
+        assert!(!rt.block_on(update_channel_codex_goals(
+            &shared,
+            "test-token",
+            channel_id,
+            true,
+        )));
+
+        // The toggle marked the goals session reset pending exactly once.
+        assert!(clear_codex_goals_reset_pending_for_channel(
+            &shared, channel_id
+        ));
+        assert!(!clear_codex_goals_reset_pending_for_channel(
+            &shared, channel_id
+        ));
+
+        // Disabling re-marks it.
+        assert!(rt.block_on(update_channel_codex_goals(
+            &shared,
+            "test-token",
+            channel_id,
+            false,
+        )));
+        assert!(!channel_codex_goals_enabled(&shared, channel_id));
+        assert!(clear_codex_goals_reset_pending_for_channel(
+            &shared, channel_id
+        ));
+    }
+
+    #[test]
+    fn model_override_round_trip_observed_via_would_change_probe() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = isolate_persistence(tmp.path());
+
+        let shared = make_shared_data_for_tests();
+        let channel_id = serenity::ChannelId::new(3_038_430);
+        let provider = ProviderKind::Claude;
+        let rt = test_rt();
+
+        assert!(would_channel_model_override_change(
+            &shared,
+            channel_id,
+            Some("model-a")
+        ));
+        assert!(rt.block_on(update_channel_model_override(
+            &shared,
+            "test-token",
+            channel_id,
+            &provider,
+            Some("model-a".to_string()),
+        )));
+        assert!(!would_channel_model_override_change(
+            &shared,
+            channel_id,
+            Some("model-a")
+        ));
+        assert!(would_channel_model_override_change(
+            &shared, channel_id, None
+        ));
+
+        // Setting the same override again is a no-op.
+        assert!(!rt.block_on(update_channel_model_override(
+            &shared,
+            "test-token",
+            channel_id,
+            &provider,
+            Some("model-a".to_string()),
+        )));
+
+        // Clearing restores the no-override state.
+        assert!(rt.block_on(update_channel_model_override(
+            &shared,
+            "test-token",
+            channel_id,
+            &provider,
+            None,
+        )));
+        assert!(!would_channel_model_override_change(
+            &shared, channel_id, None
+        ));
+    }
+}
