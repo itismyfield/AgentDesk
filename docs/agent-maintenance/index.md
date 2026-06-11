@@ -57,15 +57,20 @@
   routes and the file/line where each is registered.
 - [`docs/generated/worker-inventory.md`](../generated/worker-inventory.md) —
   background workers spawned at startup.
-- [`docs/generated/db-file-duplication-audit.md`](../generated/db-file-duplication-audit.md)
-  and [`docs/generated/policy-db-inventory.md`](../generated/policy-db-inventory.md)
-  — cross-file duplication and policy DB usage.
 
-Regenerate with:
+Regenerate the docs above with:
 
 ```
 python3 scripts/generate_inventory_docs.py
 ```
+
+Manually maintained (not emitted by `generate_inventory_docs.py`):
+
+- [`docs/generated/db-file-duplication-audit.md`](../generated/db-file-duplication-audit.md)
+  — cross-file duplication audit (dated snapshot).
+- [`docs/generated/policy-db-inventory.md`](../generated/policy-db-inventory.md)
+  — policy raw-DB usage; refresh by hand using the reproducible `grep` command
+  documented inside that file.
 
 ## Freshness Gate
 
