@@ -65,8 +65,9 @@ mod session_runtime;
 pub(crate) mod settings;
 mod shadow_parity_warn;
 pub(crate) mod shared_memory;
-// #3038 S1: extracted SharedData field clusters (named sub-structs + their
-// dedicated inherent impls). See `shared_state::QueuedPlaceholderState`.
+// #3038 S1/S2: extracted SharedData field clusters (named sub-structs + their
+// dedicated inherent impls). See `shared_state::QueuedPlaceholderState` and
+// `shared_state::SessionOverrideState`.
 mod shared_state;
 mod stall_recovery;
 mod status_panel_orphan_store;
@@ -115,6 +116,9 @@ pub(crate) use router::HeadlessTurnStartError;
 #[cfg(unix)]
 pub(crate) use session_relay_sink::run_session_bound_discord_relay_supervisor;
 pub(in crate::services::discord) use shared_state::QueuedPlaceholderState;
+// #3038 S2: the cluster-D members were `pub(super)` on `SharedData` (visible up
+// to `crate::services`), so the group type is re-exported with that same scope.
+pub(in crate::services) use shared_state::SessionOverrideState;
 // Phase 2-pre.3 of intake-node-routing: worker entry point. Phase 3 will
 // add the worker polling loop that imports these names; until then they
 // are intentionally exposed but unused at the crate boundary.
@@ -2318,27 +2322,14 @@ pub(crate) struct SharedData {
     pub(super) bot_connected: std::sync::atomic::AtomicBool,
     /// ISO 8601 timestamp of the last completed turn (for health reporting).
     pub(super) last_turn_at: std::sync::Mutex<Option<String>>,
-    /// Per-channel model override, independent of session lifecycle.
-    /// Takes priority over role-map model. Cleared via the `/model` picker default option.
-    pub(super) model_overrides: dashmap::DashMap<ChannelId, String>,
-    /// Per-channel native fast mode enablement for providers that support it.
-    pub(super) fast_mode_channels: dashmap::DashSet<ChannelId>,
-    /// Provider-scoped pending native fast-mode resets, encoded as
-    /// `provider:channel_id` strings for mixed-provider dispatch safety.
-    pub(super) fast_mode_session_reset_pending: dashmap::DashSet<String>,
-    /// Per-channel Codex goals feature enablement.
-    pub(super) codex_goals_channels: dashmap::DashSet<ChannelId>,
-    /// Channels that must restart Codex before the next turn because goals changed.
-    pub(super) codex_goals_session_reset_pending: dashmap::DashSet<ChannelId>,
-    /// Channels that must start a fresh provider session on the next turn
-    /// because the effective model override changed.
-    pub(super) model_session_reset_pending: dashmap::DashSet<ChannelId>,
-    /// Channels that must start a fresh provider session on the next turn
-    /// because a persisted runtime execution setting changed.
-    pub(super) session_reset_pending: dashmap::DashSet<ChannelId>,
-    /// Per-message staged model picker selection.
-    /// Key: picker message id. Value tracks owner, target channel, and staged model until submit.
-    pub(super) model_picker_pending: dashmap::DashMap<MessageId, ModelPickerPendingState>,
+    /// #3038 cluster D — session-scoped override / reset-pending state (the
+    /// `model_overrides` map, the fast-mode / Codex-goals enablement sets, the
+    /// per-cause `*_session_reset_pending` sets plus the aggregated
+    /// `session_reset_pending` set, and the staged `model_picker_pending`
+    /// selections). Field declarations and docs live on
+    /// `shared_state::SessionOverrideState`; call sites access the members via
+    /// `shared.overrides.<original field name>`.
+    pub(super) overrides: SessionOverrideState,
     /// Per-thread role/model override for cross-channel dispatch reuse.
     /// When a review dispatch reuses an implementation thread, this maps
     /// thread_channel_id → alt_channel_id so role_binding and model_for_turn
@@ -2643,14 +2634,16 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         voice_pairings: Arc::new(voice_routing::VoiceChannelPairingStore::load_default()),
         bot_connected: std::sync::atomic::AtomicBool::new(false),
         last_turn_at: std::sync::Mutex::new(None),
-        model_overrides: dashmap::DashMap::new(),
-        fast_mode_channels: dashmap::DashSet::new(),
-        fast_mode_session_reset_pending: dashmap::DashSet::new(),
-        codex_goals_channels: dashmap::DashSet::new(),
-        codex_goals_session_reset_pending: dashmap::DashSet::new(),
-        model_session_reset_pending: dashmap::DashSet::new(),
-        session_reset_pending: dashmap::DashSet::new(),
-        model_picker_pending: dashmap::DashMap::new(),
+        overrides: SessionOverrideState {
+            model_overrides: dashmap::DashMap::new(),
+            fast_mode_channels: dashmap::DashSet::new(),
+            fast_mode_session_reset_pending: dashmap::DashSet::new(),
+            codex_goals_channels: dashmap::DashSet::new(),
+            codex_goals_session_reset_pending: dashmap::DashSet::new(),
+            model_session_reset_pending: dashmap::DashSet::new(),
+            session_reset_pending: dashmap::DashSet::new(),
+            model_picker_pending: dashmap::DashMap::new(),
+        },
         dispatch_role_overrides: dashmap::DashMap::new(),
         last_message_ids: dashmap::DashMap::new(),
         catch_up_retry_pending: dashmap::DashMap::new(),

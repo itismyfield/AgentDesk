@@ -70,7 +70,9 @@
 # kickoff / intervention enqueue through `*_with_closed_retry`) are offset by
 # queue-exit comment dedup in the same root, so the frozen baseline stays at
 # 4987 (no raise; #3028 ratchet).
-"src/services/discord/mod.rs" = 4987
+# #3038 S2: lowered 4987 -> 4980 (-7) as the cluster-D field block (8 fields)
+# moved into `shared_state::SessionOverrideState`. Locks in the shrink win.
+"src/services/discord/mod.rs" = 4980
 # #3305: the local-only pass-through lifecycle-skip (kind hoist + note-only return
 # branch + idle-loop skip) is offset by comment dedup in the same root, lowering the
 # frozen baseline 5438 -> 5429 (-9). Locks in the shrink win (#3028 ratchet).
@@ -155,7 +157,13 @@
 # in prod; rustfmt keeps the attribute and the comment on separate lines).
 "src/services/discord/turn_finalizer.rs" = 1528
 "src/services/discord/router/message_handler/headless_turn.rs" = 1316
-"src/services/discord/commands/config.rs" = 1054
+# #3038 S2: lowered 1054 -> 954 (-100) as the session-override bookkeeping
+# helpers (fast-mode reset-entry codec + reset-pending probes/clears +
+# enablement probes + sync_session_reset_pending) moved verbatim to the
+# `shared_state` sibling module alongside `SessionOverrideState`. config.rs is
+# no longer a prod-giant; the entry stays ratcheted at the landed value so a
+# re-expansion past it fails the gate (runtime_bootstrap.rs precedent, #3038).
+"src/services/discord/commands/config.rs" = 954
 "src/services/discord/commands/diagnostics.rs" = 1026
 
 # #3038 slice 1: decision_route.rs (4392 prod LoC) was decomposed into a 139-line

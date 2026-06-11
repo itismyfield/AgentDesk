@@ -383,6 +383,13 @@
 
 ### Audited touches
 
+- #3038 SharedData S2: `runtime_bootstrap.rs` changed only inside
+  `run_bot_build_shared_data` — the eight session-override fields are now
+  initialized through the `SessionOverrideState` group literal wrapped at the
+  first member's original position (member expressions byte-identical,
+  evaluation order preserved; `run_bot` body byte-identical). Worker-local
+  state grouping only: no multinode ownership, singleton, or lease assumption
+  changes.
 - #3038 run_bot S0/S1: `runtime_bootstrap.rs` gained characterization tests and
   moved restored-state, queued-placeholder, startup-doctor, orphan-recovery, and
   session-GC helpers into `runtime_bootstrap/` submodules. This is a

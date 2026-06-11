@@ -1,4 +1,4 @@
-//! #3038 S1 — extracted field clusters of [`SharedData`].
+//! #3038 S1/S2 — extracted field clusters of [`SharedData`].
 //!
 //! This module hosts named sub-structs that group cohesive `SharedData` fields
 //! together with the inherent `impl SharedData` methods that exclusively own
@@ -17,9 +17,12 @@
 
 use std::sync::Arc;
 
+use poise::serenity_prelude as serenity;
 use poise::serenity_prelude::{ChannelId, MessageId};
 
-use super::{QueueExitVisibleCard, SharedData};
+use crate::services::provider::ProviderKind;
+
+use super::{ModelPickerPendingState, QueueExitVisibleCard, SharedData};
 
 /// #3038 cluster C — the queued-placeholder handoff state.
 ///
@@ -276,4 +279,210 @@ impl SharedData {
             })
             .collect()
     }
+}
+
+/// #3038 cluster D — session-scoped override / reset-pending state.
+///
+/// Groups the eight fields that together implement per-channel runtime
+/// overrides (model override, native fast mode, Codex goals) and the
+/// session-reset bookkeeping they drive: the per-cause `*_session_reset_pending`
+/// sets, the aggregated `session_reset_pending` set kept in sync by
+/// `commands::config::sync_session_reset_pending`, and the staged `/model`
+/// picker selections. Field declarations, docs, and types moved verbatim from
+/// `discord/mod.rs`; the members' original `pub(super)` annotations (declared
+/// in `discord/mod.rs`, i.e. visible up to `crate::services`) are re-spelled
+/// per-field as the semantically identical `pub(in crate::services)` because
+/// `pub(super)` written *here* would shrink the scope to
+/// `crate::services::discord` — a compile-time-only re-annotation with zero
+/// runtime effect.
+pub(in crate::services) struct SessionOverrideState {
+    /// Per-channel model override, independent of session lifecycle.
+    /// Takes priority over role-map model. Cleared via the `/model` picker default option.
+    pub(in crate::services) model_overrides: dashmap::DashMap<ChannelId, String>,
+    /// Per-channel native fast mode enablement for providers that support it.
+    pub(in crate::services) fast_mode_channels: dashmap::DashSet<ChannelId>,
+    /// Provider-scoped pending native fast-mode resets, encoded as
+    /// `provider:channel_id` strings for mixed-provider dispatch safety.
+    pub(in crate::services) fast_mode_session_reset_pending: dashmap::DashSet<String>,
+    /// Per-channel Codex goals feature enablement.
+    pub(in crate::services) codex_goals_channels: dashmap::DashSet<ChannelId>,
+    /// Channels that must restart Codex before the next turn because goals changed.
+    pub(in crate::services) codex_goals_session_reset_pending: dashmap::DashSet<ChannelId>,
+    /// Channels that must start a fresh provider session on the next turn
+    /// because the effective model override changed.
+    pub(in crate::services) model_session_reset_pending: dashmap::DashSet<ChannelId>,
+    /// Channels that must start a fresh provider session on the next turn
+    /// because a persisted runtime execution setting changed.
+    pub(in crate::services) session_reset_pending: dashmap::DashSet<ChannelId>,
+    /// Per-message staged model picker selection.
+    /// Key: picker message id. Value tracks owner, target channel, and staged model until submit.
+    pub(in crate::services) model_picker_pending:
+        dashmap::DashMap<MessageId, ModelPickerPendingState>,
+}
+
+// #3038 cluster D — free-function helpers that exclusively own
+// [`SessionOverrideState`]. Moved verbatim from `commands/config.rs` (which
+// re-exports them so every `super::config::*` importer and unqualified call
+// site is unchanged). The only edits are the per-item visibility
+// re-annotations documented inline; bodies, signatures, and the
+// `shared.overrides.<field>` access paths are byte-identical to the
+// pre-move state of this slice. The settings-coupled writers
+// (`update_channel_fast_mode` / `update_channel_codex_goals` /
+// `update_channel_model_override`) intentionally stay in config.rs: they mix
+// this cluster with `settings` persistence (`save_bot_settings`).
+
+pub(in crate::services::discord) fn fast_mode_reset_pending_key(
+    channel_id: serenity::ChannelId,
+    provider: &ProviderKind,
+) -> String {
+    format!("{}:{}", provider.as_str(), channel_id.get())
+}
+
+pub(in crate::services::discord) fn parse_fast_mode_reset_pending_entry(
+    entry: &str,
+) -> Option<(Option<&str>, serenity::ChannelId)> {
+    if let Some((provider_id, raw_channel_id)) = entry.split_once(':') {
+        let channel_id = raw_channel_id
+            .parse::<u64>()
+            .ok()
+            .map(serenity::ChannelId::new)?;
+        return Some((Some(provider_id), channel_id));
+    }
+
+    entry
+        .parse::<u64>()
+        .ok()
+        .map(serenity::ChannelId::new)
+        .map(|channel_id| (None, channel_id))
+}
+
+fn fast_mode_reset_entry_matches_channel(entry: &str, channel_id: serenity::ChannelId) -> bool {
+    parse_fast_mode_reset_pending_entry(entry)
+        .map(|(_, entry_channel_id)| entry_channel_id == channel_id)
+        .unwrap_or(false)
+}
+
+// #3038 S2: this helper was module-private in `commands/config.rs`; the
+// verbatim move requires widening it to `pub(in crate::services::discord)`
+// because one caller (`update_channel_fast_mode`, a settings-coupled writer)
+// stays behind in config.rs and resolves it through the re-export there.
+// Compile-time-only re-annotation; effective reachability is unchanged.
+pub(in crate::services::discord) fn fast_mode_reset_entry_matches_provider(
+    entry: &str,
+    channel_id: serenity::ChannelId,
+    provider: &ProviderKind,
+) -> bool {
+    parse_fast_mode_reset_pending_entry(entry)
+        .map(|(provider_id, entry_channel_id)| {
+            entry_channel_id == channel_id
+                && provider_id
+                    .map(|entry_provider| entry_provider.eq_ignore_ascii_case(provider.as_str()))
+                    .unwrap_or(true)
+        })
+        .unwrap_or(false)
+}
+
+pub(in crate::services::discord) fn fast_mode_reset_pending_for_provider(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    provider: &ProviderKind,
+) -> bool {
+    shared
+        .overrides
+        .fast_mode_session_reset_pending
+        .iter()
+        .any(|entry| fast_mode_reset_entry_matches_provider(entry.key(), channel_id, provider))
+}
+
+pub(in crate::services::discord) fn any_fast_mode_reset_pending(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+) -> bool {
+    shared
+        .overrides
+        .fast_mode_session_reset_pending
+        .iter()
+        .any(|entry| fast_mode_reset_entry_matches_channel(entry.key(), channel_id))
+}
+
+pub(in crate::services::discord) fn clear_fast_mode_reset_pending_for_provider(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    provider: &ProviderKind,
+) -> bool {
+    let provider_key = fast_mode_reset_pending_key(channel_id, provider);
+    shared
+        .overrides
+        .fast_mode_session_reset_pending
+        .remove(&provider_key)
+        .is_some()
+}
+
+pub(in crate::services::discord) fn clear_fast_mode_reset_pending_for_channel(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+) -> bool {
+    let keys: Vec<String> = shared
+        .overrides
+        .fast_mode_session_reset_pending
+        .iter()
+        .filter_map(|entry| {
+            fast_mode_reset_entry_matches_channel(entry.key(), channel_id)
+                .then(|| entry.key().clone())
+        })
+        .collect();
+
+    let had_entries = !keys.is_empty();
+    for key in keys {
+        shared
+            .overrides
+            .fast_mode_session_reset_pending
+            .remove(&key);
+    }
+    had_entries
+}
+
+pub(in crate::services::discord) fn sync_session_reset_pending(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+) {
+    if any_fast_mode_reset_pending(shared, channel_id)
+        || shared
+            .overrides
+            .codex_goals_session_reset_pending
+            .contains(&channel_id)
+        || shared
+            .overrides
+            .model_session_reset_pending
+            .contains(&channel_id)
+    {
+        shared.overrides.session_reset_pending.insert(channel_id);
+    } else {
+        shared.overrides.session_reset_pending.remove(&channel_id);
+    }
+}
+
+pub(in crate::services::discord) fn channel_fast_mode_enabled(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+) -> bool {
+    shared.overrides.fast_mode_channels.contains(&channel_id)
+}
+
+pub(in crate::services::discord) fn channel_codex_goals_enabled(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+) -> bool {
+    shared.overrides.codex_goals_channels.contains(&channel_id)
+}
+
+pub(in crate::services::discord) fn clear_codex_goals_reset_pending_for_channel(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+) -> bool {
+    shared
+        .overrides
+        .codex_goals_session_reset_pending
+        .remove(&channel_id)
+        .is_some()
 }

@@ -60,6 +60,7 @@ pub(in crate::services::discord) async fn cmd_goals(ctx: Context<'_>) -> Result<
     let reset_pending = ctx
         .data()
         .shared
+        .overrides
         .session_reset_pending
         .contains(&channel_id);
     let notice = if next_enabled {
