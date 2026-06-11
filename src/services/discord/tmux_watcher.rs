@@ -3936,6 +3936,29 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             );
                             false
                         }
+                    } else if watcher_should_reclaim_orphan_turn_placeholder(
+                        turn_is_external_input_for_session,
+                        placeholder_msg_id,
+                        !full_response.trim().is_empty(),
+                        &last_edit_text,
+                    ) {
+                        // #3351 (codex r2 #1): a restored TUI-direct placeholder was
+                        // previously dropped here with the message left stuck on the
+                        // spinner. Route it through the orphan reclaim path
+                        // (still-placeholder gated) so it is deleted or durably
+                        // enqueued instead of stranded; transient failure defers
+                        // finalization like the panel guard above.
+                        reclaim_orphan_external_input_placeholder(
+                            &http,
+                            &shared,
+                            channel_id,
+                            &mut placeholder_msg_id,
+                            &mut placeholder_from_restored_inflight,
+                            &mut last_edit_text,
+                            &watcher_provider,
+                            &tmux_session_name,
+                        )
+                        .await
                     } else {
                         let _ = placeholder_msg_id.take();
                         placeholder_from_restored_inflight = false;
@@ -6276,6 +6299,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                                 placeholder_msg_id = None;
                                                 placeholder_from_restored_inflight = false;
                                                 last_edit_text.clear();
+                                                // #3351 (#3003 r21 mirror): the stale
+                                                // placeholder delete committed; drop any
+                                                // durable record from an earlier transient
+                                                // reclaim failure this turn.
+                                                crate::services::discord::status_panel_orphan_store::remove(
+                                                    &watcher_provider,
+                                                    &shared.token_hash,
+                                                    channel_id.get(),
+                                                    msg_id.get(),
+                                                );
                                             }
                                             FallbackPlaceholderCleanupDecision::PreserveInflightForCleanupRetry => {
                                                 relay_ok = false;
@@ -6292,6 +6325,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                         placeholder_msg_id = None;
                                         placeholder_from_restored_inflight = false;
                                         last_edit_text.clear();
+                                        // #3351 (codex r2 #2): this message is intentionally
+                                        // preserved because it may contain streamed response
+                                        // content — a durable record enqueued by an earlier
+                                        // transient reclaim failure must not outlive the turn
+                                        // and let a later drain delete the preserved message.
+                                        crate::services::discord::status_panel_orphan_store::remove(
+                                            &watcher_provider,
+                                            &shared.token_hash,
+                                            channel_id.get(),
+                                            msg_id.get(),
+                                        );
                                         let ts = chrono::Local::now().format("%H:%M:%S");
                                         tracing::warn!(
                                             "  [{ts}] ⚠ watcher: terminal response delivered via fallback send; preserving original msg {} in channel {} because it may contain streamed response content (#2757)",
