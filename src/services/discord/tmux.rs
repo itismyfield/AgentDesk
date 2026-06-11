@@ -2138,6 +2138,11 @@ async fn finish_restored_watcher_active_turn(
     // confirmed a normal completion pass `false` and keep the restore-gated path.
     normal_completion: bool,
     kickoff_queue: bool,
+    // #3350 codex r1-1: the caller's PRE-CLEAR row snapshot for the #3303
+    // DeferredClaim marker ensure — inflight is cleared before this helper
+    // (see `user_msg_id`), so a row re-load cannot authenticate the watcher's
+    // synthetic turns. `None` keeps the row-reload fallback.
+    claim_snapshot: Option<super::turn_finalizer::SyntheticClaimSnapshot>,
     stop_source: &'static str,
 ) -> bool {
     // The mailbox is cleared now when EITHER gate holds:
@@ -2147,26 +2152,20 @@ async fn finish_restored_watcher_active_turn(
     //     restored/recovered watcher inherits its turn from the bridge, so
     //     it owns the cancel_token when the turn ends). Pre-existing.
     //
-    // #3016 phase-5b2: the third gate — `delegated_finalize_owed`, sourced from
-    // the per-handle `mailbox_finalize_owed` flag (#1452) — has been removed.
-    // At both production call sites the watcher already passes
-    // `normal_completion = true`, so the flag was redundant in this OR and only
-    // fed an observability log/event; the ledger's exactly-once phase gate makes
-    // a double `mailbox_finish_turn` idempotent.
+    // #3016 phase-5b2: the third gate (`delegated_finalize_owed`, the #1452
+    // `mailbox_finalize_owed` flag) is removed — both production sites pass
+    // `normal_completion = true`, and the ledger's exactly-once phase gate
+    // makes a double `mailbox_finish_turn` idempotent.
     //
-    // `kickoff_queue` is the dispatch-lifecycle gate (codex #1670 P2): the
-    // mailbox/inflight cleanup above is required for orphan prevention even
-    // when the dispatch finalization failed, but auto-dispatching the next
-    // queued turn must NOT happen on a failed dispatch — that decision is
-    // left to the operator/user. Callers pass `dispatch_ok` (or an
-    // equivalent gate) here.
+    // `kickoff_queue` is the dispatch-lifecycle gate (codex #1670 P2):
+    // cleanup must run even on a failed dispatch (orphan prevention), but
+    // auto-dispatching the next queued turn must not — callers pass
+    // `dispatch_ok` here.
     //
-    // #3016 (codex R1): the return value reports whether this helper actually
-    // DROVE the finalize (i.e. did NOT early-return). The caller folds it into
+    // #3016 (codex R1): returns whether this helper actually DROVE the
+    // finalize (did not early-return); the caller folds it into
     // `watcher_handled_mailbox_finish` so the post-finalize lifecycle (queue
-    // kickoff suppression + terminal-stop-candidate path) reflects the real
-    // finalize — otherwise the decoupled `normal_completion`-only finalize would
-    // leave that signal false and double-schedule kickoff / skip terminal-stop.
+    // kickoff suppression + terminal-stop) reflects the real finalize.
     if !normal_completion && !finish_mailbox_on_completion {
         return false;
     }
@@ -2190,11 +2189,12 @@ async fn finish_restored_watcher_active_turn(
     // caller's `kickoff_queue`.
     let outcome = shared
         .turn_finalizer
-        .submit_terminal(
+        .submit_terminal_with_claim_snapshot(
             super::turn_finalizer::TurnKey::new(channel_id, user_msg_id, shared.current_generation),
             provider.clone(),
             super::turn_finalizer::TerminalEvent::Complete,
             super::turn_finalizer::FinalizeContext::watcher(),
+            claim_snapshot,
             shared.clone(),
         )
         .await;

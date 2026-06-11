@@ -4079,6 +4079,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             // flag (removed in #3016 phase-5b2).
                             true,
                             true,
+                            // #3350 codex r1-1: the row was cleared above — the
+                            // finalize-time marker ensure authenticates against
+                            // this pre-clear snapshot instead of a no-op re-load.
+                            pinned_pre_cleanup_inflight.as_ref().map(
+                                crate::services::discord::turn_finalizer::SyntheticClaimSnapshot::from_row,
+                            ),
                             "watcher fresh ready-for-input idle (structural/pane-idle completion)",
                         )
                         .await;
@@ -7146,6 +7152,27 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             lifecycle_stage_paused,
             inflight_state.is_some(),
         ) {
+            // #3350 issue-1 + codex r1-2 (lease-gated row-absent commit,
+            // tombstone-BEFORE-deliver): resolve the #3303 own-pin markers for
+            // the anchor we are ABOUT to ✅ — synchronously, before the Discord
+            // await below. The old deliver-then-resolve order let a TTL sweep
+            // firing during (or just before) the await claim the row-absent
+            // marker uncovered and stack a ⚠ next to the delivered ✅. If the
+            // ✅ delivery below then fails, the anchor keeps its ⏳ for retry
+            // with the marker already resolved — the same residual state as
+            // pre-PR (no marker existed), not a regression.
+            if let Some(anchor) = crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
+                watcher_provider.as_str(),
+                &tmux_session_name,
+                channel_id.get(),
+            ) {
+                crate::services::discord::tui_direct_abort_marker::resolve_own_claim_markers_for_visibly_completed_anchor(
+                    watcher_provider.as_str(),
+                    &tmux_session_name,
+                    channel_id.get(),
+                    anchor.message_id,
+                );
+            }
             let completed = crate::services::discord::tui_prompt_relay::complete_tui_direct_prompt_anchor_lifecycle_if_present(
                 &http,
                 watcher_provider.as_str(),
@@ -7158,18 +7185,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 },
             )
             .await;
-            // #3350 issue-1 (lease-gated row-absent commit): a delivered ✅ has
-            // NO committed row left for the tombstone chokepoint below, so the
-            // #3303 own-pin marker would TTL-sweep a false ⚠ onto this ✅. Fix
-            // from the marker's pin: tombstone-first + claimed discard (I1).
-            if let Some(anchor) = completed.as_ref() {
-                crate::services::discord::tui_direct_abort_marker::resolve_own_claim_markers_for_visibly_completed_anchor(
-                    watcher_provider.as_str(),
-                    &tmux_session_name,
-                    channel_id.get(),
-                    anchor.message_id,
-                );
-            }
             // #3174: turn-identity guard on the ⏳ lifecycle vs the lease-gated
             // completion. The gate above can fire on the external-input LEASE
             // alone; a commit inside the sub-second `notify-post + ⏳-add`
@@ -7492,34 +7507,24 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 drop(data);
             }
             turn_result_relayed = true;
-            // #1670/#1708: Always consume the handoff debt and clear inflight
+            // #1670/#1708: always consume the handoff debt and clear inflight
             // when terminal output was committed — the bridge's
-            // `bridge_relay_delegated_to_watcher` arm in `turn_bridge/mod.rs`
-            // (the `else if` at ~line 4071) saves inflight and returns, so it
-            // never comes back to revoke the debt / clear the inflight even if
-            // dispatch finalization fails (organic `dispatch_id = null` turns
-            // surfaced this: a stale fallback dispatch_id reporting
-            // `dispatch_ok = false` used to orphan the inflight + mailbox
-            // cancel_token forever). Decoupling rule: `clear_inflight_state` +
-            // `finish_restored_watcher_active_turn` fire whenever the watcher
-            // committed terminal output (delivered or intentionally
-            // suppressed; bridge + watcher may call them concurrently —
-            // `mailbox_finish_turn` is idempotent), while anything genuinely
-            // dependent on the dispatch lifecycle (queue kickoff, dispatch
-            // followup, terminal-stop decision) stays gated on `dispatch_ok`
-            // further below.
-            // #3016 phase-5b2: the legacy `mailbox_finalize_owed` flag (and its
-            // `swap(false, AcqRel)` read here) is removed — exactly-once is the
-            // ledger's job; the Release-reset cross-turn safety is subsumed by
-            // the ledger phase gate.
-            // #3016 (codex R3): do NOT delete the on-disk inflight when it
-            // belongs to a NEWER follow-up turn (same session, started AT/AFTER
-            // this committed range) — the same offset decision that makes
-            // `pinned_finalize_user_msg_id` return 0 below gates the clear, so
-            // this stale-range pass cannot wipe the newer turn's inflight. Only
-            // the on-disk file is gated; the in-memory `inflight_state` used
-            // afterward is unaffected, and `cleared_by_watcher` fires only when
-            // the clear actually ran (preserve existing semantics).
+            // `bridge_relay_delegated_to_watcher` arm saves inflight and never
+            // returns to clear it even if dispatch finalization fails (a stale
+            // fallback dispatch_id with `dispatch_ok = false` used to orphan
+            // the inflight + cancel_token forever). Decoupling rule: clear +
+            // `finish_restored_watcher_active_turn` fire on every committed
+            // terminal (idempotent under bridge/watcher concurrency), while
+            // dispatch-lifecycle side-effects (queue kickoff, followup,
+            // terminal-stop) stay gated on `dispatch_ok` below.
+            // #3016 phase-5b2: the legacy `mailbox_finalize_owed` flag is
+            // removed — exactly-once is the ledger phase gate's job.
+            // #3016 (codex R3): do NOT delete on-disk inflight owned by a
+            // NEWER follow-up turn — the same offset decision that zeroes
+            // `pinned_finalize_user_msg_id` below gates this clear, so a
+            // stale-range pass cannot wipe it. Only the on-disk file is gated;
+            // the in-memory `inflight_state` and `cleared_by_watcher` keep
+            // their semantics.
             // #3296 codex r2: aborted-anchor reconcile, sited BEFORE the row
             // clear — tombstone evidence (committed turn identity) lands first,
             // then the drain covers, then the clear; a sweep claiming a marker
@@ -7591,42 +7596,29 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // below is also `dispatch_ok`-gated and remains as a fallback
             // for paths where the helper short-circuited.
             // #3016 (codex R1+R2): derive the finalize id from the TURN-PINNED
-            // pre-relay snapshot, never from the late `inflight_state` re-read
-            // above. That late read reloads the on-disk inflight AFTER the
-            // relay/emit; the watcher loop is not turn-scoped (see the L~7327
-            // warning), so a follow-up turn may have already rewritten inflight on
-            // disk by then — its `user_msg_id` would belong to a NEWER turn. Under
-            // the old flag-gated path this finalize fired narrowly; with
-            // `normal_completion = true` it fires UNCONDITIONALLY, so a stale-id
-            // match here could `finish_turn_if_matches` and release the WRONG
-            // (follow-up) turn.
+            // pre-relay snapshot, never the late `inflight_state` re-read — the
+            // watcher loop is not turn-scoped (L~7327 warning), so a follow-up
+            // may have rewritten on-disk inflight after the relay/emit, and
+            // with `normal_completion = true` a stale-id match would
+            // `finish_turn_if_matches` the WRONG (follow-up) turn.
             //
-            // R2 (offset-aliasing): even the pre-relay snapshot
-            // `inflight_before_relay` (loaded L~6163) is NOT inherently pinned to
-            // the OUTPUT RANGE being completed. The watcher-yield guard
-            // `watcher_should_yield_to_inflight_state` (tmux.rs:2110-2111) lets the
-            // watcher PROCEED on this old range when a FOLLOW-UP turn on the SAME
-            // session has `turn_start_offset >= current_offset` (it starts AFTER
-            // this range). In that case the snapshot holds the newer turn's id, and
-            // a session-only filter would still pass it. `pinned_finalize_user_msg_id`
-            // gates on the range relationship — effective start
-            // `turn_start_offset.unwrap_or(last_offset) < current_offset` — exactly
-            // mirroring the guard, so a newer turn yields 0 (no exact ledger match;
-            // turn_finalizer L~526 refuses to release a mismatched live turn). It
-            // keeps the session-match + `user_msg_id != 0` checks too.
+            // R2 (offset-aliasing): even `inflight_before_relay` is not pinned
+            // to the OUTPUT RANGE being completed — the watcher-yield guard
+            // (tmux.rs:2110-2111) proceeds on this old range when a follow-up
+            // on the SAME session starts AT/AFTER `current_offset`, leaving the
+            // newer turn's id in the snapshot. `pinned_finalize_user_msg_id`
+            // mirrors the guard's range test (effective start
+            // `turn_start_offset.unwrap_or(last_offset) < current_offset`), so
+            // a newer turn yields 0 (turn_finalizer L~526 refuses a mismatched
+            // live turn); session-match + `user_msg_id != 0` checks kept.
+            // `current_offset` is this completion range's end (same value as
+            // `commit_watcher_direct_terminal_session_idle` below).
             //
-            // `current_offset` here is the end of the range this completion covers
-            // (same value passed to `commit_watcher_direct_terminal_session_idle`
-            // just below).
-            //
-            // R3 cross-ref: this SAME offset decision now also gates the
-            // `⏳ → ✅` reaction + transcript + analytics block and the
-            // `clear_inflight_state` above, via
-            // `completion_is_stale_for_newer_turn`
-            // (`committed_completion_is_stale_for_newer_turn` is the exact
-            // complement of this helper's `< current_offset` range test). So the
-            // newer-turn case yields 0 here AND skips those destructive
-            // side-effects — the two stay consistent by construction.
+            // R3 cross-ref: `completion_is_stale_for_newer_turn` (the exact
+            // complement of that `< current_offset` test) gates the `⏳ → ✅` /
+            // transcript / analytics block and the `clear_inflight_state`
+            // above, so "yields 0" and "skip destructive side-effects" stay
+            // consistent by construction.
             let restored_user_msg_id = pinned_finalize_user_msg_id(
                 inflight_before_relay.as_ref(),
                 &tmux_session_name,
@@ -7681,6 +7673,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     // AlreadyFinalized here), so this cannot over-finalize.
                     true,
                     dispatch_ok,
+                    // #3350 codex r1-1: inflight was cleared above — carry the
+                    // pre-relay snapshot (the same row `restored_user_msg_id` was
+                    // pinned from) for the finalize-time marker ensure.
+                    inflight_before_relay.as_ref().map(
+                        crate::services::discord::turn_finalizer::SyntheticClaimSnapshot::from_row,
+                    ),
                     "restored watcher completed with queued backlog",
                 )
                 .await
@@ -8777,6 +8775,7 @@ mod tests {
             true,  // finish_mailbox_on_completion (restore semantics)
             false, // normal_completion (#3016: this path is restore-gated, not the decoupled normal-completion arm)
             false, // kickoff_queue
+            None,  // claim_snapshot (#3350 r1-1: not a synthetic-claim path)
             "terminal_delivery_timeout_cleanup_test",
         )
         .await;
@@ -8871,6 +8870,7 @@ mod tests {
             false, // finish_mailbox_on_completion — fresh live watcher
             true,  // normal_completion — confirmed terminal-output-committed point
             false, // kickoff_queue
+            None,
             "normal_completion_decouple_test",
         )
         .await;
@@ -8899,6 +8899,7 @@ mod tests {
             false,
             true,
             false,
+            None,
             "normal_completion_decouple_test_double",
         )
         .await;
@@ -8963,6 +8964,7 @@ mod tests {
             false,
             true,
             false,
+            None,
             "stale_guard_turn_a",
         )
         .await;
@@ -8999,6 +9001,7 @@ mod tests {
             false,
             true, // normal_completion fires unconditionally
             false,
+            None,
             "stale_guard_stale_id",
         )
         .await;
@@ -9021,6 +9024,7 @@ mod tests {
             false,
             true,
             false,
+            None,
             "stale_guard_turn_b",
         )
         .await;
@@ -9548,6 +9552,7 @@ mod tests {
             false, // finish_mailbox_on_completion — fresh live watcher
             true,  // normal_completion — S3: structural-signal-driven, flag-independent
             true,
+            None,
             "watcher fresh ready-for-input idle (structural completion terminator)",
         )
         .await;
@@ -9572,6 +9577,7 @@ mod tests {
             false,
             true,
             true,
+            None,
             "watcher fresh ready-for-input idle (structural completion terminator)",
         )
         .await;

@@ -2398,4 +2398,56 @@ mod tests {
         );
         assert!(load_for_channel("claude", 100).is_empty());
     }
+
+    /// #3350 codex r1-2 (tombstone-BEFORE-deliver): the watcher now runs the
+    /// resolver before awaiting the visible `⏳ → ✅` delivery. Race legs:
+    ///
+    /// * OLD order (RED contrast) — the sweep preempts while the watcher is
+    ///   still inside the delivery await, i.e. BEFORE any tombstone landed:
+    ///   the row-absent, TTL-expired, uncovered marker degrades to the `⚠`
+    ///   that then stacks next to the just-delivered `✅`.
+    /// * NEW order — the resolver (tombstone + claimed discard) runs first;
+    ///   the same sweep finds nothing to claim and delivers NOTHING.
+    #[test]
+    fn sweep_preempting_delivery_await_warns_only_under_the_old_order() {
+        let _root = test_root();
+        // OLD order: no tombstone yet when the sweep fires mid-await.
+        record(&deferred_marker("claude", 100, 914, 10_000)).unwrap();
+        let (warn_applier, warn_calls) = recording_applier(ReactionDelivery::Delivered);
+        let swept = test_rt().block_on(sweep_expired_with_applier(
+            "claude",
+            10_000 + TTL_MS,
+            true,
+            &|_marker: &AbortedAnchorMarker| false,
+            &warn_applier,
+        ));
+        assert_eq!(swept, 1);
+        assert_eq!(
+            warn_calls.lock().unwrap().as_slice(),
+            &[(914, ReactionOp::FailureWarn)],
+            "deliver-then-resolve let the mid-await sweep stack ⚠ next to the ✅"
+        );
+
+        // NEW order: resolver first (as the watcher call site now does), then
+        // the identical sweep — no ⚠, no duplicate ✅, store empty.
+        record(&deferred_marker("claude", 100, 915, 10_000)).unwrap();
+        assert_eq!(
+            resolve_own_claim_markers_for_visibly_completed_anchor("claude", "tmux-100", 100, 915),
+            1
+        );
+        let (applier, calls) = recording_applier(ReactionDelivery::Delivered);
+        let swept = test_rt().block_on(sweep_expired_with_applier(
+            "claude",
+            10_000 + TTL_MS,
+            true,
+            &|_marker: &AbortedAnchorMarker| false,
+            &applier,
+        ));
+        assert_eq!(swept, 0, "nothing left for the preempting sweep to claim");
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "tombstone-first: the about-to-be-✅'d anchor sees no sweep reaction at all"
+        );
+        assert!(load_for_channel("claude", 100).is_empty());
+    }
 }

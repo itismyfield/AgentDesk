@@ -84,37 +84,86 @@ pub(super) fn should_ensure_synthetic_claim_marker(
         && row_tmux_session_present
 }
 
+/// #3350 codex r1-1: submit-time snapshot of the inflight-row fields the
+/// finalize-time marker ensure authenticates against. The production watcher
+/// submitters clear the row BEFORE submitting the finalize (tmux.rs
+/// `finish_restored_watcher_active_turn` docs), so a row re-load inside
+/// `do_finalize` is a guaranteed no-op for exactly the turns the ensure
+/// exists for — the snapshot, captured from the caller's pre-clear row pinned
+/// to the submitted turn, closes that guarantee hole.
+#[derive(Clone, Debug)]
+pub(in crate::services::discord) struct SyntheticClaimSnapshot {
+    pub(in crate::services::discord) user_msg_id: u64,
+    pub(in crate::services::discord) turn_source_external: bool,
+    pub(in crate::services::discord) relay_owner_watcher: bool,
+    pub(in crate::services::discord) injected_prompt_message_id: Option<u64>,
+    pub(in crate::services::discord) tmux_session_name: Option<String>,
+    pub(in crate::services::discord) started_at: String,
+}
+
+impl SyntheticClaimSnapshot {
+    pub(in crate::services::discord) fn from_row(
+        row: &crate::services::discord::inflight::InflightTurnState,
+    ) -> Self {
+        use crate::services::discord::inflight::{RelayOwnerKind, TurnSource};
+        Self {
+            user_msg_id: row.user_msg_id,
+            turn_source_external: row.turn_source == TurnSource::ExternalInput,
+            relay_owner_watcher: row.relay_owner_kind == RelayOwnerKind::Watcher,
+            injected_prompt_message_id: row.injected_prompt_message_id,
+            tmux_session_name: row.tmux_session_name.clone(),
+            started_at: row.started_at.clone(),
+        }
+    }
+}
+
 /// #3350 ②: `do_finalize` entry hook — whatever submitter (watcher / bridge /
 /// monitor / backstop) finalizes a watcher-owned TUI-direct synthetic turn,
 /// guarantee the durable #3303 DeferredClaim marker exists for its anchor.
-/// Idempotent (an existing marker is NEVER touched) and reaction-free: the
-/// `⏳` verdict belongs exclusively to the #3303 reconcilers (drain `✅` /
-/// sweep TTL `⚠`), so output that commits late after a Stopped event never
-/// races a false-`⚠` here. Runs for Cancel too — a cancelled turn with no
-/// commit converging to the TTL `⚠` is the honest signal. Must run BEFORE the
-/// `do_finalize` (A) inflight clear: the row is the evidence.
-pub(super) fn ensure_synthetic_claim_marker_before_clear(key: TurnKey, provider: &ProviderKind) {
-    use crate::services::discord::inflight::{RelayOwnerKind, TurnSource};
-
+/// Idempotent (an existing own-pin/covered marker is never touched; an
+/// uncovered stale Abort pin is replaced per the #3303 contract — see
+/// `ensure_marker_for_own_synthetic_turn`) and reaction-free: the `⏳`
+/// verdict belongs exclusively to the #3303 reconcilers (drain `✅` / sweep
+/// TTL `⚠`), so output that commits late after a Stopped event never races a
+/// false-`⚠` here. Runs for Cancel too — a cancelled turn with no commit
+/// converging to the TTL `⚠` is the honest signal.
+///
+/// Evidence source (codex r1-1): the SUBMIT-TIME snapshot wins when the
+/// submitter carried one — the watcher clears the row before submitting, so
+/// for its turns the re-load below proves nothing. The row re-load (which
+/// must then run BEFORE the `do_finalize` (A) inflight clear) remains the
+/// fallback for submitters that did not capture a snapshot.
+pub(super) fn ensure_synthetic_claim_marker_before_clear(
+    key: TurnKey,
+    provider: &ProviderKind,
+    submit_snapshot: Option<&SyntheticClaimSnapshot>,
+) {
     if key.user_msg_id == 0 {
         return;
     }
-    let Some(row) =
-        crate::services::discord::inflight::load_inflight_state(provider, key.channel_id.get())
-    else {
-        return;
+    let snapshot = match submit_snapshot {
+        Some(snapshot) => snapshot.clone(),
+        None => {
+            let Some(row) = crate::services::discord::inflight::load_inflight_state(
+                provider,
+                key.channel_id.get(),
+            ) else {
+                return;
+            };
+            SyntheticClaimSnapshot::from_row(&row)
+        }
     };
     if !should_ensure_synthetic_claim_marker(
         key.user_msg_id,
-        row.user_msg_id,
-        row.turn_source == TurnSource::ExternalInput,
-        row.relay_owner_kind == RelayOwnerKind::Watcher,
-        row.injected_prompt_message_id,
-        row.tmux_session_name.is_some(),
+        snapshot.user_msg_id,
+        snapshot.turn_source_external,
+        snapshot.relay_owner_watcher,
+        snapshot.injected_prompt_message_id,
+        snapshot.tmux_session_name.is_some(),
     ) {
         return;
     }
-    let Some(tmux) = row.tmux_session_name.as_deref() else {
+    let Some(tmux) = snapshot.tmux_session_name.as_deref() else {
         return;
     };
     let _ = crate::services::discord::tui_direct_abort_marker::ensure_marker_for_own_synthetic_turn(
@@ -122,7 +171,7 @@ pub(super) fn ensure_synthetic_claim_marker_before_clear(key: TurnKey, provider:
         key.channel_id.get(),
         key.user_msg_id,
         tmux,
-        &row.started_at,
+        &snapshot.started_at,
     );
 }
 
@@ -532,6 +581,139 @@ mod tests {
                 );
             });
         });
+    }
+
+    /// #3350 codex r1-1 (the production watcher shape): the watcher clears the
+    /// row BEFORE submitting the finalize, so the row re-load inside
+    /// `do_finalize` proves nothing — the submit-time snapshot must carry the
+    /// identity. RED pre-fix: with the row already gone the ensure was a
+    /// guaranteed no-op on exactly the watcher path it was built for (a turn
+    /// claimed before the inline record existed finalized with no marker —
+    /// eternal anchor ⏳). Also pins the negative: a snapshot pinned to a
+    /// DIFFERENT turn than the submitted key must ensure NOTHING.
+    #[test]
+    fn finalize_ensures_marker_from_submit_snapshot_when_watcher_precleared_row() {
+        use crate::services::discord::inflight::{
+            InflightTurnState, TurnSource, save_inflight_state,
+        };
+
+        with_isolated_runtime_root(|| {
+            test_rt().block_on(async {
+                let shared =
+                    super::super::super::make_shared_data_for_tests_with_storage(None, None);
+                let ch = ChannelId::new(3_350_200);
+                let tid = 3_350_201_u64;
+                shared
+                    .global_active
+                    .store(1, std::sync::atomic::Ordering::Relaxed);
+                let _token = seed_active_turn(&shared, ch, tid).await;
+                let fin = TurnFinalizer::spawn();
+                let key = TurnKey::new(ch, tid, 0);
+                fin.register_start(key, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
+
+                let mut row = InflightTurnState::new(
+                    ProviderKind::Claude,
+                    ch.get(),
+                    None,
+                    0,
+                    tid,
+                    0,
+                    "/loop tick".to_string(),
+                    None,
+                    Some("tmux-3350-pre".to_string()),
+                    None,
+                    None,
+                    0,
+                );
+                row.turn_source = TurnSource::ExternalInput;
+                row.set_relay_owner_kind(RelayOwnerKind::Watcher);
+                row.injected_prompt_message_id = Some(tid);
+                save_inflight_state(&row).expect("persist synthetic watcher row");
+
+                // The watcher's exact production sequence: snapshot, clear, submit.
+                let snapshot = super::SyntheticClaimSnapshot::from_row(&row);
+                assert!(snapshot.turn_source_external && snapshot.relay_owner_watcher);
+                assert_eq!(snapshot.user_msg_id, tid);
+                assert_eq!(snapshot.injected_prompt_message_id, Some(tid));
+                crate::services::discord::inflight::clear_inflight_state(
+                    &ProviderKind::Claude,
+                    ch.get(),
+                );
+
+                begin_reaction_cleanup_recording();
+                let outcome = fin
+                    .submit_terminal_with_claim_snapshot(
+                        key,
+                        ProviderKind::Claude,
+                        TerminalEvent::Complete,
+                        FinalizeContext::watcher(),
+                        Some(snapshot),
+                        shared.clone(),
+                    )
+                    .await;
+                assert!(matches!(outcome, FinalizeOutcome::Finalized { .. }));
+
+                let markers = crate::services::discord::tui_direct_abort_marker::load_for_channel(
+                    "claude",
+                    ch.get(),
+                );
+                assert_eq!(
+                    markers.len(),
+                    1,
+                    "RED pre-r1-1: the row-reload ensure no-op'd on the precleared watcher path"
+                );
+                assert_eq!(markers[0].anchor_message_id, tid);
+                assert_eq!(markers[0].foreign_user_msg_id, Some(tid), "OWN pin (SC1)");
+                assert_eq!(
+                    markers[0].foreign_started_at.as_deref(),
+                    Some(row.started_at.as_str()),
+                    "the pin is the SUBMIT-TIME snapshot identity"
+                );
+                assert!(
+                    take_reaction_cleanup_records().is_empty(),
+                    "the ensure stays reaction-free (#3303 reconcilers own delivery)"
+                );
+
+                // Negative: a snapshot for a DIFFERENT turn (newer row captured
+                // by mistake) fails the row-is-this-turn gate — no marker.
+                let ch2 = ChannelId::new(3_350_300);
+                let key2 = TurnKey::new(ch2, 3_350_301, 0);
+                let mut foreign = snapshot_for_other_turn(&row, 3_350_999);
+                foreign.tmux_session_name = Some("tmux-3350-pre".to_string());
+                let outcome = fin
+                    .submit_terminal_with_claim_snapshot(
+                        key2,
+                        ProviderKind::Claude,
+                        TerminalEvent::Complete,
+                        FinalizeContext::watcher(),
+                        Some(foreign),
+                        shared.clone(),
+                    )
+                    .await;
+                assert!(matches!(outcome, FinalizeOutcome::Finalized { .. }));
+                assert!(
+                    crate::services::discord::tui_direct_abort_marker::load_for_channel(
+                        "claude",
+                        ch2.get(),
+                    )
+                    .is_empty(),
+                    "a mismatched snapshot must never pin a marker onto the submitted key"
+                );
+            });
+        });
+    }
+
+    /// Helper for the negative leg: the same row's snapshot re-pinned to a
+    /// different `user_msg_id` (what a buggy caller passing a newer row's
+    /// snapshot would produce).
+    fn snapshot_for_other_turn(
+        row: &crate::services::discord::inflight::InflightTurnState,
+        other_user_msg_id: u64,
+    ) -> super::SyntheticClaimSnapshot {
+        let mut snapshot = super::SyntheticClaimSnapshot::from_row(row);
+        snapshot.user_msg_id = other_user_msg_id;
+        snapshot.injected_prompt_message_id = Some(other_user_msg_id);
+        snapshot
     }
 
     #[test]

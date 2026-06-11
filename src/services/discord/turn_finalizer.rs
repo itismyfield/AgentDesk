@@ -35,6 +35,8 @@ use super::{DeliveryLeaseCell, LeaseHolder, LeaseOutcome};
 
 mod cleanup;
 
+pub(in crate::services::discord) use cleanup::SyntheticClaimSnapshot;
+
 /// How often the reconciler `Tick` fires to re-check deadline-armed
 /// gate-timeout entries and garbage-collect the ledger.
 const RECONCILE_INTERVAL: Duration = Duration::from_millis(1000);
@@ -524,6 +526,29 @@ impl TurnFinalizer {
         ctx: FinalizeContext,
         shared: Arc<SharedData>,
     ) -> FinalizeOutcome {
+        self.submit_terminal_with_claim_snapshot(key, provider, event, ctx, None, shared)
+            .await
+    }
+
+    /// #3350 codex r1-1: `submit_terminal` carrying the submit-time row
+    /// snapshot for the #3303 DeferredClaim marker ensure. Watcher submitters
+    /// clear the row BEFORE submitting, so `do_finalize`'s row re-load proves
+    /// nothing for their turns — the pre-clear snapshot is the identity
+    /// evidence. The idempotent, reaction-free ensure runs HERE, before the
+    /// exactly-once gate: an `AlreadyFinalized` loser's snapshot still ensures
+    /// (the winner may have finalized row/snapshot-less; gates: cleanup.rs).
+    pub(in crate::services::discord) async fn submit_terminal_with_claim_snapshot(
+        &self,
+        key: TurnKey,
+        provider: ProviderKind,
+        event: TerminalEvent,
+        ctx: FinalizeContext,
+        claim_snapshot: Option<SyntheticClaimSnapshot>,
+        shared: Arc<SharedData>,
+    ) -> FinalizeOutcome {
+        if let Some(snapshot) = claim_snapshot.as_ref() {
+            cleanup::ensure_synthetic_claim_marker_before_clear(key, &provider, Some(snapshot));
+        }
         let (ack, rx) = oneshot::channel();
         if self
             .tx
@@ -866,25 +891,18 @@ async fn handle_terminal(
     ctx: FinalizeContext,
     shared: &Arc<SharedData>,
 ) -> FinalizeOutcome {
-    // Resolve to the entry this terminal acts on. A real id uses its exact
-    // key; a channel-only id-0 terminal collapses onto the channel's single
-    // live entry (recovery/orphan path). A terminal for an unregistered turn is
-    // the orphan path (post-restart inflight on disk, no live `Start`); we
-    // still finalize it driven by the inflight identity — idempotent
-    // `mailbox_finish_turn` returns `removed_token = None` so the counter is
-    // untouched and inflight is cleared exactly once.
+    // Resolve to the entry this terminal acts on: a real id keys exactly; a
+    // channel-only id-0 collapses onto the channel's single live entry
+    // (recovery/orphan). An unregistered turn (post-restart inflight, no live
+    // `Start`) still finalizes below — idempotent, exactly-once.
     let ledger_key = resolve_ledger_key(ledger, key);
 
-    // Codex P1 — ambiguous channel-only terminal. A `user_msg_id == 0`
-    // submission whose resolver fell back to the literal orphan key (because a
-    // recently-`Finalized` entry exists) is most likely a STALE terminal of
-    // that finalized turn. If a DIFFERENT live entry exists for the channel
-    // (a queued follow-up that has since registered), running the
-    // channel-scoped `mailbox_finish_turn` here would release the follow-up's
-    // token and decrement `global_active` for a turn this terminal does not
-    // own. Treat it as a no-op so it cannot corrupt the next active turn. (A
-    // genuine orphan with NO live entry still finalizes below — its
-    // `mailbox_finish_turn` is harmless: idempotent + counter-gated.)
+    // Codex P1 — ambiguous channel-only terminal: an id-0 submission that fell
+    // back to the literal orphan key (a recently-`Finalized` entry exists) is
+    // most likely that turn's STALE terminal. With a DIFFERENT live entry on
+    // this channel, the channel-scoped finish would release the follow-up's
+    // token / decrement `global_active` — treat as no-op. (A genuine orphan
+    // with NO live entry still finalizes below; idempotent + counter-gated.)
     if key.user_msg_id == 0 && !ledger.contains_key(&ledger_key) {
         let channel_has_live_turn = ledger.iter().any(|(lk, e)| {
             lk.channel_id == key.channel_id
@@ -936,23 +954,15 @@ async fn handle_terminal(
                 .get_or_insert_with(|| Instant::now() + GATE_BACKSTOP);
             return FinalizeOutcome::Deferred;
         }
-        // No live relay owner → nothing will drive the pane to quiescence, so
-        // finalize now rather than wait out the backstop. This is the
-        // recovered/orphan watcher case (post-restart inflight on disk, never
-        // registered via the bridge handoff `register_start`) where there is no
-        // later watcher block to clear inflight or kick off the queue — the
-        // caller submits with `FinalizeContext::watcher()` while the
-        // `!lifecycle_stage_paused` cleanup block is SKIPPED and discards this
-        // outcome. So this immediate path MUST reproduce that skipped cleanup
-        // itself, exactly as the deadline-armed `gate_backstop()` would have:
-        //   * clear inflight here (the watcher never cleared it inline), so the
-        //     mailbox is not released while the inflight file keeps blocking
-        //     the channel; and
-        //   * kick off any queued soft-queue backlog, so a follow-up message
-        //     queued behind the restored turn actually dispatches instead of
-        //     staying stuck (regression of the EPIC's restart/#3011 goal).
-        // Without the kickoff the restored channel clears inflight but never
-        // drains its pending follow-up, leaving it effectively stuck.
+        // No live relay owner → nothing will drive the pane to quiescence;
+        // finalize now. This recovered/orphan watcher case (post-restart
+        // inflight, no `register_start`) has no later watcher block to clear
+        // inflight or kick the queue — the caller's `watcher()` submit SKIPS
+        // its cleanup block and discards this outcome, so reproduce what the
+        // deadline-armed `gate_backstop()` would have done: clear inflight
+        // here (else the file keeps blocking the channel after the mailbox
+        // release) AND kick off the queued soft-queue backlog (else a queued
+        // follow-up stays stuck — the EPIC restart/#3011 regression).
         effective_ctx.clear_inflight = true;
         effective_ctx.kickoff_queue = true;
     }
@@ -960,14 +970,11 @@ async fn handle_terminal(
     // Flip Pending → Finalizing, run the side-effects, flip → Finalized.
     entry.phase = Phase::Finalizing;
     let provider = entry.provider.clone();
-    // Codex P1 — finalize on the RESOLVED identity. An id-0 watcher/recovery
-    // terminal that collapsed onto a ledger entry registered (via
-    // `register_start`) with the real `user_msg_id` must finalize under THAT
-    // identity so `do_finalize` takes the guarded `finish_turn_if_matches` /
-    // `clear_inflight_state_if_matches` path. Otherwise the id-0 key would force
-    // the unguarded channel-scoped finish and could release a newer turn's token
-    // when the ledger entry is stale. When the submission already carries a real
-    // id, or the entry has no better identity (still id-0), this is the same key.
+    // Codex P1 — finalize on the RESOLVED identity: an id-0 terminal that
+    // collapsed onto an entry registered with the real `user_msg_id` finalizes
+    // under THAT identity, so `do_finalize` takes the guarded if-matches paths
+    // instead of the unguarded channel-scoped finish (which could release a
+    // newer turn's token when the entry is stale). Otherwise the same key.
     let finalize_key = if key.user_msg_id == 0 && entry.turn_key.user_msg_id != 0 {
         entry.turn_key
     } else {
@@ -996,21 +1003,19 @@ async fn do_finalize(
     let channel_id = key.channel_id;
 
     // #3350 ②: ensure the #3303 DeferredClaim marker for a watcher-owned TUI-direct
-    // synthetic turn BEFORE (A) erases the row evidence (gates/rationale: cleanup.rs).
-    cleanup::ensure_synthetic_claim_marker_before_clear(key, &provider);
+    // synthetic turn BEFORE (A) erases the row evidence. Codex r1-1: watcher
+    // submitters cleared the row pre-submit, so for them this row re-load proves
+    // nothing — their guarantee runs at submit time from the pre-clear snapshot
+    // (`submit_terminal_with_claim_snapshot`); rationale/gates: cleanup.rs.
+    cleanup::ensure_synthetic_claim_marker_before_clear(key, &provider, None);
 
-    // (A) inflight clear. Only the deadline-armed gate-timeout backstop and the
-    //     immediate no-owner restored-watcher path set `clear_inflight` (every
-    //     live-caller bridge/watcher site clears inflight inline and passes
-    //     `false`). Those two paths CONSOLIDATE the pre-#3016 1800s placeholder
-    //     sweeper, which was IDENTITY-GUARDED: it refused to delete a different
-    //     (newer) turn's inflight and never wiped a planned-restart /
-    //     rebind-origin marker. So a real identity (`user_msg_id != 0`)
-    //     reproduces that guard via `clear_inflight_state_if_matches` —
-    //     finalize NEVER deletes a newer turn's inflight and preserves
-    //     `PlannedRestartSkipped` / `RebindOriginSkipped`. A true orphan
-    //     (`user_msg_id == 0`, nothing to authenticate against) falls back to
-    //     the unguarded clear, exactly as the orphan paths always had to.
+    // (A) inflight clear. Only the gate-timeout backstop and the immediate
+    //     no-owner restored-watcher path set `clear_inflight` (live bridge /
+    //     watcher sites clear inline, pass `false`). They consolidate the
+    //     pre-#3016 IDENTITY-GUARDED 1800s sweeper: a real identity clears via
+    //     `clear_inflight_state_if_matches` — never a newer turn's inflight,
+    //     preserving `PlannedRestartSkipped` / `RebindOriginSkipped`; a true
+    //     orphan (id-0, nothing to authenticate) keeps the unguarded clear.
     if ctx.clear_inflight {
         if key.user_msg_id != 0 {
             let _ = super::inflight::clear_inflight_state_if_matches(
@@ -1023,18 +1028,13 @@ async fn do_finalize(
         }
     }
 
-    // (B) mailbox cancel_token release — the routed sites' single
-    //     `mailbox_finish_turn`. Idempotent: returns `removed_token = None` on
-    //     a second call, which is what makes a transitional double-finalize a
-    //     no-op during Phases 2-3.
-    //
-    //     #3016 root-cause: when the terminal carries a real identity, use the
-    //     IDENTITY-GUARDED finish so finalize only releases the token of the
-    //     turn it actually owns — closes the wrong-turn race where a stale
-    //     channel-scoped terminal arriving post-finalize (or after ledger GC)
-    //     would release the NEWER turn's token and decrement `global_active`.
-    //     An ambiguous id-0 (recovery/orphan) terminal keeps the channel-scoped
-    //     finish — the ledger gate + id-0 no-op guard already bound those.
+    // (B) mailbox cancel_token release — the routed sites' single, idempotent
+    //     `mailbox_finish_turn` (`removed_token = None` on a second call).
+    //     #3016 root-cause: a real identity uses the IDENTITY-GUARDED finish so
+    //     finalize only releases the token it owns — a stale channel-scoped
+    //     terminal post-finalize/ledger-GC must not release the NEWER turn's
+    //     token or decrement `global_active`. Ambiguous id-0 (recovery/orphan)
+    //     keeps the channel-scoped finish (ledger gate + id-0 no-op bound it).
     let finish = if key.user_msg_id != 0 {
         super::mailbox_finish_turn_if_matches(
             shared,
@@ -1360,7 +1360,7 @@ async fn run_backstop_finalize(
     }
     // Backstop finalize: the deferred terminal originated from the watcher but
     // no caller is around to clear inflight, so the backstop context clears it
-    // here.
+    // here — and the row, still on disk, feeds the marker-ensure row fallback.
     let _ = do_finalize(
         turn_key,
         provider,
