@@ -138,6 +138,37 @@ pub(super) fn missing_inflight_after_session_bound_delivery(
     inflight_missing && !session_bound_relay_delivered
 }
 
+/// #3350 issue-1 pure core: must a committed pass tombstone+drain the row even
+/// when the TUI-direct anchor body was NOT visible (e.g. a suppressed
+/// task-notification completion)? A watcher-owned `ExternalInput` synthetic
+/// row converges its anchor `⏳ → ✅` on EVERY committed pass — suppressed
+/// included (`terminal_output_committed = relay_ok || relay_suppressed`) — and
+/// its #3303/#3350 DeferredClaim marker pins exactly this row's identity, so
+/// skipping the tombstone lets the TTL sweep stack a false `⚠` on that `✅`.
+/// Anything else (bridge-owned, Managed, id-0, session-less) keeps the #3296
+/// body-visible-only tombstone scope.
+pub(super) fn committed_synthetic_commit_requires_marker_tombstone(
+    turn_source_external: bool,
+    relay_owner_watcher: bool,
+    user_msg_id: u64,
+    tmux_session_present: bool,
+) -> bool {
+    turn_source_external && relay_owner_watcher && user_msg_id != 0 && tmux_session_present
+}
+
+/// Row adapter for [`committed_synthetic_commit_requires_marker_tombstone`].
+pub(super) fn committed_row_requires_marker_tombstone(
+    row: &crate::services::discord::inflight::InflightTurnState,
+) -> bool {
+    use crate::services::discord::inflight::{RelayOwnerKind, TurnSource};
+    committed_synthetic_commit_requires_marker_tombstone(
+        row.turn_source == TurnSource::ExternalInput,
+        row.relay_owner_kind == RelayOwnerKind::Watcher,
+        row.user_msg_id,
+        row.tmux_session_name.is_some(),
+    )
+}
+
 #[cfg(test)]
 mod runtime_binding_offset_tests {
     use super::*;
@@ -229,5 +260,34 @@ mod runtime_binding_offset_tests {
         assert!(!missing_inflight_after_session_bound_delivery(true, true));
         assert!(missing_inflight_after_session_bound_delivery(true, false));
         assert!(!missing_inflight_after_session_bound_delivery(false, false));
+    }
+
+    /// #3350 issue-1: a suppressed (body-invisible) committed pass must still
+    /// tombstone a watcher-owned ExternalInput synthetic row — that is the
+    /// exact class whose `⏳ → ✅` block fires while the old body-visible-only
+    /// tombstone gate skipped, stacking a TTL `⚠` on the `✅`.
+    #[test]
+    fn suppressed_commit_requires_tombstone_only_for_watcher_synthetic_rows() {
+        // The false-⚠ class: watcher-owned synthetic row with a real anchor.
+        assert!(committed_synthetic_commit_requires_marker_tombstone(
+            true, true, 42, true
+        ));
+        // Bridge-owned synthetic turn (SC3): finalizes via the bridge, no
+        // watcher tombstone owed outside the body-visible #3296 scope.
+        assert!(!committed_synthetic_commit_requires_marker_tombstone(
+            true, false, 42, true
+        ));
+        // Managed (non-synthetic) row keeps the #3296 body-visible-only scope.
+        assert!(!committed_synthetic_commit_requires_marker_tombstone(
+            false, true, 42, true
+        ));
+        // id-0 rows can never carry an own-pin marker (record rejects zero).
+        assert!(!committed_synthetic_commit_requires_marker_tombstone(
+            true, true, 0, true
+        ));
+        // Session-less rows are outside every marker's reconcile scope.
+        assert!(!committed_synthetic_commit_requires_marker_tombstone(
+            true, true, 42, false
+        ));
     }
 }

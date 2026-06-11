@@ -870,16 +870,16 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                     );
                 }
                 // #3350: the INLINE claim records the same #3303 DeferredClaim marker
-                // as the deferred worker, bounding a never-committed turn's anchor ⏳
-                // (drain ✅ / sweep TTL ⚠). SC3/own-row/I5 gates live in the helper.
-                if claim.claimed {
-                    super::tui_direct_pending_start::record_claim_marker_if_watcher_owned(
-                        &prompt.provider,
-                        channel_id.get(),
-                        anchor_message.id.get(),
-                        &prompt.tmux_session_name,
-                    );
-                }
+                // as the deferred worker (drain ✅ / sweep TTL ⚠). SC3/own-row/I5 gates
+                // live in the recorder; a pending_start test pins this wiring.
+                super::tui_direct_pending_start::record_inline_claim_marker_if_claimed(
+                    claim.claimed,
+                    &prompt.provider,
+                    channel_id.get(),
+                    anchor_message.id.get(),
+                    &prompt.tmux_session_name,
+                    super::tui_direct_pending_start::record_claim_marker_if_watcher_owned,
+                );
             }
         }
         tracing::info!(

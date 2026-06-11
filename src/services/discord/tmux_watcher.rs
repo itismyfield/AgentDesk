@@ -7158,33 +7158,31 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 },
             )
             .await;
+            // #3350 issue-1 (lease-gated row-absent commit): a delivered ✅ has
+            // NO committed row left for the tombstone chokepoint below, so the
+            // #3303 own-pin marker would TTL-sweep a false ⚠ onto this ✅. Fix
+            // from the marker's pin: tombstone-first + claimed discard (I1).
+            if let Some(anchor) = completed.as_ref() {
+                crate::services::discord::tui_direct_abort_marker::resolve_own_claim_markers_for_visibly_completed_anchor(
+                    watcher_provider.as_str(),
+                    &tmux_session_name,
+                    channel_id.get(),
+                    anchor.message_id,
+                );
+            }
             // #3174: turn-identity guard on the ⏳ lifecycle vs the lease-gated
             // completion. The gate above can fire on the external-input LEASE
-            // alone (`tui_direct_anchor_or_lease_present_for_lifecycle` is seeded
-            // from `prompt_anchor_present_before_relay || external_input_lease_before_relay`).
-            // If the provider committed terminal output inside the sub-second
-            // `notify-post + ⏳-add` Discord I/O window, the lease is present but
-            // THIS turn's `record_prompt_anchor` has not landed yet — so the
-            // completion above found no anchor and was a no-op (`None`). The lease
-            // is cleared after this delivery, so no later pass reconciles it and
-            // the ⏳ would be stranded. Record a deferred-completion marker keyed
-            // to this `(provider, tmux, channel)`; the SAME turn's
-            // `record_prompt_anchor` (in the relay) drains it and finishes the
-            // ⏳ → ✅ swap against the just-recorded anchor. Only record when the
-            // anchor is genuinely still absent (an anchor-less completion) — a
-            // `None` from a Discord `create_reaction` error keeps the anchor
-            // findable, and that path retries via the existing anchor lookup,
-            // so we must not also queue a deferred completion for it.
-            //
-            // #3174 codex P1: stamp the marker with the TURN IDENTITY — the
-            // `generation` of the lease this completion gated on
-            // (`external_input_lease_generation_before_relay`). The relay drains
-            // it ONLY when the generation matches THIS turn's recorded lease, so
-            // a NEWER same-(provider,tmux) turn inside the marker TTL can never
-            // complete the wrong turn's ⏳. Require the gating lease's generation
-            // to be known (`Some`): if the gate fired on the anchor alone there
-            // is no lease turn-identity to stamp, and the anchor-based path
-            // already owns the completion.
+            // alone; a commit inside the sub-second `notify-post + ⏳-add`
+            // window finds THIS turn's `record_prompt_anchor` not yet landed —
+            // the completion above no-ops (`None`) and the lease clears after
+            // delivery, stranding the ⏳. Record a deferred-completion marker
+            // keyed to `(provider, tmux, channel)`; the SAME turn's
+            // `record_prompt_anchor` (relay) drains it and finishes the swap.
+            // Only when the anchor is genuinely still absent — a `None` from a
+            // `create_reaction` error keeps the anchor findable and retries.
+            // codex P1: stamp the gating lease's `generation`; the relay drains
+            // ONLY on a matching generation, so a NEWER same-tmux turn cannot
+            // complete the wrong ⏳. Anchor-only firings stay anchor-based.
             if completed.is_none()
                 && let Some(turn_lease_generation) = external_input_lease_generation_before_relay
                 && crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
@@ -7523,17 +7521,19 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // afterward is unaffected, and `cleared_by_watcher` fires only when
             // the clear actually ran (preserve existing semantics).
             // #3296 codex r2: aborted-anchor reconcile, sited BEFORE the row
-            // clear — commit-tombstone evidence (committed turn identity) lands
-            // first, then the drain covers any marker pinned to this turn, then
-            // the clear. A sweep pass claiming a marker mid-commit can thus
-            // observe "no live row" only AFTER the tombstone is durable, so its
-            // 대조 lands ✅ instead of ⚠ (r2 finding 1 — the flock alone only
-            // serialized the reconcilers, it never ordered the verdicts); an
-            // ABORT recording its marker after this drain pass still converges
-            // via the tombstone (record-instant or sweep 대조).
-            if tui_direct_anchor_terminal_body_visible
-                && !completion_is_stale_for_newer_turn
+            // clear — tombstone evidence (committed turn identity) lands first,
+            // then the drain covers, then the clear; a sweep claiming a marker
+            // mid-commit sees "no live row" only AFTER the tombstone is durable,
+            // so its 대조 lands ✅ not ⚠ (r2 finding 1). An ABORT recording its
+            // marker after this drain still converges via the tombstone 대조.
+            // #3350 issue-1: ALSO tombstone+drain body-INVISIBLE commits of
+            // watcher-owned synthetic rows (suppressed task-notification
+            // completions) — their `⏳ → ✅` block fires regardless, and skipping
+            // here left their own-pin marker to a false TTL `⚠`.
+            if !completion_is_stale_for_newer_turn
                 && let Some(committed) = inflight_state.as_ref()
+                && (tui_direct_anchor_terminal_body_visible
+                    || committed_row_requires_marker_tombstone(committed))
             {
                 crate::services::discord::tui_direct_abort_marker::record_commit_tombstone(
                     watcher_provider.as_str(),

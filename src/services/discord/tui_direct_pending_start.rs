@@ -930,6 +930,26 @@ fn record_deferred_claim_marker_if_watcher_owned(record: &TuiDirectPendingStart)
     );
 }
 
+/// #3350 issue-3: the observer INLINE-claim wiring, separated so a unit test
+/// can pin it — `relay_observed_prompt` must record the #3303 DeferredClaim
+/// marker IFF the inline synthetic claim actually claimed, forwarding the
+/// prompt's exact `(provider, channel, anchor, tmux)` identity. `recorder` is
+/// injected (`FnOnce` flavor of the `ClaimFn` injection convention);
+/// production passes [`record_claim_marker_if_watcher_owned`] itself, so the
+/// signature match is compiler-pinned at the call site.
+pub(in crate::services::discord) fn record_inline_claim_marker_if_claimed(
+    claimed: bool,
+    provider: &str,
+    channel_id: u64,
+    anchor_message_id: u64,
+    tmux_session_name: &str,
+    recorder: impl FnOnce(&str, u64, u64, &str),
+) {
+    if claimed {
+        recorder(provider, channel_id, anchor_message_id, tmux_session_name);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2137,5 +2157,33 @@ mod tests {
             "the pin is the freshly-claimed row's identity (SC1)"
         );
         assert_eq!(markers[0].covered_at_ms, None);
+    }
+
+    /// #3350 issue-3: pins the observer inline-claim wiring.
+    /// `relay_observed_prompt` routes through
+    /// `record_inline_claim_marker_if_claimed`, which must invoke the recorder
+    /// with the prompt's EXACT `(provider, channel, anchor, tmux)` identity
+    /// when the synthetic claim succeeded — and must invoke NOTHING when it
+    /// did not (an unclaimed prompt leaving a marker would TTL-⚠ a turn the
+    /// watcher never owned).
+    #[test]
+    fn inline_claim_marker_wiring_records_only_when_claimed() {
+        let recorded: std::cell::RefCell<Vec<(String, u64, u64, String)>> =
+            std::cell::RefCell::new(Vec::new());
+        record_inline_claim_marker_if_claimed(true, "claude", 42, 4242, "tmux-w", |p, c, a, t| {
+            recorded
+                .borrow_mut()
+                .push((p.to_string(), c, a, t.to_string()));
+        });
+        record_inline_claim_marker_if_claimed(false, "claude", 43, 4343, "tmux-w", |p, c, a, t| {
+            recorded
+                .borrow_mut()
+                .push((p.to_string(), c, a, t.to_string()));
+        });
+        assert_eq!(
+            *recorded.borrow(),
+            vec![("claude".to_string(), 42u64, 4242u64, "tmux-w".to_string())],
+            "claimed forwards the exact prompt identity; unclaimed records nothing"
+        );
     }
 }
