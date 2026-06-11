@@ -147,6 +147,19 @@ pub(super) fn empty_terminal_response_visibility_kind(
     }
 }
 
+// "Handoff occurred" is positional, not a parameter: the only emit site runs
+// inside `maybe_hand_off_busy_turn_to_watcher` after the
+// `bridge_should_hand_off_busy_turn_to_watcher` gate and past the
+// proven-delivered early-return, so a pre-gate delegated turn can never reach
+// this kind (no per-turn noise).
+pub(super) fn post_gate_handoff_pending_response_visibility_kind(
+    response_pending_bytes: usize,
+    response_pending_trimmed_empty: bool,
+) -> Option<&'static str> {
+    (response_pending_bytes > 0 && !response_pending_trimmed_empty)
+        .then_some("bridge_post_gate_handoff_pending_response")
+}
+
 /// #3281: emit the empty-terminal-response visibility event chosen by
 /// [`empty_terminal_response_visibility_kind`]. Moved out of
 /// `turn_bridge/mod.rs` (frozen giant baseline); the owner-`None` kind and
@@ -222,6 +235,41 @@ pub(super) fn emit_bridge_empty_terminal_response_visibility(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
+fn emit_post_gate_handoff_pending_response_visibility(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    dispatch_id: Option<&str>,
+    session_key: Option<&str>,
+    turn_id: &str,
+    current_msg_id: u64,
+    response_unsent: &str,
+    tmux_last_offset: Option<u64>,
+    turn_start_offset: Option<u64>,
+) {
+    let response_pending_bytes = response_unsent.len();
+    let Some(kind) = post_gate_handoff_pending_response_visibility_kind(
+        response_pending_bytes,
+        response_unsent.trim().is_empty(),
+    ) else {
+        return;
+    };
+    crate::services::observability::emit_inflight_lifecycle_event(
+        provider.as_str(),
+        channel_id.get(),
+        dispatch_id,
+        session_key,
+        Some(turn_id),
+        kind,
+        serde_json::json!({
+            "current_msg_id": current_msg_id,
+            "response_pending_bytes": response_pending_bytes,
+            "tmux_last_offset": tmux_last_offset,
+            "turn_start_offset": turn_start_offset,
+        }),
+    );
+}
+
 /// #3268 (Defect B): the self-healing watcher handoff itself. When the gate
 /// fires, registers the watcher in the single-authority finalizer ledger,
 /// unpauses it at the bridge's confirmed offset with `turn_delivered = false`,
@@ -239,7 +287,12 @@ pub(super) fn maybe_hand_off_busy_turn_to_watcher(
     watcher_owner_channel_id: ChannelId,
     channel_id: ChannelId,
     provider: &ProviderKind,
+    dispatch_id: Option<&str>,
+    session_key: Option<&str>,
+    turn_id: &str,
+    current_msg_id: u64,
     tmux_last_offset: Option<u64>,
+    response_unsent: &str,
     inflight_state: &mut InflightTurnState,
     bridge_relay_delegated_to_watcher: &mut bool,
     bridge_output_owner: &mut Option<BridgeOutputOwner>,
@@ -288,6 +341,17 @@ pub(super) fn maybe_hand_off_busy_turn_to_watcher(
             );
             return;
         }
+        emit_post_gate_handoff_pending_response_visibility(
+            provider,
+            channel_id,
+            dispatch_id,
+            session_key,
+            turn_id,
+            current_msg_id,
+            response_unsent,
+            tmux_last_offset,
+            inflight_state.turn_start_offset,
+        );
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
             provider = %provider.as_str(),
@@ -426,6 +490,16 @@ mod tests {
             empty_terminal_response_visibility_kind(None, false, 42, false),
             None,
         );
+        // Delegated watcher + non-empty unsent response is not an empty-response signal.
+        assert_eq!(
+            empty_terminal_response_visibility_kind(
+                Some(BridgeOutputOwner::WatcherRelay),
+                false,
+                42,
+                false,
+            ),
+            None,
+        );
         // Terminal-error path → excluded (matches the pre-#3281 gate).
         assert_eq!(
             empty_terminal_response_visibility_kind(None, true, 42, true),
@@ -445,6 +519,22 @@ mod tests {
                 true,
             ),
             None,
+        );
+    }
+
+    #[test]
+    fn post_gate_handoff_pending_response_visibility_kind_truth_table() {
+        assert_eq!(
+            post_gate_handoff_pending_response_visibility_kind(12, false),
+            Some("bridge_post_gate_handoff_pending_response"),
+        );
+        assert_eq!(
+            post_gate_handoff_pending_response_visibility_kind(0, false),
+            None
+        );
+        assert_eq!(
+            post_gate_handoff_pending_response_visibility_kind(12, true),
+            None
         );
     }
 }

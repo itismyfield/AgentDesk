@@ -7006,14 +7006,15 @@ pub(super) fn spawn_turn_bridge(
                 && watcher_owns_assistant_relay
                 && watcher_relay_available_for_turn
                 && !terminal_error_path;
+        let response_unsent =
+            response_portion_after_offset(&full_response, response_sent_offset);
+        let response_pending_trimmed_empty = response_unsent.trim().is_empty();
         // #3268: `mut` so the post-gate self-healing handoff (below) can promote it.
         let mut bridge_relay_delegated_to_watcher = recovered_watcher_owns_output
             || should_delegate_bridge_relay_to_watcher(
                 watcher_owns_assistant_relay,
                 watcher_relay_available_for_turn,
-                !response_portion_after_offset(&full_response, response_sent_offset)
-                    .trim()
-                    .is_empty(),
+                !response_pending_trimmed_empty,
                 cancelled,
                 is_prompt_too_long,
                 transport_error,
@@ -7043,9 +7044,7 @@ pub(super) fn spawn_turn_bridge(
             adk_session_key.as_deref(),
             turn_id.as_str(),
             current_msg_id.get(),
-            response_portion_after_offset(&full_response, response_sent_offset)
-                .trim()
-                .is_empty(),
+            response_pending_trimmed_empty,
             watcher_owns_assistant_relay,
             watcher_relay_available_for_turn,
             standby_relay_owns_output,
@@ -7175,7 +7174,12 @@ pub(super) fn spawn_turn_bridge(
             watcher_owner_channel_id,
             channel_id,
             &provider,
+            dispatch_id.as_deref(),
+            adk_session_key.as_deref(),
+            turn_id.as_str(),
+            current_msg_id.get(),
             tmux_last_offset,
+            response_unsent,
             &mut inflight_state,
             &mut bridge_relay_delegated_to_watcher,
             &mut bridge_output_owner,
