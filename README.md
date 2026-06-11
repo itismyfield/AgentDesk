@@ -493,7 +493,6 @@ The QuickJS engine installs the `agentdesk.*` global with ~21 namespaces (source
 ```javascript
 // Database (Postgres-backed; use ? placeholders, sqlx rebinds them)
 agentdesk.db.query("SELECT * FROM agents WHERE id = ?", ["my-agent"])
-agentdesk.db.execute("UPDATE kv_meta SET value = ? WHERE key = ?", ["true", "my_flag"])
 
 // Key-value store (TTL-aware; replaces direct kv_meta writes for ephemeral state)
 agentdesk.kv.set("pr:42", JSON.stringify(meta), 3600)   // ttlSeconds optional

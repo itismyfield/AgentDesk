@@ -30,8 +30,7 @@ facade or a per-policy capability manifest.
 | `card_review_state` | `INSERT`, `REPLACE`, `UPDATE`, `DELETE` | `agentdesk.reviewState.sync(cardId, state, opts)` |
 | `auto_queue_entries` | `INSERT`, `REPLACE`, `UPDATE`, `DELETE` | `agentdesk.autoQueue.updateEntryStatus(entryId, status, source, opts)` |
 
-Raw DB usage is also budgeted by
-`src/engine/ops/tests.rs::policies_raw_db_count_stays_within_budget`. New raw
+Raw DB usage can be audited with: `grep -rn "agentdesk.db." policies/`. New raw
 DB callsites must migrate to a typed facade or carry a
 `legacy-raw-db: policy=<name> capability=<intent> source_event=<hook>` marker
 so audit logs can attribute the capability.
