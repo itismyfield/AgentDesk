@@ -90,7 +90,10 @@
 # #3038 run_bot S0/S1: lowered 2802 -> 1918 by adding characterization tests and
 # moving restored_state, queued_placeholders, startup_doctor, orphan_recovery,
 # and session_gc into sub-700 `runtime_bootstrap/` modules.
-"src/services/discord/runtime_bootstrap.rs" = 1918
+# #3038 run_bot S2/S3: lowered 1918 -> 524 by moving framework_setup,
+# spawns, recovery_flush, voice, gateway_lease, shutdown, and intake into
+# sub-700 `runtime_bootstrap/` modules. S4 shared-data builder remains gated.
+"src/services/discord/runtime_bootstrap.rs" = 524
 # #3034 batch-8: lowered 2655 -> 2645 (dead-code removal: `stop_provider_channel_runtime`).
 # #3293: lowered 2645 -> 2641 (mailbox probe routed through the non-creating
 # `health/mailbox.rs::peeked_provider_mailbox_state`).

@@ -4,7 +4,7 @@
 > moving any AgentDesk runtime, worker, dispatch, provider, MCP, merge, or test
 > execution path from one dcserver node to multiple nodes.
 >
-> Last refreshed: 2026-06-11 (against #3038 run_bot S0/S1 runtime_bootstrap directory split).
+> Last refreshed: 2026-06-11 (against #3038 run_bot S2/S3 runtime_bootstrap directory split).
 
 ## Read This First
 
@@ -22,16 +22,18 @@
 ### `multinode / discord_gateway_singleton`
 
 - feature: `multinode / discord_gateway_singleton`
-- canonical_modules: `src/services/discord/runtime_bootstrap.rs:1526` builds the
-  Serenity client, `src/services/discord/runtime_bootstrap.rs:1531` starts the
-  gateway lease keepalive task, `src/services/discord/runtime_bootstrap.rs:1549`
-  self-fences on lease loss, and `src/services/discord/runtime_bootstrap.rs:1730`
-  starts the gateway client.
+- canonical_modules: `src/services/discord/runtime_bootstrap.rs` builds the
+  Serenity client and preserves the call order; `runtime_bootstrap/gateway_lease.rs`
+  owns gateway lease acquisition, keepalive, and self-fencing;
+  `runtime_bootstrap/shutdown.rs` owns SIGTERM persistence and gateway backend
+  execution; `runtime_bootstrap/intake.rs` owns the standby intake-worker spawn.
 - legacy_modules: none. The current gateway owner is the active dcserver process
   for that provider.
 - do_not_edit_without_migration_plan:
-  `src/services/discord/runtime_bootstrap.rs` gateway startup and shutdown paths,
-  especially watcher cancellation at `src/services/discord/runtime_bootstrap.rs:1622`.
+  `src/services/discord/runtime_bootstrap.rs` gateway startup order plus
+  `src/services/discord/runtime_bootstrap/gateway_lease.rs` and
+  `src/services/discord/runtime_bootstrap/shutdown.rs` lease/shutdown paths,
+  especially watcher cancellation on gateway lease loss.
 - active_callsite_coverage: single-node runtime with an existing gateway lease.
   It does not yet define cluster role discovery, worker heartbeats, or a
   capability registry for non-gateway workers.
@@ -212,7 +214,7 @@
 
 | assumption | owning module | current risk |
 | --- | --- | --- |
-| Discord gateway singleton | `src/services/discord/runtime_bootstrap.rs:1526`, `src/services/discord/runtime_bootstrap.rs:1531`, `src/services/discord/runtime_bootstrap.rs:1730` | Two nodes starting a gateway for the same provider can duplicate command intake, watcher startup, and shutdown cleanup unless #877 fences gateway ownership to the leader. |
+| Discord gateway singleton | `src/services/discord/runtime_bootstrap.rs`, `src/services/discord/runtime_bootstrap/gateway_lease.rs`, `src/services/discord/runtime_bootstrap/shutdown.rs` | Two nodes starting a gateway for the same provider can duplicate command intake, watcher startup, and shutdown cleanup unless #877 fences gateway ownership to the leader. |
 | Supervised workers singleton | `src/server/worker_registry.rs:151`, `src/server/mod.rs:202`, `src/server/mod.rs:209` | Cluster-enabled worker nodes skip `leader_only` supervised workers unless they hold the startup leader lease; lease-loss self-fencing for already-running loops remains follow-up work. |
 | Merge/review side effects local | `policies/merge-automation.js:46`, `policies/merge-automation.js:522`, `policies/merge-automation.js:1761` | Duplicate policy runners can race direct pushes, PR auto-merge, review notifications, and worktree cleanup. |
 | GitHub issue/body mutation local | `src/github/mod.rs:166`, `src/github/mod.rs:218`, `src/github/dod.rs:122`, `src/server/routes/github.rs:275` | Multiple nodes can create, close, comment, or edit issue bodies unless calls are leader-only or idempotent. |
@@ -274,7 +276,7 @@
   gateway, GitHub merge/issue mutation, singleton policy ticks, global cleanup,
   and any unleased outbox delivery.
 - Current anchors: gateway lease keepalive at
-  `src/services/discord/runtime_bootstrap.rs:1531`, policy tick advisory lock at
+  `src/services/discord/runtime_bootstrap/gateway_lease.rs`, policy tick advisory lock at
   `src/server/mod.rs:301`, GitHub sync advisory lock at `src/server/mod.rs:2818`,
   server cluster leader lease bootstrap at `src/server/cluster.rs`, and
   leader-only worker self-fence at `src/server/worker_registry.rs:522`.
@@ -390,6 +392,14 @@
   ownership remains leader-only under the existing lease, while thread/session GC
   and queued-placeholder cleanup retain their previous worker-local/runtime-local
   assumptions.
+- #3038 run_bot S2/S3: setup/spawn/recovery/voice helpers moved into
+  `framework_setup.rs`, `spawns.rs`, `recovery_flush.rs`, and `voice.rs`; gateway
+  lease, shutdown/backend, and intake-worker helpers moved into
+  `gateway_lease.rs`, `shutdown.rs`, and `intake.rs`. This is a
+  **behavior-preserving module split**: the `run_bot` call order, gateway
+  acquisition before client startup, keepalive self-fence, SIGTERM
+  persist-before-I/O ordering, and standby intake-worker placement are unchanged.
+  S4 (`run_bot_build_shared_data`) remains gated on the SharedData slice.
 - #3274 residual cleanup: `turn_finalizer.rs` now invokes a small
   `turn_finalizer/cleanup.rs` helper when a terminal loser receives
   `AlreadyFinalized`, clearing only same-`user_msg_id` mailbox/inflight

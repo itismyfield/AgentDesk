@@ -464,11 +464,18 @@ src/
 │   │   │   ├── thread_binding.rs
 │   │   │   └── turn_start.rs
 │   │   ├── runtime_bootstrap/
+│   │   │   ├── framework_setup.rs
+│   │   │   ├── gateway_lease.rs
+│   │   │   ├── intake.rs
 │   │   │   ├── orphan_recovery.rs
 │   │   │   ├── queued_placeholders.rs
+│   │   │   ├── recovery_flush.rs
 │   │   │   ├── restored_state.rs
 │   │   │   ├── session_gc.rs
-│   │   │   └── startup_doctor.rs
+│   │   │   ├── shutdown.rs
+│   │   │   ├── spawns.rs
+│   │   │   ├── startup_doctor.rs
+│   │   │   └── voice.rs
 │   │   ├── settings/
 │   │   │   ├── content.rs
 │   │   │   ├── memory.rs

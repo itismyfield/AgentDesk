@@ -756,15 +756,19 @@
     `finalize_stale_streaming_footer` / `text_ends_with_streaming_footer` shared
     terminal-idle reconciliation helpers + their unit tests).
   - `src/services/discord/prompt_builder/` (directory, refactored).
-  - `src/services/discord/runtime_bootstrap.rs` (1918 production lines after
-    #3038 run_bot S0/S1; characterization tests pin the startup-doctor barrier,
+  - `src/services/discord/runtime_bootstrap.rs` (524 production lines after
+    #3038 run_bot S0/S3; characterization tests pin the startup-doctor barrier,
     restored settings filters, queued-placeholder filtering/deletion, and
     gateway intents, then the low-risk clusters moved verbatim into
     `runtime_bootstrap/`: `restored_state.rs` (124), `queued_placeholders.rs`
-    (193), `startup_doctor.rs` (156), `orphan_recovery.rs` (337), and
-    `session_gc.rs` (102 prod / 69 test). The namespace is capped at 700 prod
-    lines per child module in `audit_maintainability_config.toml`; the root
-    remains a registered giant until the later S2-S5 slices finish).
+    (193), `startup_doctor.rs` (156), `orphan_recovery.rs` (337),
+    `session_gc.rs` (102 prod / 69 test), `framework_setup.rs` (287),
+    `spawns.rs` (218), `recovery_flush.rs` (356), `voice.rs` (140),
+    `gateway_lease.rs` (187), `shutdown.rs` (203), and `intake.rs` (63).
+    The namespace is capped at 700 prod lines per child module in
+    `audit_maintainability_config.toml`; the root is no longer a prod giant and
+    was removed from `giant_file_registry.toml`, while S4
+    (`run_bot_build_shared_data`) stays gated on the SharedData slice).
   - `src/services/discord/session_runtime.rs` (1753 lines).
   - `src/services/discord/voice_barge_in.rs` (4657 lines; net +0 from #3034
     scoped dead-code allows on the test-only runtime API
