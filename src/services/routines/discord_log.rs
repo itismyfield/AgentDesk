@@ -1193,6 +1193,36 @@ fn run_outcome_section(
     {
         basic.push(field_line("error", compact(error, 160)));
     }
+    if let Some(agent_id) = outcome
+        .result_json
+        .as_ref()
+        .and_then(|value| {
+            value
+                .get("agent_id")
+                .or_else(|| value.get("failed_agent_id"))
+        })
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        basic.push(field_line("agent", compact(agent_id, 80)));
+    }
+    if let Some(attempt_kind) = outcome
+        .result_json
+        .as_ref()
+        .and_then(|value| value.get("attempt_kind"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        basic.push(field_line("attempt", compact(attempt_kind, 40)));
+    }
+    if let Some(retry_count) = outcome
+        .result_json
+        .as_ref()
+        .and_then(|value| value.get("retry_count"))
+        .and_then(Value::as_i64)
+    {
+        basic.push(field_line("retry_count", retry_count.to_string()));
+    }
     if let Some(warning) = discord_log_warning.filter(|value| !value.trim().is_empty()) {
         basic.push(field_line("discord_log_warning", compact(warning, 160)));
     }
@@ -1453,6 +1483,50 @@ mod tests {
 
         assert!(message.contains("[요약]"));
         assert!(message.contains("result: 성공 요약: 새 자동화 추천 후보 없음"));
+    }
+
+    #[test]
+    fn run_outcome_message_includes_agent_attempt_metadata() {
+        let routine = RoutineRecord {
+            id: "routine-123456789".to_string(),
+            agent_id: Some("codex".to_string()),
+            fallback_agent_id: Some("claude".to_string()),
+            max_retries: 1,
+            script_ref: "daily-summary.js".to_string(),
+            name: "Daily Summary".to_string(),
+            status: "enabled".to_string(),
+            execution_strategy: "fresh".to_string(),
+            schedule: None,
+            next_due_at: None,
+            last_run_at: None,
+            last_result: None,
+            checkpoint: None,
+            discord_thread_id: None,
+            timeout_secs: None,
+            in_flight_run_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let outcome = RoutineRunOutcome {
+            run_id: "run-123456789".to_string(),
+            routine_id: routine.id.clone(),
+            script_ref: routine.script_ref.clone(),
+            action: "agent".to_string(),
+            status: "succeeded".to_string(),
+            result_json: Some(json!({
+                "agent_id": "claude",
+                "attempt_kind": "fallback",
+                "retry_count": 1
+            })),
+            error: None,
+            fresh_context_guaranteed: false,
+        };
+
+        let message = run_outcome_message(&routine, &outcome);
+
+        assert!(message.contains("agent: claude"));
+        assert!(message.contains("attempt: fallback"));
+        assert!(message.contains("retry_count: 1"));
     }
 
     #[test]

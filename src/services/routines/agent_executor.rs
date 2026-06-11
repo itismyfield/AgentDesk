@@ -299,12 +299,28 @@ impl RoutineAgentExecutor {
                     let combined = format!(
                         "{message}; fallback agent {fallback_agent_id} failed: {fallback_error}"
                     );
-                    return fail_claimed_agent_run(store, claimed, action, combined).await;
+                    return fail_claimed_agent_run(
+                        store,
+                        claimed,
+                        action,
+                        combined,
+                        Some(&fallback_agent_id),
+                        "fallback",
+                    )
+                    .await;
                 }
             }
         }
 
-        fail_claimed_agent_run(store, claimed, action, message.to_string()).await
+        fail_claimed_agent_run(
+            store,
+            claimed,
+            action,
+            message.to_string(),
+            Some(failed_agent_id),
+            attempt_kind,
+        )
+        .await
     }
 
     pub async fn poll_agent_runs(
@@ -1475,10 +1491,14 @@ async fn fail_claimed_agent_run(
     claimed: ClaimedRoutineRun,
     action: String,
     message: String,
+    failed_agent_id: Option<&str>,
+    attempt_kind: &str,
 ) -> Result<RoutineRunOutcome> {
     let result_json = Some(json!({
         "status": "failed_to_start",
         "error": message,
+        "failed_agent_id": failed_agent_id,
+        "attempt_kind": attempt_kind,
         "routine_id": claimed.routine_id,
         "run_id": claimed.run_id,
         "script_ref": claimed.script_ref,
@@ -1506,8 +1526,10 @@ async fn fail_claimed_agent_run(
 }
 
 fn retry_next_at(retry_count_before_increment: i32) -> DateTime<Utc> {
-    let exponent = retry_count_before_increment.clamp(0, 5) as u32;
-    let secs = 30_i64.saturating_mul(2_i64.saturating_pow(exponent));
+    let exponent = retry_count_before_increment.max(0) as u32;
+    let secs = 60_i64
+        .saturating_mul(2_i64.saturating_pow(exponent))
+        .min(900);
     Utc::now() + Duration::seconds(secs)
 }
 
@@ -1600,7 +1622,13 @@ fn merge_pending_result(
 }
 
 fn with_started_run_routing_metadata(mut result: Value, started_result: Option<&Value>) -> Value {
-    const ROUTING_KEYS: &[&str] = &["channel_id", "parent_channel_id", "discord_thread_id"];
+    const ROUTING_KEYS: &[&str] = &[
+        "channel_id",
+        "parent_channel_id",
+        "discord_thread_id",
+        "agent_id",
+        "attempt_kind",
+    ];
 
     let Some(started_result) = started_result else {
         return result;
@@ -1901,10 +1929,13 @@ mod tests {
         let first = retry_next_at(0);
         let second = retry_next_at(1);
 
-        assert!(first >= before + chrono::Duration::seconds(29));
-        assert!(first <= before + chrono::Duration::seconds(31));
-        assert!(second >= before + chrono::Duration::seconds(59));
-        assert!(second <= before + chrono::Duration::seconds(61));
+        assert!(first >= before + chrono::Duration::seconds(59));
+        assert!(first <= before + chrono::Duration::seconds(61));
+        assert!(second >= before + chrono::Duration::seconds(119));
+        assert!(second <= before + chrono::Duration::seconds(121));
+        let capped = retry_next_at(5);
+        assert!(capped >= before + chrono::Duration::seconds(899));
+        assert!(capped <= before + chrono::Duration::seconds(901));
     }
 
     #[test]
