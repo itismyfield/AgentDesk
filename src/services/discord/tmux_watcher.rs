@@ -2195,6 +2195,17 @@ mod pane_dead_identity_tests {
     }
 
     #[test]
+    fn watcher_does_not_adopt_persisted_panel_without_session_binding() {
+        let mut state = state_for_turn(0, "AgentDesk-codex-adk-cdx");
+        state.tmux_session_name = None;
+        state.status_message_id = Some(1_510_747_006_337_945_732);
+        assert_eq!(
+            watcher_persisted_status_panel_msg_id(Some(&state), "AgentDesk-codex-adk-cdx"),
+            None
+        );
+    }
+
+    #[test]
     fn watcher_has_no_persisted_panel_without_status_message_id() {
         let state = state_for_turn(0, "AgentDesk-codex-adk-cdx");
         assert_eq!(
@@ -13656,6 +13667,16 @@ TUI-E2E-marker ssh-direct
         ));
         assert!(watcher_batch_contains_relayable_response(
             br#"{"type":"result","result":"ok"}"#
+        ));
+    }
+
+    #[test]
+    fn legacy_wrapper_prompt_observation_accepts_spaced_json_type_forms() {
+        assert!(watcher_batch_contains_relayable_response(
+            br#"{"type": "assistant","message":{"content":[{"text":"ok"}]}}"#
+        ));
+        assert!(watcher_batch_contains_relayable_response(
+            br#"{"type": "result","result":"ok"}"#
         ));
     }
 
