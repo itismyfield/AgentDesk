@@ -167,7 +167,7 @@ pub fn hook_receiver_router() -> Router {
     hook_receiver_router_with_state(HOOK_SERVER_STATE.clone())
 }
 
-fn hook_receiver_router_with_state(state: HookServerState) -> Router {
+pub(crate) fn hook_receiver_router_with_state(state: HookServerState) -> Router {
     Router::new()
         .route("/hooks/{provider}/{event}", post(receive_hook))
         .layer(DefaultBodyLimit::max(8 * 1024 * 1024))

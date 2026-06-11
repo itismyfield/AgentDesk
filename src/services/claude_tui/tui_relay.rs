@@ -24,14 +24,15 @@
 //!   (`hook_server::subscribe_hook_events`) so we observe Stop events the
 //!   moment they land instead of polling the transcript every second.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
-use axum::{Json, Router, routing::post};
+use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
 use crate::services::claude_tui::hook_server::{HookEvent, HookEventKind, subscribe_hook_events};
+use crate::services::claude_tui::input::validate_prompt_text;
 use crate::services::platform::tmux;
 
 /// Hard ceiling on `claude_tui_wait` timeout so a misbehaving caller cannot
@@ -45,6 +46,43 @@ const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 /// so concurrent sends to different sessions cannot stomp each other.
 fn allocate_buffer_name() -> String {
     format!("adk-tui-send-{}", uuid::Uuid::new_v4().simple())
+}
+
+pub(crate) trait SendBackend: Send + Sync {
+    fn has_session(&self, session_name: &str) -> bool;
+    fn load_buffer(&self, buffer_name: &str, text: &str) -> Result<(), String>;
+    fn paste_buffer(
+        &self,
+        session_name: &str,
+        buffer_name: &str,
+        delete: bool,
+    ) -> Result<(), String>;
+    fn send_enter(&self, session_name: &str) -> Result<(), String>;
+}
+
+struct TmuxSendBackend;
+
+impl SendBackend for TmuxSendBackend {
+    fn has_session(&self, session_name: &str) -> bool {
+        tmux::has_session(session_name)
+    }
+
+    fn load_buffer(&self, buffer_name: &str, text: &str) -> Result<(), String> {
+        tmux::load_buffer(buffer_name, text).map(|_| ())
+    }
+
+    fn paste_buffer(
+        &self,
+        session_name: &str,
+        buffer_name: &str,
+        delete: bool,
+    ) -> Result<(), String> {
+        tmux::paste_buffer(session_name, buffer_name, delete).map(|_| ())
+    }
+
+    fn send_enter(&self, session_name: &str) -> Result<(), String> {
+        tmux::send_keys(session_name, &["Enter"]).map(|_| ())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,54 +148,70 @@ fn default_true() -> bool {
 }
 
 pub fn router() -> Router {
+    router_with_send_backend(Arc::new(TmuxSendBackend))
+}
+
+pub(crate) fn router_with_send_backend(backend: Arc<dyn SendBackend>) -> Router {
     Router::new()
         .route("/tui/send", post(handle_send))
         .route("/tui/wait", post(handle_wait))
+        .with_state(backend)
 }
 
-async fn handle_send(Json(req): Json<SendRequest>) -> Json<Value> {
+async fn handle_send(
+    State(backend): State<Arc<dyn SendBackend>>,
+    Json(req): Json<SendRequest>,
+) -> (StatusCode, Json<Value>) {
+    handle_send_with_backend(req, backend.as_ref())
+}
+
+fn handle_send_with_backend(
+    req: SendRequest,
+    backend: &dyn SendBackend,
+) -> (StatusCode, Json<Value>) {
     let session_name = req.session_name.trim().to_string();
     if session_name.is_empty() {
-        return Json(error_json("session_name is required"));
+        return bad_request_json("session_name is required");
     }
-    if !tmux::has_session(&session_name) {
-        return Json(error_json(&format!(
-            "tmux session not found: {session_name}"
-        )));
+    if let Err(error) = validate_prompt_text(&req.text) {
+        return bad_request_json(&error);
+    }
+    if !backend.has_session(&session_name) {
+        return ok_error_json(&format!("tmux session not found: {session_name}"));
     }
     if req.text.is_empty() && !req.submit {
         // Empty text + no submit would be a no-op. Surface this as a 400 so
         // upstream bugs do not silently swallow attempted relays.
-        return Json(error_json(
+        return bad_request_json(
             "text must not be empty when submit=false (call would be a no-op)",
-        ));
+        );
     }
 
     let bytes = req.text.len();
     if !req.text.is_empty() {
         let buffer_name = allocate_buffer_name();
-        if let Err(error) = tmux::load_buffer(&buffer_name, &req.text) {
-            return Json(error_json(&format!("tmux load-buffer failed: {error}")));
+        if let Err(error) = backend.load_buffer(&buffer_name, &req.text) {
+            return ok_error_json(&format!("tmux load-buffer failed: {error}"));
         }
 
         // `paste-buffer -p -r -d` pastes in bracketed-paste mode (so the TUI
         // recognises it as a paste, not many tiny keystrokes), preserves LF
         // (so it does NOT get auto-Enter'd by tmux), and deletes the buffer
         // after pasting.
-        if let Err(error) = tmux::paste_buffer(&session_name, &buffer_name, true) {
+        if let Err(error) = backend.paste_buffer(&session_name, &buffer_name, true) {
             // Best-effort cleanup of the orphan buffer is fine to skip:
             // tmux removes buffers when the server exits and we never reuse
             // the UUID-suffixed name.
-            return Json(error_json(&format!("tmux paste-buffer failed: {error}")));
+            return ok_error_json(&format!("tmux paste-buffer failed: {error}"));
         }
     }
 
     let mut submitted = false;
     if req.submit {
-        match tmux::send_keys(&session_name, &["Enter"]) {
-            Ok(_) => submitted = true,
+        match backend.send_enter(&session_name) {
+            Ok(()) => submitted = true,
             Err(error) => {
-                return Json(error_json(&format!("tmux send-keys Enter failed: {error}")));
+                return ok_error_json(&format!("tmux send-keys Enter failed: {error}"));
             }
         }
     }
@@ -168,7 +222,10 @@ async fn handle_send(Json(req): Json<SendRequest>) -> Json<Value> {
         bytes,
         submitted,
     };
-    Json(serde_json::to_value(resp).unwrap_or_else(|_| json!({ "ok": true })))
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(resp).unwrap_or_else(|_| json!({ "ok": true }))),
+    )
 }
 
 async fn handle_wait(Json(req): Json<WaitRequest>) -> Json<Value> {
@@ -306,11 +363,94 @@ fn error_json(message: &str) -> Value {
     json!({ "ok": false, "error": message })
 }
 
+fn ok_error_json(message: &str) -> (StatusCode, Json<Value>) {
+    (StatusCode::OK, Json(error_json(message)))
+}
+
+fn bad_request_json(message: &str) -> (StatusCode, Json<Value>) {
+    (StatusCode::BAD_REQUEST, Json(error_json(message)))
+}
+
+/// Test-only `SendBackend` exposed to the crate so the server-layer
+/// auth-boundary integration tests (which own the middleware wiring) can mount
+/// `/tui/send` without touching tmux. Kept next to the trait it implements; the
+/// auth-boundary assertions live under `crate::server` because middleware
+/// composition is a server-layer responsibility (#3311).
+#[cfg(test)]
+pub(crate) struct FakeSendBackend;
+
+#[cfg(test)]
+impl SendBackend for FakeSendBackend {
+    fn has_session(&self, _session_name: &str) -> bool {
+        true
+    }
+
+    fn load_buffer(&self, _buffer_name: &str, _text: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn paste_buffer(
+        &self,
+        _session_name: &str,
+        _buffer_name: &str,
+        _delete: bool,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn send_enter(&self, _session_name: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
     use chrono::Utc;
     use serde_json::json;
+
+    fn send_request(text: &str, submit: bool) -> SendRequest {
+        SendRequest {
+            session_name: "test-session".to_string(),
+            text: text.to_string(),
+            submit,
+        }
+    }
+
+    #[test]
+    fn handle_send_rejects_control_characters_with_bad_request() {
+        let (status, body) =
+            handle_send_with_backend(send_request("hello\u{1b}[31m", true), &FakeSendBackend);
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.0["error"],
+            "prompt contains unsupported terminal control characters"
+        );
+    }
+
+    #[test]
+    fn handle_send_rejects_empty_session_name() {
+        let mut req = send_request("hello", true);
+        req.session_name = "   ".to_string();
+        let (status, body) = handle_send_with_backend(req, &FakeSendBackend);
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body.0["error"], "session_name is required");
+    }
+
+    #[test]
+    fn handle_send_valid_input_returns_success() {
+        let (status, body) =
+            handle_send_with_backend(send_request("hello\nworld", true), &FakeSendBackend);
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.0["ok"], true);
+        assert_eq!(body.0["session_name"], "test-session");
+        assert_eq!(body.0["bytes"].as_u64(), Some("hello\nworld".len() as u64));
+        assert_eq!(body.0["submitted"], true);
+    }
 
     fn make_event(provider: &str, sid: &str, kind: HookEventKind, payload: Value) -> HookEvent {
         HookEvent {

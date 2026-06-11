@@ -1250,7 +1250,7 @@ fn prompt_ready_debug_tail(pane: &str) -> String {
     crate::utils::format::safe_suffix(tail.trim(), PROMPT_READY_DEBUG_TAIL_BYTES).to_string()
 }
 
-fn validate_prompt_text(input: &str) -> Result<(), String> {
+pub(crate) fn validate_prompt_text(input: &str) -> Result<(), String> {
     // Block terminal control channels such as ESC bracketed-paste markers,
     // DEL, and C1 controls before either literal send or tmux paste-buffer
     // delivery can relay them into the hosted TUI.
