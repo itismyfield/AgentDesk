@@ -482,6 +482,15 @@ src/
 │   │   │   ├── read.rs
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
+│   │   ├── tmux_watcher/
+│   │   │   ├── commit_decisions.rs
+│   │   │   ├── completion_gate.rs
+│   │   │   ├── completion_gate_tests.rs
+│   │   │   ├── liveness.rs
+│   │   │   ├── panel_decisions.rs
+│   │   │   ├── prompt_observe.rs
+│   │   │   ├── turn_identity.rs
+│   │   │   └── turn_identity_tests.rs
 │   │   ├── tui_direct_abort_marker/
 │   │   │   ├── deferred_claim.rs
 │   │   │   ├── mod.rs

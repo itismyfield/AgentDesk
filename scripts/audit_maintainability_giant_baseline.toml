@@ -35,7 +35,17 @@
 # compressing the #3016-S3 finalize/TOCTOU and #1670/#1708 decoupling comment
 # blocks (issue references and rationale preserved), so the file lands at
 # 9580 under the unchanged frozen baseline (no raise).
-"src/services/discord/tmux_watcher.rs" = 9583
+# #3038 tmux_watcher S1: lowered 9583 -> 8122 by moving top-level decision
+# clusters A/B/C/E/F/I/J/K into tmux_watcher/ child modules. The relay loop,
+# D/H clusters, and relay path remain in the root.
+"src/services/discord/tmux_watcher.rs" = 8122
+# #3038 tmux_watcher S1 child modules, frozen at landed production LoC.
+"src/services/discord/tmux_watcher/commit_decisions.rs" = 140
+"src/services/discord/tmux_watcher/completion_gate.rs" = 275
+"src/services/discord/tmux_watcher/liveness.rs" = 301
+"src/services/discord/tmux_watcher/panel_decisions.rs" = 372
+"src/services/discord/tmux_watcher/prompt_observe.rs" = 109
+"src/services/discord/tmux_watcher/turn_identity.rs" = 327
 # Frozen at its true production LoC once #3028 fixed the prod/test splitter
 # (lifetime/char-literal brace miscount): the first inline `#[cfg(test)] mod`
 # block was over-extended to EOF, so `spawn_turn_bridge` and ~9000 lines of the
