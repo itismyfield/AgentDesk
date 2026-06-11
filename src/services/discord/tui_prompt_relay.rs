@@ -4926,8 +4926,7 @@ fn owner_channel_for_tmux_session(
 }
 
 /// Pure decision core for [`owner_channel_for_tmux_session`], split out so the
-/// registry-as-single-authority and drift-alert behaviour can be unit tested
-/// without constructing a full `SharedData`.
+/// registry-single-authority + drift-alert behaviour is unit-testable.
 fn resolve_owner_channel_authoritatively(
     tmux_session_name: &str,
     registry_owner: Option<ChannelId>,
@@ -4936,11 +4935,8 @@ fn resolve_owner_channel_authoritatively(
     match (registry_owner, dedupe_owner) {
         (Some(registry_channel), _) => Some(registry_channel),
         (None, Some(dedupe_channel)) => {
-            // #3018: registry miss + dedupe mirror hit == observable drift. Do NOT
-            // fall back to the mirror (not a reverse authority). #3306: rate-limit
-            // the per-poll "drift alert" so a permanently drifted routine session
-            // cannot flood the log (52k+ WARN). The idle drift hook does not
-            // consume this limiter again; this resolver WARN is the single log.
+            // #3018: registry miss + mirror hit == drift; never route from the mirror
+            // (not a reverse authority). #3306: rate-limit this single drift-alert WARN.
             let warn_decision = super::idle_relay_drift::should_emit_drift_warn(tmux_session_name);
             if warn_decision.emit {
                 tracing::warn!(
