@@ -383,6 +383,13 @@
 
 ### Audited touches
 
+- #3038 SharedData S3 (S3-0): `runtime_bootstrap.rs` gained restart-lifecycle
+  characterization tests that pin the deferred-restart marker quick-exit path
+  (`run_bot_spawn_deferred_restart_poller`) and the
+  `shutdown_counted`/`shutdown_remaining` exactly-once protocol through the
+  `run_bot_build_shared_data` injection seam, observed via the test's own
+  handle on the injected counter. Worker-local test coverage only: no
+  multinode ownership, singleton, or lease assumption changes.
 - #3038 SharedData S2: `runtime_bootstrap.rs` changed only inside
   `run_bot_build_shared_data` — the eight session-override fields are now
   initialized through the `SessionOverrideState` group literal wrapped at the
