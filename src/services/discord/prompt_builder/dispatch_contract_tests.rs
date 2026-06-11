@@ -1,10 +1,11 @@
 use super::dispatch_contract::render_dispatch_contract;
 use super::manifest::{
     memory_recall_manifest_layer, prompt_manifest_content_sha256, recovery_context_manifest_layer,
+    role_prompt_manifest_layer, truncate_prompt_manifest_preview,
 };
 use super::*;
 use crate::db::prompt_manifests::PromptContentVisibility;
-use crate::services::discord::settings::MemoryBackendKind;
+use crate::services::discord::settings::{MemoryBackendKind, RoleBinding};
 use crate::services::observability::recovery_audit::{
     RecoveryAuditRecord, recovery_context_sha256,
 };
@@ -39,6 +40,62 @@ fn build_prompt_with_optional_manifest_for(
         None,
         Some("turn-current-task-test"),
     )
+}
+
+fn test_role_binding(role_id: &str) -> RoleBinding {
+    RoleBinding {
+        role_id: role_id.to_string(),
+        prompt_file: "/nonexistent".to_string(),
+        provider: None,
+        model: None,
+        reasoning_effort: None,
+        peer_agents_enabled: true,
+        quality_feedback_injection_enabled: true,
+        memory: Default::default(),
+    }
+}
+
+#[test]
+fn prompt_manifest_log_records_hash_metadata_without_full_content() {
+    // The `info!("recorded prompt manifest", ...)` call logs the manifest's
+    // `turn_id`/`channel_id`/`layer_count` plus the `?layer_hashes` field whose
+    // value is the Debug render of `prompt_manifest_layer_hashes(...)`. Asserting
+    // on that pure value (instead of capturing subscriber output) is
+    // deterministic — a global tracing callsite-interest race in the 3k-test
+    // binary otherwise leaves a captured buffer empty under parallel execution.
+    let current_task = CurrentTaskContext {
+        dispatch_id: Some("dispatch-log-secret"),
+        card_title: Some("Instrument prompt manifest logging"),
+        ..CurrentTaskContext::default()
+    };
+    let built = build_prompt_with_manifest_for(&current_task, Some("implementation"));
+
+    let manifest = built.manifest.expect("prompt manifest");
+    let dispatch_layer = manifest
+        .layers
+        .iter()
+        .find(|layer| layer.layer_name == "dispatch_contract")
+        .expect("dispatch_contract manifest layer");
+    let full_content = dispatch_layer.full_content.as_deref().unwrap();
+    let sensitive_contract_fragment = "PATCH /api/dispatches/dispatch-log-secret";
+    // Full content stays in the manifest for storage/audit even though it is
+    // never emitted to the log surface below.
+    assert!(full_content.contains(sensitive_contract_fragment));
+
+    // Exactly the metadata logged at info level — no full_content field exists.
+    let layer_hashes = format!("{:?}", prompt_manifest_layer_hashes(&manifest));
+    assert_eq!(manifest.layers.len(), 3);
+    assert_eq!(manifest.turn_id, "turn-current-task-test");
+    assert!(layer_hashes.contains("dispatch_contract"));
+    assert!(layer_hashes.contains(&dispatch_layer.content_sha256));
+    for layer in &manifest.layers {
+        assert!(layer_hashes.contains(layer.layer_name.as_str()));
+        assert!(layer_hashes.contains(layer.content_sha256.as_str()));
+    }
+    // The logged hash list must never carry the body or any sensitive fragment.
+    assert!(!layer_hashes.contains("full_content"));
+    assert!(!layer_hashes.contains(sensitive_contract_fragment));
+    assert!(!layer_hashes.contains("PATCH /api/dispatches"));
 }
 
 #[test]
@@ -143,12 +200,15 @@ fn dispatch_contract_layer_records_adk_full_content() {
         layer.content_visibility,
         PromptContentVisibility::AdkProvided
     );
-    assert!(layer.redacted_preview.is_none());
     assert_eq!(
         layer.full_content.as_deref(),
         render_dispatch_contract(Some("implementation"), &current_task).as_deref()
     );
     let full_content = layer.full_content.as_deref().unwrap();
+    assert_eq!(
+        layer.redacted_preview.as_deref(),
+        Some(truncate_prompt_manifest_preview(full_content, 200).as_str())
+    );
     assert_eq!(
         layer.content_sha256,
         prompt_manifest_content_sha256(full_content)
@@ -156,6 +216,30 @@ fn dispatch_contract_layer_records_adk_full_content() {
     assert!(full_content.contains("[Dispatch Contract]"));
     assert!(full_content.contains("`OUTCOME: noop`"));
     assert!(full_content.contains("PATCH /api/dispatches/dispatch-1537"));
+}
+
+#[test]
+fn role_prompt_layer_records_adk_preview_while_preserving_full_content() {
+    let binding = test_role_binding("project-agentdesk");
+    let full_content = format!(
+        "{}TAIL SECTION MUST REMAIN ONLY IN full_content",
+        "Role prompt authoritative source. ".repeat(12)
+    );
+    let expected_preview = truncate_prompt_manifest_preview(&full_content, 200);
+
+    let layer = role_prompt_manifest_layer(&binding, true, Some(full_content.clone()));
+
+    assert_eq!(layer.layer_name, "role_prompt");
+    assert!(layer.enabled);
+    assert_eq!(
+        layer.content_visibility,
+        PromptContentVisibility::AdkProvided
+    );
+    assert_eq!(layer.full_content.as_deref(), Some(full_content.as_str()));
+    assert_eq!(
+        layer.redacted_preview.as_deref(),
+        Some(expected_preview.as_str())
+    );
 }
 
 #[test]

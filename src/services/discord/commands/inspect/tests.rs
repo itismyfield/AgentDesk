@@ -29,10 +29,13 @@ fn test_manifest() -> PromptManifest {
                 tokens_est: 100,
                 content_sha256: "a".repeat(64),
                 content_visibility: PromptContentVisibility::AdkProvided,
-                full_content: Some("ADK full body with ``` fence".to_string()),
-                redacted_preview: None,
+                full_content: Some(format!(
+                    "{}\nADK SECRET TAIL MUST NOT LEAK",
+                    "ADK full body with ``` fence ".repeat(8)
+                )),
+                redacted_preview: Some("ADK bounded preview with ``` fence".to_string()),
                 is_truncated: false,
-                original_bytes: Some(28),
+                original_bytes: Some(248),
             },
             PromptManifestLayer {
                 id: None,
@@ -85,16 +88,28 @@ mod prompt {
     use super::*;
 
     #[test]
-    fn prompt_report_uses_full_adk_body_but_only_redacted_user_preview() {
-        let report = render_prompt_manifest_report(&test_manifest());
+    fn prompt_report_uses_adk_preview_and_only_redacted_user_preview() {
+        let report = render_prompt_manifest_report(&test_manifest(), false);
 
-        assert!(report.contains("ADK full body"));
+        assert!(report.contains("Layer content (ADK hash + bounded preview"));
+        assert!(report.contains(&"a".repeat(64)));
+        assert!(report.contains("ADK bounded preview"));
+        assert!(!report.contains("ADK SECRET TAIL"));
         assert!(report.contains("redacted user preview"));
         assert!(!report.contains("SECRET USER BODY"));
         assert!(report.contains("``\u{200B}` fence"));
         assert!(report.contains("storage:"));
-        assert!(report.contains("58 original bytes"));
+        assert!(report.contains("278 original bytes"));
         assert!(report.contains("0 truncated"));
+    }
+
+    #[test]
+    fn privileged_prompt_report_can_show_full_adk_body() {
+        let report = render_prompt_manifest_report(&test_manifest(), true);
+
+        assert!(report.contains("Layer content (ADK full source"));
+        assert!(report.contains("ADK SECRET TAIL MUST NOT LEAK"));
+        assert!(!report.contains("SECRET USER BODY"));
     }
 }
 
