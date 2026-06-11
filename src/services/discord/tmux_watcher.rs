@@ -1439,13 +1439,17 @@ async fn reclaim_orphan_external_input_placeholder(
         );
         return false;
     }
+    // #3351 (#3003 r21 mirror): an earlier transient attempt this turn may have
+    // enqueued this placeholder in the durable store; the delete has now
+    // committed (or permanently failed and is treated as committed), so drop
+    // the record before the local handle is cleared.
+    crate::services::discord::status_panel_orphan_store::remove(
+        provider,
+        &shared.token_hash,
+        channel_id.get(),
+        msg_id.get(),
+    );
     if !outcome.is_committed() {
-        crate::services::discord::status_panel_orphan_store::remove(
-            provider,
-            &shared.token_hash,
-            channel_id.get(),
-            msg_id.get(),
-        );
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
             "  [{ts}] ⚠ watcher: orphan placeholder delete permanently failed for channel {} msg {}; giving up (treated as committed)",
@@ -6151,6 +6155,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                         placeholder_msg_id = None;
                                         placeholder_from_restored_inflight = false;
                                         last_edit_text.clear();
+                                        // #3351 (#3003 r21 mirror): the placeholder delete
+                                        // committed; drop any stale durable record from an
+                                        // earlier transient reclaim failure this turn.
+                                        crate::services::discord::status_panel_orphan_store::remove(
+                                            &watcher_provider,
+                                            &shared.token_hash,
+                                            channel_id.get(),
+                                            msg_id.get(),
+                                        );
                                     }
                                     let ts = chrono::Local::now().format("%H:%M:%S");
                                     tracing::info!(
@@ -6188,6 +6201,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                     placeholder_msg_id = None;
                                     placeholder_from_restored_inflight = false;
                                     last_edit_text.clear();
+                                    // #3351 (#3003 r21 mirror): an earlier reclaim attempt
+                                    // this turn may have enqueued this placeholder after a
+                                    // transient delete failure, but it has now been edited
+                                    // into the final terminal response. Drop the stale
+                                    // durable record so a later drain does not delete the
+                                    // delivered response.
+                                    crate::services::discord::status_panel_orphan_store::remove(
+                                        &watcher_provider,
+                                        &shared.token_hash,
+                                        channel_id.get(),
+                                        msg_id.get(),
+                                    );
                                     let ts = chrono::Local::now().format("%H:%M:%S");
                                     tracing::info!(
                                         "  [{ts}] 👁 ✓ relayed terminal response (edit) channel {} msg {} ({} chars)",
