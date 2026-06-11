@@ -125,19 +125,15 @@ fn hook_success_stdout(provider: &str) -> &'static str {
 /// `suppressOutput: true`, while Codex CLI 0.137.0 expects only the
 /// `hookSpecificOutput` block. Codex non-nudge events, including `Stop`, remain
 /// observational `{}`.
+///
+/// Session-end feedback flushing is not implemented in the hook relay; that
+/// path is deferred to #3332 for a server-side design.
 fn hook_stdout(provider: &str, event: &str, payload: &Value) -> String {
     let provider_key = provider.trim().to_ascii_lowercase();
     let event_is_post_tool_use = event.trim().eq_ignore_ascii_case("PostToolUse");
     if event_is_post_tool_use && memento_search_tool_name(payload).is_some() {
         let additional_context = memento_feedback_instruction(extract_search_event_id(payload));
         return hook_specific_stdout(&provider_key, "PostToolUse", additional_context);
-    }
-    if provider_key == "claude" && event.trim().eq_ignore_ascii_case("Stop") {
-        return hook_specific_stdout(
-            &provider_key,
-            "Stop",
-            memento_feedback_stop_flush_instruction(),
-        );
     }
     hook_success_stdout(provider).to_string()
 }
@@ -253,17 +249,6 @@ results were enough to proceed. If `mcp__memento__tool_feedback` is not in your 
 (memento tools are deferred), first load it with ToolSearch query \
 `select:mcp__memento__tool_feedback`, then make the call. Do this now, then continue."
     )
-}
-
-fn memento_feedback_stop_flush_instruction() -> String {
-    "Action required before ending this session: flush any pending memento search feedback now. \
-For each memento recall/context result from this session that does not yet have a matching \
-`mcp__memento__tool_feedback` call, submit one with the search_event_id shown under \
-`_meta.searchEventId` in that result, `relevant` = whether any returned fragment was on-topic, \
-and `sufficient` = whether the results were enough to proceed. Do not invent or guess \
-search_event_id values; if there were no memento search results or all feedback is already \
-submitted, no tool_feedback call is needed."
-        .to_string()
 }
 
 pub fn relay_hook_event(
@@ -583,19 +568,11 @@ mod tests {
     }
 
     #[test]
-    fn claude_stop_flushes_pending_feedback_with_suppress_output() {
-        let out = hook_stdout("claude", "Stop", &serde_json::json!({}));
-        let value: Value = serde_json::from_str(&out).unwrap();
-        let ctx = value["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap();
-
-        assert_eq!(value["hookSpecificOutput"]["hookEventName"], "Stop");
-        assert_eq!(value["suppressOutput"], true);
-        assert!(ctx.contains("flush any pending memento search feedback now"));
-        assert!(ctx.contains("_meta.searchEventId"));
-        assert!(ctx.contains("Do not invent or guess search_event_id values"));
-        assert!(!ctx.contains("search_event_id="));
+    fn claude_stop_stays_observational_with_suppress_output() {
+        assert_eq!(
+            hook_stdout("claude", "Stop", &serde_json::json!({})),
+            r#"{"suppressOutput":true}"#
+        );
     }
 
     #[test]
