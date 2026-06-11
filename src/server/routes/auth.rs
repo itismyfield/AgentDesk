@@ -31,6 +31,8 @@ pub async fn get_session(State(state): State<AppState>) -> Json<serde_json::Valu
 /// paths because headers are trivially forgeable by a LAN attacker.
 fn is_internal_loopback_path(path: &str) -> bool {
     path.starts_with("/hook/")
+        || path.starts_with("/hooks/")
+        || path.starts_with("/tui/")
         || path == "/dispatched-sessions/webhook"
         || path.starts_with("/internal/")
 }
@@ -70,12 +72,40 @@ fn unauthorized_response() -> axum::response::Response {
 }
 
 /// Auth middleware: checks Bearer token against config.server.auth_token.
-/// If auth_token is not set, all requests pass through (local-only mode).
+/// If auth_token is not set, non-internal requests pass through (local-only
+/// mode). Internal control-plane routes still require loopback peer proof or a
+/// configured Bearer token.
 pub async fn auth_middleware(
     State(state): State<AppState>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    // Note: path is relative to the /api nest, so "/health" not "/api/health"
+    let path = req.uri().path();
+    let headers = req.headers().clone();
+    let peer = peer_addr_from_request(&req);
+
+    // Internal in-process paths (escalation emit, dispatch↔thread link,
+    // hook/* state mutations, root TUI/hook control-plane routes,
+    // dispatched-sessions webhook). Require strict loopback peer OR matching
+    // Bearer token — never accept Origin/Referer alone since those are
+    // forgeable from the LAN.
+    if is_internal_loopback_path(path) {
+        if is_loopback_peer(peer) {
+            return next.run(req).await;
+        }
+        if let Some(expected_token) = state.config.server.auth_token.as_deref() {
+            if !expected_token.is_empty() {
+                if let Some(token) = extract_bearer(&headers) {
+                    if crate::utils::auth::constant_time_token_eq(expected_token, token) {
+                        return next.run(req).await;
+                    }
+                }
+            }
+        }
+        return unauthorized_response();
+    }
+
     let Some(expected_token) = state.config.server.auth_token.as_deref() else {
         // No auth configured — pass through
         return next.run(req).await;
@@ -85,32 +115,10 @@ pub async fn auth_middleware(
         return next.run(req).await;
     }
 
-    // Note: path is relative to the /api nest, so "/health" not "/api/health"
-    let path = req.uri().path();
-
     // Truly-public endpoints. These return no privileged data and are safe to
     // expose without authentication on any interface.
     if path == "/health" || path == "/auth/session" {
         return next.run(req).await;
-    }
-
-    let headers = req.headers().clone();
-    let peer = peer_addr_from_request(&req);
-
-    // Internal in-process paths (escalation emit, dispatch↔thread link,
-    // hook/* state mutations, dispatched-sessions webhook). Require strict
-    // loopback peer OR matching Bearer token — never accept Origin/Referer
-    // alone since those are forgeable from the LAN.
-    if is_internal_loopback_path(path) {
-        if is_loopback_peer(peer) {
-            return next.run(req).await;
-        }
-        if let Some(token) = extract_bearer(&headers) {
-            if crate::utils::auth::constant_time_token_eq(expected_token, token) {
-                return next.run(req).await;
-            }
-        }
-        return unauthorized_response();
     }
 
     // Same-origin bypass (dashboard SPA served from this server). #2047
@@ -188,6 +196,9 @@ mod tests {
         assert!(is_internal_loopback_path("/hook/reset-status"));
         assert!(is_internal_loopback_path("/hook/skill-usage"));
         assert!(is_internal_loopback_path("/hook/session/abc"));
+        assert!(is_internal_loopback_path("/hooks/claude/Stop"));
+        assert!(is_internal_loopback_path("/tui/send"));
+        assert!(is_internal_loopback_path("/tui/wait"));
         assert!(is_internal_loopback_path("/dispatched-sessions/webhook"));
     }
 

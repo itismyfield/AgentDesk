@@ -917,7 +917,7 @@
 - legacy_modules: none — these are shared runtime coordination surfaces.
 - do_not_edit_without_migration_plan (giant-file):
   - `src/config.rs` (2272 lines).
-  - `src/server/mod.rs` (2239 lines).
+  - `src/server/mod.rs` (2267 lines).
   - `src/receipt.rs` (1842 lines).
   - `src/github/sync.rs` (1488 lines).
   - `src/reconcile.rs` (1809 lines; periodic reconcile loop covering stale

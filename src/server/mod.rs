@@ -406,6 +406,15 @@ pub(crate) async fn run(
     let dashboard_service = ServeDir::new(&dashboard_dir)
         .append_index_html_on_directories(true)
         .fallback(ServeFile::new(dashboard_dir.join("index.html")));
+    let control_plane_auth_state = routes::AppState {
+        pg_pool: pg_pool.clone(),
+        engine: engine.clone(),
+        config: Arc::new(config.clone()),
+        broadcast_tx: broadcast_tx.clone(),
+        batch_buffer: batch_buffer.clone(),
+        health_registry: health_registry.clone(),
+        cluster_instance_id: Some(cluster_instance_id.clone()),
+    };
 
     let mut app = Router::new()
         .route("/ws", get(ws::ws_handler).with_state(broadcast_tx.clone()))
@@ -422,13 +431,25 @@ pub(crate) async fn run(
             ),
         );
     if _claude_tui_hook_endpoint.is_some() {
-        app = app.merge(crate::services::claude_tui::hook_server::hook_receiver_router());
+        app = app.merge(
+            crate::services::claude_tui::hook_server::hook_receiver_router().layer(
+                axum::middleware::from_fn_with_state(
+                    control_plane_auth_state.clone(),
+                    routes::auth::auth_middleware,
+                ),
+            ),
+        );
     }
     // `tui_relay` exposes the `claude_tui_send` / `claude_tui_wait` MCP
     // primitives (see audit issue #2652). It is always mounted because the
     // event-driven wait path is useful even when the hook receiver
     // endpoint has not been published yet (e.g. early-boot Codex calls).
-    app = app.merge(crate::services::claude_tui::tui_relay::router());
+    app = app.merge(crate::services::claude_tui::tui_relay::router().layer(
+        axum::middleware::from_fn_with_state(
+            control_plane_auth_state,
+            routes::auth::auth_middleware,
+        ),
+    ));
     let app = app.fallback_service(dashboard_service);
 
     let addr = format!("{}:{}", config.server.host, config.server.port);
@@ -2358,5 +2379,208 @@ async fn routine_runtime_loop(
             Ok(_) => {}
             Err(e) => tracing::warn!(error = %e, "routine due tick failed"),
         }
+    }
+}
+
+/// Auth-boundary integration tests for the root-mounted control-plane routers
+/// (`/tui/*`, `/hooks/*`). These live in the server layer because composing a
+/// router with `auth::auth_middleware` is a server-layer responsibility — the
+/// service modules only own the handler/validation behavior (#3311). The
+/// service-layer tests (control-character rejection, handler success) stay
+/// next to their handlers in `services::claude_tui`.
+#[cfg(test)]
+mod control_plane_auth_tests {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
+    use axum::extract::ConnectInfo;
+    use axum::http::{Method, Request, StatusCode, header::AUTHORIZATION};
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    use crate::server::routes::AppState;
+    use crate::server::routes::auth::auth_middleware;
+    use crate::services::claude_tui::hook_server::{
+        HookServerState, hook_receiver_router_with_state,
+    };
+    use crate::services::claude_tui::tui_relay::{FakeSendBackend, router_with_send_backend};
+
+    fn test_app_state(auth_token: Option<&str>) -> AppState {
+        let mut config = crate::config::Config::default();
+        // Non-loopback host so the middleware cannot fall back to a host-based
+        // shortcut; the boundary must be proven by peer addr / Bearer alone.
+        config.server.host = "0.0.0.0".to_string();
+        config.server.auth_token = auth_token.map(str::to_string);
+        let tx = crate::eventbus::new_broadcast();
+        let buf = crate::eventbus::spawn_batch_flusher(tx.clone());
+        AppState {
+            pg_pool: None,
+            engine: crate::engine::PolicyEngine::new(&config).expect("test policy engine"),
+            config: Arc::new(config),
+            broadcast_tx: tx,
+            batch_buffer: buf,
+            health_registry: None,
+            cluster_instance_id: None,
+        }
+    }
+
+    fn protected_tui_router(auth_token: Option<&str>) -> Router {
+        router_with_send_backend(Arc::new(FakeSendBackend)).layer(
+            axum::middleware::from_fn_with_state(test_app_state(auth_token), auth_middleware),
+        )
+    }
+
+    fn protected_hook_router(auth_token: Option<&str>) -> Router {
+        hook_receiver_router_with_state(HookServerState::new()).layer(
+            axum::middleware::from_fn_with_state(test_app_state(auth_token), auth_middleware),
+        )
+    }
+
+    fn tui_send_request(peer: &str, token: Option<&str>, text: &str) -> Request<Body> {
+        let body = json!({
+            "session_name": "test-session",
+            "text": text,
+            "submit": true,
+        });
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/tui/send")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("build request");
+        request.extensions_mut().insert(ConnectInfo(
+            peer.parse::<SocketAddr>().expect("valid socket addr"),
+        ));
+        if let Some(token) = token {
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                format!("Bearer {token}").parse().expect("valid bearer"),
+            );
+        }
+        request
+    }
+
+    fn hook_request(peer: &str, token: Option<&str>) -> Request<Body> {
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/hooks/claude/Stop?session_id=sess-auth")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"hook_event_name":"Stop"}"#))
+            .expect("build request");
+        request.extensions_mut().insert(ConnectInfo(
+            peer.parse::<SocketAddr>().expect("valid socket addr"),
+        ));
+        if let Some(token) = token {
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                format!("Bearer {token}").parse().expect("valid bearer"),
+            );
+        }
+        request
+    }
+
+    async fn response_json(response: axum::response::Response) -> Value {
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        serde_json::from_slice(&bytes).expect("json response")
+    }
+
+    #[tokio::test]
+    async fn tui_send_rejects_unauthenticated_non_loopback_when_protected() {
+        let app = protected_tui_router(Some("secret"));
+
+        let response = app
+            .oneshot(tui_send_request("10.0.0.5:8791", None, "hello"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn tui_send_rejects_unauthenticated_non_loopback_when_unconfigured() {
+        // Defense in depth: even with no auth_token configured ("local-only
+        // mode"), a non-loopback caller must NOT reach the control plane.
+        let app = protected_tui_router(None);
+
+        let response = app
+            .oneshot(tui_send_request("10.0.0.5:8791", None, "hello"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn tui_send_valid_input_with_valid_auth_returns_success() {
+        let app = protected_tui_router(Some("secret"));
+
+        let response = app
+            .oneshot(tui_send_request(
+                "10.0.0.5:8791",
+                Some("secret"),
+                "hello\nworld",
+            ))
+            .await
+            .expect("response");
+        let status = response.status();
+        let body = response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["session_name"], "test-session");
+        assert_eq!(body["bytes"].as_u64(), Some("hello\nworld".len() as u64));
+        assert_eq!(body["submitted"], true);
+    }
+
+    #[tokio::test]
+    async fn tui_send_allows_loopback_without_bearer_when_protected() {
+        let app = protected_tui_router(Some("secret"));
+
+        let response = app
+            .oneshot(tui_send_request("127.0.0.1:8791", None, "hello"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn hook_receiver_rejects_unauthenticated_non_loopback_when_protected() {
+        let app = protected_hook_router(Some("secret"));
+
+        let response = app
+            .oneshot(hook_request("10.0.0.5:8791", None))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn hook_receiver_rejects_unauthenticated_non_loopback_when_unconfigured() {
+        let app = protected_hook_router(None);
+
+        let response = app
+            .oneshot(hook_request("10.0.0.5:8791", None))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn hook_receiver_allows_loopback_without_bearer_when_protected() {
+        let app = protected_hook_router(Some("secret"));
+
+        let response = app
+            .oneshot(hook_request("127.0.0.1:8791", None))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
 }
