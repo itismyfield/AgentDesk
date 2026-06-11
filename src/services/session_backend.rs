@@ -494,7 +494,7 @@ pub fn process_stream_line(
     // `StatusUpdate` (turn_duration housekeeping) is metadata, not content.
     let (harvested, text_bytes) = match &message {
         StreamMessage::Text { content } => (1, content.len() as u64),
-        StreamMessage::StatusUpdate { .. } => (0, 0),
+        StreamMessage::Done { .. } | StreamMessage::StatusUpdate { .. } => (0, 0),
         _ => (1, 0),
     };
     if sender.send(message).is_err() {
@@ -893,9 +893,9 @@ pub fn parse_assistant_extra_tool_uses(json: &Value) -> Vec<StreamMessage> {
 }
 
 /// #3281 observability-only summary of what one transcript read forwarded to
-/// the bridge (status-only telemetry and synthetic idle-timeout `Done`s are
-/// NOT counted): `forwarded_messages == 0` on a `Completed` read means a
-/// zero-harvest transcript window.
+/// the bridge (status telemetry and `Done` terminators are NOT counted):
+/// `forwarded_messages == 0` on a `Completed` read means a zero-harvest
+/// transcript window.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReadHarvestStats {
     pub forwarded_messages: u64,
@@ -1212,14 +1212,80 @@ mod stream_tail_guard_tests {
         );
     }
 
+    /// #3292: a window that starts after assistant text and sees only the
+    /// `stop_hook_summary` terminator must still forward `Done` to the bridge,
+    /// but count as zero-harvest so the observability event can see it.
+    #[test]
+    fn done_only_window_forwards_done_but_counts_zero_harvest() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("done-only.jsonl");
+        std::fs::write(
+            &output_path,
+            concat!(
+                r#"{"type":"system","subtype":"stop_hook_summary","session_id":"sess-done"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let (sender, receiver) = mpsc::channel();
+        let (result, stats) = read_output_file_until_result_with_harvest(
+            output_path.to_string_lossy().as_ref(),
+            0,
+            sender,
+            None,
+            SessionProbe::process(|| true),
+        )
+        .unwrap();
+
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        assert_eq!(stats.forwarded_messages, 0);
+        assert_eq!(stats.assistant_text_bytes, 0);
+        let messages: Vec<_> = receiver.try_iter().collect();
+        assert!(
+            messages.iter().any(
+                |message| matches!(message, StreamMessage::Done { session_id, .. } if session_id.as_deref() == Some("sess-done"))
+            ),
+            "Done still reaches the bridge: {messages:?}"
+        );
+    }
+
+    /// #3292 non-regression: normal assistant text still counts as harvested
+    /// content, while the following `Done` terminator does not inflate the
+    /// count.
+    #[test]
+    fn assistant_text_plus_done_counts_text_only() {
+        let (sender, receiver) = mpsc::channel();
+        let mut state = StreamLineState::new();
+        assert!(process_stream_line(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}"#,
+            &sender,
+            &mut state,
+        ));
+        assert!(process_stream_line(
+            r#"{"type":"system","subtype":"stop_hook_summary","session_id":"sess-text"}"#,
+            &sender,
+            &mut state,
+        ));
+
+        assert_eq!(state.forwarded_message_count, 1);
+        assert_eq!(state.forwarded_assistant_text_bytes, 5);
+        let messages: Vec<_> = receiver.try_iter().collect();
+        assert!(messages.iter().any(
+            |message| matches!(message, StreamMessage::Text { content } if content == "hello")
+        ));
+        assert!(messages.iter().any(
+            |message| matches!(message, StreamMessage::Done { session_id, .. } if session_id.as_deref() == Some("sess-text"))
+        ));
+    }
+
     /// #3281 zero side: a transcript window containing ONLY housekeeping lines
     /// (queued-prompt attachment / last-prompt / ai-title / mode records /
     /// `turn_duration` telemetry) harvests nothing — the counters stay 0 even
     /// though `turn_duration` still reaches the bridge as a `StatusUpdate`.
     /// This is the substrate of the `Completed`-only zero-harvest gate: such a
-    /// read can only complete via the synthetic idle-timeout `Done` (also
-    /// uncounted), and the producer-exit log must then report `lines=0` as a
-    /// REAL measurement.
+    /// read may complete via an uncounted synthetic idle-timeout `Done`, and
+    /// the producer-exit log must then report `lines=0` as a REAL measurement.
     #[test]
     fn housekeeping_only_window_harvests_nothing() {
         let (sender, receiver) = std::sync::mpsc::channel();
