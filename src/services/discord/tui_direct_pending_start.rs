@@ -1630,9 +1630,11 @@ mod tests {
         reset_present_for_tests();
     }
 
-    #[allow(clippy::await_holding_lock)]
-    #[tokio::test(start_paused = true)]
-    async fn live_worker_with_capped_attempt_count_is_not_abandoned() {
+    // Sync test + explicit block_on: the std-mutex test-env guards live only in
+    // this sync scope and never span an await, so no await_holding_lock allow is
+    // needed (#3034 ratchet stays frozen at its baseline).
+    #[test]
+    fn live_worker_with_capped_attempt_count_is_not_abandoned() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let _guard = worker_test_lock();
@@ -1644,53 +1646,61 @@ mod tests {
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
 
         reset_present_for_tests();
-        let shared = super::super::make_shared_data_for_tests();
-        let finalized = Arc::new(AtomicBool::new(false));
-        let finalized_for_view = finalized.clone();
-        let view: ViewFn = Box::new(move |_shared, _record| {
-            let finalized = finalized_for_view.clone();
-            Box::pin(async move {
-                let view = if finalized.load(Ordering::SeqCst) {
-                    base_view()
-                } else {
-                    PriorTurnView {
-                        inflight_present: true,
-                        inflight_is_own_anchor: false,
-                        mailbox_blocking_turn_present: true,
-                        mailbox_turn_is_own_anchor: false,
-                        runtime_binding_present: true,
-                    }
-                };
-                Some(obs(view))
-            })
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("test runtime");
+        rt.block_on(async {
+            let shared = super::super::make_shared_data_for_tests();
+            let finalized = Arc::new(AtomicBool::new(false));
+            let finalized_for_view = finalized.clone();
+            let view: ViewFn = Box::new(move |_shared, _record| {
+                let finalized = finalized_for_view.clone();
+                Box::pin(async move {
+                    let view = if finalized.load(Ordering::SeqCst) {
+                        base_view()
+                    } else {
+                        PriorTurnView {
+                            inflight_present: true,
+                            inflight_is_own_anchor: false,
+                            mailbox_blocking_turn_present: true,
+                            mailbox_turn_is_own_anchor: false,
+                            runtime_binding_present: true,
+                        }
+                    };
+                    Some(obs(view))
+                })
+            });
+            let claim: ClaimFn = Box::new(move |_shared, _record| Box::pin(async move { true }));
+
+            let mut rec = record("claude", 13, 133);
+            rec.attempt_count = PENDING_START_MAX_CLAIM_ATTEMPTS;
+            persist(&rec).unwrap();
+            let (abort_cleanup, _, _) = recording_abort_cleanup();
+            let handle = tokio::spawn(run_worker(shared.clone(), rec, view, claim, abort_cleanup));
+
+            tokio::task::yield_now().await;
+            assert!(
+                !pending_synthetic_start_abandoned("claude", 13),
+                "a live worker must protect a capped durable record from being \
+                 treated as abandoned during restart re-claim"
+            );
+            assert!(
+                !clear_abandoned_synthetic_start_presence("claude", 13),
+                "presence clear must refuse while a worker is active"
+            );
+
+            finalized.store(true, Ordering::SeqCst);
+            tokio::time::advance(PENDING_START_POLL * 2).await;
+            tokio::task::yield_now().await;
+            handle.await.unwrap();
+            assert!(
+                !pending_synthetic_start_present("claude", 13),
+                "the live worker's successful claim clears the presence through the normal delete path"
+            );
         });
-        let claim: ClaimFn = Box::new(move |_shared, _record| Box::pin(async move { true }));
-
-        let mut rec = record("claude", 13, 133);
-        rec.attempt_count = PENDING_START_MAX_CLAIM_ATTEMPTS;
-        persist(&rec).unwrap();
-        let (abort_cleanup, _, _) = recording_abort_cleanup();
-        let handle = tokio::spawn(run_worker(shared.clone(), rec, view, claim, abort_cleanup));
-
-        tokio::task::yield_now().await;
-        assert!(
-            !pending_synthetic_start_abandoned("claude", 13),
-            "a live worker must protect a capped durable record from being \
-             treated as abandoned during restart re-claim"
-        );
-        assert!(
-            !clear_abandoned_synthetic_start_presence("claude", 13),
-            "presence clear must refuse while a worker is active"
-        );
-
-        finalized.store(true, Ordering::SeqCst);
-        tokio::time::advance(PENDING_START_POLL * 2).await;
-        tokio::task::yield_now().await;
-        handle.await.unwrap();
-        assert!(
-            !pending_synthetic_start_present("claude", 13),
-            "the live worker's successful claim clears the presence through the normal delete path"
-        );
 
         reset_present_for_tests();
     }

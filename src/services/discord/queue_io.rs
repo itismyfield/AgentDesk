@@ -316,9 +316,11 @@ mod presleep_tests {
         assert_eq!(consecutive, 0, "an empty target queue is a normal exit");
     }
 
-    #[allow(clippy::await_holding_lock)]
-    #[tokio::test]
-    async fn abandoned_presence_clear_releases_idle_queue_gate_but_keeps_durable_record() {
+    // Sync test + explicit block_on: the std-mutex test-env guards live only in
+    // this sync scope and never span an await, so no await_holding_lock allow is
+    // needed (#3034 ratchet stays frozen at its baseline).
+    #[test]
+    fn abandoned_presence_clear_releases_idle_queue_gate_but_keeps_durable_record() {
         let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
         let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let tmp = tempfile::tempdir().expect("temp runtime root");
@@ -326,43 +328,54 @@ mod presleep_tests {
 
         super::super::tui_direct_pending_start::reset_present_for_tests();
 
-        let shared = make_shared_data_for_tests();
-        let provider = ProviderKind::Claude;
-        let channel_id = ChannelId::new(3_333_300);
-        shared
-            .mailbox(channel_id)
-            .replace_queue(
-                vec![user_intervention(3_333_301, "queued after abandoned claim")],
-                queue_persistence_context(&shared, &provider, channel_id),
-            )
-            .await;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        rt.block_on(async {
+            let shared = make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            let channel_id = ChannelId::new(3_333_300);
+            shared
+                .mailbox(channel_id)
+                .replace_queue(
+                    vec![user_intervention(3_333_301, "queued after abandoned claim")],
+                    queue_persistence_context(&shared, &provider, channel_id),
+                )
+                .await;
 
-        let record = pending_record(&provider, channel_id);
-        super::super::tui_direct_pending_start::persist(&record).unwrap();
-        let snapshot = mailbox_snapshot(&shared, channel_id).await;
-        assert!(
-            !idle_queue_snapshot_has_kickable_backlog(&shared, &provider, channel_id, &snapshot),
-            "pending synthetic-start presence must block the idle queue before the #3333 clear"
-        );
+            let record = pending_record(&provider, channel_id);
+            super::super::tui_direct_pending_start::persist(&record).unwrap();
+            let snapshot = mailbox_snapshot(&shared, channel_id).await;
+            assert!(
+                !idle_queue_snapshot_has_kickable_backlog(
+                    &shared,
+                    &provider,
+                    channel_id,
+                    &snapshot
+                ),
+                "pending synthetic-start presence must block the idle queue before the #3333 clear"
+            );
 
-        assert!(
-            super::super::tui_direct_pending_start::clear_abandoned_synthetic_start_presence(
-                provider.as_str(),
-                channel_id.get(),
-            ),
-            "the abandoned durable record should allow presence-only clearing"
-        );
-        assert!(
-            idle_queue_snapshot_has_kickable_backlog(&shared, &provider, channel_id, &snapshot),
-            "after presence-only clear, the queued item is kickable by the final one-shot drain"
-        );
-        assert!(
-            super::super::tui_direct_pending_start::pending_synthetic_start_abandoned(
-                provider.as_str(),
-                channel_id.get(),
-            ),
-            "the durable record remains retained for restart retry; only the in-memory gate is cleared"
-        );
+            assert!(
+                super::super::tui_direct_pending_start::clear_abandoned_synthetic_start_presence(
+                    provider.as_str(),
+                    channel_id.get(),
+                ),
+                "the abandoned durable record should allow presence-only clearing"
+            );
+            assert!(
+                idle_queue_snapshot_has_kickable_backlog(&shared, &provider, channel_id, &snapshot),
+                "after presence-only clear, the queued item is kickable by the final one-shot drain"
+            );
+            assert!(
+                super::super::tui_direct_pending_start::pending_synthetic_start_abandoned(
+                    provider.as_str(),
+                    channel_id.get(),
+                ),
+                "the durable record remains retained for restart retry; only the in-memory gate is cleared"
+            );
+        });
 
         super::super::tui_direct_pending_start::reset_present_for_tests();
     }
