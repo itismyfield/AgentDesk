@@ -105,6 +105,54 @@ pub(crate) async fn load_force_kill_session_pg(
     )))
 }
 
+/// #3306: narrow durable-truth accessor for the idle-relay drift self-heal.
+///
+/// Reads the `sessions.channel_id` column (the dispatch-time owner channel a
+/// session's own hook upsert records via
+/// `channel_id = COALESCE(EXCLUDED.channel_id, sessions.channel_id)`) plus the
+/// owning `instance_id`, so a registry-drifted ROUTINE tmux session — which has
+/// no settings channel binding and whose `agent_id`/`thread_channel_id` are NULL
+/// (so `load_force_kill_session_pg` cannot resolve it) — can re-derive its
+/// authoritative owner channel. The drift self-heal still gates this value
+/// behind a live-pane check, an instance-id guard, and a dedupe-mirror agreement
+/// check before promoting it; this function is read-only and never authoritative
+/// on its own.
+pub(crate) async fn load_session_channel_id_pg(
+    pool: &PgPool,
+    session_key: &str,
+) -> Result<Option<(u64, Option<String>)>, String> {
+    let row = sqlx::query("SELECT channel_id, instance_id FROM sessions WHERE session_key = $1")
+        .bind(session_key)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| {
+            format!(
+                "load session channel_id {session_key}: {}",
+                crate::utils::redact::redact_known_secrets(&error.to_string())
+            )
+        })?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let channel_id: Option<String> = row
+        .try_get("channel_id")
+        .map_err(|error| format!("decode channel_id for {session_key}: {error}"))?;
+    let instance_id: Option<String> = row
+        .try_get("instance_id")
+        .map_err(|error| format!("decode instance_id for {session_key}: {error}"))?;
+    let Some(channel_id) = channel_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value != 0)
+    else {
+        return Ok(None);
+    };
+    Ok(Some((channel_id, instance_id)))
+}
+
 pub(crate) async fn disconnect_session_and_prepare_retry_pg(
     pool: &PgPool,
     session_key: &str,
