@@ -1,6 +1,17 @@
 use super::*;
 use sqlx::Row as SqlxRow;
 
+mod orphan_recovery;
+mod queued_placeholders;
+mod restored_state;
+mod session_gc;
+mod startup_doctor;
+
+#[allow(unused_imports)]
+pub(in crate::services::discord) use self::queued_placeholders::*;
+#[allow(unused_imports)]
+use self::{orphan_recovery::*, restored_state::*, session_gc::*, startup_doctor::*};
+
 pub(crate) struct RunBotContext {
     pub(crate) global_active: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) global_finalizing: Arc<std::sync::atomic::AtomicUsize>,
