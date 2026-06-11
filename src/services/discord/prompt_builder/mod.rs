@@ -31,6 +31,31 @@ pub(super) struct BuiltSystemPrompt {
     pub(super) manifest: Option<PromptManifest>,
 }
 
+struct PromptManifestLayerHash<'a> {
+    name: &'a str,
+    sha256: &'a str,
+}
+
+impl std::fmt::Debug for PromptManifestLayerHash<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PromptManifestLayerHash")
+            .field("name", &self.name)
+            .field("sha256", &self.sha256)
+            .finish()
+    }
+}
+
+fn prompt_manifest_layer_hashes(manifest: &PromptManifest) -> Vec<PromptManifestLayerHash<'_>> {
+    manifest
+        .layers
+        .iter()
+        .map(|layer| PromptManifestLayerHash {
+            name: layer.layer_name.as_str(),
+            sha256: layer.content_sha256.as_str(),
+        })
+        .collect()
+}
+
 /// Dispatch prompt profile — controls which system prompt sections are injected.
 /// `Full` includes the normal Discord contract plus compact lookup indexes
 /// (used for implementation dispatches and normal turns).
@@ -383,13 +408,15 @@ pub(super) fn build_system_prompt_with_manifest(
         prompt_manifest_layers,
     );
     if let Some(prompt_manifest) = manifest.as_ref() {
-        if let Ok(manifest_json) = serde_json::to_string(prompt_manifest) {
-            tracing::info!(
-                target: "agentdesk.prompt_manifest",
-                prompt_manifest = %manifest_json,
-                "recorded prompt manifest"
-            );
-        }
+        let layer_hashes = prompt_manifest_layer_hashes(prompt_manifest);
+        tracing::info!(
+            target: "agentdesk.prompt_manifest",
+            turn_id = %prompt_manifest.turn_id,
+            channel_id = %prompt_manifest.channel_id,
+            layer_count = prompt_manifest.layers.len(),
+            layer_hashes = ?layer_hashes,
+            "recorded prompt manifest"
+        );
     }
 
     BuiltSystemPrompt {

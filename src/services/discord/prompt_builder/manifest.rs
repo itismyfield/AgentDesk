@@ -29,6 +29,7 @@ pub(super) const RECOVERY_CONTEXT_LAYER_REASON: &str = "provider-native resume f
 pub(super) const ROLE_PROMPT_LAYER_NAME: &str = "role_prompt";
 pub(super) const MEMORY_RECALL_LAYER_NAME: &str = "memory_recall";
 pub(super) const MEMORY_RECALL_LAYER_SOURCE: &str = "memento";
+const ADK_PROMPT_MANIFEST_PREVIEW_MAX_BYTES: usize = 200;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RecoveryContextManifestInput<'a> {
@@ -92,7 +93,12 @@ pub(super) fn dispatch_contract_manifest_layer(
     layer.chars = chars;
     layer.tokens_est = tokens_est;
     layer.content_sha256 = content_sha256;
-    layer.redacted_preview = None;
+    layer.redacted_preview = full_content
+        .as_deref()
+        .filter(|content| !content.trim().is_empty())
+        .map(|content| {
+            truncate_prompt_manifest_preview(content, ADK_PROMPT_MANIFEST_PREVIEW_MAX_BYTES)
+        });
     layer.full_content = full_content;
     layer
 }
@@ -208,6 +214,8 @@ pub(super) fn role_prompt_manifest_layer(
     full_content: Option<String>,
 ) -> PromptManifestLayer {
     let content = full_content.unwrap_or_default();
+    let redacted_preview = (!content.trim().is_empty())
+        .then(|| truncate_prompt_manifest_preview(&content, ADK_PROMPT_MANIFEST_PREVIEW_MAX_BYTES));
     let mut layer = PromptManifestLayer::from_content(
         ROLE_PROMPT_LAYER_NAME,
         enabled,
@@ -216,6 +224,7 @@ pub(super) fn role_prompt_manifest_layer(
         PromptContentVisibility::AdkProvided,
         content,
     );
+    layer.redacted_preview = redacted_preview;
     if !enabled {
         layer.full_content = None;
     }

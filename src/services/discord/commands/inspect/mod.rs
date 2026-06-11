@@ -123,7 +123,7 @@ async fn build_inspect_report(
             let Some(manifest) = load_latest_prompt_manifest(pool, channel_id).await? else {
                 return Ok(no_data_report());
             };
-            Ok(render_prompt_manifest_report(&manifest))
+            Ok(render_prompt_manifest_report(&manifest, false))
         }
         InspectView::Context => {
             let Some(turn) = load_latest_turn(pool, channel_id).await? else {
