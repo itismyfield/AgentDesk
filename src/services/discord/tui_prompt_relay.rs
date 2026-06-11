@@ -2386,14 +2386,12 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
             {
                 let Some(channel_id) = owner_channel_for_tmux_session(&shared, &tmux_session_name)
                 else {
-                    // #3018: registry has no owner channel for this active Claude
-                    // TUI binding — the idle relay cannot route, so it skips. Make
-                    // the skip visible (was a silent continue) so missing mappings
-                    // are diagnosable instead of silently dropping relay output.
-                    tracing::warn!(
-                        tmux_session_name = %tmux_session_name,
-                        provider = "claude",
-                        "Claude idle relay skipped: no authoritative owner channel for tmux session"
+                    // #3018/#3306: registry miss ⇒ drop. The drift handler
+                    // rate-limits the WARN and self-heals from a durable source.
+                    super::idle_relay_drift::on_idle_relay_drift(
+                        &shared,
+                        ProviderKind::Claude,
+                        &tmux_session_name,
                     );
                     continue;
                 };
@@ -3118,7 +3116,7 @@ fn resolve_idle_relay_transcript(
 }
 
 #[cfg(unix)]
-fn resolve_rehydrated_claude_tmux_channel_id(tmux_session_name: &str) -> Option<u64> {
+pub(super) fn resolve_rehydrated_claude_tmux_channel_id(tmux_session_name: &str) -> Option<u64> {
     let mut matched: Option<u64> = None;
     for binding in super::settings::list_registered_channel_bindings() {
         if binding.owner_provider != ProviderKind::Claude {
@@ -3323,13 +3321,12 @@ fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                 }
                 let Some(channel_id) = owner_channel_for_tmux_session(&shared, &tmux_session_name)
                 else {
-                    // #3018: registry has no owner channel for this active Codex
-                    // TUI binding — surface the relay skip (was a silent continue)
-                    // so missing mappings are diagnosable.
-                    tracing::warn!(
-                        tmux_session_name = %tmux_session_name,
-                        provider = "codex",
-                        "Codex idle relay skipped: no authoritative owner channel for tmux session"
+                    // #3018/#3306: registry miss ⇒ drop. Codex gets the
+                    // rate-limited drift WARN only (no settings/DB self-heal).
+                    super::idle_relay_drift::on_idle_relay_drift(
+                        &shared,
+                        ProviderKind::Codex,
+                        &tmux_session_name,
                     );
                     continue;
                 };
@@ -4939,15 +4936,18 @@ fn resolve_owner_channel_authoritatively(
     match (registry_owner, dedupe_owner) {
         (Some(registry_channel), _) => Some(registry_channel),
         (None, Some(dedupe_channel)) => {
-            // #3018: registry miss + dedupe mirror hit == observable drift.
-            // Do NOT fall back to the mirror (it is not a reverse authority);
-            // surface the drift so it is visible instead of routing on stale state.
-            tracing::warn!(
-                tmux_session_name = %tmux_session_name,
-                dedupe_channel_id = dedupe_channel,
-                "tmux-session→channel registry miss while dedupe mirror has a mapping; \
-                 treating registry as single authority and dropping (drift alert)"
-            );
+            // #3018: registry miss + dedupe mirror hit == observable drift. Do NOT
+            // fall back to the mirror (not a reverse authority). #3306: rate-limit
+            // the per-poll "drift alert" so a permanently drifted routine session
+            // cannot flood the log (52k+ WARN); the message text is preserved.
+            if super::idle_relay_drift::should_emit_drift_warn(tmux_session_name).emit {
+                tracing::warn!(
+                    tmux_session_name = %tmux_session_name,
+                    dedupe_channel_id = dedupe_channel,
+                    "tmux-session→channel registry miss while dedupe mirror has a mapping; \
+                     treating registry as single authority and dropping (drift alert)"
+                );
+            }
             None
         }
         (None, None) => None,
@@ -5843,6 +5843,62 @@ mod tests {
         );
 
         // Cleanup shared global dedupe state for cross-test isolation.
+        crate::services::tui_prompt_dedupe::evict_dead_tmux_mirror(tmux);
+    }
+
+    // #3306: a drift-triggered self-heal (the new path for ROUTINE sessions that
+    // have NO settings binding) must promote a durable channel via the SAME
+    // authoritative `restore_owner_channel_for_tmux_session` registry path the
+    // #3105 rehydrate uses — proving the registry stays the single authority and
+    // the resolver routes again after the drift WARN drop. The decision-core
+    // tests (`idle_relay_drift`) prove WHICH durable source is chosen and the
+    // mis-delivery guards; this end-to-end test pins the registry promotion +
+    // resolver hand-off.
+    #[test]
+    fn drift_triggered_restore_makes_routine_session_route_again() {
+        let shared = super::super::make_shared_data_for_tests();
+        // A routine tmux name that matches no settings channel binding (the
+        // exact class that drifts permanently before #3306).
+        let tmux = "AgentDesk-claude-routine-token-daily-report---token-manager";
+        let owner = ChannelId::new(1_512_635_194_124_013_681);
+
+        // Drift precondition: mirror holds a mapping, registry misses ⇒ drop.
+        crate::services::tui_prompt_dedupe::register_tmux_channel(tmux, owner.get());
+        assert_eq!(
+            owner_channel_for_tmux_session(&shared, tmux),
+            None,
+            "registry miss + mirror hit must drop (drift), never route from mirror"
+        );
+
+        // The drift repair (durable source promotion) re-registers the owner via
+        // the authoritative restore path — exactly what `attempt_drift_repair`
+        // does on a passing `RepairDecision::Promote`.
+        let repaired = shared
+            .tmux_watchers
+            .restore_owner_channel_for_tmux_session(tmux, owner);
+        assert!(repaired, "first drift-triggered restore reports a change");
+        assert_eq!(
+            owner_channel_for_tmux_session(&shared, tmux),
+            Some(owner),
+            "after the drift-triggered authoritative restore the session routes again"
+        );
+
+        // Live truth wins: a real watcher claim for the session must own it
+        // authoritatively, so a subsequent restore no-ops (the restored entry
+        // can never shadow a live watcher).
+        shared.tmux_watchers.insert(
+            owner,
+            test_watcher_handle(tmux, Path::new("/tmp/nope.jsonl")),
+        );
+        assert!(
+            !shared
+                .tmux_watchers
+                .restore_owner_channel_for_tmux_session(tmux, owner),
+            "restore must no-op while a live watcher owns the session (live truth wins)"
+        );
+
+        // Cleanup shared global state for cross-test isolation.
+        shared.tmux_watchers.remove(&owner);
         crate::services::tui_prompt_dedupe::evict_dead_tmux_mirror(tmux);
     }
 
