@@ -11,6 +11,7 @@ use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::{CancelToken, ProviderKind};
 
 use super::HealthRegistry;
+use super::relay_auto_heal;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeTurnStopResult {
@@ -1584,7 +1585,8 @@ pub(crate) async fn run_stall_watchdog_pass(
         }
     }
     if candidate_channels.is_empty() {
-        return 0;
+        return relay_auto_heal::run_orphan_token_auto_heal_pass(registry, provider, &runtimes)
+            .await;
     }
     let now_unix_secs = chrono::Utc::now().timestamp();
     let mut cleaned = 0usize;
@@ -1834,19 +1836,12 @@ pub(crate) async fn run_stall_watchdog_pass(
             "  [{ts}] ⚡ STALL-WATCHDOG: forced cleanup for desynced channel {}",
             channel_id
         );
-        // Force cleanup mirrors THREAD-GUARD's stale path:
-        //   1. clear inflight state file (releases the durable lock)
-        //   2. **clear** the mailbox (drops cancel token + active turn
-        //      anchor + queued interventions). `cancel_active_turn` alone
-        //      only marks the cancel flag and waits for the live turn task
-        //      to call `finish_turn`; for the dead-dispatch case this
-        //      watchdog targets, no such task exists so we must use
-        //      `mailbox_clear_channel` to synchronously release the
-        //      in-memory lock and stop subsequent THREAD-GUARD queueing.
-        //   3. finalize the orphaned clear via `stall_recovery` so
-        //      `global_active` and any leftover child/tmux are released.
-        //   4. drop any parent → thread mapping that points at this channel
-        //      (so the parent's THREAD-GUARD stops queueing)
+        // Force cleanup releases the durable inflight lock first, then asks
+        // relay_recovery to clear the mailbox only if its fresh safety
+        // predicate still sees no bridge, watcher, or live tmux evidence.
+        // That keeps token cleanup on the same audited path as the
+        // operator-facing orphan_pending_token recovery and avoids a second
+        // local interpretation of "safe to release".
         // #1914: capture user_msg_id BEFORE deleting the inflight state file
         // so we can scrub the ⏳ reaction the bridge added at turn start. The
         // normal cleanup paths (`turn_bridge::mod.rs:3047-3048` and the four
@@ -1874,13 +1869,13 @@ pub(crate) async fn run_stall_watchdog_pass(
         )
         .await;
         discord::inflight::delete_inflight_state_file(provider, channel_id.get());
-        let cleared = discord::mailbox_clear_channel(&shared, provider, channel_id).await;
-        discord::stall_recovery::finalize_orphaned_clear(
-            &shared,
+        let _ = relay_auto_heal::apply_watchdog_orphan_token_cleanup(
+            registry,
+            provider,
+            shared.clone(),
             channel_id,
-            cleared.removed_token,
-            "1446_stall_watchdog",
-        );
+        )
+        .await;
         shared
             .dispatch_thread_parents
             .retain(|_, thread_id| *thread_id != channel_id);
@@ -1892,7 +1887,7 @@ pub(crate) async fn run_stall_watchdog_pass(
         }
         cleaned += 1;
     }
-    cleaned
+    cleaned + relay_auto_heal::run_orphan_token_auto_heal_pass(registry, provider, &runtimes).await
 }
 
 /// Spawn the long-lived background task that runs the stall watchdog at
@@ -3712,5 +3707,75 @@ mod stall_watchdog_pure_tests {
             false,
             None,
         ));
+    }
+}
+
+#[cfg(test)]
+mod stall_watchdog_auto_heal_tests {
+    use super::super::HealthRegistry;
+    use crate::services::provider::{CancelToken, ProviderKind};
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
+
+    #[tokio::test]
+    async fn stall_watchdog_cleanup_releases_residual_orphan_pending_token() {
+        let provider = ProviderKind::Codex;
+        let registry = HealthRegistry::new();
+        let shared = super::super::super::make_shared_data_for_tests();
+        registry
+            .register(provider.as_str().to_string(), shared.clone())
+            .await;
+        let channel = ChannelId::new(3_360_101);
+        let token = Arc::new(CancelToken::new());
+        let started = super::super::super::mailbox_try_start_turn(
+            &shared,
+            channel,
+            token.clone(),
+            UserId::new(7),
+            MessageId::new(70),
+        )
+        .await;
+        assert!(started, "test turn should seed a residual mailbox token");
+        let watcher_cancel = Arc::new(AtomicBool::new(false));
+        shared.tmux_watchers.insert(
+            channel,
+            super::super::super::TmuxWatcherHandle {
+                tmux_session_name: "AgentDesk-codex-dead-watchdog".to_string(),
+                output_path: "/tmp/agentdesk-test-watchdog.jsonl".to_string(),
+                paused: Arc::new(AtomicBool::new(false)),
+                resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                cancel: watcher_cancel.clone(),
+                pause_epoch: Arc::new(AtomicU64::new(0)),
+                turn_delivered: Arc::new(AtomicBool::new(false)),
+                last_heartbeat_ts_ms: Arc::new(AtomicI64::new(0)),
+            },
+        );
+        assert!(
+            shared.tmux_watchers.contains_key(&channel),
+            "test setup must leave watcher evidence before watchdog cleanup"
+        );
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+
+        let released = super::super::relay_auto_heal::apply_watchdog_orphan_token_cleanup(
+            &registry,
+            &provider,
+            shared.clone(),
+            channel,
+        )
+        .await;
+
+        assert!(released, "watchdog cleanup must release the orphan token");
+        assert!(watcher_cancel.load(Ordering::Relaxed));
+        assert!(!shared.tmux_watchers.contains_key(&channel));
+        assert!(
+            super::super::super::mailbox_snapshot(&shared, channel)
+                .await
+                .cancel_token
+                .is_none()
+        );
+        assert!(token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
     }
 }

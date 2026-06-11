@@ -148,10 +148,10 @@ impl SessionEnrichment {
         }
     }
 
-    pub async fn tmux_session_alive(&self) -> Option<bool> {
-        match self.tmux_session.as_ref() {
+    pub async fn probe_tmux_session_alive(tmux_session: Option<&str>) -> Option<bool> {
+        match tmux_session {
             Some(name) => {
-                let probe_target = name.clone();
+                let probe_target = name.to_string();
                 let alive = tokio::task::spawn_blocking(move || {
                     crate::services::platform::tmux::has_session(&probe_target)
                 })

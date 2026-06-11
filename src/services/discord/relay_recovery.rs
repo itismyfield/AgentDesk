@@ -31,6 +31,38 @@ pub(in crate::services::discord) enum RelayRecoveryActionKind {
     ReattachWatcher,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::services::discord) enum RelayRecoveryApplySource {
+    Manual,
+    ProbeAutoHeal,
+    StallWatchdog,
+}
+
+impl RelayRecoveryApplySource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::ProbeAutoHeal => "probe_auto_heal",
+            Self::StallWatchdog => "stall_watchdog",
+        }
+    }
+
+    fn finalizer_reason(self) -> &'static str {
+        match self {
+            Self::StallWatchdog => "1446_stall_watchdog",
+            Self::Manual | Self::ProbeAutoHeal => "1462_relay_recovery_auto_heal",
+        }
+    }
+
+    fn cleanup_session(self) -> bool {
+        matches!(self, Self::StallWatchdog)
+    }
+
+    fn uses_rate_limit(self) -> bool {
+        !matches!(self, Self::StallWatchdog)
+    }
+}
+
 impl RelayRecoveryActionKind {
     fn as_str(self) -> &'static str {
         match self {
@@ -417,8 +449,7 @@ pub(in crate::services::discord) async fn run_relay_recovery(
     })?;
 
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let mut decision =
-        plan_relay_recovery(&snapshot.relay_health, snapshot.relay_stall_state, now_ms);
+    let decision = plan_relay_recovery(&snapshot.relay_health, snapshot.relay_stall_state, now_ms);
     trace_relay_recovery_decision(&decision, apply);
 
     if !apply {
@@ -427,18 +458,6 @@ pub(in crate::services::discord) async fn run_relay_recovery(
             mode: "dry_run",
             applied: false,
             skipped: false,
-            decision,
-            apply_result: None,
-        });
-    }
-
-    if !decision.auto_heal.eligible {
-        trace_relay_recovery_skipped(&decision, decision.auto_heal.skipped_reason);
-        return Ok(RelayRecoveryResponse {
-            ok: false,
-            mode: "apply",
-            applied: false,
-            skipped: true,
             decision,
             apply_result: None,
         });
@@ -453,55 +472,130 @@ pub(in crate::services::discord) async fn run_relay_recovery(
         .shared_for_provider_on_channel(&provider, ChannelId::new(decision.channel_id))
         .await
         .ok_or_else(|| RelayRecoveryError::ProviderUnavailable(decision.provider.clone()))?;
-    let key = auto_heal_key(&decision.provider, decision.channel_id, decision.action);
-    match reserve_auto_heal_attempt(&key, now_ms) {
-        Ok(remaining) => {
-            decision.auto_heal.remaining_attempts = remaining;
-        }
-        Err(reason) => {
-            decision.auto_heal.remaining_attempts = 0;
-            decision.auto_heal.skipped_reason = Some(reason);
-            trace_relay_recovery_skipped(&decision, Some(reason));
-            return Ok(RelayRecoveryResponse {
-                ok: false,
-                mode: "apply",
-                applied: false,
-                skipped: true,
-                decision,
-                apply_result: None,
-            });
-        }
+    Ok(apply_relay_recovery_plan(
+        registry,
+        &shared,
+        &provider,
+        decision,
+        now_ms,
+        RelayRecoveryApplySource::Manual,
+    )
+    .await)
+}
+
+pub(in crate::services::discord) async fn auto_apply_relay_recovery_for_shared(
+    registry: &HealthRegistry,
+    shared: Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: u64,
+    allowed_action: RelayRecoveryActionKind,
+    source: RelayRecoveryApplySource,
+) -> Result<RelayRecoveryResponse, RelayRecoveryError> {
+    let snapshot = registry
+        .snapshot_watcher_state_for_shared(provider, shared.clone(), channel_id)
+        .await
+        .ok_or_else(|| RelayRecoveryError::SnapshotNotFound {
+            channel_id,
+            provider: Some(provider.as_str().to_string()),
+        })?;
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut decision =
+        plan_relay_recovery(&snapshot.relay_health, snapshot.relay_stall_state, now_ms);
+    trace_relay_recovery_decision(&decision, true);
+
+    if decision.action != allowed_action {
+        decision.auto_heal.skipped_reason = Some("auto_heal_action_not_allowed");
+        trace_relay_recovery_skipped(&decision, decision.auto_heal.skipped_reason);
+        return Ok(RelayRecoveryResponse {
+            ok: false,
+            mode: "apply",
+            applied: false,
+            skipped: true,
+            decision,
+            apply_result: None,
+        });
     }
 
-    let apply_result = apply_relay_recovery_decision(registry, &shared, &provider, &decision).await;
-    // `reuse_existing_live_watcher` still counts as applied: the rebind
-    // succeeded and the restored inflight is picked up by the live watcher —
-    // only the status string is honest about not spawning one (#3277 verify-2).
-    let applied = matches!(
-        apply_result.status,
-        "applied"
-            | "reattached_watcher"
-            | "reuse_existing_live_watcher"
-            | "cleared_idle_tmux_stale_turn"
-    );
+    Ok(apply_relay_recovery_plan(registry, &shared, provider, decision, now_ms, source).await)
+}
+
+async fn apply_relay_recovery_plan(
+    registry: &HealthRegistry,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    mut decision: RelayRecoveryDecision,
+    now_ms: i64,
+    source: RelayRecoveryApplySource,
+) -> RelayRecoveryResponse {
+    if !decision.auto_heal.eligible {
+        trace_relay_recovery_skipped(&decision, decision.auto_heal.skipped_reason);
+        return RelayRecoveryResponse {
+            ok: false,
+            mode: "apply",
+            applied: false,
+            skipped: true,
+            decision,
+            apply_result: None,
+        };
+    }
+
+    let key = auto_heal_key(&decision.provider, decision.channel_id, decision.action);
+    if source.uses_rate_limit() {
+        match reserve_auto_heal_attempt(&key, now_ms) {
+            Ok(remaining) => {
+                decision.auto_heal.remaining_attempts = remaining;
+            }
+            Err(reason) => {
+                decision.auto_heal.remaining_attempts = 0;
+                decision.auto_heal.skipped_reason = Some(reason);
+                trace_relay_recovery_skipped(&decision, Some(reason));
+                return RelayRecoveryResponse {
+                    ok: false,
+                    mode: "apply",
+                    applied: false,
+                    skipped: true,
+                    decision,
+                    apply_result: None,
+                };
+            }
+        }
+    } else {
+        decision.auto_heal.remaining_attempts = remaining_auto_heal_attempts(&key, now_ms);
+    }
+
+    let apply_result =
+        apply_relay_recovery_decision(registry, shared, provider, &decision, source).await;
+    let applied = relay_recovery_status_counts_as_applied(apply_result.status);
     tracing::info!(
         target: "agentdesk::discord::relay_recovery",
         provider = decision.provider.as_str(),
         channel_id = decision.channel_id,
         action = decision.action.as_str(),
+        source = source.as_str(),
         status = apply_result.status,
         removed_thread_proofs = apply_result.removed_thread_proofs,
         removed_mailbox_token = apply_result.removed_mailbox_token,
         "relay recovery auto-heal applied"
     );
-    Ok(RelayRecoveryResponse {
+    RelayRecoveryResponse {
         ok: applied,
         mode: "apply",
         applied,
         skipped: false,
         decision,
         apply_result: Some(apply_result),
-    })
+    }
+}
+
+fn relay_recovery_status_counts_as_applied(status: &'static str) -> bool {
+    matches!(
+        status,
+        "applied"
+            | "reattached_watcher"
+            | "reuse_existing_live_watcher"
+            | "cleared_idle_tmux_stale_turn"
+    )
 }
 
 /// #3277 verify-2 (Defect D follow-up): report the reattach apply HONESTLY.
@@ -554,6 +648,7 @@ async fn apply_relay_recovery_decision(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     decision: &RelayRecoveryDecision,
+    source: RelayRecoveryApplySource,
 ) -> RelayRecoveryApplyResult {
     match decision.action {
         RelayRecoveryActionKind::ClearStaleThreadProof => {
@@ -577,12 +672,21 @@ async fn apply_relay_recovery_decision(
         RelayRecoveryActionKind::ClearOrphanPendingToken => {
             let channel = ChannelId::new(decision.channel_id);
             let cleared = mailbox_clear_channel(shared, provider, channel).await;
-            super::stall_recovery::finalize_orphaned_clear_preserve_session(
-                shared,
-                channel,
-                cleared.removed_token.clone(),
-                "1462_relay_recovery_auto_heal",
-            );
+            if source.cleanup_session() {
+                super::stall_recovery::finalize_orphaned_clear(
+                    shared,
+                    channel,
+                    cleared.removed_token.clone(),
+                    source.finalizer_reason(),
+                );
+            } else {
+                super::stall_recovery::finalize_orphaned_clear_preserve_session(
+                    shared,
+                    channel,
+                    cleared.removed_token.clone(),
+                    source.finalizer_reason(),
+                );
+            }
             mailbox_clear_recovery_marker(shared, channel).await;
             let after = mailbox_snapshot(shared, channel).await;
             RelayRecoveryApplyResult {
@@ -738,6 +842,42 @@ fn clear_auto_heal_attempts_for_tests() {
 mod tests {
     use super::super::relay_health::RelayStallClassifier;
     use super::*;
+    use crate::services::provider::{CancelToken, ProviderKind};
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, OnceLock};
+
+    fn auto_heal_test_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    async fn registry_with_shared(provider: ProviderKind) -> (HealthRegistry, Arc<SharedData>) {
+        let registry = HealthRegistry::new();
+        let shared = super::super::make_shared_data_for_tests();
+        registry
+            .register(provider.as_str().to_string(), shared.clone())
+            .await;
+        (registry, shared)
+    }
+
+    async fn start_test_turn(
+        shared: &Arc<SharedData>,
+        channel: ChannelId,
+        message: MessageId,
+    ) -> Arc<CancelToken> {
+        let token = Arc::new(CancelToken::new());
+        let started = super::super::mailbox_try_start_turn(
+            shared,
+            channel,
+            token.clone(),
+            UserId::new(1),
+            message,
+        )
+        .await;
+        assert!(started, "test mailbox turn should start on an idle channel");
+        token
+    }
 
     fn snapshot() -> RelayHealthSnapshot {
         RelayHealthSnapshot {
@@ -1032,8 +1172,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn auto_heal_attempts_are_rate_limited_per_window() {
+    #[tokio::test]
+    async fn auto_heal_attempts_are_rate_limited_per_window() {
+        let _guard = auto_heal_test_lock().lock().await;
         clear_auto_heal_attempts_for_tests();
         let key = auto_heal_key(
             "codex",
@@ -1049,6 +1190,138 @@ mod tests {
         assert_eq!(
             reserve_auto_heal_attempt(&key, 1_000 + AUTO_HEAL_WINDOW_SECS * 1000),
             Ok(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_apply_orphan_pending_token_clears_mailbox_token() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let provider = ProviderKind::Codex;
+        let (registry, shared) = registry_with_shared(provider.clone()).await;
+        let channel = ChannelId::new(3_360_001);
+        let token = start_test_turn(&shared, channel, MessageId::new(91)).await;
+        token
+            .tmux_session
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .replace("AgentDesk-codex-3360-dead-token-session".to_string());
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+
+        let response = auto_apply_relay_recovery_for_shared(
+            &registry,
+            shared.clone(),
+            &provider,
+            channel.get(),
+            RelayRecoveryActionKind::ClearOrphanPendingToken,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+        )
+        .await
+        .expect("orphan token auto-heal should evaluate");
+
+        assert!(response.applied);
+        assert_eq!(
+            response.decision.action,
+            RelayRecoveryActionKind::ClearOrphanPendingToken
+        );
+        assert_eq!(response.decision.evidence.tmux_alive, Some(false));
+        assert!(
+            response
+                .apply_result
+                .as_ref()
+                .is_some_and(|result| result.removed_mailbox_token)
+        );
+        assert!(
+            super::super::mailbox_snapshot(&shared, channel)
+                .await
+                .cancel_token
+                .is_none()
+        );
+        assert!(token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn probe_auto_apply_is_rate_limited_per_channel_action() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let provider = ProviderKind::Codex;
+        let (registry, shared) = registry_with_shared(provider.clone()).await;
+        let channel = ChannelId::new(3_360_002);
+        start_test_turn(&shared, channel, MessageId::new(92)).await;
+
+        let first = auto_apply_relay_recovery_for_shared(
+            &registry,
+            shared.clone(),
+            &provider,
+            channel.get(),
+            RelayRecoveryActionKind::ClearOrphanPendingToken,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+        )
+        .await
+        .expect("first orphan token auto-heal should evaluate");
+        assert!(first.applied);
+
+        start_test_turn(&shared, channel, MessageId::new(93)).await;
+        let second = auto_apply_relay_recovery_for_shared(
+            &registry,
+            shared.clone(),
+            &provider,
+            channel.get(),
+            RelayRecoveryActionKind::ClearOrphanPendingToken,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+        )
+        .await
+        .expect("second orphan token auto-heal should evaluate");
+
+        assert!(second.skipped);
+        assert!(!second.applied);
+        assert_eq!(
+            second.decision.auto_heal.skipped_reason,
+            Some("auto_heal_rate_limited")
+        );
+        assert!(
+            super::super::mailbox_snapshot(&shared, channel)
+                .await
+                .cancel_token
+                .is_some(),
+            "rate-limited auto-heal must leave the token untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_apply_is_limited_to_requested_action_kind() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let provider = ProviderKind::Codex;
+        let (registry, shared) = registry_with_shared(provider.clone()).await;
+        let parent = ChannelId::new(3_360_003);
+        let thread = ChannelId::new(3_360_004);
+        shared.dispatch_thread_parents.insert(parent, thread);
+
+        let response = auto_apply_relay_recovery_for_shared(
+            &registry,
+            shared.clone(),
+            &provider,
+            parent.get(),
+            RelayRecoveryActionKind::ClearOrphanPendingToken,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+        )
+        .await
+        .expect("stale thread proof decision should evaluate");
+
+        assert!(response.skipped);
+        assert_eq!(
+            response.decision.action,
+            RelayRecoveryActionKind::ClearStaleThreadProof
+        );
+        assert_eq!(
+            response.decision.auto_heal.skipped_reason,
+            Some("auto_heal_action_not_allowed")
+        );
+        assert!(
+            shared.dispatch_thread_parents.contains_key(&parent),
+            "auto orphan cleanup must not apply other recovery action kinds"
         );
     }
 }

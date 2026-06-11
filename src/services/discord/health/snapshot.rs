@@ -416,7 +416,19 @@ async fn watcher_state_snapshot_for_shared(
     let mailbox_active_user_msg_id =
         redaction::visible_serenity_message_id(mailbox_snapshot.active_user_message_id);
     let has_pending_queue = !mailbox_snapshot.intervention_queue.is_empty();
-    let mailbox_engaged = mailbox_active_user_msg_id.is_some() || has_pending_queue;
+    let mailbox_engaged =
+        mailbox_has_cancel_token || mailbox_active_user_msg_id.is_some() || has_pending_queue;
+    let mailbox_cancel_tmux_session = mailbox_snapshot.cancel_token.as_ref().and_then(|token| {
+        token
+            .tmux_session
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    });
+    let tmux_session_for_liveness_probe = session
+        .tmux_session
+        .as_deref()
+        .or(mailbox_cancel_tmux_session.as_deref());
     let has_thread_proof = shared.dispatch_thread_parents.contains_key(&channel)
         || shared
             .dispatch_thread_parents
@@ -431,7 +443,8 @@ async fn watcher_state_snapshot_for_shared(
         return None;
     }
 
-    let tmux_session_alive = session.tmux_session_alive().await;
+    let tmux_session_alive =
+        SessionEnrichment::probe_tmux_session_alive(tmux_session_for_liveness_probe).await;
     let desynced = session.desynced(tmux_session_alive == Some(true), session.attached);
     let active_turn =
         relay_active_turn_from_inflight(mailbox_has_cancel_token, session.inflight.as_ref());
