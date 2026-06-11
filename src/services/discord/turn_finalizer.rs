@@ -545,7 +545,6 @@ impl TurnFinalizer {
         };
         if matches!(out, FinalizeOutcome::AlreadyFinalized) {
             cleanup::already_finalized_active_state(key, &provider, &event, ctx, &shared).await;
-            cleanup::finalized_reaction_lifecycle(key, &event, ctx, &shared, "af").await;
         }
         out
     }
@@ -1135,7 +1134,7 @@ async fn do_finalize(
         has_pending_after_voice
     };
 
-    cleanup::finalized_reaction_lifecycle(key, event, ctx, shared, "finalized").await;
+    cleanup::finalized_reaction_lifecycle(key, event, ctx, shared, "finalized");
 
     // (F) relay-miss observability — emitted from inside the finalizer so the
     //     signal fires exactly once per finalize regardless of submitter.

@@ -5,7 +5,30 @@ use crate::services::provider::ProviderKind;
 use super::{FinalizeContext, TerminalEvent, TurnKey};
 use crate::services::discord::SharedData;
 
-pub(super) async fn finalized_reaction_lifecycle(
+#[derive(Clone, Copy)]
+struct ReactionCleanupRequest {
+    channel_id: serenity::model::id::ChannelId,
+    message_id: serenity::model::id::MessageId,
+    add_checkmark: bool,
+    source: &'static str,
+}
+
+/// Backstop-only reaction cleanup for terminal paths that skipped the normal
+/// watcher `⏳ -> ✅` block.
+///
+/// Reachable production matrix:
+/// * `watcher` / `bridge` / `monitor` submitters pass `clear_inflight = false`,
+///   so they never run this helper; watcher owns the normal committed-output
+///   reaction block when it is safe to claim completion.
+/// * `gate_backstop()` is not a production `submit_terminal` context. It is
+///   reached only by `run_backstop_finalize -> do_finalize` after a deferred
+///   busy-pane gate, where no caller remains to clear inflight or the reaction.
+/// * the no-owner restored-watcher path mutates watcher context into the same
+///   `clear_inflight && kickoff_queue && !completion_cleanup && !voice` shape.
+///   That path also skipped the normal watcher block, so it needs this fallback.
+/// * `AlreadyFinalized` losers only inherit their submitter context, so they
+///   cannot become the backstop reaction owner after someone else won the gate.
+pub(super) fn finalized_reaction_lifecycle(
     key: TurnKey,
     event: &TerminalEvent,
     ctx: FinalizeContext,
@@ -21,10 +44,15 @@ pub(super) async fn finalized_reaction_lifecycle(
         return;
     }
     let message_id = serenity::model::id::MessageId::new(key.user_msg_id);
-    apply_reaction(shared, key.channel_id, message_id, '⏳', false, source).await;
-    if !matches!(event, TerminalEvent::Cancel) {
-        apply_reaction(shared, key.channel_id, message_id, '✅', true, source).await;
-    }
+    schedule_reaction_cleanup(
+        shared.clone(),
+        ReactionCleanupRequest {
+            channel_id: key.channel_id,
+            message_id,
+            add_checkmark: !matches!(event, TerminalEvent::Cancel),
+            source,
+        },
+    );
 }
 
 /// Late `AlreadyFinalized` losers still perform guarded active-state cleanup.
@@ -72,6 +100,32 @@ pub(super) async fn already_finalized_active_state(
     if !finish.has_pending {
         shared.dispatch_role_overrides.remove(&key.channel_id);
     }
+}
+
+#[cfg(not(test))]
+fn schedule_reaction_cleanup(shared: Arc<SharedData>, request: ReactionCleanupRequest) {
+    super::super::task_supervisor::spawn_observed("turn_finalizer_reaction_cleanup", async move {
+        apply_reaction(
+            &shared,
+            request.channel_id,
+            request.message_id,
+            '⏳',
+            false,
+            request.source,
+        )
+        .await;
+        if request.add_checkmark {
+            apply_reaction(
+                &shared,
+                request.channel_id,
+                request.message_id,
+                '✅',
+                true,
+                request.source,
+            )
+            .await;
+        }
+    });
 }
 
 #[cfg(not(test))]
@@ -132,8 +186,27 @@ pub(super) fn take_reaction_cleanup_records() -> Vec<ReactionCleanupRecord> {
 }
 
 #[cfg(test)]
-async fn apply_reaction(
-    _shared: &Arc<SharedData>,
+fn schedule_reaction_cleanup(_shared: Arc<SharedData>, request: ReactionCleanupRequest) {
+    record_reaction(
+        request.channel_id,
+        request.message_id,
+        '⏳',
+        false,
+        request.source,
+    );
+    if request.add_checkmark {
+        record_reaction(
+            request.channel_id,
+            request.message_id,
+            '✅',
+            true,
+            request.source,
+        );
+    }
+}
+
+#[cfg(test)]
+fn record_reaction(
     channel_id: serenity::model::id::ChannelId,
     message_id: serenity::model::id::MessageId,
     emoji: char,
@@ -192,10 +265,6 @@ mod tests {
         }
     }
 
-    fn reaction_context() -> FinalizeContext {
-        FinalizeContext::gate_backstop()
-    }
-
     async fn seed_active_turn(
         shared: &Arc<SharedData>,
         channel_id: ChannelId,
@@ -224,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn backstop_finalize_removes_hourglass_and_marks_complete() {
+    fn reconciler_backstop_finalize_removes_hourglass_and_marks_complete() {
         with_isolated_runtime_root(|| {
             test_rt().block_on(async {
                 let shared =
@@ -267,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn already_finalized_loser_runs_idempotent_reaction_cleanup() {
+    fn already_finalized_loser_does_not_claim_reaction_cleanup() {
         with_isolated_runtime_root(|| {
             test_rt().block_on(async {
                 let shared =
@@ -288,12 +357,12 @@ mod tests {
                         key,
                         ProviderKind::Claude,
                         TerminalEvent::Complete,
-                        reaction_context(),
+                        FinalizeContext::watcher(),
                         shared.clone(),
                     )
                     .await;
                 assert!(matches!(first, FinalizeOutcome::Finalized { .. }));
-                let _ = take_reaction_cleanup_records();
+                assert!(take_reaction_cleanup_records().is_empty());
 
                 begin_reaction_cleanup_recording();
                 let late = fin
@@ -301,51 +370,14 @@ mod tests {
                         key,
                         ProviderKind::Claude,
                         TerminalEvent::Complete,
-                        reaction_context(),
+                        FinalizeContext::bridge(),
                         shared.clone(),
                     )
                     .await;
                 assert!(matches!(late, FinalizeOutcome::AlreadyFinalized));
-                let records = take_reaction_cleanup_records();
-                assert_eq!(
-                    recorded_actions(&records),
-                    vec![(ch.get(), tid, '⏳', false), (ch.get(), tid, '✅', true)]
-                );
-                assert!(records.iter().all(|record| record.source == "af"));
-            });
-        });
-    }
-
-    #[test]
-    fn cancel_removes_hourglass_without_checkmark() {
-        with_isolated_runtime_root(|| {
-            test_rt().block_on(async {
-                let shared =
-                    super::super::super::make_shared_data_for_tests_with_storage(None, None);
-                let ch = ChannelId::new(3_334_300);
-                let tid = 3_334_301_u64;
-                shared
-                    .global_active
-                    .store(1, std::sync::atomic::Ordering::Relaxed);
-                let _token = seed_active_turn(&shared, ch, tid).await;
-                let fin = TurnFinalizer::spawn();
-                let key = TurnKey::new(ch, tid, 0);
-                fin.register_start(key, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
-
-                begin_reaction_cleanup_recording();
-                let outcome = fin
-                    .submit_terminal(
-                        key,
-                        ProviderKind::Claude,
-                        TerminalEvent::Cancel,
-                        reaction_context(),
-                        shared.clone(),
-                    )
-                    .await;
-                assert!(matches!(outcome, FinalizeOutcome::Finalized { .. }));
-                assert_eq!(
-                    recorded_actions(&take_reaction_cleanup_records()),
-                    vec![(ch.get(), tid, '⏳', false)]
+                assert!(
+                    take_reaction_cleanup_records().is_empty(),
+                    "reachable AlreadyFinalized losers inherit watcher/bridge/monitor context and must not masquerade as the backstop reaction owner"
                 );
             });
         });
@@ -403,8 +435,10 @@ mod tests {
                     .submit_terminal(
                         TurnKey::new(ch, old_tid, 0),
                         ProviderKind::Claude,
-                        TerminalEvent::Complete,
-                        reaction_context(),
+                        TerminalEvent::GateTimeout {
+                            pane_quiescent: Some(false),
+                        },
+                        FinalizeContext::watcher(),
                         shared.clone(),
                     )
                     .await;
@@ -426,8 +460,10 @@ mod tests {
                     .submit_terminal(
                         TurnKey::new(ChannelId::new(3_334_600), 0, 0),
                         ProviderKind::Claude,
-                        TerminalEvent::Complete,
-                        reaction_context(),
+                        TerminalEvent::GateTimeout {
+                            pane_quiescent: Some(false),
+                        },
+                        FinalizeContext::watcher(),
                         shared.clone(),
                     )
                     .await;
