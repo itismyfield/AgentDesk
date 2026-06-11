@@ -4939,11 +4939,15 @@ fn resolve_owner_channel_authoritatively(
             // #3018: registry miss + dedupe mirror hit == observable drift. Do NOT
             // fall back to the mirror (not a reverse authority). #3306: rate-limit
             // the per-poll "drift alert" so a permanently drifted routine session
-            // cannot flood the log (52k+ WARN); the message text is preserved.
-            if super::idle_relay_drift::should_emit_drift_warn(tmux_session_name).emit {
+            // cannot flood the log (52k+ WARN). The idle drift hook does not
+            // consume this limiter again; this resolver WARN is the single log.
+            let warn_decision = super::idle_relay_drift::should_emit_drift_warn(tmux_session_name);
+            if warn_decision.emit {
                 tracing::warn!(
                     tmux_session_name = %tmux_session_name,
                     dedupe_channel_id = dedupe_channel,
+                    suppressed_count = warn_decision.suppressed_count,
+                    drift_age_secs = warn_decision.drift_age_secs,
                     "tmux-session→channel registry miss while dedupe mirror has a mapping; \
                      treating registry as single authority and dropping (drift alert)"
                 );

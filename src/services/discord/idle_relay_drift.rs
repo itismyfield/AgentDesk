@@ -57,12 +57,17 @@
 //! `Blocked` whenever the sources are ambiguous.
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+#[cfg(unix)]
+use std::sync::Arc;
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 use poise::serenity_prelude::ChannelId;
 
+#[cfg(unix)]
 use super::SharedData;
+#[cfg(unix)]
 use crate::services::provider::ProviderKind;
 
 /// Re-emit the per-session drift WARN at most once per this window after the
@@ -72,6 +77,7 @@ const DRIFT_WARN_COOLDOWN: Duration = Duration::from_secs(300);
 
 /// Minimum spacing between repair attempts for the same session, so a permanent
 /// no-source session does not re-spawn a repair task on every ~500ms poll.
+#[cfg(unix)]
 const DRIFT_REPAIR_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// Purge per-session drift state entries untouched for longer than this, so the
@@ -84,6 +90,7 @@ struct DriftState {
     last_touched_at: Instant,
     last_warn_at: Option<Instant>,
     suppressed_count: u64,
+    #[cfg_attr(not(unix), allow(dead_code))]
     last_repair_attempt_at: Option<Instant>,
     repair_inflight: bool,
 }
@@ -152,9 +159,9 @@ fn purge_expired_locked(map: &mut HashMap<String, DriftState>, now: Instant) {
 }
 
 /// Rate-limit decision for the resolver-internal drift WARN (the
-/// `resolve_owner_channel_authoritatively` "drift alert"). Shares the same
-/// per-session limiter as the idle-loop skip WARN so a session does not emit two
-/// uncapped streams. Returns the decision the caller folds into its log fields.
+/// `resolve_owner_channel_authoritatively` "drift alert"). The resolver is the
+/// single WARN owner; the idle drift hook only triggers repair. Returns the
+/// decision the caller folds into its log fields.
 pub(super) fn should_emit_drift_warn(tmux_session_name: &str) -> WarnDecision {
     let now = Instant::now();
     let mut map = DRIFT_STATE
@@ -169,6 +176,7 @@ pub(super) fn should_emit_drift_warn(tmux_session_name: &str) -> WarnDecision {
 
 /// Source a repair value was promoted from (for the success log) or the reason a
 /// promotion was blocked / had no source.
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RepairSource {
     /// Settings-derived channel binding (#3105 trust level).
@@ -177,6 +185,7 @@ pub(super) enum RepairSource {
     SessionsTable,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BlockReason {
     /// DB row's `instance_id` belongs to another instance.
@@ -192,6 +201,7 @@ pub(super) enum BlockReason {
 }
 
 /// Decision of the repair core for a single session.
+#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum RepairDecision {
     /// Promote `channel` from `source` into the authoritative registry.
@@ -203,6 +213,7 @@ pub(super) enum RepairDecision {
 }
 
 /// Resolved facts the IO layer feeds into the pure repair decision core.
+#[cfg(unix)]
 #[derive(Debug, Clone, Default)]
 pub(super) struct RepairInputs {
     /// Settings-derived channel (`resolve_rehydrated_claude_tmux_channel_id`).
@@ -226,6 +237,7 @@ pub(super) struct RepairInputs {
 /// 1. Settings binding (same trust as #3105) wins when the pane is live.
 /// 2. Otherwise `sessions.channel_id` may be promoted ONLY behind all three
 ///    guards: live pane, matching instance, AND mirror-agrees.
+#[cfg(unix)]
 pub(super) fn evaluate_drift_repair(inputs: &RepairInputs) -> RepairDecision {
     if !inputs.pane_live {
         // A dead pane can never resolve (mirrors the #3105 dead-pane branch). If
@@ -280,10 +292,12 @@ pub(super) fn evaluate_drift_repair(inputs: &RepairInputs) -> RepairDecision {
 
 /// RAII guard that clears the `repair_inflight` flag on drop, so a panicking
 /// repair task can never leak the single-flight lock for a session.
+#[cfg(unix)]
 struct RepairInflightGuard {
     tmux_session_name: String,
 }
 
+#[cfg(unix)]
 impl Drop for RepairInflightGuard {
     fn drop(&mut self) {
         let mut map = DRIFT_STATE
@@ -298,6 +312,7 @@ impl Drop for RepairInflightGuard {
 /// Try to claim the single-flight repair slot for this session. Returns a guard
 /// (held until the repair task ends) when the caller may proceed, or `None` when
 /// a repair is already inflight or the 60s cooldown has not elapsed.
+#[cfg(unix)]
 fn try_begin_repair(tmux_session_name: &str, now: Instant) -> Option<RepairInflightGuard> {
     let mut map = DRIFT_STATE
         .lock()
@@ -321,29 +336,18 @@ fn try_begin_repair(tmux_session_name: &str, now: Instant) -> Option<RepairInfli
     })
 }
 
-/// Entry point invoked from the idle relay loop's drift (drop) branch. Emits a
-/// rate-limited WARN and, for Claude, fires a one-shot async repair (cooldown +
-/// single-flight gated).
+/// Entry point invoked from the idle relay loop's drift (drop) branch. The
+/// resolver owns the single rate-limited drift WARN; this path only fires the
+/// Claude one-shot async repair (cooldown + single-flight gated).
+#[cfg(unix)]
 pub(super) fn on_idle_relay_drift(
     shared: &Arc<SharedData>,
     provider: ProviderKind,
     tmux_session_name: &str,
 ) {
-    let decision = should_emit_drift_warn(tmux_session_name);
-    if decision.emit {
-        tracing::warn!(
-            tmux_session_name = %tmux_session_name,
-            provider = %provider.as_str(),
-            suppressed_count = decision.suppressed_count,
-            drift_age_secs = decision.drift_age_secs,
-            "idle relay skipped: no authoritative owner channel for tmux session \
-             (registry/dedupe-mirror drift)"
-        );
-    }
-
     // Repair is Claude-only: the settings resolver is Claude-specific and the
     // durable DB column is written by the Claude/routine hook flow. Codex drift
-    // gets rate-limited WARN only.
+    // is WARN-only at the resolver.
     if provider != ProviderKind::Claude {
         return;
     }
@@ -467,6 +471,7 @@ async fn load_db_channel(
     (None, None)
 }
 
+#[cfg(unix)]
 impl RepairSource {
     fn label(self) -> &'static str {
         match self {
@@ -476,6 +481,7 @@ impl RepairSource {
     }
 }
 
+#[cfg(unix)]
 impl BlockReason {
     fn label(self) -> &'static str {
         match self {
@@ -501,6 +507,7 @@ pub(super) fn reset_drift_state_for_tests() {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn inputs() -> RepairInputs {
         RepairInputs {
             settings_channel: None,
@@ -565,6 +572,7 @@ mod tests {
 
     // --- repair decision core ------------------------------------------
 
+    #[cfg(unix)]
     #[test]
     fn settings_hit_live_pane_promotes_settings() {
         let i = RepairInputs {
@@ -581,6 +589,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn settings_miss_db_hit_mirror_agrees_instance_match_promotes_db() {
         let i = RepairInputs {
@@ -603,6 +612,7 @@ mod tests {
     // #3306 KEY regression: session-name REUSE. The DB row still points at the
     // OLD channel (C1) while the new dispatch's mirror already recorded the NEW
     // channel (C2). Promotion MUST be blocked — mis-delivery is worse than a drop.
+    #[cfg(unix)]
     #[test]
     fn db_channel_disagrees_with_mirror_blocks_misdelivery() {
         let i = RepairInputs {
@@ -617,6 +627,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn db_channel_without_mirror_witness_is_blocked() {
         let i = RepairInputs {
@@ -631,6 +642,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn db_channel_foreign_instance_is_blocked() {
         let i = RepairInputs {
@@ -647,6 +659,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn dead_pane_blocks_any_candidate() {
         let i = RepairInputs {
@@ -660,6 +673,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn dead_pane_no_candidate_is_no_source() {
         let i = RepairInputs {
@@ -669,6 +683,7 @@ mod tests {
         assert_eq!(evaluate_drift_repair(&i), RepairDecision::NoSource);
     }
 
+    #[cfg(unix)]
     #[test]
     fn all_sources_miss_is_no_source() {
         // #3018 semantics preserved: no durable source ⇒ keep the drop.
@@ -677,6 +692,7 @@ mod tests {
 
     // --- cooldown / single-flight state machine ------------------------
 
+    #[cfg(unix)]
     #[test]
     fn repair_cooldown_and_single_flight_gate() {
         reset_drift_state_for_tests();
