@@ -346,3 +346,12 @@ function flushEscalations() {
     agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [rows[i].key]);
   }
 }
+
+// #3335: this file is a shared helper library (evaluated first via the 00-
+// prefix so escalate()/flushEscalations()/escalateToManualIntervention() are
+// globals for timeouts/ci-recovery/kanban-rules/review-automation). Register
+// a hook-less policy so the loader stops logging a load failure at every boot.
+agentdesk.registerPolicy({
+  name: "escalation-helpers",
+  priority: 0
+});
