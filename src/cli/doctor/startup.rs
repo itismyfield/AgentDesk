@@ -554,13 +554,12 @@ fn write_startup_doctor_artifact(skipped_reason: Option<&str>) -> Result<Option<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::MutexGuard;
 
     const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
 
     fn env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner())
     }

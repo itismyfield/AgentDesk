@@ -3,7 +3,43 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub(super) fn agentdesk_root() -> Option<PathBuf> {
-    crate::config::runtime_root()
+    #[cfg(test)]
+    {
+        test_agentdesk_root()
+    }
+    #[cfg(not(test))]
+    {
+        crate::config::runtime_root()
+    }
+}
+
+#[cfg(test)]
+fn test_agentdesk_root() -> Option<PathBuf> {
+    if let Ok(override_root) = std::env::var("AGENTDESK_ROOT_DIR") {
+        let trimmed = override_root.trim();
+        if !trimmed.is_empty() {
+            let root = PathBuf::from(trimmed);
+            assert_not_live_release_runtime_root(&root);
+            return Some(root);
+        }
+    }
+    static ROOT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    Some(
+        ROOT.get_or_init(|| tempfile::tempdir().expect("create isolated test runtime root"))
+            .path()
+            .to_path_buf(),
+    )
+}
+
+#[cfg(test)]
+fn assert_not_live_release_runtime_root(root: &Path) {
+    if let Some(home) = dirs::home_dir() {
+        let live = home.join(".adk").join("release");
+        assert!(
+            root != live,
+            "#3293: test must set AGENTDESK_ROOT_DIR via tempdir before resolving AgentDesk runtime store root"
+        );
+    }
 }
 
 pub(super) fn runtime_root() -> Option<PathBuf> {

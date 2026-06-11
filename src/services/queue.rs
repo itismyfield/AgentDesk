@@ -887,6 +887,17 @@ mod tests {
         ChannelMailboxRegistry, Intervention, InterventionMode, QueuePersistenceContext,
     };
 
+    struct EnvReset(Option<std::ffi::OsString>);
+
+    impl Drop for EnvReset {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
     fn make_intervention(message_id: u64, text: &str) -> Intervention {
         Intervention {
             author_id: UserId::new(1),
@@ -904,29 +915,42 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn force_purge_channel_mailbox_drains_queue_without_session_key() {
-        let provider = ProviderKind::Claude;
-        let channel_id = ChannelId::new(9270601);
-        let registry = ChannelMailboxRegistry::default();
-        let handle = registry.handle(channel_id);
-        let persistence = QueuePersistenceContext::new(&provider, "force-purge-test", None);
-        handle
-            .replace_queue(
-                vec![make_intervention(10, "stale queued prompt")],
-                persistence,
-            )
-            .await;
+    #[test]
+    fn force_purge_channel_mailbox_drains_queue_without_session_key() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
 
-        let target = TurnLifecycleTarget {
-            provider: Some(provider),
-            channel_id: Some(channel_id),
-            tmux_name: String::new(),
-        };
+        rt.block_on(async {
+            let provider = ProviderKind::Claude;
+            let channel_id = ChannelId::new(9270601);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            let persistence = QueuePersistenceContext::new(&provider, "force-purge-test", None);
+            handle
+                .replace_queue(
+                    vec![make_intervention(10, "stale queued prompt")],
+                    persistence,
+                )
+                .await;
 
-        let purged = force_purge_channel_mailbox(None, &target, None).await;
+            let target = TurnLifecycleTarget {
+                provider: Some(provider),
+                channel_id: Some(channel_id),
+                tmux_name: String::new(),
+            };
 
-        assert_eq!(purged, Some(1));
-        assert!(handle.snapshot().await.intervention_queue.is_empty());
+            let purged = force_purge_channel_mailbox(None, &target, None).await;
+
+            assert_eq!(purged, Some(1));
+            assert!(handle.snapshot().await.intervention_queue.is_empty());
+        });
     }
 }
