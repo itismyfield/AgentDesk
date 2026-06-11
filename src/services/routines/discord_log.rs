@@ -192,6 +192,14 @@ impl RoutineDiscordLogger {
             return status;
         };
 
+        let discord_log_warning = match store.get_run_discord_log_failure(&outcome.run_id).await {
+            Ok(Some(failure)) => failure.error,
+            Ok(None) => None,
+            Err(error) => Some(format!(
+                "failed to inspect prior discord log status: {error}"
+            )),
+        };
+
         let status = self
             .log_run_section(
                 store,
@@ -201,7 +209,7 @@ impl RoutineDiscordLogger {
                 routine.discord_thread_id.as_deref(),
                 &outcome.run_id,
                 "outcome",
-                &run_outcome_section(&routine, outcome),
+                &run_outcome_section(&routine, outcome, discord_log_warning.as_deref()),
             )
             .await;
         self.persist_run_log_status(store, &outcome.run_id, &status)
@@ -1164,10 +1172,14 @@ fn run_js_action_section(
 // #3034: exercised only by the discord_log unit tests below.
 #[allow(dead_code)]
 fn run_outcome_message(routine: &RoutineRecord, outcome: &RoutineRunOutcome) -> String {
-    routine_run_progress_message(&run_outcome_section(routine, outcome))
+    routine_run_progress_message(&run_outcome_section(routine, outcome, None))
 }
 
-fn run_outcome_section(routine: &RoutineRecord, outcome: &RoutineRunOutcome) -> String {
+fn run_outcome_section(
+    routine: &RoutineRecord,
+    outcome: &RoutineRunOutcome,
+    discord_log_warning: Option<&str>,
+) -> String {
     let mut basic = vec![
         field_line("routine", &compact(&routine.name, 80)),
         field_line("run", short_id(&outcome.run_id)),
@@ -1180,6 +1192,9 @@ fn run_outcome_section(routine: &RoutineRecord, outcome: &RoutineRunOutcome) -> 
         .filter(|value| !value.trim().is_empty())
     {
         basic.push(field_line("error", compact(error, 160)));
+    }
+    if let Some(warning) = discord_log_warning.filter(|value| !value.trim().is_empty()) {
+        basic.push(field_line("discord_log_warning", compact(warning, 160)));
     }
     let mut sections = vec![("기본", basic)];
     if let Some(summary) = outcome_summary_for_message(outcome) {
@@ -1359,6 +1374,8 @@ mod tests {
         let routine = RoutineRecord {
             id: "routine-123456789".to_string(),
             agent_id: Some("maker".to_string()),
+            fallback_agent_id: None,
+            max_retries: 0,
             script_ref: "daily-summary.js".to_string(),
             name: "Daily Summary".to_string(),
             status: "enabled".to_string(),
@@ -1402,6 +1419,8 @@ mod tests {
         let routine = RoutineRecord {
             id: "routine-123456789".to_string(),
             agent_id: Some("monitoring".to_string()),
+            fallback_agent_id: None,
+            max_retries: 0,
             script_ref: "monitoring/automation-candidate-recommender.js".to_string(),
             name: "automation-candidate-recommender".to_string(),
             status: "enabled".to_string(),
@@ -1441,6 +1460,8 @@ mod tests {
         let routine = RoutineRecord {
             id: "routine-123456789".to_string(),
             agent_id: Some("maker".to_string()),
+            fallback_agent_id: None,
+            max_retries: 0,
             script_ref: "daily-summary.js".to_string(),
             name: "Daily Summary".to_string(),
             status: "enabled".to_string(),
@@ -1481,6 +1502,8 @@ mod tests {
             run_id: "21e14c13-0000-0000-0000-000000000000".to_string(),
             routine_id: "routine-123456789".to_string(),
             agent_id: Some("monitoring".to_string()),
+            fallback_agent_id: None,
+            max_retries: 0,
             script_ref: "monitoring/automation-candidate-recommender.js".to_string(),
             name: "Automation Candidate Recommender".to_string(),
             execution_strategy: "fresh".to_string(),
@@ -1514,6 +1537,8 @@ mod tests {
             run_id: "21e14c13-0000-0000-0000-000000000000".to_string(),
             routine_id: "routine-123456789".to_string(),
             agent_id: Some("monitoring".to_string()),
+            fallback_agent_id: None,
+            max_retries: 0,
             script_ref: "monitoring/automation-candidate-recommender.js".to_string(),
             name: "Automation Candidate Recommender".to_string(),
             execution_strategy: "fresh".to_string(),
@@ -1546,6 +1571,8 @@ mod tests {
             run_id: "21e14c13-0000-0000-0000-000000000000".to_string(),
             routine_id: "routine-123456789".to_string(),
             agent_id: Some("monitoring".to_string()),
+            fallback_agent_id: None,
+            max_retries: 0,
             script_ref: "monitoring/working-watchdog.js".to_string(),
             name: "monitoring-working-watchdog".to_string(),
             execution_strategy: "fresh".to_string(),

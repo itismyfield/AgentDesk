@@ -1907,6 +1907,9 @@ pub struct RoutinesConfig {
     /// Default maximum wait for agent-backed routine completion, in seconds.
     #[serde(default = "default_routines_agent_timeout_secs")]
     pub agent_timeout_secs: u64,
+    /// Maximum serialized checkpoint payload accepted from a routine run.
+    #[serde(default = "default_routines_max_checkpoint_bytes")]
+    pub max_checkpoint_bytes: usize,
     /// Watch `dir` for script changes and reload without restart.
     #[serde(default = "default_true")]
     pub hot_reload: bool,
@@ -1923,6 +1926,7 @@ impl Default for RoutinesConfig {
             max_agent_polls_per_tick: default_routines_max_agent_polls_per_tick(),
             default_timezone: default_routines_timezone(),
             agent_timeout_secs: default_routines_agent_timeout_secs(),
+            max_checkpoint_bytes: default_routines_max_checkpoint_bytes(),
             hot_reload: true,
         }
     }
@@ -1966,6 +1970,10 @@ fn default_routines_timezone() -> String {
 
 fn default_routines_agent_timeout_secs() -> u64 {
     30 * 60
+}
+
+fn default_routines_max_checkpoint_bytes() -> usize {
+    256 * 1024
 }
 
 #[cfg(test)]

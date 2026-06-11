@@ -2507,8 +2507,11 @@ async fn routine_runtime_loop(
         Err(e) => tracing::warn!(error = %e, "routine script registry initialization failed"),
     }
 
-    let store =
-        RoutineStore::new_with_timezone(pg_pool.clone(), routines_config.default_timezone.clone());
+    let store = RoutineStore::new_with_timezone_and_checkpoint_limit(
+        pg_pool.clone(),
+        routines_config.default_timezone.clone(),
+        routines_config.max_checkpoint_bytes,
+    );
     let discord_logger = RoutineDiscordLogger::new_with_health_registry(
         pg_pool.clone(),
         health_registry.clone(),

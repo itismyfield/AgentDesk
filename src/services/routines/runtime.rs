@@ -927,6 +927,8 @@ mod tests {
             run_id: "run-1".to_string(),
             routine_id: "routine-1".to_string(),
             agent_id: None,
+            fallback_agent_id: None,
+            max_retries: 0,
             script_ref,
             name: "Missing entrypoint".to_string(),
             execution_strategy: "script".to_string(),

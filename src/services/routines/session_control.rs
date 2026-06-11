@@ -906,6 +906,8 @@ mod tests {
         RoutineRecord {
             id: "routine-1".to_string(),
             agent_id: Some("agent-1".to_string()),
+            fallback_agent_id: None,
+            max_retries: 0,
             script_ref: "script".to_string(),
             name: "Routine".to_string(),
             status: "enabled".to_string(),

@@ -3951,6 +3951,14 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ),
             ("name", body_param("string", false, "Human-readable routine name")),
             ("agent_id", body_param("string", false, "Optional attached agent id")),
+            (
+                "fallback_agent_id",
+                body_param("string", false, "Optional fallback agent id used after primary retry exhaustion"),
+            ),
+            (
+                "max_retries",
+                body_param("integer", false, "Maximum primary-agent retries before fallback/failure; default 0"),
+            ),
             ("execution_strategy", body_param("string", false, "fresh or persistent")),
             (
                 "schedule",
@@ -3961,7 +3969,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ("timeout_secs", body_param("integer", false, "Optional per-routine agent timeout in seconds")),
         ])
         .with_example(
-            json!({"body": {"script_ref": "daily-summary.js", "name": "Daily Summary", "execution_strategy": "fresh"}}),
+            json!({"body": {"script_ref": "daily-summary.js", "name": "Daily Summary", "agent_id": "codex", "fallback_agent_id": "claude", "max_retries": 1, "execution_strategy": "fresh"}}),
             json!({"routine": {"id": "routine-1", "script_ref": "daily-summary.js", "status": "enabled"}, "discord_log": {"status": "skipped"}}),
         ),
         ep(
@@ -3985,6 +3993,14 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ("id", path_param("Routine id")),
             ("name", body_param("string", false, "New routine name")),
             (
+                "fallback_agent_id",
+                body_param("string|null", false, "Fallback agent id or null to clear it"),
+            ),
+            (
+                "max_retries",
+                body_param("integer", false, "Maximum primary-agent retries before fallback/failure"),
+            ),
+            (
                 "execution_strategy",
                 body_param("string", false, "fresh or persistent"),
             ),
@@ -3998,7 +4014,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ),
             (
                 "checkpoint",
-                body_param("object|null", false, "Replacement checkpoint JSON or null to clear it"),
+                body_param("object|null", false, "Replacement checkpoint JSON or null to clear it; run-produced checkpoints are capped by routines.max_checkpoint_bytes"),
             ),
             (
                 "discord_thread_id",

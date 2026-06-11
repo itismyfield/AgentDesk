@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde_json::{Map, Value, json};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -96,10 +96,18 @@ impl RoutineAgentExecutor {
         next_due_at: Option<DateTime<Utc>>,
     ) -> Result<RoutineRunOutcome> {
         let action = "agent".to_string();
+        let agent_id = claimed
+            .agent_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow!("routine agent action requires routine.agent_id"))?
+            .to_string();
         let result = self
             .start_turn(
                 store,
                 &claimed,
+                &agent_id,
+                "primary",
                 &prompt,
                 dm_user_id.as_deref(),
                 &checkpoint,
@@ -150,35 +158,153 @@ impl RoutineAgentExecutor {
             }
             Err(error) => {
                 let message = error.to_string();
-                let result_json = Some(json!({
-                    "status": "failed_to_start",
-                    "error": message,
-                    "routine_id": claimed.routine_id,
-                    "run_id": claimed.run_id,
-                    "script_ref": claimed.script_ref,
-                    "fresh_context_guaranteed": FRESH_CONTEXT_GUARANTEED,
-                }));
-                let closed = store
-                    .fail_agent_run(&claimed.run_id, &message, result_json.clone(), None)
-                    .await?;
-                if !closed {
-                    return Err(anyhow!(
-                        "routine agent run {} was already closed before failed outcome",
-                        claimed.run_id
-                    ));
-                }
-                Ok(RoutineRunOutcome {
-                    run_id: claimed.run_id,
-                    routine_id: claimed.routine_id,
-                    script_ref: claimed.script_ref,
+                self.handle_claimed_agent_failure(
+                    store,
+                    claimed,
+                    prompt,
+                    dm_user_id,
+                    checkpoint,
+                    next_due_at,
+                    &agent_id,
+                    "primary",
+                    &message,
                     action,
-                    status: "failed".to_string(),
-                    result_json,
-                    error: Some(message),
-                    fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
-                })
+                )
+                .await
             }
         }
+    }
+
+    async fn handle_claimed_agent_failure(
+        &self,
+        store: &RoutineStore,
+        claimed: ClaimedRoutineRun,
+        prompt: String,
+        dm_user_id: Option<String>,
+        checkpoint: Option<Value>,
+        next_due_at: Option<DateTime<Utc>>,
+        failed_agent_id: &str,
+        attempt_kind: &str,
+        message: &str,
+        action: String,
+    ) -> Result<RoutineRunOutcome> {
+        if claimed.max_retries > 0 && attempt_kind != "fallback" {
+            let retry_at = retry_next_at(0);
+            let result_json = Some(retry_scheduled_result_for_claimed(
+                &claimed,
+                failed_agent_id,
+                attempt_kind,
+                message,
+                &prompt,
+                retry_at,
+                1,
+                &checkpoint,
+                next_due_at,
+            ));
+            let scheduled = store
+                .schedule_agent_retry(
+                    &claimed.run_id,
+                    retry_at,
+                    result_json.clone(),
+                    message,
+                    Some(failed_agent_id),
+                    attempt_kind,
+                )
+                .await?;
+            if !scheduled {
+                return Err(anyhow!(
+                    "routine agent run {} was already closed before retry scheduling",
+                    claimed.run_id
+                ));
+            }
+            return Ok(RoutineRunOutcome {
+                run_id: claimed.run_id,
+                routine_id: claimed.routine_id,
+                script_ref: claimed.script_ref,
+                action,
+                status: "running".to_string(),
+                result_json,
+                error: Some(message.to_string()),
+                fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+            });
+        }
+
+        let fallback_agent_id = claimed
+            .fallback_agent_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .filter(|value| *value != failed_agent_id)
+            .map(str::to_string);
+        if let Some(fallback_agent_id) = fallback_agent_id
+            && attempt_kind != "fallback"
+        {
+            match self
+                .start_turn(
+                    store,
+                    &claimed,
+                    &fallback_agent_id,
+                    "fallback",
+                    &prompt,
+                    dm_user_id.as_deref(),
+                    &checkpoint,
+                    next_due_at,
+                )
+                .await
+            {
+                Ok(started) if started.started => {
+                    return Ok(RoutineRunOutcome {
+                        run_id: claimed.run_id,
+                        routine_id: claimed.routine_id,
+                        script_ref: claimed.script_ref,
+                        action,
+                        status: "running".to_string(),
+                        result_json: Some(started.result_json),
+                        error: Some(message.to_string()),
+                        fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                    });
+                }
+                Ok(started) => {
+                    let last_result =
+                        "fallback headless command consumed without starting an agent turn";
+                    let closed = store
+                        .complete_agent_run(
+                            &claimed.run_id,
+                            Some(started.result_json.clone()),
+                            checkpoint,
+                            Some(last_result),
+                            match next_due_at {
+                                Some(value) => NextDueAtUpdate::Set(value),
+                                None => NextDueAtUpdate::Preserve,
+                            },
+                        )
+                        .await?;
+                    if !closed {
+                        return Err(anyhow!(
+                            "routine agent run {} was already closed before fallback consumed outcome",
+                            claimed.run_id
+                        ));
+                    }
+                    return Ok(RoutineRunOutcome {
+                        run_id: claimed.run_id,
+                        routine_id: claimed.routine_id,
+                        script_ref: claimed.script_ref,
+                        action,
+                        status: "succeeded".to_string(),
+                        result_json: Some(started.result_json),
+                        error: Some(message.to_string()),
+                        fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                    });
+                }
+                Err(fallback_error) => {
+                    let combined = format!(
+                        "{message}; fallback agent {fallback_agent_id} failed: {fallback_error}"
+                    );
+                    return fail_claimed_agent_run(store, claimed, action, combined).await;
+                }
+            }
+        }
+
+        fail_claimed_agent_run(store, claimed, action, message.to_string()).await
     }
 
     pub async fn poll_agent_runs(
@@ -190,6 +316,13 @@ impl RoutineAgentExecutor {
         let pending = store.list_running_agent_runs(limit).await?;
         let mut outcomes = Vec::new();
         for run in pending {
+            if run.turn_id.is_none() {
+                if let Some(outcome) = self.restart_due_retry(store, run).await? {
+                    outcomes.push(outcome);
+                }
+                continue;
+            }
+
             if let Some(completion) = self.find_turn_completion(&run).await? {
                 let checkpoint =
                     pending_checkpoint_for_completion(run.result_json.as_ref(), &completion);
@@ -238,12 +371,6 @@ impl RoutineAgentExecutor {
                     timeout_secs
                 );
                 let result_json = Some(merge_pending_result(&run, "timeout", Some(&message), None));
-                let closed = store
-                    .fail_agent_run(&run.run_id, &message, result_json.clone(), None)
-                    .await?;
-                if !closed {
-                    continue;
-                }
                 self.teardown_fresh_agent_session(
                     store,
                     &run.routine_id,
@@ -251,20 +378,319 @@ impl RoutineAgentExecutor {
                     "routine fresh agent run timed out",
                 )
                 .await;
-                outcomes.push(RoutineRunOutcome {
+                let failed_agent_id = current_agent_id_from_result(run.result_json.as_ref())
+                    .or(run.agent_id.as_deref())
+                    .map(str::to_string);
+                let attempt_kind = current_attempt_kind_from_result(run.result_json.as_ref())
+                    .unwrap_or("primary")
+                    .to_string();
+                if let Some(outcome) = self
+                    .handle_running_agent_failure(
+                        store,
+                        run,
+                        &message,
+                        result_json,
+                        failed_agent_id.as_deref(),
+                        &attempt_kind,
+                    )
+                    .await?
+                {
+                    outcomes.push(outcome);
+                }
+                continue;
+            }
+        }
+        Ok(outcomes)
+    }
+
+    async fn restart_due_retry(
+        &self,
+        store: &RoutineStore,
+        run: RunningAgentRoutineRun,
+    ) -> Result<Option<RoutineRunOutcome>> {
+        let prompt = match pending_prompt(run.result_json.as_ref()) {
+            Some(prompt) => prompt.to_string(),
+            None => {
+                let message = "routine retry cannot restart because prompt is missing";
+                let result_json = Some(merge_pending_result(&run, "failed", Some(message), None));
+                let closed = store
+                    .fail_agent_run(&run.run_id, message, result_json.clone(), None)
+                    .await?;
+                return Ok(closed.then(|| RoutineRunOutcome {
                     run_id: run.run_id,
                     routine_id: run.routine_id,
                     script_ref: run.script_ref,
                     action: "agent".to_string(),
                     status: "failed".to_string(),
                     result_json,
-                    error: Some(message),
+                    error: Some(message.to_string()),
                     fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
-                });
-                continue;
+                }));
+            }
+        };
+        let Some(agent_id) = run
+            .agent_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+        else {
+            let message = "routine retry cannot restart because routine.agent_id is missing";
+            let result_json = Some(merge_pending_result(&run, "failed", Some(message), None));
+            let closed = store
+                .fail_agent_run(&run.run_id, message, result_json.clone(), None)
+                .await?;
+            return Ok(closed.then(|| RoutineRunOutcome {
+                run_id: run.run_id,
+                routine_id: run.routine_id,
+                script_ref: run.script_ref,
+                action: "agent".to_string(),
+                status: "failed".to_string(),
+                result_json,
+                error: Some(message.to_string()),
+                fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+            }));
+        };
+        let checkpoint = pending_checkpoint(run.result_json.as_ref());
+        let next_due_at = pending_next_due_at(run.result_json.as_ref());
+        let claimed = claimed_from_running_run(&run);
+        match self
+            .start_turn(
+                store,
+                &claimed,
+                &agent_id,
+                "retry",
+                &prompt,
+                None,
+                &checkpoint,
+                next_due_at,
+            )
+            .await
+        {
+            Ok(started) if started.started => Ok(Some(RoutineRunOutcome {
+                run_id: run.run_id,
+                routine_id: run.routine_id,
+                script_ref: run.script_ref,
+                action: "agent".to_string(),
+                status: "running".to_string(),
+                result_json: Some(started.result_json),
+                error: None,
+                fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+            })),
+            Ok(started) => {
+                let last_result = "retry headless command consumed without starting an agent turn";
+                let closed = store
+                    .complete_agent_run(
+                        &run.run_id,
+                        Some(started.result_json.clone()),
+                        checkpoint,
+                        Some(last_result),
+                        match next_due_at {
+                            Some(value) => NextDueAtUpdate::Set(value),
+                            None => NextDueAtUpdate::Preserve,
+                        },
+                    )
+                    .await?;
+                Ok(closed.then(|| RoutineRunOutcome {
+                    run_id: run.run_id,
+                    routine_id: run.routine_id,
+                    script_ref: run.script_ref,
+                    action: "agent".to_string(),
+                    status: "succeeded".to_string(),
+                    result_json: Some(started.result_json),
+                    error: None,
+                    fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                }))
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let result_json = Some(merge_pending_result(
+                    &run,
+                    "failed_to_start",
+                    Some(&message),
+                    None,
+                ));
+                self.handle_running_agent_failure(
+                    store,
+                    run,
+                    &message,
+                    result_json,
+                    Some(&agent_id),
+                    "retry",
+                )
+                .await
             }
         }
-        Ok(outcomes)
+    }
+
+    async fn handle_running_agent_failure(
+        &self,
+        store: &RoutineStore,
+        run: RunningAgentRoutineRun,
+        message: &str,
+        result_json: Option<Value>,
+        failed_agent_id: Option<&str>,
+        attempt_kind: &str,
+    ) -> Result<Option<RoutineRunOutcome>> {
+        if attempt_kind != "fallback" && run.retry_count < run.max_retries {
+            let next_retry_at = retry_next_at(run.retry_count);
+            let retry_count = run.retry_count + 1;
+            let mut retry_result = result_json.unwrap_or_else(|| {
+                merge_pending_result(&run, "retry_scheduled", Some(message), None)
+            });
+            if let Some(object) = retry_result.as_object_mut() {
+                object.insert(
+                    "status".to_string(),
+                    Value::String("retry_scheduled".to_string()),
+                );
+                object.insert(
+                    "retry_count".to_string(),
+                    Value::Number(serde_json::Number::from(retry_count)),
+                );
+                object.insert(
+                    "next_retry_at".to_string(),
+                    Value::String(next_retry_at.to_rfc3339()),
+                );
+            }
+            preserve_pending_agent_state(&mut retry_result, run.result_json.as_ref());
+            let result_json = Some(retry_result);
+            let scheduled = store
+                .schedule_agent_retry(
+                    &run.run_id,
+                    next_retry_at,
+                    result_json.clone(),
+                    message,
+                    failed_agent_id,
+                    attempt_kind,
+                )
+                .await?;
+            return Ok(scheduled.then(|| RoutineRunOutcome {
+                run_id: run.run_id,
+                routine_id: run.routine_id,
+                script_ref: run.script_ref,
+                action: "agent".to_string(),
+                status: "running".to_string(),
+                result_json,
+                error: Some(message.to_string()),
+                fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+            }));
+        }
+
+        let fallback_agent_id = run
+            .fallback_agent_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .filter(|value| Some(*value) != failed_agent_id)
+            .filter(|_| attempt_kind != "fallback")
+            .filter(|_| !attempts_include_fallback(&run.attempts))
+            .map(str::to_string);
+        if let Some(fallback_agent_id) = fallback_agent_id {
+            let Some(prompt) = pending_prompt(run.result_json.as_ref()).map(str::to_string) else {
+                let closed = store
+                    .fail_agent_run(&run.run_id, message, result_json.clone(), None)
+                    .await?;
+                return Ok(closed.then(|| RoutineRunOutcome {
+                    run_id: run.run_id,
+                    routine_id: run.routine_id,
+                    script_ref: run.script_ref,
+                    action: "agent".to_string(),
+                    status: "failed".to_string(),
+                    result_json,
+                    error: Some(message.to_string()),
+                    fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                }));
+            };
+            let checkpoint = pending_checkpoint(run.result_json.as_ref());
+            let next_due_at = pending_next_due_at(run.result_json.as_ref());
+            let claimed = claimed_from_running_run(&run);
+            match self
+                .start_turn(
+                    store,
+                    &claimed,
+                    &fallback_agent_id,
+                    "fallback",
+                    &prompt,
+                    None,
+                    &checkpoint,
+                    next_due_at,
+                )
+                .await
+            {
+                Ok(started) if started.started => {
+                    return Ok(Some(RoutineRunOutcome {
+                        run_id: run.run_id,
+                        routine_id: run.routine_id,
+                        script_ref: run.script_ref,
+                        action: "agent".to_string(),
+                        status: "running".to_string(),
+                        result_json: Some(started.result_json),
+                        error: Some(message.to_string()),
+                        fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                    }));
+                }
+                Ok(started) => {
+                    let last_result =
+                        "fallback headless command consumed without starting an agent turn";
+                    let closed = store
+                        .complete_agent_run(
+                            &run.run_id,
+                            Some(started.result_json.clone()),
+                            checkpoint,
+                            Some(last_result),
+                            match next_due_at {
+                                Some(value) => NextDueAtUpdate::Set(value),
+                                None => NextDueAtUpdate::Preserve,
+                            },
+                        )
+                        .await?;
+                    return Ok(closed.then(|| RoutineRunOutcome {
+                        run_id: run.run_id,
+                        routine_id: run.routine_id,
+                        script_ref: run.script_ref,
+                        action: "agent".to_string(),
+                        status: "succeeded".to_string(),
+                        result_json: Some(started.result_json),
+                        error: Some(message.to_string()),
+                        fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                    }));
+                }
+                Err(fallback_error) => {
+                    let combined = format!(
+                        "{message}; fallback agent {fallback_agent_id} failed: {fallback_error}"
+                    );
+                    let result_json =
+                        Some(merge_pending_result(&run, "failed", Some(&combined), None));
+                    let closed = store
+                        .fail_agent_run(&run.run_id, &combined, result_json.clone(), None)
+                        .await?;
+                    return Ok(closed.then(|| RoutineRunOutcome {
+                        run_id: run.run_id,
+                        routine_id: run.routine_id,
+                        script_ref: run.script_ref,
+                        action: "agent".to_string(),
+                        status: "failed".to_string(),
+                        result_json,
+                        error: Some(combined),
+                        fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                    }));
+                }
+            }
+        }
+
+        let result_json =
+            result_json.or_else(|| Some(merge_pending_result(&run, "failed", Some(message), None)));
+        let closed = store
+            .fail_agent_run(&run.run_id, message, result_json.clone(), None)
+            .await?;
+        Ok(closed.then(|| RoutineRunOutcome {
+            run_id: run.run_id,
+            routine_id: run.routine_id,
+            script_ref: run.script_ref,
+            action: "agent".to_string(),
+            status: "failed".to_string(),
+            result_json,
+            error: Some(message.to_string()),
+            fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+        }))
     }
 
     pub(crate) async fn teardown_fresh_agent_session(
@@ -427,16 +853,13 @@ impl RoutineAgentExecutor {
         &self,
         store: &RoutineStore,
         claimed: &ClaimedRoutineRun,
+        agent_id: &str,
+        attempt_kind: &str,
         prompt: &str,
         dm_user_id: Option<&str>,
         checkpoint: &Option<Value>,
         next_due_at: Option<DateTime<Utc>>,
     ) -> Result<StartedAgentTurn> {
-        let agent_id = claimed
-            .agent_id
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| anyhow!("routine agent action requires routine.agent_id"))?;
         let Some(registry) = self.health_registry.as_deref() else {
             return Err(anyhow!(
                 "routine agent action requires discord runtime health registry"
@@ -539,13 +962,21 @@ impl RoutineAgentExecutor {
             "routine_id": claimed.routine_id,
             "run_id": claimed.run_id,
             "script_ref": claimed.script_ref,
+            "attempt_kind": attempt_kind,
+            "prompt": prompt,
             "completion_evidence": "session_transcripts",
             "fresh_context_guaranteed": FRESH_CONTEXT_GUARANTEED,
             "checkpoint": checkpoint,
             "next_due_at": next_due_at.map(|value| value.to_rfc3339()),
         });
         let updated = store
-            .mark_agent_turn_started(&claimed.run_id, &turn_id, Some(result_json.clone()))
+            .mark_agent_turn_started(
+                &claimed.run_id,
+                &turn_id,
+                Some(result_json.clone()),
+                agent_id,
+                attempt_kind,
+            )
             .await?;
         if !updated {
             return Err(anyhow!(
@@ -736,6 +1167,9 @@ impl RoutineAgentExecutor {
         &self,
         run: &RunningAgentRoutineRun,
     ) -> Result<Option<AgentTurnCompletion>> {
+        let Some(turn_id) = run.turn_id.as_deref() else {
+            return Ok(None);
+        };
         let transcript = sqlx::query_as::<_, AgentTranscriptCompletionRow>(
             r#"
             SELECT assistant_message, duration_ms::bigint AS duration_ms, created_at
@@ -747,14 +1181,14 @@ impl RoutineAgentExecutor {
             LIMIT 1
             "#,
         )
-        .bind(&run.turn_id)
+        .bind(turn_id)
         .bind(run.started_at)
         .fetch_optional(&*self.pool)
         .await
         .map_err(|error| {
             anyhow!(
                 "lookup routine agent transcript {} for run {}: {error}",
-                run.turn_id,
+                turn_id,
                 run.run_id
             )
         })?;
@@ -793,14 +1227,14 @@ impl RoutineAgentExecutor {
             LIMIT 1
             "#,
         )
-        .bind(&run.turn_id)
+        .bind(turn_id)
         .bind(run.started_at)
         .fetch_optional(&*self.pool)
         .await
         .map_err(|error| {
             anyhow!(
                 "lookup routine agent terminal turn {} for run {}: {error}",
-                run.turn_id,
+                turn_id,
                 run.run_id
             )
         })?;
@@ -1036,6 +1470,75 @@ fn timeout_secs_for_run(run: &RunningAgentRoutineRun, default_completion_timeout
         .unwrap_or(default_completion_timeout_secs)
 }
 
+async fn fail_claimed_agent_run(
+    store: &RoutineStore,
+    claimed: ClaimedRoutineRun,
+    action: String,
+    message: String,
+) -> Result<RoutineRunOutcome> {
+    let result_json = Some(json!({
+        "status": "failed_to_start",
+        "error": message,
+        "routine_id": claimed.routine_id,
+        "run_id": claimed.run_id,
+        "script_ref": claimed.script_ref,
+        "fresh_context_guaranteed": FRESH_CONTEXT_GUARANTEED,
+    }));
+    let closed = store
+        .fail_agent_run(&claimed.run_id, &message, result_json.clone(), None)
+        .await?;
+    if !closed {
+        return Err(anyhow!(
+            "routine agent run {} was already closed before failed outcome",
+            claimed.run_id
+        ));
+    }
+    Ok(RoutineRunOutcome {
+        run_id: claimed.run_id,
+        routine_id: claimed.routine_id,
+        script_ref: claimed.script_ref,
+        action,
+        status: "failed".to_string(),
+        result_json,
+        error: Some(message),
+        fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+    })
+}
+
+fn retry_next_at(retry_count_before_increment: i32) -> DateTime<Utc> {
+    let exponent = retry_count_before_increment.clamp(0, 5) as u32;
+    let secs = 30_i64.saturating_mul(2_i64.saturating_pow(exponent));
+    Utc::now() + Duration::seconds(secs)
+}
+
+fn retry_scheduled_result_for_claimed(
+    claimed: &ClaimedRoutineRun,
+    failed_agent_id: &str,
+    attempt_kind: &str,
+    error: &str,
+    prompt: &str,
+    next_retry_at: DateTime<Utc>,
+    retry_count: i32,
+    checkpoint: &Option<Value>,
+    next_due_at: Option<DateTime<Utc>>,
+) -> Value {
+    json!({
+        "status": "retry_scheduled",
+        "error": error,
+        "failed_agent_id": failed_agent_id,
+        "attempt_kind": attempt_kind,
+        "prompt": prompt,
+        "retry_count": retry_count,
+        "next_retry_at": next_retry_at.to_rfc3339(),
+        "routine_id": claimed.routine_id,
+        "run_id": claimed.run_id,
+        "script_ref": claimed.script_ref,
+        "fresh_context_guaranteed": FRESH_CONTEXT_GUARANTEED,
+        "checkpoint": checkpoint,
+        "next_due_at": next_due_at.map(|value| value.to_rfc3339()),
+    })
+}
+
 fn completed_result(
     run: &RunningAgentRoutineRun,
     completion: &AgentTurnCompletion,
@@ -1118,6 +1621,26 @@ fn with_started_run_routing_metadata(mut result: Value, started_result: Option<&
     result
 }
 
+fn preserve_pending_agent_state(result: &mut Value, previous_result: Option<&Value>) {
+    const PENDING_KEYS: &[&str] = &["prompt", "checkpoint", "next_due_at"];
+
+    let Some(previous) = previous_result.and_then(Value::as_object) else {
+        return;
+    };
+    let Some(result_object) = result.as_object_mut() else {
+        return;
+    };
+
+    for key in PENDING_KEYS {
+        if result_object.contains_key(*key) {
+            continue;
+        }
+        if let Some(value) = previous.get(*key) {
+            result_object.insert((*key).to_string(), value.clone());
+        }
+    }
+}
+
 fn pending_checkpoint_for_completion(
     result_json: Option<&Value>,
     completion: &AgentTurnCompletion,
@@ -1135,6 +1658,59 @@ fn pending_checkpoint(result_json: Option<&Value>) -> Option<Value> {
         .and_then(|value| value.get("checkpoint"))
         .filter(|value| !value.is_null())
         .cloned()
+}
+
+fn pending_prompt(result_json: Option<&Value>) -> Option<&str> {
+    result_json
+        .and_then(|value| value.get("prompt"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn current_agent_id_from_result(result_json: Option<&Value>) -> Option<&str> {
+    result_json
+        .and_then(|value| value.get("agent_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn current_attempt_kind_from_result(result_json: Option<&Value>) -> Option<&str> {
+    result_json
+        .and_then(|value| value.get("attempt_kind"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn attempts_include_fallback(attempts: &Value) -> bool {
+    attempts
+        .as_array()
+        .map(|items| {
+            items.iter().any(|item| {
+                item.get("kind").and_then(Value::as_str) == Some("fallback")
+                    || item.get("attempt_kind").and_then(Value::as_str) == Some("fallback")
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn claimed_from_running_run(run: &RunningAgentRoutineRun) -> ClaimedRoutineRun {
+    ClaimedRoutineRun {
+        run_id: run.run_id.clone(),
+        routine_id: run.routine_id.clone(),
+        agent_id: run.agent_id.clone(),
+        fallback_agent_id: run.fallback_agent_id.clone(),
+        max_retries: run.max_retries,
+        script_ref: run.script_ref.clone(),
+        name: run.name.clone(),
+        execution_strategy: run.execution_strategy.clone(),
+        checkpoint: pending_checkpoint(run.result_json.as_ref()),
+        discord_thread_id: run.discord_thread_id.clone(),
+        timeout_secs: run.timeout_secs,
+        lease_expires_at: Utc::now(),
+    }
 }
 
 fn finalize_family_profile_probe_pending_delivery(mut checkpoint: Value) -> Value {
@@ -1280,8 +1856,17 @@ mod tests {
         RunningAgentRoutineRun {
             run_id: "run-1".to_string(),
             routine_id: "routine-1".to_string(),
+            agent_id: Some("agent-1".to_string()),
+            fallback_agent_id: None,
+            max_retries: 0,
+            retry_count: 0,
             script_ref: "agent-checkpoint-review.js".to_string(),
-            turn_id: "discord:123:456".to_string(),
+            name: "Agent Checkpoint Review".to_string(),
+            execution_strategy: "fresh".to_string(),
+            discord_thread_id: None,
+            turn_id: Some("discord:123:456".to_string()),
+            next_retry_at: None,
+            attempts: serde_json::json!([]),
             result_json: None,
             started_at: Utc::now(),
             timeout_secs,
@@ -1308,6 +1893,39 @@ mod tests {
             terminal_status: matches!(evidence, AgentTurnCompletionEvidence::TerminalTurn)
                 .then(|| "empty_response".to_string()),
         }
+    }
+
+    #[test]
+    fn retry_next_at_uses_exponential_backoff() {
+        let before = Utc::now();
+        let first = retry_next_at(0);
+        let second = retry_next_at(1);
+
+        assert!(first >= before + chrono::Duration::seconds(29));
+        assert!(first <= before + chrono::Duration::seconds(31));
+        assert!(second >= before + chrono::Duration::seconds(59));
+        assert!(second <= before + chrono::Duration::seconds(61));
+    }
+
+    #[test]
+    fn pending_prompt_trims_and_rejects_empty_values() {
+        assert_eq!(
+            pending_prompt(Some(&json!({"prompt": "  run me  "}))),
+            Some("run me")
+        );
+        assert_eq!(pending_prompt(Some(&json!({"prompt": "   "}))), None);
+        assert_eq!(pending_prompt(Some(&json!({}))), None);
+    }
+
+    #[test]
+    fn attempts_include_fallback_detects_kind() {
+        assert!(!attempts_include_fallback(&json!([
+            {"kind": "primary"},
+            {"attempt_kind": "retry"}
+        ])));
+        assert!(attempts_include_fallback(&json!([
+            {"kind": "fallback"}
+        ])));
     }
 
     fn quality_completion_row(

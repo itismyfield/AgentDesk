@@ -4,7 +4,7 @@ use chrono_tz::Tz;
 use croner::Cron;
 use croner::parser::{CronParser, Seconds, Year};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -303,6 +303,7 @@ fn precomputed_observation_from_kv(
 pub struct RoutineStore {
     pool: Arc<PgPool>,
     default_timezone: String,
+    max_checkpoint_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
@@ -310,6 +311,8 @@ pub struct ClaimedRoutineRun {
     pub run_id: String,
     pub routine_id: String,
     pub agent_id: Option<String>,
+    pub fallback_agent_id: Option<String>,
+    pub max_retries: i32,
     pub script_ref: String,
     pub name: String,
     pub execution_strategy: String,
@@ -323,6 +326,8 @@ pub struct ClaimedRoutineRun {
 pub struct RoutineRecord {
     pub id: String,
     pub agent_id: Option<String>,
+    pub fallback_agent_id: Option<String>,
+    pub max_retries: i32,
     pub script_ref: String,
     pub name: String,
     pub status: String,
@@ -347,6 +352,9 @@ pub struct RoutineRunRecord {
     pub action: Option<String>,
     pub turn_id: Option<String>,
     pub lease_expires_at: Option<DateTime<Utc>>,
+    pub retry_count: i32,
+    pub next_retry_at: Option<DateTime<Utc>>,
+    pub attempts: Value,
     pub result_json: Option<Value>,
     pub error: Option<String>,
     pub discord_log_status: Option<String>,
@@ -397,8 +405,17 @@ pub struct RoutineMetrics {
 pub struct RunningAgentRoutineRun {
     pub run_id: String,
     pub routine_id: String,
+    pub agent_id: Option<String>,
+    pub fallback_agent_id: Option<String>,
+    pub max_retries: i32,
+    pub retry_count: i32,
     pub script_ref: String,
-    pub turn_id: String,
+    pub name: String,
+    pub execution_strategy: String,
+    pub discord_thread_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub next_retry_at: Option<DateTime<Utc>>,
+    pub attempts: Value,
     pub result_json: Option<Value>,
     pub started_at: DateTime<Utc>,
     pub timeout_secs: Option<i32>,
@@ -450,9 +467,17 @@ pub struct RunDiscordLogState {
     pub sections: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+pub struct RunDiscordLogFailure {
+    pub status: Option<String>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewRoutine {
     pub agent_id: Option<String>,
+    pub fallback_agent_id: Option<String>,
+    pub max_retries: Option<i32>,
     pub script_ref: String,
     pub name: String,
     pub status: Option<String>,
@@ -467,6 +492,8 @@ pub struct NewRoutine {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RoutinePatch {
     pub name: Option<String>,
+    pub fallback_agent_id: Option<Option<String>>,
+    pub max_retries: Option<i32>,
     pub execution_strategy: Option<String>,
     pub schedule: Option<Option<String>>,
     pub next_due_at: Option<Option<DateTime<Utc>>>,
@@ -479,6 +506,8 @@ pub struct RoutinePatch {
 struct RoutineClaimCandidate {
     id: String,
     agent_id: Option<String>,
+    fallback_agent_id: Option<String>,
+    max_retries: i32,
     script_ref: String,
     name: String,
     execution_strategy: String,
@@ -488,10 +517,15 @@ struct RoutineClaimCandidate {
 }
 
 impl RoutineStore {
-    pub fn new_with_timezone(pool: Arc<PgPool>, default_timezone: impl Into<String>) -> Self {
+    pub fn new_with_timezone_and_checkpoint_limit(
+        pool: Arc<PgPool>,
+        default_timezone: impl Into<String>,
+        max_checkpoint_bytes: usize,
+    ) -> Self {
         Self {
             pool,
             default_timezone: default_timezone.into(),
+            max_checkpoint_bytes: max_checkpoint_bytes.max(1),
         }
     }
 
@@ -513,8 +547,8 @@ impl RoutineStore {
         Self::seed_scheduled_due_times(&mut tx, &self.default_timezone).await?;
         let candidates: Vec<RoutineClaimCandidate> = sqlx::query_as(
             r#"
-            SELECT id, agent_id, script_ref, name, execution_strategy, checkpoint,
-                   discord_thread_id, timeout_secs
+            SELECT id, agent_id, fallback_agent_id, max_retries, script_ref, name,
+                   execution_strategy, checkpoint, discord_thread_id, timeout_secs
             FROM routines
             WHERE status = 'enabled'
               AND next_due_at IS NOT NULL
@@ -602,7 +636,8 @@ impl RoutineStore {
             r#"
             SELECT id, agent_id, script_ref, name, status, execution_strategy,
                    schedule, next_due_at, last_run_at, last_result, checkpoint,
-                   discord_thread_id, timeout_secs, in_flight_run_id,
+                   discord_thread_id, timeout_secs, fallback_agent_id, max_retries,
+                   in_flight_run_id,
                    created_at, updated_at
             FROM routines
             WHERE ($1::text IS NULL OR agent_id = $1)
@@ -622,7 +657,8 @@ impl RoutineStore {
             r#"
             SELECT id, agent_id, script_ref, name, status, execution_strategy,
                    schedule, next_due_at, last_run_at, last_result, checkpoint,
-                   discord_thread_id, timeout_secs, in_flight_run_id,
+                   discord_thread_id, timeout_secs, fallback_agent_id, max_retries,
+                   in_flight_run_id,
                    created_at, updated_at
             FROM routines
             WHERE id = $1
@@ -639,6 +675,7 @@ impl RoutineStore {
         sqlx::query_as(
             r#"
             SELECT id, routine_id, status, action, turn_id, lease_expires_at,
+                   retry_count, next_retry_at, attempts,
                    result_json, error, discord_log_status, discord_log_error,
                    discord_message_id, discord_log_sections, started_at,
                    finished_at, created_at, updated_at
@@ -731,8 +768,17 @@ impl RoutineStore {
             r#"
             SELECT rr.id AS run_id,
                    rr.routine_id,
+                   r.agent_id,
+                   r.fallback_agent_id,
+                   r.max_retries,
+                   rr.retry_count,
                    r.script_ref,
+                   r.name,
+                   r.execution_strategy,
+                   r.discord_thread_id,
                    rr.turn_id,
+                   rr.next_retry_at,
+                   rr.attempts,
                    rr.result_json,
                    rr.started_at,
                    r.timeout_secs
@@ -740,8 +786,11 @@ impl RoutineStore {
             JOIN routines r ON r.id = rr.routine_id
             WHERE rr.status = 'running'
               AND rr.action = 'agent'
-              AND rr.turn_id IS NOT NULL
-            ORDER BY rr.started_at ASC, rr.created_at ASC
+              AND (
+                    rr.turn_id IS NOT NULL
+                    OR (rr.next_retry_at IS NOT NULL AND rr.next_retry_at <= NOW())
+                  )
+            ORDER BY COALESCE(rr.next_retry_at, rr.started_at) ASC, rr.created_at ASC
             LIMIT $1
             "#,
         )
@@ -759,7 +808,7 @@ impl RoutineStore {
                 updated_at = NOW()
             WHERE status = 'running'
               AND action = 'agent'
-              AND turn_id IS NOT NULL
+              AND (turn_id IS NOT NULL OR next_retry_at IS NOT NULL)
             "#,
         )
         .bind(RUN_LEASE_SECS)
@@ -1701,7 +1750,10 @@ impl RoutineStore {
         let status = normalize_new_routine_status(new_routine.status.as_deref())?;
         let schedule = normalize_schedule(new_routine.schedule)?;
         validate_timeout_secs(new_routine.timeout_secs)?;
+        validate_max_retries(new_routine.max_retries)?;
         let discord_thread_id = normalize_optional_text(new_routine.discord_thread_id);
+        let fallback_agent_id = normalize_optional_text(new_routine.fallback_agent_id);
+        let max_retries = new_routine.max_retries.unwrap_or(0);
         let next_due_at = if let Some(value) = new_routine.next_due_at {
             Some(value)
         } else if let Some(schedule) = schedule.as_deref() {
@@ -1714,12 +1766,14 @@ impl RoutineStore {
             r#"
             INSERT INTO routines (
                 id, agent_id, script_ref, name, status, execution_strategy,
-                schedule, next_due_at, checkpoint, discord_thread_id, timeout_secs
+                schedule, next_due_at, checkpoint, discord_thread_id, timeout_secs,
+                fallback_agent_id, max_retries
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             RETURNING id, agent_id, script_ref, name, status, execution_strategy,
                       schedule, next_due_at, last_run_at, last_result, checkpoint,
-                      discord_thread_id, timeout_secs, in_flight_run_id,
+                      discord_thread_id, timeout_secs, fallback_agent_id, max_retries,
+                      in_flight_run_id,
                       created_at, updated_at
             "#,
         )
@@ -1734,6 +1788,8 @@ impl RoutineStore {
         .bind(new_routine.checkpoint)
         .bind(discord_thread_id)
         .bind(new_routine.timeout_secs)
+        .bind(fallback_agent_id)
+        .bind(max_retries)
         .fetch_one(&*self.pool)
         .await
         .map_err(|e| anyhow!("attach routine: {e}"))
@@ -1748,6 +1804,7 @@ impl RoutineStore {
             validate_execution_strategy(strategy)?;
         }
         validate_timeout_secs(patch.timeout_secs.flatten())?;
+        validate_max_retries(patch.max_retries)?;
         let schedule_was_set = patch.schedule.is_some();
         let schedule = match patch.schedule {
             Some(value) => normalize_schedule(value)?,
@@ -1759,6 +1816,11 @@ impl RoutineStore {
             .map(|value| normalize_optional_text(value));
         let timeout_secs_was_set = patch.timeout_secs.is_some();
         let timeout_secs = patch.timeout_secs.flatten();
+        let fallback_agent_id_was_set = patch.fallback_agent_id.is_some();
+        let fallback_agent_id = patch
+            .fallback_agent_id
+            .map(|value| normalize_optional_text(value));
+        let max_retries_was_set = patch.max_retries.is_some();
         let next_due_was_set = patch.next_due_at.is_some();
         let mut next_due_at = patch.next_due_at.flatten();
         let mut update_next_due_at = next_due_was_set;
@@ -1786,12 +1848,15 @@ impl RoutineStore {
                 checkpoint = CASE WHEN $8 THEN $9 ELSE checkpoint END,
                 discord_thread_id = CASE WHEN $10 THEN $11 ELSE discord_thread_id END,
                 timeout_secs = CASE WHEN $12 THEN $13 ELSE timeout_secs END,
+                fallback_agent_id = CASE WHEN $14 THEN $15 ELSE fallback_agent_id END,
+                max_retries = CASE WHEN $16 THEN $17 ELSE max_retries END,
                 updated_at = NOW()
             WHERE id = $1
               AND status <> 'detached'
             RETURNING id, agent_id, script_ref, name, status, execution_strategy,
                       schedule, next_due_at, last_run_at, last_result, checkpoint,
-                      discord_thread_id, timeout_secs, in_flight_run_id,
+                      discord_thread_id, timeout_secs, fallback_agent_id, max_retries,
+                      in_flight_run_id,
                       created_at, updated_at
             "#,
         )
@@ -1808,6 +1873,10 @@ impl RoutineStore {
         .bind(discord_thread_id.flatten())
         .bind(timeout_secs_was_set)
         .bind(timeout_secs)
+        .bind(fallback_agent_id_was_set)
+        .bind(fallback_agent_id.flatten())
+        .bind(max_retries_was_set)
+        .bind(patch.max_retries.unwrap_or(0))
         .fetch_optional(&*self.pool)
         .await
         .map_err(|e| anyhow!("patch routine {routine_id}: {e}"))
@@ -1818,8 +1887,8 @@ impl RoutineStore {
         let mut tx = self.pool.begin().await?;
         let candidate: Option<RoutineClaimCandidate> = sqlx::query_as(
             r#"
-            SELECT id, agent_id, script_ref, name, execution_strategy, checkpoint,
-                   discord_thread_id, timeout_secs
+            SELECT id, agent_id, fallback_agent_id, max_retries, script_ref, name,
+                   execution_strategy, checkpoint, discord_thread_id, timeout_secs
             FROM routines
             WHERE id = $1
               AND status = 'enabled'
@@ -1962,6 +2031,8 @@ impl RoutineStore {
         run_id: &str,
         turn_id: &str,
         result_json: Option<Value>,
+        agent_id: &str,
+        attempt_kind: &str,
     ) -> Result<bool> {
         let result = sqlx::query(
             r#"
@@ -1970,6 +2041,17 @@ impl RoutineStore {
                 turn_id = $2,
                 result_json = $3,
                 lease_expires_at = NOW() + ($4::bigint * INTERVAL '1 second'),
+                next_retry_at = NULL,
+                owned_tmux_session = NULL,
+                attempts = COALESCE(attempts, '[]'::jsonb) || jsonb_build_array(
+                    jsonb_build_object(
+                        'event', 'started',
+                        'agent_id', $5,
+                        'kind', $6,
+                        'turn_id', $2,
+                        'at', NOW()
+                    )
+                ),
                 updated_at = NOW()
             WHERE id = $1
               AND status = 'running'
@@ -1979,9 +2061,60 @@ impl RoutineStore {
         .bind(turn_id)
         .bind(result_json)
         .bind(RUN_LEASE_SECS)
+        .bind(agent_id)
+        .bind(attempt_kind)
         .execute(&*self.pool)
         .await
         .map_err(|e| anyhow!("mark routine agent turn started {run_id}: {e}"))?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn schedule_agent_retry(
+        &self,
+        run_id: &str,
+        next_retry_at: DateTime<Utc>,
+        result_json: Option<Value>,
+        error: &str,
+        failed_agent_id: Option<&str>,
+        attempt_kind: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE routine_runs
+            SET action = 'agent',
+                turn_id = NULL,
+                next_retry_at = $2,
+                retry_count = retry_count + 1,
+                result_json = $3,
+                error = $4,
+                owned_tmux_session = NULL,
+                lease_expires_at = NOW() + ($5::bigint * INTERVAL '1 second'),
+                attempts = COALESCE(attempts, '[]'::jsonb) || jsonb_build_array(
+                    jsonb_build_object(
+                        'event', 'retry_scheduled',
+                        'agent_id', $6,
+                        'kind', $7,
+                        'error', $4,
+                        'next_retry_at', $2,
+                        'at', NOW()
+                    )
+                ),
+                updated_at = NOW()
+            WHERE id = $1
+              AND status = 'running'
+            "#,
+        )
+        .bind(run_id)
+        .bind(next_retry_at)
+        .bind(result_json)
+        .bind(error)
+        .bind(RUN_LEASE_SECS)
+        .bind(failed_agent_id)
+        .bind(attempt_kind)
+        .execute(&*self.pool)
+        .await
+        .map_err(|e| anyhow!("schedule routine agent retry {run_id}: {e}"))?;
 
         Ok(result.rows_affected() == 1)
     }
@@ -2258,6 +2391,26 @@ impl RoutineStore {
         .map_err(|e| anyhow!("record routine discord log result {run_id}: {e}"))?;
 
         Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn get_run_discord_log_failure(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<RunDiscordLogFailure>> {
+        let state: Option<RunDiscordLogFailure> = sqlx::query_as(
+            r#"
+            SELECT discord_log_status AS status,
+                   discord_log_error AS error
+            FROM routine_runs
+            WHERE id = $1
+              AND discord_log_status = 'failed'
+            "#,
+        )
+        .bind(run_id)
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|e| anyhow!("load routine run discord log failure {run_id}: {e}"))?;
+        Ok(state)
     }
 
     pub async fn record_run_discord_log_section(
@@ -2609,6 +2762,8 @@ impl RoutineStore {
             run_id,
             routine_id: candidate.id,
             agent_id: candidate.agent_id,
+            fallback_agent_id: candidate.fallback_agent_id,
+            max_retries: candidate.max_retries,
             script_ref: candidate.script_ref,
             name: candidate.name,
             execution_strategy: candidate.execution_strategy,
@@ -2620,6 +2775,29 @@ impl RoutineStore {
     }
 
     async fn close_run(&self, run_id: &str, close: CloseRun<'_>) -> Result<bool> {
+        let checkpoint_size_error = match close.checkpoint.as_ref() {
+            Some(checkpoint) => checkpoint_size_error(checkpoint, self.max_checkpoint_bytes)?,
+            None => None,
+        };
+        let mut result_json = close.result_json;
+        let mut checkpoint = close.checkpoint;
+        if let Some(message) = checkpoint_size_error.as_deref() {
+            result_json = Some(json!({
+                "status": "failed",
+                "error": message,
+                "checkpoint_rejected": true,
+                "max_checkpoint_bytes": self.max_checkpoint_bytes,
+            }));
+            checkpoint = None;
+        }
+        let run_status = if checkpoint_size_error.is_some() {
+            "failed"
+        } else {
+            close.run_status
+        };
+        let error = checkpoint_size_error.as_deref().or(close.error);
+        let last_result = checkpoint_size_error.as_deref().or(close.last_result);
+
         let mut tx = self.pool.begin().await?;
 
         let target: Option<(String, Option<String>, Option<DateTime<Utc>>, DateTime<Utc>)> =
@@ -2682,8 +2860,8 @@ impl RoutineStore {
         )
         .bind(&routine_id)
         .bind(scheduled_next_due_at)
-        .bind(&close.checkpoint)
-        .bind(close.last_result)
+        .bind(&checkpoint)
+        .bind(last_result)
         .bind(close.pause_routine)
         .bind(run_id)
         .bind(should_update_next_due_at)
@@ -2705,16 +2883,17 @@ impl RoutineStore {
                 error = $5,
                 finished_at = NOW(),
                 lease_expires_at = NULL,
+                next_retry_at = NULL,
                 updated_at = NOW()
             WHERE id = $1
               AND status = 'running'
             "#,
         )
         .bind(run_id)
-        .bind(close.run_status)
+        .bind(run_status)
         .bind(close.action)
-        .bind(&close.result_json)
-        .bind(close.error)
+        .bind(&result_json)
+        .bind(error)
         .execute(&mut *tx)
         .await
         .map_err(|e| anyhow!("close run {run_id}: update run: {e}"))?;
@@ -2774,6 +2953,33 @@ fn validate_timeout_secs(timeout_secs: Option<i32>) -> Result<()> {
         return Err(anyhow!("routine timeout_secs must be greater than zero"));
     }
     Ok(())
+}
+
+fn validate_max_retries(max_retries: Option<i32>) -> Result<()> {
+    if let Some(value) = max_retries
+        && value < 0
+    {
+        return Err(anyhow!(
+            "routine max_retries must be greater than or equal to zero"
+        ));
+    }
+    Ok(())
+}
+
+fn checkpoint_size_error(
+    checkpoint: &Value,
+    max_checkpoint_bytes: usize,
+) -> Result<Option<String>> {
+    let bytes = serde_json::to_vec(checkpoint)
+        .map_err(|e| anyhow!("serialize routine checkpoint for size check: {e}"))?
+        .len();
+    if bytes > max_checkpoint_bytes {
+        Ok(Some(format!(
+            "routine checkpoint is too large: {bytes} bytes exceeds max_checkpoint_bytes {max_checkpoint_bytes}"
+        )))
+    } else {
+        Ok(None)
+    }
 }
 
 enum ParsedRoutineSchedule {
@@ -3005,10 +3211,10 @@ struct CloseRun<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        API_FRICTION_OBSERVATION_QUERY, include_automation_candidate_card_observations,
-        next_due_after, next_due_after_anchor, parse_schedule_interval,
-        precomputed_observation_from_kv, resume_without_next_due_is_invalid, truncate_chars,
-        validate_routine_schedule,
+        API_FRICTION_OBSERVATION_QUERY, checkpoint_size_error,
+        include_automation_candidate_card_observations, next_due_after, next_due_after_anchor,
+        parse_schedule_interval, precomputed_observation_from_kv,
+        resume_without_next_due_is_invalid, truncate_chars, validate_routine_schedule,
     };
     use chrono::{TimeZone, Timelike, Utc};
     use serde_json::Value;
@@ -3067,6 +3273,13 @@ mod tests {
         assert!(validate_routine_schedule("@daily").is_err());
         assert!(validate_routine_schedule("* * * * * *").is_err());
         assert!(validate_routine_schedule("60 9 * * *").is_err());
+    }
+
+    #[test]
+    fn checkpoint_size_error_reports_oversized_payload() {
+        let checkpoint = serde_json::json!({"payload": "abcdef"});
+        assert!(checkpoint_size_error(&checkpoint, 8).unwrap().is_some());
+        assert!(checkpoint_size_error(&checkpoint, 128).unwrap().is_none());
     }
 
     #[test]

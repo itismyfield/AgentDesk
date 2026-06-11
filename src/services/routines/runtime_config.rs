@@ -9,6 +9,7 @@ pub enum RoutineRuntimeConfigError {
     TickIntervalSecs,
     AgentPollLimit,
     AgentTimeoutSecs,
+    MaxCheckpointBytes,
 }
 
 impl RoutineRuntimeConfigError {
@@ -19,6 +20,7 @@ impl RoutineRuntimeConfigError {
             }
             Self::AgentPollLimit => "routines.max_agent_polls_per_tick must be greater than zero",
             Self::AgentTimeoutSecs => "routines.agent_timeout_secs must be greater than zero",
+            Self::MaxCheckpointBytes => "routines.max_checkpoint_bytes must be greater than zero",
         }
     }
 }
@@ -38,6 +40,8 @@ pub fn validate_routine_runtime_config(
         .ok_or(RoutineRuntimeConfigError::AgentPollLimit)?;
     valid_routine_agent_timeout_secs(config.agent_timeout_secs)
         .ok_or(RoutineRuntimeConfigError::AgentTimeoutSecs)?;
+    valid_routine_max_checkpoint_bytes(config.max_checkpoint_bytes)
+        .ok_or(RoutineRuntimeConfigError::MaxCheckpointBytes)?;
     Ok(config.tick_interval_secs)
 }
 
@@ -51,6 +55,10 @@ pub fn valid_routine_agent_poll_limit(value: u32) -> Option<u32> {
 }
 
 pub fn valid_routine_agent_timeout_secs(value: u64) -> Option<u64> {
+    (value > 0).then_some(value)
+}
+
+pub fn valid_routine_max_checkpoint_bytes(value: usize) -> Option<usize> {
     (value > 0).then_some(value)
 }
 
@@ -83,6 +91,16 @@ mod tests {
     }
 
     #[test]
+    fn routine_max_checkpoint_bytes_rejects_zero() {
+        assert_eq!(valid_routine_max_checkpoint_bytes(0), None);
+        assert_eq!(valid_routine_max_checkpoint_bytes(1), Some(1));
+        assert_eq!(
+            valid_routine_max_checkpoint_bytes(256 * 1024),
+            Some(256 * 1024)
+        );
+    }
+
+    #[test]
     fn routine_runtime_config_returns_first_invalid_field() {
         let mut config = RoutinesConfig::default();
         config.tick_interval_secs = 901;
@@ -103,6 +121,13 @@ mod tests {
         assert_eq!(
             validate_routine_runtime_config(&config),
             Err(RoutineRuntimeConfigError::AgentTimeoutSecs)
+        );
+
+        config.agent_timeout_secs = 1800;
+        config.max_checkpoint_bytes = 0;
+        assert_eq!(
+            validate_routine_runtime_config(&config),
+            Err(RoutineRuntimeConfigError::MaxCheckpointBytes)
         );
     }
 }

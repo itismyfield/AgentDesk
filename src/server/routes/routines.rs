@@ -51,6 +51,8 @@ pub struct SearchRoutineRunResultsQuery {
 #[derive(Debug, Deserialize)]
 pub struct AttachRoutineBody {
     pub agent_id: Option<String>,
+    pub fallback_agent_id: Option<String>,
+    pub max_retries: Option<i32>,
     pub script_ref: String,
     pub name: Option<String>,
     pub execution_strategy: Option<String>,
@@ -64,6 +66,9 @@ pub struct AttachRoutineBody {
 #[derive(Debug, Deserialize)]
 pub struct PatchRoutineBody {
     pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    fallback_agent_id: PatchField<Option<String>>,
+    pub max_retries: Option<i32>,
     pub execution_strategy: Option<String>,
     #[serde(default, deserialize_with = "deserialize_patch_field")]
     schedule: PatchField<Option<String>>,
@@ -136,6 +141,8 @@ impl PatchRoutineBody {
     fn into_patch(self) -> RoutinePatch {
         RoutinePatch {
             name: self.name,
+            fallback_agent_id: self.fallback_agent_id.into_option(),
+            max_retries: self.max_retries,
             execution_strategy: self.execution_strategy,
             schedule: self.schedule.into_option(),
             next_due_at: self.next_due_at.into_option(),
@@ -260,10 +267,20 @@ pub async fn attach_routine(
     validate_execution_strategy_request(&execution_strategy)?;
     validate_schedule_request(body.schedule.as_deref())?;
     validate_timeout_request(body.timeout_secs)?;
+    validate_max_retries_request(body.max_retries)?;
+    let agent_id = validate_agent_id_request(&state, "agent_id", body.agent_id.as_deref()).await?;
+    let fallback_agent_id = validate_agent_id_request(
+        &state,
+        "fallback_agent_id",
+        body.fallback_agent_id.as_deref(),
+    )
+    .await?;
     let initial_status = initial_attach_status(&script_ref).to_string();
     let routine = store
         .attach_routine(NewRoutine {
-            agent_id: body.agent_id,
+            agent_id,
+            fallback_agent_id,
+            max_retries: body.max_retries,
             script_ref,
             name,
             status: Some(initial_status),
@@ -299,6 +316,11 @@ pub async fn patch_routine(
     }
     if let Some(timeout_secs) = body.timeout_secs.as_present().copied().flatten() {
         validate_timeout_request(Some(timeout_secs))?;
+    }
+    validate_max_retries_request(body.max_retries)?;
+    if let Some(fallback_agent_id) = body.fallback_agent_id.as_present() {
+        validate_agent_id_request(&state, "fallback_agent_id", fallback_agent_id.as_deref())
+            .await?;
     }
     let patch = body.into_patch();
     let Some(routine) = store
@@ -615,9 +637,10 @@ fn routine_store(state: &AppState) -> AppResult<RoutineStore> {
             "postgres pool unavailable; routines require postgresql",
         ));
     };
-    Ok(RoutineStore::new_with_timezone(
+    Ok(RoutineStore::new_with_timezone_and_checkpoint_limit(
         std::sync::Arc::new(pool),
         state.config.routines.default_timezone.clone(),
+        state.config.routines.max_checkpoint_bytes,
     ))
 }
 
@@ -723,6 +746,38 @@ fn validate_timeout_request(timeout_secs: Option<i32>) -> AppResult<()> {
         ));
     }
     Ok(())
+}
+
+fn validate_max_retries_request(max_retries: Option<i32>) -> AppResult<()> {
+    if matches!(max_retries, Some(value) if value < 0) {
+        return Err(AppError::bad_request(
+            "routine max_retries must be greater than or equal to zero",
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_agent_id_request(
+    state: &AppState,
+    field_name: &str,
+    agent_id: Option<&str>,
+) -> AppResult<Option<String>> {
+    let Some(agent_id) = agent_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(pool) = state.pg_pool.as_ref() else {
+        return Err(AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Database,
+            "postgres pool unavailable; routines require postgresql",
+        ));
+    };
+    match crate::db::kanban_cards::resolve_existing_agent_id_with_pg(pool, agent_id).await {
+        Some(existing) => Ok(Some(existing)),
+        None => Err(AppError::bad_request(format!(
+            "routine {field_name} references unknown agent '{agent_id}'"
+        ))),
+    }
 }
 
 fn routine_health_target(config: &Config) -> Option<String> {
