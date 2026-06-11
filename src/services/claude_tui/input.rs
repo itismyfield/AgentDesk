@@ -30,6 +30,15 @@ const PROMPT_SUBMIT_CONFIRM_RETRIES: usize = 2;
 const SELECTOR_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 const PROMPT_READY_TIMEOUT_ERROR_PREFIX: &str = "timeout waiting for claude tui";
 pub const PROMPT_READY_CANCELLED_ERROR: &str = "claude tui prompt readiness wait cancelled";
+/// Cap on auto-dismiss key presses for Claude startup dialogs (resume-from-
+/// summary picker, workspace trust) per readiness wait. Startup can stack at
+/// most two dialogs back to back; if the pane still shows a dialog after this
+/// many Enters something unexpected is on screen and we fall back to the
+/// normal timeout path instead of blindly mashing Enter.
+const STARTUP_DIALOG_DISMISS_MAX_ATTEMPTS: usize = 5;
+/// Settle delay after dismissing a startup dialog so the TUI can redraw
+/// (either the next dialog or the composer prompt) before the next snapshot.
+const STARTUP_DIALOG_DISMISS_SETTLE: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptReadinessKind {
@@ -1080,6 +1089,7 @@ fn wait_for_prompt_ready_polling(
     transcript_path: Option<&std::path::Path>,
 ) -> Result<(), String> {
     let mut wait_interval = Duration::from_millis(100);
+    let mut dialog_dismiss_attempts = 0usize;
     loop {
         check_prompt_cancel(cancel_token)?;
         if transcript_idle_confirms_prompt_ready_without_capture(session_name, transcript_path) {
@@ -1095,6 +1105,49 @@ fn wait_for_prompt_ready_polling(
         check_prompt_cancel(cancel_token)?;
         if prompt_marker_confirms_prompt_ready(&snapshot) {
             return Ok(());
+        }
+        // Startup dialogs (resume-from-summary picker, workspace trust) park
+        // the pane on an option selector whose highlighted `❯ 1. ...` row
+        // reads as a composer draft, so neither the marker check above nor
+        // the transcript fallback below would ever pass. Handle them before
+        // the transcript fallback so an idle transcript cannot confirm
+        // readiness while a modal dialog is still swallowing input.
+        if let Some(dialog) =
+            crate::services::claude_tui::startup_dialog::detect_claude_startup_dialog(
+                &snapshot.pane_tail,
+            )
+        {
+            use crate::services::claude_tui::startup_dialog::StartupDialogPlan;
+            match crate::services::claude_tui::startup_dialog::plan_startup_dialog_response(&dialog)
+            {
+                StartupDialogPlan::DismissWithEnter
+                    if dialog_dismiss_attempts < STARTUP_DIALOG_DISMISS_MAX_ATTEMPTS =>
+                {
+                    dialog_dismiss_attempts += 1;
+                    log_startup_dialog_dismiss(
+                        session_name,
+                        readiness,
+                        dialog.label(),
+                        dialog_dismiss_attempts,
+                    );
+                    run_actions(session_name, &[TuiInputAction::Enter], cancel_token)?;
+                    std::thread::sleep(STARTUP_DIALOG_DISMISS_SETTLE);
+                    check_prompt_cancel(cancel_token)?;
+                    continue;
+                }
+                StartupDialogPlan::DismissWithEnter => {
+                    // Dismiss budget exhausted with a dialog still on screen —
+                    // fall through to the regular timeout bookkeeping so the
+                    // canonical timeout error (with pane tail logging) fires.
+                }
+                StartupDialogPlan::FailUntrustedWorkspace { workspace } => {
+                    check_prompt_cancel(cancel_token)?;
+                    log_startup_dialog_untrusted_workspace(session_name, readiness, &workspace);
+                    return Err(format!(
+                        "claude tui startup blocked by workspace trust dialog for untrusted path '{workspace}'; refusing to auto-trust; fix the agent/channel workspace mapping so claude does not spawn there"
+                    ));
+                }
+            }
         }
         if transcript_idle_confirms_prompt_ready(&snapshot, transcript_path) {
             tracing::info!(
@@ -1163,6 +1216,49 @@ fn transcript_idle_confirms_prompt_ready(
         crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(path)
             == crate::services::tui_turn_state::TuiTurnState::Idle
     })
+}
+
+fn log_startup_dialog_dismiss(
+    session_name: &str,
+    readiness: PromptReadinessKind,
+    dialog_label: &str,
+    attempt: usize,
+) {
+    tracing::info!(
+        tmux_session_name = session_name,
+        readiness = readiness.label(),
+        dialog = dialog_label,
+        attempt,
+        max_attempts = STARTUP_DIALOG_DISMISS_MAX_ATTEMPTS,
+        "claude_tui dismissing startup dialog with Enter"
+    );
+    crate::services::claude::debug_log_to(
+        "claude_tui.log",
+        &format!(
+            "startup dialog dismiss session={session_name} readiness={} dialog={dialog_label} attempt={attempt}/{STARTUP_DIALOG_DISMISS_MAX_ATTEMPTS}",
+            readiness.label(),
+        ),
+    );
+}
+
+fn log_startup_dialog_untrusted_workspace(
+    session_name: &str,
+    readiness: PromptReadinessKind,
+    workspace: &str,
+) {
+    tracing::warn!(
+        tmux_session_name = session_name,
+        readiness = readiness.label(),
+        workspace,
+        "claude_tui startup blocked by workspace trust dialog for untrusted path; failing fast"
+    );
+    crate::services::claude::debug_log_to(
+        "claude_tui.log",
+        &format!(
+            "startup dialog untrusted workspace session={session_name} readiness={} workspace={workspace}",
+            readiness.label(),
+        ),
+    );
 }
 
 fn log_prompt_ready_timeout(
