@@ -62,14 +62,14 @@ pub(super) fn clear_watchdog_deadline_override(channel_id: u64) {
 /// to drain here.
 pub(super) fn check_deferred_restart(shared: &SharedData) {
     if !shared
-        .restart_pending
+        .restart.restart_pending
         .load(std::sync::atomic::Ordering::Relaxed)
     {
         return;
     }
     // CAS: ensure this provider only decrements once
     if shared
-        .shutdown_counted
+        .restart.shutdown_counted
         .compare_exchange(
             false,
             true,
@@ -81,7 +81,7 @@ pub(super) fn check_deferred_restart(shared: &SharedData) {
         return;
     }
     if shared
-        .shutdown_remaining
+        .restart.shutdown_remaining
         .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
         != 1
     {
