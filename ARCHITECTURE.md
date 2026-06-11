@@ -463,6 +463,12 @@ src/
 │   │   │   ├── response_format.rs
 │   │   │   ├── thread_binding.rs
 │   │   │   └── turn_start.rs
+│   │   ├── runtime_bootstrap/
+│   │   │   ├── orphan_recovery.rs
+│   │   │   ├── queued_placeholders.rs
+│   │   │   ├── restored_state.rs
+│   │   │   ├── session_gc.rs
+│   │   │   └── startup_doctor.rs
 │   │   ├── settings/
 │   │   │   ├── content.rs
 │   │   │   ├── memory.rs

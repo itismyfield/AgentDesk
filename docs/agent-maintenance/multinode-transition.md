@@ -4,7 +4,7 @@
 > moving any AgentDesk runtime, worker, dispatch, provider, MCP, merge, or test
 > execution path from one dcserver node to multiple nodes.
 >
-> Last refreshed: 2026-05-30 (against #2896 runtime bootstrap thread-session GC safety).
+> Last refreshed: 2026-06-11 (against #3038 run_bot S0/S1 runtime_bootstrap directory split).
 
 ## Read This First
 
@@ -381,6 +381,15 @@
 
 ### Audited touches
 
+- #3038 run_bot S0/S1: `runtime_bootstrap.rs` gained characterization tests and
+  moved restored-state, queued-placeholder, startup-doctor, orphan-recovery, and
+  session-GC helpers into `runtime_bootstrap/` submodules. This is a
+  **behavior-preserving module split**: `run_bot` body, gateway lease acquisition,
+  keepalive self-fence, shutdown ordering, and the recovery/spawn callsites remain
+  in their original order. Multinode classification is unchanged: gateway
+  ownership remains leader-only under the existing lease, while thread/session GC
+  and queued-placeholder cleanup retain their previous worker-local/runtime-local
+  assumptions.
 - #3274 residual cleanup: `turn_finalizer.rs` now invokes a small
   `turn_finalizer/cleanup.rs` helper when a terminal loser receives
   `AlreadyFinalized`, clearing only same-`user_msg_id` mailbox/inflight
