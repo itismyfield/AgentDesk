@@ -298,9 +298,10 @@ deadline = "2026-08-31"
 decompose_issue = "#3036"
 
 # NOTE: src/services/discord/turn_bridge/terminal_delivery.rs previously had an
-# [[entry]] here; the #3028 splitter fix dropped its production LoC to 504 (its
-# inline test mod was being miscounted as production), so it is no longer a
-# prod-giant and its entry was removed to avoid a ghost registration.
+# [[entry]] here; the #3028 splitter fix dropped its production LoC below the
+# giant threshold (its inline test mod was being miscounted as production), so it
+# is no longer a prod-giant and its entry was removed to avoid a ghost
+# registration.
 
 [[entry]]
 # Surfaced as an 8417-prod-LoC giant only after #3028 fixed the prod/test
@@ -309,9 +310,11 @@ decompose_issue = "#3036"
 # `spawn_turn_bridge` and ~9000 lines of the turn-lifecycle surface were
 # mislabeled as test (the file reported only 626 prod). This entry is the
 # accounting correction; the production LoC is also frozen in
-# scripts/audit_maintainability_giant_baseline.toml (#3028 ratchet). Decompose
-# the turn-bridge spawn/lifecycle surface once #3016 settles.
+# scripts/audit_maintainability_giant_baseline.toml (#3028 ratchet). #3038 S1
+# moved the helper-zone clusters out of the root while leaving the
+# `spawn_turn_bridge` async body byte-identical; remaining spawn/lifecycle
+# decomposition is tracked under #3038.
 file = "src/services/discord/turn_bridge/mod.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
-decompose_issue = "#3016"
+decompose_issue = "#3038"

@@ -10,3 +10,6 @@
 "src/services/discord/prompt_builder/**" = 700
 "src/services/discord/runtime_bootstrap/**" = 700
 "src/services/discord/tmux_watcher/**" = 700
+"src/services/discord/turn_bridge/headless_delivery.rs" = 700
+"src/services/discord/turn_bridge/status_panel.rs" = 700
+"src/services/discord/turn_bridge/voice_completion.rs" = 700
