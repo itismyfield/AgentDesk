@@ -387,6 +387,11 @@
   active-state. This is **worker-local**: it runs in the same process that owns
   the channel mailbox, finalizer actor, and local inflight file, and it adds no
   leader-only side effect, durable queue authority, or PG lease assumption.
+- #3334 reaction lifecycle cleanup: abnormal finalizer backstops and restart
+  catch-up now run idempotent same-message reaction cleanup through local Discord
+  HTTP helpers. This is **worker-local**: it touches only the recovered/finalized
+  Discord message id on the worker processing that channel and adds no shared
+  scheduling authority or cross-node lease dependency.
 - #3038 S1 (SharedData `QueuedPlaceholderState` extraction): `runtime_bootstrap.rs`
   changed in two helpers only — `run_bot_build_shared_data` (three consecutive
   queued-placeholder members wrapped into the new `queued:` group field;
