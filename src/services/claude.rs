@@ -737,6 +737,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                 return execute_streaming_local_tmux(
                     &args,
                     prompt,
+                    session_id,
                     working_dir,
                     sender,
                     cancel_token,
@@ -2011,6 +2012,22 @@ fn classify_local_tmux_startup_plan(
     } else {
         LocalTmuxStartupPlan::ColdStart
     }
+}
+
+/// Decide whether a stale-classified tmux session must be preserved rather than
+/// killed-and-recreated. Mirrors the Codex (`codex.rs`) and Qwen (`qwen.rs`)
+/// guards: a pane that is still live (`has_live_pane`) AND was selected for
+/// provider-session reuse (a non-empty resume id) is carrying an active
+/// conversation, so missing wrapper I/O files alone must not trigger a kill.
+#[cfg(unix)]
+fn should_preserve_live_reused_provider_session(
+    resume_session_id: Option<&str>,
+    has_live_pane: bool,
+) -> bool {
+    resume_session_id
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+        && has_live_pane
 }
 
 #[cfg(unix)]
@@ -3546,6 +3563,7 @@ mod claude_tui_ready_probe_tests {
 fn execute_streaming_local_tmux(
     args: &[String],
     prompt: &str,
+    session_id: Option<&str>,
     working_dir: &str,
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
@@ -3572,13 +3590,18 @@ fn execute_streaming_local_tmux(
     // that older wrappers still hold open fds to — so a dcserver restart
     // that lost its /tmp files does not invalidate a still-alive tmux pane.
     let session_exists = tmux_session_exists(tmux_session_name);
+    let has_live_pane = tmux_session_has_live_pane(tmux_session_name);
     let resolved_output =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "jsonl");
     let resolved_input =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "input");
+    // Resume id selected for this turn (`--resume <sid>` was pushed by the
+    // caller when `session_id` is a valid id). Used to recognise a live pane
+    // that was deliberately reused for provider-session continuity.
+    let resume_session_id = session_id.filter(|sid| is_valid_session_id(sid));
     let startup_plan = classify_local_tmux_startup_plan(
         session_exists,
-        tmux_session_has_live_pane(tmux_session_name),
+        has_live_pane,
         resolved_output.is_some(),
         resolved_input.is_some(),
     );
@@ -3698,6 +3721,26 @@ fn execute_streaming_local_tmux(
                 return Ok(());
             }
         }
+    } else if startup_plan == LocalTmuxStartupPlan::RecreateStaleSession
+        && should_preserve_live_reused_provider_session(resume_session_id, has_live_pane)
+    {
+        // Parity with the Codex (codex.rs) and Qwen (qwen.rs) guards: refuse to
+        // kill a still-live pane that was deliberately selected for provider-
+        // session reuse just because its wrapper I/O files are momentarily
+        // missing (e.g. a dcserver restart lost /tmp, or runtime files were GC'd).
+        // The classifier still labels this `RecreateStaleSession`, but a live
+        // pane carrying an active `--resume` conversation must be preserved, not
+        // recreated. Fail safely with an operator-visible message instead.
+        tracing::warn!(
+            tmux_session_name,
+            session_id = resume_session_id.unwrap_or_default(),
+            output_path_present = resolved_output.is_some(),
+            input_path_present = resolved_input.is_some(),
+            "refusing to kill live Claude tmux selected for provider-session reuse"
+        );
+        return Err(format!(
+            "live Claude tmux session {tmux_session_name} was selected for reuse but wrapper I/O is unavailable; refusing stale cleanup/recreate"
+        ));
     } else if startup_plan == LocalTmuxStartupPlan::RecreateStaleSession {
         debug_log("Stale tmux session found — recreating");
         crate::services::termination_audit::record_termination_for_tmux(
@@ -4234,6 +4277,34 @@ mod local_tmux_lifecycle_tests {
                 "existing tmux sessions missing live ownership evidence must be killed and recreated"
             );
         }
+    }
+
+    #[test]
+    fn live_reused_provider_session_is_preserved_when_wrapper_io_is_missing() {
+        // Parity with codex.rs / qwen.rs: a live pane selected for reuse (valid,
+        // non-empty resume id) must be preserved even though the classifier
+        // labels it RecreateStaleSession because its wrapper I/O files are gone.
+        assert!(should_preserve_live_reused_provider_session(
+            Some("claude-session-1"),
+            true,
+        ));
+        // A genuinely dead pane (no live pane) is still recreated, even with a
+        // resume id — preservation must never over-protect a stale session.
+        assert!(!should_preserve_live_reused_provider_session(
+            Some("claude-session-1"),
+            false,
+        ));
+        // A live pane that was NOT selected for reuse (no/blank resume id) has
+        // no conversation to protect, so the normal recreate path applies.
+        assert!(!should_preserve_live_reused_provider_session(None, true));
+        assert!(!should_preserve_live_reused_provider_session(
+            Some("  "),
+            true
+        ));
+        assert!(!should_preserve_live_reused_provider_session(
+            Some(""),
+            true
+        ));
     }
 
     #[test]
