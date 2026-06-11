@@ -149,6 +149,13 @@ pub(super) fn channel_lock(provider: &str, channel_id: u64) -> Arc<tokio::sync::
 static PRESENT: LazyLock<Mutex<HashMap<(String, u64), u32>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+static ACTIVE_WORKERS: LazyLock<Mutex<HashMap<(String, u64), u32>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static PRECLAIMED_ACTIVE_WORKERS: LazyLock<Mutex<HashMap<(String, u64), u32>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static PRESENCE_RECONCILE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
 fn mark_present(provider: &str, channel_id: u64) {
     let mut map = PRESENT.lock().unwrap_or_else(|e| e.into_inner());
     *map.entry((provider.to_string(), channel_id)).or_insert(0) += 1;
@@ -162,6 +169,92 @@ fn mark_absent(provider: &str, channel_id: u64) {
             map.remove(&(provider.to_string(), channel_id));
         }
     }
+}
+
+fn clear_present(provider: &str, channel_id: u64) {
+    PRESENT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&(provider.to_string(), channel_id));
+}
+
+struct ActiveWorkerGuard {
+    provider: String,
+    channel_id: u64,
+}
+
+impl ActiveWorkerGuard {
+    fn new(provider: &str, channel_id: u64) -> Self {
+        let mut workers = ACTIVE_WORKERS.lock().unwrap_or_else(|e| e.into_inner());
+        *workers
+            .entry((provider.to_string(), channel_id))
+            .or_insert(0) += 1;
+        Self {
+            provider: provider.to_string(),
+            channel_id,
+        }
+    }
+
+    fn from_preclaimed(provider: &str, channel_id: u64) -> Self {
+        Self {
+            provider: provider.to_string(),
+            channel_id,
+        }
+    }
+}
+
+impl Drop for ActiveWorkerGuard {
+    fn drop(&mut self) {
+        let mut workers = ACTIVE_WORKERS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = workers.get_mut(&(self.provider.clone(), self.channel_id)) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                workers.remove(&(self.provider.clone(), self.channel_id));
+            }
+        }
+    }
+}
+
+fn active_worker_present(provider: &str, channel_id: u64) -> bool {
+    ACTIVE_WORKERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&(provider.to_string(), channel_id))
+        .copied()
+        .unwrap_or(0)
+        > 0
+}
+
+fn preclaim_active_worker(provider: &str, channel_id: u64) {
+    {
+        let mut workers = ACTIVE_WORKERS.lock().unwrap_or_else(|e| e.into_inner());
+        *workers
+            .entry((provider.to_string(), channel_id))
+            .or_insert(0) += 1;
+    }
+    let mut preclaimed = PRECLAIMED_ACTIVE_WORKERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *preclaimed
+        .entry((provider.to_string(), channel_id))
+        .or_insert(0) += 1;
+}
+
+fn take_preclaimed_active_worker(provider: &str, channel_id: u64) -> Option<ActiveWorkerGuard> {
+    let mut preclaimed = PRECLAIMED_ACTIVE_WORKERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let count = preclaimed.get_mut(&(provider.to_string(), channel_id))?;
+    *count = count.saturating_sub(1);
+    if *count == 0 {
+        preclaimed.remove(&(provider.to_string(), channel_id));
+    }
+    Some(ActiveWorkerGuard::from_preclaimed(provider, channel_id))
+}
+
+fn active_worker_guard_for_spawn(provider: &str, channel_id: u64) -> ActiveWorkerGuard {
+    take_preclaimed_active_worker(provider, channel_id)
+        .unwrap_or_else(|| ActiveWorkerGuard::new(provider, channel_id))
 }
 
 /// GATE probe consulted by the watcher no-inflight suppression and the idle
@@ -185,12 +278,24 @@ pub(super) fn pending_synthetic_start_present(provider: &str, channel_id: u64) -
 /// state before the respawned worker's first poll. The worker's terminal
 /// [`delete`] balances it.
 pub(super) fn mark_present_on_restore(provider: &str, channel_id: u64) {
+    let _guard = PRESENCE_RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     mark_present(provider, channel_id);
+    preclaim_active_worker(provider, channel_id);
 }
 
 #[cfg(test)]
 pub(super) fn reset_present_for_tests() {
     PRESENT.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    ACTIVE_WORKERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    PRECLAIMED_ACTIVE_WORKERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -201,14 +306,8 @@ fn root() -> Option<std::path::PathBuf> {
     super::runtime_store::tui_direct_pending_start_root()
 }
 
-/// Persist (or update) a pending-start record and mark it present in the
-/// in-memory index. Called BEFORE any wait, immediately after the anchor/lease
-/// are created.
-pub(super) fn persist(record: &TuiDirectPendingStart) -> Result<(), String> {
-    mark_present(&record.provider, record.channel_id);
+fn write_record(record: &TuiDirectPendingStart) -> Result<(), String> {
     let Some(root) = root() else {
-        // No runtime root (tests / unconfigured): the in-memory presence index
-        // still gates the watcher / idle queue for this process lifetime.
         return Ok(());
     };
     let path = root.join(format!("{}.json", record.file_stem()));
@@ -222,13 +321,45 @@ pub(super) fn persist(record: &TuiDirectPendingStart) -> Result<(), String> {
     )
 }
 
+/// Persist (or update) a pending-start record and mark it present in the
+/// in-memory index. Called BEFORE any wait, immediately after the anchor/lease
+/// are created.
+pub(super) fn persist(record: &TuiDirectPendingStart) -> Result<(), String> {
+    let _guard = PRESENCE_RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    mark_present(&record.provider, record.channel_id);
+    write_record(record)?;
+    Ok(())
+}
+
 /// Delete a pending-start record AFTER the inflight save succeeds (or when the
 /// worker gives up). Idempotent.
 pub(super) fn delete(record: &TuiDirectPendingStart) {
+    let _guard = PRESENCE_RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     mark_absent(&record.provider, record.channel_id);
     if let Some(root) = root() {
         let path = root.join(format!("{}.json", record.file_stem()));
         let _ = std::fs::remove_file(path);
+    }
+}
+
+fn update_claim_attempt_count(record: &mut TuiDirectPendingStart, claim_attempts: u32) {
+    record.attempt_count = claim_attempts;
+    let _guard = PRESENCE_RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Err(error) = write_record(record) {
+        tracing::warn!(
+            provider = %record.provider,
+            channel_id = record.channel_id,
+            anchor_message_id = record.anchor_message_id,
+            claim_attempts,
+            error = %error,
+            "tui_direct_pending_start: failed to persist claim attempt count; retaining in-memory retry budget"
+        );
     }
 }
 
@@ -266,6 +397,42 @@ pub(super) fn load_all() -> Vec<TuiDirectPendingStart> {
             .then(a.anchor_message_id.cmp(&b.anchor_message_id))
     });
     out
+}
+
+fn records_for_channel(provider: &str, channel_id: u64) -> Vec<TuiDirectPendingStart> {
+    load_all()
+        .into_iter()
+        .filter(|record| record.provider == provider && record.channel_id == channel_id)
+        .collect()
+}
+
+fn channel_records_are_abandoned_locked(provider: &str, channel_id: u64) -> bool {
+    if active_worker_present(provider, channel_id) {
+        return false;
+    }
+    let records = records_for_channel(provider, channel_id);
+    !records.is_empty()
+        && records
+            .iter()
+            .all(|record| record.attempt_count >= PENDING_START_MAX_CLAIM_ATTEMPTS)
+}
+
+pub(super) fn pending_synthetic_start_abandoned(provider: &str, channel_id: u64) -> bool {
+    let _guard = PRESENCE_RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    channel_records_are_abandoned_locked(provider, channel_id)
+}
+
+pub(super) fn clear_abandoned_synthetic_start_presence(provider: &str, channel_id: u64) -> bool {
+    let _guard = PRESENCE_RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if !channel_records_are_abandoned_locked(provider, channel_id) {
+        return false;
+    }
+    clear_present(provider, channel_id);
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -438,8 +605,10 @@ pub(super) fn spawn_worker(
     claim_fn: ClaimFn,
     abort_cleanup_fn: AbortCleanupFn,
 ) {
+    let active_guard = active_worker_guard_for_spawn(&record.provider, record.channel_id);
     super::task_supervisor::spawn_observed("tui_direct_pending_start_worker", async move {
-        run_worker(shared, record, view_fn, claim_fn, abort_cleanup_fn).await;
+        let _active_guard = active_guard;
+        run_worker_inner(shared, record, view_fn, claim_fn, abort_cleanup_fn).await;
     });
 }
 
@@ -456,9 +625,21 @@ enum WaitOutcome {
     BackstopForeignInflightLive,
 }
 
+#[cfg(test)]
 async fn run_worker(
     shared: Arc<SharedData>,
     record: TuiDirectPendingStart,
+    view_fn: ViewFn,
+    claim_fn: ClaimFn,
+    abort_cleanup_fn: AbortCleanupFn,
+) {
+    let _active_guard = ActiveWorkerGuard::new(&record.provider, record.channel_id);
+    run_worker_inner(shared, record, view_fn, claim_fn, abort_cleanup_fn).await;
+}
+
+async fn run_worker_inner(
+    shared: Arc<SharedData>,
+    mut record: TuiDirectPendingStart,
     view_fn: ViewFn,
     claim_fn: ClaimFn,
     abort_cleanup_fn: AbortCleanupFn,
@@ -591,6 +772,7 @@ async fn run_worker(
 
         // Transient claim failure: do NOT delete (P1-2). Retry, bounded.
         claim_attempts = claim_attempts.saturating_add(1);
+        update_claim_attempt_count(&mut record, claim_attempts);
         if claim_attempts >= PENDING_START_MAX_CLAIM_ATTEMPTS {
             tracing::error!(
                 provider = %record.provider,
@@ -741,6 +923,17 @@ mod tests {
         LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
     }
 
+    struct EnvReset(Option<std::ffi::OsString>);
+
+    impl Drop for EnvReset {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
     /// Wrap a pure view into the worker's per-poll observation (no foreign
     /// identity — the common already-finalized case).
     fn obs(view: PriorTurnView) -> PriorTurnObservation {
@@ -881,6 +1074,43 @@ mod tests {
         );
         mark_absent(provider, channel);
         assert!(!pending_synthetic_start_present(provider, channel));
+        reset_present_for_tests();
+    }
+
+    #[test]
+    fn abandoned_presence_clear_keeps_durable_record() {
+        let _guard = worker_test_lock();
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        reset_present_for_tests();
+        let mut rec = record("claude", 70, 700);
+        rec.attempt_count = PENDING_START_MAX_CLAIM_ATTEMPTS;
+        persist(&rec).unwrap();
+
+        assert!(pending_synthetic_start_present("claude", 70));
+        assert!(
+            pending_synthetic_start_abandoned("claude", 70),
+            "a capped durable attempt_count with no active worker is an abandoned claim"
+        );
+        assert!(clear_abandoned_synthetic_start_presence("claude", 70));
+        assert!(
+            !pending_synthetic_start_present("claude", 70),
+            "the #3333 clear removes only the in-memory gate"
+        );
+        assert_eq!(
+            load_all()
+                .into_iter()
+                .filter(|record| record.provider == "claude" && record.channel_id == 70)
+                .count(),
+            1,
+            "the durable record must remain for restart retry"
+        );
+
         reset_present_for_tests();
     }
 
@@ -1335,6 +1565,13 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
 
         let _guard = worker_test_lock();
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
         reset_present_for_tests();
         let shared = super::super::make_shared_data_for_tests();
         let view: ViewFn =
@@ -1371,6 +1608,18 @@ mod tests {
             "on retry exhaustion the record is RETAINED for restart re-attempt — \
              RED if the worker deletes after exhausting claims (turn-loss)."
         );
+        assert!(
+            pending_synthetic_start_abandoned("claude", 12),
+            "after the worker exits with retry exhaustion, the durable capped \
+             attempt_count plus no active worker identifies the record as abandoned"
+        );
+        let retained = records_for_channel("claude", 12);
+        assert_eq!(retained.len(), 1);
+        assert_eq!(
+            retained[0].attempt_count, PENDING_START_MAX_CLAIM_ATTEMPTS,
+            "retry exhaustion must be persisted so queue_io can distinguish \
+             abandoned claims from live workers"
+        );
         assert_eq!(
             abort_cleanup_calls.load(Ordering::SeqCst),
             0,
@@ -1378,6 +1627,71 @@ mod tests {
              re-attempt — the anchor's ⏳ must stay (the restored worker may still \
              claim and complete it normally), so the abort cleanup must NOT fire"
         );
+        reset_present_for_tests();
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(start_paused = true)]
+    async fn live_worker_with_capped_attempt_count_is_not_abandoned() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let _guard = worker_test_lock();
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        reset_present_for_tests();
+        let shared = super::super::make_shared_data_for_tests();
+        let finalized = Arc::new(AtomicBool::new(false));
+        let finalized_for_view = finalized.clone();
+        let view: ViewFn = Box::new(move |_shared, _record| {
+            let finalized = finalized_for_view.clone();
+            Box::pin(async move {
+                let view = if finalized.load(Ordering::SeqCst) {
+                    base_view()
+                } else {
+                    PriorTurnView {
+                        inflight_present: true,
+                        inflight_is_own_anchor: false,
+                        mailbox_blocking_turn_present: true,
+                        mailbox_turn_is_own_anchor: false,
+                        runtime_binding_present: true,
+                    }
+                };
+                Some(obs(view))
+            })
+        });
+        let claim: ClaimFn = Box::new(move |_shared, _record| Box::pin(async move { true }));
+
+        let mut rec = record("claude", 13, 133);
+        rec.attempt_count = PENDING_START_MAX_CLAIM_ATTEMPTS;
+        persist(&rec).unwrap();
+        let (abort_cleanup, _, _) = recording_abort_cleanup();
+        let handle = tokio::spawn(run_worker(shared.clone(), rec, view, claim, abort_cleanup));
+
+        tokio::task::yield_now().await;
+        assert!(
+            !pending_synthetic_start_abandoned("claude", 13),
+            "a live worker must protect a capped durable record from being \
+             treated as abandoned during restart re-claim"
+        );
+        assert!(
+            !clear_abandoned_synthetic_start_presence("claude", 13),
+            "presence clear must refuse while a worker is active"
+        );
+
+        finalized.store(true, Ordering::SeqCst);
+        tokio::time::advance(PENDING_START_POLL * 2).await;
+        tokio::task::yield_now().await;
+        handle.await.unwrap();
+        assert!(
+            !pending_synthetic_start_present("claude", 13),
+            "the live worker's successful claim clears the presence through the normal delete path"
+        );
+
         reset_present_for_tests();
     }
 
