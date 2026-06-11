@@ -2524,12 +2524,31 @@ mod tests {
         );
     }
 
+    // Live #3304 reproduction. The duplicate did NOT come from the isMeta
+    // skill-expansion entry (that is already filtered to None below): the two
+    // observation paths see ASYMMETRIC text for one submission — the hook path
+    // records the raw `/loop <args>` invocation echo a ScheduleWakeup writes
+    // into the terminal, while the idle transcript relay later extracts the
+    // string-content `<command-*>` wrapper entry. Before the slash canonical
+    // key their fuzzy keys diverged and the wrapper published a second
+    // synthetic turn (2026-06-11 05:15 incident).
     #[test]
-    fn ignores_live_loop_skill_expansion_meta_entry_after_command_xml_prompt() {
+    fn suppresses_transcript_command_xml_after_raw_invocation_echo() {
         let _guard = TEST_LOCK.lock().unwrap();
         reset_state();
         let command_args = "매 주기마다: (1) sonnet 모델 서브에이전트를 스폰해 \
             **adk-cc 채널(1479671298497183835)만** 조사시키고 보고받는다";
+
+        // 1st observation (hook path): raw invocation echo, published normally.
+        let invocation_echo = format!("/loop {command_args}");
+        assert_eq!(
+            observe_prompt_by_tmux("claude", "tmux-loop", &invocation_echo),
+            PromptObservation::PublishedSshDirect
+        );
+
+        // 2nd observation (idle transcript relay): the same submission as a
+        // command-XML wrapper. Without the slash canonical key this fuzzy-
+        // mismatched the echo and published a duplicate synthetic turn.
         let wrapper = format!(
             "<command-message>loop</command-message>\n\
              <command-name>/loop</command-name>\n\
@@ -2543,6 +2562,15 @@ mod tests {
             },
             "timestamp": "2026-06-10T20:15:20.334Z",
         });
+        let prompt = extract_claude_transcript_user_prompt(&command_json).expect("command prompt");
+        assert_eq!(
+            observe_prompt_by_tmux("claude", "tmux-loop", &prompt),
+            PromptObservation::SuppressedRecentDuplicate,
+            "#3304: the XML wrapper form must attribute to the raw invocation echo"
+        );
+
+        // The isMeta:true skill-expansion entry is machine context and never
+        // reaches dedupe at all (pre-existing filter, unrelated to the bug).
         let skill_expansion_json = serde_json::json!({
             "type": "user",
             "isMeta": true,
@@ -2559,20 +2587,10 @@ mod tests {
             },
             "timestamp": "2026-06-10T20:15:20.334Z",
         });
-
-        let prompt = extract_claude_transcript_user_prompt(&command_json).expect("command prompt");
-        assert_eq!(
-            observe_prompt_by_tmux("claude", "tmux-loop", &prompt),
-            PromptObservation::PublishedSshDirect
-        );
         assert_eq!(
             extract_claude_transcript_user_prompt(&skill_expansion_json),
             None,
             "Claude records slash-command skill expansion as isMeta=true machine context"
-        );
-        assert_eq!(
-            observe_prompt_by_tmux("claude", "tmux-loop", &prompt),
-            PromptObservation::SuppressedRecentDuplicate
         );
     }
 
