@@ -162,7 +162,10 @@ pub async fn list_routines(
         .list_routines(query.agent_id.as_deref(), query.status.as_deref())
         .await
         .map_err(store_error)?;
-    Ok(Json(json!({ "routines": routines })))
+    Ok(Json(json!({
+        "routines": routines,
+        "default_timeout_secs": state.config.routines.agent_timeout_secs,
+    })))
 }
 
 pub async fn routine_metrics(
@@ -228,7 +231,10 @@ pub async fn get_routine(
             "routine {routine_id} not found"
         )));
     };
-    Ok(Json(json!({ "routine": routine })))
+    Ok(Json(json!({
+        "routine": routine,
+        "default_timeout_secs": state.config.routines.agent_timeout_secs,
+    })))
 }
 
 pub async fn list_routine_runs(
@@ -275,6 +281,7 @@ pub async fn attach_routine(
         body.fallback_agent_id.as_deref(),
     )
     .await?;
+    validate_distinct_fallback_agent(agent_id.as_deref(), fallback_agent_id.as_deref())?;
     let initial_status = initial_attach_status(&script_ref).to_string();
     let routine = store
         .attach_routine(NewRoutine {
@@ -319,8 +326,18 @@ pub async fn patch_routine(
     }
     validate_max_retries_request(body.max_retries)?;
     if let Some(fallback_agent_id) = body.fallback_agent_id.as_present() {
-        validate_agent_id_request(&state, "fallback_agent_id", fallback_agent_id.as_deref())
-            .await?;
+        let fallback_agent_id =
+            validate_agent_id_request(&state, "fallback_agent_id", fallback_agent_id.as_deref())
+                .await?;
+        let current = store
+            .get_routine(&routine_id)
+            .await
+            .map_err(store_error)?
+            .ok_or_else(|| AppError::not_found(format!("routine {routine_id} not found")))?;
+        validate_distinct_fallback_agent(
+            current.agent_id.as_deref(),
+            fallback_agent_id.as_deref(),
+        )?;
     }
     let patch = body.into_patch();
     let Some(routine) = store
@@ -780,6 +797,27 @@ async fn validate_agent_id_request(
     }
 }
 
+fn validate_distinct_fallback_agent(
+    agent_id: Option<&str>,
+    fallback_agent_id: Option<&str>,
+) -> AppResult<()> {
+    let Some(agent_id) = agent_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    let Some(fallback_agent_id) = fallback_agent_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    if agent_id == fallback_agent_id {
+        return Err(AppError::bad_request(
+            "routine fallback_agent_id must differ from agent_id",
+        ));
+    }
+    Ok(())
+}
+
 fn routine_health_target(config: &Config) -> Option<String> {
     config
         .kanban
@@ -820,6 +858,7 @@ mod tests {
     use super::{
         PARALLEL_SAFE_MIGRATED_LAUNCHD_SCRIPT_REF, PatchRoutineBody, ResumeRoutineBody,
         ensure_routine_runtime_runnable, initial_attach_status, normalize_script_ref, store_error,
+        validate_distinct_fallback_agent,
     };
     use crate::config::RoutinesConfig;
     use crate::error::ErrorCode;
@@ -833,6 +872,17 @@ mod tests {
         assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(err.code(), ErrorCode::Config);
         assert_eq!(err.message(), "routines are disabled by config");
+    }
+
+    #[test]
+    fn fallback_agent_must_differ_from_primary_agent() {
+        assert!(validate_distinct_fallback_agent(Some("codex"), Some("claude")).is_ok());
+        assert!(validate_distinct_fallback_agent(None, Some("claude")).is_ok());
+        assert!(validate_distinct_fallback_agent(Some("codex"), None).is_ok());
+
+        let err = validate_distinct_fallback_agent(Some("codex"), Some("codex"))
+            .expect_err("self fallback must be rejected");
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]

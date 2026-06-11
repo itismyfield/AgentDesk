@@ -3883,7 +3883,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ])
         .with_example(
             json!({"query": {"status": "enabled"}}),
-            json!({"routines": [{"id": "routine-1", "script_ref": "daily-summary.js", "status": "enabled"}]}),
+            json!({"routines": [{"id": "routine-1", "script_ref": "daily-summary.js", "status": "enabled", "fallback_agent_id": "claude", "max_retries": 1}], "default_timeout_secs": 1800}),
         ),
         ep(
             "GET",
@@ -3981,7 +3981,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_params([("id", path_param("Routine id"))])
         .with_example(
             json!({"path": {"id": "routine-1"}}),
-            json!({"routine": {"id": "routine-1", "script_ref": "daily-summary.js"}}),
+            json!({"routine": {"id": "routine-1", "script_ref": "daily-summary.js", "fallback_agent_id": "claude", "max_retries": 1}, "default_timeout_secs": 1800}),
         ),
         ep(
             "PATCH",

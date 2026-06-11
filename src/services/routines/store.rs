@@ -2881,6 +2881,19 @@ impl RoutineStore {
                 action = $3,
                 result_json = $4,
                 error = $5,
+                attempts = CASE
+                    WHEN $3 = 'agent' THEN COALESCE(attempts, '[]'::jsonb) || jsonb_build_array(
+                        jsonb_build_object(
+                            'event', 'closed',
+                            'agent_id', COALESCE($4::jsonb ->> 'agent_id', $4::jsonb ->> 'failed_agent_id'),
+                            'kind', COALESCE($4::jsonb ->> 'attempt_kind', 'primary'),
+                            'outcome', $2,
+                            'error', $5,
+                            'at', NOW()
+                        )
+                    )
+                    ELSE attempts
+                END,
                 finished_at = NOW(),
                 lease_expires_at = NULL,
                 next_retry_at = NULL,
