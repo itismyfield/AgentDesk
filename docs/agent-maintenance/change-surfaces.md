@@ -1046,7 +1046,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   execution are the canonical scheduled JS routine surfaces. Split focused
   helper modules before growing these files again.
 - `src/services/platform/binary_resolver.rs` (1221).
-- `src/services/discord/mod.rs` (4980; +34 from #3019 added the
+- `src/services/discord/mod.rs` (4965; +34 from #3019 added the
   single-authority `increment_global_active` helper + doc mirroring the
   existing decrement helper — offset by removing 6 inline raw `fetch_add`
   blocks across the relay turn-start sites that now route through it; +12 from
@@ -1064,7 +1064,10 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   root, no baseline raise; -7 from #3038 S2 lifting cluster D — the eight
   session-override fields — into `shared_state::SessionOverrideState`, leaving
   a single `overrides: SessionOverrideState` group field on `SharedData` with
-  the type re-exported for surface freeze),
+  the type re-exported for surface freeze; -15 from #3038 S3 lifting cluster E
+  — the thirteen restart-lifecycle fields — into
+  `shared_state::RestartLifecycle`, leaving a single `restart: RestartLifecycle`
+  group field on `SharedData` with the type re-exported for surface freeze),
   `src/services/discord_config_audit.rs` (1273).
 - `src/services/turn_orchestrator.rs` (3089; +3 from #3293 declaring the
   `registry_purge` child module — the non-creating `peek` lookup and the

@@ -383,6 +383,24 @@
 
 ### Audited touches
 
+- #3038 SharedData S3: `runtime_bootstrap.rs` gained restart-lifecycle
+  characterization tests that pin the deferred-restart marker quick-exit path
+  (`run_bot_spawn_deferred_restart_poller`) and the
+  `shutdown_counted`/`shutdown_remaining` exactly-once protocol through the
+  `run_bot_build_shared_data` injection seam, observed via the test's own
+  handle on the injected counter. The thirteen restart-lifecycle fields are
+  now initialized through the `RestartLifecycle` group literal wrapped at the
+  first member's original position (member expressions byte-identical; the
+  three trailing members hoisted above the actor-spawn calls are
+  side-effect-free, so every side-effecting initializer keeps its relative
+  order). `run_bot` body changes are two single-token field-path renames (one
+  comment, one tracing argument); the SIGTERM handler, poller, and
+  gateway-lease/recovery helpers received the same mechanical
+  `shared.<field>` → `shared.restart.<field>` substitution with no
+  statement, ordering, or lock-span changes. The process-global
+  `global_active`/`global_finalizing`/`shutdown_remaining` counters remain
+  injected `Arc` handles (no flattening), so worker-local state grouping
+  only: no multinode ownership, singleton, or lease assumption changes.
 - #3038 SharedData S2: `runtime_bootstrap.rs` changed only inside
   `run_bot_build_shared_data` — the eight session-override fields are now
   initialized through the `SessionOverrideState` group literal wrapped at the

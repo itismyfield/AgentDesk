@@ -206,7 +206,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // only touches `shared.{core, settings, pg_pool, dispatch_thread_parents}`,
     // none of which depend on a live gateway shard.
     //
-    // Cancellation rides on `shared.shutting_down`. On the leader, the
+    // Cancellation rides on `shared.restart.shutting_down`. On the leader, the
     // gateway-lease loss handler and SIGTERM handler flip that flag.
     // On standby today no signal handler is wired; the worker exits
     // when launchd kills the process during deploy. A follow-up could
@@ -241,7 +241,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
             "  [{ts}] 🔑 dcserver generation: {}",
-            shared.current_generation
+            shared.restart.current_generation
         );
         if !restored_model_overrides.is_empty() {
             tracing::info!(
@@ -436,23 +436,36 @@ fn run_bot_build_shared_data(
         answer_flush_barrier: std::sync::Arc::new(
             super::answer_flush_barrier::AnswerFlushBarrier::default(),
         ),
-        recovering_channels: dashmap::DashMap::new(),
-        shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        current_generation: runtime_store::load_generation(),
-        restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),
-        recovery_started_at: std::time::Instant::now(),
-        recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
-        global_active,
+        // #3038 S3: wrapped at the first-member position with member
+        // expressions byte-identical. The three trailing members
+        // (`global_finalizing` / `shutdown_remaining` / `shutdown_counted`)
+        // move textually above the TurnFinalizer/StatusPanelController spawn
+        // calls, but all three are side-effect-free initializers (parameter
+        // move, `Arc::clone`, const constructor), so the relative order of
+        // every side-effecting initializer
+        // (`load_queue_exit_placeholder_clears` ↔ `load_generation` ↔
+        // `Instant::now` ↔ `TurnFinalizer::spawn` ↔
+        // `StatusPanelController::spawn` ↔ `broadcast::channel`) is
+        // preserved.
+        restart: RestartLifecycle {
+            recovering_channels: dashmap::DashMap::new(),
+            shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            current_generation: runtime_store::load_generation(),
+            restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),
+            recovery_started_at: std::time::Instant::now(),
+            recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
+            global_active,
+            global_finalizing,
+            shutdown_remaining: shutdown_remaining.clone(),
+            shutdown_counted: std::sync::atomic::AtomicBool::new(false),
+        },
         turn_finalizer: super::turn_finalizer::TurnFinalizer::spawn(),
         status_panel_controller: super::status_panel_controller::StatusPanelController::spawn(
             status_panel_v2_enabled,
         ),
-        global_finalizing,
-        shutdown_remaining: shutdown_remaining.clone(),
-        shutdown_counted: std::sync::atomic::AtomicBool::new(false),
         intake_dedup: dashmap::DashMap::new(),
         dispatch_thread_parents: dashmap::DashMap::new(),
         bot_connected: std::sync::atomic::AtomicBool::new(false),
@@ -912,5 +925,199 @@ agents:
             !tmp.path().join("runtime").join("discord_handoff").exists(),
             "legacy handoff JSON must be removed without being parsed or consumed"
         );
+    }
+}
+
+#[cfg(test)]
+mod restart_lifecycle_characterization_tests {
+    //! #3038 S3-0 — characterization tests for the restart-lifecycle cluster
+    //! (cluster E) BEFORE the thirteen fields are lifted into
+    //! `shared_state::RestartLifecycle`. The same tests passing unchanged
+    //! after the move is the behaviour-equivalence proof (the S1
+    //! `QueuedPlaceholderState` / S2 `SessionOverrideState` characterization
+    //! standard, #3294/#3295 lineage).
+    //!
+    //! The tests never read `SharedData` fields. State is observed through
+    //! the test's own `Arc` handle on the injected process-global
+    //! `shutdown_remaining` counter (the `run_bot_build_shared_data`
+    //! injection seam used by the real `run_bot`), and behaviour is driven
+    //! only through the production function surface:
+    //! `run_bot_spawn_deferred_restart_poller` (the deferred-restart marker
+    //! poll loop, historically the `restart_ctrl` path) and
+    //! `check_deferred_restart`. This is what lets the extraction's
+    //! field-path rewiring land without a single test edit.
+    //!
+    //! Branches that cannot be pinned here, and why:
+    //! - the final-provider `std::process::exit(0)` arms (poller,
+    //!   `check_deferred_restart`, SIGTERM handler) would kill the test
+    //!   runner — every scenario below keeps `shutdown_remaining > 1`;
+    //! - the SIGTERM handler itself needs a process signal — its
+    //!   `shutdown_counted` CAS + `shutdown_remaining` decrement protocol is
+    //!   byte-identical to the poller/`check_deferred_restart` protocol
+    //!   pinned here, and the run_bot S0 precedent (word-diff 0 + compile
+    //!   gate) covers the unseedable handler body;
+    //! - `check_deferred_restart`'s fresh-token decrement branch requires
+    //!   `restart_pending == true` with `shutdown_counted == false`, a state
+    //!   only the unseedable SIGTERM path produces without writing fields
+    //!   directly — it is pinned by a post-move regression test instead
+    //!   (`shared_state.rs` S3), where the group path may be used freely.
+
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+
+    struct EnvGuard;
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var(AGENTDESK_ROOT_DIR_ENV);
+            }
+        }
+    }
+
+    fn isolate_runtime_root(tmp: &std::path::Path) -> EnvGuard {
+        unsafe {
+            std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.to_str().unwrap());
+        }
+        EnvGuard
+    }
+
+    /// Build a `SharedData` through the production constructor
+    /// (`run_bot_build_shared_data`) so the test keeps its own handle on the
+    /// injected `shutdown_remaining` counter — exactly how `run_bot` shares
+    /// the counter across providers — instead of reading `SharedData` fields.
+    fn build_shared_with_injected_shutdown_remaining(
+        shutdown_remaining: &Arc<AtomicUsize>,
+    ) -> Arc<SharedData> {
+        let voice = Arc::new(voice_barge_in::VoiceBargeInRuntime::disabled());
+        let health_registry = Arc::new(health::HealthRegistry::new());
+        run_bot_build_shared_data(
+            DiscordBotSettings::default(),
+            Vec::new(),
+            &ProviderKind::Claude,
+            "s3-restart-characterization-token-hash",
+            &voice,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            shutdown_remaining,
+            &health_registry,
+            None,
+            None,
+            9,
+            false,
+            false,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+    }
+
+    // Current-thread runtime driven from a synchronous `#[test]` so the
+    // `test_support` env lock is never held across an `.await` inside an
+    // async context (await_holding_lock ratchet stays flat — S1/S2 pattern).
+    // `start_paused` auto-advance fast-forwards the 10s deferred-restart
+    // poll interval instead of sleeping through it in real time.
+    fn paused_rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn check_deferred_restart_is_noop_without_restart_pending() {
+        // #3167 B3: serialize process-global env mutation via the single
+        // crate-wide `test_support` lock (no local per-module Mutex).
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = isolate_runtime_root(tmp.path());
+        let rt = paused_rt();
+        rt.block_on(async {
+            let shutdown_remaining = Arc::new(AtomicUsize::new(5));
+            let shared = build_shared_with_injected_shutdown_remaining(&shutdown_remaining);
+
+            // Decision matrix row 1: no restart pending — the helper must
+            // return before touching the shutdown token or the barrier.
+            check_deferred_restart(&shared);
+            assert_eq!(
+                shutdown_remaining.load(Ordering::Acquire),
+                5,
+                "without restart_pending, check_deferred_restart must not consume the shutdown token"
+            );
+
+            // Idempotent: a second poll-loop tick is still a no-op.
+            check_deferred_restart(&shared);
+            assert_eq!(shutdown_remaining.load(Ordering::Acquire), 5);
+        });
+    }
+
+    #[test]
+    fn deferred_restart_poller_consumes_marker_token_and_decrements_exactly_once() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = isolate_runtime_root(tmp.path());
+        let rt = paused_rt();
+        rt.block_on(async {
+            // Three providers outstanding: this provider's quick-exit pass
+            // must take the count 3 → 2 and stop there (the exit(0) arm is
+            // only reachable for the LAST provider, remaining == 1).
+            let shutdown_remaining = Arc::new(AtomicUsize::new(3));
+            let shared = build_shared_with_injected_shutdown_remaining(&shutdown_remaining);
+
+            let root = crate::agentdesk_runtime_root().expect("runtime root override");
+            std::fs::create_dir_all(&root).unwrap();
+            let marker = root.join("restart_pending");
+            std::fs::write(&marker, "v0.0.0-s3-characterization").unwrap();
+
+            spawns::run_bot_spawn_deferred_restart_poller(&shared, &ProviderKind::Claude);
+
+            // Marker branch: restart_pending + shutting_down are flipped,
+            // the shutdown_counted CAS consumes this provider's token, local
+            // state is persisted, and shutdown_remaining decrements ONCE.
+            let mut decremented = false;
+            for _ in 0..400 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if shutdown_remaining.load(Ordering::Acquire) == 2 {
+                    decremented = true;
+                    break;
+                }
+            }
+            assert!(
+                decremented,
+                "deferred-restart poller must decrement the injected shutdown_remaining via the marker quick-exit path"
+            );
+
+            // Exactly-once: the consumed token blocks every later decrement
+            // attempt — give the poller several more (auto-advanced) poll
+            // intervals and re-drive the check_deferred_restart surface
+            // directly. If the CAS guard regressed, remaining would hit 1.
+            for _ in 0..400 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            assert_eq!(
+                shutdown_remaining.load(Ordering::Acquire),
+                2,
+                "shutdown_counted must hold the poller to a single shutdown_remaining decrement"
+            );
+            check_deferred_restart(&shared);
+            assert_eq!(
+                shutdown_remaining.load(Ordering::Acquire),
+                2,
+                "a consumed shutdown token must make check_deferred_restart a no-op (poll-loop + SIGTERM double-run guard)"
+            );
+
+            // Non-final provider must leave the marker on disk for the
+            // remaining providers' own quick-exit passes.
+            assert!(
+                marker.exists(),
+                "restart_pending marker is only removed by the final provider's exit arm"
+            );
+        });
     }
 }

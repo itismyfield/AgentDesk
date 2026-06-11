@@ -2455,16 +2455,16 @@ pub(in crate::services::discord) async fn handle_event(
                     has_reply_boundary,
                     merge_consecutive,
                     upload_records.clone(),
-                    // #2266: main busy-active-turn queue path — voice
-                    // transcripts that arrive while a previous turn is
-                    // running flow through here. Embed the announcement
-                    // so the queued dispatch reinserts it into the store
-                    // even if the >30s in-memory TTL expires first.
+                    // #2266: main busy-active-turn queue path — voice transcripts that
+                    // arrive while a previous turn is running flow through here. Embed the
+                    // announcement so the queued dispatch reinserts it into the store even
+                    // if the >30s in-memory TTL expires first.
                     resolved_voice_announcement.clone(),
                 )
                 .await;
                 let is_shutting_down = data
                     .shared
+                    .restart
                     .shutting_down
                     .load(std::sync::atomic::Ordering::Relaxed);
 
@@ -2522,6 +2522,7 @@ pub(in crate::services::discord) async fn handle_event(
             // Reconcile gate (#122): until startup recovery is complete, queue messages.
             if !data
                 .shared
+                .restart
                 .reconcile_done
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
@@ -2547,9 +2548,8 @@ pub(in crate::services::discord) async fn handle_event(
                     has_reply_boundary,
                     merge_consecutive,
                     upload_records.clone(),
-                    // #2266: reconcile gate — startup-recovery queue path.
-                    // Voice transcripts that arrive before recovery
-                    // completes need the embedded payload too.
+                    // #2266: reconcile gate — startup-recovery queue path. Voice transcripts
+                    // that arrive before recovery completes need the embedded payload too.
                     resolved_voice_announcement.clone(),
                 )
                 .await;
@@ -2568,11 +2568,13 @@ pub(in crate::services::discord) async fn handle_event(
             // starting new turns. This ensures only existing turns drain to completion.
             if data
                 .shared
+                .restart
                 .restart_pending
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
                 let is_shutting_down = data
                     .shared
+                    .restart
                     .shutting_down
                     .load(std::sync::atomic::Ordering::Relaxed);
 
@@ -2598,9 +2600,8 @@ pub(in crate::services::discord) async fn handle_event(
                     has_reply_boundary,
                     merge_consecutive,
                     upload_records.clone(),
-                    // #2266: drain-mode queue path (restart pending) —
-                    // pass the embedded voice payload so the post-restart
-                    // dispatch path can reinsert it into the store.
+                    // #2266: drain-mode queue path (restart pending) — pass the embedded voice
+                    // payload so the post-restart dispatch path can reinsert it into the store.
                     resolved_voice_announcement.clone(),
                 )
                 .await;
@@ -2621,8 +2622,7 @@ pub(in crate::services::discord) async fn handle_event(
                 )
                 .await;
 
-                // Checkpoint: message successfully queued in drain mode
-                // (#2044 F12 — monotonic).
+                // Checkpoint: message successfully queued in drain mode (#2044 F12 — monotonic).
                 super::super::advance_last_message_checkpoint(
                     &data.shared,
                     &data.provider,

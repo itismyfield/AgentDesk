@@ -508,6 +508,7 @@ mod tests {
                 let ch = ChannelId::new(3_350_100);
                 let tid = 3_350_101_u64;
                 shared
+                    .restart
                     .global_active
                     .store(1, std::sync::atomic::Ordering::Relaxed);
                 let _token = seed_active_turn(&shared, ch, tid).await;
@@ -604,6 +605,7 @@ mod tests {
                 let ch = ChannelId::new(3_350_200);
                 let tid = 3_350_201_u64;
                 shared
+                    .restart
                     .global_active
                     .store(1, std::sync::atomic::Ordering::Relaxed);
                 let _token = seed_active_turn(&shared, ch, tid).await;
@@ -725,6 +727,7 @@ mod tests {
                 let ch = ChannelId::new(3_334_100);
                 let tid = 3_334_101_u64;
                 shared
+                    .restart
                     .global_active
                     .store(1, std::sync::atomic::Ordering::Relaxed);
                 let _token = seed_active_turn(&shared, ch, tid).await;
@@ -768,7 +771,7 @@ mod tests {
                 let ch = ChannelId::new(3_334_200);
                 let tid = 3_334_201_u64;
                 shared
-                    .global_active
+                    .restart.global_active
                     .store(1, std::sync::atomic::Ordering::Relaxed);
                 let _token = seed_active_turn(&shared, ch, tid).await;
                 let fin = TurnFinalizer::spawn();
@@ -816,6 +819,7 @@ mod tests {
                 let ch = ChannelId::new(3_334_400);
                 let tid = 3_334_401_u64;
                 shared
+                    .restart
                     .global_active
                     .store(1, std::sync::atomic::Ordering::Relaxed);
                 let _token = seed_active_turn(&shared, ch, tid).await;
@@ -849,6 +853,7 @@ mod tests {
                 let old_tid = 3_334_501_u64;
                 let newer_tid = 3_334_502_u64;
                 shared
+                    .restart
                     .global_active
                     .store(1, std::sync::atomic::Ordering::Relaxed);
                 let _newer = seed_active_turn(&shared, ch, newer_tid).await;

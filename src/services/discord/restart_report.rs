@@ -298,6 +298,7 @@ pub(super) async fn flush_restart_reports(
             let age = report_age(&report).unwrap_or_default();
             let has_active_turn = mailbox_has_active_turn(shared, channel_id).await;
             let has_finalizing = shared
+                .restart
                 .finalizing_turns
                 .load(std::sync::atomic::Ordering::Relaxed)
                 > 0;

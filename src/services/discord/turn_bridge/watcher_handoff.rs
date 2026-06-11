@@ -376,7 +376,7 @@ pub(super) fn maybe_hand_off_busy_turn_to_watcher(
             TurnKey::new(
                 channel_id,
                 inflight_state.user_msg_id,
-                shared_owned.current_generation,
+                shared_owned.restart.current_generation,
             ),
             provider.clone(),
             RelayOwnerKind::Watcher,

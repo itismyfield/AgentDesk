@@ -1256,7 +1256,7 @@ pub(super) async fn finish_recovered_turn_mailbox(
     let _ = shared
         .turn_finalizer
         .submit_terminal(
-            super::turn_finalizer::TurnKey::new(channel_id, 0, shared.current_generation),
+            super::turn_finalizer::TurnKey::new(channel_id, 0, shared.restart.current_generation),
             provider.clone(),
             super::turn_finalizer::TerminalEvent::Complete,
             super::turn_finalizer::FinalizeContext::monitor(),
@@ -1297,7 +1297,7 @@ fn reseed_watcher_owned_finalizer_ledger(
         super::turn_finalizer::TurnKey::new(
             channel_id,
             user_msg_id.get(),
-            shared.current_generation,
+            shared.restart.current_generation,
         ),
         provider.clone(),
         super::inflight::RelayOwnerKind::Watcher,
@@ -3763,14 +3763,14 @@ pub(super) async fn restore_inflight_turns(
                 }
             }
 
-            // Keep the inflight state until the watcher either relays the
-            // final response or triggers watcher-death handoff. Clearing it
-            // here breaks the handoff path if the recovered tmux session
-            // dies before producing a result.
+            // Keep the inflight state until the watcher either relays the final response or
+            // triggers watcher-death handoff. Clearing it here breaks the handoff path if the
+            // recovered tmux session dies before producing a result.
             continue;
         }
 
         shared
+            .restart
             .recovering_channels
             .insert(channel_id, std::time::Instant::now());
 
@@ -4628,7 +4628,7 @@ mod reregister_ledger_reseed_tests {
         assert!(
             !shared
                 .turn_finalizer
-                .has_live_watcher_pending(ch, shared.current_generation)
+                .has_live_watcher_pending(ch, shared.restart.current_generation)
                 .await,
             "ledger must start empty (simulating a post-restart in-memory ledger)"
         );
@@ -4644,7 +4644,7 @@ mod reregister_ledger_reseed_tests {
         assert!(
             shared
                 .turn_finalizer
-                .has_live_watcher_pending(ch, shared.current_generation)
+                .has_live_watcher_pending(ch, shared.restart.current_generation)
                 .await,
             "#3248 gap-1: reattach must register_start the turn as Watcher-owned"
         );
@@ -4673,7 +4673,7 @@ mod reregister_ledger_reseed_tests {
         assert!(
             shared
                 .turn_finalizer
-                .has_live_watcher_pending(ch, shared.current_generation)
+                .has_live_watcher_pending(ch, shared.restart.current_generation)
                 .await,
             "repeated reattach keeps a single live Watcher-pending entry"
         );
@@ -4697,7 +4697,7 @@ mod reregister_ledger_reseed_tests {
         assert!(
             !shared
                 .turn_finalizer
-                .has_live_watcher_pending(ch, shared.current_generation)
+                .has_live_watcher_pending(ch, shared.restart.current_generation)
                 .await,
             "a zero user_msg_id turn must NOT seed an orphan ledger entry"
         );

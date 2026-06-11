@@ -55,6 +55,7 @@ fn deferred_idle_queue_initial_presleep(immediate_once: bool) -> std::time::Dura
 impl Drop for DeferredHookBacklogGuard {
     fn drop(&mut self) {
         self.shared
+            .restart
             .deferred_hook_backlog
             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
@@ -95,6 +96,7 @@ fn schedule_deferred_idle_queue_kickoff_inner(
     immediate_once: bool,
 ) {
     shared
+        .restart
         .deferred_hook_backlog
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     super::task_supervisor::spawn_observed("deferred_idle_queue_kickoff", async move {

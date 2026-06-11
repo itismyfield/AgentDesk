@@ -606,7 +606,7 @@ async fn apply_runtime_hard_stop_cleanup(
     shared
         .dispatch_thread_parents
         .retain(|_, thread| *thread != channel_id);
-    shared.recovering_channels.remove(&channel_id);
+    shared.restart.recovering_channels.remove(&channel_id);
     shared.turn_start_times.remove(&channel_id);
 
     if !finish.has_pending {
@@ -740,7 +740,7 @@ pub async fn finish_cancelled_provider_channel_mailbox(
         return FinishCancelledMailboxResult::default();
     };
 
-    let before = runtime.shared.global_active.load(Ordering::Acquire);
+    let before = runtime.shared.restart.global_active.load(Ordering::Acquire);
     let finish = discord::mailbox_finish_cancelled_turn(&runtime.shared, channel_id).await;
     if finish.removed_token.is_none() {
         return FinishCancelledMailboxResult {
@@ -760,7 +760,7 @@ pub async fn finish_cancelled_provider_channel_mailbox(
         true,
     )
     .await;
-    let after = runtime.shared.global_active.load(Ordering::Acquire);
+    let after = runtime.shared.restart.global_active.load(Ordering::Acquire);
     let global_active_decremented = after < before;
     if !global_active_decremented {
         tracing::warn!(

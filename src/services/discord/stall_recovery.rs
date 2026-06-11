@@ -27,7 +27,7 @@ use poise::serenity_prelude as serenity;
 use super::SharedData;
 use crate::services::provider::CancelToken;
 
-/// Saturating decrement of `shared.global_active`. The naive
+/// Saturating decrement of `shared.restart.global_active`. The naive
 /// `fetch_sub(1)` can wrap `0 → usize::MAX` when the counter was never
 /// incremented for this turn — `reregister_active_turn_from_inflight`
 /// re-creates a mailbox cancel token after a dcserver restart without

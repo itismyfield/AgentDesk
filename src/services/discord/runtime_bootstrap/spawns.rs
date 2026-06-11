@@ -22,12 +22,15 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                 let marker = root.join("restart_pending");
                 if marker.exists() {
                     shared_for_deferred
+                        .restart
                         .restart_pending
                         .store(true, Ordering::SeqCst);
                     shared_for_deferred
+                        .restart
                         .shutting_down
                         .store(true, Ordering::SeqCst);
                     if shared_for_deferred
+                        .restart
                         .shutdown_counted
                         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
                         .is_err()
@@ -83,6 +86,7 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                         "  [{ts}] 🔄 restart_pending detected — quick exit after persisting {queue_count} queued item(s)"
                     );
                     if shared_for_deferred
+                        .restart
                         .shutdown_remaining
                         .fetch_sub(1, Ordering::AcqRel)
                         == 1
@@ -93,13 +97,20 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                 }
             }
             // Use process-global counters so we wait for ALL providers
-            let g_active = shared_for_deferred.global_active.load(Ordering::Relaxed);
+            let g_active = shared_for_deferred
+                .restart
+                .global_active
+                .load(Ordering::Relaxed);
             let g_finalizing = shared_for_deferred
+                .restart
                 .global_finalizing
                 .load(Ordering::Relaxed);
             if g_active == 0
                 && g_finalizing == 0
-                && shared_for_deferred.restart_pending.load(Ordering::Relaxed)
+                && shared_for_deferred
+                    .restart
+                    .restart_pending
+                    .load(Ordering::Relaxed)
             {
                 let drain =
                     mailbox_restart_drain_all(&shared_for_deferred, &provider_for_deferred).await;

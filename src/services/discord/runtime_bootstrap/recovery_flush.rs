@@ -227,7 +227,7 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
             // already handles them with longer retention).
             let invalidated = super::inflight::invalidate_stale_generation(
                 &provider_for_restore,
-                shared_for_tmux2.current_generation,
+                shared_for_tmux2.restart.current_generation,
             );
             if invalidated > 0 {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -235,7 +235,7 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                     "  [{ts}] 🧹 inflight: invalidated {} stale-generation row(s) for {} (current generation {}) — #2437",
                     invalidated,
                     provider_for_restore.as_str(),
-                    shared_for_tmux2.current_generation,
+                    shared_for_tmux2.restart.current_generation,
                 );
             }
 
@@ -254,6 +254,7 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                 // by inserting a recovery_handled marker in kv_meta.
                 // restore_tmux_watchers checks this and skips those channels.
                 let recovery_channels: Vec<u64> = shared_for_tmux2
+                    .restart
                     .recovering_channels
                     .iter()
                     .map(|entry| entry.key().get())
