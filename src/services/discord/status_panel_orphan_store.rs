@@ -154,6 +154,8 @@ fn load_pending_in_root(root: &Path, provider: &ProviderKind, token_hash: &str) 
 
 /// Record a panel id for durable delete-retry. Idempotent (set semantics) so a
 /// sweeper that re-observes the same orphan every pass does not grow the file.
+/// #3351: also accepts watcher relay-placeholder ids (not only v2 panel ids) —
+/// the drain semantics (delete or forget) are identical for both.
 pub(in crate::services::discord) fn enqueue(
     provider: &ProviderKind,
     token_hash: &str,
@@ -260,6 +262,12 @@ fn assert_orphan_gate_parity(
     );
 }
 
+/// #3351: pure drain-defer decision for relay-placeholder records — `true` when
+/// the live inflight row still anchors `candidate` as its `current_msg_id`.
+fn orphan_drain_placeholder_is_live(current_msg_id: Option<u64>, candidate: u64) -> bool {
+    candidate != 0 && current_msg_id == Some(candidate)
+}
+
 /// Retry every pending panel delete once. A committed delete, or a permanent
 /// "message gone" (404/403/410), drops the record; a transient failure keeps it
 /// for the next pass. Returns the number of records cleared this pass.
@@ -295,9 +303,11 @@ pub(in crate::services::discord) async fn drain(
         // tmux pane — would defer an OLD turn's orphan forever (the store is its only
         // reclaim path). A different/absent `status_message_id` means the live turn
         // does not own this orphan, so it is safe to delete now.
-        let inflight_panel_id =
-            crate::services::discord::inflight::load_inflight_state(provider, channel_id)
-                .and_then(|state| state.status_message_id);
+        let inflight_state =
+            crate::services::discord::inflight::load_inflight_state(provider, channel_id);
+        let inflight_panel_id = inflight_state
+            .as_ref()
+            .and_then(|state| state.status_message_id);
         let legacy_owns = inflight_panel_id == Some(panel_msg_id);
         // EPIC #3078 PR-3 — route this turn-aware defer gate through the
         // `StatusPanelController` behind a SHADOW parity check. The controller
@@ -328,7 +338,15 @@ pub(in crate::services::discord) async fn drain(
                 .await;
             assert_orphan_gate_parity(controller_owns, legacy_owns, channel_id, panel_msg_id);
         }
-        if legacy_owns {
+        // #3351: the store also holds watcher relay-placeholder ids. Defer while
+        // the live inflight row still anchors this id as `current_msg_id` (the
+        // watcher's in-turn retry may be editing it). Kept SEPARATE from
+        // `legacy_owns` so the #3078 controller parity assert above is untouched.
+        let live_placeholder_owns = orphan_drain_placeholder_is_live(
+            inflight_state.as_ref().map(|state| state.current_msg_id),
+            panel_msg_id,
+        );
+        if legacy_owns || live_placeholder_owns {
             continue;
         }
         let channel = serenity::ChannelId::new(channel_id);
@@ -379,6 +397,16 @@ mod tests {
         // Removing the last id deletes the channel file → empty pending.
         remove_in_root(root, &provider, token, 100, 5002);
         assert!(load_pending_in_root(root, &provider, token).is_empty());
+    }
+
+    /// #3351: the drain defers a record only while the live inflight row still
+    /// anchors that exact id as its relay placeholder.
+    #[test]
+    fn orphan_drain_placeholder_is_live_defers_only_exact_live_anchor() {
+        assert!(orphan_drain_placeholder_is_live(Some(5555), 5555));
+        assert!(!orphan_drain_placeholder_is_live(Some(0), 0));
+        assert!(!orphan_drain_placeholder_is_live(Some(9999), 5555));
+        assert!(!orphan_drain_placeholder_is_live(None, 5555));
     }
 
     /// EPIC #3078 PR-3: for representative drain-gate inputs, the

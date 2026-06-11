@@ -362,6 +362,30 @@ pub(super) fn watcher_external_input_turn_abandoned(
     }
 }
 
+/// #3351: at the orphan-panel reclaim sites, should the same turn's relay
+/// placeholder be reclaimed alongside the status panel?
+///
+/// A message already edited into a real response body (the still-placeholder
+/// probe returns false) is NEVER deleted. Turns that DID produce assistant text
+/// are excluded (`!has_assistant_response`) so the existing recent-stop /
+/// stale-clear arms keep sole ownership of the abandoned-with-response case.
+/// A restored placeholder's `last_edit_text` is seeded from
+/// `reconstructed_inflight_placeholder_body`, so streamed content also fails
+/// the probe and is protected.
+pub(super) fn watcher_should_reclaim_orphan_turn_placeholder(
+    turn_is_external_input: bool,
+    placeholder_msg_id: Option<serenity::MessageId>,
+    has_assistant_response: bool,
+    last_edit_text: &str,
+) -> bool {
+    turn_is_external_input
+        && placeholder_msg_id.is_some()
+        && !has_assistant_response
+        && crate::services::discord::placeholder_sweeper::is_message_still_placeholder(
+            last_edit_text,
+        )
+}
+
 /// #3107 (CHANGE 3): pure decision for the `load_inflight_state == None` arm of
 /// `watcher_external_input_turn_abandoned`. A missing inflight is abandonment
 /// ONLY when the pane is not actively streaming; an actively-streaming pane is a

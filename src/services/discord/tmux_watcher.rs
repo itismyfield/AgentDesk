@@ -1392,6 +1392,86 @@ async fn cleanup_orphan_external_input_status_panel(
     true
 }
 
+/// #3351: reclaim the same turn's relay placeholder alongside the orphan status
+/// panel. Caller has already passed `watcher_should_reclaim_orphan_turn_placeholder`.
+/// Outcome handling mirrors the panel arm (#3003 r10/r16): transient failure keeps
+/// the local id for an in-turn retry + enqueues a durable record; committed /
+/// permanent failure drops the handles and compare-and-clears the persisted
+/// `current_msg_id` (#3077 pattern) so a later segment cannot edit the stale id.
+/// The return value is NOT wired into finalize decisions (panel defer semantics
+/// #3003 r5/r12 unchanged).
+#[allow(clippy::too_many_arguments)]
+async fn reclaim_orphan_external_input_placeholder(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    placeholder_msg_id: &mut Option<serenity::MessageId>,
+    placeholder_from_restored_inflight: &mut bool,
+    last_edit_text: &mut String,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+) -> bool {
+    let Some(msg_id) = *placeholder_msg_id else {
+        return true;
+    };
+    let outcome = delete_nonterminal_placeholder(
+        http,
+        channel_id,
+        shared,
+        provider,
+        tmux_session_name,
+        msg_id,
+        "watcher_orphan_external_input_placeholder_cleanup",
+    )
+    .await;
+    if !outcome.is_committed() && !outcome.is_permanent_failure() {
+        crate::services::discord::status_panel_orphan_store::enqueue(
+            provider,
+            &shared.token_hash,
+            channel_id.get(),
+            msg_id.get(),
+        );
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ watcher: orphan placeholder delete did not commit for channel {} msg {}; kept local id + enqueued durable retry",
+            channel_id.get(),
+            msg_id.get()
+        );
+        return false;
+    }
+    if !outcome.is_committed() {
+        crate::services::discord::status_panel_orphan_store::remove(
+            provider,
+            &shared.token_hash,
+            channel_id.get(),
+            msg_id.get(),
+        );
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ watcher: orphan placeholder delete permanently failed for channel {} msg {}; giving up (treated as committed)",
+            channel_id.get(),
+            msg_id.get()
+        );
+    }
+    *placeholder_msg_id = None;
+    *placeholder_from_restored_inflight = false;
+    last_edit_text.clear();
+    let _ = crate::services::discord::inflight::clear_current_msg_if_matches(
+        provider,
+        channel_id.get(),
+        msg_id.get(),
+        Some(tmux_session_name),
+    );
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!(
+        "  [{ts}] 🧹 watcher: cleaned orphan relay placeholder for TUI-direct turn (channel {}, tmux={}, msg={})",
+        channel_id.get(),
+        tmux_session_name,
+        msg_id.get()
+    );
+    true
+}
+
 /// Returns whether the completion edit/send committed. `false` means the final
 /// panel edit hit a transient Discord error and the panel is still showing the
 /// processing state — the caller must preserve a retry handle (enqueue the panel
@@ -2986,8 +3066,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     // guard can skip it — the recurring orphan source. Committed turns
                     // null out `status_panel_msg_id` right after completion, so a
                     // finalized panel is never deleted here.
+                    // #3351: an abandoned TUI-direct turn can also leave its relay
+                    // placeholder stuck on the spinner — reclaim it alongside the
+                    // panel (never a message already edited into a real response).
+                    let tick_placeholder_reclaim = watcher_should_reclaim_orphan_turn_placeholder(
+                        turn_is_external_input_for_session,
+                        placeholder_msg_id,
+                        !full_response.trim().is_empty(),
+                        &last_edit_text,
+                    );
                     if turn_is_external_input_for_session
-                        && status_panel_msg_id.is_some()
+                        && (status_panel_msg_id.is_some() || tick_placeholder_reclaim)
                         && watcher_external_input_turn_abandoned(
                             &watcher_provider,
                             channel_id,
@@ -3007,6 +3096,19 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             turn_is_external_input_for_session,
                         )
                         .await;
+                        if tick_placeholder_reclaim {
+                            reclaim_orphan_external_input_placeholder(
+                                &http,
+                                &shared,
+                                channel_id,
+                                &mut placeholder_msg_id,
+                                &mut placeholder_from_restored_inflight,
+                                &mut last_edit_text,
+                                &watcher_provider,
+                                &tmux_session_name,
+                            )
+                            .await;
+                        }
                     }
 
                     // Headless silent trigger (metadata.silent=true): skip both
@@ -5095,8 +5197,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // its panel — deleting it here would erase a panel that is about to
         // complete. Stopped/abandoned such turns are still reclaimed via the
         // abandon arm.
-        let terminal_panel_reclaim_committed = if turn_is_external_input_for_session
-            && status_panel_msg_id.is_some()
+        // #3351: same-turn relay placeholder reclaim rides the identical orphan
+        // context; gated so a placeholder already edited into a real response (or
+        // a turn with assistant text — owned by the recent-stop/stale-clear arms)
+        // is never deleted here.
+        let terminal_placeholder_reclaim = watcher_should_reclaim_orphan_turn_placeholder(
+            turn_is_external_input_for_session,
+            placeholder_msg_id,
+            has_assistant_response,
+            &last_edit_text,
+        );
+        let terminal_orphan_context = turn_is_external_input_for_session
+            && (status_panel_msg_id.is_some() || terminal_placeholder_reclaim)
             && ((!has_assistant_response && task_notification_kind.is_none())
                 || watcher_external_input_turn_abandoned(
                     &watcher_provider,
@@ -5105,20 +5217,35 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     &output_path,
                     data_start_offset,
                     turn_identity_for_panel.as_ref(),
-                )) {
-            cleanup_orphan_external_input_status_panel(
+                ));
+        let terminal_panel_reclaim_committed =
+            if terminal_orphan_context && status_panel_msg_id.is_some() {
+                cleanup_orphan_external_input_status_panel(
+                    &http,
+                    &shared,
+                    channel_id,
+                    &mut status_panel_msg_id,
+                    &watcher_provider,
+                    &tmux_session_name,
+                    turn_is_external_input_for_session,
+                )
+                .await
+            } else {
+                true
+            };
+        if terminal_orphan_context && terminal_placeholder_reclaim {
+            reclaim_orphan_external_input_placeholder(
                 &http,
                 &shared,
                 channel_id,
-                &mut status_panel_msg_id,
+                &mut placeholder_msg_id,
+                &mut placeholder_from_restored_inflight,
+                &mut last_edit_text,
                 &watcher_provider,
                 &tmux_session_name,
-                turn_is_external_input_for_session,
             )
-            .await
-        } else {
-            true
-        };
+            .await;
+        }
         let inflight_silent_turn = inflight_before_relay
             .as_ref()
             .map(|state| state.silent_turn)
@@ -8137,6 +8264,7 @@ mod tests {
         watcher_inflight_represents_external_input, watcher_jsonl_turn_state_ready_for_input,
         watcher_output_progressed_recently, watcher_should_clear_stale_terminal_message_ids,
         watcher_should_delete_suppressed_placeholder,
+        watcher_should_reclaim_orphan_turn_placeholder,
         watcher_should_suppress_streaming_after_bridge_delivery,
         watcher_terminal_commit_side_effects_for_test, watcher_terminal_edit_consumes_placeholder,
         watcher_terminal_token_update_status,
@@ -9922,6 +10050,50 @@ TUI-E2E-marker ssh-direct
         ));
         assert!(!watcher_should_clear_stale_terminal_message_ids(
             false, true, None
+        ));
+    }
+
+    /// #3351: orphan-reclaim decision for the same turn's relay placeholder.
+    #[test]
+    fn orphan_turn_placeholder_reclaim_decision() {
+        let id = Some(MessageId::new(42));
+        // The leaked-spinner case from the issue: reclaim.
+        assert!(watcher_should_reclaim_orphan_turn_placeholder(
+            true,
+            id,
+            false,
+            "⠸ 계속 처리 중"
+        ));
+        // Empty body = still-placeholder (sweeper semantics inherited).
+        assert!(watcher_should_reclaim_orphan_turn_placeholder(
+            true, id, false, ""
+        ));
+        // Already edited into a real response body: never delete.
+        assert!(!watcher_should_reclaim_orphan_turn_placeholder(
+            true,
+            id,
+            false,
+            "실제 응답 본문"
+        ));
+        // Turn produced assistant text: owned by the existing arms.
+        assert!(!watcher_should_reclaim_orphan_turn_placeholder(
+            true,
+            id,
+            true,
+            "⠸ 계속 처리 중"
+        ));
+        // Bridge-owned turn: hands off.
+        assert!(!watcher_should_reclaim_orphan_turn_placeholder(
+            false,
+            id,
+            false,
+            "⠸ 계속 처리 중"
+        ));
+        assert!(!watcher_should_reclaim_orphan_turn_placeholder(
+            true,
+            None,
+            false,
+            "⠸ 계속 처리 중"
         ));
     }
 

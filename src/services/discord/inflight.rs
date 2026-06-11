@@ -1577,6 +1577,70 @@ fn clear_status_panel_if_current_in_root(
     .is_ok()
 }
 
+/// #3351: compare-and-clear for the persisted relay-placeholder id
+/// (`current_msg_id`), mirroring `clear_status_panel_if_current` (#3077): only
+/// the exact `msg_id` is cleared, a placeholderless Discord turn
+/// (`current_msg_id == user_msg_id`) is never touched, and the optional tmux
+/// guard restricts the clear to the caller's own session row. `current_msg_id
+/// == 0` is a legitimate "no anchored placeholder" state, so clearing to 0 is
+/// safe.
+pub(in crate::services::discord) fn clear_current_msg_if_matches(
+    provider: &ProviderKind,
+    channel_id: u64,
+    msg_id: u64,
+    require_tmux_session_name: Option<&str>,
+) -> bool {
+    let Some(root) = inflight_runtime_root() else {
+        return false;
+    };
+    clear_current_msg_if_matches_in_root(
+        &root,
+        provider,
+        channel_id,
+        msg_id,
+        require_tmux_session_name,
+    )
+}
+
+fn clear_current_msg_if_matches_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    msg_id: u64,
+    require_tmux_session_name: Option<&str>,
+) -> bool {
+    let path = inflight_state_path(root, provider, channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return false;
+    };
+    let Some(mut state) = load_inflight_state_unlocked(&path) else {
+        return false;
+    };
+    if msg_id == 0 || state.current_msg_id != msg_id {
+        // A newer turn already advanced `current_msg_id` (or there is nothing
+        // to compare) — never wipe another turn's anchor.
+        return false;
+    }
+    if state.user_msg_id != 0 && state.current_msg_id == state.user_msg_id {
+        // Placeholderless Discord turn: `current_msg_id` mirrors the user's own
+        // message id (adopt-guard mirror) — not a relay placeholder.
+        return false;
+    }
+    if let Some(expected) = require_tmux_session_name
+        && state.tmux_session_name.as_deref() != Some(expected)
+    {
+        return false;
+    }
+    state.current_msg_id = 0;
+    persist_under_lock(
+        root,
+        &path,
+        &state,
+        "src/services/discord/inflight.rs:clear_current_msg_if_matches_in_root",
+    )
+    .is_ok()
+}
+
 /// `true` when `id` is a real Discord panel id (present and not a synthetic
 /// headless placeholder). Mirrors `turn_bridge::normalize_status_panel_message_id`
 /// without pulling in the serenity `MessageId` newtype.
@@ -2653,7 +2717,8 @@ mod stall_recovery_tests {
         bind_status_panel_in_root, clear_inflight_state_if_matches_identity_after_delivery_in_root,
         clear_inflight_state_if_matches_identity_in_root, clear_inflight_state_if_matches_in_root,
         clear_inflight_state_if_matches_tmux_response_in_root,
-        clear_inflight_state_if_matches_zero_owned_in_root, clear_status_panel_if_current_in_root,
+        clear_current_msg_if_matches_in_root, clear_inflight_state_if_matches_zero_owned_in_root,
+        clear_status_panel_if_current_in_root,
         inflight_state_allows_idle_tmux_repair_state, inflight_state_is_stale, inflight_state_path,
         load_inflight_states_from_root, lock_inflight_state_path, normalize_response_sent_offset,
         refresh_inflight_last_offset_if_matches_identity_in_root,
@@ -3141,6 +3206,116 @@ mod stall_recovery_tests {
         );
         assert!(cleared);
         assert_eq!(loaded_status_message_id(temp.path(), 7103), None);
+    }
+
+    // ---- #3351: relay-placeholder (`current_msg_id`) compare-and-clear ----
+
+    fn loaded_current_msg_id(root: &Path, channel_id: u64) -> Option<u64> {
+        load_inflight_states_from_root(root, &ProviderKind::Claude)
+            .into_iter()
+            .find(|s| s.channel_id == channel_id)
+            .map(|s| s.current_msg_id)
+    }
+
+    #[test]
+    fn clear_current_msg_if_matches_clears_on_match() {
+        let temp = TempDir::new().unwrap();
+        seed_status_panel_state(
+            temp.path(),
+            7201,
+            10,
+            5555,
+            Some("AgentDesk-claude-a"),
+            None,
+        );
+
+        let cleared = clear_current_msg_if_matches_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            7201,
+            5555,
+            Some("AgentDesk-claude-a"),
+        );
+
+        assert!(cleared);
+        assert_eq!(loaded_current_msg_id(temp.path(), 7201), Some(0));
+    }
+
+    #[test]
+    fn clear_current_msg_if_matches_preserves_newer_turn_on_mismatch() {
+        let temp = TempDir::new().unwrap();
+        // A newer turn already advanced `current_msg_id` to 9999; a stale actor
+        // asking to clear 5555 must not touch it. A zero msg_id never matches.
+        seed_status_panel_state(
+            temp.path(),
+            7202,
+            10,
+            9999,
+            Some("AgentDesk-claude-a"),
+            None,
+        );
+
+        assert!(!clear_current_msg_if_matches_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            7202,
+            5555,
+            None,
+        ));
+        assert!(!clear_current_msg_if_matches_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            7202,
+            0,
+            None,
+        ));
+        assert_eq!(loaded_current_msg_id(temp.path(), 7202), Some(9999));
+    }
+
+    #[test]
+    fn clear_current_msg_if_matches_respects_tmux_guard() {
+        let temp = TempDir::new().unwrap();
+        seed_status_panel_state(
+            temp.path(),
+            7203,
+            10,
+            5555,
+            Some("AgentDesk-claude-a"),
+            None,
+        );
+
+        assert!(!clear_current_msg_if_matches_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            7203,
+            5555,
+            Some("AgentDesk-claude-other"),
+        ));
+        assert_eq!(loaded_current_msg_id(temp.path(), 7203), Some(5555));
+    }
+
+    #[test]
+    fn clear_current_msg_if_matches_preserves_placeholderless_turn() {
+        let temp = TempDir::new().unwrap();
+        // Placeholderless Discord turn: `current_msg_id` mirrors the user's own
+        // message id — never clear it (adopt-guard mirror).
+        seed_status_panel_state(
+            temp.path(),
+            7204,
+            5555,
+            5555,
+            Some("AgentDesk-claude-a"),
+            None,
+        );
+
+        assert!(!clear_current_msg_if_matches_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            7204,
+            5555,
+            Some("AgentDesk-claude-a"),
+        ));
+        assert_eq!(loaded_current_msg_id(temp.path(), 7204), Some(5555));
     }
 
     #[test]
