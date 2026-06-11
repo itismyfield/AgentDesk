@@ -34,6 +34,7 @@ mod placeholder_sweeper;
 mod prompt_builder;
 mod queue_io;
 mod queued_placeholders_store;
+mod reaction_cleanup;
 mod relay_health;
 mod relay_recovery;
 pub(crate) mod response_sanitizer;
@@ -4004,8 +4005,7 @@ async fn catch_up_missed_messages(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) {
-    let retry_checkpoints = HashMap::new();
-    catch_up_missed_messages_inner(http, shared, provider, &retry_checkpoints).await;
+    catch_up_missed_messages_inner(http, shared, provider, &HashMap::new()).await;
 }
 
 async fn catch_up_missed_messages_inner(
@@ -4103,10 +4103,9 @@ async fn catch_up_missed_messages_inner(
         // Fetch messages after last_id (Discord returns oldest first with after=)
         // #1227: limit was 10 — channels with bursty bot activity (streaming
         // replies + many short turns) routinely fill that window with bot
-        // messages, pushing user messages outside the page entirely. Discord
-        // applies `limit` BEFORE author filtering, so an active channel
-        // (1 user : 9 bots) silently drops the user message. 50 keeps the
-        // single-page contract while giving headroom for the realistic
+        // messages, pushing user messages outside the page. Discord applies
+        // `limit` BEFORE author filtering; 50 keeps the single-page contract with
+        // headroom for the realistic
         // bot:user ratio. Discord per-channel rate limit (5 req / 5 sec)
         // has plenty of margin for this 5x cost.
         let messages = match channel_id
@@ -4214,6 +4213,7 @@ async fn catch_up_missed_messages_inner(
                 continue;
             }
 
+            reaction_cleanup::cleanup_recovered_catch_up_hourglass(http, channel_id, msg.id).await;
             mailbox_enqueue_intervention(
                 shared,
                 provider,
