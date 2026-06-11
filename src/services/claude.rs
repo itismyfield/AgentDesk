@@ -2383,6 +2383,18 @@ enum ClaudeTuiWarmFollowupOutcome {
     Recreate(ClaudeTuiRecreateState),
 }
 
+/// Verbatim extraction of the warm-followup submit-and-stream block.
+///
+/// `Terminal` carries the original early-return `Result` unchanged.
+/// `FallThroughRecreate` preserves the original fall-through-to-fresh-launch,
+/// including the `RecreateSession` arm's kill-then-fall-through behavior.
+#[cfg(unix)]
+#[must_use]
+enum ClaudeTuiWarmFollowupSubmitOutcome {
+    Terminal(Result<(), String>),
+    FallThroughRecreate,
+}
+
 /// Recover from a stranded prompt draft left in the composer before a warm
 /// follow-up submit.
 ///
@@ -2628,6 +2640,297 @@ fn recover_claude_tui_stranded_prompt_draft(
     }
 }
 
+#[cfg(unix)]
+fn run_claude_tui_warm_followup_submit_and_stream(
+    submit_plan: ClaudeTuiWarmFollowupSubmitPlan,
+    mut busy_waited: bool,
+    tmux_session_name: &str,
+    resolved_session_id: &str,
+    transcript_path: &std::path::Path,
+    transcript_path_string: &str,
+    prompt: &str,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<std::sync::Arc<CancelToken>>,
+    report_channel_id: Option<u64>,
+    hook_rx: tokio::sync::broadcast::Receiver<crate::services::claude_tui::hook_server::HookEvent>,
+) -> ClaudeTuiWarmFollowupSubmitOutcome {
+    if submit_plan.recheck_busy_before_submit
+        && let Some(snapshot) =
+            claude_tui_followup_busy_before_submit(tmux_session_name, Some(&transcript_path))
+    {
+        // #2416: instead of dropping the user's message when the TUI is busy,
+        // wait for the next prompt-ready window. The transcript-idle
+        // fallback covers Claude TUI redraws where the JSONL terminal
+        // envelope is authoritative but the prompt glyph is not visible.
+        match crate::services::claude_tui::input::wait_for_prompt_ready_or_idle_transcript(
+            tmux_session_name,
+            crate::services::claude_tui::input::PromptReadinessKind::Followup,
+            cancel_token.as_deref(),
+            &transcript_path,
+        ) {
+            Ok(()) => {
+                busy_waited = true;
+                debug_log(&format!(
+                    "Claude TUI follow-up: busy at first check, became ready after wait (session={})",
+                    tmux_session_name
+                ));
+            }
+            Err(err) => {
+                if crate::services::claude_tui::input::is_prompt_ready_cancelled_error(&err) {
+                    debug_log(&format!(
+                        "Claude TUI follow-up: cancellation observed during busy wait, aborting injection (session={})",
+                        tmux_session_name
+                    ));
+                    log_producer_exit(
+                        "tui_warm_followup_cancelled_during_busy_wait",
+                        Some(&resolved_session_id),
+                        report_channel_id,
+                        0,
+                        serde_json::json!({
+                            "tmux_session_name": tmux_session_name,
+                            "transcript_path": transcript_path_string,
+                        }),
+                    );
+                    return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Ok(()));
+                }
+                let timed_out =
+                    crate::services::claude_tui::input::is_prompt_ready_timeout_error(&err);
+                debug_log(&format!(
+                    "Claude TUI follow-up wait failed after busy snapshot (session={}, timed_out={}): {}",
+                    tmux_session_name, timed_out, err
+                ));
+                let post_wait_snapshot =
+                    crate::services::claude_tui::input::prompt_readiness_snapshot(
+                        tmux_session_name,
+                    );
+                emit_claude_tui_busy_followup_notice(
+                    &sender,
+                    tmux_session_name,
+                    &post_wait_snapshot,
+                );
+                log_producer_exit(
+                    "tui_warm_followup_busy_pre_submit",
+                    Some(&resolved_session_id),
+                    report_channel_id,
+                    0,
+                    serde_json::json!({
+                        "tmux_session_name": tmux_session_name,
+                        "transcript_path": transcript_path_string,
+                        "prompt_marker_detected": post_wait_snapshot.prompt_marker_detected,
+                        "prompt_draft_detected": post_wait_snapshot.prompt_draft_detected,
+                        "prompt_draft_blocks_submission": post_wait_snapshot.tmux_pane_alive && post_wait_snapshot.prompt_draft_detected,
+                        "tmux_pane_alive": post_wait_snapshot.tmux_pane_alive,
+                        "capture_available": post_wait_snapshot.capture_available,
+                        "initial_busy_snapshot_prompt_marker_detected": snapshot.prompt_marker_detected,
+                        "initial_busy_snapshot_prompt_draft_detected": snapshot.prompt_draft_detected,
+                        "wait_outcome": if timed_out { "timeout" } else { "error" },
+                        "wait_error": err,
+                    }),
+                );
+                return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Ok(()));
+            }
+        }
+    }
+    // #2416: capture the transcript offset AFTER the optional busy wait so
+    // that any bytes the previous TUI turn appended while we were waiting
+    // are not replayed as part of this follow-up's output window. This
+    // closes a Codex-flagged HIGH (stale offset → duplicate / early-done
+    // delivery accounting).
+    let fallback_start_offset = std::fs::metadata(&transcript_path)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    // #2416: also honour cancellation that may have flipped during the
+    // up-to-45s busy wait. Without this, a user stop reaction / watchdog
+    // cancellation arriving mid-wait would still inject the prompt as
+    // soon as the TUI returns to ready. Closes a Codex-flagged HIGH.
+    if busy_waited && crate::services::provider::cancel_requested(cancel_token.as_deref()) {
+        debug_log(&format!(
+            "Claude TUI follow-up: cancellation observed after busy wait, aborting injection (session={})",
+            tmux_session_name
+        ));
+        log_producer_exit(
+            "tui_warm_followup_cancelled_after_busy_wait",
+            Some(&resolved_session_id),
+            report_channel_id,
+            0,
+            serde_json::json!({
+                "tmux_session_name": tmux_session_name,
+                "transcript_path": transcript_path_string,
+            }),
+        );
+        return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Ok(()));
+    }
+    let turn_started_at = chrono::Utc::now();
+    if let Err(error) = crate::services::claude_tui::input::send_followup_prompt_or_idle_transcript(
+        tmux_session_name,
+        prompt,
+        cancel_token.as_deref(),
+        &transcript_path,
+    ) {
+        if crate::services::claude_tui::input::is_prompt_ready_cancelled_error(&error) {
+            debug_log(&format!(
+                "Claude TUI follow-up: cancellation observed during prompt submission, aborting injection (session={})",
+                tmux_session_name
+            ));
+            log_producer_exit(
+                "tui_warm_followup_cancelled_during_prompt_submit",
+                Some(&resolved_session_id),
+                report_channel_id,
+                0,
+                serde_json::json!({
+                    "tmux_session_name": tmux_session_name,
+                    "transcript_path": transcript_path_string,
+                }),
+            );
+            return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Ok(()));
+        }
+        return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Err(error));
+    }
+    let hook_events_after = chrono::Utc::now();
+    let start_offset = claude_tui_turn_start_offset_after_timestamp(
+        &transcript_path,
+        turn_started_at,
+        fallback_start_offset,
+    );
+    let (read_result, harvest) = match read_claude_tui_transcript_until_done(
+        &transcript_path_string,
+        start_offset,
+        sender.clone(),
+        cancel_token.clone(),
+        tmux_session_name,
+        &resolved_session_id,
+        hook_rx,
+        hook_events_after,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Err(error));
+        }
+    };
+    // #3281: capture BEFORE `classify_followup_result` consumes the read
+    // result. The zero-harvest gate is `Completed`-only: classify maps
+    // `Cancelled` to `Delivered` too, and a cancelled turn legitimately
+    // forwards nothing.
+    let read_result_kind = read_output_result_kind(&read_result);
+    let delivered_zero_harvest = tui_delivered_zero_harvest(&read_result, &harvest);
+    let zero_advance_terminal_result = match &read_result {
+        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+            *offset <= start_offset
+        }
+        ReadOutputResult::SessionDied { .. } => false,
+    };
+    if zero_advance_terminal_result {
+        let snapshot =
+            crate::services::claude_tui::input::prompt_readiness_snapshot(tmux_session_name);
+        if claude_tui_prompt_remained_in_input_buffer(&snapshot, prompt) {
+            return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Err(
+                claude_tui_zero_advance_input_buffer_error(
+                    tmux_session_name,
+                    &transcript_path_string,
+                    start_offset,
+                    &snapshot,
+                ),
+            ));
+        }
+    }
+    match classify_followup_result(
+        read_result,
+        start_offset,
+        "claude tui session died during follow-up output reading",
+    ) {
+        ClaudeFollowupResult::Delivered => {
+            emit_claude_tui_watcher_handoff(
+                &sender,
+                &transcript_path_string,
+                tmux_session_name,
+                &transcript_path,
+            );
+            let transcript_len = std::fs::metadata(&transcript_path)
+                .map(|meta| meta.len())
+                .unwrap_or(0);
+            if delivered_zero_harvest {
+                emit_claude_tui_zero_harvest(
+                    "claude_tui_zero_harvest_warm_followup_delivered",
+                    report_channel_id,
+                    tmux_session_name,
+                    &transcript_path_string,
+                    start_offset,
+                    transcript_len,
+                );
+            }
+            log_producer_exit(
+                "tui_warm_followup_delivered",
+                Some(&resolved_session_id),
+                report_channel_id,
+                // #3281: real forwarded-message count (was a hardcoded 0).
+                usize::try_from(harvest.forwarded_messages).unwrap_or(usize::MAX),
+                serde_json::json!({
+                    "tmux_session_name": tmux_session_name,
+                    "transcript_path": transcript_path_string,
+                    "assistant_text_bytes": harvest.assistant_text_bytes,
+                    "start_offset": start_offset,
+                    "transcript_len": transcript_len,
+                    "read_result_kind": read_result_kind,
+                }),
+            );
+            return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Ok(()));
+        }
+        ClaudeFollowupResult::RecreateSession { error } => {
+            debug_log(&format!(
+                "Claude TUI follow-up failed, recreating session: {}",
+                error
+            ));
+            crate::services::termination_audit::record_termination_for_tmux(
+                tmux_session_name,
+                None,
+                "claude_tui_provider",
+                "followup_failed_recreate",
+                Some(&format!(
+                    "claude tui follow-up failed, recreating: {}",
+                    error
+                )),
+                None,
+            );
+            record_tmux_exit_reason(
+                tmux_session_name,
+                &format!("claude tui follow-up failed, recreating: {}", error),
+            );
+            crate::services::platform::tmux::kill_session(
+                tmux_session_name,
+                &format!("claude tui follow-up failed, recreating: {}", error),
+            );
+        }
+        ClaudeFollowupResult::FinalizeWithNotice { error, notice } => {
+            debug_log(&format!(
+                "Claude TUI follow-up streamed partial output before session death — suppressing replay: {}",
+                error
+            ));
+            crate::services::termination_audit::record_termination_for_tmux(
+                tmux_session_name,
+                None,
+                "claude_tui_provider",
+                "followup_partial_output_no_replay",
+                Some(&format!(
+                    "claude tui partial follow-up output delivered: {}",
+                    error
+                )),
+                None,
+            );
+            record_tmux_exit_reason(
+                tmux_session_name,
+                &format!("claude tui partial follow-up output delivered: {}", error),
+            );
+            crate::services::platform::tmux::kill_session(
+                tmux_session_name,
+                &format!("claude tui partial follow-up output delivered: {}", error),
+            );
+            emit_followup_restart_suppressed_notice(&sender, &notice);
+            return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Ok(()));
+        }
+    }
+    ClaudeTuiWarmFollowupSubmitOutcome::FallThroughRecreate
+}
+
 /// Attempt a warm follow-up against an existing live Claude TUI tmux session.
 ///
 /// Mirrors the pre-refactor inline `if session_exists && has_live_pane && resume`
@@ -2659,7 +2962,7 @@ fn try_claude_tui_warm_followup(
             Some(tmux_session_name.to_string());
     }
     let hook_rx = crate::services::claude_tui::hook_server::subscribe_hook_events();
-    let (mut busy_waited, recreate_before_submit, prompt_draft_cleared_before_submit) =
+    let (busy_waited, recreate_before_submit, prompt_draft_cleared_before_submit) =
         match recover_claude_tui_stranded_prompt_draft(
             ClaudeTuiRecreateState {
                 resolved_session_id,
@@ -2697,281 +3000,23 @@ fn try_claude_tui_warm_followup(
         prompt_draft_cleared_before_submit,
     );
     if submit_plan.submit_existing_session {
-        if submit_plan.recheck_busy_before_submit
-            && let Some(snapshot) =
-                claude_tui_followup_busy_before_submit(tmux_session_name, Some(&transcript_path))
-        {
-            // #2416: instead of dropping the user's message when the TUI is busy,
-            // wait for the next prompt-ready window. The transcript-idle
-            // fallback covers Claude TUI redraws where the JSONL terminal
-            // envelope is authoritative but the prompt glyph is not visible.
-            match crate::services::claude_tui::input::wait_for_prompt_ready_or_idle_transcript(
-                tmux_session_name,
-                crate::services::claude_tui::input::PromptReadinessKind::Followup,
-                cancel_token.as_deref(),
-                &transcript_path,
-            ) {
-                Ok(()) => {
-                    busy_waited = true;
-                    debug_log(&format!(
-                        "Claude TUI follow-up: busy at first check, became ready after wait (session={})",
-                        tmux_session_name
-                    ));
-                }
-                Err(err) => {
-                    if crate::services::claude_tui::input::is_prompt_ready_cancelled_error(&err) {
-                        debug_log(&format!(
-                            "Claude TUI follow-up: cancellation observed during busy wait, aborting injection (session={})",
-                            tmux_session_name
-                        ));
-                        log_producer_exit(
-                            "tui_warm_followup_cancelled_during_busy_wait",
-                            Some(&resolved_session_id),
-                            report_channel_id,
-                            0,
-                            serde_json::json!({
-                                "tmux_session_name": tmux_session_name,
-                                "transcript_path": transcript_path_string,
-                            }),
-                        );
-                        return ClaudeTuiWarmFollowupOutcome::Terminal(Ok(()));
-                    }
-                    let timed_out =
-                        crate::services::claude_tui::input::is_prompt_ready_timeout_error(&err);
-                    debug_log(&format!(
-                        "Claude TUI follow-up wait failed after busy snapshot (session={}, timed_out={}): {}",
-                        tmux_session_name, timed_out, err
-                    ));
-                    let post_wait_snapshot =
-                        crate::services::claude_tui::input::prompt_readiness_snapshot(
-                            tmux_session_name,
-                        );
-                    emit_claude_tui_busy_followup_notice(
-                        &sender,
-                        tmux_session_name,
-                        &post_wait_snapshot,
-                    );
-                    log_producer_exit(
-                        "tui_warm_followup_busy_pre_submit",
-                        Some(&resolved_session_id),
-                        report_channel_id,
-                        0,
-                        serde_json::json!({
-                            "tmux_session_name": tmux_session_name,
-                            "transcript_path": transcript_path_string,
-                            "prompt_marker_detected": post_wait_snapshot.prompt_marker_detected,
-                            "prompt_draft_detected": post_wait_snapshot.prompt_draft_detected,
-                            "prompt_draft_blocks_submission": post_wait_snapshot.tmux_pane_alive && post_wait_snapshot.prompt_draft_detected,
-                            "tmux_pane_alive": post_wait_snapshot.tmux_pane_alive,
-                            "capture_available": post_wait_snapshot.capture_available,
-                            "initial_busy_snapshot_prompt_marker_detected": snapshot.prompt_marker_detected,
-                            "initial_busy_snapshot_prompt_draft_detected": snapshot.prompt_draft_detected,
-                            "wait_outcome": if timed_out { "timeout" } else { "error" },
-                            "wait_error": err,
-                        }),
-                    );
-                    return ClaudeTuiWarmFollowupOutcome::Terminal(Ok(()));
-                }
-            }
-        }
-        // #2416: capture the transcript offset AFTER the optional busy wait so
-        // that any bytes the previous TUI turn appended while we were waiting
-        // are not replayed as part of this follow-up's output window. This
-        // closes a Codex-flagged HIGH (stale offset → duplicate / early-done
-        // delivery accounting).
-        let fallback_start_offset = std::fs::metadata(&transcript_path)
-            .map(|meta| meta.len())
-            .unwrap_or(0);
-        // #2416: also honour cancellation that may have flipped during the
-        // up-to-45s busy wait. Without this, a user stop reaction / watchdog
-        // cancellation arriving mid-wait would still inject the prompt as
-        // soon as the TUI returns to ready. Closes a Codex-flagged HIGH.
-        if busy_waited && crate::services::provider::cancel_requested(cancel_token.as_deref()) {
-            debug_log(&format!(
-                "Claude TUI follow-up: cancellation observed after busy wait, aborting injection (session={})",
-                tmux_session_name
-            ));
-            log_producer_exit(
-                "tui_warm_followup_cancelled_after_busy_wait",
-                Some(&resolved_session_id),
-                report_channel_id,
-                0,
-                serde_json::json!({
-                    "tmux_session_name": tmux_session_name,
-                    "transcript_path": transcript_path_string,
-                }),
-            );
-            return ClaudeTuiWarmFollowupOutcome::Terminal(Ok(()));
-        }
-        let turn_started_at = chrono::Utc::now();
-        if let Err(error) =
-            crate::services::claude_tui::input::send_followup_prompt_or_idle_transcript(
-                tmux_session_name,
-                prompt,
-                cancel_token.as_deref(),
-                &transcript_path,
-            )
-        {
-            if crate::services::claude_tui::input::is_prompt_ready_cancelled_error(&error) {
-                debug_log(&format!(
-                    "Claude TUI follow-up: cancellation observed during prompt submission, aborting injection (session={})",
-                    tmux_session_name
-                ));
-                log_producer_exit(
-                    "tui_warm_followup_cancelled_during_prompt_submit",
-                    Some(&resolved_session_id),
-                    report_channel_id,
-                    0,
-                    serde_json::json!({
-                        "tmux_session_name": tmux_session_name,
-                        "transcript_path": transcript_path_string,
-                    }),
-                );
-                return ClaudeTuiWarmFollowupOutcome::Terminal(Ok(()));
-            }
-            return ClaudeTuiWarmFollowupOutcome::Terminal(Err(error));
-        }
-        let hook_events_after = chrono::Utc::now();
-        let start_offset = claude_tui_turn_start_offset_after_timestamp(
-            &transcript_path,
-            turn_started_at,
-            fallback_start_offset,
-        );
-        let (read_result, harvest) = match read_claude_tui_transcript_until_done(
-            &transcript_path_string,
-            start_offset,
-            sender.clone(),
-            cancel_token.clone(),
+        match run_claude_tui_warm_followup_submit_and_stream(
+            submit_plan,
+            busy_waited,
             tmux_session_name,
             &resolved_session_id,
+            &transcript_path,
+            &transcript_path_string,
+            prompt,
+            sender,
+            cancel_token,
+            report_channel_id,
             hook_rx,
-            hook_events_after,
         ) {
-            Ok(result) => result,
-            Err(error) => {
-                return ClaudeTuiWarmFollowupOutcome::Terminal(Err(error));
+            ClaudeTuiWarmFollowupSubmitOutcome::Terminal(r) => {
+                return ClaudeTuiWarmFollowupOutcome::Terminal(r);
             }
-        };
-        // #3281: capture BEFORE `classify_followup_result` consumes the read
-        // result. The zero-harvest gate is `Completed`-only: classify maps
-        // `Cancelled` to `Delivered` too, and a cancelled turn legitimately
-        // forwards nothing.
-        let read_result_kind = read_output_result_kind(&read_result);
-        let delivered_zero_harvest = tui_delivered_zero_harvest(&read_result, &harvest);
-        let zero_advance_terminal_result = match &read_result {
-            ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
-                *offset <= start_offset
-            }
-            ReadOutputResult::SessionDied { .. } => false,
-        };
-        if zero_advance_terminal_result {
-            let snapshot =
-                crate::services::claude_tui::input::prompt_readiness_snapshot(tmux_session_name);
-            if claude_tui_prompt_remained_in_input_buffer(&snapshot, prompt) {
-                return ClaudeTuiWarmFollowupOutcome::Terminal(Err(
-                    claude_tui_zero_advance_input_buffer_error(
-                        tmux_session_name,
-                        &transcript_path_string,
-                        start_offset,
-                        &snapshot,
-                    ),
-                ));
-            }
-        }
-        match classify_followup_result(
-            read_result,
-            start_offset,
-            "claude tui session died during follow-up output reading",
-        ) {
-            ClaudeFollowupResult::Delivered => {
-                emit_claude_tui_watcher_handoff(
-                    &sender,
-                    &transcript_path_string,
-                    tmux_session_name,
-                    &transcript_path,
-                );
-                let transcript_len = std::fs::metadata(&transcript_path)
-                    .map(|meta| meta.len())
-                    .unwrap_or(0);
-                if delivered_zero_harvest {
-                    emit_claude_tui_zero_harvest(
-                        "claude_tui_zero_harvest_warm_followup_delivered",
-                        report_channel_id,
-                        tmux_session_name,
-                        &transcript_path_string,
-                        start_offset,
-                        transcript_len,
-                    );
-                }
-                log_producer_exit(
-                    "tui_warm_followup_delivered",
-                    Some(&resolved_session_id),
-                    report_channel_id,
-                    // #3281: real forwarded-message count (was a hardcoded 0).
-                    usize::try_from(harvest.forwarded_messages).unwrap_or(usize::MAX),
-                    serde_json::json!({
-                        "tmux_session_name": tmux_session_name,
-                        "transcript_path": transcript_path_string,
-                        "assistant_text_bytes": harvest.assistant_text_bytes,
-                        "start_offset": start_offset,
-                        "transcript_len": transcript_len,
-                        "read_result_kind": read_result_kind,
-                    }),
-                );
-                return ClaudeTuiWarmFollowupOutcome::Terminal(Ok(()));
-            }
-            ClaudeFollowupResult::RecreateSession { error } => {
-                debug_log(&format!(
-                    "Claude TUI follow-up failed, recreating session: {}",
-                    error
-                ));
-                crate::services::termination_audit::record_termination_for_tmux(
-                    tmux_session_name,
-                    None,
-                    "claude_tui_provider",
-                    "followup_failed_recreate",
-                    Some(&format!(
-                        "claude tui follow-up failed, recreating: {}",
-                        error
-                    )),
-                    None,
-                );
-                record_tmux_exit_reason(
-                    tmux_session_name,
-                    &format!("claude tui follow-up failed, recreating: {}", error),
-                );
-                crate::services::platform::tmux::kill_session(
-                    tmux_session_name,
-                    &format!("claude tui follow-up failed, recreating: {}", error),
-                );
-            }
-            ClaudeFollowupResult::FinalizeWithNotice { error, notice } => {
-                debug_log(&format!(
-                    "Claude TUI follow-up streamed partial output before session death — suppressing replay: {}",
-                    error
-                ));
-                crate::services::termination_audit::record_termination_for_tmux(
-                    tmux_session_name,
-                    None,
-                    "claude_tui_provider",
-                    "followup_partial_output_no_replay",
-                    Some(&format!(
-                        "claude tui partial follow-up output delivered: {}",
-                        error
-                    )),
-                    None,
-                );
-                record_tmux_exit_reason(
-                    tmux_session_name,
-                    &format!("claude tui partial follow-up output delivered: {}", error),
-                );
-                crate::services::platform::tmux::kill_session(
-                    tmux_session_name,
-                    &format!("claude tui partial follow-up output delivered: {}", error),
-                );
-                emit_followup_restart_suppressed_notice(&sender, &notice);
-                return ClaudeTuiWarmFollowupOutcome::Terminal(Ok(()));
-            }
+            ClaudeTuiWarmFollowupSubmitOutcome::FallThroughRecreate => {}
         }
     }
 
