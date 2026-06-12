@@ -3,6 +3,8 @@ pub mod hook_relay;
 pub mod hook_server;
 #[cfg(test)]
 mod hook_server_memento_tests;
+#[cfg(unix)]
+pub(crate) mod hosting;
 pub mod input;
 pub(crate) mod memento_feedback;
 pub mod session;
