@@ -250,9 +250,21 @@ pub(in crate::services::discord) fn committed_frontier_for_current_generation(
 ) -> Option<u64> {
     use std::sync::atomic::Ordering::Acquire;
     let coord = shared.tmux_relay_coord(channel_id);
+    // #3358 r2 review P1 (TOCTOU): the (offset, generation) pair lives in two
+    // atomics — a concurrent commit between the loads could pair an OLD offset
+    // with the NEW wrapper's generation stamp and resurrect the stale clamp.
+    // Double-read fence: the generation stamp must agree on both sides of the
+    // offset load; a mid-transition mismatch returns None (no clamp — the
+    // content-skip-safe direction, same tradeoff as the stale-generation path).
+    let generation_before = coord.confirmed_end_generation_mtime_ns.load(Acquire);
+    let committed_offset = coord.confirmed_end_offset.load(Acquire);
+    let generation_after = coord.confirmed_end_generation_mtime_ns.load(Acquire);
+    if generation_before != generation_after {
+        return None;
+    }
     committed_frontier_for_same_generation(
-        coord.confirmed_end_offset.load(Acquire),
-        coord.confirmed_end_generation_mtime_ns.load(Acquire),
+        committed_offset,
+        generation_after,
         read_generation_file_mtime_ns(tmux_session_name),
     )
 }

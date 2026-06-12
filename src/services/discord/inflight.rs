@@ -3984,8 +3984,20 @@ mod stall_recovery_tests {
         )
     }
 
+    /// #3358: the two monotonicity tests catch panics via `catch_unwind` while
+    /// sharing the process-global panic hook with every parallel test thread —
+    /// serialize them so a sibling's hook traffic cannot interleave (rare
+    /// parallel-run flake observed on loaded machines).
+    fn monotonic_3358_test_mutex() -> &'static std::sync::Mutex<()> {
+        static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        M.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     #[test]
     fn synthetic_lagging_birth_reproduces_backward_regression_3358() {
+        let _serialized = monotonic_3358_test_mutex()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         // REPRODUCE: a lagging birth re-claim over the committed frontier is a
         // same-identity backward write that trips the monotonicity guard. This is
         // the pre-fix incident; it MUST still be flagged so the guard's protective
@@ -4022,6 +4034,9 @@ mod stall_recovery_tests {
 
     #[test]
     fn synthetic_carry_forward_keeps_reclaim_monotonic_3358() {
+        let _serialized = monotonic_3358_test_mutex()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         // FIX: birth carried up to the committed frontier → re-claim is forward/
         // equal, ZERO invariant violations, offsets end at the frontier.
         let temp = TempDir::new().unwrap();
