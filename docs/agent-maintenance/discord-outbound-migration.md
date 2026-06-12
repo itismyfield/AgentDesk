@@ -92,8 +92,8 @@ These callsites already use the unified delivery engine. Rows marked
 | `src/server/routes/dispatches/outbox.rs:1124` (`post_dispatch_completion_summary`) | final dispatch thread callback | **migrated_v3**. Ensures the dispatch thread is postable, then posts the completion summary through v3 with a per-producer `dispatch_completion_summary_deduper()`. |
 | `src/services/issue_announcements.rs:408` (`send_issue_announcement_message`) | issue announcements | **migrated_v3**. Review-style policy, `OutboundOperation::Edit` for edits, and the shared process-wide outbound deduper. |
 | `src/services/discord/discord_io.rs:478` (`deliver_channel_message`) | CLI text/DM helper | **migrated_v3**. Used by `--discord-sendmessage` / `--discord-senddm` *after* the DM channel has been resolved. Static `discord_io_deduper`; no caller-supplied delivery id means `without_idempotency()`. |
-| `src/services/discord/health.rs:2802` (`deliver_manual_notification`) | manual `/api/discord/send` | **migrated_v3 for sub-2k text**. Over-limit content remains a compatibility shim to `post_text_attachment` (announce) or `deliver_chunked_manual_notification` (notify). |
-| `src/services/discord/health.rs:2873` (`deliver_manual_dm_notification`) | `dm_reply` / `/api/discord/send-dm` | **migrated_v3 for sub-2k text** using `OutboundTarget::DmUser(UserId)`. The v3 transport resolves the DM channel and duplicate delivery returns before a second resolve. Over-limit content keeps the compatibility attachment/chunk path. |
+| `src/services/discord/outbound/manual_delivery.rs` (`deliver_manual_notification`) | manual `/api/discord/send` | **migrated_v3 for sub-2k text**. Over-limit content remains a compatibility shim to `post_text_attachment` (announce) or `deliver_chunked_manual_notification` (notify). Moved from `health/` to `outbound/` in #3038 S1 with `health::` compatibility re-exports preserved. |
+| `src/services/discord/outbound/manual_delivery.rs` (`deliver_manual_dm_notification`) | `dm_reply` / `/api/discord/send-dm` | **migrated_v3 for sub-2k text** using `OutboundTarget::DmUser(UserId)`. The v3 transport resolves the DM channel and duplicate delivery returns before a second resolve. Over-limit content keeps the compatibility attachment/chunk path. Moved from `health/` to `outbound/` in #3038 S1. |
 | `src/services/discord/gateway.rs:359` (`send_intake_placeholder`) | `placeholder_sends` (intake) | **migrated_v3**. Posts the `"..."` placeholder before a turn via direct v3. Uses `preserve_inline_content().without_idempotency()` to preserve streaming behavior. |
 | `src/services/discord/gateway.rs:377` (`edit_outbound_message`) | `placeholder_sends` (edit) | **migrated_v3**. Encodes edit through `OutboundOperation::Edit`. |
 | `src/services/discord/gateway.rs:400` (`TurnGateway::{send_message, edit_message}`) | turn-bridge messages/edits | **migrated_v3 transitively via gateway**. Used for handoff, rollover freeze, snapshot, stable update, and terminal edit. |
@@ -154,7 +154,7 @@ fallback policy). Excluded by #1175.
 | `src/services/discord/discord_io.rs:390` (`send_file_to_channel`) | CLI `--discord-sendfile` | excluded — attachment is the payload |
 | `src/services/discord/router/message_handler.rs:4598` | text-command file output | excluded |
 | `src/services/discord/commands/text_commands.rs:975` | text-command attached output | excluded |
-| `src/services/discord/health.rs:2235` (`post_text_attachment`) | announce-bot oversize fallback | excluded — attachment fallback that lives below the outbound layer because outbound truncates first |
+| `src/services/discord/outbound/manual_delivery.rs` (`post_text_attachment`) | announce-bot oversize fallback | excluded — attachment fallback that remains a compatibility shim while the v3 outbound text contract truncates first |
 | `src/services/discord/router/message_handler.rs:4820` | skill-running banner (file path) | excluded |
 | `src/services/discord/commands/skill.rs:273, 339` | skill announce | excluded |
 
@@ -219,7 +219,7 @@ These overlap with §B.3 in some places — counted once here.
 
 Dashboard never sends to Discord through these routes; the dashboard's send
 button hits the manual outbound API, which is covered under §3.A
-(`health.rs:2802`). **No migration needed.**
+(`outbound/manual_delivery.rs`). **No migration needed.**
 
 ---
 
@@ -275,11 +275,11 @@ button hits the manual outbound API, which is covered under §3.A
   `final_completion_delivery_stays_blocked_until_terminal_message_commits`
   verifies final completion delivery remains blocked until the terminal Discord
   message commit has happened.
-- `src/services/discord/health.rs`:
+- `src/services/discord/outbound/manual_delivery.rs`:
   `manual_dm_notification_uses_v3_dm_target_and_dedupes_before_resolve`
   verifies `/api/discord/send-dm` short text uses v3 DM target semantics and preserves
   the manual duplicate response contract.
-- `src/services/discord/health.rs`:
+- `src/services/discord/outbound/manual_delivery.rs`:
   `api_send_rejects_user_supplied_voice_delivery_id_namespace` verifies manual
   `/api/discord/send` callers cannot forge the reserved `voice:` correlation
   namespace used by voice announce delivery ids.

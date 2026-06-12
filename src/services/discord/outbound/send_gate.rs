@@ -7,17 +7,16 @@ use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
 use sqlx::PgPool;
 
-use super::HealthRegistry;
 use super::manual_delivery::{
     ManualOutboundDeliveryId, SerenityManualOutboundClient,
     send_resolved_manual_message_with_client,
 };
-use super::runtime_resolve::resolve_bot_http;
 use super::send_target::{
     SendTargetResolutionError, resolve_send_target_channel_id_with_backends,
     routine_thread_parent_hint,
 };
 use crate::db::Db;
+use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
 use crate::services::discord::outbound::shared_outbound_deduper;
 use crate::services::provider::ProviderKind;
 
@@ -70,7 +69,7 @@ pub(crate) async fn send_message_with_backends_and_delivery_id(
 
 const HEADLESS_TURN_OUTBOX_SOURCE: &str = "headless_turn";
 
-pub(super) fn dm_default_agent_authorizes_unmapped_private_channel(
+pub(in crate::services::discord) fn dm_default_agent_authorizes_unmapped_private_channel(
     is_private_channel: bool,
     source: &str,
     provider: &ProviderKind,

@@ -31,9 +31,10 @@
 
 ### `discord_outbound`
 
-- canonical_modules: `src/services/discord/outbound/{message,policy,result,decision,delivery,transport}.rs`
-  (#1006 v3 domain types, pure planner, delivery implementation, and shared
-  transport/dedup primitives).
+- canonical_modules: `src/services/discord/outbound/{message,policy,result,decision,delivery,transport,send_to_agent,send_target,send_gate,send_api,manual_delivery}.rs`
+  (#1006 v3 domain types, pure planner, delivery implementation, shared
+  transport/dedup primitives, and the #3038 send-to-agent/manual outbound
+  dispatch surface).
 - legacy_modules: none; `src/services/discord/outbound/legacy.rs` was removed
   in #2535.
 - do_not_edit_without_migration_plan:
@@ -697,12 +698,13 @@
     directory decomposition; module root keeps the `HealthRegistry` core +
     re-export surface, and the former monolith body lives in flat
     `health/` submodules, all sub-1000 prod LoC: `runtime_resolve.rs` (321),
-    `headless_turn.rs` (297), `send_target.rs` (150), `send_gate.rs` (374),
-    `manual_delivery.rs` (580), `send_api.rs` (259), `relay_auto_heal.rs`
-    (123), `stall_liveness.rs` (527). Previously 2240 after the #3034
-    dead-code sweep, 2292 after
-    #3038 send-to-agent dispatch extraction to `outbound/send_to_agent.rs`,
-    #1879 snapshot/mailbox extraction, and #3082 answer-flush-barrier field).
+    `headless_turn.rs` (297), `relay_auto_heal.rs` (123),
+    `stall_liveness.rs` (527). Previously 2240 after the #3034 dead-code
+    sweep, 2292 after #3038 send-to-agent dispatch extraction to
+    `outbound/send_to_agent.rs`, then S1 moved the manual outbound dispatch
+    children (`send_target`, `send_gate`, `send_api`, `manual_delivery`) to
+    `outbound/` while preserving the `health::` re-export API; #1879
+    snapshot/mailbox extraction, and #3082 answer-flush-barrier field).
   - `src/services/discord/health/recovery.rs` (2615 lines; health recovery
     extraction surface, split further before adding non-bugfix behavior; +70
     from #3126 stall-watchdog completed-idle false-positive guard tests; +88
