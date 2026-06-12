@@ -406,7 +406,8 @@ src/
 │   │   │   ├── send_gate.rs
 │   │   │   ├── send_target.rs
 │   │   │   ├── session_enrichment.rs
-│   │   │   └── snapshot.rs
+│   │   │   ├── snapshot.rs
+│   │   │   └── stall_liveness.rs
 │   │   ├── inflight/
 │   │   │   └── budget.rs
 │   │   ├── outbound/

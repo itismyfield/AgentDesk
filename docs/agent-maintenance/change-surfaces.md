@@ -687,16 +687,17 @@
     `recovery_paths/restart.rs::dispose_recovery_relay_outcome` (permanent
     Discord 404/403/410 force-clear + 3-restart transient budget); the pure
     decision matrix lives in `recovery_paths/shared.rs`).
-  - `src/services/discord/health.rs` (402 prod lines after the #3038 Phase A
+  - `src/services/discord/health.rs` (417 prod lines after the #3038 Phase A
     directory decomposition; module root keeps the `HealthRegistry` core +
-    re-export surface, and the former monolith body lives in seven flat
+    re-export surface, and the former monolith body lives in flat
     `health/` submodules, all sub-1000 prod LoC: `runtime_resolve.rs` (321),
     `headless_turn.rs` (297), `send_target.rs` (150), `send_gate.rs` (374),
     `manual_delivery.rs` (580), `send_api.rs` (259), `relay_auto_heal.rs`
-    (123). Previously 2240 after the #3034 dead-code sweep, 2292 after
+    (123), `stall_liveness.rs` (527). Previously 2240 after the #3034
+    dead-code sweep, 2292 after
     #3038 send-to-agent dispatch extraction to `outbound/send_to_agent.rs`,
     #1879 snapshot/mailbox extraction, and #3082 answer-flush-barrier field).
-  - `src/services/discord/health/recovery.rs` (2637 lines; health recovery
+  - `src/services/discord/health/recovery.rs` (2615 lines; health recovery
     extraction surface, split further before adding non-bugfix behavior; +70
     from #3126 stall-watchdog completed-idle false-positive guard tests; +88
     from #3169 stall-watchdog jsonl-mtime liveness guard + tests, closing the
@@ -705,7 +706,8 @@
     `health/mailbox.rs::peeked_provider_mailbox_state` so repair probes stop
     minting permanent registry entries for non-existent channels; -4 from
     #3360 moving orphan pending-token auto-heal out to
-    `health/relay_auto_heal.rs`).
+    `health/relay_auto_heal.rs`; #3361 moved positive stall-watchdog liveness
+    guard state/logging to `health/stall_liveness.rs`).
   - `src/services/discord/router/message_handler/intake_turn.rs` (3771 lines;
     Discord message intake turn orchestration split from the router message
     handler; bugfix only outside a further extraction plan; +9 from #3082
