@@ -2244,6 +2244,174 @@ fn status_panel_background_subagent_not_marked_done_on_launch_ack() {
     );
 }
 
+// #3359: an ack-only Task result with a non-matching tool_use_id must be
+// ignored, not routed through the last-unfinished fallback. The later
+// summary-bearing completion with the matching id is the first event allowed to
+// mark the still-running background subagent done.
+#[test]
+fn status_panel_background_ack_only_unmatched_id_waits_for_matching_completion() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(874);
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({
+                "subagent_type": "bgworker",
+                "description": "Background fallback guard",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_bg_real"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        vec![StatusEvent::SubagentEnd {
+            success: true,
+            tool_use_id: Some("toolu_other".to_string()),
+            summary: None,
+            ack_only: true,
+        }],
+    );
+
+    let rendered_running =
+        events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let running_line = rendered_running
+        .lines()
+        .find(|line| line.contains("bgworker Background fallback guard"))
+        .unwrap_or_else(|| panic!("background subagent slot missing in: {rendered_running}"));
+    assert!(
+        !running_line.contains('✓') && !running_line.contains('✗'),
+        "unmatched ack-only end must leave background slot running, got: {running_line}"
+    );
+
+    events.push_status_events(
+        channel_id,
+        vec![StatusEvent::SubagentEnd {
+            success: true,
+            tool_use_id: Some("toolu_bg_real".to_string()),
+            summary: Some(crate::services::agent_protocol::SubagentSummary {
+                tool_count: Some(3),
+                tokens: Some(1_200),
+                duration_secs: Some(42),
+            }),
+            ack_only: false,
+        }],
+    );
+
+    let rendered_done =
+        events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let done_line = rendered_done
+        .lines()
+        .find(|line| line.contains("bgworker Background fallback guard"))
+        .unwrap_or_else(|| panic!("background subagent slot missing in: {rendered_done}"));
+    assert!(
+        done_line.contains("Done (3 tools · 1.2k tokens · 42s)"),
+        "matching summary completion must attach accounting, got: {done_line}"
+    );
+    assert!(
+        done_line.contains('✓'),
+        "matching summary completion must mark the slot done, got: {done_line}"
+    );
+}
+
+// #3359 hole 2: an id-bearing ack-only end with no matching slot must not
+// finalize any unfinished slot via fallback, whether the candidate slot is
+// background or foreground.
+#[test]
+fn status_panel_ack_only_unmatched_id_does_not_fallback_to_any_slot() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(875);
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({
+                "subagent_type": "bgworker",
+                "description": "Still background",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_bg"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({"subagent_type": "fgworker", "description": "Still foreground"}).to_string(),
+            Some("toolu_fg"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        vec![StatusEvent::SubagentEnd {
+            success: true,
+            tool_use_id: Some("toolu_wrong".to_string()),
+            summary: None,
+            ack_only: true,
+        }],
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    for expected in ["bgworker Still background", "fgworker Still foreground"] {
+        let line = rendered
+            .lines()
+            .find(|line| line.contains(expected))
+            .unwrap_or_else(|| panic!("subagent slot missing in: {rendered}"));
+        assert!(
+            !line.contains('✓') && !line.contains('✗'),
+            "unmatched ack-only end must not fallback-finalize {expected}, got: {line}"
+        );
+    }
+}
+
+// Foreground subagents still close on their genuine summary-bearing completion.
+#[test]
+fn status_panel_foreground_subagent_summary_completion_still_marks_done() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(876);
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({"subagent_type": "fgworker", "description": "Summary completion"}).to_string(),
+            Some("toolu_fg_summary"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        vec![StatusEvent::SubagentEnd {
+            success: true,
+            tool_use_id: Some("toolu_fg_summary".to_string()),
+            summary: Some(crate::services::agent_protocol::SubagentSummary {
+                tool_count: Some(2),
+                tokens: Some(900),
+                duration_secs: Some(11),
+            }),
+            ack_only: false,
+        }],
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let line = rendered
+        .lines()
+        .find(|line| line.contains("fgworker Summary completion"))
+        .unwrap_or_else(|| panic!("foreground subagent slot missing in: {rendered}"));
+    assert!(
+        line.contains("Done (2 tools · 900 tokens · 11s)"),
+        "foreground summary completion must keep Done summary, got: {line}"
+    );
+    assert!(
+        line.contains('✓'),
+        "foreground summary completion must mark the slot done, got: {line}"
+    );
+}
+
 // Edge case of the premature-✓ fix: a `run_in_background` LAUNCH that FAILS
 // (the Task `tool_result` is an error — the subagent never started) is TERMINAL,
 // not a launch ack. The slot must finalize as failed (✗) instead of being stuck

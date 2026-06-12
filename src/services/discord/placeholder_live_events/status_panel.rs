@@ -190,12 +190,20 @@ impl StatusPanelState {
                 // specific subagent (identified by its `tool_use_id`). If that
                 // id does not match a tracked slot, the end MUST NOT fall back
                 // to the last-unfinished slot — doing so would mark an unrelated
-                // running subagent Done with the wrong summary. Drop the unmatched
-                // summary-bearing end entirely. A plain (no-summary) end keeps the
-                // legacy fallback so #3084 id-less backends still close a slot.
+                // running subagent Done with the wrong summary. #3359 applies
+                // the same rule to id-bearing ack-only ends: for background
+                // dispatches, a successful Task result can be only a launch ack,
+                // so it is safe only on an exact id match. Id-less legacy acks
+                // may close only id-less slots; id-bearing slots are never
+                // fallback targets.
                 let has_summary = summary.as_ref().is_some_and(|s| !s.is_empty());
                 let target = match matched {
                     Some(index) => Some(index),
+                    None if ack_only && id.is_some() => None,
+                    None if ack_only => self
+                        .subagents
+                        .iter()
+                        .rposition(|slot| slot.finished.is_none() && slot.tool_use_id.is_none()),
                     None if has_summary && id.is_some() => None,
                     None => self
                         .subagents
