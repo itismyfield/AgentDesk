@@ -10,7 +10,10 @@ pub(super) fn watcher_single_message_panel_footer_enabled(status_panel_v2_enable
 }
 
 fn footer_mode_enabled(single_message_panel_enabled: bool, status_panel_v2_enabled: bool) -> bool {
-    single_message_panel_enabled && status_panel_v2_enabled
+    crate::services::discord::single_message_panel::footer_mode_enabled(
+        single_message_panel_enabled,
+        status_panel_v2_enabled,
+    )
 }
 
 pub(super) fn watcher_separate_status_panel_enabled(status_panel_v2_enabled: bool) -> bool {
@@ -24,15 +27,20 @@ fn separate_status_panel_enabled_for_flags(
     single_message_panel_enabled: bool,
     status_panel_v2_enabled: bool,
 ) -> bool {
-    status_panel_v2_enabled
-        && !footer_mode_enabled(single_message_panel_enabled, status_panel_v2_enabled)
+    crate::services::discord::single_message_panel::separate_status_panel_enabled_for_flags(
+        single_message_panel_enabled,
+        status_panel_v2_enabled,
+    )
 }
 
 pub(super) fn watcher_live_events_dirty_should_force_status_update(
     live_events_dirty: bool,
     single_message_panel_footer_mode: bool,
 ) -> bool {
-    live_events_dirty && !single_message_panel_footer_mode
+    crate::services::discord::single_message_panel::live_events_dirty_should_force_status_update(
+        live_events_dirty,
+        single_message_panel_footer_mode,
+    )
 }
 
 #[cfg(test)]
@@ -66,29 +74,9 @@ pub(super) fn watcher_should_complete_separate_status_panel(status_panel_v2_enab
 }
 
 fn compose_single_message_footer_status_block(indicator: &str, panel_text: &str) -> String {
-    let spinner = crate::services::discord::formatting::build_processing_status_block(indicator);
-    let panel_text = panel_text.trim();
-    let status_block = if panel_text.is_empty() {
-        spinner
-    } else {
-        format!("{spinner}\n{panel_text}")
-    };
-    clamp_single_message_footer_status_block(status_block)
-}
-
-fn clamp_single_message_footer_status_block(status_block: String) -> String {
-    let max_bytes = crate::services::discord::DISCORD_MSG_LIMIT.saturating_sub(6);
-    if status_block.len() <= max_bytes {
-        return status_block;
-    }
-    let ellipsis = "…";
-    let body_budget = max_bytes.saturating_sub(ellipsis.len());
-    if body_budget == 0 {
-        return ellipsis.to_string();
-    }
-    let safe_end =
-        crate::services::discord::formatting::floor_char_boundary(&status_block, body_budget);
-    format!("{}{}", &status_block[..safe_end], ellipsis)
+    crate::services::discord::single_message_panel::compose_footer_status_block(
+        indicator, panel_text,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -126,42 +114,9 @@ pub(super) fn finalize_single_message_panel_streaming_footer(
     last_edit_text: &str,
     provider: &ProviderKind,
 ) -> Option<String> {
-    if let Some(finalized) = crate::services::discord::formatting::finalize_stale_streaming_footer(
+    crate::services::discord::single_message_panel::finalize_streaming_footer(
         last_edit_text,
         provider,
-    ) {
-        return Some(finalized);
-    }
-
-    let (body, _footer) = split_single_message_panel_footer(last_edit_text)?;
-    let cleaned =
-        crate::services::discord::formatting::format_for_discord_with_status_panel(body, provider);
-    if cleaned.trim().is_empty() || cleaned == last_edit_text {
-        None
-    } else {
-        Some(cleaned)
-    }
-}
-
-fn split_single_message_panel_footer(text: &str) -> Option<(&str, &str)> {
-    let mut search_end = text.len();
-    while let Some(idx) = text[..search_end].rfind("\n\n") {
-        let body = &text[..idx];
-        let footer = &text[(idx + 2)..];
-        if single_message_panel_footer_starts_with_spinner(footer) {
-            return Some((body, footer));
-        }
-        search_end = idx;
-    }
-    None
-}
-
-fn single_message_panel_footer_starts_with_spinner(footer: &str) -> bool {
-    let Some(first_footer_line) = footer.lines().find(|line| !line.trim().is_empty()) else {
-        return false;
-    };
-    crate::services::discord::formatting::is_streaming_placeholder_status_line(
-        first_footer_line.trim(),
     )
 }
 

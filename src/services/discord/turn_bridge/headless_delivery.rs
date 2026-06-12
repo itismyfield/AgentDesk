@@ -108,7 +108,33 @@ fn headless_streaming_placeholder_cleanup_action(
     last_edit_text: &str,
     provider: &ProviderKind,
     status_panel_v2_enabled: bool,
+    single_message_panel_footer_mode: bool,
 ) -> HeadlessPlaceholderCleanupAction {
+    if single_message_panel_footer_mode {
+        if let Some(cleaned) =
+            super::finalize_bridge_streaming_footer(true, last_edit_text, provider)
+        {
+            return if cleaned == last_edit_text {
+                HeadlessPlaceholderCleanupAction::Skip
+            } else {
+                HeadlessPlaceholderCleanupAction::Edit(cleaned)
+            };
+        }
+        if let Some(cleaned) =
+            crate::services::discord::single_message_panel::strip_streaming_footer(
+                last_edit_text,
+                provider,
+            )
+        {
+            return if cleaned.trim().is_empty() {
+                HeadlessPlaceholderCleanupAction::Delete
+            } else if cleaned == last_edit_text {
+                HeadlessPlaceholderCleanupAction::Skip
+            } else {
+                HeadlessPlaceholderCleanupAction::Edit(cleaned)
+            };
+        }
+    }
     let mut cleaned = if status_panel_v2_enabled {
         super::formatting::format_for_discord_with_status_panel(last_edit_text, provider)
     } else {
@@ -147,6 +173,7 @@ pub(super) async fn cleanup_headless_streaming_placeholder_after_delivery(
         last_edit_text,
         provider,
         shared.status_panel_v2_enabled,
+        super::bridge_single_message_panel_footer_enabled(shared.status_panel_v2_enabled),
     ) {
         HeadlessPlaceholderCleanupAction::Delete => {
             if let Err(error) =
@@ -423,6 +450,7 @@ mod headless_delivery_tests {
             "[Bash] /bin/zsh -lc 'cargo test'\n⠙ Processing...",
             &ProviderKind::Codex,
             true,
+            false,
         );
 
         assert_eq!(action, HeadlessPlaceholderCleanupAction::Delete);
@@ -434,6 +462,7 @@ mod headless_delivery_tests {
             "⠂ Processing...\n\n```\n[Bash] /bin/zsh -lc 'grep -n foo src/lib.rs'\n[Bash] /bin/zsh -lc \"sed -n '1,40p' src/lib.rs\"\n```",
             &ProviderKind::Codex,
             true,
+            false,
         );
 
         assert_eq!(action, HeadlessPlaceholderCleanupAction::Delete);
@@ -445,6 +474,7 @@ mod headless_delivery_tests {
             "partial answer\n\n⠙ Processing...",
             &ProviderKind::Codex,
             true,
+            false,
         );
 
         assert_eq!(
@@ -458,6 +488,25 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             "partial answer\n\n⠙ 계속 처리 중",
             &ProviderKind::Codex,
+            true,
+            false,
+        );
+
+        assert_eq!(
+            action,
+            HeadlessPlaceholderCleanupAction::Edit("partial answer".to_string())
+        );
+    }
+
+    #[test]
+    fn headless_cleanup_strips_single_message_panel_footer() {
+        let panel = "🟢 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n└ review inspect";
+        let footer =
+            crate::services::discord::single_message_panel::compose_footer_status_block("⠸", panel);
+        let action = headless_streaming_placeholder_cleanup_action(
+            &format!("partial answer\n\n{footer}"),
+            &ProviderKind::Claude,
+            true,
             true,
         );
 

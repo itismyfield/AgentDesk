@@ -6,6 +6,7 @@ mod output_lifecycle;
 mod recall_feedback;
 mod recovery_text;
 mod retry_state;
+mod single_message_footer;
 mod skill_usage;
 mod stale_resume;
 mod status_panel;
@@ -48,6 +49,7 @@ pub(super) use recovery_text::{
     auto_retry_with_history, build_session_retry_context_from_history, release_retry_pending,
     store_session_retry_context, take_session_retry_context_for_turn_with_audit,
 };
+use single_message_footer::*;
 pub(super) use stale_resume::result_event_has_stale_resume_error;
 pub(in crate::services::discord) use status_panel::{
     complete_status_panel_v2_with_http, normalize_status_panel_message_id,
@@ -2356,43 +2358,34 @@ pub(super) fn spawn_turn_bridge(
             &mut inflight_state,
             bridge.reuse_status_panel_message,
         );
+        let single_message_panel_footer_mode =
+            bridge_single_message_panel_footer_enabled(shared_owned.status_panel_v2_enabled);
+        if single_message_panel_footer_mode {
+            status_panel_msg_id = None;
+            inflight_state.status_message_id = None;
+        }
         let mut last_status_panel_text = String::new();
         let mut status_panel_dirty = shared_owned.status_panel_v2_enabled;
         let mut last_status_panel_edit = tokio::time::Instant::now() - status_interval;
         let status_panel_started_at = chrono::Utc::now().timestamp();
         let turn_start = std::time::Instant::now();
 
-        if shared_owned.status_panel_v2_enabled
-            && (status_panel_msg_id.is_none() || status_panel_msg_id == Some(current_msg_id))
-        {
-            let response_placeholder = super::formatting::build_processing_status_block(SPINNER[0]);
-            match gateway.send_message(channel_id, &response_placeholder).await {
-                Ok(response_msg_id) => {
-                    if is_synthetic_headless_message_id(current_msg_id) {
-                        status_panel_msg_id = None;
-                        inflight_state.status_message_id = None;
-                    } else {
-                        status_panel_msg_id = Some(current_msg_id);
-                        inflight_state.status_message_id = Some(current_msg_id.get());
-                    }
-                    current_msg_id = response_msg_id;
-                    bridge_created_response_placeholder_msg_id = Some(response_msg_id);
-                    last_edit_text = response_placeholder.to_string();
-                    inflight_state.current_msg_id = current_msg_id.get();
-                    inflight_state.current_msg_len = last_edit_text.len();
-                    inflight_state.response_sent_offset = response_sent_offset;
-                    inflight_state.full_response = full_response.clone();
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        "[turn_bridge] failed to create status-panel-v2 response message in channel {}: {}",
-                        channel_id,
-                        error
-                    );
-                    status_panel_dirty = false;
-                }
-            }
-        }
+        maybe_create_bridge_separate_status_panel_response(
+            single_message_panel_footer_mode,
+            shared_owned.status_panel_v2_enabled,
+            gateway.as_ref(),
+            channel_id,
+            SPINNER[0],
+            &mut current_msg_id,
+            &mut status_panel_msg_id,
+            &mut bridge_created_response_placeholder_msg_id,
+            &mut last_edit_text,
+            &mut inflight_state,
+            response_sent_offset,
+            &full_response,
+            &mut status_panel_dirty,
+        )
+        .await;
 
         if shared_owned.status_panel_v2_enabled
             && let Some(dispatch_id) = dispatch_id.as_deref()
@@ -4129,7 +4122,10 @@ pub(super) fn spawn_turn_bridge(
             spin_idx += 1;
 
             if shared_owned.status_panel_v2_enabled
-                && status_panel_dirty
+                && bridge_status_panel_dirty_should_edit_separate_panel(
+                    status_panel_dirty,
+                    single_message_panel_footer_mode,
+                )
                 && last_status_panel_edit.elapsed() >= status_interval
                 && let Some(status_msg_id) = status_panel_msg_id
             {
@@ -4171,16 +4167,16 @@ pub(super) fn spawn_turn_bridge(
                     }
 
                     let indicator = SPINNER[spin_idx % SPINNER.len()];
-                    let status_block = if shared_owned.status_panel_v2_enabled {
-                        super::formatting::build_processing_status_block(indicator)
-                    } else {
-                        super::formatting::build_placeholder_status_block(
-                            indicator,
-                            prev_tool_status.as_deref(),
-                            current_tool_line.as_deref(),
-                            &full_response,
-                        )
-                    };
+                    let status_block = build_bridge_single_message_panel_status_block(
+                        shared_owned.as_ref(),
+                        channel_id,
+                        &provider,
+                        status_panel_started_at,
+                        indicator,
+                        prev_tool_status.as_deref(),
+                        current_tool_line.as_deref(),
+                        &full_response,
+                    );
                     let Some(plan) =
                         super::formatting::plan_streaming_rollover(current_portion, &status_block)
                     else {
@@ -4290,16 +4286,16 @@ pub(super) fn spawn_turn_bridge(
 
                 let current_portion =
                     response_portion_after_offset(&full_response, response_sent_offset);
-                let status_block = if shared_owned.status_panel_v2_enabled {
-                    super::formatting::build_processing_status_block(indicator)
-                } else {
-                    super::formatting::build_placeholder_status_block(
-                        indicator,
-                        prev_tool_status.as_deref(),
-                        current_tool_line.as_deref(),
-                        &full_response,
-                    )
-                };
+                let status_block = build_bridge_single_message_panel_status_block(
+                    shared_owned.as_ref(),
+                    channel_id,
+                    &provider,
+                    status_panel_started_at,
+                    indicator,
+                    prev_tool_status.as_deref(),
+                    current_tool_line.as_deref(),
+                    &full_response,
+                );
                 let stable_display_text = build_turn_bridge_streaming_edit_text(
                     shared_owned.status_panel_v2_enabled,
                     current_portion,
@@ -6448,7 +6444,10 @@ pub(super) fn spawn_turn_bridge(
         }
 
         let mut status_panel_completion_committed = true;
-        if status_panel_terminal_committed && bridge_should_emit_completion {
+        if status_panel_terminal_committed
+            && bridge_should_emit_completion
+            && bridge_should_complete_separate_status_panel(shared_owned.status_panel_v2_enabled)
+        {
             // #2849: before rendering the completed panel, backfill exact final
             // context usage when the live StatusUpdates never carried it (e.g.
             // silent/background turns). resolve_exact_completion_usage prefers

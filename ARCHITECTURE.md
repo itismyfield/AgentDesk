@@ -510,6 +510,7 @@ src/
 │   │   │   ├── recall_feedback.rs
 │   │   │   ├── recovery_text.rs
 │   │   │   ├── retry_state.rs
+│   │   │   ├── single_message_footer.rs
 │   │   │   ├── skill_usage.rs
 │   │   │   ├── stale_resume.rs
 │   │   │   ├── status_panel.rs
