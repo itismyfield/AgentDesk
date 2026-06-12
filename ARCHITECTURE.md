@@ -523,6 +523,7 @@ src/
 │   │   ├── turn_finalizer/
 │   │   │   └── cleanup.rs
 │   │   ├── voice_barge_in/
+│   │   │   ├── progress_playback.rs
 │   │   │   └── stt.rs
 │   │   ├── watchers/
 │   │   │   ├── lifecycle.rs
