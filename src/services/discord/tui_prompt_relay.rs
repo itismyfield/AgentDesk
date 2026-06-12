@@ -5816,6 +5816,12 @@ mod tests {
     // tests (`idle_relay_drift`) prove WHICH durable source is chosen and the
     // mis-delivery guards; this end-to-end test pins the registry promotion +
     // resolver hand-off.
+    //
+    // #3356: gated to unix to match the `test_watcher_handle` helper (def at
+    // `#[cfg(unix)]` below) it consumes — every other caller of that helper is
+    // already `#[cfg(unix)]`, so this restores def/usage cfg symmetry and lets
+    // the windows leg compile (the helper does not exist on windows).
+    #[cfg(unix)]
     #[test]
     fn drift_triggered_restore_makes_routine_session_route_again() {
         let shared = super::super::make_shared_data_for_tests();
