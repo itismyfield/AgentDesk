@@ -34,6 +34,9 @@ pub(in crate::services::discord) struct CompletionFooterEdit {
     pub(in crate::services::discord) text: String,
     pub(in crate::services::discord) remove_after_edit: bool,
     completion_block: Option<String>,
+    // #3391: identities of terminal task/subagent slots in `text`; evicted by
+    // slot identity (not line string) once this edit is delivered.
+    delivered_terminal_ids: Vec<super::placeholder_live_events::TerminalSlotId>,
 }
 
 fn completion_footer_registry() -> &'static Mutex<HashMap<u64, RegisteredCompletionFooter>> {
@@ -262,6 +265,7 @@ pub(in crate::services::discord) fn completion_footer_edit_for_registered_target
         text,
         remove_after_edit: idle_expired || !rendered.has_unfinished_entries,
         completion_block,
+        delivered_terminal_ids: rendered.delivered_terminal_ids,
     })
 }
 
@@ -278,6 +282,7 @@ pub(in crate::services::discord) fn completion_footer_record_edit_result(
 }
 
 pub(in crate::services::discord) fn completion_footer_record_edit_result_for_edit(
+    shared: &super::SharedData,
     channel_id: ChannelId,
     edit: &CompletionFooterEdit,
     edited: bool,
@@ -288,6 +293,15 @@ pub(in crate::services::discord) fn completion_footer_record_edit_result_for_edi
         edited,
         edit.completion_block.as_deref(),
     );
+    // #3391: this edit delivered the terminal marks once; evict those slot
+    // identities so the next render (and any #3386 migration footer) drops the
+    // completed task AND subagent entries.
+    if edited {
+        shared
+            .ui
+            .placeholder_live_events
+            .evict_delivered_terminal_footer_tasks(channel_id, &edit.delivered_terminal_ids);
+    }
 }
 
 fn completion_footer_record_edit_result_with_block(
@@ -333,6 +347,12 @@ fn supersede_edit_from_registered_target(
         text,
         remove_after_edit: true,
         completion_block,
+        // #3391 migration-race rule: a frozen supersede snapshot never counts
+        // as "the once" — it carries only the last delivered block string with
+        // no slot identity. Terminal marks in it were either already evicted by
+        // a confirmed live delivery, or (failed-edit race) render once more on
+        // the new target and evict on that delivery; a ✓ is never lost.
+        delivered_terminal_ids: Vec::new(),
     }
 }
 
@@ -667,6 +687,36 @@ mod tests {
                 name: "Bash".to_string(),
                 summary: "Run background codex".to_string(),
                 tool_use_id: format!("tool-{}", channel_id.get()),
+            },
+        );
+        shared
+    }
+
+    fn push_finished_and_running_background_tasks(
+        channel_id: ChannelId,
+    ) -> std::sync::Arc<super::super::SharedData> {
+        let shared = super::super::make_shared_data_for_tests();
+        shared.ui.placeholder_live_events.push_status_event(
+            channel_id,
+            StatusEvent::BackgroundTaskStart {
+                name: "Bash".to_string(),
+                summary: "Finished job".to_string(),
+                tool_use_id: format!("tool-done-{}", channel_id.get()),
+            },
+        );
+        shared.ui.placeholder_live_events.push_status_event(
+            channel_id,
+            StatusEvent::BackgroundTaskEnd {
+                tool_use_id: format!("tool-done-{}", channel_id.get()),
+                success: true,
+            },
+        );
+        shared.ui.placeholder_live_events.push_status_event(
+            channel_id,
+            StatusEvent::BackgroundTaskStart {
+                name: "Bash".to_string(),
+                summary: "Running job".to_string(),
+                tool_use_id: format!("tool-run-{}", channel_id.get()),
             },
         );
         shared
@@ -1128,8 +1178,233 @@ mod tests {
         assert!(latest.text.contains("Carried bash ✓"));
         assert!(latest.text.contains("Carried agent ✓"));
         assert!(!supersede.text.contains('✓'));
-        super::completion_footer_record_edit_result_for_edit(channel_id, &latest, true);
+        super::completion_footer_record_edit_result_for_edit(
+            shared.as_ref(),
+            channel_id,
+            &latest,
+            true,
+        );
         assert!(!super::completion_footer_has_registered_target(channel_id));
+    }
+
+    #[test]
+    fn completion_footer_terminal_mark_renders_once_then_next_edit_drops_it() {
+        let channel_id = ChannelId::new(3_391_101);
+        super::completion_footer_forget_registered_target(channel_id);
+        let shared = push_finished_and_running_background_tasks(channel_id);
+        let _ = super::register_completion_footer_target(
+            channel_id,
+            MessageId::new(3_391_201),
+            &ProviderKind::Claude,
+            1_800_000_000,
+            "Final answer",
+            None,
+            true,
+        );
+
+        let edit = super::completion_footer_edit_for_registered_target_at(
+            shared.as_ref(),
+            channel_id,
+            "⠸",
+            1_800_000_001,
+        )
+        .expect("first refresh should render the terminal mark");
+        assert!(edit.text.contains("Bash Finished job ✓"));
+        assert!(edit.text.contains("Bash Running job ⠸"));
+        assert!(!edit.remove_after_edit);
+
+        super::completion_footer_record_edit_result_for_edit(
+            shared.as_ref(),
+            channel_id,
+            &edit,
+            true,
+        );
+
+        let next = super::completion_footer_edit_for_registered_target_at(
+            shared.as_ref(),
+            channel_id,
+            "⠼",
+            1_800_000_002,
+        )
+        .expect("running entry keeps the target registered");
+        assert!(!next.text.contains("Finished job"));
+        assert!(next.text.contains("Bash Running job ⠼"));
+        super::completion_footer_forget_registered_target(channel_id);
+    }
+
+    #[test]
+    fn completion_footer_failed_delivery_retries_terminal_mark() {
+        let channel_id = ChannelId::new(3_391_102);
+        super::completion_footer_forget_registered_target(channel_id);
+        let shared = push_finished_and_running_background_tasks(channel_id);
+        let _ = super::register_completion_footer_target(
+            channel_id,
+            MessageId::new(3_391_202),
+            &ProviderKind::Claude,
+            1_800_000_000,
+            "Final answer",
+            None,
+            true,
+        );
+        let edit = super::completion_footer_edit_for_registered_target_at(
+            shared.as_ref(),
+            channel_id,
+            "⠸",
+            1_800_000_001,
+        )
+        .expect("first refresh should render the terminal mark");
+
+        super::completion_footer_record_edit_result_for_edit(
+            shared.as_ref(),
+            channel_id,
+            &edit,
+            false,
+        );
+
+        let retry = super::completion_footer_edit_for_registered_target_at(
+            shared.as_ref(),
+            channel_id,
+            "⠼",
+            1_800_000_002,
+        )
+        .expect("failed edit keeps the target registered");
+        assert!(retry.text.contains("Bash Finished job ✓"));
+        super::completion_footer_forget_registered_target(channel_id);
+    }
+
+    #[test]
+    fn completion_footer_evicts_all_terminal_marks_delivered_by_one_edit() {
+        let channel_id = ChannelId::new(3_391_103);
+        super::completion_footer_forget_registered_target(channel_id);
+        let shared = push_finished_and_running_background_tasks(channel_id);
+        shared.ui.placeholder_live_events.push_status_event(
+            channel_id,
+            StatusEvent::BackgroundTaskStart {
+                name: "Bash".to_string(),
+                summary: "Failed sweep".to_string(),
+                tool_use_id: "tool-fail-3391103".to_string(),
+            },
+        );
+        shared.ui.placeholder_live_events.push_status_event(
+            channel_id,
+            StatusEvent::BackgroundTaskEnd {
+                tool_use_id: "tool-fail-3391103".to_string(),
+                success: false,
+            },
+        );
+        let _ = super::register_completion_footer_target(
+            channel_id,
+            MessageId::new(3_391_203),
+            &ProviderKind::Claude,
+            1_800_000_000,
+            "Final answer",
+            None,
+            true,
+        );
+        let edit = super::completion_footer_edit_for_registered_target_at(
+            shared.as_ref(),
+            channel_id,
+            "⠸",
+            1_800_000_001,
+        )
+        .expect("first refresh should render both terminal marks");
+        assert!(edit.text.contains("Bash Finished job ✓"));
+        assert!(edit.text.contains("Bash Failed sweep ✗"));
+
+        super::completion_footer_record_edit_result_for_edit(
+            shared.as_ref(),
+            channel_id,
+            &edit,
+            true,
+        );
+
+        let next = super::completion_footer_edit_for_registered_target_at(
+            shared.as_ref(),
+            channel_id,
+            "⠼",
+            1_800_000_002,
+        )
+        .expect("running entry keeps the target registered");
+        assert!(!next.text.contains("Finished job"));
+        assert!(!next.text.contains("Failed sweep"));
+        assert!(next.text.contains("Bash Running job ⠼"));
+        super::completion_footer_forget_registered_target(channel_id);
+    }
+
+    #[test]
+    fn migration_does_not_carry_delivered_terminal_marks_to_new_target() {
+        let channel_id = ChannelId::new(3_391_104);
+        super::completion_footer_forget_registered_target(channel_id);
+        let shared = push_finished_and_running_background_tasks(channel_id);
+        let old_block = shared
+            .ui
+            .placeholder_live_events
+            .render_completion_footer(channel_id, &ProviderKind::Claude, "⠸")
+            .block
+            .expect("old footer block");
+        assert_eq!(
+            super::register_completion_footer_target(
+                channel_id,
+                MessageId::new(3_391_204),
+                &ProviderKind::Claude,
+                1_800_000_000,
+                "Old answer",
+                Some(&old_block),
+                true,
+            ),
+            None
+        );
+        let edit = super::completion_footer_edit_for_registered_target_at(
+            shared.as_ref(),
+            channel_id,
+            "⠸",
+            1_800_000_001,
+        )
+        .expect("old target refresh");
+        assert!(edit.text.contains("Bash Finished job ✓"));
+        super::completion_footer_record_edit_result_for_edit(
+            shared.as_ref(),
+            channel_id,
+            &edit,
+            true,
+        );
+
+        // #3386 migration: the channel footer moves to a newer message. The new
+        // footer must not carry the already-delivered terminal mark, while the
+        // frozen snapshot of the superseded message keeps it (that delivered
+        // render IS "the once").
+        let new_block = shared
+            .ui
+            .placeholder_live_events
+            .render_completion_footer(channel_id, &ProviderKind::Claude, "⠼")
+            .block
+            .expect("running entry still renders");
+        assert!(!new_block.contains("Finished job"));
+        let supersede = super::register_completion_footer_target(
+            channel_id,
+            MessageId::new(3_391_205),
+            &ProviderKind::Claude,
+            1_800_000_010,
+            "New answer",
+            Some(&new_block),
+            true,
+        )
+        .expect("new target should supersede old target");
+        assert_eq!(supersede.message_id, MessageId::new(3_391_204));
+        assert!(supersede.text.contains("Bash Finished job ✓"));
+        assert!(supersede.text.contains("Bash Running job …"));
+
+        let latest = super::completion_footer_edit_for_registered_target_at(
+            shared.as_ref(),
+            channel_id,
+            "⠋",
+            1_800_000_011,
+        )
+        .expect("new target refresh");
+        assert_eq!(latest.message_id, MessageId::new(3_391_205));
+        assert!(!latest.text.contains("Finished job"));
+        assert!(latest.text.contains("Bash Running job ⠋"));
+        super::completion_footer_forget_registered_target(channel_id);
     }
 
     #[test]
@@ -1171,7 +1446,12 @@ mod tests {
         assert!(edit.text.contains("Tasks\n└ Bash Run background codex …"));
         assert!(!edit.text.contains('⠼'));
         assert!(!edit.text.contains('✓'));
-        super::completion_footer_record_edit_result_for_edit(channel_id, &edit, true);
+        super::completion_footer_record_edit_result_for_edit(
+            shared.as_ref(),
+            channel_id,
+            &edit,
+            true,
+        );
         assert!(!super::completion_footer_has_registered_target(channel_id));
     }
 

@@ -1,6 +1,6 @@
 use super::common::{
     EVENT_LINE_MAX_CHARS, TASK_PANEL_LINE_MAX_CHARS, escape_status_panel_markdown,
-    first_content_line, sanitized_tool_name, truncate_chars,
+    first_content_line, sanitized_tool_name, truncate_chars, truncate_chars_with_marker,
 };
 
 const DISPATCH_ID_SHORT_LEN: usize = 8;
@@ -92,6 +92,10 @@ pub(super) struct TaskToolSlot {
     pub(super) status: Option<String>,
     pub(super) tool_use_id: Option<String>,
     pub(super) background: bool,
+    /// #3391: monotonic per-channel-entry slot id assigned at creation and never
+    /// reused. Backs slot-identity eviction so two slots that render the same
+    /// terminal line stay distinct (string-identity eviction collided them).
+    pub(super) ordinal: u64,
 }
 
 pub(super) fn clean_task_tool_value(raw: impl AsRef<str>) -> Option<String> {
@@ -101,6 +105,7 @@ pub(super) fn clean_task_tool_value(raw: impl AsRef<str>) -> Option<String> {
 
 pub(super) fn upsert_task_tool_slot(
     slots: &mut Vec<TaskToolSlot>,
+    next_ordinal: &mut u64,
     name: String,
     task_id: Option<String>,
     summary: Option<String>,
@@ -132,12 +137,14 @@ pub(super) fn upsert_task_tool_slot(
         status,
         tool_use_id: None,
         background: false,
+        ordinal: take_slot_ordinal(next_ordinal),
     });
     trim_task_tool_slots(slots);
 }
 
 pub(super) fn upsert_background_task_tool_slot(
     slots: &mut Vec<TaskToolSlot>,
+    next_ordinal: &mut u64,
     name: String,
     summary: String,
     tool_use_id: String,
@@ -163,8 +170,18 @@ pub(super) fn upsert_background_task_tool_slot(
         status: None,
         tool_use_id: Some(tool_use_id),
         background: true,
+        ordinal: take_slot_ordinal(next_ordinal),
     });
     trim_task_tool_slots(slots);
+}
+
+/// #3391: hands out the next never-reused per-channel-entry slot ordinal. The
+/// counter only ever advances, so a trimmed/evicted slot's ordinal cannot be
+/// minted again within the same channel entry.
+pub(super) fn take_slot_ordinal(next_ordinal: &mut u64) -> u64 {
+    let ordinal = *next_ordinal;
+    *next_ordinal = next_ordinal.saturating_add(1);
+    ordinal
 }
 
 pub(super) fn finish_background_task_tool_slot(
@@ -201,18 +218,22 @@ pub(super) fn render_task_tool_slot(slot: &TaskToolSlot) -> String {
         detail_parts.push(escape_status_panel_markdown(status));
     }
 
-    let mut line = if detail_parts.is_empty() {
+    let line = if detail_parts.is_empty() {
         format!("└ {label}")
     } else {
         format!("└ {label} {}", detail_parts.join(" · "))
     };
+    // #3391: reserve marker width then append, so a terminal background slot's
+    // line always ENDS WITH its ✓/✗ even when the description is long enough
+    // that a post-append truncation would have swallowed the mark. Non-terminal
+    // lines keep their plain char truncation.
     if slot.background
         && let Some(marker) = task_tool_terminal_marker(slot.status.as_deref())
     {
-        line.push(' ');
-        line.push_str(marker);
+        truncate_chars_with_marker(&line, marker, EVENT_LINE_MAX_CHARS)
+    } else {
+        truncate_chars(&line, EVENT_LINE_MAX_CHARS)
     }
-    truncate_chars(&line, EVENT_LINE_MAX_CHARS)
 }
 
 pub(super) fn task_tool_terminal_marker(status: Option<&str>) -> Option<&'static str> {
@@ -252,6 +273,29 @@ pub(super) fn task_tool_terminal_marker(status: Option<&str>) -> Option<&'static
 
 pub(super) fn task_tool_slot_is_unfinished_background(slot: &TaskToolSlot) -> bool {
     slot.background && task_tool_terminal_marker(slot.status.as_deref()).is_none()
+}
+
+/// #3391: a task slot carries a terminal mark (✓/✗) iff its status maps to one.
+/// Matches the `unfinished == false` branch of `completion_task_marker`, so a
+/// slot is "still terminal at evict time" exactly when this holds.
+pub(super) fn task_tool_slot_is_terminal(slot: &TaskToolSlot) -> bool {
+    task_tool_terminal_marker(slot.status.as_deref()).is_some()
+}
+
+/// #3391: stable slot identity for delivered-terminal eviction. Background
+/// tasks key on their `tool_use_id`, Task-tool slots on their `task_id`, and
+/// any slot lacking both falls back to the never-reused `ordinal`. The ordinal
+/// alone is unique within a channel entry, so the id/task_id preference only
+/// reflects the slot's primary handle without weakening uniqueness.
+pub(super) fn task_tool_slot_identity(slot: &TaskToolSlot) -> super::completion_footer::SlotKey {
+    use super::completion_footer::SlotKey;
+    if let Some(tool_use_id) = slot.tool_use_id.as_deref() {
+        SlotKey::ToolUseId(tool_use_id.to_string())
+    } else if let Some(task_id) = slot.task_id.as_deref() {
+        SlotKey::TaskId(task_id.to_string())
+    } else {
+        SlotKey::Ordinal(slot.ordinal)
+    }
 }
 
 fn short_dispatch_id(dispatch_id: &str) -> String {

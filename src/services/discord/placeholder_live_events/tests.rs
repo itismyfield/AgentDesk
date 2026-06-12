@@ -1891,6 +1891,550 @@ fn completion_footer_background_bash_animates_and_flips_on_notification() {
     assert!(!done_block.contains('⠼'));
 }
 
+fn push_background_bash_task(
+    events: &PlaceholderLiveEvents,
+    channel_id: ChannelId,
+    summary: &str,
+    tool_use_id: &str,
+) {
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id_for_footer_mode(
+            "Bash",
+            &json!({
+                "command": "sleep 1",
+                "description": summary,
+                "run_in_background": true
+            })
+            .to_string(),
+            Some(tool_use_id),
+            true,
+        ),
+    );
+}
+
+// #3391: a background task's slot identity keys on its `tool_use_id`.
+fn bg_task_id(tool_use_id: &str) -> super::completion_footer::TerminalSlotId {
+    super::completion_footer::TerminalSlotId::Task(super::completion_footer::SlotKey::ToolUseId(
+        tool_use_id.to_string(),
+    ))
+}
+
+// #3391: a subagent slot keyed on its launching `tool_use_id`.
+fn subagent_id(tool_use_id: &str) -> super::completion_footer::TerminalSlotId {
+    super::completion_footer::TerminalSlotId::Subagent(
+        super::completion_footer::SlotKey::ToolUseId(tool_use_id.to_string()),
+    )
+}
+
+fn complete_background_bash_task(
+    events: &PlaceholderLiveEvents,
+    channel_id: ChannelId,
+    tool_use_id: &str,
+) {
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_with_tool_use_id(
+            "background",
+            "completed",
+            "Background command completed (exit code 0)",
+            Some(tool_use_id),
+        ),
+    );
+}
+
+#[test]
+fn completion_footer_delivered_terminal_task_evicts_from_next_render() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_001);
+    push_background_bash_task(&events, channel_id, "Keep running", "toolu_3391_run");
+    push_background_bash_task(&events, channel_id, "Evict after ack", "toolu_3391_done");
+    complete_background_bash_task(&events, channel_id, "toolu_3391_done");
+
+    let delivered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = delivered
+        .block
+        .expect("running + finished tasks should render");
+    assert!(block.contains("Bash Evict after ack ✓"));
+    assert!(block.contains("Bash Keep running ⠸"));
+    assert_eq!(
+        delivered.delivered_terminal_ids,
+        vec![bg_task_id("toolu_3391_done")]
+    );
+
+    events.evict_delivered_terminal_footer_tasks(channel_id, &delivered.delivered_terminal_ids);
+
+    let next = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    let next_block = next.block.expect("running task should keep rendering");
+    assert!(!next_block.contains("Evict after ack"));
+    assert!(next_block.contains("Bash Keep running ⠼"));
+    assert!(next.has_unfinished_entries);
+    assert!(next.delivered_terminal_ids.is_empty());
+}
+
+#[test]
+fn completion_footer_undelivered_terminal_task_keeps_rendering_and_inflight_never_evicts() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_002);
+    push_background_bash_task(&events, channel_id, "Stay running", "toolu_3391_stay");
+    push_background_bash_task(
+        &events,
+        channel_id,
+        "Retry my checkmark",
+        "toolu_3391_retry",
+    );
+    complete_background_bash_task(&events, channel_id, "toolu_3391_retry");
+
+    // A failed Discord edit never acks the render, so the ✓ renders again.
+    let first = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    assert_eq!(first.delivered_terminal_ids.len(), 1);
+    let retry = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    assert!(
+        retry
+            .block
+            .expect("undelivered terminal task should re-render")
+            .contains("Bash Retry my checkmark ✓")
+    );
+    assert_eq!(retry.delivered_terminal_ids, first.delivered_terminal_ids);
+
+    // Stale/unknown identities and the in-flight slot's id never evict anything.
+    events.evict_delivered_terminal_footer_tasks(
+        channel_id,
+        &[bg_task_id("toolu_3391_stay"), bg_task_id("toolu_unknown")],
+    );
+    let after = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let after_block = after.block.expect("both tasks should still render");
+    assert!(after_block.contains("Bash Retry my checkmark ✓"));
+    assert!(after_block.contains("Bash Stay running ⠸"));
+}
+
+#[test]
+fn completion_footer_evicts_all_terminal_tasks_delivered_in_one_render() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_003);
+    push_background_bash_task(&events, channel_id, "First done", "toolu_3391_a");
+    push_background_bash_task(&events, channel_id, "Second done", "toolu_3391_b");
+    push_background_bash_task(&events, channel_id, "Still running", "toolu_3391_c");
+    complete_background_bash_task(&events, channel_id, "toolu_3391_a");
+    complete_background_bash_task(&events, channel_id, "toolu_3391_b");
+
+    let delivered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    assert_eq!(delivered.delivered_terminal_ids.len(), 2);
+
+    events.evict_delivered_terminal_footer_tasks(channel_id, &delivered.delivered_terminal_ids);
+
+    let next = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    let next_block = next.block.expect("running task should keep rendering");
+    assert!(!next_block.contains("First done"));
+    assert!(!next_block.contains("Second done"));
+    assert!(next_block.contains("Bash Still running ⠼"));
+    assert!(next.has_unfinished_entries);
+}
+
+#[test]
+fn completion_footer_terminal_lines_clamped_out_of_budget_are_not_delivered() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_004);
+    for i in 0..STATUS_PANEL_TASK_LIMIT {
+        let tool_use_id = format!("toolu_3391_clamp_{i:02}");
+        push_background_bash_task(
+            &events,
+            channel_id,
+            &format!("Clamp slot {i:02} {}", "x".repeat(70)),
+            &tool_use_id,
+        );
+        complete_background_bash_task(&events, channel_id, &tool_use_id);
+    }
+
+    let first = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let _first_block = first.block.expect("clamped task section should render");
+    let first_delivered = first.delivered_terminal_ids.clone();
+    assert!(
+        !first_delivered.is_empty() && first_delivered.len() < STATUS_PANEL_TASK_LIMIT,
+        "the 600B clamp should deliver some but not all terminal slots: {}",
+        first_delivered.len()
+    );
+
+    events.evict_delivered_terminal_footer_tasks(channel_id, &first_delivered);
+
+    // The clamped-out (undelivered) slots are still terminal and re-render with
+    // their marks; the delivered ones are gone, so their identities cannot
+    // reappear in a later render's delivered set.
+    let second = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    second
+        .block
+        .expect("clamped-out terminal tasks must render on a later pass");
+    for id in &first_delivered {
+        assert!(
+            !second.delivered_terminal_ids.contains(id),
+            "an already-evicted slot id must not re-deliver: {id:?}"
+        );
+    }
+    assert!(!second.delivered_terminal_ids.is_empty());
+}
+
+// #3391 Finding 1(a) collision pin: two slots render the IDENTICAL terminal
+// line but only ONE survives the 600B clamp. Slot-identity eviction must drop
+// EXACTLY the delivered slot; the clamped-out duplicate keeps its ✓ and
+// re-renders. The old line-string eviction dropped BOTH (matched the shared
+// line), permanently swallowing the clamped-out mark, so this FAILS on HEAD.
+#[test]
+fn completion_footer_identical_terminal_lines_evict_only_the_delivered_slot() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_201);
+    const DUP_SUMMARY: &str = "Wait until CI settles";
+
+    // Push dup_a first, then padding, then dup_b. Newest renders first (`.rev()`),
+    // so render order is [Tasks, dup_b, ...padding, dup_a]: dup_b survives the
+    // clamp while dup_a is pushed past the 600B budget.
+    push_background_bash_task(&events, channel_id, DUP_SUMMARY, "toolu_dup_a");
+    complete_background_bash_task(&events, channel_id, "toolu_dup_a");
+    for i in 0..8 {
+        let id = format!("toolu_pad_{i:02}");
+        push_background_bash_task(
+            &events,
+            channel_id,
+            &format!("Padding job {i:02} {}", "y".repeat(80)),
+            &id,
+        );
+        complete_background_bash_task(&events, channel_id, &id);
+    }
+    push_background_bash_task(&events, channel_id, DUP_SUMMARY, "toolu_dup_b");
+    complete_background_bash_task(&events, channel_id, "toolu_dup_b");
+
+    let first = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let first_block = first.block.expect("clamped task section should render");
+    let dup_line = format!("└ Bash {DUP_SUMMARY} ✓");
+    assert!(
+        first_block.contains(&dup_line),
+        "the surviving duplicate's line should render: {first_block}"
+    );
+    // dup_b survives the clamp and is delivered; dup_a was clamped out.
+    assert!(
+        first
+            .delivered_terminal_ids
+            .contains(&bg_task_id("toolu_dup_b"))
+    );
+    assert!(
+        !first
+            .delivered_terminal_ids
+            .contains(&bg_task_id("toolu_dup_a")),
+        "the clamped-out duplicate must NOT be reported delivered"
+    );
+
+    events.evict_delivered_terminal_footer_tasks(channel_id, &first.delivered_terminal_ids);
+
+    // After eviction, dup_a (never delivered) is still terminal and re-renders
+    // its identical ✓ line. With the old line-string eviction both vanished.
+    let second = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    let second_block = second.block.expect("clamped-out duplicate must re-render");
+    assert!(
+        second_block.contains(&dup_line),
+        "the clamped-out duplicate's ✓ must survive eviction of its twin: {second_block}"
+    );
+    assert!(
+        second
+            .delivered_terminal_ids
+            .contains(&bg_task_id("toolu_dup_a"))
+    );
+    assert!(
+        !second
+            .delivered_terminal_ids
+            .contains(&bg_task_id("toolu_dup_b")),
+        "the already-evicted slot must not re-appear"
+    );
+}
+
+// #3391 Finding 1(b) race pin: a running slot turns terminal AFTER its render
+// snapshot but BEFORE ack, and the delivered mark belonged to a DIFFERENT slot
+// whose line is identical. The newly-terminal slot must NOT be evicted — its
+// own mark was never shown. The old line-string eviction matched the shared
+// line and dropped it, so this FAILS on HEAD.
+#[test]
+fn completion_footer_slot_turning_terminal_before_ack_is_not_evicted_on_twin_line() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_202);
+    const TWIN_SUMMARY: &str = "Bash Wait until CI settles";
+
+    // delivered: completed twin whose mark IS in this render.
+    push_background_bash_task(&events, channel_id, TWIN_SUMMARY, "toolu_delivered");
+    complete_background_bash_task(&events, channel_id, "toolu_delivered");
+    // racing: identical summary, still RUNNING at render time.
+    push_background_bash_task(&events, channel_id, TWIN_SUMMARY, "toolu_racing");
+
+    let delivered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    // Only the completed twin's id is delivered; the running slot is in-flight.
+    assert_eq!(
+        delivered.delivered_terminal_ids,
+        vec![bg_task_id("toolu_delivered")]
+    );
+
+    // The edit is in flight; before the ack lands the racing slot completes and
+    // now renders the IDENTICAL terminal line as the delivered twin.
+    complete_background_bash_task(&events, channel_id, "toolu_racing");
+
+    events.evict_delivered_terminal_footer_tasks(channel_id, &delivered.delivered_terminal_ids);
+
+    // The racing slot's ✓ was never delivered, so it must still render and be
+    // reportable on the next pass; only the delivered twin is gone.
+    let next = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    next.block.expect("racing slot's mark must still render");
+    assert_eq!(
+        next.delivered_terminal_ids,
+        vec![bg_task_id("toolu_racing")],
+        "only the racing slot's never-delivered mark should remain"
+    );
+}
+
+// #3391 Finding 2: terminal SUBAGENT slots must evict on confirmed delivery,
+// in-flight subagents are untouched, and the migration carry-over filters
+// evicted subagents. On HEAD eviction only retained over `tasks`, so subagents
+// accumulated and this FAILS for the eviction part.
+#[test]
+fn completion_footer_terminal_subagent_evicts_after_delivery_inflight_unaffected() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_203);
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("reviewer".to_string()),
+            desc: Some("Audit the diff".to_string()),
+            tool_use_id: Some("toolu_done_sub".to_string()),
+            background: false,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("reviewer".to_string()),
+            desc: Some("Still inspecting".to_string()),
+            tool_use_id: Some("toolu_running_sub".to_string()),
+            background: false,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentEnd {
+            success: true,
+            tool_use_id: Some("toolu_done_sub".to_string()),
+            summary: None,
+            ack_only: false,
+        },
+    );
+
+    let delivered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = delivered.block.expect("subagents should render");
+    assert!(block.contains("Audit the diff ✓"));
+    assert!(block.contains("Still inspecting ⠸"));
+    assert_eq!(
+        delivered.delivered_terminal_ids,
+        vec![subagent_id("toolu_done_sub")]
+    );
+
+    events.evict_delivered_terminal_footer_tasks(channel_id, &delivered.delivered_terminal_ids);
+
+    let next = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    let next_block = next.block.expect("running subagent keeps rendering");
+    assert!(
+        !next_block.contains("Audit the diff"),
+        "delivered terminal subagent must be evicted: {next_block}"
+    );
+    assert!(next_block.contains("Still inspecting ⠼"));
+    assert!(next.has_unfinished_entries);
+    assert!(next.delivered_terminal_ids.is_empty());
+}
+
+// #3391 round 3 helper: pull the single rendered footer line that contains
+// `needle` so a test can assert what its TAIL looks like after truncation.
+fn footer_line_containing<'a>(block: &'a str, needle: &str) -> &'a str {
+    block
+        .lines()
+        .find(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("no footer line contains {needle:?}: {block}"))
+}
+
+// #3391 round 3 review P2: degenerate budgets must never exceed `max_chars`.
+// `truncate_chars` emits up to 3 chars ("...") below its budget, so budgets
+// under marker_reserve+3 degrade to a hard clamp (marker may be lost there —
+// the delivered-ID honesty gate then keeps the slot un-evicted).
+#[test]
+fn truncate_chars_with_marker_never_exceeds_max_chars_on_degenerate_budgets() {
+    for max_chars in [0usize, 1, 2, 3, 4, 5] {
+        let line = super::common::truncate_chars_with_marker("a long base", "✓", max_chars);
+        assert!(
+            line.chars().count() <= max_chars,
+            "budget {max_chars}: {line:?} exceeds the contract"
+        );
+    }
+    // Sound budgets keep the marker guarantee.
+    let line = super::common::truncate_chars_with_marker(&"x".repeat(200), "✓", 100);
+    assert!(
+        line.ends_with('✓') && line.chars().count() <= 100,
+        "{line:?}"
+    );
+}
+
+// #3391 round 3 finding 1 (task): a background task whose description is long
+// enough that the pre-fix append-then-truncate swallowed the mark must still
+// render a line that ENDS WITH ✓. FAILS on HEAD 95f6e2176 (the ✓ was chopped
+// off the >EVENT_LINE_MAX_CHARS line).
+#[test]
+fn completion_footer_long_background_task_line_ends_with_check_mark() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_301);
+    let long_desc = format!("Long bg task {}", "x".repeat(EVENT_LINE_MAX_CHARS));
+    push_background_bash_task(&events, channel_id, &long_desc, "toolu_3391_long_task");
+    complete_background_bash_task(&events, channel_id, "toolu_3391_long_task");
+
+    let rendered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = rendered.block.expect("long terminal task should render");
+    let line = footer_line_containing(&block, "Long bg task");
+    assert!(
+        line.chars().count() > EVENT_LINE_MAX_CHARS - 2,
+        "test must exercise the truncation path: {line:?}"
+    );
+    assert!(
+        line.ends_with('✓'),
+        "long terminal background task line must end with ✓: {line:?}"
+    );
+    assert!(line.chars().count() <= EVENT_LINE_MAX_CHARS);
+}
+
+// #3391 round 3 finding 1 (subagent): same shape for a finished subagent slot
+// with a long desc — the rendered line must END WITH ✓. FAILS on HEAD.
+#[test]
+fn completion_footer_long_subagent_line_ends_with_check_mark() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_302);
+    let long_desc = format!("Audit subagent {}", "y".repeat(EVENT_LINE_MAX_CHARS));
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("reviewer".to_string()),
+            desc: Some(long_desc),
+            tool_use_id: Some("toolu_3391_long_sub".to_string()),
+            background: false,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentEnd {
+            success: true,
+            tool_use_id: Some("toolu_3391_long_sub".to_string()),
+            summary: None,
+            ack_only: false,
+        },
+    );
+
+    let rendered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = rendered
+        .block
+        .expect("long terminal subagent should render");
+    let line = footer_line_containing(&block, "Audit subagent");
+    assert!(
+        line.chars().count() > EVENT_LINE_MAX_CHARS - 2,
+        "test must exercise the truncation path: {line:?}"
+    );
+    assert!(
+        line.ends_with('✓'),
+        "long terminal subagent line must end with ✓: {line:?}"
+    );
+    assert!(line.chars().count() <= EVENT_LINE_MAX_CHARS);
+}
+
+// #3391 round 3 finding 2/3 (honesty): a terminal slot whose mark would (pre-fix)
+// be truncated off its line must, post-fix, show the mark AND be reported in the
+// delivered set — the two are pinned together. On HEAD the ✓ is chopped, so the
+// `ends_with('✓')` assertion FAILS; post-fix the mark survives and the id ships.
+#[test]
+fn completion_footer_long_task_visible_mark_and_id_reported_together() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_303);
+    let long_desc = format!("Honesty task {}", "z".repeat(EVENT_LINE_MAX_CHARS));
+    push_background_bash_task(&events, channel_id, &long_desc, "toolu_3391_honesty");
+    complete_background_bash_task(&events, channel_id, "toolu_3391_honesty");
+
+    let rendered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = rendered.block.expect("long terminal task should render");
+    let line = footer_line_containing(&block, "Honesty task");
+    let mark_visible = line.ends_with('✓');
+    let id_reported = rendered
+        .delivered_terminal_ids
+        .contains(&bg_task_id("toolu_3391_honesty"));
+    // Mark visibility and delivered-id reporting must agree: the honesty gate
+    // never reports an id whose mark the user cannot see, and fix 1 keeps the
+    // mark visible, so both are true together.
+    assert!(
+        mark_visible,
+        "post-fix the ✓ must survive truncation: {line:?}"
+    );
+    assert!(
+        id_reported,
+        "a visible terminal mark must be reported as delivered: {:?}",
+        rendered.delivered_terminal_ids
+    );
+    assert_eq!(
+        mark_visible, id_reported,
+        "mark visibility and delivered-id reporting must agree"
+    );
+}
+
+// #3391 Finding 2 migration filter: the #3386 carry-over (clear-preserving
+// residuals) must drop an EVICTED terminal subagent. A background subagent that
+// completed and was evicted on delivery must not re-appear in the carried
+// footer; an in-flight background subagent does carry over.
+#[test]
+fn completion_footer_evicted_subagent_does_not_survive_migration_carry_over() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_204);
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("bgworker".to_string()),
+            desc: Some("Finished bg agent".to_string()),
+            tool_use_id: Some("toolu_bg_done".to_string()),
+            background: true,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("bgworker".to_string()),
+            desc: Some("Running bg agent".to_string()),
+            tool_use_id: Some("toolu_bg_run".to_string()),
+            background: true,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentEnd {
+            success: true,
+            tool_use_id: Some("toolu_bg_done".to_string()),
+            summary: None,
+            ack_only: false,
+        },
+    );
+
+    let delivered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    assert_eq!(
+        delivered.delivered_terminal_ids,
+        vec![subagent_id("toolu_bg_done")]
+    );
+    events.evict_delivered_terminal_footer_tasks(channel_id, &delivered.delivered_terminal_ids);
+
+    // #3386 migration carry-over: only unfinished background residuals survive.
+    events.clear_channel_preserving_footer_residuals(channel_id);
+    let carried = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    let carried_block = carried
+        .block
+        .expect("running residual subagent carries over");
+    assert!(
+        !carried_block.contains("Finished bg agent"),
+        "an evicted terminal subagent must not carry over: {carried_block}"
+    );
+    assert!(carried_block.contains("Running bg agent"));
+}
+
 #[test]
 fn footer_residual_entries_carry_to_next_turn_and_finished_entries_do_not() {
     let events = PlaceholderLiveEvents::default();
@@ -3756,6 +4300,11 @@ fn status_panel_caps_partial_workflow_state_without_start() {
         Some("wf-5")
     );
     drop(guard);
+    // Drop the DashMap shard Ref too: the pushes below target channel 2896,
+    // whose `entry()` needs the shard WRITE lock. With the per-instance random
+    // hasher, 2895/2896 sometimes share a shard — holding this read guard
+    // across the pushes then self-deadlocks the test (observed hang).
+    drop(status_entry);
 
     let channel_id = ChannelId::new(2896);
     for idx in 0..=STATUS_PANEL_WORKFLOW_PHASE_LIMIT {

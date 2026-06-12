@@ -238,6 +238,15 @@ pub(super) async fn complete_bridge_single_message_completion_footer(
         !rendered.has_unfinished_entries,
         edited,
     );
+    // #3391: the finalize edit delivered this render's terminal marks once;
+    // evict those slot identities so subsequent footer renders (incl. #3386
+    // migration) drop the completed task AND subagent entries.
+    if edited {
+        shared
+            .ui
+            .placeholder_live_events
+            .evict_delivered_terminal_footer_tasks(channel_id, &rendered.delivered_terminal_ids);
+    }
     edited
 }
 
@@ -294,7 +303,7 @@ pub(super) async fn refresh_bridge_registered_completion_footer(
         }
     };
     super::single_message_panel::completion_footer_record_edit_result_for_edit(
-        channel_id, &edit, edited,
+        shared, channel_id, &edit, edited,
     );
     edited
 }
