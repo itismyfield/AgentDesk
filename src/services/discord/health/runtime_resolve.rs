@@ -159,7 +159,7 @@ pub(super) async fn resolve_direct_meeting_runtime(
     for (index, shared) in &shared_candidates {
         let settings = shared.settings.read().await.clone();
         let explicit_channel_match = settings.allowed_channel_ids.contains(&channel_id.get());
-        let live_channel_match = match shared.cached_serenity_ctx.get() {
+        let live_channel_match = match shared.http.cached_serenity_ctx.get() {
             Some(ctx) => {
                 crate::services::discord::provider_handles_channel(
                     ctx,
@@ -197,6 +197,7 @@ pub(super) async fn resolve_direct_meeting_runtime(
                 .to_string()
             })?;
         let http = shared
+            .http
             .cached_serenity_ctx
             .get()
             .map(|ctx| ctx.http.clone())
@@ -216,7 +217,7 @@ pub(super) async fn resolve_direct_meeting_runtime(
 
     if shared_candidates.len() == 1 {
         let (_, shared) = shared_candidates[0].clone();
-        if let Some(ctx) = shared.cached_serenity_ctx.get() {
+        if let Some(ctx) = shared.http.cached_serenity_ctx.get() {
             return Ok((ctx.http.clone(), shared));
         }
         let http = resolve_bot_http(registry, provider_name)
@@ -264,7 +265,7 @@ pub(super) async fn resolve_direct_meeting_shared(
     for (index, shared) in &shared_candidates {
         let settings = shared.settings.read().await.clone();
         let explicit_channel_match = settings.allowed_channel_ids.contains(&channel_id.get());
-        let live_channel_match = match shared.cached_serenity_ctx.get() {
+        let live_channel_match = match shared.http.cached_serenity_ctx.get() {
             Some(ctx) => {
                 crate::services::discord::provider_handles_channel(
                     ctx,

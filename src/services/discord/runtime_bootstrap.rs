@@ -195,7 +195,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // setup callback — that second `set` is a no-op (`OnceCell::set`
     // returns Err on already-set), preserving the leader's existing
     // semantics.
-    let _ = shared.cached_bot_token.set(token.to_string());
+    let _ = shared.http.cached_bot_token.set(token.to_string());
 
     let voice_receiver =
         run_bot_init_voice_workers(&voice_config, &voice_barge_in, &shared, &provider);

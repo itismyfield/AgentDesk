@@ -1797,7 +1797,7 @@ fn handle_watcher_runtime_handoff(
     if watcher_claimed {
         #[cfg(unix)]
         {
-            let on_standby = shared_owned.cached_serenity_ctx.get().is_none();
+            let on_standby = shared_owned.http.cached_serenity_ctx.get().is_none();
             if on_standby {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
@@ -3668,7 +3668,7 @@ pub(super) fn spawn_turn_bridge(
                                     // `cached_serenity_ctx` is set, spawn the
                                     // watcher as before so streaming partial
                                     // output continues to work.
-                                    let on_standby = shared_owned.cached_serenity_ctx.get().is_none();
+                                    let on_standby = shared_owned.http.cached_serenity_ctx.get().is_none();
                                     if on_standby {
                                         // Phase 5.3 of intake-node-routing (issue #2011):
                                         // skip the watcher entirely on standby and

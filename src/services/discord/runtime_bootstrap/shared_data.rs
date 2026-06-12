@@ -164,8 +164,10 @@ pub(super) fn run_bot_build_shared_data(
         catch_up_retry_pending: dashmap::DashMap::new(),
         turn_start_times: dashmap::DashMap::new(),
         channel_rosters: dashmap::DashMap::new(),
-        cached_serenity_ctx: tokio::sync::OnceCell::new(),
-        cached_bot_token: tokio::sync::OnceCell::new(),
+        http: RuntimeHttpCache {
+            cached_serenity_ctx: tokio::sync::OnceCell::new(),
+            cached_bot_token: tokio::sync::OnceCell::new(),
+        },
         token_hash: token_hash.to_string(),
         provider: provider.clone(),
         api_port,

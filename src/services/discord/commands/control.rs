@@ -683,7 +683,7 @@ async fn persist_fast_mode_reset_marker(
     provider: &ProviderKind,
     pending: bool,
 ) {
-    let Some(token) = shared.cached_bot_token.get() else {
+    let Some(token) = shared.http.cached_bot_token.get() else {
         return;
     };
 
@@ -713,7 +713,7 @@ async fn persist_codex_goals_reset_marker(
     channel_id: serenity::ChannelId,
     pending: bool,
 ) {
-    let Some(token) = shared.cached_bot_token.get() else {
+    let Some(token) = shared.http.cached_bot_token.get() else {
         return;
     };
 
@@ -735,7 +735,7 @@ async fn clear_all_fast_mode_reset_markers(
     shared: &Arc<SharedData>,
     channel_id: serenity::ChannelId,
 ) {
-    let Some(token) = shared.cached_bot_token.get() else {
+    let Some(token) = shared.http.cached_bot_token.get() else {
         return;
     };
 

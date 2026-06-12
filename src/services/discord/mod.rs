@@ -120,6 +120,7 @@ pub(crate) use session_relay_sink::run_session_bound_discord_relay_supervisor;
 // declarations/constructors keep the S1/S2/S3 unqualified surface.
 pub(in crate::services::discord) use shared_state::PlaceholderState;
 pub(in crate::services::discord) use shared_state::QueuedPlaceholderState;
+pub(in crate::services::discord) use shared_state::RuntimeHttpCache;
 // #3038 S2: the cluster-D members were `pub(super)` on `SharedData` (visible up
 // to `crate::services`), so the group type is re-exported with that same scope.
 pub(in crate::services) use shared_state::SessionOverrideState;
@@ -2320,10 +2321,12 @@ pub(crate) struct SharedData {
     pub(super) turn_start_times: dashmap::DashMap<ChannelId, std::time::Instant>,
     /// Per-channel known speakers collected lazily from incoming messages.
     pub(super) channel_rosters: dashmap::DashMap<ChannelId, Vec<UserRecord>>,
-    /// Cached serenity context for deferred queue drain (set once during ready event).
-    pub(super) cached_serenity_ctx: tokio::sync::OnceCell<serenity::Context>,
-    /// Cached bot token for deferred queue drain.
-    pub(super) cached_bot_token: tokio::sync::OnceCell<String>,
+    /// #3038 cluster G — cached Discord HTTP runtime state: the gateway
+    /// serenity context plus the bot-token fallback for standby REST sends.
+    /// Field docs live on `shared_state::RuntimeHttpCache`; call sites use
+    /// `shared.http.*` for direct cache reads and keep
+    /// `shared.serenity_http_or_token_fallback()` for the accessor.
+    pub(in crate::services::discord) http: RuntimeHttpCache,
     /// SHA-256 hash of the bot token — used to namespace the pending-queue directory
     /// so that multiple bots sharing the same runtime root cannot steal each other's queues.
     pub(super) token_hash: String,
@@ -2358,34 +2361,6 @@ pub(crate) struct SharedData {
 impl SharedData {
     pub(super) fn has_runtime_storage(&self) -> bool {
         self.pg_pool.is_some()
-    }
-
-    /// Phase 5.2 of intake-node-routing (issue #2009): return an `Arc<Http>`
-    /// that the response path (tmux watcher, placeholder updates, message
-    /// edits) can use to call Discord. On the leader the gateway-attached
-    /// runtime caches `cached_serenity_ctx`, and `ctx.http` is preferred so
-    /// the Http instance shares the same application_id and connection
-    /// pool the gateway already owns. On cluster-standby nodes the
-    /// OnceCell is empty (no gateway runtime ever ran), so we fall back to
-    /// a freshly constructed `serenity::http::Http` built from the bot
-    /// token cached in `cached_bot_token`. Returns `None` only when both
-    /// caches are empty — that means the runtime never reached the
-    /// "token known" milestone in `run_bot()`, which today only happens
-    /// before `bot_settings` finishes loading.
-    ///
-    /// Callers should treat `None` as a hard failure: they cannot post
-    /// to Discord without an Http instance. The current call sites
-    /// either propagate the failure (skip the work + warn) or have
-    /// their own panic-on-None invariant tied to `cached_bot_token`
-    /// being populated at `run_bot()` startup.
-    pub(super) fn serenity_http_or_token_fallback(&self) -> Option<Arc<serenity::http::Http>> {
-        if let Some(ctx) = self.cached_serenity_ctx.get() {
-            return Some(ctx.http.clone());
-        }
-        if let Some(token) = self.cached_bot_token.get() {
-            return Some(Arc::new(serenity::http::Http::new(token)));
-        }
-        None
     }
 
     fn mailbox(&self, channel_id: ChannelId) -> ChannelMailboxHandle {
@@ -2635,8 +2610,10 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         catch_up_retry_pending: dashmap::DashMap::new(),
         turn_start_times: dashmap::DashMap::new(),
         channel_rosters: dashmap::DashMap::new(),
-        cached_serenity_ctx: tokio::sync::OnceCell::new(),
-        cached_bot_token: tokio::sync::OnceCell::new(),
+        http: RuntimeHttpCache {
+            cached_serenity_ctx: tokio::sync::OnceCell::new(),
+            cached_bot_token: tokio::sync::OnceCell::new(),
+        },
         token_hash: "test-token-hash".to_string(),
         provider: ProviderKind::Claude,
         api_port: 9,

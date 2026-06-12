@@ -108,12 +108,17 @@ pub async fn start_headless_agent_turn_in_dm(
     let (_, shared) = resolve_direct_meeting_runtime(registry, owner_channel_id, &owner_provider)
         .await
         .map_err(router::HeadlessTurnStartError::Internal)?;
-    let ctx = shared.cached_serenity_ctx.get().cloned().ok_or_else(|| {
-        router::HeadlessTurnStartError::Internal(format!(
-            "provider runtime is not ready for channel {}",
-            owner_channel_id.get()
-        ))
-    })?;
+    let ctx = shared
+        .http
+        .cached_serenity_ctx
+        .get()
+        .cloned()
+        .ok_or_else(|| {
+            router::HeadlessTurnStartError::Internal(format!(
+                "provider runtime is not ready for channel {}",
+                owner_channel_id.get()
+            ))
+        })?;
     let dm_channel = serenity::UserId::new(dm_user_id)
         .create_dm_channel(&ctx.http)
         .await
@@ -151,12 +156,17 @@ pub async fn reserve_headless_agent_turn_in_dm(
     let (_, shared) = resolve_direct_meeting_runtime(registry, owner_channel_id, owner_provider)
         .await
         .map_err(router::HeadlessTurnStartError::Internal)?;
-    let ctx = shared.cached_serenity_ctx.get().cloned().ok_or_else(|| {
-        router::HeadlessTurnStartError::Internal(format!(
-            "provider runtime is not ready for channel {}",
-            owner_channel_id.get()
-        ))
-    })?;
+    let ctx = shared
+        .http
+        .cached_serenity_ctx
+        .get()
+        .cloned()
+        .ok_or_else(|| {
+            router::HeadlessTurnStartError::Internal(format!(
+                "provider runtime is not ready for channel {}",
+                owner_channel_id.get()
+            ))
+        })?;
     let dm_channel = serenity::UserId::new(dm_user_id)
         .create_dm_channel(&ctx.http)
         .await
@@ -229,13 +239,19 @@ async fn start_reserved_headless_agent_turn_with_shared(
         )));
     }
 
-    let ctx = shared.cached_serenity_ctx.get().cloned().ok_or_else(|| {
-        router::HeadlessTurnStartError::Internal(format!(
-            "provider runtime is not ready for channel {}",
-            channel_id.get()
-        ))
-    })?;
+    let ctx = shared
+        .http
+        .cached_serenity_ctx
+        .get()
+        .cloned()
+        .ok_or_else(|| {
+            router::HeadlessTurnStartError::Internal(format!(
+                "provider runtime is not ready for channel {}",
+                channel_id.get()
+            ))
+        })?;
     let token = shared
+        .http
         .cached_bot_token
         .get()
         .cloned()

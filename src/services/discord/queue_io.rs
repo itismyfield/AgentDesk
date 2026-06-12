@@ -115,8 +115,8 @@ fn schedule_deferred_idle_queue_kickoff_inner(
         let mut consecutive_zero_start_drains = 0usize;
         for attempt in 1..=DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS {
             if let (Some(ctx), Some(tok)) = (
-                shared.cached_serenity_ctx.get(),
-                shared.cached_bot_token.get(),
+                shared.http.cached_serenity_ctx.get(),
+                shared.http.cached_bot_token.get(),
             ) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(

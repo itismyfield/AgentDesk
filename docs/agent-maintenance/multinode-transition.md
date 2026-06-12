@@ -720,3 +720,13 @@
   **Worker-local**: no PG lease, no cross-node reads, no leader-only side
   effect. No new multinode ownership, singleton, or lease assumption is
   introduced.
+- #3038 S5 (SharedData cluster G — `RuntimeHttpCache`): pure field relocation;
+  `cached_serenity_ctx` / `cached_bot_token` and the
+  `serenity_http_or_token_fallback()` accessor moved verbatim from
+  `discord/mod.rs` into `shared_state.rs::RuntimeHttpCache`, with call sites
+  (including `runtime_bootstrap*` init and 2 single-token sites in the frozen
+  `turn_bridge/mod.rs`) rerouted `shared.cached_*` → `shared.http.cached_*`.
+  The leader-vs-standby semantics of the accessor (gateway ctx preferred,
+  token-built Http fallback on standby nodes) are byte-identical and stay
+  process-local. No new multinode ownership, singleton, or lease assumption
+  is introduced.

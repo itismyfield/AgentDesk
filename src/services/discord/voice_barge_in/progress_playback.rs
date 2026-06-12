@@ -360,7 +360,7 @@ impl VoiceBargeInRuntime {
             );
             return;
         };
-        let Some(ctx) = shared.cached_serenity_ctx.get() else {
+        let Some(ctx) = shared.http.cached_serenity_ctx.get() else {
             tracing::debug!(
                 channel_id = channel_id.get(),
                 guild_id = guild_id.get(),

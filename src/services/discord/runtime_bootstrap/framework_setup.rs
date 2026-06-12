@@ -43,8 +43,9 @@ pub(super) async fn run_bot_framework_setup(
     shared_for_migrate
         .bot_connected
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    let _ = shared_for_migrate.cached_serenity_ctx.set(ctx.clone());
+    let _ = shared_for_migrate.http.cached_serenity_ctx.set(ctx.clone());
     let _ = shared_for_migrate
+        .http
         .cached_bot_token
         .set(token_for_ready.clone());
     super::drain_pending_queue_exit_placeholder_clears(&shared_for_migrate).await;
