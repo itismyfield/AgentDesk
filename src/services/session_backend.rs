@@ -296,6 +296,58 @@ impl StreamLineState {
     }
 }
 
+/// #3344: backstop ceiling for impossible-magnitude session-cumulative terminal
+/// usage from NON-codex providers (codex-legacy is gated by provenance, not
+/// magnitude — see [`adopt_terminal_result_usage`]). MAINTENANCE RULE: keep
+/// strictly above the largest registry context window (1_000_000) so it never
+/// rejects honest per-call usage.
+const MAX_PLAUSIBLE_PER_CALL_CONTEXT_TOKENS: u64 = 2_000_000;
+
+/// #3344: adopt a terminal `result` frame's nested `usage` into `state`'s
+/// per-call accumulators with provenance + magnitude gating. Shared by the
+/// watcher (`process_watcher_lines`) and the analytics re-parser
+/// (`process_stream_line`) so both consumers stay in sync.
+///
+/// Provenance gate (primary): the codex legacy wrapper's `emit_success_result`
+/// ALWAYS stamps top-level `input_tokens`/`output_tokens` (Qwen emits a nested
+/// `usage` only), so that marker identifies codex-legacy, whose terminal
+/// accounting is session-cumulative. Its nested `usage` is NEVER adopted — even
+/// small/early values — because honest-unknown CTW beats a sometimes-right
+/// number that drifts into a misleading clamped 100%; codex per-call occupancy
+/// flows from session `token_count` records (#3331). Magnitude gate (backstop):
+/// non-codex providers adopt unchanged unless input+cache clears
+/// [`MAX_PLAUSIBLE_PER_CALL_CONTEXT_TOKENS`]. Suppression leaves accumulators
+/// untouched → honest "unknown". Claude never reaches this path
+/// (`saw_per_message_usage` is set on its per-message `usage` frames).
+pub fn adopt_terminal_result_usage(frame: &Value, state: &mut StreamLineState) {
+    // Provenance: top-level token fields mark the codex legacy wrapper, whose
+    // terminal usage is known-cumulative — suppress always.
+    let is_codex_legacy_frame =
+        frame.get("input_tokens").is_some() || frame.get("output_tokens").is_some();
+    if state.saw_per_message_usage || is_codex_legacy_frame {
+        return;
+    }
+    let Some(usage) = frame.get("usage") else {
+        return;
+    };
+    let read = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+    let (input, cache_read, cache_create, output) = (
+        read("input_tokens"),
+        read("cache_read_input_tokens"),
+        read("cache_creation_input_tokens"),
+        read("output_tokens"),
+    );
+    let occupancy = input
+        .saturating_add(cache_read)
+        .saturating_add(cache_create);
+    if occupancy <= MAX_PLAUSIBLE_PER_CALL_CONTEXT_TOKENS {
+        state.accum_input_tokens = input;
+        state.accum_cache_read_tokens = cache_read;
+        state.accum_cache_create_tokens = cache_create;
+        state.accum_output_tokens = output;
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskStartInfo {
     pub tool_use_id: Option<String>,
@@ -409,36 +461,10 @@ pub fn process_stream_line(
     }
 
     if msg_type == "result" {
-        // #1918: Claude CLI's result.usage in multi-call turns is
-        // turn-cumulative, so overwriting input/cache here would re-introduce
-        // the context-token inflation the per-message branch above already
-        // resolved. Only adopt result.usage when no per-message usage was
-        // observed (Qwen tmux wrappers report token counts solely on the
-        // terminal result event).
-        if !state.saw_per_message_usage
-            && let Some(usage) = json.get("usage")
-        {
-            let input_tokens = usage
-                .get("input_tokens")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0);
-            let cache_read = usage
-                .get("cache_read_input_tokens")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0);
-            let cache_creation = usage
-                .get("cache_creation_input_tokens")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0);
-            let output_tokens = usage
-                .get("output_tokens")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0);
-            state.accum_input_tokens = input_tokens;
-            state.accum_cache_read_tokens = cache_read;
-            state.accum_cache_create_tokens = cache_creation;
-            state.accum_output_tokens = output_tokens;
-        }
+        // #1918/#3344: provenance + magnitude gated. Codex-legacy terminal usage
+        // is known-cumulative and suppressed so analytics re-parse never carries
+        // poisoned context numbers. See [`adopt_terminal_result_usage`].
+        adopt_terminal_result_usage(&json, state);
 
         let cost_usd = json.get("cost_usd").and_then(|value| value.as_f64());
         let total_cost_usd = json.get("total_cost_usd").and_then(|value| value.as_f64());
@@ -1057,14 +1083,18 @@ mod stream_tail_guard_tests {
         ));
     }
 
-    /// #3275 cross-module contract: the codex tmux wrapper's result frame now
-    /// carries a Claude-compatible nested `usage` next to the legacy top-level
-    /// token fields. The result-usage fallback in `process_stream_line` must
-    /// adopt it so bridge analytics reparsing and recovery backfill
-    /// (`extract_turn_analytics_from_output_range`) return Some usage with the
-    /// per-call occupancy — not the cumulative top-level counters.
+    /// #3344 round 2 — analytics-path parity (Finding 2): the analytics
+    /// re-parser (`extract_turn_analytics_from_output_range` →
+    /// `process_stream_line`) is the SECOND consumer of terminal `result.usage`,
+    /// and `turn_analytics::resolve_output_analytics_snapshot` PREFERS its
+    /// output over the live snapshot. It must apply the same provenance gate:
+    /// the codex legacy wrapper's terminal frame (top-level
+    /// `input_tokens`/`output_tokens` marker) carries known-cumulative
+    /// accounting, so its nested `usage` is NOT adopted. The re-parse returns
+    /// the session id but `None` usage, so analytics never carries poisoned
+    /// context numbers. (On base this nested usage was adopted unconditionally.)
     #[test]
-    fn extract_turn_analytics_adopts_codex_wrapper_result_usage() {
+    fn extract_turn_analytics_suppresses_codex_wrapper_result_usage() {
         let dir = tempfile::tempdir().unwrap();
         let output_path = dir.path().join("codex-wrapper.jsonl");
         std::fs::write(
@@ -1072,7 +1102,7 @@ mod stream_tail_guard_tests {
             concat!(
                 "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-cdx\"}\n",
                 "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"codex reply\"}]}}\n",
-                "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"codex reply\",\"session_id\":\"sess-cdx\",\"duration_ms\":12,\"input_tokens\":8325687,\"output_tokens\":41600,\"usage\":{\"input_tokens\":400,\"cache_read_input_tokens\":600,\"output_tokens\":50}}\n",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"codex reply\",\"session_id\":\"sess-cdx\",\"duration_ms\":12,\"input_tokens\":8325687,\"output_tokens\":41600,\"usage\":{\"input_tokens\":500000,\"cache_read_input_tokens\":600,\"output_tokens\":50}}\n",
             ),
         )
         .unwrap();
@@ -1084,12 +1114,75 @@ mod stream_tail_guard_tests {
         );
 
         assert_eq!(session_id.as_deref(), Some("sess-cdx"));
-        let usage = usage.expect("codex wrapper result usage must be recoverable");
-        assert_eq!(usage.input_tokens, 400);
-        assert_eq!(usage.cache_read_tokens, 600);
-        assert_eq!(usage.cache_create_tokens, 0);
-        assert_eq!(usage.output_tokens, 50);
-        assert_eq!(usage.context_occupancy_input_tokens(), 1000);
+        // Codex-legacy provenance → nested usage suppressed → no poisoned
+        // analytics. `has_usage` is false so the re-parser returns None.
+        assert!(
+            usage.is_none(),
+            "codex-legacy terminal usage must be suppressed from analytics"
+        );
+    }
+
+    /// #3344 round 2 — analytics-path other-provider regression (Finding 2 /
+    /// Test 4): a terminal-usage provider WITHOUT the codex top-level marker
+    /// (Qwen's tmux wrapper) keeps flowing through the analytics re-parse
+    /// unchanged. The provenance gate does not fire; the magnitude backstop
+    /// passes for sane per-call values, so the per-call occupancy is recovered.
+    #[test]
+    fn extract_turn_analytics_adopts_qwen_terminal_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("qwen-wrapper.jsonl");
+        std::fs::write(
+            &output_path,
+            concat!(
+                "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-qwen\"}\n",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"qwen reply\"}]}}\n",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"qwen reply\",\"session_id\":\"sess-qwen\",\"duration_ms\":7,\"usage\":{\"input_tokens\":1200,\"cache_read_input_tokens\":300,\"cache_creation_input_tokens\":80,\"output_tokens\":256}}\n",
+            ),
+        )
+        .unwrap();
+
+        let (session_id, usage) = super::extract_turn_analytics_from_output_range(
+            output_path.to_string_lossy().as_ref(),
+            0,
+            None,
+        );
+
+        assert_eq!(session_id.as_deref(), Some("sess-qwen"));
+        let usage = usage.expect("qwen terminal usage must be recoverable");
+        assert_eq!(usage.input_tokens, 1200);
+        assert_eq!(usage.cache_read_tokens, 300);
+        assert_eq!(usage.cache_create_tokens, 80);
+        assert_eq!(usage.output_tokens, 256);
+    }
+
+    /// #3344 round 2 — analytics-path backstop: a non-codex provider whose
+    /// nested occupancy clears the 2M ceiling is rejected by the magnitude
+    /// backstop even with no codex marker, so impossible-magnitude garbage from
+    /// any provider never poisons analytics.
+    #[test]
+    fn extract_turn_analytics_backstop_rejects_millions_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("other-wrapper.jsonl");
+        std::fs::write(
+            &output_path,
+            concat!(
+                "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-x\"}\n",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"reply\"}]}}\n",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"reply\",\"session_id\":\"sess-x\",\"duration_ms\":7,\"usage\":{\"input_tokens\":3000000,\"cache_read_input_tokens\":1000000,\"output_tokens\":256}}\n",
+            ),
+        )
+        .unwrap();
+
+        let (_session_id, usage) = super::extract_turn_analytics_from_output_range(
+            output_path.to_string_lossy().as_ref(),
+            0,
+            None,
+        );
+
+        assert!(
+            usage.is_none(),
+            "millions-scale terminal usage must be rejected by the backstop"
+        );
     }
 
     /// #3281 forensics pinned as code: the 2026-06-10 incident transcript shape

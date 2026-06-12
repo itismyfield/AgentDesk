@@ -421,36 +421,17 @@ pub(in crate::services::discord) fn process_watcher_lines(
                             }
                         }
                     }
-                    // #1918: for providers that emit per-message `usage` (Claude),
-                    // the assistant-message branch above already captured the
-                    // LAST API call's prompt and cumulative output, which is what
-                    // the status panel and analytics need. Result.usage in
-                    // multi-call turns is turn-cumulative on those CLIs and
-                    // inflates the displayed context occupancy past the window
-                    // size. For providers that only normalize token counts onto
-                    // the terminal `result` event (e.g. Qwen's tmux wrapper),
-                    // fall back to result.usage so session context status and
-                    // turn analytics are not lost.
-                    if !state.saw_per_message_usage
-                        && let Some(usage) = val.get("usage")
-                    {
-                        state.accum_input_tokens = usage
-                            .get("input_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        state.accum_cache_read_tokens = usage
-                            .get("cache_read_input_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        state.accum_cache_create_tokens = usage
-                            .get("cache_creation_input_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        state.accum_output_tokens = usage
-                            .get("output_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                    }
+                    // #1918/#3344: Claude emits per-message `usage`, so the
+                    // assistant-message branch already captured the LAST call's
+                    // occupancy. For terminal-usage providers, adopt the result
+                    // frame's nested usage with shared provenance + magnitude
+                    // gating: the Codex legacy wrapper's terminal accounting is
+                    // known-cumulative (top-level `input_tokens`/`output_tokens`
+                    // marker) and is suppressed so CTW renders honest "unknown"
+                    // instead of a fabricated full window; Qwen-shaped per-call
+                    // usage is adopted unchanged. See
+                    // `session_backend::adopt_terminal_result_usage`.
+                    crate::services::session_backend::adopt_terminal_result_usage(&val, state);
 
                     state.final_result = Some(String::new());
                     strip_leading_tui_response_chrome_in_place(full_response, &mut outcome);
@@ -758,18 +739,24 @@ mod tests {
         assert!(full_response.is_empty());
     }
 
-    /// #3275 cross-module contract: the codex tmux wrapper emits its result
-    /// frame with tokens as top-level fields plus a Claude-compatible nested
-    /// `usage` (receipt.rs subset convention). This is the exact frame shape
-    /// `emit_success_result` produces; the watcher's result-usage fallback
-    /// must adopt it so `stream_line_state_token_usage` turns Some and
-    /// watcher-owned completion persists session/turn token telemetry
-    /// (idle recap context source) instead of falling to "context unknown".
+    /// #3344 round 2 — provenance gate: the codex legacy tmux wrapper's
+    /// `emit_success_result` ALWAYS stamps the terminal frame with top-level
+    /// `input_tokens`/`output_tokens`. That marker means the frame's nested
+    /// `usage` is KNOWN-cumulative codex-legacy accounting, so it is NEVER
+    /// adopted as per-call context — even this small, early, plausible-looking
+    /// value (`input+cache_read = 1000`). RATIONALE: an honest-unknown CTW
+    /// beats a sometimes-right number. The same wrapper's nested `usage` grows
+    /// from per-call-ish early to wildly cumulative as the session advances; a
+    /// magnitude-only gate would adopt it through the entire blind window
+    /// (model window → 2M) and silently drift into a misleading 100%. The
+    /// legitimate per-call occupancy for codex turns flows from the session
+    /// `token_count` records (`info.last_token_usage`, #3331), not this frame.
+    /// (On base this small value was adopted; now suppressed.)
     #[test]
-    fn process_watcher_lines_adopts_codex_wrapper_result_usage() {
+    fn process_watcher_lines_suppresses_codex_legacy_early_per_call_usage() {
         let mut buffer = concat!(
             "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"codex reply\"}]}}\n",
-            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"codex reply\",\"session_id\":\"sess-cdx\",\"duration_ms\":12,\"input_tokens\":8325687,\"output_tokens\":41600,\"usage\":{\"input_tokens\":400,\"cache_read_input_tokens\":600,\"output_tokens\":50}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"codex reply\",\"session_id\":\"sess-cdx\",\"duration_ms\":12,\"input_tokens\":30000,\"output_tokens\":50,\"usage\":{\"input_tokens\":400,\"cache_read_input_tokens\":600,\"output_tokens\":50}}\n",
         )
         .to_string();
         let mut state = StreamLineState::new();
@@ -780,22 +767,138 @@ mod tests {
             process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
 
         assert!(outcome.found_result);
-        // Codex wrapper assistant frames never carry per-message usage, so the
-        // result-frame fallback must engage.
         assert!(!state.saw_per_message_usage);
-        assert_eq!(state.accum_input_tokens, 400);
-        assert_eq!(state.accum_cache_read_tokens, 600);
+        // Codex-legacy provenance (top-level token fields present) → suppress.
+        assert_eq!(state.accum_input_tokens, 0);
+        assert_eq!(state.accum_cache_read_tokens, 0);
         assert_eq!(state.accum_cache_create_tokens, 0);
-        assert_eq!(state.accum_output_tokens, 50);
-        // Occupancy reconstruction: input + cache_read == the original codex
-        // last_token_usage.input_tokens — NOT the cumulative top-level 8.3M.
+        assert_eq!(state.accum_output_tokens, 0);
         let usage = crate::db::turns::TurnTokenUsage {
             input_tokens: state.accum_input_tokens,
             cache_create_tokens: state.accum_cache_create_tokens,
             cache_read_tokens: state.accum_cache_read_tokens,
             output_tokens: state.accum_output_tokens,
         };
-        assert_eq!(usage.context_occupancy_input_tokens(), 1000);
+        assert_eq!(usage.context_occupancy_input_tokens(), 0);
+    }
+
+    /// #3344 round 2 — blind-window pin: a codex-legacy frame whose nested
+    /// occupancy (500_000) sits ABOVE the model window (~258_400) but BELOW the
+    /// old 2M magnitude ceiling. The retired magnitude-only gate adopted this,
+    /// rendering a bogus clamped 100%. The provenance gate (top-level token
+    /// marker) suppresses it regardless of magnitude. (Fails on base, where the
+    /// 500k occupancy cleared the ceiling and was adopted.)
+    #[test]
+    fn process_watcher_lines_suppresses_codex_legacy_blind_window_usage() {
+        let mut buffer = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"codex reply\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"codex reply\",\"session_id\":\"sess-cdx\",\"duration_ms\":12,\"input_tokens\":500000,\"output_tokens\":400,\"usage\":{\"input_tokens\":100000,\"cache_read_input_tokens\":400000,\"output_tokens\":400}}\n",
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert!(!state.saw_per_message_usage);
+        assert_eq!(state.accum_input_tokens, 0);
+        assert_eq!(state.accum_cache_read_tokens, 0);
+        assert_eq!(state.accum_cache_create_tokens, 0);
+        assert_eq!(state.accum_output_tokens, 0);
+    }
+
+    /// #3344 regression: the Codex legacy tmux wrapper can hand back a terminal
+    /// frame carrying session-cumulative accounting (the issue's exact values:
+    /// `cache_read_input_tokens=4022400`, `input_tokens=344752`, ~4.37M occupancy
+    /// against a 258400 window). With the top-level codex-legacy marker present,
+    /// the provenance gate suppresses it; the accumulators stay zero so
+    /// `stream_line_state_token_usage` returns None and the panel/recap render an
+    /// honest "unknown" instead of a clamped, misleading 100%.
+    #[test]
+    fn process_watcher_lines_suppresses_cumulative_codex_wrapper_result_usage() {
+        let mut buffer = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"codex reply\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"codex reply\",\"session_id\":\"sess-cdx\",\"duration_ms\":12,\"input_tokens\":4367152,\"output_tokens\":1280,\"usage\":{\"input_tokens\":344752,\"cache_read_input_tokens\":4022400,\"output_tokens\":1280}}\n",
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert!(!state.saw_per_message_usage);
+        // The cumulative shape is suppressed: every accumulator stays zero, so
+        // context occupancy is unknown (no false full-window render).
+        assert_eq!(state.accum_input_tokens, 0);
+        assert_eq!(state.accum_cache_read_tokens, 0);
+        assert_eq!(state.accum_cache_create_tokens, 0);
+        assert_eq!(state.accum_output_tokens, 0);
+        let usage = crate::db::turns::TurnTokenUsage {
+            input_tokens: state.accum_input_tokens,
+            cache_create_tokens: state.accum_cache_create_tokens,
+            cache_read_tokens: state.accum_cache_read_tokens,
+            output_tokens: state.accum_output_tokens,
+        };
+        assert_eq!(usage.context_occupancy_input_tokens(), 0);
+    }
+
+    /// #3344 round 2 — backstop pin: a NON-codex terminal-usage provider (no
+    /// top-level token marker) whose nested occupancy clears the 2M
+    /// defense-in-depth ceiling is still rejected. The provenance gate does not
+    /// fire (no codex marker), so the magnitude backstop catches the
+    /// millions-scale garbage from any provider.
+    #[test]
+    fn process_watcher_lines_backstop_rejects_other_provider_millions_usage() {
+        let mut buffer = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"reply\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"reply\",\"session_id\":\"sess-x\",\"duration_ms\":12,\"usage\":{\"input_tokens\":3000000,\"cache_read_input_tokens\":1000000,\"output_tokens\":120}}\n",
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert!(!state.saw_per_message_usage);
+        assert_eq!(state.accum_input_tokens, 0);
+        assert_eq!(state.accum_cache_read_tokens, 0);
+        assert_eq!(state.accum_cache_create_tokens, 0);
+        assert_eq!(state.accum_output_tokens, 0);
+    }
+
+    /// #3344 fallback regression: a provider that legitimately reports per-call
+    /// token counts solely on the terminal `result.usage` (Qwen's tmux wrapper)
+    /// must keep flowing through the fallback unchanged — the cumulative-shape
+    /// guard never trips for sane per-call magnitudes.
+    #[test]
+    fn process_watcher_lines_keeps_per_call_terminal_usage_fallback() {
+        let mut buffer = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"qwen reply\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"qwen reply\",\"session_id\":\"sess-qwen\",\"duration_ms\":7,\"usage\":{\"input_tokens\":1200,\"cache_read_input_tokens\":300,\"cache_creation_input_tokens\":80,\"output_tokens\":256}}\n",
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert!(!state.saw_per_message_usage);
+        assert_eq!(state.accum_input_tokens, 1200);
+        assert_eq!(state.accum_cache_read_tokens, 300);
+        assert_eq!(state.accum_cache_create_tokens, 80);
+        assert_eq!(state.accum_output_tokens, 256);
     }
 
     #[test]
