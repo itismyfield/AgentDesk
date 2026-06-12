@@ -493,6 +493,7 @@ src/
 │   │   │   ├── panel_decisions.rs
 │   │   │   ├── placeholder_reclaim.rs
 │   │   │   ├── prompt_observe.rs
+│   │   │   ├── single_message_footer.rs
 │   │   │   ├── turn_identity.rs
 │   │   │   └── turn_identity_tests.rs
 │   │   ├── tui_direct_abort_marker/

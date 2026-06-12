@@ -36,10 +36,14 @@ use self::commit_decisions::*;
 #[path = "tmux_watcher/placeholder_reclaim.rs"]
 mod placeholder_reclaim;
 
+#[path = "tmux_watcher/single_message_footer.rs"]
+mod single_message_footer;
+
 pub(in crate::services::discord) use self::completion_gate::{
     TuiCompletionGateOutcome, run_tui_completion_gate,
 };
 use self::placeholder_reclaim::*;
+use self::single_message_footer::*;
 
 fn adopt_watcher_terminal_message_ids_from_inflight(
     placeholder_msg_id: &mut Option<serenity::MessageId>,
@@ -1310,6 +1314,10 @@ async fn cleanup_orphan_external_input_status_panel(
     tmux_session_name: &str,
     turn_is_external_input: bool,
 ) -> bool {
+    if !watcher_separate_status_panel_enabled(shared.status_panel_v2_enabled) {
+        *status_panel_msg_id = None;
+        return true;
+    }
     if !turn_is_external_input {
         return true;
     }
@@ -1421,7 +1429,7 @@ async fn complete_watcher_status_panel_v2(
     // for the turn the watcher actually finished. Recovery-driven
     // TurnCompleted still emits the guarded signal (see recovery_engine.rs)
     // because its state snapshot is pinned at recovery entry.
-    if !shared.status_panel_v2_enabled {
+    if !watcher_should_complete_separate_status_panel(shared.status_panel_v2_enabled) {
         return true;
     }
     // EPIC #3078: completion parity is DEFERRED to the controller execute-cutover
@@ -2289,6 +2297,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let mut placeholder_msg_id: Option<serenity::MessageId> = stream_seed.placeholder_msg_id;
         let mut placeholder_from_restored_inflight = placeholder_msg_id.is_some();
         let mut status_panel_msg_id: Option<serenity::MessageId> = stream_seed.status_panel_msg_id;
+        let single_message_panel_footer_mode =
+            watcher_single_message_panel_footer_enabled(shared.status_panel_v2_enabled);
+        if single_message_panel_footer_mode {
+            status_panel_msg_id = None;
+        }
         // #3003 (codex P2 r4): cache whether this turn is a TUI-direct
         // external-input turn while the inflight row is still present, so the
         // orphan-panel reclaim can run after a stop/cancel clears inflight.
@@ -2312,34 +2325,21 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             .as_ref()
             .filter(|state| state.tmux_session_name.as_deref() == Some(tmux_session_name.as_str()))
             .map(crate::services::discord::inflight::InflightTurnIdentity::from_state);
-        // #3003 (codex P2 r8): on a restart that created+persisted the panel before
-        // an answer placeholder existed (current_msg_id == 0), watcher_stream_seed
-        // leaves status_panel_msg_id None. Rehydrate it from the persisted inflight
-        // id now — while the inflight row is still present — so a later stop/fresh-idle
-        // cleanup can reclaim the panel even after the inflight row is cleared. Only
-        // for external-input turns, so a bridge-owned panel is never adopted here.
-        if status_panel_msg_id.is_none() && turn_is_external_input_for_session {
+        // #3003 P2: rehydrate a watcher-owned persisted panel id while the row
+        // still exists; footer mode intentionally has no separate panel handle.
+        if !single_message_panel_footer_mode
+            && status_panel_msg_id.is_none()
+            && turn_is_external_input_for_session
+        {
             status_panel_msg_id = watcher_persisted_status_panel_msg_id(
                 startup_inflight_snapshot.as_ref(),
                 &tmux_session_name,
             );
         }
-        // #3003 (codex P2 r6): turn_bridge clears the per-channel live-status store
-        // at managed turn start (mod.rs:4188). The watcher-owned TUI-direct path has
-        // no such reset, so a fresh external-input turn would inherit the previous
-        // turn's status/todos and render them in its new v2 panel. Clear once at the
-        // fresh-turn boundary — no restored placeholder/panel/response seed — before
-        // the initial live-events flush below, so the current turn's own events
-        // (re-derived from this frame's buffer) are preserved.
-        //
-        // The clear is NOT gated on external-input detection (codex P2 r16/r17): the
-        // ExternalInput inflight may not be written yet at turn start, so gating here
-        // would skip the clear and force a late clear that wipes already-flushed
-        // current-turn events. The fresh-frame guards below already exclude
-        // bridge-owned turns (those restore a placeholder/panel id from inflight) and
-        // mid-turn restarts (restored assistant text), so clearing every genuinely
-        // fresh watcher frame before the initial flush is safe and covers the
-        // not-yet-detected external-input case cleanly.
+        // #3003 P2: reset per-channel live-status state on a genuinely fresh
+        // watcher frame. This is deliberately not gated on external-input because
+        // the inflight row may not exist yet; restored/bridge-owned frames are
+        // excluded by the seed guards.
         let watcher_fresh_turn_frame = placeholder_msg_id.is_none()
             && status_panel_msg_id.is_none()
             && !restored_assistant_text_seen;
@@ -2551,7 +2551,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             let turn_timeout = crate::services::discord::turn_watchdog_timeout();
             let mut last_status_update = tokio::time::Instant::now();
             let mut last_output_at = tokio::time::Instant::now();
-            if live_events_dirty {
+            if watcher_live_events_dirty_should_force_status_update(
+                live_events_dirty,
+                single_message_panel_footer_mode,
+            ) {
                 force_next_watcher_status_update(&mut last_status_update);
             }
             let mut ready_for_input_tracker =
@@ -2711,7 +2714,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             chunk_buffer_len,
                             all_data.len(),
                         );
-                        if flush_placeholder_live_events(&shared, channel_id, &mut tool_state) {
+                        if watcher_live_events_dirty_should_force_status_update(
+                            flush_placeholder_live_events(&shared, channel_id, &mut tool_state),
+                            single_message_panel_footer_mode,
+                        ) {
                             force_next_watcher_status_update(&mut last_status_update);
                         }
                         found_result = found_result || outcome.found_result;
@@ -3051,15 +3057,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     }
 
                     if shared.status_panel_v2_enabled
-                        && let Some(status_msg_id) = status_panel_msg_id
+                        && (single_message_panel_footer_mode || status_panel_msg_id.is_some())
                     {
-                        // #3055: re-derive the session lifecycle panel line for
-                        // *this* watcher turn before each streaming render, the
-                        // same way the bridge does on every status tick. Without
-                        // this the watcher-direct path renders a stale
-                        // per-channel `🆕 새 세션 시작 (최근 대화 N개…)` snapshot left
-                        // by an earlier recovery/new-session turn. The lookup is
-                        // already throttled by `status_update_interval`.
+                        // #3055: re-derive this turn's session lifecycle panel
+                        // line on the throttled status tick, matching bridge
+                        // behavior and avoiding stale per-channel snapshots.
                         refresh_watcher_session_panel_from_lifecycle(
                             &shared,
                             channel_id,
@@ -3070,6 +3072,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             &tmux_session_name,
                         )
                         .await;
+                    }
+                    if watcher_separate_status_panel_enabled(shared.status_panel_v2_enabled)
+                        && let Some(status_msg_id) = status_panel_msg_id
+                    {
                         let panel_text = shared.placeholder_live_events.render_status_panel(
                             channel_id,
                             &watcher_provider,
@@ -3274,16 +3280,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         continue;
                     }
 
-                    // #3003: TUI-direct turns have no preceding Discord message to
-                    // re-designate as the status panel, so create a dedicated v2 panel
-                    // here — past the bridge-delivered / inflight-missing / recent-stop
-                    // suppression guards above, so suppressed turns never spawn a panel.
-                    // The panel seeds with a minimal processing block (matching
-                    // turn_bridge ~4359) and the interval edit above refreshes it via
-                    // render_status_panel on the next tick. Creation is gated on
-                    // visible streaming work (response text or a tool/task status line)
-                    // so a turn that only emits non-user-visible JSONL and returns to
-                    // idle never publishes an orphan panel (codex P2 r3).
+                    // #3003: TUI-direct turns lack a prior Discord message to
+                    // re-designate, so flag-off creates a dedicated v2 panel here
+                    // after suppression guards and only once visible work exists.
                     let has_visible_streaming_work = !full_response
                         .get(response_sent_offset..)
                         .unwrap_or("")
@@ -3294,7 +3293,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             tool_state.current_tool_line.as_deref(),
                             task_notification_kind,
                         );
-                    if shared.status_panel_v2_enabled
+                    if watcher_separate_status_panel_enabled(shared.status_panel_v2_enabled)
                         && status_panel_msg_id.is_none()
                         && has_visible_streaming_work
                     {
@@ -3317,12 +3316,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         );
                         if panel_eligible_turn {
                             turn_is_external_input_for_session = true;
-                            // #3003 (codex P2 r15): when the watcher started before
-                            // this turn's inflight existed, the startup identity
-                            // snapshot was None. Capture it now that we own the panel
-                            // so the abandon check can detect a later same-channel
-                            // replacement (otherwise the old panel would survive or be
-                            // edited as the new turn's).
+                            // #3003 P2: if startup predated inflight creation,
+                            // capture identity now so abandon detects replacement.
                             if turn_identity_for_panel.is_none() {
                                 turn_identity_for_panel = inflight_for_panel
                                     .as_ref()
@@ -3332,11 +3327,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                     })
                                     .map(crate::services::discord::inflight::InflightTurnIdentity::from_state);
                             }
-                            // #3003 (codex P2 r17): the previous-turn live-event store
-                            // was already cleared at the fresh-turn boundary above
-                            // (now ungated on external-input detection), before the
-                            // initial flush — so the current turn's events are intact
-                            // and no late clear (which would wipe them) is needed here.
+                            // #3003 P2: no late live-event clear here; the fresh-frame
+                            // reset above preserved this turn's initial flush.
                         }
                         if let Some(persisted) = persisted_panel_msg_id {
                             // Restart-safe adoption: the panel already exists and was
@@ -3344,7 +3336,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             // publishing a duplicate (#3003 codex P2). Synthetic headless
                             // ids are already filtered by the persisted helper.
                             status_panel_msg_id = Some(persisted);
-                        } else if watcher_should_create_external_input_status_panel(
+                        } else if watcher_should_create_separate_status_panel(
+                            single_message_panel_footer_mode,
                             shared.status_panel_v2_enabled,
                             status_panel_msg_id.is_some(),
                             panel_eligible_turn,
@@ -3586,9 +3579,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             break;
                         }
 
-                        let status_block = build_watcher_placeholder_status_block(
+                        let status_block = build_watcher_single_message_panel_status_block(
                             &shared,
                             channel_id,
+                            &watcher_provider,
+                            status_panel_started_at,
                             indicator,
                             tool_state.prev_tool_status.as_deref(),
                             tool_state.current_tool_line.as_deref(),
@@ -3674,9 +3669,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         }
                     }
 
-                    let status_block = build_watcher_placeholder_status_block(
+                    let status_block = build_watcher_single_message_panel_status_block(
                         &shared,
                         channel_id,
+                        &watcher_provider,
+                        status_panel_started_at,
                         indicator,
                         tool_state.prev_tool_status.as_deref(),
                         tool_state.current_tool_line.as_deref(),
@@ -5096,6 +5093,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 inflight,
                 &tmux_session_name,
             );
+            if single_message_panel_footer_mode {
+                status_panel_msg_id = None;
+            }
         }
         if discard_restored_response_seed_before_no_inflight_terminal_relay(
             &mut full_response,
@@ -7034,11 +7034,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         if terminal_output_committed
             && !lifecycle_stage_paused
             && let Some(placeholder) = placeholder_msg_id
-            && let Some(finalized) =
-                crate::services::discord::formatting::finalize_stale_streaming_footer(
-                    &last_edit_text,
-                    &watcher_provider,
-                )
+            && let Some(finalized) = finalize_watcher_streaming_footer(
+                single_message_panel_footer_mode,
+                &last_edit_text,
+                &watcher_provider,
+            )
         {
             match crate::services::discord::http::edit_channel_message(
                 &http,
