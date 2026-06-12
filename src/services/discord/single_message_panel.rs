@@ -6,6 +6,11 @@ use poise::serenity_prelude::{ChannelId, MessageId};
 pub(in crate::services::discord) const SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES: usize = 600;
 pub(in crate::services::discord) const SINGLE_MESSAGE_PANEL_SPINNER_FRAMES: &[&str] =
     &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+// Residual background agents can legitimately run for about an hour, but a
+// crashed agent must not keep editing the terminal message forever.
+pub(in crate::services::discord) const COMPLETION_FOOTER_MAX_IDLE_ANIMATION_SECS: i64 = 3600;
+pub(in crate::services::discord) const COMPLETION_FOOTER_MAX_CONSECUTIVE_EDIT_FAILURES: u8 = 3;
+const COMPLETION_FOOTER_IDLE_EXPIRED_INDICATOR: &str = "…";
 
 pub(in crate::services::discord) fn single_message_panel_spinner_frame(
     index: usize,
@@ -18,6 +23,8 @@ struct RegisteredCompletionFooter {
     message_id: MessageId,
     provider: super::ProviderKind,
     base_body: String,
+    registered_at_unix: i64,
+    consecutive_edit_failures: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,7 +153,7 @@ pub(in crate::services::discord) fn register_completion_footer_target(
     channel_id: ChannelId,
     message_id: MessageId,
     provider: &super::ProviderKind,
-    _started_at_unix: i64,
+    registered_at_unix: i64,
     base_body: &str,
     has_unfinished_entries: bool,
 ) {
@@ -160,11 +167,24 @@ pub(in crate::services::discord) fn register_completion_footer_target(
                 message_id,
                 provider: provider.clone(),
                 base_body: completion_footer_base_body(base_body, provider),
+                registered_at_unix,
+                consecutive_edit_failures: 0,
             },
         );
     } else {
         guard.remove(&channel_id.get());
     }
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn completion_footer_registered_failure_count(
+    channel_id: ChannelId,
+) -> Option<u8> {
+    completion_footer_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&channel_id.get())
+        .map(|target| target.consecutive_edit_failures)
 }
 
 pub(in crate::services::discord) fn completion_footer_has_registered_target(
@@ -181,22 +201,79 @@ pub(in crate::services::discord) fn completion_footer_edit_for_registered_target
     channel_id: ChannelId,
     indicator: &str,
 ) -> Option<CompletionFooterEdit> {
+    completion_footer_edit_for_registered_target_at(
+        shared,
+        channel_id,
+        indicator,
+        chrono::Utc::now().timestamp(),
+    )
+}
+
+pub(in crate::services::discord) fn completion_footer_edit_for_registered_target_at(
+    shared: &super::SharedData,
+    channel_id: ChannelId,
+    indicator: &str,
+    now_unix: i64,
+) -> Option<CompletionFooterEdit> {
     let target = completion_footer_registry()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(&channel_id.get())
         .cloned()?;
+    let idle_expired =
+        completion_footer_idle_animation_expired(target.registered_at_unix, now_unix);
+    let render_indicator = if idle_expired {
+        COMPLETION_FOOTER_IDLE_EXPIRED_INDICATOR
+    } else {
+        indicator
+    };
     let rendered = shared.placeholder_live_events.render_completion_footer(
         channel_id,
         &target.provider,
-        indicator,
+        render_indicator,
     );
     let text = compose_completion_footer_text(&target.base_body, rendered.block.as_deref());
-    (!text.trim().is_empty()).then_some(CompletionFooterEdit {
+    if text.trim().is_empty() {
+        if idle_expired {
+            completion_footer_forget_registered_target(channel_id);
+        }
+        return None;
+    }
+    Some(CompletionFooterEdit {
         message_id: target.message_id,
         text,
-        remove_after_edit: !rendered.has_unfinished_entries,
+        remove_after_edit: idle_expired || !rendered.has_unfinished_entries,
     })
+}
+
+fn completion_footer_idle_animation_expired(registered_at_unix: i64, now_unix: i64) -> bool {
+    now_unix.saturating_sub(registered_at_unix) >= COMPLETION_FOOTER_MAX_IDLE_ANIMATION_SECS
+}
+
+pub(in crate::services::discord) fn completion_footer_record_edit_result(
+    channel_id: ChannelId,
+    remove_after_edit: bool,
+    edited: bool,
+) {
+    if remove_after_edit {
+        completion_footer_forget_registered_target(channel_id);
+        return;
+    }
+
+    let mut guard = completion_footer_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(target) = guard.get_mut(&channel_id.get()) else {
+        return;
+    };
+    if edited {
+        target.consecutive_edit_failures = 0;
+        return;
+    }
+    target.consecutive_edit_failures = target.consecutive_edit_failures.saturating_add(1);
+    if target.consecutive_edit_failures >= COMPLETION_FOOTER_MAX_CONSECUTIVE_EDIT_FAILURES {
+        guard.remove(&channel_id.get());
+    }
 }
 
 pub(in crate::services::discord) fn completion_footer_forget_registered_target(
@@ -364,7 +441,7 @@ fn strip_completion_footer(text: &str, provider: &super::ProviderKind) -> Option
     while let Some(idx) = text[..search_end].rfind("\n\n") {
         let body = &text[..idx];
         let footer = &text[(idx + 2)..];
-        if completion_footer_starts(footer) {
+        if completion_footer_starts_after_body(footer, body) {
             if completion_footer_first_line_is_section_header(footer)
                 && (body_ends_with_completion_context_line(body)
                     || body_ends_with_single_message_footer_status_line(body))
@@ -387,7 +464,22 @@ fn completion_footer_starts(footer: &str) -> bool {
     let Some(first) = lines.next().map(str::trim) else {
         return false;
     };
-    completion_footer_context_line(first) || completion_footer_section_header(first)
+    completion_footer_context_line(first)
+        || (completion_footer_section_header(first) && completion_footer_has_slot_shape(footer))
+}
+
+fn completion_footer_starts_after_body(footer: &str, body: &str) -> bool {
+    let mut lines = footer.lines().filter(|line| !line.trim().is_empty());
+    let Some(first) = lines.next().map(str::trim) else {
+        return false;
+    };
+    if completion_footer_context_line(first) {
+        return true;
+    }
+    completion_footer_section_header(first)
+        && (completion_footer_has_slot_shape(footer)
+            || body_ends_with_completion_context_line(body)
+            || body_ends_with_single_message_footer_status_line(body))
 }
 
 fn completion_footer_context_line(line: &str) -> bool {
@@ -396,6 +488,10 @@ fn completion_footer_context_line(line: &str) -> bool {
 
 fn completion_footer_section_header(line: &str) -> bool {
     line == "Tasks" || line == "Subagents"
+}
+
+fn completion_footer_has_slot_shape(footer: &str) -> bool {
+    footer.lines().any(|line| line.starts_with("└ "))
 }
 
 fn completion_footer_first_line_is_section_header(footer: &str) -> bool {
@@ -465,6 +561,8 @@ fn strip_footer_braille_spinner_prefix(line: &str) -> Option<&str> {
 mod tests {
     use super::super::DISCORD_MSG_LIMIT;
     use super::super::ProviderKind;
+    use crate::services::agent_protocol::StatusEvent;
+    use poise::serenity_prelude::{ChannelId, MessageId};
 
     fn panel_portion(status_block: &str) -> &str {
         status_block
@@ -475,6 +573,20 @@ mod tests {
 
     fn footer_header(status_block: &str) -> &str {
         status_block.lines().next().unwrap_or("")
+    }
+
+    fn push_unfinished_subagent(channel_id: ChannelId) -> std::sync::Arc<super::super::SharedData> {
+        let shared = super::super::make_shared_data_for_tests();
+        shared.placeholder_live_events.push_status_event(
+            channel_id,
+            StatusEvent::SubagentStart {
+                subagent_type: Some("reviewer".to_string()),
+                desc: Some("Long background job".to_string()),
+                tool_use_id: Some(format!("tool-{}", channel_id.get())),
+                background: true,
+            },
+        );
+        shared
     }
 
     #[test]
@@ -739,6 +851,158 @@ mod tests {
                 &ProviderKind::Claude,
             ),
             Some("visible assistant body".to_string())
+        );
+    }
+
+    #[test]
+    fn completion_footer_strip_preserves_bare_user_section_heading_without_slot_evidence() {
+        let body = "visible assistant body\n\nSubagents\n- user-authored note";
+
+        assert_eq!(
+            super::strip_streaming_footer(body, &ProviderKind::Claude),
+            None
+        );
+        assert_eq!(
+            super::finalize_streaming_footer(body, &ProviderKind::Claude),
+            None
+        );
+    }
+
+    #[test]
+    fn completion_footer_strip_still_removes_real_slot_section() {
+        let body = "visible assistant body\n\nSubagents\n└ bgworker Long job ✓";
+
+        assert_eq!(
+            super::strip_streaming_footer(body, &ProviderKind::Claude),
+            Some("visible assistant body".to_string())
+        );
+    }
+
+    #[test]
+    fn completion_footer_ttl_freezes_unfinished_entries_then_forgets_target() {
+        let channel_id = ChannelId::new(3_089_001);
+        super::completion_footer_forget_registered_target(channel_id);
+        let shared = push_unfinished_subagent(channel_id);
+        let now = 1_800_000_000;
+        super::register_completion_footer_target(
+            channel_id,
+            MessageId::new(3_089_101),
+            &ProviderKind::Claude,
+            now - super::COMPLETION_FOOTER_MAX_IDLE_ANIMATION_SECS - 1,
+            "Final answer",
+            true,
+        );
+
+        let edit = super::completion_footer_edit_for_registered_target_at(
+            shared.as_ref(),
+            channel_id,
+            "⠸",
+            now,
+        )
+        .expect("expired unfinished footer should render one freeze edit");
+
+        assert!(edit.remove_after_edit);
+        assert!(edit.text.contains("Subagents\n└ "));
+        assert!(edit.text.contains('…'));
+        assert!(!edit.text.contains('⠸'));
+        assert!(!edit.text.contains('✓'));
+
+        super::completion_footer_record_edit_result(channel_id, edit.remove_after_edit, true);
+        assert!(!super::completion_footer_has_registered_target(channel_id));
+    }
+
+    #[test]
+    fn completion_footer_below_ttl_keeps_animating_registered_target() {
+        let channel_id = ChannelId::new(3_089_002);
+        super::completion_footer_forget_registered_target(channel_id);
+        let shared = push_unfinished_subagent(channel_id);
+        let now = 1_800_000_000;
+        super::register_completion_footer_target(
+            channel_id,
+            MessageId::new(3_089_102),
+            &ProviderKind::Claude,
+            now - super::COMPLETION_FOOTER_MAX_IDLE_ANIMATION_SECS + 1,
+            "Final answer",
+            true,
+        );
+
+        let edit = super::completion_footer_edit_for_registered_target_at(
+            shared.as_ref(),
+            channel_id,
+            "⠸",
+            now,
+        )
+        .expect("non-expired unfinished footer should render an animated edit");
+
+        assert!(!edit.remove_after_edit);
+        assert!(edit.text.contains("Subagents\n└ "));
+        assert!(edit.text.contains('⠸'));
+
+        super::completion_footer_record_edit_result(channel_id, edit.remove_after_edit, true);
+        assert!(super::completion_footer_has_registered_target(channel_id));
+        super::completion_footer_forget_registered_target(channel_id);
+    }
+
+    #[test]
+    fn completion_footer_consecutive_edit_failures_evict_registered_target() {
+        let channel_id = ChannelId::new(3_089_003);
+        super::completion_footer_forget_registered_target(channel_id);
+        let shared = push_unfinished_subagent(channel_id);
+        super::register_completion_footer_target(
+            channel_id,
+            MessageId::new(3_089_103),
+            &ProviderKind::Claude,
+            1_800_000_000,
+            "Final answer",
+            true,
+        );
+
+        for expected_failures in 1..super::COMPLETION_FOOTER_MAX_CONSECUTIVE_EDIT_FAILURES {
+            super::completion_footer_record_edit_result(channel_id, false, false);
+            assert_eq!(
+                super::completion_footer_registered_failure_count(channel_id),
+                Some(expected_failures)
+            );
+            assert!(super::completion_footer_has_registered_target(channel_id));
+        }
+
+        super::completion_footer_record_edit_result(channel_id, false, false);
+        assert!(!super::completion_footer_has_registered_target(channel_id));
+        assert_eq!(
+            super::completion_footer_edit_for_registered_target_at(
+                shared.as_ref(),
+                channel_id,
+                "⠸",
+                1_800_000_005,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn completion_footer_forget_registered_target_suppresses_future_edits() {
+        let channel_id = ChannelId::new(3_089_004);
+        super::completion_footer_forget_registered_target(channel_id);
+        let shared = push_unfinished_subagent(channel_id);
+        super::register_completion_footer_target(
+            channel_id,
+            MessageId::new(3_089_104),
+            &ProviderKind::Claude,
+            1_800_000_000,
+            "Final answer",
+            true,
+        );
+
+        super::completion_footer_forget_registered_target(channel_id);
+
+        assert_eq!(
+            super::completion_footer_edit_for_registered_target_at(
+                shared.as_ref(),
+                channel_id,
+                "⠸",
+                1_800_000_005,
+            ),
+            None
         );
     }
 

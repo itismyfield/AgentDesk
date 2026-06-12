@@ -213,7 +213,7 @@ pub(super) async fn complete_watcher_single_message_completion_footer(
     channel_id: ChannelId,
     terminal_msg_id: Option<serenity::MessageId>,
     provider: &ProviderKind,
-    started_at_unix: i64,
+    _started_at_unix: i64,
     terminal_text: &str,
     indicator: &str,
     background: bool,
@@ -232,7 +232,7 @@ pub(super) async fn complete_watcher_single_message_completion_footer(
         channel_id,
         msg_id,
         provider,
-        started_at_unix,
+        chrono::Utc::now().timestamp(),
         terminal_text,
         rendered.has_unfinished_entries,
     );
@@ -246,8 +246,10 @@ pub(super) async fn complete_watcher_single_message_completion_footer(
         return true;
     };
     rate_limit_wait(shared, channel_id).await;
-    match crate::services::discord::http::edit_channel_message(http, channel_id, msg_id, &finalized)
-        .await
+    let edited = match crate::services::discord::http::edit_channel_message(
+        http, channel_id, msg_id, &finalized,
+    )
+    .await
     {
         Ok(_) => true,
         Err(error) => {
@@ -259,7 +261,13 @@ pub(super) async fn complete_watcher_single_message_completion_footer(
             );
             false
         }
-    }
+    };
+    crate::services::discord::single_message_panel::completion_footer_record_edit_result(
+        channel_id,
+        !rendered.has_unfinished_entries,
+        edited,
+    );
+    edited
 }
 
 pub(super) async fn refresh_watcher_registered_completion_footer(
@@ -297,11 +305,11 @@ pub(super) async fn refresh_watcher_registered_completion_footer(
             false
         }
     };
-    if edit.remove_after_edit {
-        crate::services::discord::single_message_panel::completion_footer_forget_registered_target(
-            channel_id,
-        );
-    }
+    crate::services::discord::single_message_panel::completion_footer_record_edit_result(
+        channel_id,
+        edit.remove_after_edit,
+        edited,
+    );
     edited
 }
 

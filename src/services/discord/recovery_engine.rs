@@ -243,6 +243,10 @@ fn should_advance_recovery_dispatch_after_relay(relay_ok: bool) -> bool {
     relay_ok
 }
 
+fn forget_completion_footer_for_recovery_takeover(channel_id: ChannelId) {
+    super::single_message_panel::completion_footer_forget_registered_target(channel_id);
+}
+
 async fn relay_recovery_terminal_notice(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -273,6 +277,7 @@ async fn relay_recovered_terminal_text_to_placeholder(
     placeholder: Option<MessageId>,
     text: &str,
 ) -> RecoveryRelayOutcome {
+    forget_completion_footer_for_recovery_takeover(channel_id);
     let delivery = match placeholder {
         Some(placeholder) => {
             super::formatting::replace_long_message_raw(http, channel_id, placeholder, text, shared)
@@ -527,6 +532,7 @@ mod recovery_completion_outcome_tests {
         RecoveryCompletionOutcome, assert_recovery_completion_parity, recovery_status_panel,
     };
     use crate::services::provider::ProviderKind;
+    use poise::serenity_prelude::{ChannelId, MessageId};
 
     fn state_for_recovery(user_msg_id: u64) -> super::inflight::InflightTurnState {
         super::inflight::InflightTurnState::new(
@@ -632,6 +638,33 @@ mod recovery_completion_outcome_tests {
             target,
             Some(None),
             "flag-off v2 recovery preserves the SendFallback rollback behavior when no status_message_id was persisted"
+        );
+    }
+
+    #[test]
+    fn recovery_takeover_forgets_registered_completion_footer_target() {
+        let channel_id = ChannelId::new(3_089_201);
+        let shared = super::super::make_shared_data_for_tests();
+        super::super::single_message_panel::completion_footer_forget_registered_target(channel_id);
+        super::super::single_message_panel::register_completion_footer_target(
+            channel_id,
+            MessageId::new(3_089_301),
+            &ProviderKind::Claude,
+            1_800_000_000,
+            "Final answer",
+            true,
+        );
+
+        super::forget_completion_footer_for_recovery_takeover(channel_id);
+
+        assert_eq!(
+            super::super::single_message_panel::completion_footer_edit_for_registered_target_at(
+                shared.as_ref(),
+                channel_id,
+                "⠸",
+                1_800_000_005,
+            ),
+            None
         );
     }
 
@@ -4419,6 +4452,7 @@ pub(crate) async fn rebind_inflight_for_channel(
         }
         state
     };
+    forget_completion_footer_for_recovery_takeover(discord_channel_id);
 
     // Register / refresh the in-memory session so downstream handlers can
     // locate this channel after the rebind.

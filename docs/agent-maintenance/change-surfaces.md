@@ -667,7 +667,7 @@
     its G1/G2 snapshots from `external_input_relay_lease(...).map(|l| l.generation)`;
     +62 from #3304: slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
-  - `src/services/discord/recovery_engine.rs` (4077 lines; #3016 phase-5b2
+  - `src/services/discord/recovery_engine.rs` (4083 lines; #3016 phase-5b2
     dropped the `mailbox_finalize_owed` construction from the three recovery
     watcher-spawn handles; +9 from #3166
     fetching real context thresholds for the recovered-turn status panel; +36 from #3099
@@ -690,7 +690,9 @@
     Discord 404/403/410 force-clear + 3-restart transient budget); the pure
     decision matrix lives in `recovery_paths/shared.rs`; -13 from #3089 S4
     moving single-message status-panel completion targeting into
-    `recovery_engine/status_panel.rs`).
+    `recovery_engine/status_panel.rs`; +6 from #3089 completion-footer round 2
+    forgetting registered completion-footer targets when recovery takes ownership
+    of a channel's terminal message).
   - `src/services/discord/health.rs` (417 prod lines after the #3038 Phase A
     directory decomposition; module root keeps the `HealthRegistry` core +
     re-export surface, and the former monolith body lives in flat
