@@ -53,6 +53,7 @@ static CLAUDE_IDLE_RESPONSE_TAILS: LazyLock<Mutex<HashSet<String>>> =
 /// created). A genuine SECOND `/loop` or `/compact` arrives seconds later, well
 /// outside this window, so it gets its own active turn (no over-suppression).
 const SLASH_COMMAND_CONTROL_DEDUPE_WINDOW: Duration = Duration::from_secs(2);
+const COMPACT_REPLAY_KIND_NOTE_SUPPRESSION_WINDOW: Duration = Duration::from_secs(30);
 /// #3178: last-seen timestamp per (tmux_session, command_kind) for the
 /// slash-command-control turn, so the two halves of the #3153 double-post create
 /// the active turn only once. Keyed by a stable string built from the REAL
@@ -60,6 +61,9 @@ const SLASH_COMMAND_CONTROL_DEDUPE_WINDOW: Duration = Duration::from_secs(2);
 /// and the expanded `<command-*>` wrapper for the SAME command collapse to one
 /// entry, while two DIFFERENT commands within the window never collapse together.
 static SLASH_COMMAND_CONTROL_LAST_POSTED: LazyLock<
+    Mutex<std::collections::HashMap<String, std::time::Instant>>,
+> = LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+static SYSTEM_CONTINUATION_LAST_RENDERED: LazyLock<
     Mutex<std::collections::HashMap<String, std::time::Instant>>,
 > = LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
@@ -508,7 +512,8 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     let mut local_only_slash = false;
     if matches!(injected_class, InjectedPromptClass::SlashCommandControl) {
         let kind = slash_command_control_kind(&prompt.prompt);
-        local_only_slash = super::commands::is_local_only_slash_command_kind(&kind);
+        local_only_slash = super::commands::is_local_only_slash_command_kind(&kind)
+            || slash_command_control_prompt_is_caveat_only(&prompt.prompt);
         if !slash_command_control_turn_is_first_sighting(&prompt.tmux_session_name, &kind) {
             // #3153 second half within the 2s window: drop before any lease/anchor/
             // inflight exists; the first half already relays via its own bridge tail.
@@ -614,6 +619,21 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         // `claim_tui_direct_synthetic_turn` → no synthetic inflight → the next
         // injection is not FOREIGN-ABORTed and the #3302 sweeper sees no fake row.
         let kind = slash_command_control_kind(&prompt.prompt);
+        // #3388: in-session /compact rewrites can replay the local command stub
+        // seconds after the continuation banner; hide that duplicate note. The
+        // real machine-injected /compact (#3262) happens minutes before compaction
+        // completes, so it stays outside this narrow replay window.
+        if local_only_kind_note_suppressed_by_recent_continuation(&prompt.tmux_session_name, &kind)
+        {
+            tracing::info!(
+                provider = %prompt.provider,
+                channel_id = channel_id.get(),
+                session = %prompt.tmux_session_name,
+                kind = %kind,
+                "suppressed local-only slash-command kind note after recent system continuation note"
+            );
+            return;
+        }
         let note =
             format_slash_command_control_note(&prompt.tmux_session_name, &kind, &prompt.prompt);
         match channel_id.say(&*notify_http, note).await {
@@ -643,6 +663,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         let note = format_system_continuation_note(&prompt.tmux_session_name, &prompt.prompt);
         match channel_id.say(&*notify_http, note).await {
             Ok(message) => {
+                record_system_continuation_note_rendered(&prompt.tmux_session_name);
                 tracing::info!(
                     provider = %prompt.provider,
                     channel_id = channel_id.get(),
@@ -4954,41 +4975,9 @@ fn resolve_owner_channel_authoritatively(
     }
 }
 
-/// Classification of TUI-injected prompt text (#3099, #3100).
-///
-/// Injected terminal input arrives through a single observation path
-/// (`relay_observed_prompt`) regardless of origin, but the three origins must
-/// drive different ⏳/turn-lifecycle behaviour:
-///
-/// * [`HumanTuiDirect`](InjectedPromptClass::HumanTuiDirect) — a person typed
-///   into the TUI. This is a real active turn: it earns a `⏳` reaction, claims
-///   queue/inflight ownership, and cleans `⏳ → ✅` on completion.
-/// * [`TaskNotificationEvent`](InjectedPromptClass::TaskNotificationEvent) — a
-///   `<task-notification>` auto-turn (e.g. a background `run_in_background`
-///   completing) that Claude Code / Codex inject into their own session. These
-///   ARE real Discord messages with their own id, so they get a `⏳`, but the
-///   completion of that auto-turn must remove the `⏳` from the injected
-///   message itself (#3099) — not from a synthetic `user_msg_id == 0`.
-/// * [`SystemContinuation`](InjectedPromptClass::SystemContinuation) — a
-///   compact / "this session is being continued from a previous conversation"
-///   system prologue. This is NOT a human request and must not occupy the
-///   user-turn lifecycle: no `⏳`, no queue/inflight ownership, no
-///   cancel-on-hourglass semantics (#3100). It is rendered as a neutral
-///   session note if visible at all.
-/// * [`SlashCommandControl`](InjectedPromptClass::SlashCommandControl) — a
-///   MACHINE slash-command control echo (#3153): the raw `/loop …` / `/compact`
-///   text a `ScheduleWakeup` writes into the terminal, the Claude Code expanded
-///   `<command-message>…</command-message>` wrapper for that slash command, and
-///   the `<local-command-stdout>Compacted …` stdout line. Like
-///   [`SystemContinuation`] it is NOT a human request and must not occupy the
-///   user-turn lifecycle (no `⏳`, no anchor, no synthetic turn). #3178: it posts
-///   a SINGLE neutral note showing only the command KIND (`/loop` / `/compact`),
-///   never the raw prompt body, so the following completion card has a visible
-///   anchor — and the #3153 DOUBLE-post (the raw echo AND the expanded
-///   `<command-*>` wrapper arrive as two independent observed prompts) is
-///   collapsed by a (tmux_session + command_kind) dedupe window so the trigger
-///   shows exactly once. The resulting provider assistant output STILL flows via
-///   the bridge tail.
+/// Classification of TUI-injected prompt text. Each class drives different
+/// lifecycle handling: human/task turns get active-turn ownership, continuation
+/// banners stay passive, and slash-control echoes use command-kind rendering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum InjectedPromptClass {
     HumanTuiDirect,
@@ -5004,52 +4993,20 @@ impl InjectedPromptClass {
         matches!(self, InjectedPromptClass::HumanTuiDirect)
     }
 
-    /// #3099 codex re-review (P1): whether this class must SKIP the user-turn
-    /// lifecycle — the `⏳` reaction, the prompt anchor, and the synthetic
-    /// user-turn/inflight ownership. Only [`SystemContinuation`] (a system
-    /// continuation banner) does; it is not a human request and earns no active
-    /// turn. Routing it through the `is_system_continuation` branch makes it skip
-    /// the active-turn `else` block (anchor post + `⏳` + record_prompt_anchor +
-    /// synthetic-turn claim).
-    ///
-    /// #3178 (codex fix): [`SlashCommandControl`] (#3153, a machine slash-command
-    /// control echo: /loop, /compact, the expanded `<command-*>` wrapper) is NO
-    /// LONGER suppressed. A machine slash turn is a FULL active turn so a message
-    /// injected mid-/loop registers the mailbox active turn and queues cleanly
-    /// (📬) instead of colliding with the busy pane; it gets the kind-only anchor +
-    /// `⏳` + synthetic inflight + `✅` lifecycle. The #3153 near-simultaneous
-    /// duplicate half is collapsed by the 2s dedupe gate at the top of
-    /// `relay_observed_prompt`, BEFORE any lease is recorded.
+    /// Only continuation banners suppress the active-turn lifecycle. Slash
+    /// control echoes are not human turns, but keep the full synthetic lifecycle.
     pub(super) fn suppresses_user_turn_lifecycle(self) -> bool {
         matches!(self, InjectedPromptClass::SystemContinuation)
     }
 
-    /// #3099 codex re-review (P1): whether the provider turn's assistant OUTPUT
-    /// must still be delivered (via the Claude bridge tail / transcript path)
-    /// for this class. This is true for EVERY class — a `SystemContinuation`
-    /// suppresses the user-turn lifecycle but the compact continuation is still
-    /// fed to Claude, which produces assistant output that MUST reach Discord.
-    /// The original early-return regressed this by orphaning that output.
+    /// Every injected class still delivers provider output via the bridge tail.
     pub(super) fn still_delivers_assistant_output(self) -> bool {
         true
     }
 }
 
-/// Pure classifier for injected TUI prompt text (#3099, #3100).
-///
-/// Order matters: a compact-continuation prologue can itself embed an
-/// arbitrary summary, so the system-continuation predicate is checked first
-/// (it is the most specific "not a human turn" signal), then the
-/// task-notification tag, then (#3153) the machine slash-command control echo
-/// (`/loop` / `/compact` / the `<command-*>` wrapper / `Compacted` stdout),
-/// otherwise it is treated as human direct input.
-///
-/// The slash-command-control check is placed AFTER the continuation check so the
-/// compact CONTINUATION banner (which opens with "This session is being
-/// continued…" / "Please continue…", never with "/compact" or
-/// "<local-command-stdout>") is still caught as [`SystemContinuation`] and left
-/// untouched — the `/compact` COMMAND echo and the `Compacted` stdout are
-/// textually disjoint from that banner opening, so there is no overlap.
+/// Pure classifier for injected TUI prompt text. Order is load-bearing:
+/// continuation banners win before task notifications and slash-control echoes.
 pub(super) fn classify_injected_prompt(prompt: &str) -> InjectedPromptClass {
     if is_system_continuation_prompt(prompt) {
         InjectedPromptClass::SystemContinuation
@@ -5062,33 +5019,15 @@ pub(super) fn classify_injected_prompt(prompt: &str) -> InjectedPromptClass {
     }
 }
 
-/// #3153: detects a MACHINE slash-command control echo that must skip the
-/// active-turn lifecycle (no `⏳`, no anchor, no synthetic turn). #3178: it is
-/// rendered as a SINGLE neutral kind-only note (deduped across the double-post),
-/// not fully suppressed.
-///
-/// Covers both halves of the #3153 `/loop` ScheduleWakeup double-post plus the
-/// `/compact` echo leak, all START-ANCHORED (mirroring
-/// [`is_system_continuation_prompt`]'s normalization pipeline) so a human merely
-/// quoting a "/loop" / "/compact" / `<command-*>` string mid-message is NEVER
-/// misclassified:
-///   * the raw `/loop …` echo a `ScheduleWakeup` writes into the terminal,
-///   * the Claude Code expanded `<command-message>…</command-message>` wrapper
-///     for that slash command,
-///   * the raw `/compact` echo (whole slash-token, so `/compactX` does not trip),
-///   * the `<local-command-stdout>Compacted …` stdout line.
-///
-/// Normalization peels a leading terminal-control prefix and a leading SSH-direct
-/// injection envelope (reusing [`strip_leading_injection_wrapper`]) so a
-/// round-tripped echo is still anchored, exactly as the continuation classifier
-/// relies on. Because each form is an independent OR-branch, both halves of the
-/// double-post are classified independently — neither relies on dedupe.
+/// Detects machine slash-control echoes, start-anchored after terminal controls,
+/// SSH-direct wrapper, and one complete leading local-command caveat.
 fn is_slash_command_control_prompt(prompt: &str) -> bool {
-    let normalized = strip_terminal_controls(prompt);
-    let normalized = normalized.trim_start();
-    let normalized = strip_leading_injection_wrapper(normalized);
-    let normalized = normalized.trim_start();
+    let (normalized, peeled_caveat) = normalize_slash_command_control_prompt(prompt);
+    if peeled_caveat && normalized.is_empty() {
+        return true;
+    }
     if normalized.starts_with("<command-message>")
+        || normalized.starts_with("<command-name>")
         || normalized.starts_with("<local-command-stdout>Compacted")
         || normalized.starts_with("/loop ")
     {
@@ -5103,6 +5042,27 @@ fn is_slash_command_control_prompt(prompt: &str) -> bool {
     false
 }
 
+fn normalize_slash_command_control_prompt(prompt: &str) -> (String, bool) {
+    let normalized = strip_terminal_controls(prompt);
+    let normalized = normalized.trim_start();
+    let normalized = strip_leading_injection_wrapper(normalized);
+    let normalized = normalized.trim_start();
+    let (normalized, peeled_caveat) = strip_leading_local_command_caveat(normalized);
+    (normalized.trim_start().to_string(), peeled_caveat)
+}
+
+fn strip_leading_local_command_caveat(text: &str) -> (&str, bool) {
+    const OPEN: &str = "<local-command-caveat>";
+    const CLOSE: &str = "</local-command-caveat>";
+    if !text.starts_with(OPEN) {
+        return (text, false);
+    }
+    let Some(end) = text.find(CLOSE) else {
+        return (text, false);
+    };
+    (&text[end + CLOSE.len()..], true)
+}
+
 /// Detects the `<task-notification>` auto-turn tag injected by Claude Code /
 /// Codex when a background task reaches a terminal state.
 fn is_task_notification_prompt(prompt: &str) -> bool {
@@ -5114,46 +5074,12 @@ fn is_task_notification_prompt(prompt: &str) -> bool {
     normalized.contains("<task-notification>") || normalized.contains("<task-notification ")
 }
 
-/// Detects compact / system-injected continuation prologues that resume a
-/// session from a previous conversation. These are system events, never human
-/// requests, so they must not occupy the user-turn lifecycle (#3100).
-///
-/// #3100 codex re-review (P2): the compact continuation banner is *machine
-/// injected* — Claude Code emits it as the ENTIRE prompt body when a session
-/// resumes after a context compaction, and it always BEGINS with the canonical
-/// opening sentence. The previous implementation used unanchored case-sensitive
-/// `contains()` on three free-text fragments, which:
-///   * false-positives on a human message that merely *quotes* the banner mid
-///     sentence (the human then silently loses its `⏳`/turn), and
-///   * false-negatives on a banner with slightly different trailing summary text
-///     or newline layout.
-/// We instead anchor on provenance: a real continuation banner is the whole
-/// injected text and STARTS with the canonical opening. A human quoting the
-/// banner inside a normal request will not have it at the very start, so it can
-/// never trip the classifier. The opening sentence is the stable machine
-/// envelope; everything after it (the summary body) is free-form and is NOT
-/// matched, so trailing/newline variation cannot cause a false negative.
+/// Detects start-anchored compact/session-continuation banners.
 fn is_system_continuation_prompt(prompt: &str) -> bool {
     let normalized = strip_terminal_controls(prompt);
     let normalized = normalized.trim_start();
-    // #3100 codex P2: a real continuation banner can arrive WRAPPED with the
-    // SSH-direct injection envelope (`format_ssh_direct_prompt_notification`),
-    // e.g. when a previously-rendered notification round-trips back into the
-    // terminal and is re-observed. The observed text then begins with
-    // `터미널에 직접 주입된 입력 (tmux : <session>):` followed by a newline (and a
-    // ```text fence) before the actual continuation body. `strip_terminal_controls`
-    // does NOT remove that wrapper, so the canonical `starts_with` below would
-    // fail and the banner would be mis-classified as `HumanTuiDirect` (gaining a
-    // spurious ⏳/anchor/synthetic turn). Strip a LEADING wrapper line — and the
-    // immediately following ```text fence line, if present — so the check runs
-    // against the real banner body. This is anchored to the start: a human merely
-    // quoting the wrapper mid-message keeps its wrapper text deeper in the body
-    // and is not affected.
     let normalized = strip_leading_injection_wrapper(normalized);
     let normalized = normalized.trim_start();
-    // Canonical opening sentences of the system-injected continuation banner.
-    // These are anchored to start-of-prompt (the injection envelope), never
-    // matched as an embedded substring.
     const SYSTEM_CONTINUATION_OPENINGS: &[&str] = &[
         "This session is being continued from a previous conversation",
         "Please continue the conversation from where we left it off",
@@ -5163,33 +5089,17 @@ fn is_system_continuation_prompt(prompt: &str) -> bool {
         .any(|opening| normalized.starts_with(opening))
 }
 
-/// #3100 codex P2: removes a LEADING SSH-direct injection wrapper line so the
-/// continuation classifier can inspect the real banner body.
-///
-/// The wrapper is produced by [`format_ssh_direct_prompt_notification`] and
-/// looks like `터미널에 직접 주입된 입력 (tmux : `<session>`):\n```text\n<body>...`.
-/// Only a wrapper at the very START of `text` is stripped (anchored), so a human
-/// message that merely quotes the marker mid-body is never unwrapped. When the
-/// first line is the wrapper, that line (up to and including its newline) is
-/// dropped; if the next line opens a ```text / ``` code fence it is dropped too,
-/// exposing the banner body that follows. Returns the original slice unchanged
-/// when there is no leading wrapper.
+/// Removes a leading SSH-direct wrapper line/fence; mid-body quotes are untouched.
 fn strip_leading_injection_wrapper(text: &str) -> &str {
     const WRAPPER_MARKER: &str = "터미널에 직접 주입된 입력";
     if !text.starts_with(WRAPPER_MARKER) {
         return text;
     }
-    // Drop the wrapper line (through its newline). Without a newline the wrapper
-    // is the whole text and there is no banner body to expose.
     let Some(after_wrapper_line) = text.find('\n').map(|idx| &text[idx + 1..]) else {
         return text;
     };
-    // The wrapper renders the body inside a ```text fence; skip a leading fence
-    // line so the canonical opening (the fence's first content line) is exposed.
     let trimmed = after_wrapper_line.trim_start_matches(['\r', '\n']);
     if let Some(rest) = trimmed.strip_prefix("```") {
-        // Drop the rest of the fence-opening line (e.g. ```text) through its
-        // newline; if the fence opener has no newline there is no body to check.
         if let Some(idx) = rest.find('\n') {
             return &rest[idx + 1..];
         }
@@ -5213,46 +5123,14 @@ pub(super) fn format_ssh_direct_prompt_notification(
     )
 }
 
-/// Neutral session note for a system/compact continuation injection (#3100).
-///
-/// Unlike [`format_ssh_direct_prompt_notification`], this does NOT present the
-/// text as "터미널에 직접 주입된 입력" (an active-turn marker); it is a passive
-/// session event so a reader does not mistake it for a pending human request.
-/// #3178: canonical command kind of a machine slash-command control echo, used
-/// BOTH as the dedupe key suffix and to render the neutral note WITHOUT exposing
-/// the raw prompt body. The raw `/loop …` echo and the expanded
-/// `<command-message>…<command-name>/loop</command-name>…` wrapper for the SAME
-/// command both map to `"/loop"`, so the two halves of the #3153 double-post
-/// collapse to one dedupe entry and the trigger is shown exactly once.
-///
-/// Mirrors [`is_slash_command_control_prompt`]'s normalization pipeline (peel a
-/// terminal-control prefix and the SSH-direct injection envelope) so a
-/// round-tripped echo still resolves to the same kind. The bare slash token
-/// (e.g. `/loop`, `/compact`, or any other command NAME) is returned — never any
-/// argument body — so the note shows only WHICH machine command ran, not its
-/// payload.
-///
-/// #3178 (codex fix): the kind is the REAL command name, not a single collapsed
-/// `"slash"`. An unknown `<command-message>` wrapper resolves to its actual
-/// `<command-name>` (e.g. `/foo`), so two DIFFERENT commands seen in the same
-/// session within the dedupe window are NOT collapsed into one turn. The note
-/// body still shows the command name only (no args), preserving kind-only
-/// disclosure.
+/// Canonical command kind for slash-control dedupe and kind-only notes.
 fn slash_command_control_kind(prompt: &str) -> String {
-    let normalized = strip_terminal_controls(prompt);
-    let normalized = normalized.trim_start();
-    let normalized = strip_leading_injection_wrapper(normalized);
-    let normalized = normalized.trim_start();
-    // The expanded Claude Code wrapper carries the canonical command in
-    // `<command-name>/loop</command-name>`; prefer that when present so the raw
-    // echo and the wrapper for the same command share a kind.
+    let (normalized, _peeled_caveat) = normalize_slash_command_control_prompt(prompt);
     if let Some(after) = normalized
         .find("<command-name>")
         .map(|idx| &normalized[idx + "<command-name>".len()..])
     {
         let name = after.split('<').next().unwrap_or("").trim();
-        // The command NAME is the first whitespace-delimited token (drop any
-        // argument body so only the kind, never the payload, is disclosed).
         let name = name.split_whitespace().next().unwrap_or("");
         if !name.is_empty() {
             return name.to_string();
@@ -5269,10 +5147,6 @@ fn slash_command_control_kind(prompt: &str) -> String {
     if normalized.starts_with("<local-command-stdout>Compacted") {
         return "/compact".to_string();
     }
-    // A raw slash-command echo whose command token we can read directly: return
-    // the first whitespace-delimited token (the command name) so distinct
-    // commands are distinguished. Fall back to a generic marker only when no
-    // token is recoverable.
     if normalized.starts_with('/') {
         let name = normalized.split_whitespace().next().unwrap_or("");
         if name.len() > 1 {
@@ -5282,16 +5156,7 @@ fn slash_command_control_kind(prompt: &str) -> String {
     "slash".to_string()
 }
 
-/// #3178: neutral note for a machine slash-command control echo (#3153 trigger).
-///
-/// `/loop` is special: the recurring directive body IS the human-authored content
-/// the operator wants to see (only the #3153 double-post is deduped, NOT the
-/// content), so its note carries a preview of the loop body via
-/// [`extract_loop_body`]. Every OTHER machine command (`/compact`, the expanded
-/// `<command-*>` wrapper of a non-loop command, the `Compacted …` stdout) keeps a
-/// kind-only note — its payload is machine noise, not an operator directive — so
-/// the following `✅ 응답 완료` card still has a visible anchor without leaking it.
-/// It is a passive session event, not an active human turn.
+/// Kind-only slash-control note; `/loop` may include its directive body.
 fn format_slash_command_control_note(
     tmux_session_name: &str,
     kind: &str,
@@ -5319,39 +5184,27 @@ fn format_slash_command_control_note(
     header
 }
 
-/// #3305: whether an observed prompt is a machine slash-command control echo for a
-/// LOCAL-completing pass-through command (`/effort` `/compact` `/cost` `/context`,
-/// the [`commands::is_local_only_slash_command_kind`] allow-list). Such commands
-/// render in the TUI but never start a model turn, so the idle relay must post the
-/// guidance note WITHOUT minting an external/synthetic turn — otherwise the ⏳ never
-/// finalizes and the stale inflight FOREIGN-ABORTs the next injection (#3302). A
-/// `/loop`-shaped command (which DOES start a turn) is off the allow-list, so this
-/// returns false and the full #3178 lifecycle is preserved (fail-safe default).
-/// Pure composition of the existing classifiers — no new parsing. The same
-/// `slash_command_control_kind` normalization is also reusable by #3304's
-/// pending-vs-command-XML dedupe, but that is a separate change.
+/// Local-completing slash-control prompts skip synthetic turn ownership.
 fn is_local_only_slash_command_prompt(prompt: &str) -> bool {
-    is_slash_command_control_prompt(prompt)
-        && super::commands::is_local_only_slash_command_kind(&slash_command_control_kind(prompt))
+    if !is_slash_command_control_prompt(prompt) {
+        return false;
+    }
+    let kind = slash_command_control_kind(prompt);
+    super::commands::is_local_only_slash_command_kind(&kind)
+        || slash_command_control_prompt_is_caveat_only(prompt)
 }
 
-/// Pull the human-facing `/loop` directive body from either injection half — the
-/// raw echo (`/loop <body>`) or the expanded Claude Code wrapper
-/// (`<command-args>…</command-args>`). Returns `None` when no body is recoverable
-/// so [`format_slash_command_control_note`] falls back to the kind-only header.
-/// Only the loop ARGS are returned — never the trailing skill markdown the
-/// wrapper appends after `</command-args>`.
+fn slash_command_control_prompt_is_caveat_only(prompt: &str) -> bool {
+    let (normalized, peeled_caveat) = normalize_slash_command_control_prompt(prompt);
+    peeled_caveat && normalized.is_empty()
+}
+
+/// Pull the human-facing `/loop` directive body from raw echo or command args.
 fn extract_loop_body(prompt: &str) -> Option<String> {
     let normalized = strip_terminal_controls(prompt);
     let normalized = normalized.trim_start();
     let normalized = strip_leading_injection_wrapper(normalized);
     let normalized = normalized.trim_start();
-    // Expanded wrapper: the directive lives in <command-args>…</command-args>;
-    // take only that block so the appended skill body never reaches the note.
-    // The CLOSING tag is REQUIRED: an unterminated `<command-args>` (no
-    // `</command-args>`) must NOT spill the trailing skill markdown into the note,
-    // so fall through to the raw-echo / kind-only path instead of returning the
-    // whole tail.
     if let Some(start) = normalized.find("<command-args>") {
         let after = &normalized[start + "<command-args>".len()..];
         if let Some((body, _rest)) = after.split_once("</command-args>") {
@@ -5361,7 +5214,6 @@ fn extract_loop_body(prompt: &str) -> Option<String> {
             }
         }
     }
-    // Raw echo: `/loop <body>`.
     for prefix in ["/loop ", "/loop\t"] {
         if let Some(rest) = normalized.strip_prefix(prefix) {
             let body = rest.trim();
@@ -5373,22 +5225,7 @@ fn extract_loop_body(prompt: &str) -> Option<String> {
     None
 }
 
-/// #3178 (codex fix): the slash-command-control DEDUPE gate, evaluated BEFORE any
-/// external-input lease / anchor / synthetic inflight is created.
-///
-/// Returns `true` if THIS observation is the FIRST sighting of
-/// (tmux_session, command_kind) — meaning it should proceed to claim a full
-/// active turn (lease + ⏳ anchor + synthetic inflight). Returns `false` if a
-/// matching sighting was seen within [`SLASH_COMMAND_CONTROL_DEDUPE_WINDOW`] —
-/// i.e. this is the SECOND half of the #3153 double-post (raw echo + expanded
-/// `<command-*>` wrapper of the SAME injection) — so the caller must early-return
-/// WITHOUT recording a lease (the critical fix: a duplicate half can never
-/// overwrite the first turn's lease, because it never reaches the lease record).
-///
-/// On `true` the timestamp is recorded so the matching second half collapses;
-/// a genuine SECOND command seconds later falls outside the 2s window and is a
-/// fresh first sighting (its own active turn). Stale entries (older than the
-/// window) are pruned opportunistically so the map cannot grow unbounded.
+/// Dedupe the two slash-control halves before lease/anchor/synthetic ownership.
 fn slash_command_control_turn_is_first_sighting(tmux_session_name: &str, kind: &str) -> bool {
     let now = std::time::Instant::now();
     let key = format!("{tmux_session_name}\u{0}{kind}");
@@ -5407,15 +5244,71 @@ fn slash_command_control_turn_is_first_sighting(tmux_session_name: &str, kind: &
     true
 }
 
+fn record_system_continuation_note_rendered(tmux_session_name: &str) {
+    let now = std::time::Instant::now();
+    let mut guard = SYSTEM_CONTINUATION_LAST_RENDERED
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    guard.retain(|_, rendered_at| {
+        now.checked_duration_since(*rendered_at)
+            .is_none_or(|age| age < COMPACT_REPLAY_KIND_NOTE_SUPPRESSION_WINDOW)
+    });
+    guard.insert(tmux_session_name.to_string(), now);
+}
+
+fn local_only_kind_note_suppressed_by_recent_continuation(
+    tmux_session_name: &str,
+    kind: &str,
+) -> bool {
+    let now = std::time::Instant::now();
+    let mut guard = SYSTEM_CONTINUATION_LAST_RENDERED
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    guard.retain(|_, rendered_at| {
+        now.checked_duration_since(*rendered_at)
+            .is_none_or(|age| age < COMPACT_REPLAY_KIND_NOTE_SUPPRESSION_WINDOW)
+    });
+    should_suppress_local_only_kind_note_after_continuation(
+        kind,
+        guard.get(tmux_session_name).copied(),
+        now,
+    )
+}
+
+fn should_suppress_local_only_kind_note_after_continuation(
+    kind: &str,
+    last_continuation_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    if !matches!(kind, "/compact" | "slash") {
+        return false;
+    }
+    last_continuation_at.is_some_and(|rendered_at| {
+        now.checked_duration_since(rendered_at)
+            .is_none_or(|age| age < COMPACT_REPLAY_KIND_NOTE_SUPPRESSION_WINDOW)
+    })
+}
+
 pub(super) fn format_system_continuation_note(tmux_session_name: &str, prompt: &str) -> String {
     let prompt = strip_terminal_controls(prompt);
-    let preview =
-        truncate_chars(prompt.trim(), SSH_DIRECT_PROMPT_PREVIEW_LIMIT).replace("```", "` ` `");
+    let omitted_chars = format_count_with_commas(prompt.trim().chars().count());
     format!(
-        "🧩 세션 컨텍스트 이어가기 (tmux : `{}`) — 시스템 주입 (활성 턴 아님):\n```text\n{}\n```",
+        "🧩 세션 컨텍스트 이어가기 (tmux : `{}`) — 시스템 주입 (활성 턴 아님) (요약 {}자 생략 — 채널 기록과 동일 내용)",
         sanitize_inline_code(tmux_session_name),
-        preview,
+        omitted_chars,
     )
+}
+
+fn format_count_with_commas(count: usize) -> String {
+    let digits = count.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (idx, ch) in digits.chars().enumerate() {
+        if idx > 0 && (digits.len() - idx) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn sanitize_inline_code(value: &str) -> String {
@@ -5430,6 +5323,10 @@ use super::tui_task_card::{strip_terminal_controls, truncate_chars_ascii as trun
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn compact_command_name_first_stub() -> &'static str {
+        "<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>"
+    }
 
     // ====================================================================
     // #3154 P2-2 (c) — the KEY residual risk: prove there is NO relay GAP
@@ -6259,6 +6156,14 @@ mod tests {
             classify_injected_prompt("<local-command-stdout>Compacted (12.3k tokens)"),
             InjectedPromptClass::SlashCommandControl,
         );
+        let command_name_first = compact_command_name_first_stub();
+        assert_eq!(command_name_first.chars().count(), 134);
+        assert_eq!(
+            classify_injected_prompt(command_name_first),
+            InjectedPromptClass::SlashCommandControl,
+        );
+        assert_eq!(slash_command_control_kind(command_name_first), "/compact");
+        assert!(is_local_only_slash_command_prompt(command_name_first));
 
         // #3178 (codex fix): a machine slash turn is a FULL active turn — NOT
         // suppressed from the user-turn lifecycle (so concurrent input queues),
@@ -6290,6 +6195,25 @@ mod tests {
             classify_injected_prompt(wrapped_wrapper),
             InjectedPromptClass::SlashCommandControl,
         );
+        let caveat_wrapped = format!(
+            "<local-command-caveat>local commands are synthetic</local-command-caveat>\n{}",
+            compact_command_name_first_stub(),
+        );
+        assert_eq!(
+            classify_injected_prompt(&caveat_wrapped),
+            InjectedPromptClass::SlashCommandControl,
+        );
+        assert_eq!(slash_command_control_kind(&caveat_wrapped), "/compact");
+        assert!(is_local_only_slash_command_prompt(&caveat_wrapped));
+
+        let caveat_only =
+            "<local-command-caveat>local commands are synthetic</local-command-caveat>";
+        assert_eq!(
+            classify_injected_prompt(caveat_only),
+            InjectedPromptClass::SlashCommandControl,
+        );
+        assert_eq!(slash_command_control_kind(caveat_only), "slash");
+        assert!(is_local_only_slash_command_prompt(caveat_only));
     }
 
     // #3153 FALSE-POSITIVE GUARD: a human merely quoting "/loop" / "/compact"
@@ -6317,6 +6241,18 @@ mod tests {
             "터미널에 직접 주입된 입력 (tmux : `s`):\n```text\nplease /loop later maybe\n```";
         assert_eq!(
             classify_injected_prompt(wrapped_human),
+            InjectedPromptClass::HumanTuiDirect,
+        );
+        let quoted_command_name =
+            "Why did the transcript include <command-name>/compact</command-name>?";
+        assert_eq!(
+            classify_injected_prompt(quoted_command_name),
+            InjectedPromptClass::HumanTuiDirect,
+        );
+        let quoted_caveat =
+            "The log contains <local-command-caveat>x</local-command-caveat> before XML.";
+        assert_eq!(
+            classify_injected_prompt(quoted_caveat),
             InjectedPromptClass::HumanTuiDirect,
         );
     }
@@ -6570,6 +6506,38 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn compact_replay_kind_note_suppression_is_session_scoped_and_expires() {
+        let now = std::time::Instant::now();
+        let recent = now - Duration::from_secs(29);
+        let expired = now - Duration::from_secs(31);
+
+        assert!(should_suppress_local_only_kind_note_after_continuation(
+            "/compact",
+            Some(recent),
+            now,
+        ));
+        assert!(should_suppress_local_only_kind_note_after_continuation(
+            "slash",
+            Some(recent),
+            now,
+        ));
+        assert!(
+            !should_suppress_local_only_kind_note_after_continuation("/compact", None, now),
+            "a different session with no continuation timestamp must not suppress",
+        );
+        assert!(!should_suppress_local_only_kind_note_after_continuation(
+            "/compact",
+            Some(expired),
+            now,
+        ));
+        assert!(!should_suppress_local_only_kind_note_after_continuation(
+            "/cost",
+            Some(recent),
+            now,
+        ));
+    }
+
     // #3178 (codex P2 fix): the kind is the REAL command name, so two distinct
     // unknown `<command-message>` wrappers do NOT collapse into a single "slash"
     // kind (which would wrongly dedupe genuinely different commands).
@@ -6745,14 +6713,16 @@ mod tests {
     // as "터미널에 직접 주입된 입력" (an active-turn marker).
     #[test]
     fn system_continuation_note_is_neutral_not_active_turn() {
-        let note = format_system_continuation_note(
-            "AgentDesk-claude-adk-cc",
-            "This session is being continued from a previous conversation. Summary: ...",
-        );
+        let prompt = "This session is being continued from a previous conversation. Summary: ...";
+        let note = format_system_continuation_note("AgentDesk-claude-adk-cc", prompt);
         assert!(!note.contains("터미널에 직접 주입된 입력"));
         assert!(note.contains("세션 컨텍스트 이어가기"));
         assert!(note.contains("활성 턴 아님"));
         assert!(note.contains("(tmux : `AgentDesk-claude-adk-cc`)"));
+        assert!(!note.contains("```text"));
+        assert!(!note.contains("Summary:"));
+        assert!(note.contains(&format!("요약 {}자 생략", prompt.chars().count())));
+        assert!(note.contains("채널 기록과 동일 내용"));
     }
 
     // #3099 codex re-review (P2): the `user_msg_id == 0` completion cleanup must
