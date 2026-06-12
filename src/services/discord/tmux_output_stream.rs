@@ -1,28 +1,5 @@
 use super::*;
 
-/// #3344: ceiling above which a terminal `result.usage` cannot be a per-call
-/// context occupancy and is therefore the session-cumulative shape.
-///
-/// The result-event fallback below adopts `result.usage` for providers that
-/// only normalize token counts onto the terminal frame (e.g. Qwen's tmux
-/// wrapper). The Codex legacy tmux wrapper can, on stale binaries or the
-/// exec-protocol path, emit a `usage` object carrying session-cumulative
-/// accounting (the issue's `input_tokens=344752` + `cache_read_input_tokens=
-/// 4022400` ≈ 4.37M). Summed into context occupancy and clamped to the model
-/// window, that renders a stable, misleading `100%`.
-///
-/// The largest context window the provider registry knows is 1_000_000
-/// (Claude/Gemini default). A per-call context occupancy therefore cannot
-/// exceed that window plus a small margin, so any `result.usage` whose
-/// input+cache occupancy clears this 2_000_000 ceiling is unambiguously
-/// cumulative and is SUPPRESSED rather than adopted — an absent CTW signal
-/// renders honestly as "unknown" (see `stream_line_state_token_usage` /
-/// `context_panel`), whereas a clamped 100% is a lie. Legitimate per-call
-/// usage from any current model stays far below this ceiling, so the Qwen and
-/// Codex-per-call fallbacks are unaffected. Claude never reaches this branch
-/// (`saw_per_message_usage` is always set on its per-message `usage` frames).
-const MAX_PLAUSIBLE_PER_CALL_CONTEXT_TOKENS: u64 = 2_000_000;
-
 /// Tracks tool/thinking status during watcher output processing.
 pub(in crate::services::discord) struct WatcherToolState {
     /// Current tool status line (e.g. "⚙ Bash: `ls`")
@@ -444,57 +421,17 @@ pub(in crate::services::discord) fn process_watcher_lines(
                             }
                         }
                     }
-                    // #1918: for providers that emit per-message `usage` (Claude),
-                    // the assistant-message branch above already captured the
-                    // LAST API call's prompt and cumulative output, which is what
-                    // the status panel and analytics need. Result.usage in
-                    // multi-call turns is turn-cumulative on those CLIs and
-                    // inflates the displayed context occupancy past the window
-                    // size. For providers that only normalize token counts onto
-                    // the terminal `result` event (e.g. Qwen's tmux wrapper),
-                    // fall back to result.usage so session context status and
-                    // turn analytics are not lost.
-                    if !state.saw_per_message_usage
-                        && let Some(usage) = val.get("usage")
-                    {
-                        let input_tokens = usage
-                            .get("input_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        let cache_read_tokens = usage
-                            .get("cache_read_input_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        let cache_create_tokens = usage
-                            .get("cache_creation_input_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        let output_tokens = usage
-                            .get("output_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        // #3344: the Codex legacy tmux wrapper can hand back a
-                        // `result.usage` carrying session-cumulative accounting
-                        // (millions of input+cache tokens) rather than per-call
-                        // occupancy. Adopting it poisons CTW into a clamped,
-                        // misleading 100%. When the occupancy magnitude clears
-                        // the per-call plausibility ceiling, SUPPRESS the whole
-                        // usage adoption: leaving the accumulators at zero makes
-                        // `stream_line_state_token_usage` return None so the
-                        // panel/recap render an honest "unknown" instead of a
-                        // fabricated full window. Per-call usage from Qwen and
-                        // non-stale Codex wrappers stays well under the ceiling
-                        // and is adopted unchanged.
-                        let context_occupancy = input_tokens
-                            .saturating_add(cache_read_tokens)
-                            .saturating_add(cache_create_tokens);
-                        if context_occupancy <= MAX_PLAUSIBLE_PER_CALL_CONTEXT_TOKENS {
-                            state.accum_input_tokens = input_tokens;
-                            state.accum_cache_read_tokens = cache_read_tokens;
-                            state.accum_cache_create_tokens = cache_create_tokens;
-                            state.accum_output_tokens = output_tokens;
-                        }
-                    }
+                    // #1918/#3344: Claude emits per-message `usage`, so the
+                    // assistant-message branch already captured the LAST call's
+                    // occupancy. For terminal-usage providers, adopt the result
+                    // frame's nested usage with shared provenance + magnitude
+                    // gating: the Codex legacy wrapper's terminal accounting is
+                    // known-cumulative (top-level `input_tokens`/`output_tokens`
+                    // marker) and is suppressed so CTW renders honest "unknown"
+                    // instead of a fabricated full window; Qwen-shaped per-call
+                    // usage is adopted unchanged. See
+                    // `session_backend::adopt_terminal_result_usage`.
+                    crate::services::session_backend::adopt_terminal_result_usage(&val, state);
 
                     state.final_result = Some(String::new());
                     strip_leading_tui_response_chrome_in_place(full_response, &mut outcome);
@@ -802,18 +739,24 @@ mod tests {
         assert!(full_response.is_empty());
     }
 
-    /// #3275 cross-module contract: the codex tmux wrapper emits its result
-    /// frame with tokens as top-level fields plus a Claude-compatible nested
-    /// `usage` (receipt.rs subset convention). This is the exact frame shape
-    /// `emit_success_result` produces; the watcher's result-usage fallback
-    /// must adopt it so `stream_line_state_token_usage` turns Some and
-    /// watcher-owned completion persists session/turn token telemetry
-    /// (idle recap context source) instead of falling to "context unknown".
+    /// #3344 round 2 — provenance gate: the codex legacy tmux wrapper's
+    /// `emit_success_result` ALWAYS stamps the terminal frame with top-level
+    /// `input_tokens`/`output_tokens`. That marker means the frame's nested
+    /// `usage` is KNOWN-cumulative codex-legacy accounting, so it is NEVER
+    /// adopted as per-call context — even this small, early, plausible-looking
+    /// value (`input+cache_read = 1000`). RATIONALE: an honest-unknown CTW
+    /// beats a sometimes-right number. The same wrapper's nested `usage` grows
+    /// from per-call-ish early to wildly cumulative as the session advances; a
+    /// magnitude-only gate would adopt it through the entire blind window
+    /// (model window → 2M) and silently drift into a misleading 100%. The
+    /// legitimate per-call occupancy for codex turns flows from the session
+    /// `token_count` records (`info.last_token_usage`, #3331), not this frame.
+    /// (On base this small value was adopted; now suppressed.)
     #[test]
-    fn process_watcher_lines_adopts_codex_wrapper_result_usage() {
+    fn process_watcher_lines_suppresses_codex_legacy_early_per_call_usage() {
         let mut buffer = concat!(
             "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"codex reply\"}]}}\n",
-            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"codex reply\",\"session_id\":\"sess-cdx\",\"duration_ms\":12,\"input_tokens\":8325687,\"output_tokens\":41600,\"usage\":{\"input_tokens\":400,\"cache_read_input_tokens\":600,\"output_tokens\":50}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"codex reply\",\"session_id\":\"sess-cdx\",\"duration_ms\":12,\"input_tokens\":30000,\"output_tokens\":50,\"usage\":{\"input_tokens\":400,\"cache_read_input_tokens\":600,\"output_tokens\":50}}\n",
         )
         .to_string();
         let mut state = StreamLineState::new();
@@ -824,37 +767,61 @@ mod tests {
             process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
 
         assert!(outcome.found_result);
-        // Codex wrapper assistant frames never carry per-message usage, so the
-        // result-frame fallback must engage.
         assert!(!state.saw_per_message_usage);
-        assert_eq!(state.accum_input_tokens, 400);
-        assert_eq!(state.accum_cache_read_tokens, 600);
+        // Codex-legacy provenance (top-level token fields present) → suppress.
+        assert_eq!(state.accum_input_tokens, 0);
+        assert_eq!(state.accum_cache_read_tokens, 0);
         assert_eq!(state.accum_cache_create_tokens, 0);
-        assert_eq!(state.accum_output_tokens, 50);
-        // Occupancy reconstruction: input + cache_read == the original codex
-        // last_token_usage.input_tokens — NOT the cumulative top-level 8.3M.
+        assert_eq!(state.accum_output_tokens, 0);
         let usage = crate::db::turns::TurnTokenUsage {
             input_tokens: state.accum_input_tokens,
             cache_create_tokens: state.accum_cache_create_tokens,
             cache_read_tokens: state.accum_cache_read_tokens,
             output_tokens: state.accum_output_tokens,
         };
-        assert_eq!(usage.context_occupancy_input_tokens(), 1000);
+        assert_eq!(usage.context_occupancy_input_tokens(), 0);
     }
 
-    /// #3344 regression: the Codex legacy tmux wrapper can hand back a
-    /// `result.usage` carrying session-cumulative accounting (the issue's exact
-    /// values: `cache_read_input_tokens=4022400`, `input_tokens=344752`, ~4.37M
-    /// occupancy against a 258400 window). The result-usage fallback must NOT
-    /// adopt it — leaving the accumulators at zero makes
-    /// `stream_line_state_token_usage` return None so the panel/recap render an
-    /// honest "unknown" instead of a clamped, misleading 100%. (Fails on base,
-    /// where the cumulative values were adopted verbatim.)
+    /// #3344 round 2 — blind-window pin: a codex-legacy frame whose nested
+    /// occupancy (500_000) sits ABOVE the model window (~258_400) but BELOW the
+    /// old 2M magnitude ceiling. The retired magnitude-only gate adopted this,
+    /// rendering a bogus clamped 100%. The provenance gate (top-level token
+    /// marker) suppresses it regardless of magnitude. (Fails on base, where the
+    /// 500k occupancy cleared the ceiling and was adopted.)
+    #[test]
+    fn process_watcher_lines_suppresses_codex_legacy_blind_window_usage() {
+        let mut buffer = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"codex reply\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"codex reply\",\"session_id\":\"sess-cdx\",\"duration_ms\":12,\"input_tokens\":500000,\"output_tokens\":400,\"usage\":{\"input_tokens\":100000,\"cache_read_input_tokens\":400000,\"output_tokens\":400}}\n",
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert!(!state.saw_per_message_usage);
+        assert_eq!(state.accum_input_tokens, 0);
+        assert_eq!(state.accum_cache_read_tokens, 0);
+        assert_eq!(state.accum_cache_create_tokens, 0);
+        assert_eq!(state.accum_output_tokens, 0);
+    }
+
+    /// #3344 regression: the Codex legacy tmux wrapper can hand back a terminal
+    /// frame carrying session-cumulative accounting (the issue's exact values:
+    /// `cache_read_input_tokens=4022400`, `input_tokens=344752`, ~4.37M occupancy
+    /// against a 258400 window). With the top-level codex-legacy marker present,
+    /// the provenance gate suppresses it; the accumulators stay zero so
+    /// `stream_line_state_token_usage` returns None and the panel/recap render an
+    /// honest "unknown" instead of a clamped, misleading 100%.
     #[test]
     fn process_watcher_lines_suppresses_cumulative_codex_wrapper_result_usage() {
         let mut buffer = concat!(
             "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"codex reply\"}]}}\n",
-            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"codex reply\",\"session_id\":\"sess-cdx\",\"duration_ms\":12,\"usage\":{\"input_tokens\":344752,\"cache_read_input_tokens\":4022400,\"output_tokens\":1280}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"codex reply\",\"session_id\":\"sess-cdx\",\"duration_ms\":12,\"input_tokens\":4367152,\"output_tokens\":1280,\"usage\":{\"input_tokens\":344752,\"cache_read_input_tokens\":4022400,\"output_tokens\":1280}}\n",
         )
         .to_string();
         let mut state = StreamLineState::new();
@@ -881,15 +848,16 @@ mod tests {
         assert_eq!(usage.context_occupancy_input_tokens(), 0);
     }
 
-    /// #3344: a Codex wrapper result frame whose per-call occupancy sits right
-    /// below the plausibility ceiling is still adopted — the suppression only
-    /// rejects the cumulative shape, never legitimate large-but-valid per-call
-    /// usage.
+    /// #3344 round 2 — backstop pin: a NON-codex terminal-usage provider (no
+    /// top-level token marker) whose nested occupancy clears the 2M
+    /// defense-in-depth ceiling is still rejected. The provenance gate does not
+    /// fire (no codex marker), so the magnitude backstop catches the
+    /// millions-scale garbage from any provider.
     #[test]
-    fn process_watcher_lines_adopts_high_but_plausible_per_call_usage() {
+    fn process_watcher_lines_backstop_rejects_other_provider_millions_usage() {
         let mut buffer = concat!(
-            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"codex reply\"}]}}\n",
-            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"codex reply\",\"session_id\":\"sess-cdx\",\"duration_ms\":12,\"usage\":{\"input_tokens\":40000,\"cache_read_input_tokens\":900000,\"output_tokens\":120}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"reply\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"reply\",\"session_id\":\"sess-x\",\"duration_ms\":12,\"usage\":{\"input_tokens\":3000000,\"cache_read_input_tokens\":1000000,\"output_tokens\":120}}\n",
         )
         .to_string();
         let mut state = StreamLineState::new();
@@ -901,16 +869,10 @@ mod tests {
 
         assert!(outcome.found_result);
         assert!(!state.saw_per_message_usage);
-        assert_eq!(state.accum_input_tokens, 40_000);
-        assert_eq!(state.accum_cache_read_tokens, 900_000);
-        assert_eq!(state.accum_output_tokens, 120);
-        let usage = crate::db::turns::TurnTokenUsage {
-            input_tokens: state.accum_input_tokens,
-            cache_create_tokens: state.accum_cache_create_tokens,
-            cache_read_tokens: state.accum_cache_read_tokens,
-            output_tokens: state.accum_output_tokens,
-        };
-        assert_eq!(usage.context_occupancy_input_tokens(), 940_000);
+        assert_eq!(state.accum_input_tokens, 0);
+        assert_eq!(state.accum_cache_read_tokens, 0);
+        assert_eq!(state.accum_cache_create_tokens, 0);
+        assert_eq!(state.accum_output_tokens, 0);
     }
 
     /// #3344 fallback regression: a provider that legitimately reports per-call

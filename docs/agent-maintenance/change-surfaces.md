@@ -1113,11 +1113,14 @@ normal test growth is allowed): `src/services/analytics.rs`,
 `src/services/platform/tmux.rs`, `src/services/mcp_config.rs`,
 `src/services/process.rs`, `src/services/discord/tmux_lifecycle.rs`,
 `src/services/qwen_tmux_wrapper.rs`, `src/services/discord/session_relay_sink.rs`,
-`src/services/tui_turn_state.rs`, `src/services/session_backend.rs`,
+`src/services/tui_turn_state.rs`,
 `src/voice/turn_link.rs`, `src/services/discord/commands/config.rs`
 (#3038 S2: 1054 -> 954 after the session-override bookkeeping helpers
 moved verbatim to `discord/shared_state.rs` next to
 `SessionOverrideState`; still ratcheted at 954 in the frozen baseline).
+`src/services/session_backend.rs` left this list in #3344 (997 -> 1023 prod
+LoC after the shared terminal-usage provenance helper) and is registry-tracked
+again (giant_file_registry.toml, decompose_issue #3405).
 
 Same rule: `bugfix` only without a split issue.
 

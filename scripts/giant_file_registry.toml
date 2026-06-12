@@ -252,7 +252,7 @@ grandfathered = [
 file = "src/services/discord/voice_barge_in.rs"
 owner = "voice-runtime"
 deadline = "2026-08-31"
-decompose_issue = "#3036"
+decompose_issue = "#3405"
 
 [[entry]]
 # Crossed the 1000-prod-LoC threshold when #3034 restored per-item dead_code
@@ -261,7 +261,7 @@ decompose_issue = "#3036"
 file = "src/db/automation_candidates.rs"
 owner = "automation-pipeline"
 deadline = "2026-08-31"
-decompose_issue = "#3036"
+decompose_issue = "#3405"
 
 [[entry]]
 # Crossed the 1000-prod-LoC threshold when #3034 restored per-item dead_code
@@ -269,7 +269,7 @@ decompose_issue = "#3036"
 file = "src/voice/announce_meta.rs"
 owner = "voice-runtime"
 deadline = "2026-08-31"
-decompose_issue = "#3036"
+decompose_issue = "#3405"
 
 [[entry]]
 # Crossed the 1000-prod-LoC threshold when #3017 re-landed the single
@@ -280,7 +280,7 @@ decompose_issue = "#3036"
 file = "src/services/discord/session_relay_sink.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
-decompose_issue = "#3036"
+decompose_issue = "#3405"
 
 [[entry]]
 # Crossed the 1000-prod-LoC threshold when #3041 P1-0 landed the dormant
@@ -304,7 +304,7 @@ decompose_issue = "#3016"
 file = "src/services/discord/idle_recap.rs"
 owner = "discord-recap"
 deadline = "2026-08-31"
-decompose_issue = "#3036"
+decompose_issue = "#3405"
 
 # NOTE: src/services/discord/turn_bridge/terminal_delivery.rs previously had an
 # [[entry]] here; the #3028 splitter fix dropped its production LoC below the
@@ -327,3 +327,15 @@ file = "src/services/discord/turn_bridge/mod.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
 decompose_issue = "#3038"
+
+[[entry]]
+# Crossed the 1000-prod-LoC threshold (was 997, one line under) when #3344
+# round 2 landed the shared `adopt_terminal_result_usage` provenance/magnitude
+# gate plus its maintenance-rule doc — the gate is consumed by both the watcher
+# and the analytics re-parser, so it lives here next to `StreamLineState` /
+# `process_stream_line` rather than being duplicated. Active session-backend
+# surface; decompose the stream-parse + token-usage helpers out under #3036.
+file = "src/services/session_backend.rs"
+owner = "discord-relay"
+deadline = "2026-08-31"
+decompose_issue = "#3405"
