@@ -13,21 +13,15 @@ use crate::services::provider::ProviderKind;
 // as verbatim function moves:
 //   * `runtime_resolve` — bot-HTTP resolution + direct-meeting runtime resolver pair
 //   * `headless_turn` — headless agent-turn reserve/start API + direct-meeting starter
-//   * `send_target` — `/api/discord/send` target parsing/resolution
-//   * `send_gate` — send authorization ladder + caller-class label gate (#2047)
-//   * `manual_delivery` — manual outbound delivery + #2363 dedupe protocol
-//   * `send_api` — HTTP-facing `handle_send` / `handle_senddm` body parsing
+//   * `outbound::{send_target,send_gate,manual_delivery,send_api}` — manual
+//     send-to-agent/outbound dispatch, re-exported here for compatibility
 mod headless_turn;
 mod mailbox;
-mod manual_delivery;
 mod provider_probe;
 mod recovery;
 mod redaction;
 mod relay_auto_heal;
 mod runtime_resolve;
-mod send_api;
-mod send_gate;
-mod send_target;
 mod session_enrichment;
 mod snapshot;
 mod stall_liveness;
@@ -35,6 +29,17 @@ mod stall_liveness;
 // `HeadlessAgentTurnReservation` has no external referent today (callers
 // destructure the reserve/start tuple); kept re-exported for the reserve→start
 // API surface, same convention as the recovery/snapshot blocks below.
+pub(crate) use crate::services::discord::outbound::manual_delivery::ManualOutboundDeliveryId;
+pub use crate::services::discord::outbound::send_api::{handle_send, handle_senddm};
+use crate::services::discord::outbound::send_gate::dm_default_agent_authorizes_unmapped_private_channel;
+pub(crate) use crate::services::discord::outbound::send_gate::{
+    ManualOutboundOptions, send_message_with_backends, send_message_with_backends_and_delivery_id,
+    send_message_with_backends_and_delivery_options,
+};
+#[allow(unused_imports)]
+pub use crate::services::discord::outbound::send_gate::{
+    SendCallerClass, is_allowed_send_source_for,
+};
 #[allow(unused_imports)]
 pub use headless_turn::HeadlessAgentTurnReservation;
 pub use headless_turn::{
@@ -43,7 +48,6 @@ pub use headless_turn::{
     start_reserved_headless_agent_turn_in_dm,
 };
 pub use mailbox::purge_idle_channel_mailbox_registry_entry;
-pub(crate) use manual_delivery::ManualOutboundDeliveryId;
 pub(crate) use recovery::stop_provider_channel_runtime_with_policy;
 #[allow(unused_imports)]
 pub use recovery::{
@@ -58,14 +62,6 @@ pub use recovery::{
 };
 pub use runtime_resolve::{fetch_channel_name, resolve_bot_http};
 use runtime_resolve::{resolve_direct_meeting_runtime, resolve_direct_meeting_shared};
-pub use send_api::{handle_send, handle_senddm};
-use send_gate::dm_default_agent_authorizes_unmapped_private_channel;
-pub(crate) use send_gate::{
-    ManualOutboundOptions, send_message_with_backends, send_message_with_backends_and_delivery_id,
-    send_message_with_backends_and_delivery_options,
-};
-#[allow(unused_imports)]
-pub use send_gate::{SendCallerClass, is_allowed_send_source_for};
 #[allow(unused_imports)]
 pub use snapshot::{
     DiscordHealthSnapshot, HealthStatus, WatcherStateSnapshot, active_request_owner_for_channel,
@@ -157,7 +153,7 @@ impl HealthRegistry {
         providers.push(ProviderEntry { name, shared });
     }
 
-    async fn dm_default_agent_authorizes_private_channel(
+    pub(in crate::services::discord) async fn dm_default_agent_authorizes_private_channel(
         &self,
         channel_id: ChannelId,
         is_private_channel: bool,

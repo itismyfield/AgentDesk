@@ -39,11 +39,6 @@ direct_discord_sends = [
   "src/services/discord/gateway.rs#direct_discord_sends:b61365ed28b915b2",
   "src/services/discord/gateway.rs#direct_discord_sends:0a20f86f0471df2b",
   "src/services/discord/gateway.rs#direct_discord_sends:a78022596f453395",
-  # #3038 Phase A: the two SerenityManualOutboundClient `.send_message(`
-  # callsites moved verbatim from health.rs to health/manual_delivery.rs —
-  # identical stable hashes, path component updated only.
-  "src/services/discord/health/manual_delivery.rs#direct_discord_sends:fc0d3cc16af4bca7",
-  "src/services/discord/health/manual_delivery.rs#direct_discord_sends:9a1e5bc39f554d40",
   "src/services/discord/meeting_orchestrator.rs#direct_discord_sends:64c7fa00eace25a9",
   "src/services/discord/meeting_orchestrator.rs#direct_discord_sends:5e0310b8b9e373ff",
   "src/services/discord/monitoring_status.rs#direct_discord_sends:6911fe26869c481d",

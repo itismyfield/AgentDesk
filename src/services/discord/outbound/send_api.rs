@@ -5,14 +5,13 @@
 
 use sqlx::PgPool;
 
-use super::HealthRegistry;
 use super::manual_delivery::{
     ManualDeliveryOutcome, ManualOutboundDeliveryId, SerenityManualOutboundClient,
     deliver_manual_dm_notification, is_reserved_voice_correlation_namespace,
 };
-use super::runtime_resolve::resolve_bot_http;
 use super::send_gate::send_message_with_backends_and_delivery_id;
 use crate::db::Db;
+use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
 use crate::services::discord::outbound::shared_outbound_deduper;
 
 pub async fn handle_send<'a>(
