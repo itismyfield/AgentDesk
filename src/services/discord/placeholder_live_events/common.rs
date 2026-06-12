@@ -169,13 +169,20 @@ pub(super) fn truncate_chars(raw: &str, max_chars: usize) -> String {
 /// whole limit degrades to a plain truncation (cannot happen for ✓/✗).
 pub(super) fn truncate_chars_with_marker(base: &str, marker: &str, max_chars: usize) -> String {
     let reserve = marker.chars().count().saturating_add(1);
-    let Some(base_budget) = max_chars.checked_sub(reserve) else {
-        return truncate_chars(&format!("{base} {marker}"), max_chars);
-    };
-    let mut line = truncate_chars(base, base_budget);
-    line.push(' ');
-    line.push_str(marker);
-    line
+    // `truncate_chars` can emit up to 3 chars ("...") even when its budget is
+    // smaller, so the marker reservation is only sound for base budgets >= 3.
+    // Degenerate budgets degrade to a hard char clamp — the marker may be lost
+    // there, and the delivered-ID honesty gate then keeps the slot un-evicted.
+    // Real call sites pass >= 100 chars; this is a contract backstop.
+    match max_chars.checked_sub(reserve) {
+        Some(base_budget) if base_budget >= 3 => {
+            let mut line = truncate_chars(base, base_budget);
+            line.push(' ');
+            line.push_str(marker);
+            line
+        }
+        _ => format!("{base} {marker}").chars().take(max_chars).collect(),
+    }
 }
 
 pub(super) fn escape_status_panel_markdown(raw: &str) -> String {

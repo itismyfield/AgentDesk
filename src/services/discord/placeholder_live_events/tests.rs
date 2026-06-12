@@ -2253,6 +2253,27 @@ fn footer_line_containing<'a>(block: &'a str, needle: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no footer line contains {needle:?}: {block}"))
 }
 
+// #3391 round 3 review P2: degenerate budgets must never exceed `max_chars`.
+// `truncate_chars` emits up to 3 chars ("...") below its budget, so budgets
+// under marker_reserve+3 degrade to a hard clamp (marker may be lost there —
+// the delivered-ID honesty gate then keeps the slot un-evicted).
+#[test]
+fn truncate_chars_with_marker_never_exceeds_max_chars_on_degenerate_budgets() {
+    for max_chars in [0usize, 1, 2, 3, 4, 5] {
+        let line = super::common::truncate_chars_with_marker("a long base", "✓", max_chars);
+        assert!(
+            line.chars().count() <= max_chars,
+            "budget {max_chars}: {line:?} exceeds the contract"
+        );
+    }
+    // Sound budgets keep the marker guarantee.
+    let line = super::common::truncate_chars_with_marker(&"x".repeat(200), "✓", 100);
+    assert!(
+        line.ends_with('✓') && line.chars().count() <= 100,
+        "{line:?}"
+    );
+}
+
 // #3391 round 3 finding 1 (task): a background task whose description is long
 // enough that the pre-fix append-then-truncate swallowed the mark must still
 // render a line that ENDS WITH ✓. FAILS on HEAD 95f6e2176 (the ✓ was chopped
