@@ -198,7 +198,6 @@ src/
 │   │   │   ├── ops.rs
 │   │   │   └── reviews.rs
 │   │   ├── review_verdict/
-│   │   │   ├── decision_route/
 │   │   │   ├── decision_route.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── tuning_aggregate.rs
@@ -417,6 +416,7 @@ src/
 │   │   │   └── transport.rs
 │   │   ├── placeholder_live_events/
 │   │   │   ├── common.rs
+│   │   │   ├── completion_footer.rs
 │   │   │   ├── context_panel.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── recent_events.rs

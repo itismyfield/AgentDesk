@@ -208,9 +208,8 @@ use stale_resume::{
     stream_error_requires_terminal_session_reset,
 };
 use status_panel::{
-    bridge_epilogue_identity_guards_inflight_clear, complete_status_panel_v2,
+    bridge_epilogue_identity_guards_inflight_clear,
     should_open_long_running_placeholder_controller,
-    status_panel_completion_edit_aliases_newer_turn,
     status_panel_completion_ready_after_terminal_body, status_panel_message_id_for_turn,
 };
 use terminal_delivery::{
@@ -3232,6 +3231,19 @@ pub(super) fn spawn_turn_bridge(
                                     &summary,
                                 ),
                             );
+                            if single_message_panel_footer_mode {
+                                let indicator =
+                                    super::single_message_panel::single_message_panel_spinner_frame(
+                                        spin_idx,
+                                    );
+                                spin_idx = spin_idx.wrapping_add(1);
+                                refresh_bridge_registered_completion_footer(
+                                    shared_owned.as_ref(),
+                                    channel_id,
+                                    indicator,
+                                )
+                                .await;
+                            }
                             if task_notification_closes_background_child(kind, &status) {
                                 let close_status = if matches!(
                                     status.trim().to_ascii_lowercase().as_str(),
@@ -4157,6 +4169,19 @@ pub(super) fn spawn_turn_bridge(
                 }
                 status_panel_dirty = false;
             }
+            if single_message_panel_footer_mode
+                && status_panel_dirty
+                && last_status_panel_edit.elapsed() >= status_interval
+            {
+                refresh_bridge_registered_completion_footer(
+                    shared_owned.as_ref(),
+                    channel_id,
+                    indicator,
+                )
+                .await;
+                last_status_panel_edit = tokio::time::Instant::now();
+                status_panel_dirty = false;
+            }
 
             if !watcher_owns_assistant_relay && !standby_relay_owns_output {
                 loop {
@@ -5069,9 +5094,9 @@ pub(super) fn spawn_turn_bridge(
         // resurrecting. When the holder FAILS (does not clear), the row is still
         // present + matching, so the bridge refreshes it and retry survives.
         let mut bridge_skip_holder_owns_inflight = false;
-        let mut terminal_delivery_committed = false;
-        let mut terminal_body_visible = false;
+        let (mut terminal_delivery_committed, mut terminal_body_visible) = (false, false);
         let mut status_panel_terminal_committed = false;
+        let mut completion_footer_terminal_text: Option<String> = None;
         // #2161 (Codex round-2 H1): hoisted into the outer scope so the
         // bridge can run the TUI completion gate BEFORE dispatch completion
         // and reuse the same outcome for the visible status-panel emit
@@ -5961,6 +5986,10 @@ pub(super) fn spawn_turn_bridge(
                                 Ok(_) => {
                                     terminal_delivery_committed = true;
                                     terminal_body_visible = true;
+                                    if single_message_panel_footer_mode {
+                                        completion_footer_terminal_text =
+                                            Some(delivery_response.clone());
+                                    }
                                     response_sent_offset = full_response.len();
                                     inflight_state.response_sent_offset = response_sent_offset;
                                     // B6 (codex P1-b): advance ONLY via a successful
@@ -6101,6 +6130,10 @@ pub(super) fn spawn_turn_bridge(
                                 if outcome {
                                     terminal_delivery_committed = true;
                                     terminal_body_visible = true;
+                                    if single_message_panel_footer_mode {
+                                        completion_footer_terminal_text =
+                                            Some(delivery_response.clone());
+                                    }
                                 } else {
                                     preserve_inflight_for_cleanup_retry = true;
                                     if fallback_delivered {
@@ -6446,7 +6479,8 @@ pub(super) fn spawn_turn_bridge(
         let mut status_panel_completion_committed = true;
         if status_panel_terminal_committed
             && bridge_should_emit_completion
-            && bridge_should_complete_separate_status_panel(shared_owned.status_panel_v2_enabled)
+            && (single_message_panel_footer_mode
+                || bridge_should_complete_separate_status_panel(shared_owned.status_panel_v2_enabled))
         {
             // #2849: before rendering the completed panel, backfill exact final
             // context usage when the live StatusUpdates never carried it (e.g.
@@ -6483,58 +6517,25 @@ pub(super) fn spawn_turn_bridge(
                     );
                 }
             }
-            // #3161 (follow-up to #3142): re-read the CURRENT on-disk inflight
-            // and skip the panel EDIT when a NEWER turn now owns this turn's
-            // captured `status_panel_msg_id`. The bridge captured the panel id
-            // from this turn's pinned snapshot at turn start; a follow-up turn on
-            // the same channel can re-adopt that panel between start and
-            // completion, so editing it with our `응답 완료` text would alias the
-            // newer turn's live panel (the sibling of the watcher committed-output
-            // status-panel gate). Identity-based here because the bridge is
-            // turn-pinned by `user_msg_id`, not by a committed offset range. The
-            // gate keys off concrete newer-owner evidence and leaves the in-range
-            // id==0 case completing normally — see the predicate doc.
-            let this_turn_user_msg_id = user_msg_id.map(|id| id.get()).unwrap_or(0);
-            let panel_edit_aliases_newer_turn =
-                match super::inflight::load_inflight_state(&provider, channel_id.get()) {
-                    Some(on_disk) => status_panel_completion_edit_aliases_newer_turn(
-                        this_turn_user_msg_id,
-                        status_panel_msg_id,
-                        on_disk.user_msg_id,
-                        on_disk.status_message_id,
-                    ),
-                    None => false,
-                };
-            if panel_edit_aliases_newer_turn {
-                tracing::debug!(
-                    "[turn_bridge] skipping status-panel-v2 completion edit of msg {:?} in channel {}: a newer turn now owns the panel (this turn user_msg_id {})",
-                    status_panel_msg_id,
-                    channel_id,
-                    this_turn_user_msg_id
-                );
-                // The newer turn owns the panel; this turn's panel-completion
-                // step is a no-op success (its response was already delivered),
-                // so downstream session-status posting still proceeds.
-                status_panel_completion_committed = true;
-            } else {
-                // #2161 (Codex H1): the bridge-owned delivery path runs the
-                // gate ABOVE so it can also block dispatch completion on
-                // TimedOut. Here we just reuse the outcome and skip the
-                // visible `응답 완료` if the pane was still busy.
-                status_panel_completion_committed = complete_status_panel_v2(
+            let indicator = super::single_message_panel::single_message_panel_spinner_frame(
+                spin_idx,
+            );
+            status_panel_completion_committed =
+                complete_bridge_terminal_footer_or_status_panel(
                     shared_owned.as_ref(),
                     gateway.as_ref(),
                     channel_id,
+                    current_msg_id,
+                    user_msg_id,
                     status_panel_msg_id,
                     &provider,
                     status_panel_started_at,
                     &mut last_status_panel_text,
-                    false,
-                    "turn_terminal_delivery",
-                    this_turn_user_msg_id,
+                    single_message_panel_footer_mode,
+                    completion_footer_terminal_text.as_deref(),
+                    indicator,
                 )
                 .await;
-            }
         }
 
         if status_panel_terminal_committed

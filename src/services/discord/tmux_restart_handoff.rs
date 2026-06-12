@@ -122,6 +122,10 @@ fn restart_handoff_notice_target(
     RestartHandoffNoticeTarget::Edit(state.current_msg_id)
 }
 
+fn forget_completion_footer_for_restart_handoff(channel_id: ChannelId) {
+    super::single_message_panel::completion_footer_forget_registered_target(channel_id);
+}
+
 pub(super) fn resolve_dispatched_thread_dispatch_from_db(
     pg_pool: Option<&sqlx::PgPool>,
     thread_channel_id: u64,
@@ -272,6 +276,7 @@ pub(super) async fn start_restart_handoff_from_state(
     best_response: &str,
 ) -> bool {
     let stale_text = super::turn_bridge::stale_inflight_message(best_response);
+    forget_completion_footer_for_restart_handoff(channel_id);
     match restart_handoff_notice_target(&state) {
         RestartHandoffNoticeTarget::Edit(current_msg_id) => {
             let relay_ok = super::formatting::replace_long_message_raw(
@@ -471,6 +476,7 @@ mod notice_target_tests {
     use super::{RestartHandoffNoticeTarget, restart_handoff_notice_target};
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;
+    use poise::serenity_prelude::{ChannelId, MessageId};
 
     fn sample_inflight_state() -> InflightTurnState {
         InflightTurnState::new(
@@ -517,5 +523,32 @@ mod notice_target_tests {
         let target = restart_handoff_notice_target(&state);
 
         assert_eq!(target, RestartHandoffNoticeTarget::MissingCurrentMessage);
+    }
+
+    #[test]
+    fn restart_handoff_takeover_forgets_registered_completion_footer_target() {
+        let channel_id = ChannelId::new(3_089_202);
+        let shared = super::super::make_shared_data_for_tests();
+        super::super::single_message_panel::completion_footer_forget_registered_target(channel_id);
+        super::super::single_message_panel::register_completion_footer_target(
+            channel_id,
+            MessageId::new(3_089_302),
+            &ProviderKind::Codex,
+            1_800_000_000,
+            "Final answer",
+            true,
+        );
+
+        super::forget_completion_footer_for_restart_handoff(channel_id);
+
+        assert_eq!(
+            super::super::single_message_panel::completion_footer_edit_for_registered_target_at(
+                shared.as_ref(),
+                channel_id,
+                "⠸",
+                1_800_000_005,
+            ),
+            None
+        );
     }
 }

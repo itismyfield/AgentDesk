@@ -1552,6 +1552,97 @@ fn status_panel_clamps_codex_context_usage_display_to_window() {
 }
 
 #[test]
+fn completion_footer_context_only_has_no_spinner_and_stops_scheduling() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(190);
+    assert!(events.set_context_panel_usage(channel_id, None, 154_600, 0, 0, 1_000_000, 60));
+
+    let rendered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = rendered.block.expect("context line should render");
+
+    assert!(block.contains("Context   📦 154.6k / 1.0M tokens (15%) · auto-compact 60%"));
+    assert!(!block.contains('⠸'));
+    assert!(!rendered.has_unfinished_entries);
+}
+
+#[test]
+fn completion_footer_running_background_subagent_animates_until_notification_done() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(191);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({
+                "subagent_type": "bgworker",
+                "description": "Long background job",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_bg"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Task"), false, Some("toolu_bg")),
+    );
+
+    let running = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let running_block = running.block.expect("running subagent should render");
+    assert!(running.has_unfinished_entries);
+    assert!(running_block.contains("Subagents"));
+    assert!(running_block.contains("bgworker Long background job ⠸"));
+    assert!(!running_block.contains('✓'));
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification("subagent", "completed", "all done"),
+    );
+    let done = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    let done_block = done.block.expect("finished subagent should stay visible");
+    assert!(!done.has_unfinished_entries);
+    assert!(done_block.contains("bgworker Long background job"));
+    assert!(done_block.contains("all done"));
+    assert!(done_block.contains('✓'));
+    assert!(!done_block.contains('⠼'));
+}
+
+#[test]
+fn completion_footer_budget_clamps_task_section_but_keeps_context_line() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(192);
+    assert!(events.set_context_panel_usage(channel_id, None, 154_600, 0, 0, 1_000_000, 60));
+    for idx in 0..40 {
+        let tool_id = format!("toolu_{idx}");
+        events.push_status_events(
+            channel_id,
+            status_events_from_tool_use_with_id(
+                "Task",
+                &json!({
+                    "subagent_type": "reviewer",
+                    "description": format!("Inspect very long completion footer task section {idx} {}", "x".repeat(80)),
+                    "run_in_background": true
+                })
+                .to_string(),
+                Some(&tool_id),
+            ),
+        );
+    }
+
+    let rendered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = rendered.block.expect("completion footer should render");
+    let task_section = block
+        .split_once("\n\n")
+        .map(|(_, task_section)| task_section)
+        .expect("context and task sections should be separated");
+
+    assert!(block.contains("Context   📦 154.6k / 1.0M tokens (15%) · auto-compact 60%"));
+    assert!(task_section.len() <= crate::services::discord::single_message_panel::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES);
+    assert!(task_section.ends_with('…'));
+    assert!(rendered.has_unfinished_entries);
+}
+
+#[test]
 fn status_panel_tracks_todowrite_plan() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(78);

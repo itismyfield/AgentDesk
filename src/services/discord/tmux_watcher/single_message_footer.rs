@@ -135,6 +135,267 @@ pub(super) fn finalize_watcher_streaming_footer(
     }
 }
 
+pub(super) fn watcher_completion_footer_should_tick(
+    has_registered_target: bool,
+    elapsed: std::time::Duration,
+    interval: std::time::Duration,
+) -> bool {
+    has_registered_target && elapsed >= interval
+}
+
+pub(super) struct WatcherCompletionFooterIdleState {
+    tick_at: tokio::time::Instant,
+    spin_idx: usize,
+}
+
+impl Default for WatcherCompletionFooterIdleState {
+    fn default() -> Self {
+        Self {
+            tick_at: tokio::time::Instant::now(),
+            spin_idx: 0,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct WatcherCompletionFooterTerminalTarget {
+    msg_id: serenity::MessageId,
+    text: String,
+}
+
+pub(super) fn remember_watcher_completion_footer_terminal_target(
+    enabled: bool,
+    target: &mut Option<WatcherCompletionFooterTerminalTarget>,
+    msg_id: serenity::MessageId,
+    text: &str,
+) {
+    if enabled {
+        *target = Some(WatcherCompletionFooterTerminalTarget {
+            msg_id,
+            text: text.to_string(),
+        });
+    }
+}
+
+pub(super) async fn refresh_watcher_completion_footer_if_due(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    status_panel_v2_enabled: bool,
+    state: &mut WatcherCompletionFooterIdleState,
+) {
+    let has_target =
+        crate::services::discord::single_message_panel::completion_footer_has_registered_target(
+            channel_id,
+        );
+    if !watcher_single_message_panel_footer_enabled(status_panel_v2_enabled)
+        || !watcher_completion_footer_should_tick(
+            has_target,
+            state.tick_at.elapsed(),
+            crate::services::discord::status_update_interval(),
+        )
+    {
+        return;
+    }
+    state.tick_at = tokio::time::Instant::now();
+    let indicator =
+        crate::services::discord::single_message_panel::single_message_panel_spinner_frame(
+            state.spin_idx,
+        );
+    state.spin_idx = state.spin_idx.wrapping_add(1);
+    refresh_watcher_registered_completion_footer(http, shared, channel_id, indicator).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn complete_watcher_single_message_completion_footer(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    terminal_msg_id: Option<serenity::MessageId>,
+    provider: &ProviderKind,
+    _started_at_unix: i64,
+    terminal_text: &str,
+    indicator: &str,
+    background: bool,
+) -> bool {
+    shared.placeholder_live_events.push_status_event(
+        channel_id,
+        crate::services::agent_protocol::StatusEvent::TurnCompleted { background },
+    );
+    let rendered = shared
+        .placeholder_live_events
+        .render_completion_footer(channel_id, provider, indicator);
+    let Some(msg_id) = terminal_msg_id else {
+        return true;
+    };
+    crate::services::discord::single_message_panel::register_completion_footer_target(
+        channel_id,
+        msg_id,
+        provider,
+        chrono::Utc::now().timestamp(),
+        terminal_text,
+        rendered.has_unfinished_entries,
+    );
+    let Some(finalized) =
+        crate::services::discord::single_message_panel::finalize_streaming_footer_with_completion(
+            terminal_text,
+            provider,
+            rendered.block.as_deref(),
+        )
+    else {
+        return true;
+    };
+    rate_limit_wait(shared, channel_id).await;
+    let edited = match crate::services::discord::http::edit_channel_message(
+        http, channel_id, msg_id, &finalized,
+    )
+    .await
+    {
+        Ok(_) => true,
+        Err(error) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ watcher: completion footer edit failed for channel {} msg {}: {error}",
+                channel_id.get(),
+                msg_id.get()
+            );
+            false
+        }
+    };
+    crate::services::discord::single_message_panel::completion_footer_record_edit_result(
+        channel_id,
+        !rendered.has_unfinished_entries,
+        edited,
+    );
+    edited
+}
+
+pub(super) async fn refresh_watcher_registered_completion_footer(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    indicator: &str,
+) -> bool {
+    let Some(edit) =
+        crate::services::discord::single_message_panel::completion_footer_edit_for_registered_target(
+            shared.as_ref(),
+            channel_id,
+            indicator,
+        )
+    else {
+        return false;
+    };
+    rate_limit_wait(shared, channel_id).await;
+    let edited = match crate::services::discord::http::edit_channel_message(
+        http,
+        channel_id,
+        edit.message_id,
+        &edit.text,
+    )
+    .await
+    {
+        Ok(_) => true,
+        Err(error) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ watcher: completion footer refresh failed for channel {} msg {}: {error}",
+                channel_id.get(),
+                edit.message_id.get()
+            );
+            false
+        }
+    };
+    crate::services::discord::single_message_panel::completion_footer_record_edit_result(
+        channel_id,
+        edit.remove_after_edit,
+        edited,
+    );
+    edited
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn complete_watcher_terminal_footer_or_status_panel(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    provider: &ProviderKind,
+    started_at_unix: i64,
+    single_message_panel_footer_mode: bool,
+    spin_idx: &mut usize,
+    terminal_target: Option<WatcherCompletionFooterTerminalTarget>,
+    placeholder_msg_id: Option<serenity::MessageId>,
+    last_edit_text: &str,
+    status_panel_msg_id: Option<serenity::MessageId>,
+    last_status_panel_text: &mut String,
+    completion_background: bool,
+    status_panel_completion_user_msg_id: Option<u64>,
+    turn_is_external_input_for_session: bool,
+) {
+    let committed = if single_message_panel_footer_mode {
+        let fallback_target =
+            placeholder_msg_id.map(|msg_id| WatcherCompletionFooterTerminalTarget {
+                msg_id,
+                text: last_edit_text.to_string(),
+            });
+        let target = terminal_target.or(fallback_target);
+        let indicator =
+            crate::services::discord::single_message_panel::single_message_panel_spinner_frame(
+                *spin_idx,
+            );
+        *spin_idx = (*spin_idx).wrapping_add(1);
+        complete_watcher_single_message_completion_footer(
+            http,
+            shared,
+            channel_id,
+            target.as_ref().map(|target| target.msg_id),
+            provider,
+            started_at_unix,
+            target
+                .as_ref()
+                .map(|target| target.text.as_str())
+                .unwrap_or(""),
+            indicator,
+            completion_background,
+        )
+        .await
+    } else {
+        complete_watcher_status_panel_v2(
+            http,
+            shared,
+            channel_id,
+            status_panel_msg_id,
+            provider,
+            started_at_unix,
+            last_status_panel_text,
+            completion_background,
+            status_panel_completion_user_msg_id,
+        )
+        .await
+    };
+    if !turn_is_external_input_for_session {
+        return;
+    }
+    let Some(panel_msg_id) = status_panel_msg_id else {
+        return;
+    };
+    if committed {
+        crate::services::discord::status_panel_orphan_store::remove(
+            provider,
+            &shared.token_hash,
+            channel_id.get(),
+            panel_msg_id.get(),
+        );
+    } else {
+        enqueue_watcher_status_panel_orphan(shared.as_ref(), provider, channel_id, panel_msg_id);
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ watcher: status panel completion failed for channel {} msg {}; queued durable orphan cleanup",
+            channel_id.get(),
+            panel_msg_id.get()
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +508,22 @@ mod tests {
 
         assert!(rendered.len() <= DISCORD_MSG_LIMIT);
         assert!(rendered.contains("\n\n"));
+    }
+
+    #[test]
+    fn completion_footer_tick_requires_registered_unfinished_target() {
+        let interval = std::time::Duration::from_secs(5);
+
+        assert!(watcher_completion_footer_should_tick(
+            true, interval, interval
+        ));
+        assert!(!watcher_completion_footer_should_tick(
+            false, interval, interval
+        ));
+        assert!(!watcher_completion_footer_should_tick(
+            true,
+            std::time::Duration::from_secs(4),
+            interval
+        ));
     }
 }

@@ -153,6 +153,185 @@ pub(super) fn finalize_bridge_streaming_footer(
     }
 }
 
+async fn edit_bridge_completion_footer(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    msg_id: MessageId,
+    text: &str,
+) -> Result<(), String> {
+    let Some(http) = shared.serenity_http_or_token_fallback() else {
+        return Err("no Discord HTTP available for completion footer edit".to_string());
+    };
+    super::http::edit_channel_message(&http, channel_id, msg_id, text)
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn complete_bridge_single_message_completion_footer(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    terminal_msg_id: MessageId,
+    provider: &ProviderKind,
+    _started_at_unix: i64,
+    terminal_text: &str,
+    indicator: &str,
+    background: bool,
+) -> bool {
+    shared
+        .placeholder_live_events
+        .push_status_event(channel_id, StatusEvent::TurnCompleted { background });
+    let rendered = shared
+        .placeholder_live_events
+        .render_completion_footer(channel_id, provider, indicator);
+    super::single_message_panel::register_completion_footer_target(
+        channel_id,
+        terminal_msg_id,
+        provider,
+        chrono::Utc::now().timestamp(),
+        terminal_text,
+        rendered.has_unfinished_entries,
+    );
+    let Some(finalized) = super::single_message_panel::finalize_streaming_footer_with_completion(
+        terminal_text,
+        provider,
+        rendered.block.as_deref(),
+    ) else {
+        return true;
+    };
+    let edited = match edit_bridge_completion_footer(
+        shared,
+        channel_id,
+        terminal_msg_id,
+        &finalized,
+    )
+    .await
+    {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                "[turn_bridge] failed to edit completion footer message {} in channel {}: {}",
+                terminal_msg_id,
+                channel_id,
+                error
+            );
+            false
+        }
+    };
+    super::single_message_panel::completion_footer_record_edit_result(
+        channel_id,
+        !rendered.has_unfinished_entries,
+        edited,
+    );
+    edited
+}
+
+pub(super) async fn refresh_bridge_registered_completion_footer(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    indicator: &str,
+) -> bool {
+    let Some(edit) = super::single_message_panel::completion_footer_edit_for_registered_target(
+        shared, channel_id, indicator,
+    ) else {
+        return false;
+    };
+    let edited = match edit_bridge_completion_footer(
+        shared,
+        channel_id,
+        edit.message_id,
+        &edit.text,
+    )
+    .await
+    {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                "[turn_bridge] failed to refresh completion footer message {} in channel {}: {}",
+                edit.message_id,
+                channel_id,
+                error
+            );
+            false
+        }
+    };
+    super::single_message_panel::completion_footer_record_edit_result(
+        channel_id,
+        edit.remove_after_edit,
+        edited,
+    );
+    edited
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn complete_bridge_terminal_footer_or_status_panel<G: TurnGateway + ?Sized>(
+    shared: &SharedData,
+    gateway: &G,
+    channel_id: ChannelId,
+    current_msg_id: MessageId,
+    user_msg_id: Option<MessageId>,
+    status_panel_msg_id: Option<MessageId>,
+    provider: &ProviderKind,
+    started_at_unix: i64,
+    last_status_panel_text: &mut String,
+    single_message_panel_footer_mode: bool,
+    terminal_text: Option<&str>,
+    indicator: &str,
+) -> bool {
+    let this_turn_user_msg_id = user_msg_id.map(|id| id.get()).unwrap_or(0);
+    let aliases_newer_turn = match super::inflight::load_inflight_state(provider, channel_id.get())
+    {
+        Some(on_disk) => super::status_panel::status_panel_completion_edit_aliases_newer_turn(
+            this_turn_user_msg_id,
+            status_panel_msg_id,
+            on_disk.user_msg_id,
+            on_disk.status_message_id,
+        ),
+        None => false,
+    };
+    if aliases_newer_turn && !single_message_panel_footer_mode {
+        tracing::debug!(
+            "[turn_bridge] skipping status-panel-v2 completion edit of msg {:?} in channel {}: a newer turn now owns the panel (this turn user_msg_id {})",
+            status_panel_msg_id,
+            channel_id,
+            this_turn_user_msg_id
+        );
+        return true;
+    }
+    if single_message_panel_footer_mode {
+        return match terminal_text {
+            Some(text) => {
+                complete_bridge_single_message_completion_footer(
+                    shared,
+                    channel_id,
+                    current_msg_id,
+                    provider,
+                    started_at_unix,
+                    text,
+                    indicator,
+                    false,
+                )
+                .await
+            }
+            None => true,
+        };
+    }
+    super::status_panel::complete_status_panel_v2(
+        shared,
+        gateway,
+        channel_id,
+        status_panel_msg_id,
+        provider,
+        started_at_unix,
+        last_status_panel_text,
+        false,
+        "turn_terminal_delivery",
+        this_turn_user_msg_id,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

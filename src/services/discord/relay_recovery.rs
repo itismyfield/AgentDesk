@@ -611,6 +611,10 @@ fn reattach_apply_status(watcher_spawned: bool) -> &'static str {
     }
 }
 
+fn forget_completion_footer_for_relay_recovery(channel_id: ChannelId) {
+    super::single_message_panel::completion_footer_forget_registered_target(channel_id);
+}
+
 fn idle_tmux_repair_ready_for_input(
     provider: &ProviderKind,
     channel_id: u64,
@@ -696,6 +700,8 @@ async fn apply_relay_recovery_decision(
             }
         }
         RelayRecoveryActionKind::ReattachWatcher => {
+            let channel = ChannelId::new(decision.channel_id);
+            forget_completion_footer_for_relay_recovery(channel);
             if let Some(tmux_session) = decision.affected.tmux_session.as_deref()
                 && idle_tmux_repair_ready_for_input(provider, decision.channel_id, tmux_session)
                 && super::inflight::inflight_state_allows_idle_tmux_repair(
@@ -704,7 +710,6 @@ async fn apply_relay_recovery_decision(
                 )
                 .unwrap_or(false)
             {
-                let channel = ChannelId::new(decision.channel_id);
                 let finish = mailbox_finish_turn(shared, provider, channel).await;
                 if let Some(token) = finish.removed_token.as_ref() {
                     token.cancelled.store(true, Ordering::Relaxed);
@@ -901,6 +906,33 @@ mod tests {
             desynced: false,
             stale_thread_proof: false,
         }
+    }
+
+    #[test]
+    fn relay_recovery_takeover_forgets_registered_completion_footer_target() {
+        let channel_id = ChannelId::new(3_089_203);
+        let shared = super::super::make_shared_data_for_tests();
+        super::super::single_message_panel::completion_footer_forget_registered_target(channel_id);
+        super::super::single_message_panel::register_completion_footer_target(
+            channel_id,
+            MessageId::new(3_089_303),
+            &ProviderKind::Codex,
+            1_800_000_000,
+            "Final answer",
+            true,
+        );
+
+        forget_completion_footer_for_relay_recovery(channel_id);
+
+        assert_eq!(
+            super::super::single_message_panel::completion_footer_edit_for_registered_target_at(
+                shared.as_ref(),
+                channel_id,
+                "⠸",
+                1_800_000_005,
+            ),
+            None
+        );
     }
 
     #[test]
