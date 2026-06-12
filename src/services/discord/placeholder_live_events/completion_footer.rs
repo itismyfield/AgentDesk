@@ -1,3 +1,5 @@
+use poise::serenity_prelude::ChannelId;
+
 use crate::services::discord::single_message_panel::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES;
 use crate::services::provider::ProviderKind;
 
@@ -12,6 +14,42 @@ use super::task_panel::{TaskToolSlot, render_task_tool_slot, task_tool_terminal_
 pub(in crate::services::discord) struct CompletionFooterRender {
     pub(in crate::services::discord) block: Option<String>,
     pub(in crate::services::discord) has_unfinished_entries: bool,
+    /// #3391: task lines in `block` carrying a terminal mark (✓/✗) that
+    /// survived the S3 clamp. After the Discord edit containing `block` is
+    /// CONFIRMED delivered, pass these to
+    /// `evict_delivered_terminal_footer_tasks` so the next render drops them.
+    pub(in crate::services::discord) terminal_task_lines: Vec<String>,
+}
+
+// #3391: delivery-ack surface colocated with the render below — eviction must
+// reproduce exactly the per-slot lines `render_completion_footer` produced.
+impl super::PlaceholderLiveEvents {
+    /// Drops task slots whose terminal mark (✓/✗) was confirmed delivered in a
+    /// completion-footer render. Call only after the Discord edit/send returned
+    /// Ok — a failed edit retries the terminal mark on the next render. A slot
+    /// is matched by its recomputed render line (terminal lines are
+    /// indicator-free), so a slot that mutated since the delivered render keeps
+    /// rendering and evicts on the next confirmed delivery; in-flight slots
+    /// never match.
+    pub(in crate::services::discord) fn evict_delivered_terminal_footer_tasks(
+        &self,
+        channel_id: ChannelId,
+        delivered_terminal_task_lines: &[String],
+    ) {
+        if delivered_terminal_task_lines.is_empty() {
+            return;
+        }
+        let Some(entry) = self.status_by_channel.get(&channel_id) else {
+            return;
+        };
+        let mut guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.tasks.retain(|slot| {
+            let (line, unfinished) = render_completion_task_tool_slot(slot, "");
+            unfinished || !delivered_terminal_task_lines.contains(&line)
+        });
+    }
 }
 
 pub(super) fn render_completion_footer(
@@ -30,6 +68,7 @@ pub(super) fn render_completion_footer(
 
     let mut task_sections: Vec<String> = Vec::new();
     let mut has_unfinished_entries = false;
+    let mut terminal_task_lines: Vec<String> = Vec::new();
 
     if !snapshot.tasks.is_empty() {
         let mut task_unfinished = false;
@@ -41,6 +80,9 @@ pub(super) fn render_completion_footer(
             .map(|slot| {
                 let (line, unfinished) = render_completion_task_tool_slot(slot, indicator);
                 task_unfinished |= unfinished;
+                if !unfinished {
+                    terminal_task_lines.push(line.clone());
+                }
                 line
             })
             .collect::<Vec<_>>();
@@ -68,12 +110,23 @@ pub(super) fn render_completion_footer(
         // #3089 completion footer: keep the Context line outside the S3 budget
         // so usage never disappears because a task section is noisy. The same
         // 600-byte cap applies to the combined task/subagent section.
-        sections.push(clamp_completion_task_section(&task_sections.join("\n\n")));
+        let clamped = clamp_completion_task_section(&task_sections.join("\n\n"));
+        // #3391: a terminal mark counts as rendered only if its full line
+        // survived the clamp. Tasks render first, so the task lines are the
+        // prefix of `clamped` up to the first blank separator line.
+        terminal_task_lines.retain(|line| {
+            clamped
+                .lines()
+                .take_while(|l| !l.is_empty())
+                .any(|l| l == line)
+        });
+        sections.push(clamped);
     }
 
     CompletionFooterRender {
         block: (!sections.is_empty()).then(|| sections.join("\n\n")),
         has_unfinished_entries,
+        terminal_task_lines,
     }
 }
 

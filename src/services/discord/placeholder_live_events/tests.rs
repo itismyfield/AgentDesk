@@ -1891,6 +1891,173 @@ fn completion_footer_background_bash_animates_and_flips_on_notification() {
     assert!(!done_block.contains('⠼'));
 }
 
+fn push_background_bash_task(
+    events: &PlaceholderLiveEvents,
+    channel_id: ChannelId,
+    summary: &str,
+    tool_use_id: &str,
+) {
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id_for_footer_mode(
+            "Bash",
+            &json!({
+                "command": "sleep 1",
+                "description": summary,
+                "run_in_background": true
+            })
+            .to_string(),
+            Some(tool_use_id),
+            true,
+        ),
+    );
+}
+
+fn complete_background_bash_task(
+    events: &PlaceholderLiveEvents,
+    channel_id: ChannelId,
+    tool_use_id: &str,
+) {
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_with_tool_use_id(
+            "background",
+            "completed",
+            "Background command completed (exit code 0)",
+            Some(tool_use_id),
+        ),
+    );
+}
+
+#[test]
+fn completion_footer_delivered_terminal_task_evicts_from_next_render() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_001);
+    push_background_bash_task(&events, channel_id, "Keep running", "toolu_3391_run");
+    push_background_bash_task(&events, channel_id, "Evict after ack", "toolu_3391_done");
+    complete_background_bash_task(&events, channel_id, "toolu_3391_done");
+
+    let delivered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = delivered
+        .block
+        .expect("running + finished tasks should render");
+    assert!(block.contains("Bash Evict after ack ✓"));
+    assert!(block.contains("Bash Keep running ⠸"));
+    assert_eq!(
+        delivered.terminal_task_lines,
+        vec!["└ Bash Evict after ack ✓".to_string()]
+    );
+
+    events.evict_delivered_terminal_footer_tasks(channel_id, &delivered.terminal_task_lines);
+
+    let next = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    let next_block = next.block.expect("running task should keep rendering");
+    assert!(!next_block.contains("Evict after ack"));
+    assert!(next_block.contains("Bash Keep running ⠼"));
+    assert!(next.has_unfinished_entries);
+    assert!(next.terminal_task_lines.is_empty());
+}
+
+#[test]
+fn completion_footer_undelivered_terminal_task_keeps_rendering_and_inflight_never_evicts() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_002);
+    push_background_bash_task(&events, channel_id, "Stay running", "toolu_3391_stay");
+    push_background_bash_task(
+        &events,
+        channel_id,
+        "Retry my checkmark",
+        "toolu_3391_retry",
+    );
+    complete_background_bash_task(&events, channel_id, "toolu_3391_retry");
+
+    // A failed Discord edit never acks the render, so the ✓ renders again.
+    let first = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    assert_eq!(first.terminal_task_lines.len(), 1);
+    let retry = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    assert!(
+        retry
+            .block
+            .expect("undelivered terminal task should re-render")
+            .contains("Bash Retry my checkmark ✓")
+    );
+    assert_eq!(retry.terminal_task_lines, first.terminal_task_lines);
+
+    // Stale lines and in-flight base lines never evict anything.
+    events.evict_delivered_terminal_footer_tasks(
+        channel_id,
+        &[
+            "└ Bash Stay running".to_string(),
+            "└ Bash Some other line ✓".to_string(),
+        ],
+    );
+    let after = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let after_block = after.block.expect("both tasks should still render");
+    assert!(after_block.contains("Bash Retry my checkmark ✓"));
+    assert!(after_block.contains("Bash Stay running ⠸"));
+}
+
+#[test]
+fn completion_footer_evicts_all_terminal_tasks_delivered_in_one_render() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_003);
+    push_background_bash_task(&events, channel_id, "First done", "toolu_3391_a");
+    push_background_bash_task(&events, channel_id, "Second done", "toolu_3391_b");
+    push_background_bash_task(&events, channel_id, "Still running", "toolu_3391_c");
+    complete_background_bash_task(&events, channel_id, "toolu_3391_a");
+    complete_background_bash_task(&events, channel_id, "toolu_3391_b");
+
+    let delivered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    assert_eq!(delivered.terminal_task_lines.len(), 2);
+
+    events.evict_delivered_terminal_footer_tasks(channel_id, &delivered.terminal_task_lines);
+
+    let next = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    let next_block = next.block.expect("running task should keep rendering");
+    assert!(!next_block.contains("First done"));
+    assert!(!next_block.contains("Second done"));
+    assert!(next_block.contains("Bash Still running ⠼"));
+    assert!(next.has_unfinished_entries);
+}
+
+#[test]
+fn completion_footer_terminal_lines_clamped_out_of_budget_are_not_delivered() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_004);
+    for i in 0..STATUS_PANEL_TASK_LIMIT {
+        let tool_use_id = format!("toolu_3391_clamp_{i:02}");
+        push_background_bash_task(
+            &events,
+            channel_id,
+            &format!("Clamp slot {i:02} {}", "x".repeat(70)),
+            &tool_use_id,
+        );
+        complete_background_bash_task(&events, channel_id, &tool_use_id);
+    }
+
+    let first = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let first_block = first.block.expect("clamped task section should render");
+    assert!(
+        !first.terminal_task_lines.is_empty()
+            && first.terminal_task_lines.len() < STATUS_PANEL_TASK_LIMIT,
+        "the 600B clamp should cut some terminal lines: {first_block}"
+    );
+    for line in &first.terminal_task_lines {
+        assert!(first_block.contains(line.as_str()));
+    }
+
+    events.evict_delivered_terminal_footer_tasks(channel_id, &first.terminal_task_lines);
+
+    let second = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    let second_block = second
+        .block
+        .expect("clamped-out terminal tasks must render on a later pass");
+    for line in &first.terminal_task_lines {
+        assert!(!second_block.contains(line.as_str()));
+    }
+    assert!(!second.terminal_task_lines.is_empty());
+}
+
 #[test]
 fn footer_residual_entries_carry_to_next_turn_and_finished_entries_do_not() {
     let events = PlaceholderLiveEvents::default();
