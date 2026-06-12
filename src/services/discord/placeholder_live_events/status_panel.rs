@@ -401,17 +401,9 @@ impl StatusPanelState {
     /// dropped (never mis-routed/resurrected).
     fn set_subagent_activity(&mut self, tool_use_id: Option<String>, summary: String) {
         let id = tool_use_id.as_deref();
-        let target =
-            match id {
-                Some(id) => self.subagents.iter_mut().rev().find(|slot| {
-                    slot.finished.is_none() && slot.tool_use_id.as_deref() == Some(id)
-                }),
-                None => self
-                    .subagents
-                    .iter_mut()
-                    .rev()
-                    .find(|slot| slot.finished.is_none()),
-            };
+        let target = self.subagents.iter_mut().rev().find(|slot| {
+            slot.finished.is_none() && (id.is_none() || slot.tool_use_id.as_deref() == id)
+        });
         if let Some(slot) = target {
             let summary = normalize_summary(&summary);
             if !summary.trim().is_empty() {

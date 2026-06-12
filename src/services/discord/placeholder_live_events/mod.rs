@@ -13,6 +13,7 @@ mod completion_footer;
 mod context_panel;
 mod recent_events;
 mod session_panel;
+mod slot_rehydration;
 mod status_events;
 mod status_panel;
 mod subagent_rollout;

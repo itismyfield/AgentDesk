@@ -2482,11 +2482,8 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                     continue;
                 }
 
-                // #2843: resolve the freshest transcript (re-registering the
-                // binding if the bound path was stale) and apply the corrected
-                // watcher guard, instead of skipping on tmux_session_is_stale
-                // alone — a watcher pointed at a missing/stale file is non-stale
-                // by heartbeat yet does not relay direct-TUI output.
+                // #2843: resolve the freshest transcript (re-register stale bound
+                // paths) + corrected watcher guard — heartbeat misses stale files.
                 let Some(transcript_path) = resolve_idle_relay_transcript(
                     &shared,
                     &tmux_session_name,
@@ -2496,23 +2493,26 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                 ) else {
                     continue;
                 };
+                // #3402: restore footer slots a restart wiped while tasks kept
+                // running (one-shot per channel+session; footer-mode gated inside).
+                shared.ui.placeholder_live_events.rehydrate_slots_once_for_session(
+                    channel_id,
+                    binding.session_id.as_deref(),
+                    &transcript_path,
+                );
                 let path_changed = Path::new(&binding.output_path) != transcript_path;
                 let scan_offset = if path_changed {
                     // #2843 (codex P1): path changed — scan a bounded lookback
-                    // instead of starting at EOF, so a prompt already written to
-                    // the freshly-resolved transcript is still found (the
-                    // observed-prompt path uses timestamp recovery, but this
-                    // background-loop half must not miss the prompt it recovers).
+                    // instead of starting at EOF so a prompt already written to
+                    // the freshly-resolved transcript is still found.
                     claude_tui_rehydrate_start_offset(&transcript_path)
                         .saturating_sub(CLAUDE_IDLE_FRESH_TRANSCRIPT_LOOKBACK_BYTES)
                 } else {
                     binding.last_offset
                 };
-                // #2843 (codex round-2 P1): the lookback window can hold several
-                // finished turns; relaying the first would re-relay an old turn.
-                // On a path change select the NEWEST prompt in the window (the
-                // just-typed one); unchanged-path incremental tailing keeps
-                // first-prompt semantics so it never skips a queued prompt.
+                // #2843 (codex round-2 P1): the lookback can hold several finished
+                // turns — on a path change select the NEWEST prompt (the just-typed
+                // one); unchanged-path tailing keeps first-prompt semantics.
                 let scan_result = if path_changed {
                     scan_claude_idle_transcript_for_last_prompt(&transcript_path, scan_offset)
                 } else {

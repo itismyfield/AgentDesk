@@ -5203,3 +5203,255 @@ fn live_status_panel_never_leaks_dangling_fence_when_bloated() {
         "live panel leaked an unterminated fence: {rendered}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #3402: transcript-driven footer-panel slot rehydration after a restart.
+// ---------------------------------------------------------------------------
+
+/// A Claude `assistant` tool_use record launching a (foreground) subagent.
+fn transcript_subagent_start(tool_use_id: &str, desc: &str) -> String {
+    json!({
+        "type": "assistant",
+        "message": {
+            "content": [{
+                "type": "tool_use",
+                "id": tool_use_id,
+                "name": "Task",
+                "input": { "subagent_type": "explorer", "description": desc }
+            }]
+        }
+    })
+    .to_string()
+}
+
+/// A Claude `assistant` tool_use record launching a background Bash task.
+fn transcript_background_bash_start(tool_use_id: &str, desc: &str) -> String {
+    json!({
+        "type": "assistant",
+        "message": {
+            "content": [{
+                "type": "tool_use",
+                "id": tool_use_id,
+                "name": "Bash",
+                "input": { "command": "sleep 600", "description": desc, "run_in_background": true }
+            }]
+        }
+    })
+    .to_string()
+}
+
+/// A `<task-notification>` `user` record (the #3393 XML path) marking a subagent
+/// completed, keyed by its launching tool-use-id.
+fn transcript_subagent_completion(tool_use_id: &str) -> String {
+    let xml = format!(
+        "<task-notification><tool-use-id>{tool_use_id}</tool-use-id>\
+         <status>completed</status><summary>Agent \"explorer\" completed</summary>\
+         </task-notification>"
+    );
+    json!({
+        "type": "user",
+        "message": { "role": "user", "content": [{ "type": "text", "text": xml }] }
+    })
+    .to_string()
+}
+
+/// A compaction boundary record (`isCompactSummary: true`).
+fn transcript_compact_boundary() -> String {
+    json!({
+        "type": "user",
+        "isCompactSummary": true,
+        "message": { "role": "user", "content": "This session is being continued from a previous conversation" }
+    })
+    .to_string()
+}
+
+fn write_transcript(lines: &[String]) -> tempfile::NamedTempFile {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let mut body = lines.join("\n");
+    body.push('\n');
+    std::fs::write(file.path(), body).unwrap();
+    file
+}
+
+#[test]
+fn rehydration_restores_only_unmatched_starts_after_restart() {
+    // Slots present in the live process, then a restart wipes them.
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_402_001);
+    push_background_bash_task(&events, channel_id, "running bg", "toolu_bg_run");
+    // Simulate the restart by resetting (clearing) the channel registry.
+    events.clear_channel(channel_id);
+    assert!(
+        events
+            .render_completion_footer(channel_id, &ProviderKind::Claude, "⠸")
+            .block
+            .is_none(),
+        "post-restart footer should start empty"
+    );
+
+    // Fixture transcript: one completed subagent (matched pair), one still-running
+    // subagent (unmatched), and one still-running background Bash (unmatched).
+    let transcript = write_transcript(&[
+        transcript_subagent_start("toolu_done", "finished work"),
+        transcript_subagent_completion("toolu_done"),
+        transcript_subagent_start("toolu_live", "still exploring"),
+        transcript_background_bash_start("toolu_bg_live", "tailing logs"),
+    ]);
+
+    let outcome = events.rehydrate_slots_from_transcript_tail_for_footer_mode(
+        channel_id,
+        transcript.path(),
+        true,
+    );
+    assert_eq!(outcome.subagents, 1, "only the unmatched subagent restored");
+    assert_eq!(outcome.background_tasks, 1, "the bg task restored");
+
+    let render = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = render
+        .block
+        .expect("rehydrated slots should render a footer");
+    assert!(
+        block.contains("still exploring"),
+        "unmatched subagent present: {block}"
+    );
+    assert!(
+        block.contains("tailing logs"),
+        "unmatched bg task present: {block}"
+    );
+    assert!(
+        !block.contains("finished work"),
+        "completed pair absent: {block}"
+    );
+    assert!(render.has_unfinished_entries);
+}
+
+#[test]
+fn rehydration_end_after_rehydrate_flips_check_and_evicts() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_402_002);
+    let transcript = write_transcript(&[
+        transcript_subagent_start("toolu_sa", "long subagent"),
+        transcript_background_bash_start("toolu_bg", "bg worker"),
+    ]);
+    events.rehydrate_slots_from_transcript_tail_for_footer_mode(
+        channel_id,
+        transcript.path(),
+        true,
+    );
+
+    // The #3393 bridge delivers terminal Ends for the rehydrated ids.
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_with_tool_use_id(
+            "subagent",
+            "completed",
+            "Agent done",
+            Some("toolu_sa"),
+        ),
+    );
+    complete_background_bash_task(&events, channel_id, "toolu_bg");
+
+    let delivered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = delivered.block.expect("terminal slots should render");
+    assert!(block.contains("✓"), "rehydrated slots flipped ✓: {block}");
+    assert!(
+        delivered
+            .delivered_terminal_ids
+            .contains(&subagent_id("toolu_sa")),
+        "subagent terminal id delivered: {:?}",
+        delivered.delivered_terminal_ids
+    );
+    assert!(
+        delivered
+            .delivered_terminal_ids
+            .contains(&bg_task_id("toolu_bg")),
+        "bg task terminal id delivered: {:?}",
+        delivered.delivered_terminal_ids
+    );
+
+    // #3391 eviction works on rehydrated slots: after delivered-once, they drop.
+    events.evict_delivered_terminal_footer_tasks(channel_id, &delivered.delivered_terminal_ids);
+    let after = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    assert!(
+        after.block.is_none(),
+        "both terminal slots evicted: {after:?}"
+    );
+}
+
+#[test]
+fn rehydration_is_idempotent() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_402_003);
+    let transcript = write_transcript(&[
+        transcript_subagent_start("toolu_sa", "one subagent"),
+        transcript_background_bash_start("toolu_bg", "one bg"),
+    ]);
+
+    let first = events.rehydrate_slots_from_transcript_tail_for_footer_mode(
+        channel_id,
+        transcript.path(),
+        true,
+    );
+    assert_eq!((first.subagents, first.background_tasks), (1, 1));
+    // Re-running adds nothing (live slots already track both ids).
+    let second = events.rehydrate_slots_from_transcript_tail_for_footer_mode(
+        channel_id,
+        transcript.path(),
+        true,
+    );
+    assert_eq!(
+        (second.subagents, second.background_tasks),
+        (0, 0),
+        "no duplicate restore"
+    );
+
+    let block = events
+        .render_completion_footer(channel_id, &ProviderKind::Claude, "⠸")
+        .block
+        .expect("slots should render");
+    assert_eq!(
+        block.matches("one subagent").count(),
+        1,
+        "single subagent slot: {block}"
+    );
+    assert_eq!(
+        block.matches("one bg").count(),
+        1,
+        "single bg slot: {block}"
+    );
+}
+
+#[test]
+fn rehydration_bound_skips_records_before_compact_boundary() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_402_004);
+    // The pre-compaction subagent must NOT be scanned; only the post-boundary one.
+    let transcript = write_transcript(&[
+        transcript_subagent_start("toolu_pre", "before compaction"),
+        transcript_compact_boundary(),
+        transcript_subagent_start("toolu_post", "after compaction"),
+    ]);
+
+    let outcome = events.rehydrate_slots_from_transcript_tail_for_footer_mode(
+        channel_id,
+        transcript.path(),
+        true,
+    );
+    assert_eq!(
+        outcome.subagents, 1,
+        "only the post-boundary subagent restored"
+    );
+
+    let block = events
+        .render_completion_footer(channel_id, &ProviderKind::Claude, "⠸")
+        .block
+        .expect("post-boundary slot should render");
+    assert!(
+        block.contains("after compaction"),
+        "post-boundary present: {block}"
+    );
+    assert!(
+        !block.contains("before compaction"),
+        "pre-boundary skipped: {block}"
+    );
+}

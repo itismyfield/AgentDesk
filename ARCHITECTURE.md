@@ -422,6 +422,7 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── recent_events.rs
 │   │   │   ├── session_panel.rs
+│   │   │   ├── slot_rehydration.rs
 │   │   │   ├── status_events.rs
 │   │   │   ├── status_panel.rs
 │   │   │   ├── subagent_rollout.rs
