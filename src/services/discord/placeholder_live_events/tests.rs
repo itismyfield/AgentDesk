@@ -4963,3 +4963,115 @@ fn task_notification_xml_bridge_inert_when_footer_mode_off() {
         "footer-mode-off bridge must be inert: {bridged:?}"
     );
 }
+
+// #3393 finding 1: an id-LESS subagent `<task-notification>` XML (no
+// `<tool-use-id>` child) must produce NO terminal effect. Before the fix the XML
+// bridge emitted `SubagentEnd { tool_use_id: None }`, the panel fell back to "the
+// last unfinished subagent slot", and the WRONG slot was finalized (and, with
+// #3391, evicted on delivery). The bridge now drops id-less terminal ends.
+#[test]
+fn task_notification_xml_idless_subagent_does_not_flip_or_evict_a_slot() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_393_004);
+    // A running FOREGROUND Task subagent slot keyed by its launch tool-use id.
+    // Foreground (not background) so an id-less ack-only fallback WOULD finalize
+    // it pre-fix — the strongest exposure of the bug.
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({
+                "subagent_type": "scout",
+                "description": "Scout issue #3393"
+            })
+            .to_string(),
+            Some("toolu_live_slot"),
+        ),
+    );
+
+    // Real-shape subagent variant WITHOUT a `<tool-use-id>` child (some repeats /
+    // lost-process notifications omit it). Terminal status `completed`.
+    let idless = "<task-notification>\n\
+        <task-id>idless1</task-id>\n\
+        <status>completed</status>\n\
+        <summary>Agent \"some other agent\" completed</summary>\n\
+        <result>Done.</result>\n\
+        </task-notification>";
+    let bridged = status_events_from_task_notification_xml_for_footer_mode(idless, true);
+    assert!(
+        !bridged
+            .iter()
+            .any(|e| matches!(e, StatusEvent::SubagentEnd { .. })),
+        "id-less subagent XML must NOT bridge a SubagentEnd: {bridged:?}"
+    );
+    events.push_status_events(channel_id, bridged);
+
+    // The slot is untouched: still present and still unfinished (no eviction, no
+    // ✓/✗ flip onto the wrong slot).
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            guard.subagents.len(),
+            1,
+            "id-less subagent notification must not evict the slot"
+        );
+        assert!(
+            guard.subagents[0].finished.is_none(),
+            "id-less subagent notification must leave the slot unfinished"
+        );
+    }
+
+    let footer = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    assert!(
+        footer.has_unfinished_entries,
+        "the running subagent slot must remain unfinished"
+    );
+    let block = footer.block.expect("running subagent should render");
+    assert!(
+        !block.contains('✓'),
+        "id-less subagent notification must not flip ✓: {block}"
+    );
+}
+
+// #3393 finding 3: a workflow `<task-notification>` XML with a NON-terminal
+// status (e.g. running) must NOT emit `WorkflowEnd`; terminal statuses still map
+// success via `!is_error`, consistent with the subagent/background arms.
+#[test]
+fn task_notification_xml_workflow_gates_workflow_end_on_terminal_status() {
+    let running = "<task-notification><task-id>wf1</task-id><status>running</status>\
+        <summary>Dynamic workflow \"probe\" running</summary></task-notification>";
+    let running_events = status_events_from_task_notification_xml_for_footer_mode(running, true);
+    assert!(
+        !running_events
+            .iter()
+            .any(|e| matches!(e, StatusEvent::WorkflowEnd { .. })),
+        "status=running workflow XML must NOT emit WorkflowEnd: {running_events:?}"
+    );
+
+    let completed = "<task-notification><task-id>wf2</task-id><status>completed</status>\
+        <summary>Dynamic workflow \"probe\" completed</summary></task-notification>";
+    let completed_events =
+        status_events_from_task_notification_xml_for_footer_mode(completed, true);
+    assert!(
+        completed_events
+            .iter()
+            .any(|e| matches!(e, StatusEvent::WorkflowEnd { success: true, .. })),
+        "status=completed workflow XML must emit WorkflowEnd{{success:true}}: {completed_events:?}"
+    );
+
+    let failed = "<task-notification><task-id>wf3</task-id><status>failed</status>\
+        <summary>Dynamic workflow \"probe\" failed</summary></task-notification>";
+    let failed_events = status_events_from_task_notification_xml_for_footer_mode(failed, true);
+    assert!(
+        failed_events
+            .iter()
+            .any(|e| matches!(e, StatusEvent::WorkflowEnd { success: false, .. })),
+        "status=failed workflow XML must emit WorkflowEnd{{success:false}}: {failed_events:?}"
+    );
+}

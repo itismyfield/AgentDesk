@@ -146,9 +146,8 @@ pub(in crate::services::discord) fn status_events_from_tool_result_with_id(
             tool_use_id: tool_use_id.map(str::to_string),
             summary: None,
             // A SUCCESSFUL `run_in_background` launch is ack-only: dispatch
-            // succeeded but the subagent keeps running (often outliving the
-            // turn), so the panel must NOT mark it ✓. A FAILED launch is terminal
-            // — the subagent never started — so it finalizes the slot as ✗.
+            // succeeded but the subagent keeps running, so don't mark it ✓. A
+            // FAILED launch is terminal (never started) → finalizes the slot ✗.
             ack_only: !is_error,
         });
     }
@@ -190,7 +189,7 @@ pub(in crate::services::discord) fn status_events_from_task_notification_with_to
                     tool_use_id: tool_use_id.map(str::to_string),
                     summary: None,
                     // A terminal task_notification is the subagent's REAL
-                    // completion (incl. background), so it finalizes — not an ack.
+                    // completion (incl. background) → finalizes, not an ack.
                     ack_only: false,
                 });
             }
@@ -204,11 +203,15 @@ pub(in crate::services::discord) fn status_events_from_task_notification_with_to
             ));
         }
         "workflow" => {
-            events.push(StatusEvent::WorkflowEnd {
-                task_id: None,
-                success: !notification_is_error(status),
-                summary: Some(first_content_line(summary)).filter(|value| !value.is_empty()),
-            });
+            // #3393 finding 3: gate WorkflowEnd on a TERMINAL status (success via
+            // !is_error), like the subagent/background arms — running emits nothing.
+            if notification_is_terminal(status) {
+                events.push(StatusEvent::WorkflowEnd {
+                    task_id: None,
+                    success: !notification_is_error(status),
+                    summary: Some(first_content_line(summary)).filter(|value| !value.is_empty()),
+                });
+            }
         }
         _ => {}
     }
@@ -217,22 +220,17 @@ pub(in crate::services::discord) fn status_events_from_task_notification_with_to
 
 /// #3393: bridge a raw `user`-record `<task-notification>` XML payload into the
 /// same live-panel [`StatusEvent`]s the (never-occurring) stream-json `system`
-/// path produced. Background/subagent completions reach the transcript ONLY as
-/// this XML, so without the bridge terminal slots never flip ✓ from real traffic
-/// (and the #3391 delivered-ack eviction never fires). Parses with the SHARED
-/// `tui_task_card` parser, derives kind from the summary prefix, then routes
-/// through `status_events_from_task_notification_with_tool_use_id` (its match
-/// arms own the kind→event mapping). An unknown/id-less terminal End is a slot
-/// no-op, so a double notification cannot flip a slot back. See `_for_footer_mode`.
+/// path produced — background/subagent completions reach the transcript ONLY as
+/// this XML; without the bridge slots never flip ✓ (#3391 eviction never fires).
 pub(in crate::services::discord) fn status_events_from_task_notification_xml(
     raw: &str,
 ) -> Vec<StatusEvent> {
     status_events_from_task_notification_xml_for_footer_mode(raw, slots_enabled_by_footer_flag())
 }
 
-/// Footer-mode-injectable variant (mirrors the `_for_footer_mode` convention):
-/// legacy mode returns an empty vec so the separate-panel render path is
-/// untouched; tests inject the flag without the process-cached env read.
+/// Footer-mode-injectable variant: legacy mode returns an empty vec (separate-
+/// panel path untouched). Parses with the SHARED `tui_task_card` parser, derives
+/// kind from the summary prefix, routes through the `_with_tool_use_id` mapper.
 pub(in crate::services::discord) fn status_events_from_task_notification_xml_for_footer_mode(
     raw: &str,
     footer_mode_enabled: bool,
@@ -245,12 +243,22 @@ pub(in crate::services::discord) fn status_events_from_task_notification_xml_for
     if status.is_empty() {
         return Vec::new();
     }
-    status_events_from_task_notification_with_tool_use_id(
+    let events = status_events_from_task_notification_with_tool_use_id(
         parsed.kind(),
         status,
         parsed.summary.as_deref().unwrap_or(""),
         parsed.tool_use_id.as_deref(),
-    )
+    );
+    // #3393 finding 1 (XML-scoped): drop an id-less terminal `SubagentEnd` — it
+    // would fall back in the panel to "the last unfinished slot" and flip/evict
+    // the WRONG one (permanently, post-#3391). A missing id → no terminal effect
+    // (heartbeat/activity kept). The `system` path keeps its id-less fallback.
+    events.into_iter().filter(idful_subagent_or_other).collect()
+}
+
+/// #3393 finding 1 XML-bridge drop predicate: `false` for an id-less `SubagentEnd`.
+fn idful_subagent_or_other(event: &StatusEvent) -> bool {
+    !matches!(event, StatusEvent::SubagentEnd { tool_use_id, .. } if tool_use_id.is_none())
 }
 
 pub(in crate::services::discord) fn status_events_from_json(value: &Value) -> Vec<StatusEvent> {
@@ -266,10 +274,10 @@ pub(in crate::services::discord) fn status_events_from_json_for_footer_mode(
         return workflow_events;
     }
 
-    // A nested subagent record carries the launching Task's `parent_tool_use_id`.
-    // Its tool activity belongs to that subagent slot, so route it to
-    // `SubagentActivity` keyed by the parent id rather than a top-level `ToolStart`
-    // that would clobber the panel header / resurrect "tool running".
+    // A nested subagent record carries the launching Task's `parent_tool_use_id`;
+    // its tool activity belongs to that slot, so route it to `SubagentActivity`
+    // keyed by the parent id rather than a top-level `ToolStart` that would
+    // clobber the panel header / resurrect "tool running".
     if let Some(parent_id) = subagent_parent_tool_use_id(value) {
         return subagent_activity_status_events(value, parent_id);
     }
@@ -484,12 +492,11 @@ fn content_block_start_status_events(value: &Value, footer_mode_enabled: bool) -
 fn user_status_events(value: &Value) -> Vec<StatusEvent> {
     // #3086: surface a TUI-parity `Done (...)` from each finished subagent's
     // in-stream `toolUseResult` aggregate (no IO), keyed by the block's own
-    // `tool_use_id` (the slot key, #3084). #3086 P1: a BATCHED `user` record has
-    // one aggregate PER subagent — compute each summary from its own block, never
-    // attach one record-level aggregate to "the first id-bearing block" (that
-    // mis-routes A's Done onto B). Legacy single-subagent keeps the aggregate at
-    // the record top level (fall back to the first id-bearing block). The panel
-    // drops a summary-bearing end whose id matches no tracked slot.
+    // `tool_use_id` (slot key, #3084). #3086 P1: a BATCHED record has one
+    // aggregate PER subagent — compute each from its own block (never attach the
+    // record-level aggregate to "the first id-bearing block", which mis-routes
+    // A's Done onto B). Legacy single-subagent keeps the record-level aggregate on
+    // the first id-bearing block; the panel drops an end whose id matches no slot.
     let blocks = value
         .get("message")
         .and_then(|message| message.get("content"))
@@ -533,11 +540,10 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
 
-            // This block's OWN aggregate (batched multi-subagent case): attach
-            // the per-subagent summary here, keyed by THIS block's tool_use_id.
+            // This block's OWN aggregate (batched case), keyed by THIS block's
+            // tool_use_id; else the legacy record-level aggregate on the first
+            // id-bearing block.
             let block_summary = subagent_summary_from_record(block);
-            // Or, for the legacy single-subagent shape, the record-level
-            // aggregate owned by the first id-bearing block.
             let summary = block_summary.or_else(|| {
                 if Some(idx) == record_summary_owner_idx {
                     record_summary.clone()
@@ -547,9 +553,8 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
             });
 
             if let Some(summary) = summary {
-                // Pair by this block's own tool_use_id. The panel refuses to
-                // apply the summary unless the id matches a real, tracked slot,
-                // so a stray summary can never land on an unrelated running slot.
+                // Pair by this block's own tool_use_id; the panel refuses the
+                // summary unless the id matches a real tracked slot.
                 let tool_use_id = block
                     .get("tool_use_id")
                     .and_then(Value::as_str)
@@ -560,9 +565,8 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
                         success: !is_error,
                         tool_use_id,
                         summary: Some(summary),
-                        // A summary-bearing end carries real accounting
-                        // (`toolUseResult`/rollout) — a genuine completion that
-                        // always finalizes the slot, never just an ack.
+                        // A summary-bearing end carries real accounting — a
+                        // genuine completion that always finalizes, never an ack.
                         ack_only: false,
                     },
                 ];
@@ -574,12 +578,10 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
 }
 
 /// Builds the subagent [`SubagentSummary`](crate::services::agent_protocol::SubagentSummary)
-/// from a JSON object's `toolUseResult` aggregate — either an individual
-/// `tool_result` block (batched multi-subagent) or the whole `user` record
-/// (legacy single-subagent). `None` for ordinary tool results. #3086 P1: live
-/// hot path — uses ONLY the in-stream aggregate (no disk IO); the prior
-/// synchronous per-subagent rollout `read_to_string` (unbounded blocking read on
-/// the async loop) was removed. `summary_from_rollout_str` remains off-hot-path.
+/// from a JSON object's `toolUseResult` aggregate — an individual `tool_result`
+/// block (batched) or the whole `user` record (legacy single). `None` for
+/// ordinary results. #3086 P1: live hot path — in-stream aggregate only (no disk
+/// IO); the prior synchronous rollout `read_to_string` was removed.
 fn subagent_summary_from_record(
     value: &Value,
 ) -> Option<crate::services::agent_protocol::SubagentSummary> {
@@ -612,9 +614,8 @@ fn system_status_events(value: &Value) -> Vec<StatusEvent> {
 }
 
 /// Returns the launching Task's tool-use id from a nested subagent record's
-/// top-level `parent_tool_use_id` (Claude Code stream-json marks every
-/// subagent-internal `assistant`/`content_block_start` record with it). `None`
-/// for top-level records (no parent) so they take the normal panel path.
+/// top-level `parent_tool_use_id` (Claude Code marks every subagent-internal
+/// record with it). `None` for top-level records → normal panel path.
 fn subagent_parent_tool_use_id(value: &Value) -> Option<String> {
     ["parent_tool_use_id", "parentToolUseId"]
         .into_iter()
@@ -626,9 +627,8 @@ fn subagent_parent_tool_use_id(value: &Value) -> Option<String> {
 
 /// Builds [`StatusEvent::SubagentActivity`] events for a nested subagent record,
 /// one per tool_use block, keyed by the parent Task id so the panel updates the
-/// owning subagent slot's recent line (same `[Tool] args` summary the main panel
-/// uses, so a long background subagent surfaces its step, not an opaque
-/// "running").
+/// owning slot's recent line (same `[Tool] args` summary) — a long background
+/// subagent surfaces its step, not an opaque "running".
 fn subagent_activity_status_events(value: &Value, parent_id: String) -> Vec<StatusEvent> {
     let blocks: Vec<(&str, String)> = match value.get("type").and_then(Value::as_str) {
         Some("assistant") => value
