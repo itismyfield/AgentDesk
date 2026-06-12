@@ -2353,7 +2353,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         if watcher_fresh_turn_frame
             && (shared.ui.placeholder_live_events_enabled || shared.ui.status_panel_v2_enabled)
         {
-            shared.ui.placeholder_live_events.clear_channel(channel_id);
+            if single_message_panel_footer_mode {
+                supersede_watcher_registered_completion_footer(&http, &shared, channel_id).await;
+                shared
+                    .ui
+                    .placeholder_live_events
+                    .clear_channel_preserving_footer_residuals(channel_id);
+            } else {
+                shared.ui.placeholder_live_events.clear_channel(channel_id);
+            }
         }
         let mut last_status_panel_text = String::new();
         let status_panel_started_at = chrono::Utc::now().timestamp();

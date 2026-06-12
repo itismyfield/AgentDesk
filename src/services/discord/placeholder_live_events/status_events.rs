@@ -179,12 +179,18 @@ pub(in crate::services::discord) fn status_events_from_task_notification_with_to
         "subagent" => {
             let summary = first_content_line(summary);
             if !summary.is_empty() {
-                events.push(StatusEvent::SubagentEvent { summary });
+                events.push(match tool_use_id {
+                    Some(tool_use_id) => StatusEvent::SubagentActivity {
+                        tool_use_id: Some(tool_use_id.to_string()),
+                        summary,
+                    },
+                    None => StatusEvent::SubagentEvent { summary },
+                });
             }
             if notification_is_terminal(status) {
                 events.push(StatusEvent::SubagentEnd {
                     success: !notification_is_error(status),
-                    tool_use_id: None,
+                    tool_use_id: tool_use_id.map(str::to_string),
                     summary: None,
                     // A terminal task_notification is the subagent's REAL
                     // completion (including background subagents), so it always

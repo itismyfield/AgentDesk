@@ -229,14 +229,34 @@ pub(super) async fn complete_watcher_single_message_completion_footer(
     let Some(msg_id) = terminal_msg_id else {
         return true;
     };
-    crate::services::discord::single_message_panel::register_completion_footer_target(
-        channel_id,
-        msg_id,
-        provider,
-        chrono::Utc::now().timestamp(),
-        terminal_text,
-        rendered.has_unfinished_entries,
-    );
+    if let Some(edit) =
+        crate::services::discord::single_message_panel::register_completion_footer_target(
+            channel_id,
+            msg_id,
+            provider,
+            chrono::Utc::now().timestamp(),
+            terminal_text,
+            rendered.block.as_deref(),
+            rendered.has_unfinished_entries,
+        )
+    {
+        rate_limit_wait(shared, channel_id).await;
+        if let Err(error) = crate::services::discord::http::edit_channel_message(
+            http,
+            channel_id,
+            edit.message_id,
+            &edit.text,
+        )
+        .await
+        {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ watcher: completion footer supersede failed for channel {} msg {}: {error}",
+                channel_id.get(),
+                edit.message_id.get()
+            );
+        }
+    }
     let Some(finalized) =
         crate::services::discord::single_message_panel::finalize_streaming_footer_with_completion(
             terminal_text,
@@ -269,6 +289,40 @@ pub(super) async fn complete_watcher_single_message_completion_footer(
         edited,
     );
     edited
+}
+
+pub(super) async fn supersede_watcher_registered_completion_footer(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+) -> bool {
+    let Some(edit) =
+        crate::services::discord::single_message_panel::completion_footer_supersede_registered_target(
+            channel_id,
+        )
+    else {
+        return false;
+    };
+    rate_limit_wait(shared, channel_id).await;
+    match crate::services::discord::http::edit_channel_message(
+        http,
+        channel_id,
+        edit.message_id,
+        &edit.text,
+    )
+    .await
+    {
+        Ok(_) => true,
+        Err(error) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ watcher: completion footer supersede failed for channel {} msg {}: {error}",
+                channel_id.get(),
+                edit.message_id.get()
+            );
+            false
+        }
+    }
 }
 
 pub(super) async fn refresh_watcher_registered_completion_footer(
@@ -306,10 +360,8 @@ pub(super) async fn refresh_watcher_registered_completion_footer(
             false
         }
     };
-    crate::services::discord::single_message_panel::completion_footer_record_edit_result(
-        channel_id,
-        edit.remove_after_edit,
-        edited,
+    crate::services::discord::single_message_panel::completion_footer_record_edit_result_for_edit(
+        channel_id, &edit, edited,
     );
     edited
 }

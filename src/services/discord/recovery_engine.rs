@@ -646,12 +646,13 @@ mod recovery_completion_outcome_tests {
         let channel_id = ChannelId::new(3_089_201);
         let shared = super::super::make_shared_data_for_tests();
         super::super::single_message_panel::completion_footer_forget_registered_target(channel_id);
-        super::super::single_message_panel::register_completion_footer_target(
+        let _ = super::super::single_message_panel::register_completion_footer_target(
             channel_id,
             MessageId::new(3_089_301),
             &ProviderKind::Claude,
             1_800_000_000,
             "Final answer",
+            None,
             true,
         );
 

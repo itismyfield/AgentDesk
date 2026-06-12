@@ -187,14 +187,26 @@ pub(super) async fn complete_bridge_single_message_completion_footer(
         .ui
         .placeholder_live_events
         .render_completion_footer(channel_id, provider, indicator);
-    super::single_message_panel::register_completion_footer_target(
+    if let Some(edit) = super::single_message_panel::register_completion_footer_target(
         channel_id,
         terminal_msg_id,
         provider,
         chrono::Utc::now().timestamp(),
         terminal_text,
+        rendered.block.as_deref(),
         rendered.has_unfinished_entries,
-    );
+    ) {
+        if let Err(error) =
+            edit_bridge_completion_footer(shared, channel_id, edit.message_id, &edit.text).await
+        {
+            tracing::warn!(
+                "[turn_bridge] failed to supersede completion footer message {} in channel {}: {}",
+                edit.message_id,
+                channel_id,
+                error
+            );
+        }
+    }
     let Some(finalized) = super::single_message_panel::finalize_streaming_footer_with_completion(
         terminal_text,
         provider,
@@ -229,6 +241,29 @@ pub(super) async fn complete_bridge_single_message_completion_footer(
     edited
 }
 
+pub(super) async fn supersede_bridge_registered_completion_footer(
+    shared: &SharedData,
+    channel_id: ChannelId,
+) -> bool {
+    let Some(edit) =
+        super::single_message_panel::completion_footer_supersede_registered_target(channel_id)
+    else {
+        return false;
+    };
+    match edit_bridge_completion_footer(shared, channel_id, edit.message_id, &edit.text).await {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                "[turn_bridge] failed to supersede completion footer message {} in channel {}: {}",
+                edit.message_id,
+                channel_id,
+                error
+            );
+            false
+        }
+    }
+}
+
 pub(super) async fn refresh_bridge_registered_completion_footer(
     shared: &SharedData,
     channel_id: ChannelId,
@@ -258,10 +293,8 @@ pub(super) async fn refresh_bridge_registered_completion_footer(
             false
         }
     };
-    super::single_message_panel::completion_footer_record_edit_result(
-        channel_id,
-        edit.remove_after_edit,
-        edited,
+    super::single_message_panel::completion_footer_record_edit_result_for_edit(
+        channel_id, &edit, edited,
     );
     edited
 }
