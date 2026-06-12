@@ -2252,27 +2252,39 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         }
         all_data.push_str(&decoded_data.text);
         let turn_data_start_offset = all_data_start_offset;
-        // #3041 P1-3 (codex P1-3 R7): pass-scoped turn-boundary latch. Set TRUE when
-        // ANY forward on THIS watcher pass SPLIT a result-bearing chunk with a
-        // non-empty trailing tail (a LATER turn's bytes). After this turn consumes
-        // its own terminal ACK below, the stored ack is reset to `None` so the
-        // trailing turn — processed from the leftover buffer on a LATER pass, where
-        // `turn_identity_for_panel` may STILL be pinned to THIS turn's offset — can
-        // NEVER inherit this finished turn's ACK (→ MissingTarget → §3.2 reconcile,
-        // no black-hole). The reset happens AFTER the terminal ACK wait, so this
-        // turn's OWN ack resolution is untouched.
+        // #3041 P1-3 R7: reset carried ACKs after terminal/next-turn splits so later turns cannot inherit them and black-hole.
         let mut split_trailing_turn_follows = false;
         let mut state = StreamLineState::new();
         let restored_turn_seed = restored_turn.take();
-        let discard_restored_seed = should_discard_restored_seed_for_idle_direct_prompt(
-            restored_turn_seed.is_some(),
+        let restored_seed_undelivered_body_len = restored_turn_seed
+            .as_ref()
+            .and_then(|seed| seed.full_response.get(seed.response_sent_offset..))
+            .map(|body| body.trim().chars().count())
+            .unwrap_or(0);
+        let restored_seed_has_body = restored_seed_undelivered_body_len > 0;
+        let prompt_anchor_present_for_seed_discard =
             crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
                 watcher_provider.as_str(),
                 &tmux_session_name,
                 channel_id.get(),
             )
-            .is_some(),
+            .is_some();
+        let discard_restored_seed = should_discard_restored_seed_for_idle_direct_prompt(
+            restored_turn_seed.is_some(),
+            prompt_anchor_present_for_seed_discard,
+            restored_seed_has_body,
         );
+        if !discard_restored_seed
+            && prompt_anchor_present_for_seed_discard
+            && restored_seed_has_body
+        {
+            tracing::info!(
+                channel = channel_id.get(),
+                body_len = restored_seed_undelivered_body_len,
+                tmux_session = %tmux_session_name,
+                "watcher: preserving restored stream seed with undelivered body for idle SSH-direct prompt"
+            );
+        }
         if discard_restored_seed {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -5079,19 +5091,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             matching_watcher_turn_identity(inflight_before_relay.as_ref(), &tmux_session_name);
         let should_adopt_inflight_terminal_message_ids = !external_input_lease_before_relay
             || watcher_inflight_represents_external_input(inflight_before_relay.as_ref());
-        // #3142: do NOT adopt the pre-relay snapshot's terminal message ids
-        // (placeholder_msg_id / status_panel_msg_id) when that snapshot is a STALE
-        // NEWER follow-up turn (`turn_start_offset >= current_offset`). Otherwise the
-        // older committed range pulls `status_message_id` from the still-running newer
-        // turn and aliases its status panel. Use the id==0-INCLUSIVE anchor variant
-        // (NOT the id!=0 sibling) so a newer turn whose `user_msg_id == 0` (external-
-        // input / injected task-notification) panel owner is also caught; the `None`
-        // second arg is sound — the helper's inner closure is `is_some_and`, so it
-        // contributes `false` and the predicate reduces to evaluating only
-        // `inflight_before_relay`, the sole panel-id source at this site. An in-range
-        // id==0 watcher-direct turn (`start < current_offset`) is NOT flagged
-        // (stale=false) and STILL adopts normally — the gate keys off the OFFSET
-        // staleness test, not `pinned == 0`.
+        // #3142: skip adopting the pre-relay snapshot's terminal message ids when it
+        // is a STALE NEWER follow-up turn (turn_start_offset >= current_offset) — else
+        // the older range aliases the newer turn's status panel. Uses the id==0-
+        // INCLUSIVE anchor variant (None 2nd arg sound: is_some_and → false) so
+        // external-input turns are caught; in-range id==0 turns adopt (OFFSET-keyed).
         let inflight_before_relay_is_stale_newer_turn =
             committed_anchor_cleanup_is_stale_for_newer_turn(
                 inflight_before_relay.as_ref(),
@@ -8220,13 +8224,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 #[cfg(test)]
 mod tests {
     use super::{
-        FreshIdleFinalizeDecision, RelaySlotGuard, TuiCompletionGateOutcome, Utf8ChunkDecoder,
+        FreshIdleFinalizeDecision, RelaySlotGuard, SessionBoundRelayAckOutcome,
+        TuiCompletionGateOutcome, Utf8ChunkDecoder,
         adopt_watcher_terminal_message_ids_from_inflight, build_watcher_streaming_edit_text,
         discard_restored_response_seed_before_no_inflight_terminal_relay,
         discard_watcher_pending_buffer_after_suppressed_turn,
         legacy_wrapper_prompt_candidates_from_pane, mark_watcher_terminal_delivery_committed,
         reacquire_watcher_inflight_for_active_stream, resolve_persistable_provider_session_id,
-        should_probe_tmux_liveness, terminal_event_consumed_offset,
+        should_probe_tmux_liveness, terminal_event_consumed_offset, terminal_relay_decision,
         watcher_batch_contains_assistant_event, watcher_batch_contains_relayable_response,
         watcher_direct_terminal_should_commit_session_idle,
         watcher_fallback_edit_failure_can_delete_original_placeholder,
@@ -8234,10 +8239,11 @@ mod tests {
         watcher_inflight_represents_external_input, watcher_jsonl_turn_state_ready_for_input,
         watcher_output_progressed_recently, watcher_should_clear_stale_terminal_message_ids,
         watcher_should_delete_suppressed_placeholder,
+        watcher_should_direct_send_after_session_bound_ack,
         watcher_should_reclaim_orphan_turn_placeholder,
         watcher_should_suppress_streaming_after_bridge_delivery,
         watcher_terminal_commit_side_effects_for_test, watcher_terminal_edit_consumes_placeholder,
-        watcher_terminal_token_update_status,
+        watcher_terminal_response_for_direct_send, watcher_terminal_token_update_status,
     };
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::discord::InflightTurnState;
@@ -10119,7 +10125,8 @@ TUI-E2E-marker ssh-direct
     }
 
     #[test]
-    fn no_inflight_user_boundary_without_fresh_text_drops_restored_response_seed() {
+    fn no_inflight_user_boundary_without_fresh_text_drops_already_delivered_restored_response_seed()
+    {
         let restored = "previous turn";
         let mut full_response = "previous turn".to_string();
         let mut response_sent_offset = restored.len();
@@ -10138,6 +10145,47 @@ TUI-E2E-marker ssh-direct
         assert_eq!(full_response, "");
         assert_eq!(response_sent_offset, 0);
         assert!(last_edit_text.is_empty());
+    }
+
+    #[test]
+    fn no_inflight_user_boundary_without_fresh_text_preserves_body_bearing_seed_for_relay() {
+        let restored = "undelivered body";
+        let mut full_response = restored.to_string();
+        let mut response_sent_offset = 0;
+        let mut last_edit_text = String::new();
+
+        assert!(
+            !discard_restored_response_seed_before_no_inflight_terminal_relay(
+                &mut full_response,
+                &mut response_sent_offset,
+                &mut last_edit_text,
+                restored,
+                false,
+                false,
+            )
+        );
+        assert_eq!(full_response, restored);
+        assert_eq!(response_sent_offset, 0);
+        assert!(last_edit_text.is_empty());
+
+        let has_assistant_response = !full_response.trim().is_empty();
+        let current_response = full_response.get(response_sent_offset..).unwrap_or("");
+        let has_current_response = !current_response.trim().is_empty();
+        let relay_decision = terminal_relay_decision(has_assistant_response, None, true);
+        let watcher_direct_send = watcher_should_direct_send_after_session_bound_ack(
+            relay_decision.should_direct_send,
+            SessionBoundRelayAckOutcome::MissingTarget,
+            false,
+        );
+
+        assert!(has_assistant_response);
+        assert!(has_current_response);
+        assert!(relay_decision.should_direct_send);
+        assert!(watcher_direct_send);
+        assert_eq!(
+            watcher_terminal_response_for_direct_send(&full_response, response_sent_offset, false),
+            restored
+        );
     }
 
     #[test]

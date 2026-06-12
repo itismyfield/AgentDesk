@@ -246,8 +246,43 @@ fn watcher_stream_seed(restored_turn: Option<RestoredWatcherTurn>) -> WatcherStr
 fn should_discard_restored_seed_for_idle_direct_prompt(
     restored_turn_present: bool,
     prompt_anchor_present: bool,
+    seed_has_undelivered_body: bool,
 ) -> bool {
-    restored_turn_present && prompt_anchor_present
+    restored_turn_present && prompt_anchor_present && !seed_has_undelivered_body
+}
+#[cfg(test)]
+mod restored_seed_discard_tests {
+    use super::should_discard_restored_seed_for_idle_direct_prompt;
+
+    #[test]
+    fn idle_direct_prompt_preserves_restored_seed_with_undelivered_body() {
+        assert!(!should_discard_restored_seed_for_idle_direct_prompt(
+            true, true, true,
+        ));
+    }
+
+    #[test]
+    fn idle_direct_prompt_still_discards_empty_restored_seed_with_anchor() {
+        assert!(should_discard_restored_seed_for_idle_direct_prompt(
+            true, true, false,
+        ));
+    }
+
+    #[test]
+    fn idle_direct_prompt_discard_still_requires_restored_turn_and_anchor() {
+        assert!(!should_discard_restored_seed_for_idle_direct_prompt(
+            true, false, false,
+        ));
+        assert!(!should_discard_restored_seed_for_idle_direct_prompt(
+            true, false, true,
+        ));
+        assert!(!should_discard_restored_seed_for_idle_direct_prompt(
+            false, true, false,
+        ));
+        assert!(!should_discard_restored_seed_for_idle_direct_prompt(
+            false, true, true,
+        ));
+    }
 }
 
 #[allow(dead_code)] // #3034: #826/#897/#898 bg-trigger notify-outbox subsystem (unwired).
