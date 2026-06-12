@@ -695,6 +695,16 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             let kind = slash_command_control_kind(&prompt.prompt);
             format_slash_command_control_note(&prompt.tmux_session_name, &kind, &prompt.prompt)
         } else if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
+            // #3393: background-task / subagent completions arrive ONLY as this
+            // `user`-record `<task-notification>` XML — never the stream-json
+            // `system` record the footer panel's `system_status_events` parses. So
+            // before the card render (which has its OWN store), bridge the SAME
+            // payload into the live-panel terminal StatusEvents so footer Tasks /
+            // Subagents flip ✓ and the #3391 delivered-ack eviction can fire. Runs
+            // for BOTH Post and Repeat outcomes (a repeat re-asserts terminal,
+            // which is idempotent at the slot). Footer-mode gated inside the
+            // bridge; an unknown/id-less notification is a slot no-op.
+            bridge_task_notification_to_live_panel(shared, channel_id, &prompt.prompt);
             match super::tui_task_card::resolve_task_card_content(
                 &notify_http,
                 shared,
@@ -5061,6 +5071,34 @@ fn strip_leading_local_command_caveat(text: &str) -> (&str, bool) {
         return (text, false);
     };
     (&text[end + CLOSE.len()..], true)
+}
+
+/// #3393: bridge an observed `<task-notification>` XML user-record into the live
+/// footer panel's terminal StatusEvents for `channel_id`. Background-task and
+/// subagent completions reach the transcript ONLY as this XML; the panel's own
+/// `system_status_events` parses a stream-json `system` record that never
+/// occurs, so without this bridge footer Tasks/Subagents never flip ✓ from real
+/// traffic and the #3391 delivered-ack eviction never triggers. The bridge is
+/// footer-mode gated INSIDE `status_events_from_task_notification_xml` (empty vec
+/// in legacy mode), and a terminal End for an unknown/id-less tool-use-id is a
+/// slot no-op, so a double notification cannot flip a slot back.
+fn bridge_task_notification_to_live_panel(shared: &SharedData, channel_id: ChannelId, raw: &str) {
+    let events = super::placeholder_live_events::status_events_from_task_notification_xml(raw);
+    if events.is_empty() {
+        return;
+    }
+    let parsed = super::tui_task_card::parse_task_notification(raw);
+    tracing::info!(
+        channel_id = channel_id.get(),
+        kind = parsed.kind(),
+        tool_use_id = parsed.tool_use_id.as_deref().unwrap_or(""),
+        status = parsed.status.as_deref().unwrap_or(""),
+        "#3393: bridged user-record <task-notification> XML to live panel terminal StatusEvents"
+    );
+    shared
+        .ui
+        .placeholder_live_events
+        .push_status_events(channel_id, events);
 }
 
 /// Detects the `<task-notification>` auto-turn tag injected by Claude Code /

@@ -58,6 +58,10 @@ const RESULT_PREVIEW_LINES: usize = 3;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct TaskNotification {
     pub task_id: Option<String>,
+    /// The launching tool's `tool_use_id` (e.g. `toolu_…`). Hyphenated child tag
+    /// in live payloads; the panel slot key the #3393 terminal bridge pairs on.
+    /// Some repeats / lost-process notifications omit it (then no slot flips).
+    pub tool_use_id: Option<String>,
     pub status: Option<String>,
     pub summary: Option<String>,
     pub result: Option<String>,
@@ -105,6 +109,10 @@ pub(super) fn parse_task_notification(raw: &str) -> TaskNotification {
     let usage_inner = usage.as_deref().unwrap_or("");
     TaskNotification {
         task_id: extract_tag(trimmed, &["task-id", "task_id"]),
+        // #3393: the launching tool's id is a distinct top-level child tag (both
+        // hyphen and underscore spellings observed); scoped to the whole payload
+        // like task-id, never the <usage> tail.
+        tool_use_id: extract_tag(trimmed, &["tool-use-id", "tool_use_id"]),
         status: extract_tag(trimmed, &["status"]),
         summary: extract_tag(trimmed, &["summary"]),
         result: extract_tag(trimmed, &["result"]),
@@ -121,6 +129,30 @@ pub(super) fn parse_task_notification(raw: &str) -> TaskNotification {
         agent_count: extract_tag(usage_inner, &["agent-count", "agent_count"]),
         duration_ms: extract_tag(usage_inner, &["duration-ms", "duration_ms"]),
         usage,
+    }
+}
+
+impl TaskNotification {
+    /// #3393: classify a parsed notification into the `task_notification_kind`
+    /// vocabulary the live-panel status bridge consumes
+    /// (`status_events_from_task_notification_with_tool_use_id`). Live payloads
+    /// carry NO `kind=` attribute, so the kind is read from the `<summary>`
+    /// prefix Claude Code emits:
+    ///   - `Background command "…"`  → `background` (a background Bash → its
+    ///     terminal status flips a `BackgroundTaskEnd` slot, keyed by tool-use-id).
+    ///   - `Dynamic workflow "…"`    → `workflow`.
+    ///   - `Agent "…"` / `Background agent "…"` / anything else → `subagent`
+    ///     (a `SubagentEnd`; the default is the safe one — it only finalizes a
+    ///     slot whose tool-use-id matches, so an unknown prefix never mis-fires).
+    pub(super) fn kind(&self) -> &'static str {
+        let summary = self.summary.as_deref().unwrap_or("").trim_start();
+        if summary.starts_with("Background command") {
+            "background"
+        } else if summary.starts_with("Dynamic workflow") {
+            "workflow"
+        } else {
+            "subagent"
+        }
     }
 }
 
@@ -769,6 +801,55 @@ mod tests {
             parse_task_notification(&underscore).task_id.as_deref(),
             Some("codex-bg-1")
         );
+    }
+
+    #[test]
+    fn parses_tool_use_id_and_derives_kind_from_summary_prefix() {
+        // #3393: real-shape background Bash notification — hyphenated tool-use-id
+        // child tag, `Background command "…"` summary → `background` kind.
+        let bg = "<task-notification><task-id>b5gr0v9xj</task-id>\
+            <tool-use-id>toolu_01Ls2svfdnzcn9uGwA7aHjHW</tool-use-id>\
+            <status>completed</status>\
+            <summary>Background command \"Wait until PR 3392 CI settles\" completed (exit code 0)</summary>\
+            </task-notification>";
+        let parsed = parse_task_notification(bg);
+        assert_eq!(
+            parsed.tool_use_id.as_deref(),
+            Some("toolu_01Ls2svfdnzcn9uGwA7aHjHW")
+        );
+        assert_eq!(parsed.kind(), "background");
+
+        // Subagent (`Agent "…"`) and workflow (`Dynamic workflow "…"`) prefixes.
+        let subagent = payload(&[
+            ("tool-use-id", "toolu_018F3HtbweDDNEbi44HKAhhi"),
+            ("status", "completed"),
+            ("summary", "Agent \"Scout issues\" completed"),
+        ]);
+        let parsed = parse_task_notification(&subagent);
+        assert_eq!(
+            parsed.tool_use_id.as_deref(),
+            Some("toolu_018F3HtbweDDNEbi44HKAhhi")
+        );
+        assert_eq!(parsed.kind(), "subagent");
+
+        let workflow = payload(&[
+            ("status", "completed"),
+            ("summary", "Dynamic workflow \"#3277 fix\" completed"),
+        ]);
+        assert_eq!(parse_task_notification(&workflow).kind(), "workflow");
+
+        // A lost-process `Background agent "…"` notification omits tool-use-id;
+        // it still classifies as `subagent` (the safe default) with `None` id.
+        let bg_agent = payload(&[
+            ("status", "failed"),
+            (
+                "summary",
+                "Background agent \"Rebase\" was running … did not complete.",
+            ),
+        ]);
+        let parsed = parse_task_notification(&bg_agent);
+        assert_eq!(parsed.tool_use_id, None);
+        assert_eq!(parsed.kind(), "subagent");
     }
 
     #[test]

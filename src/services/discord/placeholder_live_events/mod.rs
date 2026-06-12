@@ -45,7 +45,8 @@ use status_panel::{
 
 pub(in crate::services::discord) use recent_events::RecentPlaceholderEvent;
 pub(in crate::services::discord) use status_events::{
-    status_events_from_task_notification_with_tool_use_id, status_events_from_tool_result_with_id,
+    status_events_from_task_notification_with_tool_use_id,
+    status_events_from_task_notification_xml, status_events_from_tool_result_with_id,
     status_events_from_tool_use_with_id,
 };
 // #3034: the bare (no-id) variants are consumed only by the `tests` submodule
@@ -55,8 +56,8 @@ pub(in crate::services::discord) use status_events::{
 #[cfg(test)]
 pub(in crate::services::discord) use status_events::{
     status_events_from_json_for_footer_mode, status_events_from_task_notification,
-    status_events_from_tool_result, status_events_from_tool_use,
-    status_events_from_tool_use_with_id_for_footer_mode,
+    status_events_from_task_notification_xml_for_footer_mode, status_events_from_tool_result,
+    status_events_from_tool_use, status_events_from_tool_use_with_id_for_footer_mode,
 };
 
 pub(in crate::services::discord) use recent_events::events_from_json;
