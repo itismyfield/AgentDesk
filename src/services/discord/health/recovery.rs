@@ -11,7 +11,7 @@ use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::{CancelToken, ProviderKind};
 
 use super::HealthRegistry;
-use super::relay_auto_heal;
+use super::{relay_auto_heal, stall_liveness};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeTurnStopResult {
@@ -1347,50 +1347,6 @@ pub(crate) fn stall_watchdog_should_force_clean(
     age_secs >= 0 && (age_secs as u64) >= threshold_secs
 }
 
-/// #3169 Death #1 (stall-watchdog false-positive): a self-paced `ScheduleWakeup`
-/// loop session that just posted a PR is a *healthy completed* state, yet its
-/// loop turns carry `user_msg_id == 0` and so never get
-/// `terminal_delivery_committed` marked (`tmux_watcher.rs` commit guard). That
-/// defeats the #3126 committed-turn guard and, once a ready-for-input TUI
-/// capture races past the relay offset (`capture_lagged` desync, #2965), the row
-/// reads `attached + desynced + uncommitted + stale` — the exact force-clean
-/// signature — and the watchdog destroys a perfectly healthy session
-/// (worktree/conversation reset, real loss).
-///
-/// This is the second-layer guard: before force-cleaning a desynced channel we
-/// probe the same runtime-activity signal idle-kill (#3053) uses — the session
-/// jsonl / `.generation` marker mtime (`latest_runtime_activity_unix_nanos`).
-/// A loop that is mid-write keeps touching its jsonl even while the inflight
-/// relay row looks stale, so a write inside `freshness_threshold_secs` means the
-/// "desync" is a loop mid-write, not a hang → defer the force-clean.
-///
-/// A genuinely hung turn writes no provider events: its jsonl stays stale past
-/// the window, the probe does NOT defer, and the force-clean still fires. The
-/// window is anchored at the force-clean threshold so a marginal real hang (last
-/// partial write a few seconds after the relay froze) is at worst deferred a
-/// single watchdog pass before it is cleaned — never blanket-suppressed.
-///
-/// Returns `true` to DEFER (skip) the force-clean for this pass.
-pub(crate) fn stall_watchdog_jsonl_liveness_defers_force_clean(
-    latest_runtime_activity_unix_nanos: i64,
-    now_unix_secs: i64,
-    freshness_threshold_secs: u64,
-) -> bool {
-    // No observable jsonl/generation activity → cannot vouch for liveness; let
-    // the force-clean proceed (this is the genuine-hang / dead-session case).
-    if latest_runtime_activity_unix_nanos <= 0 {
-        return false;
-    }
-    let now_nanos = now_unix_secs.saturating_mul(1_000_000_000);
-    // A write at/after "now" (clock skew, just-touched) is unambiguously fresh.
-    if latest_runtime_activity_unix_nanos >= now_nanos {
-        return true;
-    }
-    let age_nanos = now_nanos.saturating_sub(latest_runtime_activity_unix_nanos);
-    let age_secs = age_nanos / 1_000_000_000;
-    (age_secs as u64) < freshness_threshold_secs
-}
-
 /// Detection-only counterpart to `stall_watchdog_should_force_clean`:
 /// returns `true` for the "completed-stale inflight on a healthy watcher"
 /// pattern that the deadlock-manager 30-min alarms keep flagging. All five
@@ -1555,6 +1511,9 @@ pub(crate) async fn run_stall_watchdog_pass(
     registry: &HealthRegistry,
     provider: &ProviderKind,
 ) -> usize {
+    let now_unix_secs = chrono::Utc::now().timestamp();
+    stall_liveness::gc_stall_watchdog_liveness_state(now_unix_secs);
+
     // Multi-bot deployments register several runtimes under one provider
     // name. Sweep *every* runtime's watcher channels (a name-only lookup
     // would only ever visit the first-registered runtime, so the second
@@ -1588,7 +1547,6 @@ pub(crate) async fn run_stall_watchdog_pass(
         return relay_auto_heal::run_orphan_token_auto_heal_pass(registry, provider, &runtimes)
             .await;
     }
-    let now_unix_secs = chrono::Utc::now().timestamp();
     let mut cleaned = 0usize;
     for (channel_id, shared) in candidate_channels {
         // Use the already-selected runtime. A provider-name scan can be
@@ -1618,7 +1576,7 @@ pub(crate) async fn run_stall_watchdog_pass(
             // #3169: same loop-mid-write liveness guard as the desynced force-
             // clean below — a freshly-written jsonl means this idle-foreground
             // anchor is a live loop turn, not a stranded one, so do not clear it.
-            && !stall_watchdog_jsonl_liveness_defers_force_clean(
+            && !stall_liveness::stall_watchdog_jsonl_liveness_defers_force_clean(
                 crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(
                     &tmux_session,
                 ),
@@ -1721,31 +1679,42 @@ pub(crate) async fn run_stall_watchdog_pass(
             STALL_WATCHDOG_THRESHOLD_SECS,
             registry.started_at_unix(),
         );
-        // #3169 Death #1: before the destructive desynced force-clean, probe the
-        // session's jsonl/.generation mtime (the same liveness signal idle-kill
-        // #3053 uses). A self-paced loop session that just posted a PR is mid-
-        // write — its loop turns carry user_msg_id==0 so the #3126 committed-turn
-        // guard never engages, and a capture_lagged (#2965) desync makes a
-        // healthy completed session read exactly like a hang. A fresh jsonl write
-        // means "loop mid-write != hang" → defer the force-clean this pass. A
-        // genuine hang writes no events, stays stale, and is still cleaned.
-        if should_clean
-            && let Some(tmux_session) = snapshot.tmux_session.as_deref()
-            && stall_watchdog_jsonl_liveness_defers_force_clean(
-                crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(
-                    tmux_session,
-                ),
-                now_unix_secs,
-                STALL_WATCHDOG_LIVENESS_FRESHNESS_SECS,
-            )
-        {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] 🌱 STALL-WATCHDOG: deferring force-clean for desynced channel {} (provider={}) — session jsonl freshly written (loop mid-write != hang, #3169)",
+        let judgment_basis = stall_liveness::StallWatchdogJudgmentBasis::from_snapshot(
+            &snapshot,
+            now_unix_secs,
+            registry.started_at_unix(),
+        );
+        let mut force_clean_inflight = None;
+        let mut liveness_decision = None;
+        if should_clean {
+            force_clean_inflight =
+                discord::inflight::load_inflight_state(provider, channel_id.get());
+            let decision = stall_liveness::evaluate_stall_watchdog_liveness(
+                provider,
                 channel_id,
-                provider.as_str(),
+                &snapshot,
+                force_clean_inflight.as_ref(),
+                now_unix_secs,
+                stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+                stall_liveness::STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
             );
-            continue;
+            if decision.should_defer() {
+                stall_liveness::log_stall_watchdog_liveness_deferred(
+                    provider,
+                    channel_id,
+                    &snapshot,
+                    &judgment_basis,
+                    &decision,
+                    stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+                    STALL_WATCHDOG_THRESHOLD_SECS,
+                );
+                continue;
+            }
+            liveness_decision = Some(decision);
+        } else {
+            stall_liveness::clear_stall_watchdog_liveness_state_if_healthy(
+                provider, channel_id, &snapshot,
+            );
         }
         if !should_clean {
             // Detection-only sibling probe for "completed-stale" inflight
@@ -1831,10 +1800,14 @@ pub(crate) async fn run_stall_watchdog_pass(
             }
             continue;
         }
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⚡ STALL-WATCHDOG: forced cleanup for desynced channel {}",
-            channel_id
+        stall_liveness::log_stall_watchdog_force_cleanup_judgment(
+            provider,
+            channel_id,
+            &snapshot,
+            &judgment_basis,
+            liveness_decision.as_ref(),
+            stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_THRESHOLD_SECS,
         );
         // Force cleanup releases the durable inflight lock first, then asks
         // relay_recovery to clear the mailbox only if its fresh safety
@@ -1847,8 +1820,8 @@ pub(crate) async fn run_stall_watchdog_pass(
         // normal cleanup paths (`turn_bridge::mod.rs:3047-3048` and the four
         // `tmux_watcher` finalize sites) all skip this code path because the
         // turn never reached a watcher-side completion event.
-        let force_clean_inflight =
-            discord::inflight::load_inflight_state(provider, channel_id.get());
+        let force_clean_inflight = force_clean_inflight
+            .or_else(|| discord::inflight::load_inflight_state(provider, channel_id.get()));
         let pending_hourglass_user_msg_id = force_clean_inflight
             .as_ref()
             .filter(|state| state.user_msg_id != 0)
@@ -1885,6 +1858,11 @@ pub(crate) async fn run_stall_watchdog_pass(
             discord::formatting::remove_reaction_raw(&http, channel_id, user_msg_id.into(), '⏳')
                 .await;
         }
+        stall_liveness::clear_stall_watchdog_liveness_state(
+            provider,
+            channel_id,
+            snapshot.tmux_session.as_deref(),
+        );
         cleaned += 1;
     }
     cleaned + relay_auto_heal::run_orphan_token_auto_heal_pass(registry, provider, &runtimes).await
@@ -2636,6 +2614,7 @@ async fn maybe_recover_completed_stale_leak(
 
 #[cfg(test)]
 mod stall_watchdog_pure_tests {
+    use super::super::stall_liveness::stall_watchdog_jsonl_liveness_defers_force_clean;
     use super::{
         LeakRecoveryLedgerIdentity, STALL_WATCHDOG_THRESHOLD_SECS,
         force_clean_should_preserve_resume_selector, inflight_completed_stale_leak_detected,
@@ -2643,8 +2622,7 @@ mod stall_watchdog_pure_tests {
         leak_recovery_confirmed_chunk_count, leak_recovery_confirmed_prefix_from_ledger,
         leak_recovery_record_confirmed_chunk, leak_recovery_unrelayed_range,
         preserve_cancel_should_skip_provider_interrupt_for_idle_tui, render_leak_recovery_delivery,
-        stale_idle_foreground_queue_detected, stall_watchdog_jsonl_liveness_defers_force_clean,
-        stall_watchdog_should_force_clean,
+        stale_idle_foreground_queue_detected, stall_watchdog_should_force_clean,
         stall_watchdog_should_force_clean_orphan_explicit_background_work,
     };
     use crate::services::discord::relay_health::{RelayActiveTurn, RelayStallState};

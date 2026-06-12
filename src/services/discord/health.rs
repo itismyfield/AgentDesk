@@ -30,6 +30,7 @@ mod send_gate;
 mod send_target;
 mod session_enrichment;
 mod snapshot;
+mod stall_liveness;
 
 // `HeadlessAgentTurnReservation` has no external referent today (callers
 // destructure the reserve/start tuple); kept re-exported for the reserve→start
