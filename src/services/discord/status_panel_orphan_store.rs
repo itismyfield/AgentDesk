@@ -375,7 +375,7 @@ pub(in crate::services::discord) async fn drain(
         // when v2 is off. The controller actor task is NOT spawned when v2 is off,
         // so we MUST skip the awaited shadow read (its ack oneshot would never be
         // answered) — this guard is the v2-off short-circuit.
-        if shared.status_panel_v2_enabled {
+        if shared.ui.status_panel_v2_enabled {
             let controller_owns = shared
                 .status_panel_controller
                 .orphan_gate_owns_panel(

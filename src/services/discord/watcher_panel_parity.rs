@@ -112,7 +112,7 @@ pub(in crate::services::discord) async fn assert_watcher_reclaim_parity(
     provider: &ProviderKind,
     panel_msg_id: MessageId,
 ) {
-    if !shared.status_panel_v2_enabled {
+    if !shared.ui.status_panel_v2_enabled {
         return;
     }
     let controller_id = shared
@@ -262,7 +262,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn v2_off_short_circuits_without_panic() {
         let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
-        assert!(!shared.status_panel_v2_enabled);
+        assert!(!shared.ui.status_panel_v2_enabled);
         let channel = ChannelId::new(4005);
         assert_watcher_reclaim_parity(
             &shared,

@@ -181,7 +181,7 @@ pub(super) fn enqueue_watcher_status_panel_orphan(
     panel_msg_id: serenity::MessageId,
 ) {
     crate::services::discord::status_panel_orphan_store::enqueue_separate_status_panel_orphan(
-        shared.status_panel_v2_enabled,
+        shared.ui.status_panel_v2_enabled,
         provider,
         &shared.token_hash,
         channel_id.get(),

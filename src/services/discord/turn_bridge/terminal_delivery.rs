@@ -23,7 +23,7 @@ fn record_turn_bridge_terminal_replace_cleanup(
             detail
         );
     }
-    shared.placeholder_cleanup.record(
+    shared.ui.placeholder_cleanup.record(
         super::super::placeholder_cleanup::PlaceholderCleanupRecord {
             provider: provider.clone(),
             channel_id,
@@ -69,7 +69,7 @@ pub(super) async fn send_ordered_long_terminal_response(
         Ok(()) => super::super::placeholder_cleanup::PlaceholderCleanupOutcome::Succeeded,
         Err(error) => super::super::placeholder_cleanup::classify_delete_error(&error),
     };
-    shared.placeholder_cleanup.record(
+    shared.ui.placeholder_cleanup.record(
         super::super::placeholder_cleanup::PlaceholderCleanupRecord {
             provider: provider.clone(),
             channel_id,
