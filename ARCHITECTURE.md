@@ -527,7 +527,8 @@ src/
 │   │   │   ├── live_cut_playback.rs
 │   │   │   ├── progress_playback.rs
 │   │   │   ├── routing.rs
-│   │   │   └── stt.rs
+│   │   │   ├── stt.rs
+│   │   │   └── tts_pipeline.rs
 │   │   ├── watchers/
 │   │   │   ├── lifecycle.rs
 │   │   │   └── lifecycle_decision.rs
