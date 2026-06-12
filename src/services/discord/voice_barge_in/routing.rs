@@ -482,3 +482,19 @@ fn agent_text_channel_matches(agent: &crate::config::AgentDef, channel_id: Chann
         .filter_map(|(_, channel)| channel)
         .any(|channel| channel.channel_id().as_deref() == Some(channel_id.as_str()))
 }
+
+fn normalized_foreground_max_chars(value: usize) -> usize {
+    if value == 0 {
+        crate::voice::config::DEFAULT_FOREGROUND_MAX_CHARS
+    } else {
+        value
+    }
+}
+
+fn normalized_foreground_timeout_ms(value: u64) -> u64 {
+    if value == 0 {
+        crate::voice::config::DEFAULT_FOREGROUND_TIMEOUT_MS
+    } else {
+        value
+    }
+}
