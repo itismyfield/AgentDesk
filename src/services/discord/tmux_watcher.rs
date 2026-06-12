@@ -5091,19 +5091,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             matching_watcher_turn_identity(inflight_before_relay.as_ref(), &tmux_session_name);
         let should_adopt_inflight_terminal_message_ids = !external_input_lease_before_relay
             || watcher_inflight_represents_external_input(inflight_before_relay.as_ref());
-        // #3142: do NOT adopt the pre-relay snapshot's terminal message ids
-        // (placeholder_msg_id / status_panel_msg_id) when that snapshot is a STALE
-        // NEWER follow-up turn (`turn_start_offset >= current_offset`). Otherwise the
-        // older committed range pulls `status_message_id` from the still-running newer
-        // turn and aliases its status panel. Use the id==0-INCLUSIVE anchor variant
-        // (NOT the id!=0 sibling) so a newer turn whose `user_msg_id == 0` (external-
-        // input / injected task-notification) panel owner is also caught; the `None`
-        // second arg is sound — the helper's inner closure is `is_some_and`, so it
-        // contributes `false` and the predicate reduces to evaluating only
-        // `inflight_before_relay`, the sole panel-id source at this site. An in-range
-        // id==0 watcher-direct turn (`start < current_offset`) is NOT flagged
-        // (stale=false) and STILL adopts normally — the gate keys off the OFFSET
-        // staleness test, not `pinned == 0`.
+        // #3142: skip adopting the pre-relay snapshot's terminal message ids when it
+        // is a STALE NEWER follow-up turn (turn_start_offset >= current_offset) — else
+        // the older range aliases the newer turn's status panel. Uses the id==0-
+        // INCLUSIVE anchor variant (None 2nd arg sound: is_some_and → false) so
+        // external-input turns are caught; in-range id==0 turns adopt (OFFSET-keyed).
         let inflight_before_relay_is_stale_newer_turn =
             committed_anchor_cleanup_is_stale_for_newer_turn(
                 inflight_before_relay.as_ref(),
