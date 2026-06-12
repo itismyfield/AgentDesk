@@ -557,12 +557,10 @@ fn orphan_suppressed_placeholder_action(
 /// Unified entry point for every placeholder-suppression decision.
 ///
 /// Three production sites produced identical edit/delete/log scaffolding before
-/// #1055 (bridge-guard duplicate relay at `tmux_output_watcher_with_restore`,
-/// task-notification terminal suppress at the same function, and
-/// `reconcile_orphan_suppressed_placeholder_for_restored_watcher`). The
-/// `decide_placeholder_suppression` + `apply_placeholder_suppression` pair
-/// replaces those copies so a future placeholder-suppression regression can be
-/// fixed in exactly one location. See also `Shared Agent Rules` — DRY 강제.
+/// #1055 (`tmux_output_watcher_with_restore` bridge-guard duplicate relay,
+/// task-notification terminal suppress, and restored-watcher orphan reconcile).
+/// `decide_placeholder_suppression` + `apply_placeholder_suppression` replaces
+/// those copies so future regressions fix in one place. See `Shared Agent Rules`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlaceholderSuppressOrigin {
     OrphanRestartHandoff,
@@ -801,7 +799,7 @@ fn record_placeholder_cleanup(
             detail
         );
     }
-    shared.placeholder_cleanup.record(PlaceholderCleanupRecord {
+    let record = PlaceholderCleanupRecord {
         provider: provider.clone(),
         channel_id,
         message_id,
@@ -809,7 +807,8 @@ fn record_placeholder_cleanup(
         operation,
         outcome,
         source,
-    });
+    };
+    shared.ui.placeholder_cleanup.record(record);
 }
 
 async fn delete_terminal_placeholder(

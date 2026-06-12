@@ -157,6 +157,7 @@ fn make_status_panel_v2_shared_for_tests() -> Arc<crate::services::discord::Shar
     let mut shared = super::super::make_shared_data_for_tests();
     Arc::get_mut(&mut shared)
         .expect("fresh test shared data should be uniquely owned")
+        .ui
         .status_panel_v2_enabled = true;
     shared
 }

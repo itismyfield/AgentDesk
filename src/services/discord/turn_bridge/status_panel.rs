@@ -22,16 +22,18 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
     source: &'static str,
     expected_user_msg_id: u64,
 ) -> bool {
-    if !shared.status_panel_v2_enabled {
+    if !shared.ui.status_panel_v2_enabled {
         return true;
     }
     shared
+        .ui
         .placeholder_live_events
         .push_status_event(channel_id, StatusEvent::TurnCompleted { background });
-    let panel_text =
-        shared
-            .placeholder_live_events
-            .render_status_panel(channel_id, provider, started_at_unix);
+    let panel_text = shared.ui.placeholder_live_events.render_status_panel(
+        channel_id,
+        provider,
+        started_at_unix,
+    );
 
     match status_panel_completion_action(status_panel_msg_id, last_status_panel_text, &panel_text) {
         StatusPanelCompletionAction::AlreadyCommitted => true,
@@ -140,16 +142,18 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
     source: &'static str,
     expected_user_msg_id: Option<u64>,
 ) -> bool {
-    if !shared.status_panel_v2_enabled {
+    if !shared.ui.status_panel_v2_enabled {
         return true;
     }
     shared
+        .ui
         .placeholder_live_events
         .push_status_event(channel_id, StatusEvent::TurnCompleted { background });
-    let panel_text =
-        shared
-            .placeholder_live_events
-            .render_status_panel(channel_id, provider, started_at_unix);
+    let panel_text = shared.ui.placeholder_live_events.render_status_panel(
+        channel_id,
+        provider,
+        started_at_unix,
+    );
 
     match status_panel_completion_action(status_panel_msg_id, last_status_panel_text, &panel_text) {
         StatusPanelCompletionAction::AlreadyCommitted => true,

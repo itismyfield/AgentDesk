@@ -91,8 +91,8 @@ pub(super) fn build_watcher_single_message_panel_status_block(
     full_response: &str,
     status_panel_msg_id: Option<serenity::MessageId>,
 ) -> String {
-    if watcher_single_message_panel_footer_enabled(shared.status_panel_v2_enabled) {
-        let panel_text = shared.placeholder_live_events.render_status_panel(
+    if watcher_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled) {
+        let panel_text = shared.ui.placeholder_live_events.render_status_panel(
             channel_id,
             provider,
             started_at_unix,
@@ -218,11 +218,12 @@ pub(super) async fn complete_watcher_single_message_completion_footer(
     indicator: &str,
     background: bool,
 ) -> bool {
-    shared.placeholder_live_events.push_status_event(
+    shared.ui.placeholder_live_events.push_status_event(
         channel_id,
         crate::services::agent_protocol::StatusEvent::TurnCompleted { background },
     );
     let rendered = shared
+        .ui
         .placeholder_live_events
         .render_completion_footer(channel_id, provider, indicator);
     let Some(msg_id) = terminal_msg_id else {

@@ -121,15 +121,15 @@ pub(super) fn build_bridge_single_message_panel_status_block(
     current_tool_line: Option<&str>,
     full_response: &str,
 ) -> String {
-    if bridge_single_message_panel_footer_enabled(shared.status_panel_v2_enabled) {
-        let panel_text = shared.placeholder_live_events.render_status_panel(
+    if bridge_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled) {
+        let panel_text = shared.ui.placeholder_live_events.render_status_panel(
             channel_id,
             provider,
             started_at_unix,
         );
         return super::single_message_panel::compose_footer_status_block(indicator, &panel_text);
     }
-    if shared.status_panel_v2_enabled {
+    if shared.ui.status_panel_v2_enabled {
         super::formatting::build_processing_status_block(indicator)
     } else {
         super::formatting::build_placeholder_status_block(
@@ -180,9 +180,11 @@ pub(super) async fn complete_bridge_single_message_completion_footer(
     background: bool,
 ) -> bool {
     shared
+        .ui
         .placeholder_live_events
         .push_status_event(channel_id, StatusEvent::TurnCompleted { background });
     let rendered = shared
+        .ui
         .placeholder_live_events
         .render_completion_footer(channel_id, provider, indicator);
     super::single_message_panel::register_completion_footer_target(

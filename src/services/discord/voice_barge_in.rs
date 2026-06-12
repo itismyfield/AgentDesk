@@ -4047,17 +4047,21 @@ mod tests {
             skills_cache: tokio::sync::RwLock::new(Vec::new()),
             tmux_watchers: super::super::TmuxWatcherRegistry::new(),
             tmux_relay_coords: dashmap::DashMap::new(),
-            placeholder_cleanup: Arc::new(
-                super::super::placeholder_cleanup::PlaceholderCleanupRegistry::default(),
-            ),
-            placeholder_controller: Arc::new(
-                super::super::placeholder_controller::PlaceholderController::default(),
-            ),
-            placeholder_live_events: Arc::new(
-                super::super::placeholder_live_events::PlaceholderLiveEvents::default(),
-            ),
-            placeholder_live_events_enabled: false,
-            status_panel_v2_enabled: false,
+            // #3038 S4: wrapped verbatim at the first-member position
+            // (evaluation-order preserved).
+            ui: super::super::PlaceholderState {
+                placeholder_cleanup: Arc::new(
+                    super::super::placeholder_cleanup::PlaceholderCleanupRegistry::default(),
+                ),
+                placeholder_controller: Arc::new(
+                    super::super::placeholder_controller::PlaceholderController::default(),
+                ),
+                placeholder_live_events: Arc::new(
+                    super::super::placeholder_live_events::PlaceholderLiveEvents::default(),
+                ),
+                placeholder_live_events_enabled: false,
+                status_panel_v2_enabled: false,
+            },
             queued: super::super::QueuedPlaceholderState {
                 queued_placeholders: dashmap::DashMap::new(),
                 queue_exit_placeholder_clears: dashmap::DashMap::new(),

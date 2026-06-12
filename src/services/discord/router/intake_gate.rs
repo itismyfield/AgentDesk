@@ -945,8 +945,8 @@ async fn reuse_merged_queued_placeholder(
     data.shared
         .insert_queued_placeholder_locked(channel_id, user_msg_id, placeholder_msg_id);
 
-    // Refresh the card body with the merged request text. `ensure_queued` is
-    // idempotent: an unchanged render coalesces, a changed one edits.
+    // Refresh the card body with merged request text; unchanged renders
+    // coalesce, changed ones edit.
     let gateway = super::super::gateway::DiscordGateway::new(
         ctx.http.clone(),
         data.shared.clone(),
@@ -970,17 +970,15 @@ async fn reuse_merged_queued_placeholder(
     };
     let outcome = data
         .shared
+        .ui
         .placeholder_controller
         .ensure_queued(&gateway, key, queued_input)
         .await;
 
-    // codex round-1 P2 (edit-failure rollback): only commit the re-key when the
-    // card actually renders (`Edited`/`Coalesced`). On `EditFailed`/`Rejected`
-    // the card on Discord may be gone or invalid, so restore the mapping to the
-    // prior source id and report failure — the caller then falls back to the
-    // fresh-card POST path, mirroring how `render_visible_queued_ack` treats a
-    // failed `ensure_queued`. The persistence lock is held across the rollback
-    // so no concurrent drain observes the half-applied re-key.
+    // codex round-1 P2 (edit-failure rollback): only commit the re-key after
+    // `Edited`/`Coalesced`. On `EditFailed`/`Rejected`, restore the prior source
+    // id and let the caller fall back to fresh POST, with the persistence lock
+    // held so no drain observes the half-applied re-key.
     if !matches!(
         outcome,
         super::super::placeholder_controller::PlaceholderControllerOutcome::Edited
@@ -1150,6 +1148,7 @@ async fn reuse_any_queued_placeholder_for_channel(
     };
     let outcome = data
         .shared
+        .ui
         .placeholder_controller
         .ensure_queued(&gateway, key, queued_input)
         .await;
@@ -1350,6 +1349,7 @@ async fn render_visible_queued_ack(
     };
     let outcome = data
         .shared
+        .ui
         .placeholder_controller
         .ensure_queued(&gateway, key, queued_input)
         .await;

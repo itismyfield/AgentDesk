@@ -82,14 +82,18 @@ pub(in crate::services::discord) fn flush_placeholder_live_events(
     let events = tool_state.take_placeholder_events();
     let status_events = tool_state.take_status_events();
     let mut dirty = false;
-    if (shared.placeholder_live_events_enabled || shared.status_panel_v2_enabled)
+    if (shared.ui.placeholder_live_events_enabled || shared.ui.status_panel_v2_enabled)
         && !events.is_empty()
     {
-        shared.placeholder_live_events.push_many(channel_id, events);
+        shared
+            .ui
+            .placeholder_live_events
+            .push_many(channel_id, events);
         dirty = true;
     }
-    if shared.status_panel_v2_enabled && !status_events.is_empty() {
+    if shared.ui.status_panel_v2_enabled && !status_events.is_empty() {
         shared
+            .ui
             .placeholder_live_events
             .push_status_events(channel_id, status_events);
         dirty = true;
@@ -114,7 +118,7 @@ pub(in crate::services::discord) fn build_watcher_placeholder_status_block(
     status_panel_msg_id: Option<serenity::MessageId>,
 ) -> String {
     if watcher_placeholder_uses_status_panel_only(
-        shared.status_panel_v2_enabled,
+        shared.ui.status_panel_v2_enabled,
         status_panel_msg_id,
     ) {
         return crate::services::discord::formatting::build_processing_status_block(indicator);
@@ -126,10 +130,10 @@ pub(in crate::services::discord) fn build_watcher_placeholder_status_block(
         full_response,
     );
     if watcher_placeholder_inlines_live_events(
-        shared.placeholder_live_events_enabled,
-        shared.status_panel_v2_enabled,
+        shared.ui.placeholder_live_events_enabled,
+        shared.ui.status_panel_v2_enabled,
         status_panel_msg_id,
-    ) && let Some(block) = shared.placeholder_live_events.render_block(channel_id)
+    ) && let Some(block) = shared.ui.placeholder_live_events.render_block(channel_id)
     {
         return format!("{status_block}\n{block}");
     }

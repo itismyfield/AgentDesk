@@ -513,7 +513,7 @@ async fn run_placeholder_sweep_pass(
                                         channel_id: serenity::ChannelId::new(state.channel_id),
                                         message_id: serenity::MessageId::new(msg_id),
                                     };
-                                    shared.placeholder_controller.detach(&key);
+                                    shared.ui.placeholder_controller.detach(&key);
                                 }
                             }
                         }
@@ -600,7 +600,7 @@ async fn run_placeholder_sweep_pass(
                                 channel_id: serenity::ChannelId::new(state.channel_id),
                                 message_id: serenity::MessageId::new(msg_id),
                             };
-                            shared.placeholder_controller.detach(&key);
+                            shared.ui.placeholder_controller.detach(&key);
                         }
                     }
                 }
@@ -816,7 +816,7 @@ async fn sweep_orphan_status_panel(
     // executing cutover needs the async `PanelSink` PR-2 deferred). The actor is
     // NOT spawned when v2 is off, so this v2 guard short-circuits the awaited
     // shadow read (whose ack would never be answered), mirroring `recovery_engine`.
-    if shared.status_panel_v2_enabled {
+    if shared.ui.status_panel_v2_enabled {
         let controller_target = shared
             .status_panel_controller
             .sweeper_reclaim_parity_id(
