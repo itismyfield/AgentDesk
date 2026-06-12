@@ -1511,6 +1511,9 @@ pub(crate) async fn run_stall_watchdog_pass(
     registry: &HealthRegistry,
     provider: &ProviderKind,
 ) -> usize {
+    let now_unix_secs = chrono::Utc::now().timestamp();
+    stall_liveness::gc_stall_watchdog_liveness_state(now_unix_secs);
+
     // Multi-bot deployments register several runtimes under one provider
     // name. Sweep *every* runtime's watcher channels (a name-only lookup
     // would only ever visit the first-registered runtime, so the second
@@ -1544,7 +1547,6 @@ pub(crate) async fn run_stall_watchdog_pass(
         return relay_auto_heal::run_orphan_token_auto_heal_pass(registry, provider, &runtimes)
             .await;
     }
-    let now_unix_secs = chrono::Utc::now().timestamp();
     let mut cleaned = 0usize;
     for (channel_id, shared) in candidate_channels {
         // Use the already-selected runtime. A provider-name scan can be
@@ -1710,10 +1712,8 @@ pub(crate) async fn run_stall_watchdog_pass(
             }
             liveness_decision = Some(decision);
         } else {
-            stall_liveness::clear_stall_watchdog_liveness_deferral(
-                provider,
-                channel_id,
-                snapshot.tmux_session.as_deref(),
+            stall_liveness::clear_stall_watchdog_liveness_state_if_healthy(
+                provider, channel_id, &snapshot,
             );
         }
         if !should_clean {

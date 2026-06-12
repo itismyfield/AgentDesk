@@ -11,6 +11,7 @@ use super::snapshot::WatcherStateSnapshot;
 
 pub(super) const STALL_WATCHDOG_POSITIVE_LIVENESS_SECS: u64 = 120;
 pub(super) const STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS: u8 = 3;
+pub(super) const STALL_LIVENESS_STATE_TTL_SECS: u64 = 1800;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct StallLivenessKey {
@@ -23,11 +24,13 @@ struct StallLivenessKey {
 struct OffsetObservation {
     offset: u64,
     advanced_at_unix_secs: Option<i64>,
+    last_updated_unix_secs: i64,
 }
 
 #[derive(Clone, Debug)]
 struct DeferralState {
     count: u8,
+    last_updated_unix_secs: i64,
 }
 
 static OFFSET_OBSERVATIONS: LazyLock<dashmap::DashMap<StallLivenessKey, OffsetObservation>> =
@@ -191,6 +194,7 @@ pub(super) fn evaluate_stall_watchdog_liveness(
         key,
         DeferralState {
             count: deferral_count,
+            last_updated_unix_secs: now_unix_secs,
         },
     );
     StallWatchdogLivenessDecision {
@@ -198,14 +202,6 @@ pub(super) fn evaluate_stall_watchdog_liveness(
         evidence,
         max_deferrals,
     }
-}
-
-pub(super) fn clear_stall_watchdog_liveness_deferral(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    tmux_session: Option<&str>,
-) {
-    DEFERRAL_STATE.remove(&StallLivenessKey::new(provider, channel_id, tmux_session));
 }
 
 pub(super) fn clear_stall_watchdog_liveness_state(
@@ -216,6 +212,34 @@ pub(super) fn clear_stall_watchdog_liveness_state(
     let key = StallLivenessKey::new(provider, channel_id, tmux_session);
     DEFERRAL_STATE.remove(&key);
     OFFSET_OBSERVATIONS.remove(&key);
+}
+
+pub(super) fn clear_stall_watchdog_liveness_state_if_healthy(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    snapshot: &WatcherStateSnapshot,
+) -> bool {
+    if !stall_watchdog_liveness_state_is_healthy(snapshot) {
+        return false;
+    }
+    clear_stall_watchdog_liveness_state(provider, channel_id, snapshot.tmux_session.as_deref());
+    true
+}
+
+pub(super) fn gc_stall_watchdog_liveness_state(now_unix_secs: i64) {
+    OFFSET_OBSERVATIONS.retain(|_, observation| {
+        !liveness_state_expired(observation.last_updated_unix_secs, now_unix_secs)
+    });
+    DEFERRAL_STATE
+        .retain(|_, state| !liveness_state_expired(state.last_updated_unix_secs, now_unix_secs));
+}
+
+fn stall_watchdog_liveness_state_is_healthy(snapshot: &WatcherStateSnapshot) -> bool {
+    !snapshot.inflight_state_present || snapshot.inflight_terminal_delivery_committed
+}
+
+fn liveness_state_expired(last_updated_unix_secs: i64, now_unix_secs: i64) -> bool {
+    saturating_age_secs(last_updated_unix_secs, now_unix_secs) > STALL_LIVENESS_STATE_TTL_SECS
 }
 
 /// #3169: runtime jsonl / generation mtime liveness probe retained for the
@@ -398,6 +422,7 @@ fn observe_pane_offset(
         OffsetObservation {
             offset: current_offset,
             advanced_at_unix_secs,
+            last_updated_unix_secs: now_unix_secs,
         },
     );
     (
@@ -652,6 +677,25 @@ mod tests {
         )
     }
 
+    fn liveness_key(
+        provider: &ProviderKind,
+        channel: ChannelId,
+        tmux_session: &str,
+    ) -> StallLivenessKey {
+        StallLivenessKey::new(provider, channel, Some(tmux_session))
+    }
+
+    fn liveness_state_presence(key: &StallLivenessKey) -> (bool, bool) {
+        (
+            OFFSET_OBSERVATIONS.contains_key(key),
+            DEFERRAL_STATE.contains_key(key),
+        )
+    }
+
+    fn deferral_count(key: &StallLivenessKey) -> Option<u8> {
+        DEFERRAL_STATE.get(key).map(|state| state.count)
+    }
+
     #[test]
     fn positive_liveness_defers_cleanup_and_logs_reason() {
         let provider = ProviderKind::Codex;
@@ -798,5 +842,173 @@ mod tests {
             logs.contains("liveness_deferral_limit_reached=true"),
             "{logs}"
         );
+    }
+
+    #[test]
+    fn liveness_deferral_streak_survives_desync_flap_without_positive_health() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(3364);
+        let tmux_session = "AgentDesk-codex-liveness-flap";
+        let key = liveness_key(&provider, channel, tmux_session);
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+        let file = tempfile::NamedTempFile::new().expect("temp transcript");
+        let inflight = inflight_with_output(
+            channel.get(),
+            tmux_session,
+            Some(file.path().display().to_string()),
+        );
+        let snap = snapshot(channel.get(), tmux_session, Some(20));
+        let now = chrono::Utc::now().timestamp();
+
+        for expected_count in 1..=2 {
+            let decision = evaluate_stall_watchdog_liveness(
+                &provider,
+                channel,
+                &snap,
+                Some(&inflight),
+                now,
+                STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+                STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            );
+            assert_eq!(
+                decision.action,
+                StallWatchdogLivenessAction::Defer {
+                    deferral_count: expected_count
+                }
+            );
+        }
+
+        let mut flapped_snapshot = snap.clone();
+        flapped_snapshot.desynced = false;
+        flapped_snapshot.relay_health.desynced = false;
+        assert!(!clear_stall_watchdog_liveness_state_if_healthy(
+            &provider,
+            channel,
+            &flapped_snapshot,
+        ));
+        assert_eq!(deferral_count(&key), Some(2));
+
+        let third = evaluate_stall_watchdog_liveness(
+            &provider,
+            channel,
+            &snap,
+            Some(&inflight),
+            now,
+            STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+        );
+        assert_eq!(
+            third.action,
+            StallWatchdogLivenessAction::Defer { deferral_count: 3 }
+        );
+
+        let decision = evaluate_stall_watchdog_liveness(
+            &provider,
+            channel,
+            &snap,
+            Some(&inflight),
+            now,
+            STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+        );
+        assert_eq!(
+            decision.action,
+            StallWatchdogLivenessAction::ProceedAfterDeferralLimit {
+                previous_deferrals: STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS
+            }
+        );
+
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+    }
+
+    #[test]
+    fn healthy_recovery_clears_all_liveness_state() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(3365);
+        let tmux_session = "AgentDesk-codex-liveness-healthy-clear";
+        let key = liveness_key(&provider, channel, tmux_session);
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+        let file = tempfile::NamedTempFile::new().expect("temp transcript");
+        let inflight = inflight_with_output(
+            channel.get(),
+            tmux_session,
+            Some(file.path().display().to_string()),
+        );
+        let snap = snapshot(channel.get(), tmux_session, Some(20));
+        let now = chrono::Utc::now().timestamp();
+
+        let decision = evaluate_stall_watchdog_liveness(
+            &provider,
+            channel,
+            &snap,
+            Some(&inflight),
+            now,
+            STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+        );
+        assert!(decision.should_defer());
+        assert_eq!(liveness_state_presence(&key), (true, true));
+
+        let mut healthy_snapshot = snap.clone();
+        healthy_snapshot.inflight_terminal_delivery_committed = true;
+        assert!(clear_stall_watchdog_liveness_state_if_healthy(
+            &provider,
+            channel,
+            &healthy_snapshot,
+        ));
+        assert_eq!(liveness_state_presence(&key), (false, false));
+    }
+
+    #[test]
+    fn ttl_gc_removes_stale_liveness_state_and_keeps_fresh_entries() {
+        let provider = ProviderKind::Codex;
+        let old_channel = ChannelId::new(3366);
+        let fresh_channel = ChannelId::new(3367);
+        let old_tmux_session = "AgentDesk-codex-liveness-ttl-old";
+        let fresh_tmux_session = "AgentDesk-codex-liveness-ttl-fresh";
+        let old_key = liveness_key(&provider, old_channel, old_tmux_session);
+        let fresh_key = liveness_key(&provider, fresh_channel, fresh_tmux_session);
+        clear_stall_watchdog_liveness_state(&provider, old_channel, Some(old_tmux_session));
+        clear_stall_watchdog_liveness_state(&provider, fresh_channel, Some(fresh_tmux_session));
+
+        let now = 10_000;
+        let expired_at = now - STALL_LIVENESS_STATE_TTL_SECS as i64 - 1;
+        let fresh_at = now - STALL_LIVENESS_STATE_TTL_SECS as i64;
+        OFFSET_OBSERVATIONS.insert(
+            old_key.clone(),
+            OffsetObservation {
+                offset: 20,
+                advanced_at_unix_secs: Some(expired_at),
+                last_updated_unix_secs: expired_at,
+            },
+        );
+        DEFERRAL_STATE.insert(
+            old_key.clone(),
+            DeferralState {
+                count: 2,
+                last_updated_unix_secs: expired_at,
+            },
+        );
+        OFFSET_OBSERVATIONS.insert(
+            fresh_key.clone(),
+            OffsetObservation {
+                offset: 30,
+                advanced_at_unix_secs: Some(fresh_at),
+                last_updated_unix_secs: fresh_at,
+            },
+        );
+        DEFERRAL_STATE.insert(
+            fresh_key.clone(),
+            DeferralState {
+                count: 1,
+                last_updated_unix_secs: fresh_at,
+            },
+        );
+
+        gc_stall_watchdog_liveness_state(now);
+
+        assert_eq!(liveness_state_presence(&old_key), (false, false));
+        assert_eq!(liveness_state_presence(&fresh_key), (true, true));
+        clear_stall_watchdog_liveness_state(&provider, fresh_channel, Some(fresh_tmux_session));
     }
 }
