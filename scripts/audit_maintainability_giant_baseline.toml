@@ -125,7 +125,10 @@
 # into `runtime_bootstrap/shared_data.rs` (gated on the SharedData S1-S3
 # slices, now merged). The root keeps only RunBotContext + run_bot +
 # mod/re-export plumbing; final registry/baseline cleanup is the S5 slice.
-"src/services/discord/runtime_bootstrap.rs" = 369
+# #3038 run_bot S5: lowered 369 -> 274 by moving the 120-line leader gateway
+# runtime tail into `runtime_bootstrap/gateway_runtime.rs`; all
+# `runtime_bootstrap/` child modules remain under the 700-line namespace cap.
+"src/services/discord/runtime_bootstrap.rs" = 274
 # #3034 batch-8: lowered 2655 -> 2645 (dead-code removal: `stop_provider_channel_runtime`).
 # #3293: lowered 2645 -> 2641 (mailbox probe routed through the non-creating
 # `health/mailbox.rs::peeked_provider_mailbox_state`).

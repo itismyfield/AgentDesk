@@ -8,7 +8,7 @@
 > [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-06-11 (against #3306 idle-relay registry/dedupe-mirror drift self-heal — new non-giant `src/services/discord/idle_relay_drift.rs` rate-limits the per-session drift WARN and one-shot self-heals the authoritative registry from a DURABLE source — the settings binding or the `sessions.channel_id` durable column via the new `load_session_channel_id_pg` — guarded by live-pane + instance-id + mirror-agreement so #3018's single-authority / never-route-from-mirror invariant holds; `tui_prompt_relay.rs` net 0-line at the 5429 freeze, `mod.rs` +1 to the 4987 freeze, `db/dispatched_sessions.rs` +48; on top of #3303 deferred-claim anchor reconcile — the `tui_direct_abort_marker` module is decomposed into a directory module of `mod.rs` + `store.rs` + `deferred_claim.rs`, all non-giant, and a successful watcher-owned deferred claim now records an own-identity `DeferredClaim` marker so the anchor's `⏳` converges to `✅` on the own commit or a bounded sweep `⚠`; tmux_watcher / tui_prompt_relay / health recovery / placeholder_sweeper are 0-line changes; on top of #3216 resume-protection residual gaps on top of #3207 — session_runtime now adds a SAFE legacy NULL-channel_id fallback to the channel-scoped cwd resolves via resolve_cwd_for_session_key honored only for a single legacy row, plus a live-tmux recovery-cwd reconcile in auto_restore_session_force via reconcile_recovery_cwd and correct_session_cwd_to_tmux that adopts the live pane cwd over a divergent DB cwd and self-heals the row; #3207 comprehensive channel_id scoping of session-cwd DB resolves — auto_restore_session_force restart restore via restore_session_cwd_from_db and watcher recovery via load_restored_session_cwd require channel_id = $2; on top of #3105 dead/orphaned TUI-session mirror eviction made flake-resistant and run off the Tokio executor).
+> Last refreshed: 2026-06-12 (against #3038 run_bot S5 closing pass).
 
 ## Read This First
 
@@ -776,21 +776,22 @@
     `finalize_stale_streaming_footer` / `text_ends_with_streaming_footer` shared
     terminal-idle reconciliation helpers + their unit tests).
   - `src/services/discord/prompt_builder/` (directory, refactored).
-  - `src/services/discord/runtime_bootstrap.rs` (369 production lines after
-    #3038 run_bot S0/S4; characterization tests pin the startup-doctor barrier,
+  - `src/services/discord/runtime_bootstrap.rs` (274 production lines after
+    #3038 run_bot S0/S5; characterization tests pin the startup-doctor barrier,
     restored settings filters, queued-placeholder filtering/deletion, and
     gateway intents, then the low-risk clusters moved verbatim into
     `runtime_bootstrap/`: `restored_state.rs` (124), `queued_placeholders.rs`
     (193), `startup_doctor.rs` (156), `orphan_recovery.rs` (337),
     `session_gc.rs` (102 prod / 69 test), `framework_setup.rs` (287),
-    `spawns.rs` (218), `recovery_flush.rs` (356), `voice.rs` (140),
-    `gateway_lease.rs` (187), `shutdown.rs` (203), `intake.rs` (63), and —
-    once the SharedData S1-S3 slices merged — `shared_data.rs` (176, the
-    `run_bot_build_shared_data` builder plus its side-effect-order doc).
+    `spawns.rs` (229), `recovery_flush.rs` (357), `voice.rs` (140),
+    `gateway_lease.rs` (190), `shutdown.rs` (207), `intake.rs` (63),
+    `shared_data.rs` (176, the `run_bot_build_shared_data` builder plus its
+    side-effect-order doc), and `gateway_runtime.rs` (147, the leader runtime
+    tail from restored logging through backend event-loop entry).
     The namespace is capped at 700 prod lines per child module in
     `audit_maintainability_config.toml`; the root is no longer a prod giant and
-    was removed from `giant_file_registry.toml`; only the S5 accounting
-    cleanup slice remains).
+    was removed from `giant_file_registry.toml`; #3038 S5 locked the final
+    root ratchet at 274 production lines).
   - `src/services/discord/session_runtime.rs` (1753 lines).
   - `src/services/discord/voice_barge_in.rs` (4657 lines; net +0 from #3034
     scoped dead-code allows on the test-only runtime API

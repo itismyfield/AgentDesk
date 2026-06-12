@@ -4,7 +4,7 @@
 > moving any AgentDesk runtime, worker, dispatch, provider, MCP, merge, or test
 > execution path from one dcserver node to multiple nodes.
 >
-> Last refreshed: 2026-06-12 (against #3038 run_bot S4 shared-data builder move).
+> Last refreshed: 2026-06-12 (against #3038 run_bot S5 closing pass).
 
 ## Read This First
 
@@ -22,16 +22,19 @@
 ### `multinode / discord_gateway_singleton`
 
 - feature: `multinode / discord_gateway_singleton`
-- canonical_modules: `src/services/discord/runtime_bootstrap.rs` builds the
-  Serenity client and preserves the call order; `runtime_bootstrap/gateway_lease.rs`
-  owns gateway lease acquisition, keepalive, and self-fencing;
-  `runtime_bootstrap/shutdown.rs` owns SIGTERM persistence and gateway backend
-  execution; `runtime_bootstrap/intake.rs` owns the standby intake-worker spawn.
+- canonical_modules: `src/services/discord/runtime_bootstrap.rs` preserves the
+  bootstrap call order; `runtime_bootstrap/gateway_runtime.rs` builds the
+  Serenity client and enters the leader gateway event loop;
+  `runtime_bootstrap/gateway_lease.rs` owns gateway lease acquisition,
+  keepalive, and self-fencing; `runtime_bootstrap/shutdown.rs` owns SIGTERM
+  persistence and gateway backend execution; `runtime_bootstrap/intake.rs` owns
+  the standby intake-worker spawn.
 - legacy_modules: none. The current gateway owner is the active dcserver process
   for that provider.
 - do_not_edit_without_migration_plan:
   `src/services/discord/runtime_bootstrap.rs` gateway startup order plus
-  `src/services/discord/runtime_bootstrap/gateway_lease.rs` and
+  `src/services/discord/runtime_bootstrap/gateway_runtime.rs`,
+  `src/services/discord/runtime_bootstrap/gateway_lease.rs`, and
   `src/services/discord/runtime_bootstrap/shutdown.rs` lease/shutdown paths,
   especially watcher cancellation on gateway lease loss.
 - active_callsite_coverage: single-node runtime with an existing gateway lease.
@@ -386,6 +389,13 @@
 
 ### Audited touches
 
+- #3038 run_bot S5: the leader gateway runtime tail moved verbatim from
+  `runtime_bootstrap.rs` into `runtime_bootstrap/gateway_runtime.rs`: restored
+  generation/model/fast-mode logging, health registry registration,
+  slash-command/framework/client construction, gateway lease keepalive spawn,
+  SIGTERM handler spawn, and backend event-loop entry remain in the same order.
+  The root `run_bot` body now delegates that tail after the lease succeeds; no
+  gateway ownership, worker routing, singleton, or lease semantics changed.
 - #3038 run_bot S4: `run_bot_build_shared_data` (and its side-effect-order
   doc comment) moved verbatim from `runtime_bootstrap.rs` into
   `runtime_bootstrap/shared_data.rs`, unblocked by the merged SharedData
