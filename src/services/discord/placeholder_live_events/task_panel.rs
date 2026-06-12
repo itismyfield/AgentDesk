@@ -250,6 +250,10 @@ pub(super) fn task_tool_terminal_marker(status: Option<&str>) -> Option<&'static
     }
 }
 
+pub(super) fn task_tool_slot_is_unfinished_background(slot: &TaskToolSlot) -> bool {
+    slot.background && task_tool_terminal_marker(slot.status.as_deref()).is_none()
+}
+
 fn short_dispatch_id(dispatch_id: &str) -> String {
     dispatch_id.chars().take(DISPATCH_ID_SHORT_LEN).collect()
 }

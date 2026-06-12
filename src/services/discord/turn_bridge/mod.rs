@@ -2157,8 +2157,19 @@ pub(super) fn spawn_turn_bridge(
             bool, // ack_consumed
         )> = None;
         let mut active_background_child_session_ids: Vec<i64> = Vec::new();
+        let single_message_panel_footer_mode =
+            bridge_single_message_panel_footer_enabled(shared_owned.ui.status_panel_v2_enabled);
         if shared_owned.ui.placeholder_live_events_enabled || shared_owned.ui.status_panel_v2_enabled {
-            shared_owned.ui.placeholder_live_events.clear_channel(channel_id);
+            if single_message_panel_footer_mode {
+                supersede_bridge_registered_completion_footer(shared_owned.as_ref(), channel_id)
+                    .await;
+                shared_owned
+                    .ui
+                    .placeholder_live_events
+                    .clear_channel_preserving_footer_residuals(channel_id);
+            } else {
+                shared_owned.ui.placeholder_live_events.clear_channel(channel_id);
+            }
         }
         let mut transport_error = false;
         let mut api_friction_reports = Vec::new();
@@ -2357,8 +2368,6 @@ pub(super) fn spawn_turn_bridge(
             &mut inflight_state,
             bridge.reuse_status_panel_message,
         );
-        let single_message_panel_footer_mode =
-            bridge_single_message_panel_footer_enabled(shared_owned.ui.status_panel_v2_enabled);
         if single_message_panel_footer_mode {
             status_panel_msg_id = None;
             inflight_state.status_message_id = None;

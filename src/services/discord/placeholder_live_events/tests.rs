@@ -1892,6 +1892,245 @@ fn completion_footer_background_bash_animates_and_flips_on_notification() {
 }
 
 #[test]
+fn footer_residual_entries_carry_to_next_turn_and_finished_entries_do_not() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_089_107);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id_for_footer_mode(
+            "Bash",
+            &json!({
+                "command": "codex exec carry",
+                "description": "Carry bash task",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_carry_bash"),
+            true,
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id_for_footer_mode(
+            "Bash",
+            &json!({
+                "command": "codex exec done",
+                "description": "Finished bash task",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_done_bash"),
+            true,
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_with_tool_use_id(
+            "background",
+            "completed",
+            "Background command completed",
+            Some("toolu_done_bash"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({
+                "subagent_type": "bgworker",
+                "description": "Carry agent task",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_carry_agent"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Task"), false, Some("toolu_carry_agent")),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({
+                "subagent_type": "bgworker",
+                "description": "Finished agent task",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_done_agent"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Task"), false, Some("toolu_done_agent")),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_with_tool_use_id(
+            "subagent",
+            "completed",
+            "finished agent done",
+            Some("toolu_done_agent"),
+        ),
+    );
+
+    events.clear_channel_preserving_footer_residuals(channel_id);
+
+    let live = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(live.contains("Bash Carry bash task"));
+    assert!(live.contains("bgworker Carry agent task"));
+    assert!(!live.contains("Finished bash task"));
+    assert!(!live.contains("Finished agent task"));
+
+    let footer = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let footer_block = footer.block.expect("carried residual footer should render");
+    assert!(footer.has_unfinished_entries);
+    assert!(footer_block.contains("Bash Carry bash task ⠸"));
+    assert!(footer_block.contains("bgworker Carry agent task ⠸"));
+    assert!(!footer_block.contains("Finished bash task"));
+    assert!(!footer_block.contains("Finished agent task"));
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id_for_footer_mode(
+            "Bash",
+            &json!({
+                "command": "codex exec carry replay",
+                "description": "Carry bash task replay",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_carry_bash"),
+            true,
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({
+                "subagent_type": "bgworker",
+                "description": "Carry agent task replay",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_carry_agent"),
+        ),
+    );
+
+    let deduped = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let slot_lines = deduped
+        .lines()
+        .filter(|line| line.starts_with("└ "))
+        .collect::<Vec<_>>();
+    assert_eq!(deduped.matches("toolu_carry_bash").count(), 0);
+    assert_eq!(
+        slot_lines
+            .iter()
+            .filter(|line| line.contains("Carry bash task"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        slot_lines
+            .iter()
+            .filter(|line| line.contains("Carry agent task"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn carried_residual_entries_finalize_by_exact_tool_use_id_on_latest_state() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_089_108);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id_for_footer_mode(
+            "Bash",
+            &json!({
+                "command": "codex exec exact",
+                "description": "Exact carried bash",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_exact_bash"),
+            true,
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({
+                "subagent_type": "bgworker",
+                "description": "Exact carried agent",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_exact_agent"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Task"), false, Some("toolu_exact_agent")),
+    );
+    events.clear_channel_preserving_footer_residuals(channel_id);
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_with_tool_use_id(
+            "background",
+            "completed",
+            "wrong bash complete",
+            Some("toolu_other_bash"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_with_tool_use_id(
+            "subagent",
+            "completed",
+            "wrong agent complete",
+            Some("toolu_other_agent"),
+        ),
+    );
+    let still_running = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let still_running_block = still_running.block.expect("carried entries should render");
+    assert!(still_running.has_unfinished_entries);
+    assert!(still_running_block.contains("Exact carried bash ⠸"));
+    assert!(still_running_block.contains("Exact carried agent ⠸"));
+    assert!(!still_running_block.contains('✓'));
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_with_tool_use_id(
+            "background",
+            "completed",
+            "exact bash complete",
+            Some("toolu_exact_bash"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_with_tool_use_id(
+            "subagent",
+            "completed",
+            "exact agent complete",
+            Some("toolu_exact_agent"),
+        ),
+    );
+    let done = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    let done_block = done.block.expect("finished carried entries should render");
+    assert!(!done.has_unfinished_entries);
+    assert!(done_block.contains("Exact carried bash ✓"));
+    assert!(done_block.contains("Exact carried agent — exact agent complete ✓"));
+    assert!(!done_block.contains('⠼'));
+}
+
+#[test]
 fn background_bash_slots_are_footer_flag_gated() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(3_089_105);

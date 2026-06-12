@@ -13,7 +13,8 @@ use super::status_events::{is_schedule_wakeup_tool, parse_eta_secs};
 use super::subagent_summary::render_subagent_done_summary;
 use super::task_panel::{
     TaskPanelSnapshot, TaskToolSlot, finish_background_task_tool_slot, render_task_panel_line,
-    render_task_tool_slot, upsert_background_task_tool_slot, upsert_task_tool_slot,
+    render_task_tool_slot, task_tool_slot_is_unfinished_background,
+    upsert_background_task_tool_slot, upsert_task_tool_slot,
 };
 use super::workflow_panel::{
     WorkflowAgentSlot, WorkflowSlot, render_workflow_slot, trim_workflow_slot, trim_workflows,
@@ -110,6 +111,28 @@ impl StatusPanelState {
         self.workflows.clear();
     }
 
+    pub(super) fn reset_turn_content_preserving_unfinished_footer_residuals(&mut self) -> bool {
+        let tasks = self
+            .tasks
+            .iter()
+            .filter(|slot| task_tool_slot_is_unfinished_background(slot))
+            .cloned()
+            .collect::<Vec<_>>();
+        let subagents = self
+            .subagents
+            .iter()
+            .filter(|slot| slot.is_unfinished_background())
+            .cloned()
+            .collect::<Vec<_>>();
+        let has_residuals = !tasks.is_empty() || !subagents.is_empty();
+        *self = StatusPanelState {
+            tasks,
+            subagents,
+            ..StatusPanelState::default()
+        };
+        has_residuals
+    }
+
     pub(super) fn apply(&mut self, event: StatusEvent) {
         match event {
             StatusEvent::ToolStart { name, args_summary } => {
@@ -138,6 +161,19 @@ impl StatusPanelState {
                 let subagent_type = subagent_type
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or_else(|| "Task".to_string());
+                if background
+                    && let Some(id) = tool_use_id.as_deref().filter(|id| !id.trim().is_empty())
+                    && let Some(slot) = self.subagents.iter_mut().rev().find(|slot| {
+                        slot.background
+                            && slot.finished.is_none()
+                            && slot.tool_use_id.as_deref() == Some(id)
+                    })
+                {
+                    slot.subagent_type = subagent_type;
+                    slot.desc = desc.clone();
+                    self.status = DerivedStatus::SubagentRunning { desc };
+                    return;
+                }
                 self.subagents.push(SubagentSlot {
                     subagent_type,
                     desc: desc.clone(),
@@ -199,7 +235,7 @@ impl StatusPanelState {
                 let has_summary = summary.as_ref().is_some_and(|s| !s.is_empty());
                 let target = match matched {
                     Some(index) => Some(index),
-                    None if ack_only && id.is_some() => None,
+                    None if id.is_some() => None,
                     None if ack_only => self
                         .subagents
                         .iter()
@@ -631,6 +667,12 @@ pub(super) fn render_subagent_slot(slot: &SubagentSlot) -> String {
         line.push_str(marker);
     }
     truncate_chars(&line, EVENT_LINE_MAX_CHARS)
+}
+
+impl SubagentSlot {
+    fn is_unfinished_background(&self) -> bool {
+        self.background && self.finished.is_none()
+    }
 }
 
 fn sanitize_label(raw: &str) -> String {
