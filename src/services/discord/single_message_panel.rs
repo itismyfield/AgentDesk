@@ -51,13 +51,58 @@ pub(in crate::services::discord) fn compose_footer_status_block(
     panel_text: &str,
 ) -> String {
     let spinner = super::formatting::build_processing_status_block(indicator);
-    let panel_text = clamp_footer_panel_text(panel_text.trim());
+    let panel_text = panel_text.trim();
     let status_block = if panel_text.is_empty() {
         spinner
+    } else if let Some(status_block) = compose_merged_footer_status_block(indicator, panel_text) {
+        status_block
     } else {
-        format!("{spinner}\n{panel_text}")
+        spinner
     };
     clamp_footer_status_block(status_block)
+}
+
+fn compose_merged_footer_status_block(indicator: &str, panel_text: &str) -> Option<String> {
+    let (header_line, panel_body) = panel_text.split_once('\n').unwrap_or((panel_text, ""));
+    let header = merged_footer_header_line(indicator, header_line)?;
+    let panel_body = clamp_footer_panel_text(panel_body);
+    if panel_body.trim().is_empty() {
+        Some(header)
+    } else {
+        Some(format!("{header}\n{panel_body}"))
+    }
+}
+
+fn merged_footer_header_line(indicator: &str, header_line: &str) -> Option<String> {
+    let header = strip_panel_header_status_marker(header_line)?;
+    if header.is_empty() {
+        None
+    } else {
+        Some(format!("{indicator} {header}"))
+    }
+}
+
+fn strip_panel_header_status_marker(header_line: &str) -> Option<&str> {
+    let header_line = header_line.trim();
+    if header_line.is_empty() {
+        return None;
+    }
+
+    let mut chars = header_line.char_indices();
+    let (_, first) = chars.next()?;
+    let rest_start = chars
+        .next()
+        .map(|(idx, _)| idx)
+        .unwrap_or(header_line.len());
+    if is_panel_header_status_marker(first) {
+        Some(header_line[rest_start..].trim_start())
+    } else {
+        Some(header_line)
+    }
+}
+
+fn is_panel_header_status_marker(marker: char) -> bool {
+    matches!(marker, '🟢' | '💤' | '⏰' | '✅' | '🔧' | '🧵' | '🧬')
 }
 
 fn clamp_footer_panel_text(panel_text: &str) -> String {
@@ -161,7 +206,39 @@ fn footer_starts_with_spinner(footer: &str) -> bool {
     let Some(first_footer_line) = footer.lines().find(|line| !line.trim().is_empty()) else {
         return false;
     };
-    super::formatting::is_streaming_placeholder_status_line(first_footer_line.trim())
+    is_single_message_footer_status_line(first_footer_line.trim())
+}
+
+fn is_single_message_footer_status_line(line: &str) -> bool {
+    super::formatting::is_streaming_placeholder_status_line(line)
+        || is_merged_footer_status_line(line)
+}
+
+fn is_merged_footer_status_line(line: &str) -> bool {
+    let Some(status) = strip_footer_braille_spinner_prefix(line) else {
+        return false;
+    };
+    status.contains(" — ")
+        && status.contains("(<t:")
+        && (status.starts_with("진행 중")
+            || status.starts_with("monitor 대기")
+            || status.starts_with("scheduled wakeup")
+            || status.starts_with("**백그라운드 완료**")
+            || status.starts_with("**응답 완료**")
+            || status.starts_with("도구 실행 중")
+            || status.starts_with("subagent 실행 중")
+            || status.starts_with("workflow 실행 중"))
+}
+
+fn strip_footer_braille_spinner_prefix(line: &str) -> Option<&str> {
+    const BRAILLE_SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+    let mut chars = line.chars();
+    let first = chars.next()?;
+    if !BRAILLE_SPINNER_FRAMES.contains(&first) || !chars.next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    Some(chars.as_str().trim())
 }
 
 #[cfg(test)]
@@ -174,6 +251,10 @@ mod tests {
             .split_once('\n')
             .map(|(_, panel)| panel)
             .unwrap_or("")
+    }
+
+    fn footer_header(status_block: &str) -> &str {
+        status_block.lines().next().unwrap_or("")
     }
 
     #[test]
@@ -213,8 +294,22 @@ mod tests {
         let panel = "🟢 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n└ review inspect";
         let block = super::compose_footer_status_block("⠸", panel);
 
-        assert!(block.starts_with("⠸ 계속 처리 중\n🟢 진행 중"));
-        assert!(block.contains("Subagents\n└ review inspect"));
+        assert!(block.starts_with("⠸ 진행 중 — Claude (<t:1700000000:R>)"));
+        assert!(!footer_header(&block).contains('🟢'));
+        assert!(!block.contains("계속 처리 중"));
+        assert!(block.contains("\n\nSubagents\n└ review inspect"));
+    }
+
+    #[test]
+    fn footer_status_block_empty_panel_falls_back_to_processing_line() {
+        assert_eq!(
+            super::compose_footer_status_block("⠸", ""),
+            "⠸ 계속 처리 중"
+        );
+        assert_eq!(
+            super::compose_footer_status_block("⠸", " \n\t "),
+            "⠸ 계속 처리 중"
+        );
     }
 
     #[test]
@@ -222,24 +317,24 @@ mod tests {
         let panel = "Header\n\nTools\n└ cargo test";
         let block = super::compose_footer_status_block("⠸", panel);
 
-        assert_eq!(block, format!("⠸ 계속 처리 중\n{panel}"));
+        assert_eq!(block, "⠸ Header\n\nTools\n└ cargo test");
         assert!(!panel_portion(&block).ends_with("\n…"));
     }
 
     #[test]
-    fn footer_panel_over_budget_excludes_spinner_from_budget_s3() {
+    fn footer_panel_over_budget_excludes_merged_header_from_budget_s3() {
         let huge_panel = format!(
-            "{}\n{}\n{}",
+            "🟢 진행 중 — Claude (<t:1700000000:R>)\n{}\n{}\n{}",
             "a".repeat(290),
             "b".repeat(290),
             "c".repeat(100)
         );
         let block = super::compose_footer_status_block("⠸", &huge_panel);
-        let (spinner, panel) = block
+        let (header, panel) = block
             .split_once('\n')
-            .expect("over-budget panel should keep spinner and panel");
+            .expect("over-budget panel should keep merged header and panel body");
 
-        assert_eq!(spinner, "⠸ 계속 처리 중");
+        assert_eq!(header, "⠸ 진행 중 — Claude (<t:1700000000:R>)");
         assert!(panel.len() <= super::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES);
         assert!(panel.ends_with("\n…") || panel == "…");
         assert!(block.len() > super::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES);
@@ -247,17 +342,17 @@ mod tests {
 
     #[test]
     fn footer_panel_truncates_on_line_boundaries_s3() {
-        let first = "Header";
         let second = "a".repeat(250);
         let third = "b".repeat(250);
         let fourth = "c".repeat(250);
-        let panel = format!("{first}\n{second}\n{third}\n{fourth}");
+        let panel =
+            format!("🟢 진행 중 — Claude (<t:1700000000:R>)\n\n{second}\n{third}\n{fourth}");
         let block = super::compose_footer_status_block("⠸", &panel);
         let truncated_lines: Vec<&str> = panel_portion(&block).lines().collect();
 
         assert_eq!(
             truncated_lines,
-            vec![first, second.as_str(), third.as_str(), "…"]
+            vec!["", second.as_str(), third.as_str(), "…"]
         );
         assert!(!panel_portion(&block).contains(fourth.as_str()));
         assert!(panel_portion(&block).len() <= super::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES);
@@ -265,8 +360,10 @@ mod tests {
 
     #[test]
     fn footer_panel_byte_clamps_first_line_on_char_boundary_s3() {
-        let first_line = "가🙂".repeat(200);
-        let panel = format!("{first_line}\nSubagents\n└ reviewer inspect");
+        let panel_body_first_line = "가🙂".repeat(200);
+        let panel = format!(
+            "🟢 진행 중 — Claude (<t:1700000000:R>)\n{panel_body_first_line}\nSubagents\n└ reviewer inspect"
+        );
         let block = super::compose_footer_status_block("⠸", &panel);
         let panel = panel_portion(&block);
         let panel_lines: Vec<&str> = panel.lines().collect();
@@ -287,9 +384,9 @@ mod tests {
             "└ cargo test --lib single_message_panel ".repeat(120)
         );
         let status_block = super::compose_footer_status_block("⠸", &huge_panel);
-        let spinner = super::super::formatting::build_processing_status_block("⠸");
+        let merged_header = footer_header(&status_block);
         let max_footer_len =
-            2 + spinner.len() + 1 + super::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES;
+            2 + merged_header.len() + 1 + super::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES;
         let footer = format!("\n\n{status_block}");
         let expected_body_budget = DISCORD_MSG_LIMIT
             .saturating_sub(footer.len() + STREAMING_PLACEHOLDER_MARGIN_BYTES)
@@ -309,6 +406,26 @@ mod tests {
     }
 
     #[test]
+    fn footer_rollover_seed_carries_merged_header_but_frozen_chunk_does_not() {
+        let panel = "🟢 진행 중 — Claude (<t:1700000000:R>)\n\nTools\n└ cargo test --lib single_message_panel";
+        let status_block = super::compose_footer_status_block("⠸", panel);
+        let current_portion = "streamed body ".repeat(220);
+        let plan =
+            super::super::formatting::plan_streaming_rollover(&current_portion, &status_block)
+                .expect("body should roll over after reserving the footer");
+        let seed = super::super::formatting::build_streaming_placeholder_text("", &status_block);
+
+        assert!(seed.starts_with("⠸ 진행 중 — Claude (<t:1700000000:R>)"));
+        assert!(seed.contains("Tools\n└ cargo test --lib single_message_panel"));
+        assert!(!plan.frozen_chunk.contains("진행 중 — Claude"));
+        assert!(!plan.frozen_chunk.contains("Tools\n└ cargo test"));
+        assert!(
+            plan.display_snapshot
+                .ends_with(&format!("\n\n{status_block}"))
+        );
+    }
+
+    #[test]
     fn terminal_footer_strip_removes_panel_block() {
         let panel = "🟢 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n└ review inspect";
         let rendered = format!(
@@ -320,7 +437,36 @@ mod tests {
 
         assert_eq!(finalized, "Final answer");
         assert!(!finalized.contains("계속 처리 중"));
+        assert!(!finalized.contains("진행 중 — Claude"));
         assert!(!finalized.contains("Subagents"));
+    }
+
+    #[test]
+    fn terminal_footer_strip_preserves_body_text_that_mentions_running_status() {
+        let panel = "🟢 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n└ review inspect";
+        let body = "Final answer\n\n본문에 진행 중 문구가 있어도 유지";
+        let rendered = format!(
+            "{body}\n\n{}",
+            super::compose_footer_status_block("⠸", panel)
+        );
+        let finalized = super::finalize_streaming_footer(&rendered, &ProviderKind::Claude)
+            .expect("merged footer should strip at terminal reconciliation");
+
+        assert_eq!(finalized, body);
+    }
+
+    #[test]
+    fn footer_mode_strip_preserves_spinner_prefixed_user_body_without_panel_timestamp() {
+        let body = "Final answer\n\n⠋ 진행 중 — user-authored line";
+
+        assert_eq!(
+            super::strip_streaming_footer(body, &ProviderKind::Claude),
+            None
+        );
+        assert_eq!(
+            super::finalize_streaming_footer(body, &ProviderKind::Claude),
+            None
+        );
     }
 
     #[test]

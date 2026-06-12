@@ -1096,6 +1096,18 @@ mod status_panel_v2_formatter_tests {
     }
 
     #[test]
+    fn flag_off_formatter_preserves_trailing_merged_footer_shaped_user_text() {
+        let input = "Final answer\n\n⠋ 진행 중 — user-authored line";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+
+        assert_eq!(output, input);
+        assert_eq!(
+            super::finalize_stale_streaming_footer(input, &ProviderKind::Claude),
+            None
+        );
+    }
+
+    #[test]
     fn format_for_discord_removes_ascii_spinner_status_footer() {
         let input = "Final answer\n\n| Processing...";
         let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
