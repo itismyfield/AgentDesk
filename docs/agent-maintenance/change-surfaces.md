@@ -802,7 +802,7 @@
     was removed from `giant_file_registry.toml`; #3038 S5 locked the final
     root ratchet at 274 production lines).
   - `src/services/discord/session_runtime.rs` (1753 lines).
-  - `src/services/discord/voice_barge_in.rs` (3332 lines after #3038
+  - `src/services/discord/voice_barge_in.rs` (3217 lines after #3038
     VoiceBargeInRuntime S1 moved the STT method cluster to
     `src/services/discord/voice_barge_in/stt.rs` (314 production lines) and
     S2 moved the progress playback method cluster to
@@ -810,7 +810,10 @@
     lines), and S3 moved the final-result playback cluster to
     `src/services/discord/voice_barge_in/final_result_playback.rs` (230
     production lines), and S4 moved the routing-resolution cluster to
-    `src/services/discord/voice_barge_in/routing.rs` (383 production lines);
+    `src/services/discord/voice_barge_in/routing.rs` (383 production lines),
+    and S5 moved the live-cut playback cluster to
+    `src/services/discord/voice_barge_in/live_cut_playback.rs` (120 production
+    lines);
     voice STT/TTS, lobby routing, progress mirroring, and barge-in
     orchestration surface; tracked decompose target — see
     `giant-file-registry.md` (owner `voice-runtime`, deadline 2026-08-31,
