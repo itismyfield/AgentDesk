@@ -1,5 +1,7 @@
 use std::sync::OnceLock;
 
+pub(in crate::services::discord) const SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES: usize = 600;
+
 pub(super) fn enabled() -> bool {
     static CACHED: OnceLock<bool> = OnceLock::new();
     *CACHED.get_or_init(|| {
@@ -43,13 +45,48 @@ pub(in crate::services::discord) fn compose_footer_status_block(
     panel_text: &str,
 ) -> String {
     let spinner = super::formatting::build_processing_status_block(indicator);
-    let panel_text = panel_text.trim();
+    let panel_text = clamp_footer_panel_text(panel_text.trim());
     let status_block = if panel_text.is_empty() {
         spinner
     } else {
         format!("{spinner}\n{panel_text}")
     };
     clamp_footer_status_block(status_block)
+}
+
+fn clamp_footer_panel_text(panel_text: &str) -> String {
+    if panel_text.len() <= SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES {
+        return panel_text.to_string();
+    }
+
+    const TRUNCATION_MARKER: &str = "…";
+    if SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES <= TRUNCATION_MARKER.len() {
+        let safe_end = super::formatting::floor_char_boundary(
+            TRUNCATION_MARKER,
+            SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES,
+        );
+        return TRUNCATION_MARKER[..safe_end].to_string();
+    }
+
+    let lines: Vec<&str> = panel_text.lines().collect();
+    for keep_count in (1..=lines.len()).rev() {
+        let prefix = lines[..keep_count].join("\n");
+        let candidate = format!("{prefix}\n{TRUNCATION_MARKER}");
+        if candidate.len() <= SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES {
+            return candidate;
+        }
+    }
+
+    let first_line = lines.first().copied().unwrap_or_default();
+    let first_line_budget = SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES
+        .saturating_sub(TRUNCATION_MARKER.len())
+        .saturating_sub(1);
+    let safe_end = super::formatting::floor_char_boundary(first_line, first_line_budget);
+    if safe_end == 0 {
+        TRUNCATION_MARKER.to_string()
+    } else {
+        format!("{}\n{TRUNCATION_MARKER}", &first_line[..safe_end])
+    }
 }
 
 fn clamp_footer_status_block(status_block: String) -> String {
@@ -126,6 +163,13 @@ mod tests {
     use super::super::DISCORD_MSG_LIMIT;
     use super::super::ProviderKind;
 
+    fn panel_portion(status_block: &str) -> &str {
+        status_block
+            .split_once('\n')
+            .map(|(_, panel)| panel)
+            .unwrap_or("")
+    }
+
     #[test]
     fn single_message_panel_flag_defaults_off_when_unset() {
         assert!(!super::parse_single_message_panel_flag(None));
@@ -165,6 +209,97 @@ mod tests {
 
         assert!(block.starts_with("⠸ 계속 처리 중\n🟢 진행 중"));
         assert!(block.contains("Subagents\n└ review inspect"));
+    }
+
+    #[test]
+    fn footer_panel_under_budget_is_unchanged_s3() {
+        let panel = "Header\n\nTools\n└ cargo test";
+        let block = super::compose_footer_status_block("⠸", panel);
+
+        assert_eq!(block, format!("⠸ 계속 처리 중\n{panel}"));
+        assert!(!panel_portion(&block).ends_with("\n…"));
+    }
+
+    #[test]
+    fn footer_panel_over_budget_excludes_spinner_from_budget_s3() {
+        let huge_panel = format!(
+            "{}\n{}\n{}",
+            "a".repeat(290),
+            "b".repeat(290),
+            "c".repeat(100)
+        );
+        let block = super::compose_footer_status_block("⠸", &huge_panel);
+        let (spinner, panel) = block
+            .split_once('\n')
+            .expect("over-budget panel should keep spinner and panel");
+
+        assert_eq!(spinner, "⠸ 계속 처리 중");
+        assert!(panel.len() <= super::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES);
+        assert!(panel.ends_with("\n…") || panel == "…");
+        assert!(block.len() > super::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES);
+    }
+
+    #[test]
+    fn footer_panel_truncates_on_line_boundaries_s3() {
+        let first = "Header";
+        let second = "a".repeat(250);
+        let third = "b".repeat(250);
+        let fourth = "c".repeat(250);
+        let panel = format!("{first}\n{second}\n{third}\n{fourth}");
+        let block = super::compose_footer_status_block("⠸", &panel);
+        let truncated_lines: Vec<&str> = panel_portion(&block).lines().collect();
+
+        assert_eq!(
+            truncated_lines,
+            vec![first, second.as_str(), third.as_str(), "…"]
+        );
+        assert!(!panel_portion(&block).contains(fourth.as_str()));
+        assert!(panel_portion(&block).len() <= super::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES);
+    }
+
+    #[test]
+    fn footer_panel_byte_clamps_first_line_on_char_boundary_s3() {
+        let first_line = "가🙂".repeat(200);
+        let panel = format!("{first_line}\nSubagents\n└ reviewer inspect");
+        let block = super::compose_footer_status_block("⠸", &panel);
+        let panel = panel_portion(&block);
+        let panel_lines: Vec<&str> = panel.lines().collect();
+
+        assert!(std::str::from_utf8(panel.as_bytes()).is_ok());
+        assert!(panel.len() <= super::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES);
+        assert_eq!(panel_lines.last().copied(), Some("…"));
+        assert_eq!(panel_lines.len(), 2);
+        assert!(!panel.contains("Subagents"));
+    }
+
+    #[test]
+    fn footer_rollover_reservation_is_bound_by_panel_budget_s3() {
+        const STREAMING_PLACEHOLDER_MARGIN_BYTES: usize = 10;
+
+        let huge_panel = format!(
+            "🟢 진행 중 — Claude (<t:1700000000:R>)\n\nTools\n{}",
+            "└ cargo test --lib single_message_panel ".repeat(120)
+        );
+        let status_block = super::compose_footer_status_block("⠸", &huge_panel);
+        let spinner = super::super::formatting::build_processing_status_block("⠸");
+        let max_footer_len =
+            2 + spinner.len() + 1 + super::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES;
+        let footer = format!("\n\n{status_block}");
+        let expected_body_budget = DISCORD_MSG_LIMIT
+            .saturating_sub(footer.len() + STREAMING_PLACEHOLDER_MARGIN_BYTES)
+            .max(1);
+        let minimum_body_budget = DISCORD_MSG_LIMIT
+            .saturating_sub(max_footer_len + STREAMING_PLACEHOLDER_MARGIN_BYTES)
+            .max(1);
+        let current_portion = "x".repeat(expected_body_budget + 1);
+        let plan =
+            super::super::formatting::plan_streaming_rollover(&current_portion, &status_block)
+                .expect("body should roll over after reserving the bounded footer");
+
+        assert!(footer.len() <= max_footer_len);
+        assert_eq!(plan.split_at, expected_body_budget);
+        assert!(plan.split_at >= minimum_body_budget);
+        assert!(plan.display_snapshot.ends_with(&footer));
     }
 
     #[test]
