@@ -1210,15 +1210,33 @@ fn promote_task_complete_fallback_text(state: &mut RolloutParseState) {
     // Recover the assistant text from `last_agent_message` when the turn
     // produced no `response_item/message` (tool-only turns or rollouts where
     // the assistant text is only carried on `task_complete`).
+    //
+    // #3343 r2 review P2: commentary-only turns now MIRROR commentary into
+    // `final_text` without setting `saw_assistant_text`, and `last_agent_message`
+    // typically carries that same commentary body — a blind append here would
+    // duplicate it. The fallback is ALWAYS consumed and `saw_assistant_text`
+    // set (the turn has an assistant-visible body; finalize must not time out),
+    // but the text lands at most once: empty `final_text` appends, a superset
+    // replaces the mirrored commentary, an already-mirrored body (equal or a
+    // message-boundary suffix) is dropped, and anything else appends
+    // boundary-joined. #3343 r3: arbitrary substring containment is NOT a
+    // drop — a short canonical terminal body embedded mid-sentence in
+    // commentary is a genuinely new body.
     if !state.saw_assistant_text {
         let text = state
             .task_complete_fallback_text
             .take()
             .expect("task_complete fallback checked above");
-        // #3343: route the fallback body through the same shared boundary
-        // writer so `final_text` follows the suppress-on-existing-newline rule
-        // here too (any commentary already streamed advances the witness).
-        state.push_message_text(&text);
+        if state.final_text.is_empty() {
+            // #3343: route the fallback body through the same shared boundary
+            // writer so `final_text` follows the suppress-on-existing-newline
+            // rule here too.
+            state.push_message_text(&text);
+        } else if task_complete_fallback_supersedes_final_text(&state.final_text, &text) {
+            state.final_text = text;
+        } else if !task_complete_fallback_already_mirrored(&state.final_text, &text) {
+            state.push_message_text(&text);
+        }
         state.saw_assistant_text = true;
         return;
     }
@@ -1248,6 +1266,24 @@ fn task_complete_fallback_supersedes_final_text(final_text: &str, fallback_text:
     let streamed = final_text.trim();
     let fallback = fallback_text.trim();
     !streamed.is_empty() && fallback.len() > streamed.len() && fallback.ends_with(streamed)
+}
+
+// The fallback counts as already mirrored only when it IS the final text or
+// sits at the end after a message boundary — a mid-sentence substring match
+// (e.g. commentary quoting the terminal verdict) must still append. The
+// boundary tolerates horizontal whitespace after the newline (r4 P3: an
+// indented mirrored body must still drop).
+fn task_complete_fallback_already_mirrored(final_text: &str, fallback_text: &str) -> bool {
+    let streamed = final_text.trim();
+    let fallback = fallback_text.trim();
+    if fallback.is_empty() {
+        return true;
+    }
+    let Some(prefix) = streamed.strip_suffix(fallback) else {
+        return false;
+    };
+    let boundary = prefix.trim_end_matches([' ', '\t']);
+    boundary.is_empty() || boundary.ends_with('\n')
 }
 
 fn heuristic_finalize_allowed(
@@ -4309,6 +4345,111 @@ mod tests {
             final_text,
             chunks.concat(),
             "final_text must mirror the streamed accumulation across phases"
+        );
+    }
+
+    // #3343 r2 review P2 — commentary-only turn whose `task_complete` carries
+    // the SAME body as the mirrored commentary must not duplicate it in
+    // `final_text`. FAILS on 26fa75fd4: the `!saw_assistant_text` append path
+    // ignored the already-mirrored commentary and appended the fallback again.
+    #[test]
+    fn commentary_only_task_complete_does_not_duplicate_body() {
+        let body = concat!(
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"중간 점검 코멘트입니다."}]}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"중간 점검 코멘트입니다."}}"#,
+            "\n",
+        );
+        let (messages, _elapsed) = run_tail_with_options(
+            body,
+            Duration::from_secs(30),
+            Some(Duration::from_secs(60)),
+            true,
+        );
+        let Some(StreamMessage::Done { result, .. }) = messages.last() else {
+            panic!("turn must finalize with Done, got {messages:?}");
+        };
+        assert_eq!(
+            result.matches("중간 점검 코멘트입니다.").count(),
+            1,
+            "commentary-only task_complete must carry the body exactly once: {result:?}"
+        );
+        // Superset fallback still supersedes the mirrored commentary (replace,
+        // not append): the authoritative terminal body wins without doubling.
+        let body = concat!(
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"코멘트 본문."}]}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"서문.\n\n코멘트 본문."}}"#,
+            "\n",
+        );
+        let (messages, _elapsed) = run_tail_with_options(
+            body,
+            Duration::from_secs(30),
+            Some(Duration::from_secs(60)),
+            true,
+        );
+        let Some(StreamMessage::Done { result, .. }) = messages.last() else {
+            panic!("turn must finalize with Done, got {messages:?}");
+        };
+        assert_eq!(
+            result.matches("코멘트 본문.").count(),
+            1,
+            "superseding fallback must replace, never double: {result:?}"
+        );
+        assert!(result.starts_with("서문."), "{result:?}");
+    }
+
+    // #3343 r3 review P2 — a short canonical terminal body that appears only
+    // as a mid-sentence SUBSTRING of the mirrored commentary is genuinely new
+    // and must append, not drop. FAILS on the r2 fix: arbitrary
+    // `contains(text.trim())` treated the embedded quote as already mirrored
+    // and finalized on the commentary alone.
+    #[test]
+    fn task_complete_substring_of_commentary_still_lands() {
+        let body = concat!(
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"검증이 끝나면 VERDICT: CLEAN 으로 보고하겠습니다."}]}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"VERDICT: CLEAN"}}"#,
+            "\n",
+        );
+        let (messages, _elapsed) = run_tail_with_options(
+            body,
+            Duration::from_secs(30),
+            Some(Duration::from_secs(60)),
+            true,
+        );
+        let Some(StreamMessage::Done { result, .. }) = messages.last() else {
+            panic!("turn must finalize with Done, got {messages:?}");
+        };
+        assert!(
+            result.trim_end().ends_with("VERDICT: CLEAN"),
+            "terminal body embedded in commentary must still append: {result:?}"
+        );
+        // The mirrored-equality drop still holds: a fallback that ends the
+        // accumulated text at a message boundary lands exactly once.
+        assert_eq!(result.matches("검증이 끝나면").count(), 1, "{result:?}");
+
+        // r4 P3 — an INDENTED mirrored body is still "already mirrored": the
+        // boundary check tolerates horizontal whitespace after the newline.
+        let body = concat!(
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"상태 보고.\n\n  VERDICT: CLEAN"}]}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"VERDICT: CLEAN"}}"#,
+            "\n",
+        );
+        let (messages, _elapsed) = run_tail_with_options(
+            body,
+            Duration::from_secs(30),
+            Some(Duration::from_secs(60)),
+            true,
+        );
+        let Some(StreamMessage::Done { result, .. }) = messages.last() else {
+            panic!("turn must finalize with Done, got {messages:?}");
+        };
+        assert_eq!(
+            result.matches("VERDICT: CLEAN").count(),
+            1,
+            "indented mirrored suffix must drop, not double: {result:?}"
         );
     }
 
