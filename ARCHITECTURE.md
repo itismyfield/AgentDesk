@@ -199,17 +199,8 @@ src/
 │   │   │   └── reviews.rs
 │   │   ├── review_verdict/
 │   │   │   ├── decision_route/
-│   │   │   │   ├── accept.rs
-│   │   │   │   ├── adapters.rs
-│   │   │   │   ├── dismiss_finalize.rs
-│   │   │   │   ├── dispute.rs
-│   │   │   │   ├── pending.rs
-│   │   │   │   ├── repo_card.rs
-│   │   │   │   ├── repo_dispatch.rs
-│   │   │   │   └── worktree_stale.rs
 │   │   │   ├── decision_route.rs
 │   │   │   ├── mod.rs
-│   │   │   ├── review_state_repo.rs
 │   │   │   ├── tuning_aggregate.rs
 │   │   │   └── verdict_route.rs
 │   │   ├── agents.rs
@@ -691,6 +682,17 @@ src/
 │   │   ├── smoke.rs
 │   │   ├── snapshot.rs
 │   │   └── upgrade.rs
+│   ├── review_decision/
+│   │   ├── accept.rs
+│   │   ├── adapters.rs
+│   │   ├── dismiss_finalize.rs
+│   │   ├── dispute.rs
+│   │   ├── pending.rs
+│   │   ├── repo_card.rs
+│   │   ├── repo_dispatch.rs
+│   │   ├── review_state_repo.rs
+│   │   ├── tuning_aggregate.rs
+│   │   └── worktree_stale.rs
 │   ├── routines/
 │   │   ├── action.rs
 │   │   ├── agent_executor.rs

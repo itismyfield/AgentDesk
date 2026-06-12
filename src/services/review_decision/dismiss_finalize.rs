@@ -9,8 +9,6 @@ use serde_json::json;
 use crate::app_state::AppState;
 use crate::services::review_decision::ReviewDecisionBody;
 
-use super::super::review_state_repo::update_card_review_state;
-use super::super::tuning_aggregate::record_decision_tuning;
 use super::DecisionResponse;
 use super::adapters::{
     consume_pending_review_decision_or_response, dismiss_review_cleanup_pg_first,
@@ -21,6 +19,8 @@ use super::repo_card::{
     load_review_decision_card_context_pg_first, resolve_effective_pipeline_pg_first,
     review_state_db, transition_status_pg_first,
 };
+use super::review_state_repo::update_card_review_state;
+use super::tuning_aggregate::record_decision_tuning;
 
 /// Phase 3c of `submit_review_decision`: the `dismiss` decision branch (move to
 /// terminal, then cancel stale pending review dispatches). Pure extraction of
