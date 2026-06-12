@@ -118,7 +118,7 @@
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior; #3016 phase-5b2 dropped the `mailbox_finalize_owed`
     construction from the watcher-spawn handle).
-  - `src/services/discord/tmux.rs` (2049 lines after #2558 dead-code sweep;
+  - `src/services/discord/tmux.rs` (2048 lines after #2558 dead-code sweep;
     +38 for suppressed-label noise, user report 2026-06-12: provider-aware
     status/footer stripping in the placeholder suppression decisions;
     +4 from #3167: the monitor-auto-turn start passes `ActiveTurnKind::Background`
@@ -133,7 +133,8 @@
     monotonic-CAS offset INLINE (synchronously) on a `Delivered` outcome; the
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
-    still giant-file territory).
+    -1 from #3038 S4 after routing the placeholder/status-panel cluster
+    through `shared.ui`; still giant-file territory).
   - `src/services/discord/tmux_watcher.rs` (8122 production lines after
     #3038 tmux_watcher S1 moved top-level decision clusters A/B/C/E/F/I/J/K
     into `tmux_watcher/` child modules: `liveness.rs` (301),
@@ -716,7 +717,7 @@
     #3360 moving orphan pending-token auto-heal out to
     `health/relay_auto_heal.rs`; #3361 moved positive stall-watchdog liveness
     guard state/logging to `health/stall_liveness.rs`).
-  - `src/services/discord/router/message_handler/intake_turn.rs` (3771 lines;
+  - `src/services/discord/router/message_handler/intake_turn.rs` (3769 lines;
     Discord message intake turn orchestration split from the router message
     handler; bugfix only outside a further extraction plan; +9 from #3082
     queued-only answer-flush gate (`is_queued_notice` on the two
@@ -726,7 +727,8 @@
     `remove_reaction_raw` at the `started==true` promotion point, removing the
     stranded `📬`/`➕` so a processed message no longer shows `📬`+`✅`); +1 from
     #3038 S1 mechanical `.queued_placeholders` -> `.queued.queued_placeholders`
-    re-wire after lifting cluster C into `QueuedPlaceholderState`).
+    re-wire after lifting cluster C into `QueuedPlaceholderState`; -2 from #3038
+    S4 mechanical placeholder/status-panel `.ui` rewiring).
   - `src/services/discord/router/message_handler/headless_turn.rs` (1316 lines;
     headless Discord turn launch/terminal-response path split from the router
     message handler; bugfix only outside a further extraction plan).

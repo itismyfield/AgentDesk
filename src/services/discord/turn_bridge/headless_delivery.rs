@@ -172,8 +172,8 @@ pub(super) async fn cleanup_headless_streaming_placeholder_after_delivery(
     match headless_streaming_placeholder_cleanup_action(
         last_edit_text,
         provider,
-        shared.status_panel_v2_enabled,
-        super::bridge_single_message_panel_footer_enabled(shared.status_panel_v2_enabled),
+        shared.ui.status_panel_v2_enabled,
+        super::bridge_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled),
     ) {
         HeadlessPlaceholderCleanupAction::Delete => {
             if let Err(error) =

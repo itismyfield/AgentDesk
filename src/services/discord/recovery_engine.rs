@@ -421,7 +421,7 @@ async fn complete_recovery_visible_turn(
         }
     }
 
-    if !shared.status_panel_v2_enabled {
+    if !shared.ui.status_panel_v2_enabled {
         return RecoveryCompletionOutcome::Emitted;
     }
     // #2427 D wire: explicit completion signal — most recovery paths
@@ -438,7 +438,7 @@ async fn complete_recovery_visible_turn(
     let started_at_unix = super::inflight::parse_started_at_unix(&state.started_at)
         .unwrap_or_else(|| chrono::Utc::now().timestamp());
     let Some(status_msg_id) = recovery_status_panel::completion_target(
-        shared.status_panel_v2_enabled,
+        shared.ui.status_panel_v2_enabled,
         state,
         provider,
         channel_id,

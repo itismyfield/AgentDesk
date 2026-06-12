@@ -437,6 +437,7 @@ async fn refresh_session_panel_line_from_lifecycle(
     .await
     {
         Ok(Some(event)) => shared
+            .ui
             .placeholder_live_events
             .set_session_panel_lifecycle_event(
                 channel_id,
@@ -445,6 +446,7 @@ async fn refresh_session_panel_line_from_lifecycle(
                 &event.details_json,
             ),
         Ok(None) => shared
+            .ui
             .placeholder_live_events
             .clear_session_panel(channel_id),
         Err(error) => {
@@ -542,7 +544,7 @@ async fn refresh_task_panel_line_from_dispatch(
                 None
             }
         };
-    shared.placeholder_live_events.set_task_panel_info(
+    shared.ui.placeholder_live_events.set_task_panel_info(
         channel_id,
         crate::services::discord::placeholder_live_events::TaskPanelInfo {
             dispatch_id,
@@ -603,15 +605,20 @@ async fn ensure_active_placeholder_card<G: TurnGateway + ?Sized>(
     key: super::placeholder_controller::PlaceholderKey,
     input: super::placeholder_controller::PlaceholderActiveInput,
 ) -> super::placeholder_controller::PlaceholderControllerOutcome {
-    if shared.placeholder_live_events_enabled
-        && let Some(block) = shared.placeholder_live_events.render_block(key.channel_id)
+    if shared.ui.placeholder_live_events_enabled
+        && let Some(block) = shared
+            .ui
+            .placeholder_live_events
+            .render_block(key.channel_id)
     {
         return shared
+            .ui
             .placeholder_controller
             .ensure_active_with_live_events(gateway, key, input, block)
             .await;
     }
     shared
+        .ui
         .placeholder_controller
         .ensure_active(gateway, key, input)
         .await
@@ -622,10 +629,13 @@ fn record_placeholder_live_event(
     channel_id: ChannelId,
     event: Option<super::placeholder_live_events::RecentPlaceholderEvent>,
 ) {
-    if (shared.placeholder_live_events_enabled || shared.status_panel_v2_enabled)
+    if (shared.ui.placeholder_live_events_enabled || shared.ui.status_panel_v2_enabled)
         && let Some(event) = event
     {
-        shared.placeholder_live_events.push_event(channel_id, event);
+        shared
+            .ui
+            .placeholder_live_events
+            .push_event(channel_id, event);
     }
 }
 
@@ -634,8 +644,9 @@ fn record_status_panel_events(
     channel_id: ChannelId,
     events: Vec<StatusEvent>,
 ) -> bool {
-    if shared.status_panel_v2_enabled && !events.is_empty() {
+    if shared.ui.status_panel_v2_enabled && !events.is_empty() {
         shared
+            .ui
             .placeholder_live_events
             .push_status_events(channel_id, events);
         true
@@ -981,6 +992,7 @@ fn record_watcher_orphan_spinner_cleanup(
         );
     }
     shared
+        .ui
         .placeholder_cleanup
         .record(super::placeholder_cleanup::PlaceholderCleanupRecord {
             provider: provider.clone(),
@@ -2127,29 +2139,17 @@ pub(super) fn spawn_turn_bridge(
                 | super::inflight::RelayOwnerKind::SessionBoundRelay
                 | super::inflight::RelayOwnerKind::Unknown
         );
-        // #1255 live-turn long-running tool placeholder card.
-        //
-        // `last_assistant_text_line` captures the last non-empty single-line
-        // assistant prose emission so we can surface it as the placeholder
-        // card's `요약` slot (the "⏳ CI 통과 신호 대기" use case from the
-        // issue). It is reset on tool result / completion so a stale line
-        // never leaks into the next tool placeholder.
-        //
-        // `long_running_placeholder_active` is `Some(...)` while a Monitor /
-        // background-Bash call is mid-flight. It records the placeholder key
-        // we are driving so the matching ToolResult / Done event can call
-        // `controller.transition(Completed)`. The cancel / abort paths use
-        // the same handle.
+        // #1255 live-turn long-running tool placeholder card. Capture the last
+        // non-empty assistant line for the placeholder `요약` slot, then reset
+        // on tool result/completion so stale text never leaks. While Monitor /
+        // background-Bash work is mid-flight, `long_running_placeholder_active`
+        // stores the key so ToolResult/Done/cancel/abort hit the same handle.
         let mut last_assistant_text_line: Option<String> = None;
         // Pair the active key with the input snapshot, close-trigger kind, and
-        // an `ack_consumed` flag.
-        //
-        // Rollover uses the snapshot to retarget the controller onto the new
-        // `current_msg_id`; the close-trigger distinguishes Monitor-style
-        // ToolResult-closes from background-dispatch ack events; and
-        // `ack_consumed` (codex round-6 P2 on #1308) prevents subsequent
-        // unrelated ToolResults — for example a failing `Read`/`Grep` later
-        // in the same turn — from closing a still-running background card.
+        // `ack_consumed`: rollover retargets to the new `current_msg_id`, the
+        // trigger separates Monitor closes from background acks, and
+        // `ack_consumed` blocks unrelated later ToolResults from closing the
+        // still-running background card (codex round-6 P2 on #1308).
         let mut long_running_placeholder_active: Option<(
             super::placeholder_controller::PlaceholderKey,
             super::placeholder_controller::PlaceholderActiveInput,
@@ -2157,8 +2157,8 @@ pub(super) fn spawn_turn_bridge(
             bool, // ack_consumed
         )> = None;
         let mut active_background_child_session_ids: Vec<i64> = Vec::new();
-        if shared_owned.placeholder_live_events_enabled || shared_owned.status_panel_v2_enabled {
-            shared_owned.placeholder_live_events.clear_channel(channel_id);
+        if shared_owned.ui.placeholder_live_events_enabled || shared_owned.ui.status_panel_v2_enabled {
+            shared_owned.ui.placeholder_live_events.clear_channel(channel_id);
         }
         let mut transport_error = false;
         let mut api_friction_reports = Vec::new();
@@ -2358,20 +2358,20 @@ pub(super) fn spawn_turn_bridge(
             bridge.reuse_status_panel_message,
         );
         let single_message_panel_footer_mode =
-            bridge_single_message_panel_footer_enabled(shared_owned.status_panel_v2_enabled);
+            bridge_single_message_panel_footer_enabled(shared_owned.ui.status_panel_v2_enabled);
         if single_message_panel_footer_mode {
             status_panel_msg_id = None;
             inflight_state.status_message_id = None;
         }
         let mut last_status_panel_text = String::new();
-        let mut status_panel_dirty = shared_owned.status_panel_v2_enabled;
+        let mut status_panel_dirty = shared_owned.ui.status_panel_v2_enabled;
         let mut last_status_panel_edit = tokio::time::Instant::now() - status_interval;
         let status_panel_started_at = chrono::Utc::now().timestamp();
         let turn_start = std::time::Instant::now();
 
         maybe_create_bridge_separate_status_panel_response(
             single_message_panel_footer_mode,
-            shared_owned.status_panel_v2_enabled,
+            shared_owned.ui.status_panel_v2_enabled,
             gateway.as_ref(),
             channel_id,
             SPINNER[0],
@@ -2386,7 +2386,7 @@ pub(super) fn spawn_turn_bridge(
         )
         .await;
 
-        if shared_owned.status_panel_v2_enabled
+        if shared_owned.ui.status_panel_v2_enabled
             && let Some(dispatch_id) = dispatch_id.as_deref()
         {
             status_panel_dirty |= refresh_task_panel_line_from_dispatch(
@@ -2909,7 +2909,7 @@ pub(super) fn spawn_turn_bridge(
                                 }
                             }
                             if should_open_long_running_placeholder_controller(
-                                shared_owned.status_panel_v2_enabled,
+                                shared_owned.ui.status_panel_v2_enabled,
                             )
                                 && long_running_placeholder_active.is_none()
                                 && pending_long_running_open_after_state_save.is_none()
@@ -3046,20 +3046,14 @@ pub(super) fn spawn_turn_bridge(
                                     tool_use_id.as_deref(),
                                 ),
                             );
-                            // #1255: a long-running tool's ToolResult means the
-                            // background card can transition to its terminal
-                            // state.  We still keep the placeholder around for
-                            // the rest of the turn so the user can see the
-                            // status line; the controller's idempotent terminal
-                            // transition keeps duplicate edits free.
-                            // codex round-2 P1: only `Monitor`-style tools
-                            // deliver their real completion via `ToolResult`.
-                            // Background `Bash`/`Task`/`Agent` dispatches send
-                            // back a job/task id ack on `ToolResult` and the
-                            // actual work continues — terminating here would
-                            // close the card while the background job is
-                            // still running. Keep those open until `Done` /
-                            // cancel.
+                            // #1255: a long-running tool's ToolResult can move
+                            // the background card terminal while keeping the
+                            // placeholder visible for the rest of the turn; the
+                            // controller remains idempotent. codex round-2 P1:
+                            // only Monitor-style ToolResults are real
+                            // completions. Background Bash/Task/Agent results
+                            // are job/task acks, so keep those open until
+                            // Done/cancel.
                             if let Some((key, snapshot, close_trigger, ack_consumed)) =
                                 long_running_placeholder_active.take()
                             {
@@ -3105,12 +3099,12 @@ pub(super) fn spawn_turn_bridge(
                                     if pending_retarget_matches_key {
                                         let _ =
                                             pending_long_running_retarget_after_state_save.take();
-                                        shared_owned.placeholder_controller.detach(&key);
+                                        shared_owned.ui.placeholder_controller.detach(&key);
                                         inflight_state.long_running_placeholder_active = false;
                                         state_dirty = true;
                                     } else {
                                         let outcome = shared_owned
-                                            .placeholder_controller
+                                            .ui.placeholder_controller
                                             .transition(gateway.as_ref(), key.clone(), target)
                                             .await;
                                         // codex round-10 P2: only clear flag on
@@ -3331,11 +3325,11 @@ pub(super) fn spawn_turn_bridge(
                                         });
                                 if pending_retarget_matches_key {
                                     let _ = pending_long_running_retarget_after_state_save.take();
-                                    shared_owned.placeholder_controller.detach(&key);
+                                    shared_owned.ui.placeholder_controller.detach(&key);
                                     inflight_state.long_running_placeholder_active = false;
                                 } else {
                                     let outcome = shared_owned
-                                        .placeholder_controller
+                                        .ui.placeholder_controller
                                         .transition(gateway.as_ref(), key.clone(), target)
                                         .await;
                                     // codex round-10/11 P2/P3: on `EditFailed`,
@@ -3550,13 +3544,13 @@ pub(super) fn spawn_turn_bridge(
                             if let Some(ot) = output_tokens {
                                 accumulated_output_tokens = accumulated_output_tokens.max(ot);
                             }
-                            if shared_owned.status_panel_v2_enabled && has_context_token_data {
+                            if shared_owned.ui.status_panel_v2_enabled && has_context_token_data {
                                 let context_provider_session_id = new_raw_provider_session_id
                                     .as_deref()
                                     .or(new_session_id.as_deref())
                                     .or(inflight_state.session_id.as_deref());
                                 let context_dirty = shared_owned
-                                    .placeholder_live_events
+                                    .ui.placeholder_live_events
                                     .set_context_panel_usage(
                                         channel_id,
                                         context_provider_session_id,
@@ -4117,7 +4111,7 @@ pub(super) fn spawn_turn_bridge(
                 }
             }
 
-            if shared_owned.status_panel_v2_enabled
+            if shared_owned.ui.status_panel_v2_enabled
                 && last_session_panel_lifecycle_refresh.elapsed() >= status_interval
             {
                 last_session_panel_lifecycle_refresh = tokio::time::Instant::now();
@@ -4133,7 +4127,7 @@ pub(super) fn spawn_turn_bridge(
             let indicator = SPINNER[spin_idx % SPINNER.len()];
             spin_idx += 1;
 
-            if shared_owned.status_panel_v2_enabled
+            if shared_owned.ui.status_panel_v2_enabled
                 && bridge_status_panel_dirty_should_edit_separate_panel(
                     status_panel_dirty,
                     single_message_panel_footer_mode,
@@ -4141,7 +4135,7 @@ pub(super) fn spawn_turn_bridge(
                 && last_status_panel_edit.elapsed() >= status_interval
                 && let Some(status_msg_id) = status_panel_msg_id
             {
-                let panel_text = shared_owned.placeholder_live_events.render_status_panel(
+                let panel_text = shared_owned.ui.placeholder_live_events.render_status_panel(
                     channel_id,
                     &provider,
                     status_panel_started_at,
@@ -4322,7 +4316,7 @@ pub(super) fn spawn_turn_bridge(
                     &full_response,
                 );
                 let stable_display_text = build_turn_bridge_streaming_edit_text(
-                    shared_owned.status_panel_v2_enabled,
+                    shared_owned.ui.status_panel_v2_enabled,
                     current_portion,
                     &status_block,
                     &provider,
@@ -4352,13 +4346,13 @@ pub(super) fn spawn_turn_bridge(
                 }
             }
 
-            if shared_owned.placeholder_live_events_enabled
+            if shared_owned.ui.placeholder_live_events_enabled
                 && watcher_owns_assistant_relay
                 && let Some((key, input, _, _)) = long_running_placeholder_active.as_ref()
-                && let Some(block) = shared_owned.placeholder_live_events.render_block(channel_id)
+                && let Some(block) = shared_owned.ui.placeholder_live_events.render_block(channel_id)
             {
                 let outcome = shared_owned
-                    .placeholder_controller
+                    .ui.placeholder_controller
                     .ensure_active_with_live_events(
                         gateway.as_ref(),
                         key.clone(),
@@ -4454,7 +4448,7 @@ pub(super) fn spawn_turn_bridge(
                                 .as_ref()
                                 .is_some_and(|(active_key, _, _, _)| *active_key == old_key);
                             if active_still_matches_old_key {
-                                shared_owned.placeholder_controller.detach(&old_key);
+                                shared_owned.ui.placeholder_controller.detach(&old_key);
                                 let outcome = ensure_active_placeholder_card(
                                     shared_owned.as_ref(),
                                     gateway.as_ref(),
@@ -4560,7 +4554,7 @@ pub(super) fn spawn_turn_bridge(
                 && let Some((key, _, _, _)) = long_running_placeholder_active.take()
             {
                 let _ = pending_long_running_retarget_after_state_save.take();
-                shared_owned.placeholder_controller.detach(&key);
+                shared_owned.ui.placeholder_controller.detach(&key);
                 inflight_state.long_running_placeholder_active = false;
                 let _ = save_inflight_state(&inflight_state);
             }
@@ -4577,11 +4571,11 @@ pub(super) fn spawn_turn_bridge(
                     .is_some_and(|(pending_key, _, _, _, _)| *pending_key == key);
                 if pending_retarget_matches_key {
                     let _ = pending_long_running_retarget_after_state_save.take();
-                    shared_owned.placeholder_controller.detach(&key);
+                    shared_owned.ui.placeholder_controller.detach(&key);
                     inflight_state.long_running_placeholder_active = false;
                 } else {
                     let outcome = shared_owned
-                        .placeholder_controller
+                        .ui.placeholder_controller
                         .transition(gateway.as_ref(), key, target)
                         .await;
                     // codex round-10 P2: keep the persisted flag on EditFailed so
@@ -5190,12 +5184,12 @@ pub(super) fn spawn_turn_bridge(
                     .is_some_and(|(pending_key, _, _, _, _)| *pending_key == key);
                 if pending_retarget_matches_key {
                     let _ = pending_long_running_retarget_after_state_save.take();
-                    shared_owned.placeholder_controller.detach(&key);
+                    shared_owned.ui.placeholder_controller.detach(&key);
                     inflight_state.long_running_placeholder_active = false;
                     let _ = save_inflight_state(&inflight_state);
                 } else {
                     let outcome = shared_owned
-                        .placeholder_controller
+                        .ui.placeholder_controller
                         .transition(
                             gateway.as_ref(),
                             key.clone(),
@@ -5288,7 +5282,7 @@ pub(super) fn spawn_turn_bridge(
             } else if remaining_response.trim().is_empty() {
                 "[Stopped]".to_string()
             } else {
-                let formatted = if shared_owned.status_panel_v2_enabled {
+                let formatted = if shared_owned.ui.status_panel_v2_enabled {
                     super::formatting::format_for_discord_with_status_panel(
                         remaining_response,
                         &provider,
@@ -5496,7 +5490,7 @@ pub(super) fn spawn_turn_bridge(
                         channel_id
                     );
                     if should_delete_bridge_created_watcher_orphan_response(
-                        shared_owned.status_panel_v2_enabled,
+                        shared_owned.ui.status_panel_v2_enabled,
                         watcher_handoff_claim_outcome,
                         bridge_created_response_placeholder_msg_id,
                         current_msg_id,
@@ -5913,7 +5907,7 @@ pub(super) fn spawn_turn_bridge(
                     terminal_body_visible = true;
                 }
             } else {
-                delivery_response = if shared_owned.status_panel_v2_enabled {
+                delivery_response = if shared_owned.ui.status_panel_v2_enabled {
                     super::formatting::format_for_discord_with_status_panel(
                         &delivery_response,
                         &provider,
@@ -6480,7 +6474,7 @@ pub(super) fn spawn_turn_bridge(
         if status_panel_terminal_committed
             && bridge_should_emit_completion
             && (single_message_panel_footer_mode
-                || bridge_should_complete_separate_status_panel(shared_owned.status_panel_v2_enabled))
+                || bridge_should_complete_separate_status_panel(shared_owned.ui.status_panel_v2_enabled))
         {
             // #2849: before rendering the completed panel, backfill exact final
             // context usage when the live StatusUpdates never carried it (e.g.
@@ -6490,7 +6484,7 @@ pub(super) fn spawn_turn_bridge(
             // usage exists — so we never fabricate or reuse stale numbers.
             // set_context_panel_usage is a no-op when the live path already set
             // the same values, and is gated to context_window_tokens != 0.
-            if shared_owned.status_panel_v2_enabled {
+            if shared_owned.ui.status_panel_v2_enabled {
                 let context_provider_session_id = new_raw_provider_session_id
                     .as_deref()
                     .or(new_session_id.as_deref())
@@ -6506,7 +6500,7 @@ pub(super) fn spawn_turn_bridge(
                     context_provider_session_id,
                     accumulated_usage,
                 ) {
-                    shared_owned.placeholder_live_events.set_context_panel_usage(
+                    shared_owned.ui.placeholder_live_events.set_context_panel_usage(
                         channel_id,
                         context_provider_session_id,
                         usage.input_tokens,

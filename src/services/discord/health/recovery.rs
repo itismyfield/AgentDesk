@@ -2285,7 +2285,7 @@ async fn maybe_recover_completed_stale_leak(
     let Some(delivery_text) = render_leak_recovery_delivery(
         &state.full_response,
         start,
-        shared.status_panel_v2_enabled,
+        shared.ui.status_panel_v2_enabled,
         provider,
     ) else {
         return false;
