@@ -128,9 +128,43 @@ pub(in crate::services::discord) fn compose_completion_footer_text(
         body
     }
     .trim_end();
-    // #3394: backstop the Discord-limit body trim — if it chopped a code fence in
-    // the streamed response body, re-balance before the block is appended.
-    repair_fence_parity(&format!("{base}{suffix}"))
+    // #3394 round 2 (boundary-scoped repair): repair the BODY alone, THEN append
+    // the footer block — never run `repair_fence_parity` over the combined string.
+    // `repair_fence_parity` drops the last dangling opener THROUGH end-of-string,
+    // so a body whose fence was chopped by the Discord-limit trim above would, on
+    // the combined `{base}{suffix}`, take the appended footer down with it.
+    //
+    // #3391 delivered-ID honesty invariant: `delivered_terminal_ids` for this
+    // footer were already computed from the footer block (completion_footer.rs:202)
+    // and are evicted once this edit returns Ok. If repair ate the footer, the
+    // ✓/✗ marks would vanish from the delivered text yet their slots would still
+    // be evicted — reporting marks the user never saw. Repairing only the body
+    // keeps every footer mark in the delivered text, so whenever this edit
+    // succeeds every reported terminal slot's mark was actually present.
+    //
+    // The footer block is fence-balanced by construction: `render_completion_footer`
+    // emits only the Context line plus Tasks/Subagents slot lines (no fenced Recent
+    // block lives here), so it carries zero ``` runs (an even count). balanced base
+    // + balanced footer = balanced combined.
+    let base = repair_fence_parity(base);
+    let combined = format!("{base}{suffix}");
+    debug_assert_eq!(
+        combined.matches("```").count() % 2,
+        0,
+        "boundary-scoped repair left odd combined fence parity: {combined:?}"
+    );
+    // Runtime backstop: if the footer block ever did carry an odd fence (a future
+    // change to the completion-footer composition), repair the footer SEPARATELY so
+    // each part is balanced — never run a combined repair that could reach back
+    // across the boundary and delete the body's tail or the footer's marks. The
+    // already-repaired `base` stays balanced; balanced base + balanced footer =
+    // balanced combined. With today's fence-free footer this branch is unreachable,
+    // which the debug_assert above enforces in test builds.
+    if combined.matches("```").count() % 2 != 0 {
+        let repaired_suffix = repair_fence_parity(&suffix);
+        return format!("{base}{repaired_suffix}");
+    }
+    combined
 }
 
 pub(in crate::services::discord) fn finalize_streaming_footer_with_completion(
@@ -867,6 +901,106 @@ mod tests {
             "footer leaked an unterminated fence: {block}"
         );
         assert!(!block.contains("```text") || fences >= 2);
+    }
+
+    /// #3394 round 2 (P1): when the response BODY carries an unterminated code
+    /// fence (the Discord-limit trim cut inside a body fence), the boundary-scoped
+    /// repair must drop only the body's dangling opener and KEEP the appended
+    /// completion footer — its ✓ marks must survive. On HEAD the combined repair
+    /// deleted from the body opener through the footer, taking the ✓ with it while
+    /// #3391 still evicted the slot, breaking delivered-ID honesty.
+    #[test]
+    fn compose_completion_footer_repair_scoped_to_body_keeps_footer_marks_3394() {
+        let body = "Here is some output:\n\n```text\nchopped streamed body";
+        let footer = "Context   📦 154.6k / 1.0M tokens (15%)\n\nTasks\n└ Bash Finished job ✓";
+        let composed = super::compose_completion_footer_text(body, Some(footer));
+
+        // The footer block (and its terminal ✓) survives composition.
+        assert!(
+            composed.contains("Bash Finished job ✓"),
+            "footer ✓ was deleted by combined fence repair: {composed}"
+        );
+        assert!(composed.contains("Context   📦"));
+        assert!(composed.contains("Tasks"));
+        // The body's dangling opener is dropped (boundary-scoped repair).
+        assert!(
+            !composed.contains("```text"),
+            "body dangling fence leaked: {composed}"
+        );
+        assert!(composed.contains("Here is some output:"));
+        // Combined parity is even.
+        assert_eq!(
+            composed.matches("```").count() % 2,
+            0,
+            "composed text has odd fence parity: {composed}"
+        );
+    }
+
+    /// #3394 round 2 (P1): the registered-refresh composition site
+    /// (`completion_footer_edit_for_registered_target_at`, ~258) shares the
+    /// `compose_completion_footer_text` pattern. A registered body carrying an
+    /// unterminated fence must still emit the rendered footer's terminal ✓ in the
+    /// delivered edit text, with even combined parity — so the #3391 eviction that
+    /// follows a successful edit only drops marks the user actually saw.
+    #[test]
+    fn registered_refresh_repair_scoped_to_body_keeps_footer_marks_3394() {
+        let channel_id = ChannelId::new(3_394_201);
+        super::completion_footer_forget_registered_target(channel_id);
+        let shared = push_finished_and_running_background_tasks(channel_id);
+        let body_with_dangling_fence = "Streaming reply\n\n```text\ncut off mid fence";
+        let _ = super::register_completion_footer_target(
+            channel_id,
+            MessageId::new(3_394_301),
+            &ProviderKind::Claude,
+            1_800_000_000,
+            body_with_dangling_fence,
+            None,
+            true,
+        );
+
+        let edit = super::completion_footer_edit_for_registered_target_at(
+            shared.as_ref(),
+            channel_id,
+            "⠸",
+            1_800_000_001,
+        )
+        .expect("registered refresh should render the terminal mark");
+
+        assert!(
+            edit.text.contains("Bash Finished job ✓"),
+            "registered-refresh footer ✓ was deleted by fence repair: {}",
+            edit.text
+        );
+        assert!(edit.text.contains("Bash Running job ⠸"));
+        assert!(
+            !edit.text.contains("```text"),
+            "body dangling fence leaked: {}",
+            edit.text
+        );
+        assert_eq!(
+            edit.text.matches("```").count() % 2,
+            0,
+            "registered-refresh composed text has odd fence parity: {}",
+            edit.text
+        );
+        // #3391: the delivered ✓ slot identity is reported for this edit, and it is
+        // genuinely present in the delivered text above.
+        assert!(!edit.delivered_terminal_ids.is_empty());
+        super::completion_footer_forget_registered_target(channel_id);
+    }
+
+    /// #3394 round 2: a body with a BALANCED fence and a footer compose without
+    /// any repair touching the body's closed fence — parity stays even and both
+    /// the fenced body and the footer survive intact.
+    #[test]
+    fn compose_completion_footer_keeps_balanced_body_fence_intact_3394() {
+        let body = "intro\n\n```text\nclosed body\n```\noutro";
+        let footer = "Context   📦 1.0k / 1.0M tokens (1%)\n\nTasks\n└ Bash Done ✓";
+        let composed = super::compose_completion_footer_text(body, Some(footer));
+
+        assert!(composed.contains("```text\nclosed body\n```"));
+        assert!(composed.contains("Bash Done ✓"));
+        assert_eq!(composed.matches("```").count() % 2, 0);
     }
 
     #[test]
