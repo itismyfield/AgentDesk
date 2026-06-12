@@ -57,10 +57,6 @@ impl RelayRecoveryApplySource {
     fn cleanup_session(self) -> bool {
         matches!(self, Self::StallWatchdog)
     }
-
-    fn uses_rate_limit(self) -> bool {
-        !matches!(self, Self::StallWatchdog)
-    }
 }
 
 impl RelayRecoveryActionKind {
@@ -209,6 +205,8 @@ struct AttemptWindow {
 
 fn auto_heal_attempts() -> &'static Mutex<HashMap<String, AttemptWindow>> {
     static ATTEMPTS: OnceLock<Mutex<HashMap<String, AttemptWindow>>> = OnceLock::new();
+    // Short-lived process memory guard only; persistence across restarts is out
+    // of scope for this bounded local auto-heal limiter.
     ATTEMPTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -541,27 +539,23 @@ async fn apply_relay_recovery_plan(
     }
 
     let key = auto_heal_key(&decision.provider, decision.channel_id, decision.action);
-    if source.uses_rate_limit() {
-        match reserve_auto_heal_attempt(&key, now_ms) {
-            Ok(remaining) => {
-                decision.auto_heal.remaining_attempts = remaining;
-            }
-            Err(reason) => {
-                decision.auto_heal.remaining_attempts = 0;
-                decision.auto_heal.skipped_reason = Some(reason);
-                trace_relay_recovery_skipped(&decision, Some(reason));
-                return RelayRecoveryResponse {
-                    ok: false,
-                    mode: "apply",
-                    applied: false,
-                    skipped: true,
-                    decision,
-                    apply_result: None,
-                };
-            }
+    match reserve_auto_heal_attempt(&key, now_ms) {
+        Ok(remaining) => {
+            decision.auto_heal.remaining_attempts = remaining;
         }
-    } else {
-        decision.auto_heal.remaining_attempts = remaining_auto_heal_attempts(&key, now_ms);
+        Err(reason) => {
+            decision.auto_heal.remaining_attempts = 0;
+            decision.auto_heal.skipped_reason = Some(reason);
+            trace_relay_recovery_skipped(&decision, Some(reason));
+            return RelayRecoveryResponse {
+                ok: false,
+                mode: "apply",
+                applied: false,
+                skipped: true,
+                decision,
+                apply_result: None,
+            };
+        }
     }
 
     let apply_result =
@@ -1287,6 +1281,92 @@ mod tests {
                 .is_some(),
             "rate-limited auto-heal must leave the token untouched"
         );
+    }
+
+    #[tokio::test]
+    async fn watchdog_auto_apply_is_rate_limited_after_first_token_reclaim() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let provider = ProviderKind::Codex;
+        let (registry, shared) = registry_with_shared(provider.clone()).await;
+        let channel = ChannelId::new(3_360_005);
+
+        let first_token = start_test_turn(&shared, channel, MessageId::new(94)).await;
+        first_token
+            .tmux_session
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .replace("AgentDesk-codex-3360-watchdog-first".to_string());
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+        let first = auto_apply_relay_recovery_for_shared(
+            &registry,
+            shared.clone(),
+            &provider,
+            channel.get(),
+            RelayRecoveryActionKind::ClearOrphanPendingToken,
+            RelayRecoveryApplySource::StallWatchdog,
+        )
+        .await
+        .expect("first watchdog orphan token auto-heal should evaluate");
+
+        assert!(first.applied);
+        assert!(!first.skipped);
+        assert_eq!(
+            first.decision.action,
+            RelayRecoveryActionKind::ClearOrphanPendingToken
+        );
+        assert_eq!(
+            first.decision.auto_heal.skipped_reason, None,
+            "the first watchdog reclaim in a fresh window must pass"
+        );
+        assert!(
+            first
+                .apply_result
+                .as_ref()
+                .is_some_and(|result| result.removed_mailbox_token)
+        );
+        assert!(
+            super::super::mailbox_snapshot(&shared, channel)
+                .await
+                .cancel_token
+                .is_none()
+        );
+        assert!(first_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+
+        let second_token = start_test_turn(&shared, channel, MessageId::new(95)).await;
+        second_token
+            .tmux_session
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .replace("AgentDesk-codex-3360-watchdog-second".to_string());
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+        let second = auto_apply_relay_recovery_for_shared(
+            &registry,
+            shared.clone(),
+            &provider,
+            channel.get(),
+            RelayRecoveryActionKind::ClearOrphanPendingToken,
+            RelayRecoveryApplySource::StallWatchdog,
+        )
+        .await
+        .expect("second watchdog orphan token auto-heal should evaluate");
+
+        assert!(second.skipped);
+        assert!(!second.applied);
+        assert_eq!(
+            second.decision.auto_heal.skipped_reason,
+            Some("auto_heal_rate_limited")
+        );
+        assert!(
+            super::super::mailbox_snapshot(&shared, channel)
+                .await
+                .cancel_token
+                .is_some(),
+            "rate-limited watchdog auto-heal must leave the token untouched"
+        );
+        assert!(!second_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
