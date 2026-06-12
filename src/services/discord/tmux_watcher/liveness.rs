@@ -282,12 +282,21 @@ pub(super) fn discard_restored_response_seed_before_no_inflight_terminal_relay(
     last_edit_text: &mut String,
     restored_response_seed: &str,
     inflight_present: bool,
-    _fresh_assistant_text_seen: bool,
+    fresh_assistant_text_seen: bool,
 ) -> bool {
     if inflight_present || restored_response_seed.trim().is_empty() {
         return false;
     }
     if !full_response.starts_with(restored_response_seed) {
+        return false;
+    }
+    let restored_seed_has_undelivered_body = restored_response_seed
+        .get(*response_sent_offset..)
+        .is_some_and(|body| !body.trim().is_empty());
+    // Preserve the restored seed only for the quiescence handoff shape: it still
+    // contains bytes past response_sent_offset, and this pass saw no fresh
+    // assistant text. Fresh text keeps the original stale-prefix strip.
+    if restored_seed_has_undelivered_body && !fresh_assistant_text_seen {
         return false;
     }
     let seed_len = restored_response_seed.len();

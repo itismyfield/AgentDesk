@@ -8224,13 +8224,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 #[cfg(test)]
 mod tests {
     use super::{
-        FreshIdleFinalizeDecision, RelaySlotGuard, TuiCompletionGateOutcome, Utf8ChunkDecoder,
+        FreshIdleFinalizeDecision, RelaySlotGuard, SessionBoundRelayAckOutcome,
+        TuiCompletionGateOutcome, Utf8ChunkDecoder,
         adopt_watcher_terminal_message_ids_from_inflight, build_watcher_streaming_edit_text,
         discard_restored_response_seed_before_no_inflight_terminal_relay,
         discard_watcher_pending_buffer_after_suppressed_turn,
         legacy_wrapper_prompt_candidates_from_pane, mark_watcher_terminal_delivery_committed,
         reacquire_watcher_inflight_for_active_stream, resolve_persistable_provider_session_id,
-        should_probe_tmux_liveness, terminal_event_consumed_offset,
+        should_probe_tmux_liveness, terminal_event_consumed_offset, terminal_relay_decision,
         watcher_batch_contains_assistant_event, watcher_batch_contains_relayable_response,
         watcher_direct_terminal_should_commit_session_idle,
         watcher_fallback_edit_failure_can_delete_original_placeholder,
@@ -8238,10 +8239,11 @@ mod tests {
         watcher_inflight_represents_external_input, watcher_jsonl_turn_state_ready_for_input,
         watcher_output_progressed_recently, watcher_should_clear_stale_terminal_message_ids,
         watcher_should_delete_suppressed_placeholder,
+        watcher_should_direct_send_after_session_bound_ack,
         watcher_should_reclaim_orphan_turn_placeholder,
         watcher_should_suppress_streaming_after_bridge_delivery,
         watcher_terminal_commit_side_effects_for_test, watcher_terminal_edit_consumes_placeholder,
-        watcher_terminal_token_update_status,
+        watcher_terminal_response_for_direct_send, watcher_terminal_token_update_status,
     };
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::discord::InflightTurnState;
@@ -10123,7 +10125,8 @@ TUI-E2E-marker ssh-direct
     }
 
     #[test]
-    fn no_inflight_user_boundary_without_fresh_text_drops_restored_response_seed() {
+    fn no_inflight_user_boundary_without_fresh_text_drops_already_delivered_restored_response_seed()
+    {
         let restored = "previous turn";
         let mut full_response = "previous turn".to_string();
         let mut response_sent_offset = restored.len();
@@ -10142,6 +10145,47 @@ TUI-E2E-marker ssh-direct
         assert_eq!(full_response, "");
         assert_eq!(response_sent_offset, 0);
         assert!(last_edit_text.is_empty());
+    }
+
+    #[test]
+    fn no_inflight_user_boundary_without_fresh_text_preserves_body_bearing_seed_for_relay() {
+        let restored = "undelivered body";
+        let mut full_response = restored.to_string();
+        let mut response_sent_offset = 0;
+        let mut last_edit_text = String::new();
+
+        assert!(
+            !discard_restored_response_seed_before_no_inflight_terminal_relay(
+                &mut full_response,
+                &mut response_sent_offset,
+                &mut last_edit_text,
+                restored,
+                false,
+                false,
+            )
+        );
+        assert_eq!(full_response, restored);
+        assert_eq!(response_sent_offset, 0);
+        assert!(last_edit_text.is_empty());
+
+        let has_assistant_response = !full_response.trim().is_empty();
+        let current_response = full_response.get(response_sent_offset..).unwrap_or("");
+        let has_current_response = !current_response.trim().is_empty();
+        let relay_decision = terminal_relay_decision(has_assistant_response, None, true);
+        let watcher_direct_send = watcher_should_direct_send_after_session_bound_ack(
+            relay_decision.should_direct_send,
+            SessionBoundRelayAckOutcome::MissingTarget,
+            false,
+        );
+
+        assert!(has_assistant_response);
+        assert!(has_current_response);
+        assert!(relay_decision.should_direct_send);
+        assert!(watcher_direct_send);
+        assert_eq!(
+            watcher_terminal_response_for_direct_send(&full_response, response_sent_offset, false),
+            restored
+        );
     }
 
     #[test]
