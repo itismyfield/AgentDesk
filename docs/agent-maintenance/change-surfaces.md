@@ -1006,7 +1006,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
 - `src/services/dispatches/outbox_route.rs` (1089) — dispatch outbox route
   support extracted from the route layer; split before adding non-bugfix
   behavior.
-- `src/services/claude.rs` (3989), `src/services/gemini.rs` (1358),
+- `src/services/claude.rs` (2950), `src/services/gemini.rs` (1358),
   `src/services/qwen.rs` (2196), `src/services/codex.rs` (3001),
   `src/services/opencode.rs` (1881), `src/services/provider.rs` (1796) —
   provider adapters. (#3034 removed dead non-cancel `execute_command_simple*`
@@ -1023,10 +1023,10 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   with the `#[must_use] ClaudeTuiDraftRecoveryOutcome` carrier — behaviour-
   preserving, the +101 is the new outcome enum, the two verbatim-extraction doc
   contracts, and the call-site `match` dispatch (the recovery body itself is a
-  move). claude.rs is not in the giant-file ratchet baseline; this is a
-  freshness-annotation sync, not a baseline raise. Slice S3 relocates the
-  hosting cluster to a directory and drives claude.rs back under the giant
-  threshold.)
+  move). #3038 S3 relocates the TUI warm/follow-up hosting cluster into
+  `src/services/claude_tui/hosting/` child modules, ratchets claude.rs at 2950
+  production LoC, and leaves the #3262 turn-lock machinery in the claude.rs
+  root.)
 - `src/services/codex_tui/rollout_tail.rs` (1663) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
   beyond the #2169 session identity fix.

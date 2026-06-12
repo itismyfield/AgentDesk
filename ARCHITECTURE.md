@@ -332,6 +332,10 @@ src/
 │   │   ├── process.rs
 │   │   └── spawn_queue.rs
 │   ├── claude_tui/
+│   │   ├── hosting/
+│   │   │   ├── followup_support.rs
+│   │   │   ├── mod.rs
+│   │   │   └── warm_followup.rs
 │   │   ├── hook_bundle.rs
 │   │   ├── hook_relay.rs
 │   │   ├── hook_server.rs

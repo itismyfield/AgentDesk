@@ -17,6 +17,10 @@
 # documentation gate; extend this table to ratchet them too.
 
 [giant_file_ratchet]
+# #3038 execute_streaming S3: lowered claude.rs 3989 -> 2950 by moving the
+# TUI warm/follow-up hosting helpers into claude_tui/hosting/ child modules.
+# #3262 turn-lock acquisition/state/tests intentionally remain in claude.rs root.
+"src/services/claude.rs" = 2950
 # #3034 batch-8: the dead_code lint went live for the discord tree; the two
 # test-only `#[allow(dead_code)]` attributes on
 # `watcher_inflight_is_external_input_for_session` / the lease alias add +2 and
