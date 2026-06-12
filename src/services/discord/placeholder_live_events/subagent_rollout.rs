@@ -30,9 +30,9 @@ use crate::services::agent_protocol::SubagentSummary;
 
 /// Extracts the TUI summary from a parent-transcript `tool_result` record's
 /// top-level `toolUseResult` object. Returns `(summary, agent_id)` when the
-/// record looks like a finished subagent (i.e. it carries an `agentId` and/or
-/// any of the `total*` accounting fields). Returns `None` for ordinary tool
-/// results that have no subagent accounting.
+/// record looks like a finished subagent (i.e. it carries any of the `total*`
+/// accounting fields). Returns `None` for ordinary tool results and async
+/// launch acknowledgments that have no subagent completion accounting.
 pub(super) fn summary_from_tool_use_result(
     value: &Value,
 ) -> Option<(SubagentSummary, Option<String>)> {
@@ -41,11 +41,21 @@ pub(super) fn summary_from_tool_use_result(
     // the subagent accounting.
     let result = result.as_object()?;
 
+    if result.get("status").and_then(Value::as_str) == Some("async_launched")
+        || result.get("isAsync").and_then(Value::as_bool) == Some(true)
+    {
+        return None;
+    }
+
     let agent_id = result
         .get("agentId")
         .and_then(Value::as_str)
         .map(str::to_string)
         .filter(|id| !id.trim().is_empty());
+
+    let has_accounting_field = result.contains_key("totalToolUseCount")
+        || result.contains_key("totalTokens")
+        || result.contains_key("totalDurationMs");
 
     let tool_count = result.get("totalToolUseCount").and_then(as_u64_lenient);
     let tokens = result.get("totalTokens").and_then(as_u64_lenient);
@@ -62,9 +72,10 @@ pub(super) fn summary_from_tool_use_result(
         duration_secs,
     };
 
-    // Only treat this as a subagent completion when there is an agentId or at
-    // least one accounting field — otherwise it is an ordinary tool result.
-    if agent_id.is_none() && summary.is_empty() {
+    // `agentId` alone is present on async launch acknowledgments and is not a
+    // completion signal. Require explicit accounting, while preserving the
+    // existing non-empty summary path for any future summary extraction.
+    if !has_accounting_field && summary.is_empty() {
         return None;
     }
     Some((summary, agent_id))
@@ -204,6 +215,78 @@ mod tests {
         assert_eq!(summary.tokens, Some(90157));
         // 109275ms → 110s (ceil) — TUI rounds up partial seconds.
         assert_eq!(summary.duration_secs, Some(110));
+    }
+
+    #[test]
+    fn tool_use_result_async_launch_ack_is_not_a_completion_summary() {
+        let value = json!({
+            "type": "user",
+            "toolUseResult": {
+                "isAsync": true,
+                "status": "async_launched",
+                "agentId": "a31353d794c259eb9",
+                "description": "...",
+                "prompt": "...",
+                "outputFile": "...",
+                "canReadOutputFile": true
+            }
+        });
+
+        assert!(summary_from_tool_use_result(&value).is_none());
+    }
+
+    #[test]
+    fn tool_use_result_agent_id_without_accounting_is_not_a_completion_summary() {
+        let values = [
+            json!({
+                "type": "user",
+                "toolUseResult": {
+                    "isAsync": false,
+                    "status": "async_launched-ish",
+                    "agentId": "a31353d794c259eb9"
+                }
+            }),
+            json!({
+                "type": "user",
+                "toolUseResult": {
+                    "isAsync": false,
+                    "agentId": "a31353d794c259eb9"
+                }
+            }),
+            json!({
+                "type": "user",
+                "toolUseResult": {
+                    "isAsync": false,
+                    "status": "async_launched",
+                    "agentId": "a31353d794c259eb9"
+                }
+            }),
+        ];
+
+        for value in values {
+            assert!(
+                summary_from_tool_use_result(&value).is_none(),
+                "agentId-only result must not classify as completion: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_use_result_without_agent_id_but_with_accounting_is_a_completion_summary() {
+        let value = json!({
+            "type": "user",
+            "toolUseResult": {
+                "totalToolUseCount": 2,
+                "totalTokens": 1234,
+                "totalDurationMs": 1500
+            }
+        });
+
+        let (summary, agent_id) = summary_from_tool_use_result(&value).expect("completion summary");
+        assert_eq!(agent_id, None);
+        assert_eq!(summary.tool_count, Some(2));
+        assert_eq!(summary.tokens, Some(1234));
+        assert_eq!(summary.duration_secs, Some(2));
     }
 
     #[test]

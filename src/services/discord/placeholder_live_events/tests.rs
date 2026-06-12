@@ -2283,6 +2283,163 @@ fn status_panel_background_subagent_not_marked_done_on_launch_ack() {
     );
 }
 
+// #3368: the raw JSONL stream may contain an async launch-ack `toolUseResult`
+// with an agentId but no accounting. That is dispatch acknowledgment, not a
+// completion, so status_events_from_json must not synthesize SubagentEnd.
+#[test]
+fn status_events_json_async_launch_ack_does_not_close_background_subagent() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(875);
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({
+                "subagent_type": "bgworker",
+                "description": "Launch ack record reconstruction",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_launch_ack"),
+        ),
+    );
+
+    let reconstructed = status_events_from_json(&json!({
+        "type": "user",
+        "message": {
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "toolu_launch_ack",
+                "is_error": false
+            }]
+        },
+        "toolUseResult": {
+            "isAsync": true,
+            "status": "async_launched",
+            "agentId": "a31353d794c259eb9",
+            "description": "...",
+            "prompt": "...",
+            "outputFile": "...",
+            "canReadOutputFile": true
+        }
+    }));
+    assert!(
+        !reconstructed
+            .iter()
+            .any(|event| matches!(event, StatusEvent::SubagentEnd { .. })),
+        "launch ack must not synthesize SubagentEnd: {reconstructed:?}"
+    );
+
+    events.push_status_events(channel_id, reconstructed);
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let line = rendered
+        .lines()
+        .find(|line| line.contains("bgworker Launch ack record reconstruction"))
+        .unwrap_or_else(|| panic!("background subagent slot missing in: {rendered}"));
+    assert!(
+        !line.contains('✓') && !line.contains('✗') && !line.contains("Done ("),
+        "background subagent must stay running on async launch ack, got: {line}"
+    );
+}
+
+#[test]
+fn status_panel_async_completion_with_accounting_still_finalizes_subagent() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(876);
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({
+                "subagent_type": "asyncworker",
+                "description": "Completion accounting"
+            })
+            .to_string(),
+            Some("toolu_async_done"),
+        ),
+    );
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_json(&json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_async_done",
+                    "is_error": false
+                }]
+            },
+            "toolUseResult": {
+                "agentId": "aasyncdone000000",
+                "totalToolUseCount": 12,
+                "totalTokens": 5000,
+                "totalDurationMs": 30_000
+            }
+        })),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let line = rendered
+        .lines()
+        .find(|line| line.contains("asyncworker Completion accounting"))
+        .unwrap_or_else(|| panic!("async completion slot missing in: {rendered}"));
+    assert!(
+        line.contains("Done (12 tools · 5k tokens · 30s)") && line.contains('✓'),
+        "completion with accounting must still finalize, got: {line}"
+    );
+}
+
+#[test]
+fn status_panel_foreground_completion_without_agent_id_still_finalizes_subagent() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(877);
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({
+                "subagent_type": "fgworker",
+                "description": "No agent id completion"
+            })
+            .to_string(),
+            Some("toolu_fg_no_agent"),
+        ),
+    );
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_json(&json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_fg_no_agent",
+                    "is_error": false
+                }]
+            },
+            "toolUseResult": {
+                "totalToolUseCount": 3,
+                "totalTokens": 1500,
+                "totalDurationMs": 20_000
+            }
+        })),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let line = rendered
+        .lines()
+        .find(|line| line.contains("fgworker No agent id completion"))
+        .unwrap_or_else(|| panic!("foreground completion slot missing in: {rendered}"));
+    assert!(
+        line.contains("Done (3 tools · 1.5k tokens · 20s)") && line.contains('✓'),
+        "foreground completion without agentId must still finalize, got: {line}"
+    );
+}
+
 // #3359: an ack-only Task result with a non-matching tool_use_id must be
 // ignored, not routed through the last-unfinished fallback. The later
 // summary-bearing completion with the matching id is the first event allowed to
