@@ -2252,27 +2252,39 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         }
         all_data.push_str(&decoded_data.text);
         let turn_data_start_offset = all_data_start_offset;
-        // #3041 P1-3 (codex P1-3 R7): pass-scoped turn-boundary latch. Set TRUE when
-        // ANY forward on THIS watcher pass SPLIT a result-bearing chunk with a
-        // non-empty trailing tail (a LATER turn's bytes). After this turn consumes
-        // its own terminal ACK below, the stored ack is reset to `None` so the
-        // trailing turn — processed from the leftover buffer on a LATER pass, where
-        // `turn_identity_for_panel` may STILL be pinned to THIS turn's offset — can
-        // NEVER inherit this finished turn's ACK (→ MissingTarget → §3.2 reconcile,
-        // no black-hole). The reset happens AFTER the terminal ACK wait, so this
-        // turn's OWN ack resolution is untouched.
+        // #3041 P1-3 R7: reset carried ACKs after terminal/next-turn splits so later turns cannot inherit them and black-hole.
         let mut split_trailing_turn_follows = false;
         let mut state = StreamLineState::new();
         let restored_turn_seed = restored_turn.take();
-        let discard_restored_seed = should_discard_restored_seed_for_idle_direct_prompt(
-            restored_turn_seed.is_some(),
+        let restored_seed_undelivered_body_len = restored_turn_seed
+            .as_ref()
+            .and_then(|seed| seed.full_response.get(seed.response_sent_offset..))
+            .map(|body| body.trim().chars().count())
+            .unwrap_or(0);
+        let restored_seed_has_body = restored_seed_undelivered_body_len > 0;
+        let prompt_anchor_present_for_seed_discard =
             crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
                 watcher_provider.as_str(),
                 &tmux_session_name,
                 channel_id.get(),
             )
-            .is_some(),
+            .is_some();
+        let discard_restored_seed = should_discard_restored_seed_for_idle_direct_prompt(
+            restored_turn_seed.is_some(),
+            prompt_anchor_present_for_seed_discard,
+            restored_seed_has_body,
         );
+        if !discard_restored_seed
+            && prompt_anchor_present_for_seed_discard
+            && restored_seed_has_body
+        {
+            tracing::info!(
+                channel = channel_id.get(),
+                body_len = restored_seed_undelivered_body_len,
+                tmux_session = %tmux_session_name,
+                "watcher: preserving restored stream seed with undelivered body for idle SSH-direct prompt"
+            );
+        }
         if discard_restored_seed {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
