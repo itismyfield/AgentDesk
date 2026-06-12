@@ -84,7 +84,10 @@
 # #3038 S4: lowered 4970 -> 4967 (-3) as the cluster-F field block (5
 # live-placeholder/status-panel fields) moved into `shared_state::PlaceholderState`.
 # Locks in the shrink win (ratchet down only).
-"src/services/discord/mod.rs" = 4967
+# #3038 S5: lowered 4967 -> 4944 (-23) as the cluster-G runtime HTTP cache
+# fields plus the `serenity_http_or_token_fallback` accessor moved into
+# `shared_state::RuntimeHttpCache`. Locks in the shrink win (ratchet down only).
+"src/services/discord/mod.rs" = 4944
 # #3305: the local-only pass-through lifecycle-skip (kind hoist + note-only return
 # branch + idle-loop skip) is offset by comment dedup in the same root, lowering the
 # frozen baseline 5438 -> 5429 (-9). Locks in the shrink win (#3028 ratchet).
