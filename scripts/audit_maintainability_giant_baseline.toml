@@ -91,7 +91,10 @@
 # #3038 VoiceBargeInRuntime S1: lowered 4657 -> 4350 (-307) as the STT
 # method cluster moved to `voice_barge_in/stt.rs` (314 prod LoC, below the
 # giant threshold). Locks in the shrink win.
-"src/services/discord/voice_barge_in.rs" = 4350
+# #3038 VoiceBargeInRuntime S2: lowered 4350 -> 3932 (-418) as the progress
+# playback method cluster moved to `voice_barge_in/progress_playback.rs` (423
+# prod LoC, below the giant threshold). Locks in the shrink win.
+"src/services/discord/voice_barge_in.rs" = 3932
 # #3248: +60 for the gap-1 deploy-survivable-relay fix —
 # `reseed_watcher_owned_finalizer_ledger` + two guarded reattach call-sites that
 # re-register the watcher-owned turn in the post-restart finalizer ledger (a P1
