@@ -198,7 +198,6 @@ src/
 │   │   │   ├── ops.rs
 │   │   │   └── reviews.rs
 │   │   ├── review_verdict/
-│   │   │   ├── decision_route/
 │   │   │   ├── decision_route.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── tuning_aggregate.rs
@@ -521,6 +520,8 @@ src/
 │   │   │   └── watcher_handoff.rs
 │   │   ├── turn_finalizer/
 │   │   │   └── cleanup.rs
+│   │   ├── voice_barge_in/
+│   │   │   └── stt.rs
 │   │   ├── watchers/
 │   │   │   ├── lifecycle.rs
 │   │   │   └── lifecycle_decision.rs
