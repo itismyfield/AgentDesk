@@ -5,6 +5,7 @@ use crate::services::provider::ProviderKind;
 
 use super::common::{
     EVENT_LINE_MAX_CHARS, STATUS_PANEL_SUBAGENT_LIMIT, STATUS_PANEL_TASK_LIMIT, truncate_chars,
+    truncate_chars_with_marker,
 };
 use super::context_panel::render_context_panel_line;
 use super::status_panel::{StatusPanelState, SubagentSlot, render_subagent_slot};
@@ -122,8 +123,23 @@ pub(super) fn render_completion_footer(
         for slot in snapshot.tasks.iter().rev().take(STATUS_PANEL_TASK_LIMIT) {
             let (line, unfinished) = render_completion_task_tool_slot(slot, indicator);
             task_unfinished |= unfinished;
-            let terminal_id =
-                (!unfinished).then(|| TerminalSlotId::Task(task_tool_slot_identity(slot)));
+            // #3391 honesty guarantee: only report a delivered identity if the
+            // FINAL rendered line actually ends with this slot's terminal mark.
+            // Fix 1 reserves the marker width, so a terminal line ALWAYS ends
+            // with its ✓/✗ — debug_assert that invariant, but keep the runtime
+            // `line_shows_marker` gate so a future render regression can never
+            // evict a slot on a mark the user never saw.
+            let marker = task_tool_terminal_marker(slot.status.as_deref());
+            let terminal_id = (!unfinished)
+                .then(|| {
+                    debug_assert!(
+                        line_shows_marker(&line, marker),
+                        "terminal task line dropped its mark: {line:?}"
+                    );
+                    line_shows_marker(&line, marker)
+                        .then(|| TerminalSlotId::Task(task_tool_slot_identity(slot)))
+                })
+                .flatten();
             emitted.push(EmittedLine {
                 text: line,
                 terminal_id,
@@ -146,9 +162,21 @@ pub(super) fn render_completion_footer(
         {
             subagent_unfinished |= !slot.is_terminal();
             let line = render_completion_subagent_slot(slot, indicator);
+            // #3391 honesty guarantee (mirrors the task loop): a finished
+            // subagent's line always ends with its ✓/✗ thanks to fix 1 —
+            // debug_assert it, but gate the delivered id on the runtime check.
+            let marker = slot.terminal_marker();
             let terminal_id = slot
                 .is_terminal()
-                .then(|| TerminalSlotId::Subagent(slot.identity()));
+                .then(|| {
+                    debug_assert!(
+                        line_shows_marker(&line, marker),
+                        "terminal subagent line dropped its mark: {line:?}"
+                    );
+                    line_shows_marker(&line, marker)
+                        .then(|| TerminalSlotId::Subagent(slot.identity()))
+                })
+                .flatten();
             emitted.push(EmittedLine {
                 text: line,
                 terminal_id,
@@ -207,17 +235,37 @@ impl EmittedLine {
     }
 }
 
+/// #3391: true iff `line` ends with this slot's terminal mark (`marker` is the
+/// ✓/✗ the slot maps to, or `None` if it is not terminal). Used as the
+/// delivered-id honesty gate: a slot's identity is reported as delivered only
+/// when the user can actually SEE its mark on the rendered line. Fix 1 keeps
+/// this true for every terminal slot; the runtime check is the safety net.
+fn line_shows_marker(line: &str, marker: Option<&str>) -> bool {
+    match marker {
+        Some(marker) => line.ends_with(marker),
+        None => false,
+    }
+}
+
 fn render_completion_task_tool_slot(slot: &TaskToolSlot, indicator: &str) -> (String, bool) {
     let (marker, unfinished) = completion_task_marker(slot.status.as_deref(), indicator);
     let base = render_task_tool_slot(slot);
+    // #3391: when this slot is terminal (✓/✗, `unfinished == false`), reserve the
+    // marker's width before truncating so the FINAL line always ends with its
+    // mark — a long description can no longer swallow it via a second
+    // post-append truncation here. Background terminal slots already carry a
+    // truncation-proof mark from `render_task_tool_slot`, so reuse `base` as-is.
+    // Non-terminal lines (indicator or empty marker) keep plain truncation.
     let line = if slot.background && task_tool_terminal_marker(slot.status.as_deref()).is_some() {
-        base
+        truncate_chars(&base, EVENT_LINE_MAX_CHARS)
     } else if marker.is_empty() {
-        base
+        truncate_chars(&base, EVENT_LINE_MAX_CHARS)
+    } else if !unfinished {
+        truncate_chars_with_marker(&base, marker, EVENT_LINE_MAX_CHARS)
     } else {
-        format!("{base} {marker}")
+        truncate_chars(&format!("{base} {marker}"), EVENT_LINE_MAX_CHARS)
     };
-    (truncate_chars(&line, EVENT_LINE_MAX_CHARS), unfinished)
+    (line, unfinished)
 }
 
 fn completion_task_marker<'a>(status: Option<&str>, indicator: &'a str) -> (&'a str, bool) {
@@ -270,6 +318,17 @@ fn render_completion_subagent_slot(slot: &SubagentSlot, indicator: &str) -> Stri
 /// of leading lines retained verbatim. Callers map emitted-line positions
 /// `< kept_count` to delivered terminal identities; positions beyond it were
 /// collapsed into the `…` marker and are NOT delivered.
+///
+/// #3391 outer-truncation audit (fix 3): this clamp keeps WHOLE lines — it only
+/// joins a leading prefix `lines[..keep_count]` and never splits a kept line, so
+/// a retained terminal line's tail (its ✓/✗) survives intact. The only mid-line
+/// cut is the "not even the first line fits" fallback, which returns
+/// `kept_count == 0`, so nothing is reported delivered there. The single
+/// downstream byte-level clamp (`single_message_panel::clamp_footer_status_block`,
+/// ~1994 bytes against the Discord message ceiling) sits far above this 600-byte
+/// section budget and so cannot reach a terminal line tail; the body-vs-suffix
+/// split in `compose_completion_footer_text` only trims the response body, never
+/// the appended completion block. No extra reservation is needed at those sites.
 fn clamp_completion_task_section(task_section: &str) -> (String, usize) {
     let lines: Vec<&str> = task_section.lines().collect();
     if task_section.len() <= SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES {

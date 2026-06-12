@@ -2244,6 +2244,120 @@ fn completion_footer_terminal_subagent_evicts_after_delivery_inflight_unaffected
     assert!(next.delivered_terminal_ids.is_empty());
 }
 
+// #3391 round 3 helper: pull the single rendered footer line that contains
+// `needle` so a test can assert what its TAIL looks like after truncation.
+fn footer_line_containing<'a>(block: &'a str, needle: &str) -> &'a str {
+    block
+        .lines()
+        .find(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("no footer line contains {needle:?}: {block}"))
+}
+
+// #3391 round 3 finding 1 (task): a background task whose description is long
+// enough that the pre-fix append-then-truncate swallowed the mark must still
+// render a line that ENDS WITH ✓. FAILS on HEAD 95f6e2176 (the ✓ was chopped
+// off the >EVENT_LINE_MAX_CHARS line).
+#[test]
+fn completion_footer_long_background_task_line_ends_with_check_mark() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_301);
+    let long_desc = format!("Long bg task {}", "x".repeat(EVENT_LINE_MAX_CHARS));
+    push_background_bash_task(&events, channel_id, &long_desc, "toolu_3391_long_task");
+    complete_background_bash_task(&events, channel_id, "toolu_3391_long_task");
+
+    let rendered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = rendered.block.expect("long terminal task should render");
+    let line = footer_line_containing(&block, "Long bg task");
+    assert!(
+        line.chars().count() > EVENT_LINE_MAX_CHARS - 2,
+        "test must exercise the truncation path: {line:?}"
+    );
+    assert!(
+        line.ends_with('✓'),
+        "long terminal background task line must end with ✓: {line:?}"
+    );
+    assert!(line.chars().count() <= EVENT_LINE_MAX_CHARS);
+}
+
+// #3391 round 3 finding 1 (subagent): same shape for a finished subagent slot
+// with a long desc — the rendered line must END WITH ✓. FAILS on HEAD.
+#[test]
+fn completion_footer_long_subagent_line_ends_with_check_mark() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_302);
+    let long_desc = format!("Audit subagent {}", "y".repeat(EVENT_LINE_MAX_CHARS));
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("reviewer".to_string()),
+            desc: Some(long_desc),
+            tool_use_id: Some("toolu_3391_long_sub".to_string()),
+            background: false,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentEnd {
+            success: true,
+            tool_use_id: Some("toolu_3391_long_sub".to_string()),
+            summary: None,
+            ack_only: false,
+        },
+    );
+
+    let rendered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = rendered
+        .block
+        .expect("long terminal subagent should render");
+    let line = footer_line_containing(&block, "Audit subagent");
+    assert!(
+        line.chars().count() > EVENT_LINE_MAX_CHARS - 2,
+        "test must exercise the truncation path: {line:?}"
+    );
+    assert!(
+        line.ends_with('✓'),
+        "long terminal subagent line must end with ✓: {line:?}"
+    );
+    assert!(line.chars().count() <= EVENT_LINE_MAX_CHARS);
+}
+
+// #3391 round 3 finding 2/3 (honesty): a terminal slot whose mark would (pre-fix)
+// be truncated off its line must, post-fix, show the mark AND be reported in the
+// delivered set — the two are pinned together. On HEAD the ✓ is chopped, so the
+// `ends_with('✓')` assertion FAILS; post-fix the mark survives and the id ships.
+#[test]
+fn completion_footer_long_task_visible_mark_and_id_reported_together() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_303);
+    let long_desc = format!("Honesty task {}", "z".repeat(EVENT_LINE_MAX_CHARS));
+    push_background_bash_task(&events, channel_id, &long_desc, "toolu_3391_honesty");
+    complete_background_bash_task(&events, channel_id, "toolu_3391_honesty");
+
+    let rendered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = rendered.block.expect("long terminal task should render");
+    let line = footer_line_containing(&block, "Honesty task");
+    let mark_visible = line.ends_with('✓');
+    let id_reported = rendered
+        .delivered_terminal_ids
+        .contains(&bg_task_id("toolu_3391_honesty"));
+    // Mark visibility and delivered-id reporting must agree: the honesty gate
+    // never reports an id whose mark the user cannot see, and fix 1 keeps the
+    // mark visible, so both are true together.
+    assert!(
+        mark_visible,
+        "post-fix the ✓ must survive truncation: {line:?}"
+    );
+    assert!(
+        id_reported,
+        "a visible terminal mark must be reported as delivered: {:?}",
+        rendered.delivered_terminal_ids
+    );
+    assert_eq!(
+        mark_visible, id_reported,
+        "mark visibility and delivered-id reporting must agree"
+    );
+}
+
 // #3391 Finding 2 migration filter: the #3386 carry-over (clear-preserving
 // residuals) must drop an EVICTED terminal subagent. A background subagent that
 // completed and was evicted on delivery must not re-appear in the carried

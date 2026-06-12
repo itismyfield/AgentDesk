@@ -5,7 +5,7 @@ use super::common::{
     EVENT_LINE_MAX_CHARS, STATUS_PANEL_MAX_CHARS, STATUS_PANEL_SUBAGENT_LIMIT,
     STATUS_PANEL_TASK_LIMIT, STATUS_PANEL_TODO_LIMIT, STATUS_PANEL_WORKFLOW_LIMIT,
     escape_status_panel_markdown, normalize_summary, sanitized_tool_name, tool_prefix,
-    truncate_chars,
+    truncate_chars, truncate_chars_with_marker,
 };
 use super::context_panel::{ContextPanelSnapshot, render_context_panel_line};
 use super::session_panel::{SessionPanelSnapshot, render_session_panel_line};
@@ -631,11 +631,6 @@ fn render_derived_status(status: &DerivedStatus) -> String {
 }
 
 pub(super) fn render_subagent_slot(slot: &SubagentSlot) -> String {
-    let marker = match slot.finished {
-        Some(true) => "✓",
-        Some(false) => "✗",
-        None => "",
-    };
     let mut line = format!(
         "└ {} {}",
         sanitize_label(&slot.subagent_type),
@@ -656,17 +651,17 @@ pub(super) fn render_subagent_slot(slot: &SubagentSlot) -> String {
         .as_ref()
         .filter(|_| matches!(slot.finished, Some(true)))
         .filter(|summary| !summary.is_empty())
+        && let Some(done) = render_subagent_done_summary(summary)
     {
-        if let Some(done) = render_subagent_done_summary(summary) {
-            line.push_str(" — ");
-            line.push_str(&done);
-        }
+        line.push_str(" — ");
+        line.push_str(&done);
     }
-    if !marker.is_empty() {
-        line.push(' ');
-        line.push_str(marker);
+    // #3391: reserve the marker width then append, so a finished subagent line
+    // always ENDS WITH its ✓/✗ (a long desc/summary can no longer swallow it).
+    match slot.terminal_marker() {
+        Some(marker) => truncate_chars_with_marker(&line, marker, EVENT_LINE_MAX_CHARS),
+        None => truncate_chars(&line, EVENT_LINE_MAX_CHARS),
     }
-    truncate_chars(&line, EVENT_LINE_MAX_CHARS)
 }
 
 impl SubagentSlot {
@@ -676,6 +671,11 @@ impl SubagentSlot {
 
     pub(super) fn is_terminal(&self) -> bool {
         self.finished.is_some() // #3391: terminal (✓/✗) once `finished` is set.
+    }
+
+    /// #3391: the ✓/✗ this slot renders (`None` while unfinished); single source for both render and the footer honesty gate.
+    pub(super) fn terminal_marker(&self) -> Option<&'static str> {
+        self.finished.map(|ok| if ok { "✓" } else { "✗" })
     }
 
     // #3391: eviction identity — launching `tool_use_id`, else `ordinal`.

@@ -156,6 +156,28 @@ pub(super) fn truncate_chars(raw: &str, max_chars: usize) -> String {
     out
 }
 
+/// #3391: truncation-proof terminal-mark append. Reserves the marker's display
+/// width (plus the separating space) BEFORE truncating `base`, so the returned
+/// line always ends with the full `marker` regardless of how long `base` is.
+///
+/// Limits here are char-based (`truncate_chars` counts chars), so the
+/// reservation is computed in chars too: `base` is clamped to
+/// `max_chars - (marker_chars + 1)`, then ` {marker}` is appended. The result is
+/// therefore at most `max_chars` chars — never wider than the plain
+/// `truncate_chars(line, max_chars)` it replaces, so no line grows past its
+/// existing limit (600-byte panel budget preserved). A marker wider than the
+/// whole limit degrades to a plain truncation (cannot happen for ✓/✗).
+pub(super) fn truncate_chars_with_marker(base: &str, marker: &str, max_chars: usize) -> String {
+    let reserve = marker.chars().count().saturating_add(1);
+    let Some(base_budget) = max_chars.checked_sub(reserve) else {
+        return truncate_chars(&format!("{base} {marker}"), max_chars);
+    };
+    let mut line = truncate_chars(base, base_budget);
+    line.push(' ');
+    line.push_str(marker);
+    line
+}
+
 pub(super) fn escape_status_panel_markdown(raw: &str) -> String {
     raw.chars()
         .flat_map(|ch| match ch {

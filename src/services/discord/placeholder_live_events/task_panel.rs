@@ -1,6 +1,6 @@
 use super::common::{
     EVENT_LINE_MAX_CHARS, TASK_PANEL_LINE_MAX_CHARS, escape_status_panel_markdown,
-    first_content_line, sanitized_tool_name, truncate_chars,
+    first_content_line, sanitized_tool_name, truncate_chars, truncate_chars_with_marker,
 };
 
 const DISPATCH_ID_SHORT_LEN: usize = 8;
@@ -218,18 +218,22 @@ pub(super) fn render_task_tool_slot(slot: &TaskToolSlot) -> String {
         detail_parts.push(escape_status_panel_markdown(status));
     }
 
-    let mut line = if detail_parts.is_empty() {
+    let line = if detail_parts.is_empty() {
         format!("└ {label}")
     } else {
         format!("└ {label} {}", detail_parts.join(" · "))
     };
+    // #3391: reserve marker width then append, so a terminal background slot's
+    // line always ENDS WITH its ✓/✗ even when the description is long enough
+    // that a post-append truncation would have swallowed the mark. Non-terminal
+    // lines keep their plain char truncation.
     if slot.background
         && let Some(marker) = task_tool_terminal_marker(slot.status.as_deref())
     {
-        line.push(' ');
-        line.push_str(marker);
+        truncate_chars_with_marker(&line, marker, EVENT_LINE_MAX_CHARS)
+    } else {
+        truncate_chars(&line, EVENT_LINE_MAX_CHARS)
     }
-    truncate_chars(&line, EVENT_LINE_MAX_CHARS)
 }
 
 pub(super) fn task_tool_terminal_marker(status: Option<&str>) -> Option<&'static str> {
