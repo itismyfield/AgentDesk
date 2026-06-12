@@ -469,8 +469,18 @@ fn strip_inprogress_indicators(body: &str) -> String {
     lines.join("\n")
 }
 
-fn rewrite_placeholder_as_terminal_suppressed(text: &str, label: &str) -> String {
-    let cleaned = strip_inprogress_indicators(text);
+fn strip_placeholder_terminal_status(text: &str, provider: &ProviderKind) -> String {
+    let text = super::single_message_panel::strip_streaming_footer(text, provider)
+        .unwrap_or_else(|| text.to_string());
+    strip_inprogress_indicators(&text)
+}
+
+fn rewrite_placeholder_as_terminal_suppressed(
+    text: &str,
+    label: &str,
+    provider: &ProviderKind,
+) -> String {
+    let cleaned = strip_placeholder_terminal_status(text, provider);
     let trimmed = cleaned.trim_end();
     if trimmed.ends_with(label) {
         return trimmed.to_string();
@@ -517,12 +527,12 @@ fn reconstructed_inflight_placeholder_body(state: &super::inflight::InflightTurn
 
 fn orphan_suppressed_placeholder_action(
     state: &super::inflight::InflightTurnState,
+    provider: &ProviderKind,
     has_active_turn: bool,
     tmux_session_name: &str,
 ) -> SuppressedPlaceholderAction {
     if has_active_turn
         || state.rebind_origin
-        || state.response_sent_offset == 0
         || state.current_msg_id == 0
         || state.tmux_session_name.as_deref() != Some(tmux_session_name)
     {
@@ -530,9 +540,17 @@ fn orphan_suppressed_placeholder_action(
     }
 
     let body = reconstructed_inflight_placeholder_body(state);
+    let placeholder_was_exposed = state.response_sent_offset > 0
+        || !strip_placeholder_terminal_status(&body, provider)
+            .trim()
+            .is_empty();
+    if !placeholder_was_exposed {
+        return SuppressedPlaceholderAction::Delete;
+    }
     SuppressedPlaceholderAction::Edit(rewrite_placeholder_as_terminal_suppressed(
         &body,
         SUPPRESSED_RESTART_LABEL,
+        provider,
     ))
 }
 
@@ -564,6 +582,7 @@ impl PlaceholderSuppressOrigin {
 
 struct PlaceholderSuppressContext<'a> {
     origin: PlaceholderSuppressOrigin,
+    provider: &'a ProviderKind,
     placeholder_msg_id: Option<serenity::MessageId>,
     response_sent_offset: usize,
     last_edit_text: &'a str,
@@ -589,8 +608,10 @@ enum PlaceholderSuppressDecision {
     Delete,
 }
 
-fn strip_placeholder_indicators_for_preserve(text: &str) -> String {
-    strip_inprogress_indicators(text).trim_end().to_string()
+fn strip_placeholder_indicators_for_preserve(text: &str, provider: &ProviderKind) -> String {
+    strip_placeholder_terminal_status(text, provider)
+        .trim_end()
+        .to_string()
 }
 
 fn decide_placeholder_suppression(
@@ -603,6 +624,7 @@ fn decide_placeholder_suppression(
             };
             match orphan_suppressed_placeholder_action(
                 state,
+                ctx.provider,
                 ctx.has_active_turn,
                 ctx.tmux_session_name,
             ) {
@@ -617,11 +639,15 @@ fn decide_placeholder_suppression(
             if ctx.reattach_offset_match {
                 return PlaceholderSuppressDecision::Preserve {
                     reason: "reattach-offset-match",
-                    cleaned_body: strip_placeholder_indicators_for_preserve(ctx.last_edit_text),
+                    cleaned_body: strip_placeholder_indicators_for_preserve(
+                        ctx.last_edit_text,
+                        ctx.provider,
+                    ),
                 };
             }
             match suppressed_placeholder_action(
                 ctx.placeholder_msg_id.is_some(),
+                ctx.provider,
                 ctx.response_sent_offset,
                 ctx.last_edit_text,
             ) {
@@ -649,6 +675,7 @@ fn decide_placeholder_suppression(
             );
             match suppressed_placeholder_action(
                 ctx.placeholder_msg_id.is_some(),
+                ctx.provider,
                 ctx.response_sent_offset,
                 ctx.last_edit_text,
             ) {
@@ -657,7 +684,10 @@ fn decide_placeholder_suppression(
                 SuppressedPlaceholderAction::Edit(_) if preserves_body => {
                     PlaceholderSuppressDecision::Preserve {
                         reason: "auto-task-notification-kind",
-                        cleaned_body: strip_placeholder_indicators_for_preserve(ctx.last_edit_text),
+                        cleaned_body: strip_placeholder_indicators_for_preserve(
+                            ctx.last_edit_text,
+                            ctx.provider,
+                        ),
                     }
                 }
                 SuppressedPlaceholderAction::Edit(content) => {
@@ -949,6 +979,7 @@ fn fallback_placeholder_cleanup_decision(
 
 fn suppressed_placeholder_action(
     has_placeholder: bool,
+    provider: &ProviderKind,
     response_sent_offset: usize,
     last_edit_text: &str,
 ) -> SuppressedPlaceholderAction {
@@ -956,14 +987,162 @@ fn suppressed_placeholder_action(
         return SuppressedPlaceholderAction::None;
     }
 
-    let placeholder_was_exposed = response_sent_offset > 0 || !last_edit_text.trim().is_empty();
+    let placeholder_was_exposed = response_sent_offset > 0
+        || !strip_placeholder_terminal_status(last_edit_text, provider)
+            .trim()
+            .is_empty();
     if placeholder_was_exposed {
         SuppressedPlaceholderAction::Edit(rewrite_placeholder_as_terminal_suppressed(
             last_edit_text,
             SUPPRESSED_INTERNAL_LABEL,
+            provider,
         ))
     } else {
         SuppressedPlaceholderAction::Delete
+    }
+}
+
+#[cfg(test)]
+mod placeholder_suppression_tests {
+    use super::*;
+
+    const TEST_SESSION: &str = "adk-claude-test";
+
+    fn footer_status_block() -> String {
+        let long_tail = "└ cargo test --lib tmux ".repeat(120);
+        let panel = format!(
+            "🟢 진행 중 — Claude (<t:1700000000:R>)\n\nTools\n└ cargo test --lib tmux\nSubagents\n└ review inspect\n{long_tail}"
+        );
+        let status_block =
+            super::super::single_message_panel::compose_footer_status_block("⠋", &panel);
+        assert!(status_block.starts_with("⠋ 진행 중 — Claude (<t:1700000000:R>)"));
+        assert!(status_block.contains("Tools"));
+        assert!(status_block.contains("Subagents"));
+        assert!(status_block.contains('…'));
+        status_block
+    }
+
+    fn footer_only_placeholder() -> String {
+        build_streaming_placeholder_text("", &footer_status_block())
+    }
+
+    fn body_with_footer(body: &str) -> String {
+        build_streaming_placeholder_text(body, &footer_status_block())
+    }
+
+    fn orphan_state(
+        full_response: &str,
+        response_sent_offset: usize,
+    ) -> super::super::inflight::InflightTurnState {
+        let mut state = super::super::inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            42,
+            Some("test".to_string()),
+            1,
+            2,
+            3,
+            "user".to_string(),
+            Some("session".to_string()),
+            Some(TEST_SESSION.to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+        state.full_response = full_response.to_string();
+        state.response_sent_offset = response_sent_offset;
+        state
+    }
+
+    #[test]
+    fn status_only_legacy_spinner_placeholder_deletes() {
+        assert_eq!(
+            suppressed_placeholder_action(true, &ProviderKind::Claude, 0, "⠋ 계속 처리 중"),
+            SuppressedPlaceholderAction::Delete
+        );
+    }
+
+    #[test]
+    fn footer_mode_status_only_placeholder_deletes() {
+        let placeholder = footer_only_placeholder();
+
+        assert_eq!(
+            suppressed_placeholder_action(true, &ProviderKind::Claude, 0, &placeholder),
+            SuppressedPlaceholderAction::Delete
+        );
+    }
+
+    #[test]
+    fn real_body_with_footer_edits_label_and_strips_footer() {
+        let placeholder = body_with_footer("visible assistant body");
+        let action = suppressed_placeholder_action(true, &ProviderKind::Claude, 0, &placeholder);
+
+        let SuppressedPlaceholderAction::Edit(content) = action else {
+            panic!("real body plus footer should edit the terminal label");
+        };
+        assert_eq!(
+            content,
+            format!("visible assistant body\n\n{SUPPRESSED_INTERNAL_LABEL}")
+        );
+        assert!(!content.contains("진행 중 — Claude"));
+        assert!(!content.contains("Tools"));
+        assert!(!content.contains("Subagents"));
+    }
+
+    #[test]
+    fn response_sent_offset_counts_as_exposure_even_with_empty_text() {
+        assert_eq!(
+            suppressed_placeholder_action(true, &ProviderKind::Claude, 1, ""),
+            SuppressedPlaceholderAction::Edit(SUPPRESSED_INTERNAL_LABEL.to_string())
+        );
+    }
+
+    #[test]
+    fn orphan_restart_status_only_placeholder_deletes() {
+        let state = orphan_state("", 0);
+
+        assert_eq!(
+            orphan_suppressed_placeholder_action(
+                &state,
+                &ProviderKind::Claude,
+                false,
+                TEST_SESSION
+            ),
+            SuppressedPlaceholderAction::Delete
+        );
+    }
+
+    #[test]
+    fn orphan_restart_real_body_edits_restart_label() {
+        let state = orphan_state("visible assistant body", 0);
+        let action = orphan_suppressed_placeholder_action(
+            &state,
+            &ProviderKind::Claude,
+            false,
+            TEST_SESSION,
+        );
+
+        let SuppressedPlaceholderAction::Edit(content) = action else {
+            panic!("orphan restart body should edit the restart label");
+        };
+        assert_eq!(
+            content,
+            format!("visible assistant body\n\n{SUPPRESSED_RESTART_LABEL}")
+        );
+    }
+
+    #[test]
+    fn orphan_restart_offset_counts_as_exposure_even_with_empty_body() {
+        let state = orphan_state("", 1);
+
+        assert_eq!(
+            orphan_suppressed_placeholder_action(
+                &state,
+                &ProviderKind::Claude,
+                false,
+                TEST_SESSION
+            ),
+            SuppressedPlaceholderAction::Edit(SUPPRESSED_RESTART_LABEL.to_string())
+        );
     }
 }
 
@@ -1023,11 +1202,12 @@ pub(super) fn format_monitor_suppressed_label(event_count: usize, entry_keys: &[
 /// `DISCORD_MSG_LIMIT` by the underlying rewrite helper.
 pub(super) fn format_monitor_suppressed_body(
     last_edit_text: &str,
+    provider: &ProviderKind,
     event_count: usize,
     entry_keys: &[String],
 ) -> String {
     let label = format_monitor_suppressed_label(event_count, entry_keys);
-    rewrite_placeholder_as_terminal_suppressed(last_edit_text, &label)
+    rewrite_placeholder_as_terminal_suppressed(last_edit_text, &label, provider)
 }
 
 /// #1009: System-level hint injected once per monitor auto-turn entry so the
@@ -2008,6 +2188,7 @@ async fn reconcile_orphan_suppressed_placeholder_for_restored_watcher(
     }
     let ctx = PlaceholderSuppressContext {
         origin: PlaceholderSuppressOrigin::OrphanRestartHandoff,
+        provider,
         placeholder_msg_id: Some(MessageId::new(state.current_msg_id)),
         response_sent_offset: state.response_sent_offset,
         last_edit_text: "",

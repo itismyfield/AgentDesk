@@ -117,7 +117,9 @@
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior; #3016 phase-5b2 dropped the `mailbox_finalize_owed`
     construction from the watcher-spawn handle).
-  - `src/services/discord/tmux.rs` (2011 lines after #2558 dead-code sweep;
+  - `src/services/discord/tmux.rs` (2049 lines after #2558 dead-code sweep;
+    +38 for suppressed-label noise, user report 2026-06-12: provider-aware
+    status/footer stripping in the placeholder suppression decisions;
     +4 from #3167: the monitor-auto-turn start passes `ActiveTurnKind::Background`
     so a queued user message can supersede the low-priority monitor/loop turn;
     failover guard; #3087 `session_panel_instance_key`/`write_spawn_nonce`

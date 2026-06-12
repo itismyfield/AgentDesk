@@ -147,7 +147,9 @@
 "src/services/discord/idle_recap.rs" = 1320
 # #3034 batch-8: lowered 2241 -> 2011 (deleted the dead #826/#897/#898 bg-trigger
 # notify-outbox subsystem — build/enqueue/reconcile/parse/rollback).
-"src/services/discord/tmux.rs" = 2011
+# suppressed-label noise, user report 2026-06-12: +38 for provider-aware
+# status/footer stripping in the placeholder suppression decisions.
+"src/services/discord/tmux.rs" = 2049
 # #3034 batch-8: lowered 1849 -> 1834 (deleted dead `build_verdict_payload`).
 "src/services/discord/turn_bridge/completion_guard.rs" = 1834
 # #3034 batch-8: lowered 1781 -> 1753 (deleted the dead `assistant_turns` turn-cap

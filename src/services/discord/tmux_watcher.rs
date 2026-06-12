@@ -4800,6 +4800,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             });
             let ctx = PlaceholderSuppressContext {
                 origin: PlaceholderSuppressOrigin::ActiveBridgeTurnGuard,
+                provider: &watcher_provider,
                 placeholder_msg_id,
                 response_sent_offset,
                 last_edit_text: &last_edit_text,
@@ -6529,6 +6530,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             );
             let ctx = PlaceholderSuppressContext {
                 origin: PlaceholderSuppressOrigin::TaskNotificationTerminal,
+                provider: &watcher_provider,
                 placeholder_msg_id,
                 response_sent_offset,
                 last_edit_text: &last_edit_text,
@@ -6549,6 +6551,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 if let PlaceholderSuppressDecision::Edit(_) = &decision {
                     let body = format_monitor_suppressed_body(
                         &last_edit_text,
+                        &watcher_provider,
                         monitor_event_count,
                         &monitor_entry_keys,
                     );
