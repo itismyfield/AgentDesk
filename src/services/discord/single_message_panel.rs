@@ -39,7 +39,7 @@ fn completion_footer_registry() -> &'static Mutex<HashMap<u64, RegisteredComplet
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub(super) fn enabled() -> bool {
+pub(in crate::services::discord) fn enabled() -> bool {
     static CACHED: OnceLock<bool> = OnceLock::new();
     *CACHED.get_or_init(|| {
         let raw = std::env::var("AGENTDESK_SINGLE_MESSAGE_PANEL").ok();
@@ -589,6 +589,21 @@ mod tests {
         shared
     }
 
+    fn push_unfinished_background_task(
+        channel_id: ChannelId,
+    ) -> std::sync::Arc<super::super::SharedData> {
+        let shared = super::super::make_shared_data_for_tests();
+        shared.placeholder_live_events.push_status_event(
+            channel_id,
+            StatusEvent::BackgroundTaskStart {
+                name: "Bash".to_string(),
+                summary: "Run background codex".to_string(),
+                tool_use_id: format!("tool-{}", channel_id.get()),
+            },
+        );
+        shared
+    }
+
     #[test]
     fn single_message_panel_flag_defaults_off_when_unset() {
         assert!(!super::parse_single_message_panel_flag(None));
@@ -903,6 +918,39 @@ mod tests {
 
         assert!(edit.remove_after_edit);
         assert!(edit.text.contains("Subagents\n└ "));
+        assert!(edit.text.contains('…'));
+        assert!(!edit.text.contains('⠸'));
+        assert!(!edit.text.contains('✓'));
+
+        super::completion_footer_record_edit_result(channel_id, edit.remove_after_edit, true);
+        assert!(!super::completion_footer_has_registered_target(channel_id));
+    }
+
+    #[test]
+    fn completion_footer_ttl_freezes_unfinished_background_bash_task() {
+        let channel_id = ChannelId::new(3_089_011);
+        super::completion_footer_forget_registered_target(channel_id);
+        let shared = push_unfinished_background_task(channel_id);
+        let now = 1_800_000_000;
+        super::register_completion_footer_target(
+            channel_id,
+            MessageId::new(3_089_111),
+            &ProviderKind::Claude,
+            now - super::COMPLETION_FOOTER_MAX_IDLE_ANIMATION_SECS - 1,
+            "Final answer",
+            true,
+        );
+
+        let edit = super::completion_footer_edit_for_registered_target_at(
+            shared.as_ref(),
+            channel_id,
+            "⠸",
+            now,
+        )
+        .expect("expired unfinished background Bash footer should render one freeze edit");
+
+        assert!(edit.remove_after_edit);
+        assert!(edit.text.contains("Tasks\n└ Bash Run background codex"));
         assert!(edit.text.contains('…'));
         assert!(!edit.text.contains('⠸'));
         assert!(!edit.text.contains('✓'));

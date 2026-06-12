@@ -2930,6 +2930,7 @@ fn handle_codex_json_line(
             if let Some(summary) = codex_background_event_summary(&json) {
                 let _ = sender.send(StreamMessage::TaskNotification {
                     task_id: CODEX_BACKGROUND_TASK_NOTIFICATION_ID.to_string(),
+                    tool_use_id: None,
                     status: CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS.to_string(),
                     summary: summary.to_string(),
                     kind: crate::services::agent_protocol::TaskNotificationKind::Background,

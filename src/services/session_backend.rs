@@ -530,6 +530,10 @@ pub fn parse_stream_message(json: &Value) -> Option<StreamMessage> {
     parse_stream_message_with_state(json, &state)
 }
 
+fn json_str<'a>(json: &'a Value, key: &str) -> Option<&'a str> {
+    json.get(key).and_then(Value::as_str)
+}
+
 pub(crate) fn parse_stream_message_with_state(
     json: &Value,
     state: &StreamLineState,
@@ -548,21 +552,15 @@ pub(crate) fn parse_stream_message_with_state(
                     })
                 }
                 "task_notification" => Some(StreamMessage::TaskNotification {
-                    task_id: json
-                        .get("task_id")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    status: json
-                        .get("status")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    summary: json
-                        .get("summary")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("")
-                        .to_string(),
+                    task_id: json_str(json, "task_id").unwrap_or("").to_string(),
+                    tool_use_id: ["tool_use_id", "tool-use-id", "toolUseId"]
+                        .into_iter()
+                        .find_map(|key| json_str(json, key))
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string),
+                    status: json_str(json, "status").unwrap_or("").to_string(),
+                    summary: json_str(json, "summary").unwrap_or("").to_string(),
                     kind: classify_task_notification_kind(json, state),
                 }),
                 "stop_hook_summary" => Some(StreamMessage::Done {

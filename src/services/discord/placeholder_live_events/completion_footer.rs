@@ -6,7 +6,7 @@ use super::common::{
 };
 use super::context_panel::render_context_panel_line;
 use super::status_panel::{StatusPanelState, SubagentSlot, render_subagent_slot};
-use super::task_panel::{TaskToolSlot, render_task_tool_slot};
+use super::task_panel::{TaskToolSlot, render_task_tool_slot, task_tool_terminal_marker};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) struct CompletionFooterRender {
@@ -80,7 +80,9 @@ pub(super) fn render_completion_footer(
 fn render_completion_task_tool_slot(slot: &TaskToolSlot, indicator: &str) -> (String, bool) {
     let (marker, unfinished) = completion_task_marker(slot.status.as_deref(), indicator);
     let base = render_task_tool_slot(slot);
-    let line = if marker.is_empty() {
+    let line = if slot.background && task_tool_terminal_marker(slot.status.as_deref()).is_some() {
+        base
+    } else if marker.is_empty() {
         base
     } else {
         format!("{base} {marker}")
@@ -103,10 +105,20 @@ fn completion_task_marker<'a>(status: Option<&str>, indicator: &'a str) -> (&'a 
         ("✓", false)
     } else if matches!(
         normalized.as_str(),
-        "failed" | "failure" | "error" | "errored" | "aborted" | "cancelled" | "canceled"
+        "failed"
+            | "failure"
+            | "error"
+            | "errored"
+            | "aborted"
+            | "killed"
+            | "stopped"
+            | "cancelled"
+            | "canceled"
     ) || normalized.contains("fail")
         || normalized.contains("error")
         || normalized.contains("abort")
+        || normalized.contains("kill")
+        || normalized.contains("stop")
         || normalized.contains("cancel")
     {
         ("✗", false)

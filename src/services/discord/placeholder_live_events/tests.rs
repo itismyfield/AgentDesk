@@ -1608,6 +1608,359 @@ fn completion_footer_running_background_subagent_animates_until_notification_don
 }
 
 #[test]
+fn background_bash_footer_mode_creates_running_task_slot_and_ack_stays_running() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_089_100);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id_for_footer_mode(
+            "Bash",
+            &json!({
+                "command": "codex exec --skip-git-repo-check",
+                "description": "Launch codex for SharedData S4",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_bash_bg"),
+            true,
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Bash"), false, Some("toolu_bash_bg")),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let line = rendered
+        .lines()
+        .find(|line| line.contains("Bash Launch codex for SharedData S4"))
+        .unwrap_or_else(|| panic!("background Bash task slot missing in: {rendered}"));
+
+    assert!(rendered.contains("Tasks"));
+    assert!(
+        !line.contains('✓') && !line.contains('✗') && !line.contains('⠸'),
+        "running background Bash slot must not show a terminal marker/spinner in live panel: {line}"
+    );
+}
+
+#[test]
+fn background_bash_notification_finalizes_only_exact_tool_use_id() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_089_101);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id_for_footer_mode(
+            "Bash",
+            &json!({
+                "command": "codex exec",
+                "description": "Launch codex for voice S2",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_voice"),
+            true,
+        ),
+    );
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_with_tool_use_id(
+            "background",
+            "completed",
+            "Background command \"Launch codex for other\" completed (exit code 0)",
+            Some("toolu_other"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_with_tool_use_id(
+            "background",
+            "completed",
+            "Background command without id completed (exit code 0)",
+            None,
+        ),
+    );
+
+    let still_running =
+        events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let running_line = still_running
+        .lines()
+        .find(|line| line.contains("Bash Launch codex for voice S2"))
+        .unwrap_or_else(|| panic!("background Bash task slot missing in: {still_running}"));
+    assert!(
+        !running_line.contains('✓') && !running_line.contains('✗'),
+        "non-matching or id-less notification must not finalize: {running_line}"
+    );
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_with_tool_use_id(
+            "background",
+            "completed",
+            "Background command \"Launch codex for voice S2\" completed (exit code 0)",
+            Some("toolu_voice"),
+        ),
+    );
+
+    let done = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let done_line = done
+        .lines()
+        .find(|line| line.contains("Bash Launch codex for voice S2"))
+        .unwrap_or_else(|| panic!("background Bash task slot missing in: {done}"));
+    assert!(
+        done_line.contains('✓'),
+        "matching notification must mark ✓: {done_line}"
+    );
+}
+
+#[test]
+fn background_bash_failed_notification_marks_task_failed() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_089_102);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id_for_footer_mode(
+            "Bash",
+            &json!({
+                "command": "deploy-release.sh",
+                "description": "Deploy release runtime",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_deploy"),
+            true,
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_with_tool_use_id(
+            "background",
+            "failed",
+            "Background command \"Deploy release runtime\" failed with exit code 1",
+            Some("toolu_deploy"),
+        ),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let line = rendered
+        .lines()
+        .find(|line| line.contains("Bash Deploy release runtime"))
+        .unwrap_or_else(|| panic!("background Bash task slot missing in: {rendered}"));
+    assert!(
+        line.contains('✗'),
+        "failed notification must mark ✗: {line}"
+    );
+}
+
+#[test]
+fn background_bash_record_reconstruction_ack_does_not_finalize_then_notification_flips() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_089_103);
+    events.push_status_events(
+        channel_id,
+        status_events_from_json_for_footer_mode(
+            &json!({
+                "type": "assistant",
+                "message": {
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_record_bash",
+                        "name": "Bash",
+                        "input": {
+                            "command": "cd /tmp/adk && codex exec",
+                            "description": "Launch codex for SharedData S4",
+                            "run_in_background": true
+                        }
+                    }]
+                }
+            }),
+            true,
+        ),
+    );
+
+    let ack_events = status_events_from_json_for_footer_mode(
+        &json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "tool_use_id": "toolu_record_bash",
+                    "type": "tool_result",
+                    "content": "Command running in background with ID: bdri3xti5. Output is being written to: /tmp/tasks/bdri3xti5.output.",
+                    "is_error": false
+                }]
+            },
+            "toolUseResult": {
+                "stdout": "",
+                "stderr": "",
+                "interrupted": false,
+                "isImage": false,
+                "noOutputExpected": false,
+                "backgroundTaskId": "bdri3xti5"
+            }
+        }),
+        true,
+    );
+    assert!(
+        !ack_events
+            .iter()
+            .any(|event| matches!(event, StatusEvent::BackgroundTaskEnd { .. })),
+        "background Bash launch ACK must not synthesize BackgroundTaskEnd: {ack_events:?}"
+    );
+    events.push_status_events(channel_id, ack_events);
+
+    let running = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let running_line = running
+        .lines()
+        .find(|line| line.contains("Bash Launch codex for SharedData S4"))
+        .unwrap_or_else(|| panic!("background Bash task slot missing in: {running}"));
+    assert!(
+        !running_line.contains('✓') && !running_line.contains('✗'),
+        "launch ACK must leave reconstructed slot running: {running_line}"
+    );
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_json_for_footer_mode(
+            &json!({
+                "type": "system",
+                "subtype": "task_notification",
+                "task_notification_kind": "background",
+                "task_id": "bdri3xti5",
+                "tool_use_id": "toolu_record_bash",
+                "status": "completed",
+                "summary": "Background command \"Launch codex for SharedData S4\" completed (exit code 0)"
+            }),
+            true,
+        ),
+    );
+
+    let done = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let done_line = done
+        .lines()
+        .find(|line| line.contains("Bash Launch codex for SharedData S4"))
+        .unwrap_or_else(|| panic!("background Bash task slot missing in: {done}"));
+    assert!(
+        done_line.contains('✓'),
+        "matching reconstructed notification must flip ✓: {done_line}"
+    );
+}
+
+#[test]
+fn completion_footer_background_bash_animates_and_flips_on_notification() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_089_104);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id_for_footer_mode(
+            "Bash",
+            &json!({
+                "command": "codex exec --skip-git-repo-check",
+                "description": "Delegate background task slots to codex",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_delegate"),
+            true,
+        ),
+    );
+
+    let running = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let running_block = running
+        .block
+        .expect("running background Bash should render");
+    assert!(running.has_unfinished_entries);
+    assert!(running_block.contains("Tasks"));
+    assert!(running_block.contains("Bash Delegate background task slots to codex ⠸"));
+    assert!(!running_block.contains('✓'));
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_with_tool_use_id(
+            "background",
+            "completed",
+            "Background command \"Delegate background task slots to codex\" completed (exit code 0)",
+            Some("toolu_delegate"),
+        ),
+    );
+    let done = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    let done_block = done
+        .block
+        .expect("finished background Bash should stay visible");
+    assert!(!done.has_unfinished_entries);
+    assert!(done_block.contains("Bash Delegate background task slots to codex ✓"));
+    assert!(!done_block.contains('⠼'));
+}
+
+#[test]
+fn background_bash_slots_are_footer_flag_gated() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_089_105);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id_for_footer_mode(
+            "Bash",
+            &json!({
+                "command": "codex exec",
+                "description": "Should stay hidden with footer flag off",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_hidden"),
+            false,
+        ),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(!rendered.contains("Tasks"));
+    assert!(!rendered.contains("└ Bash Should stay hidden with footer flag off"));
+}
+
+#[test]
+fn background_bash_task_slots_trim_to_task_limit() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_089_106);
+    for idx in 0..=STATUS_PANEL_TASK_LIMIT {
+        let tool_use_id = format!("toolu_bg_{idx}");
+        events.push_status_events(
+            channel_id,
+            status_events_from_tool_use_with_id_for_footer_mode(
+                "Bash",
+                &json!({
+                    "command": format!("codex exec {idx}"),
+                    "description": format!("background bash task {idx}"),
+                    "run_in_background": true
+                })
+                .to_string(),
+                Some(&tool_use_id),
+                true,
+            ),
+        );
+    }
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let status_entry = events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("status panel state");
+    let guard = status_entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    assert_eq!(guard.tasks.len(), STATUS_PANEL_TASK_LIMIT);
+    assert_eq!(
+        guard.tasks.first().and_then(|slot| slot.summary.as_deref()),
+        Some("background bash task 1")
+    );
+    assert_eq!(
+        guard.tasks.last().and_then(|slot| slot.summary.as_deref()),
+        Some("background bash task 10")
+    );
+    assert!(!rendered.contains("background bash task 0"));
+    assert!(rendered.contains("background bash task 1"));
+    assert!(rendered.contains("background bash task 10"));
+}
+
+#[test]
 fn completion_footer_budget_clamps_task_section_but_keeps_context_line() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(192);

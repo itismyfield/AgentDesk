@@ -3204,12 +3204,7 @@ pub(super) fn spawn_turn_bridge(
                                 },
                             );
                         }
-                        StreamMessage::TaskNotification {
-                            summary,
-                            status,
-                            kind,
-                            ..
-                        } => {
+                        StreamMessage::TaskNotification { tool_use_id, summary, status, kind, .. } => {
                             inflight_state.task_notification_kind =
                                 merge_task_notification_kind(inflight_state.task_notification_kind, kind);
                             state_dirty = true;
@@ -3225,10 +3220,11 @@ pub(super) fn spawn_turn_bridge(
                             status_panel_dirty |= record_status_panel_events(
                                 shared_owned.as_ref(),
                                 channel_id,
-                                super::placeholder_live_events::status_events_from_task_notification(
+                                super::placeholder_live_events::status_events_from_task_notification_with_tool_use_id(
                                     kind.as_str(),
                                     &status,
                                     &summary,
+                                    tool_use_id.as_deref(),
                                 ),
                             );
                             if single_message_panel_footer_mode {

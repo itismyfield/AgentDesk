@@ -90,11 +90,98 @@ pub(super) struct TaskToolSlot {
     pub(super) task_id: Option<String>,
     pub(super) summary: Option<String>,
     pub(super) status: Option<String>,
+    pub(super) tool_use_id: Option<String>,
+    pub(super) background: bool,
 }
 
 pub(super) fn clean_task_tool_value(raw: impl AsRef<str>) -> Option<String> {
     let value = first_content_line(raw.as_ref());
     (!value.is_empty()).then_some(value)
+}
+
+pub(super) fn upsert_task_tool_slot(
+    slots: &mut Vec<TaskToolSlot>,
+    name: String,
+    task_id: Option<String>,
+    summary: Option<String>,
+    status: Option<String>,
+) {
+    let task_id = task_id.and_then(clean_task_tool_value);
+    let summary = summary.and_then(clean_task_tool_value);
+    let status = status.and_then(clean_task_tool_value);
+    if let Some(task_id_value) = task_id.as_deref()
+        && let Some(slot) = slots
+            .iter_mut()
+            .rev()
+            .find(|slot| slot.task_id.as_deref() == Some(task_id_value))
+    {
+        slot.name = name;
+        if summary.is_some() {
+            slot.summary = summary;
+        }
+        if status.is_some() {
+            slot.status = status;
+        }
+        return;
+    }
+
+    slots.push(TaskToolSlot {
+        name,
+        task_id,
+        summary,
+        status,
+        tool_use_id: None,
+        background: false,
+    });
+    trim_task_tool_slots(slots);
+}
+
+pub(super) fn upsert_background_task_tool_slot(
+    slots: &mut Vec<TaskToolSlot>,
+    name: String,
+    summary: String,
+    tool_use_id: String,
+) {
+    let Some(tool_use_id) = clean_task_tool_value(tool_use_id) else {
+        return;
+    };
+    let summary = clean_task_tool_value(summary).unwrap_or_else(|| "Bash".to_string());
+    if let Some(slot) = slots
+        .iter_mut()
+        .rev()
+        .find(|slot| slot.background && slot.tool_use_id.as_deref() == Some(&tool_use_id))
+    {
+        slot.name = name;
+        slot.summary = Some(summary);
+        return;
+    }
+
+    slots.push(TaskToolSlot {
+        name,
+        task_id: None,
+        summary: Some(summary),
+        status: None,
+        tool_use_id: Some(tool_use_id),
+        background: true,
+    });
+    trim_task_tool_slots(slots);
+}
+
+pub(super) fn finish_background_task_tool_slot(
+    slots: &mut [TaskToolSlot],
+    tool_use_id: &str,
+    success: bool,
+) {
+    let Some(tool_use_id) = clean_task_tool_value(tool_use_id) else {
+        return;
+    };
+    if let Some(slot) = slots
+        .iter_mut()
+        .rev()
+        .find(|slot| slot.background && slot.tool_use_id.as_deref() == Some(&tool_use_id))
+    {
+        slot.status = Some(if success { "completed" } else { "failed" }.to_string());
+    }
 }
 
 pub(super) fn render_task_tool_slot(slot: &TaskToolSlot) -> String {
@@ -108,18 +195,68 @@ pub(super) fn render_task_tool_slot(slot: &TaskToolSlot) -> String {
             detail_parts.push(escape_status_panel_markdown(summary));
         }
     }
-    if let Some(status) = slot.status.as_deref() {
+    if !slot.background
+        && let Some(status) = slot.status.as_deref()
+    {
         detail_parts.push(escape_status_panel_markdown(status));
     }
 
-    let line = if detail_parts.is_empty() {
+    let mut line = if detail_parts.is_empty() {
         format!("└ {label}")
     } else {
         format!("└ {label} {}", detail_parts.join(" · "))
     };
+    if slot.background
+        && let Some(marker) = task_tool_terminal_marker(slot.status.as_deref())
+    {
+        line.push(' ');
+        line.push_str(marker);
+    }
     truncate_chars(&line, EVENT_LINE_MAX_CHARS)
+}
+
+pub(super) fn task_tool_terminal_marker(status: Option<&str>) -> Option<&'static str> {
+    let status = status.map(str::trim).filter(|value| !value.is_empty())?;
+    let normalized = status.to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "completed" | "complete" | "done" | "success" | "succeeded" | "ok"
+    ) || normalized.contains("complete")
+        || normalized.contains("success")
+        || normalized.contains("done")
+    {
+        Some("✓")
+    } else if matches!(
+        normalized.as_str(),
+        "failed"
+            | "failure"
+            | "error"
+            | "errored"
+            | "aborted"
+            | "killed"
+            | "stopped"
+            | "cancelled"
+            | "canceled"
+    ) || normalized.contains("fail")
+        || normalized.contains("error")
+        || normalized.contains("abort")
+        || normalized.contains("kill")
+        || normalized.contains("stop")
+        || normalized.contains("cancel")
+    {
+        Some("✗")
+    } else {
+        None
+    }
 }
 
 fn short_dispatch_id(dispatch_id: &str) -> String {
     dispatch_id.chars().take(DISPATCH_ID_SHORT_LEN).collect()
+}
+
+fn trim_task_tool_slots(slots: &mut Vec<TaskToolSlot>) {
+    if slots.len() > super::common::STATUS_PANEL_TASK_LIMIT {
+        let excess = slots.len() - super::common::STATUS_PANEL_TASK_LIMIT;
+        slots.drain(0..excess);
+    }
 }

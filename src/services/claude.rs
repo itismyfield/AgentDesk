@@ -1146,13 +1146,11 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         status,
                         summary,
                         kind,
+                        ..
                     } => {
                         debug_log(&format!(
-                            "  >>> TaskNotification: task_id={}, status={}, kind={}, summary={}",
-                            task_id,
-                            status,
-                            kind.as_str(),
-                            summary
+                            "  >>> TaskNotification: task_id={task_id}, status={status}, kind={}, summary={summary}",
+                            kind.as_str()
                         ));
                     }
                     StreamMessage::StatusUpdate {

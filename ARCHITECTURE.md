@@ -415,6 +415,7 @@ src/
 │   │   │   ├── send_to_agent.rs
 │   │   │   └── transport.rs
 │   │   ├── placeholder_live_events/
+│   │   │   ├── background_task_events.rs
 │   │   │   ├── common.rs
 │   │   │   ├── completion_footer.rs
 │   │   │   ├── context_panel.rs

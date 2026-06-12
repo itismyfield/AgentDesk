@@ -12,8 +12,8 @@ use super::session_panel::{SessionPanelSnapshot, render_session_panel_line};
 use super::status_events::{is_schedule_wakeup_tool, parse_eta_secs};
 use super::subagent_summary::render_subagent_done_summary;
 use super::task_panel::{
-    TaskPanelSnapshot, TaskToolSlot, clean_task_tool_value, render_task_panel_line,
-    render_task_tool_slot,
+    TaskPanelSnapshot, TaskToolSlot, finish_background_task_tool_slot, render_task_panel_line,
+    render_task_tool_slot, upsert_background_task_tool_slot, upsert_task_tool_slot,
 };
 use super::workflow_panel::{
     WorkflowAgentSlot, WorkflowSlot, render_workflow_slot, trim_workflow_slot, trim_workflows,
@@ -238,7 +238,20 @@ impl StatusPanelState {
                 summary,
                 status,
             } => {
-                self.upsert_task_tool(name, task_id, summary, status);
+                upsert_task_tool_slot(&mut self.tasks, name, task_id, summary, status);
+            }
+            StatusEvent::BackgroundTaskStart {
+                name,
+                summary,
+                tool_use_id,
+            } => {
+                upsert_background_task_tool_slot(&mut self.tasks, name, summary, tool_use_id);
+            }
+            StatusEvent::BackgroundTaskEnd {
+                tool_use_id,
+                success,
+            } => {
+                finish_background_task_tool_slot(&mut self.tasks, &tool_use_id, success);
             }
             StatusEvent::TodoUpdate { items } => {
                 self.todos = items
@@ -372,42 +385,6 @@ impl StatusPanelState {
                 slot.recent = Some(summary);
             }
         }
-    }
-
-    fn upsert_task_tool(
-        &mut self,
-        name: String,
-        task_id: Option<String>,
-        summary: Option<String>,
-        status: Option<String>,
-    ) {
-        let task_id = task_id.and_then(clean_task_tool_value);
-        let summary = summary.and_then(clean_task_tool_value);
-        let status = status.and_then(clean_task_tool_value);
-        if let Some(task_id_value) = task_id.as_deref()
-            && let Some(slot) = self
-                .tasks
-                .iter_mut()
-                .rev()
-                .find(|slot| slot.task_id.as_deref() == Some(task_id_value))
-        {
-            slot.name = name;
-            if summary.is_some() {
-                slot.summary = summary;
-            }
-            if status.is_some() {
-                slot.status = status;
-            }
-            return;
-        }
-
-        self.tasks.push(TaskToolSlot {
-            name,
-            task_id,
-            summary,
-            status,
-        });
-        trim_tasks(&mut self.tasks);
     }
 
     fn workflow_slot_mut(&mut self, task_id: Option<String>) -> &mut WorkflowSlot {
@@ -663,13 +640,6 @@ fn sanitize_label(raw: &str) -> String {
 fn trim_subagents(slots: &mut Vec<SubagentSlot>) {
     if slots.len() > STATUS_PANEL_SUBAGENT_LIMIT {
         let excess = slots.len() - STATUS_PANEL_SUBAGENT_LIMIT;
-        slots.drain(0..excess);
-    }
-}
-
-fn trim_tasks(slots: &mut Vec<TaskToolSlot>) {
-    if slots.len() > STATUS_PANEL_TASK_LIMIT {
-        let excess = slots.len() - STATUS_PANEL_TASK_LIMIT;
         slots.drain(0..excess);
     }
 }

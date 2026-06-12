@@ -185,6 +185,10 @@ pub enum StreamMessage {
     /// Background task notification
     TaskNotification {
         task_id: String,
+        /// Originating tool-use id when the provider/harness surfaces one (for
+        /// example Claude Code background Bash `<tool-use-id>` notifications).
+        /// `None` means consumers must not guess an owner.
+        tool_use_id: Option<String>,
         status: String,
         summary: String,
         kind: TaskNotificationKind,
@@ -341,6 +345,15 @@ pub enum StatusEvent {
         task_id: Option<String>,
         summary: Option<String>,
         status: Option<String>,
+    },
+    BackgroundTaskStart {
+        name: String,
+        summary: String,
+        tool_use_id: String,
+    },
+    BackgroundTaskEnd {
+        tool_use_id: String,
+        success: bool,
     },
     TodoUpdate {
         items: Vec<StatusTodoItem>,

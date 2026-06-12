@@ -5,11 +5,16 @@ use crate::services::agent_protocol::{
 };
 
 use super::super::formatting::format_tool_input;
+use super::background_task_events::{
+    events_from_background_notification, notification_is_error, notification_is_terminal,
+    slots_enabled_by_footer_flag, start_event_from_bash_tool_use, tool_use_id_from_notification,
+};
 use super::common::{
     EVENT_LINE_MAX_CHARS, first_content_line, is_harness_task_tool_name, normalize_summary,
     normalize_tool_key, truncate_chars, value_to_compact_string,
 };
 
+#[cfg(test)]
 pub(in crate::services::discord) fn status_events_from_tool_use(
     name: &str,
     input: &str,
@@ -21,6 +26,20 @@ pub(in crate::services::discord) fn status_events_from_tool_use_with_id(
     name: &str,
     input: &str,
     tool_use_id: Option<&str>,
+) -> Vec<StatusEvent> {
+    status_events_from_tool_use_with_id_for_footer_mode(
+        name,
+        input,
+        tool_use_id,
+        background_bash_task_slots_enabled(),
+    )
+}
+
+pub(in crate::services::discord) fn status_events_from_tool_use_with_id_for_footer_mode(
+    name: &str,
+    input: &str,
+    tool_use_id: Option<&str>,
+    footer_mode_enabled: bool,
 ) -> Vec<StatusEvent> {
     let args_summary = format_tool_input(name, input)
         .trim()
@@ -53,6 +72,18 @@ pub(in crate::services::discord) fn status_events_from_tool_use_with_id(
             status,
         });
     }
+    if footer_mode_enabled {
+        let value = tool_input_value(input);
+        if let Some(event) = start_event_from_bash_tool_use(
+            name,
+            &value,
+            args_summary.clone(),
+            tool_use_id,
+            footer_mode_enabled,
+        ) {
+            events.push(event);
+        }
+    }
     if is_task_tool(name) {
         let value = tool_input_value(input);
         let background = value
@@ -83,6 +114,10 @@ pub(in crate::services::discord) fn status_events_from_tool_use_with_id(
         });
     }
     events
+}
+
+fn background_bash_task_slots_enabled() -> bool {
+    slots_enabled_by_footer_flag()
 }
 
 fn tool_input_value(input: &str) -> Value {
@@ -123,10 +158,20 @@ pub(in crate::services::discord) fn status_events_from_tool_result_with_id(
     events
 }
 
+#[cfg(test)]
 pub(in crate::services::discord) fn status_events_from_task_notification(
     kind: &str,
     status: &str,
     summary: &str,
+) -> Vec<StatusEvent> {
+    status_events_from_task_notification_with_tool_use_id(kind, status, summary, None)
+}
+
+pub(in crate::services::discord) fn status_events_from_task_notification_with_tool_use_id(
+    kind: &str,
+    status: &str,
+    summary: &str,
+    tool_use_id: Option<&str>,
 ) -> Vec<StatusEvent> {
     let mut events = Vec::new();
     match kind {
@@ -136,9 +181,9 @@ pub(in crate::services::discord) fn status_events_from_task_notification(
             if !summary.is_empty() {
                 events.push(StatusEvent::SubagentEvent { summary });
             }
-            if task_notification_is_terminal(status) {
+            if notification_is_terminal(status) {
                 events.push(StatusEvent::SubagentEnd {
-                    success: !task_notification_is_error(status),
+                    success: !notification_is_error(status),
                     tool_use_id: None,
                     summary: None,
                     // A terminal task_notification is the subagent's REAL
@@ -150,14 +195,16 @@ pub(in crate::services::discord) fn status_events_from_task_notification(
         }
         "background" => {
             let summary = first_content_line(summary);
-            if !summary.is_empty() {
-                events.push(StatusEvent::Heartbeat);
-            }
+            events.extend(events_from_background_notification(
+                status,
+                &summary,
+                tool_use_id,
+            ));
         }
         "workflow" => {
             events.push(StatusEvent::WorkflowEnd {
                 task_id: None,
-                success: !task_notification_is_error(status),
+                success: !notification_is_error(status),
                 summary: Some(first_content_line(summary)).filter(|value| !value.is_empty()),
             });
         }
@@ -167,6 +214,13 @@ pub(in crate::services::discord) fn status_events_from_task_notification(
 }
 
 pub(in crate::services::discord) fn status_events_from_json(value: &Value) -> Vec<StatusEvent> {
+    status_events_from_json_for_footer_mode(value, background_bash_task_slots_enabled())
+}
+
+pub(in crate::services::discord) fn status_events_from_json_for_footer_mode(
+    value: &Value,
+    footer_mode_enabled: bool,
+) -> Vec<StatusEvent> {
     let workflow_events = status_events_from_workflow_json(value);
     if !workflow_events.is_empty() {
         return workflow_events;
@@ -183,8 +237,8 @@ pub(in crate::services::discord) fn status_events_from_json(value: &Value) -> Ve
     }
 
     match value.get("type").and_then(Value::as_str).unwrap_or("") {
-        "assistant" => assistant_status_events(value),
-        "content_block_start" => content_block_start_status_events(value),
+        "assistant" => assistant_status_events(value, footer_mode_enabled),
+        "content_block_start" => content_block_start_status_events(value, footer_mode_enabled),
         "user" => user_status_events(value),
         "system" => system_status_events(value),
         "background_event" => background_status_events(value),
@@ -344,29 +398,7 @@ fn eta_secs_from_value(value: &Value) -> Option<u64> {
     None
 }
 
-fn task_notification_is_terminal(status: &str) -> bool {
-    matches!(
-        status.trim().to_ascii_lowercase().as_str(),
-        "completed"
-            | "done"
-            | "finished"
-            | "success"
-            | "failed"
-            | "error"
-            | "aborted"
-            | "cancelled"
-            | "canceled"
-    )
-}
-
-fn task_notification_is_error(status: &str) -> bool {
-    matches!(
-        status.trim().to_ascii_lowercase().as_str(),
-        "failed" | "error" | "aborted" | "cancelled" | "canceled"
-    )
-}
-
-fn assistant_status_events(value: &Value) -> Vec<StatusEvent> {
+fn assistant_status_events(value: &Value, footer_mode_enabled: bool) -> Vec<StatusEvent> {
     value
         .get("message")
         .and_then(|message| message.get("content"))
@@ -379,12 +411,18 @@ fn assistant_status_events(value: &Value) -> Vec<StatusEvent> {
             }
             let name = block.get("name").and_then(Value::as_str).unwrap_or("Tool");
             let input = value_to_compact_string(block.get("input").unwrap_or(&Value::Null));
-            status_events_from_tool_use(name, &input)
+            let tool_use_id = block.get("id").and_then(Value::as_str);
+            status_events_from_tool_use_with_id_for_footer_mode(
+                name,
+                &input,
+                tool_use_id,
+                footer_mode_enabled,
+            )
         })
         .collect()
 }
 
-fn content_block_start_status_events(value: &Value) -> Vec<StatusEvent> {
+fn content_block_start_status_events(value: &Value, footer_mode_enabled: bool) -> Vec<StatusEvent> {
     let Some(block) = value.get("content_block") else {
         return Vec::new();
     };
@@ -396,7 +434,13 @@ fn content_block_start_status_events(value: &Value) -> Vec<StatusEvent> {
         .get("input")
         .map(value_to_compact_string)
         .unwrap_or_default();
-    status_events_from_tool_use(name, &input)
+    let tool_use_id = block.get("id").and_then(Value::as_str);
+    status_events_from_tool_use_with_id_for_footer_mode(
+        name,
+        &input,
+        tool_use_id,
+        footer_mode_enabled,
+    )
 }
 
 fn user_status_events(value: &Value) -> Vec<StatusEvent> {
@@ -552,7 +596,13 @@ fn system_status_events(value: &Value) -> Vec<StatusEvent> {
         .unwrap_or("system");
     let status = value.get("status").and_then(Value::as_str).unwrap_or("");
     let summary = value.get("summary").and_then(Value::as_str).unwrap_or("");
-    status_events_from_task_notification(kind, status, summary)
+    let tool_use_id = tool_use_id_from_notification(value);
+    status_events_from_task_notification_with_tool_use_id(
+        kind,
+        status,
+        summary,
+        tool_use_id.as_deref(),
+    )
 }
 
 /// Returns the launching Task's tool-use id from a nested subagent record's
