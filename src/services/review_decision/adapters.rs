@@ -2,18 +2,17 @@
 //! aggregate spawn, WS card-updated emit, the consume/mark `or_response`
 //! wrappers, and the `services::review_decision` / `dispatch` delegation
 //! shims. Function bodies are verbatim moves from the former
-//! `decision_route.rs` monolith (one module-depth path adjustment:
-//! `super::super::kanban` -> `crate::server::routes::kanban`).
+//! `decision_route.rs` monolith (module-depth path adjustments only).
 
 use axum::{Json, http::StatusCode};
 use serde_json::json;
 
 use crate::app_state::AppState;
 
-use super::super::tuning_aggregate::spawn_aggregate_if_needed_with_pg;
 use super::repo_dispatch::{
     consume_review_decision_dispatch_pg_first, mark_review_decision_side_effects_complete_pg_first,
 };
+use super::tuning_aggregate::spawn_aggregate_if_needed_with_pg;
 
 pub(super) fn spawn_review_tuning_aggregate_pg_first(state: &AppState) {
     spawn_aggregate_if_needed_with_pg(state.pg_pool_ref().cloned());
@@ -21,9 +20,9 @@ pub(super) fn spawn_review_tuning_aggregate_pg_first(state: &AppState) {
 
 pub(super) async fn emit_card_updated(state: &AppState, card_id: &str) {
     if let Some(pool) = state.pg_pool_ref() {
-        match crate::server::routes::kanban::load_card_json_pg(pool, card_id).await {
+        match crate::db::kanban_cards::load_card_json_pg(pool, card_id).await {
             Ok(Some(card)) => {
-                crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
+                crate::eventbus::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
                 return;
             }
             Ok(None) => return,

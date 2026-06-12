@@ -174,10 +174,11 @@ grandfathered = [
   "src/server/routes/kanban.rs",
   "src/server/routes/meetings.rs",
   "src/server/routes/resume.rs",
-  # decision_route.rs was decomposed in #3038 slice 1 (4392 prod LoC -> 139-line
-  # module root + 8 sub-1000-LoC directory modules under decision_route/); no
-  # longer a prod-giant, so it is removed from `grandfathered` (kept in the
-  # frozen baseline above) and the split outputs are ratcheted in
+  # decision_route.rs was decomposed in #3038 slice 1 and then S1-relocated in
+  # #3038 review-decision S1 (4392 prod LoC -> 26-line route shim +
+  # sub-1000-LoC modules under services/review_decision/); no longer a
+  # prod-giant, so it is removed from `grandfathered` (kept in the frozen
+  # baseline above) and the split outputs are ratcheted in
   # scripts/audit_maintainability_giant_baseline.toml.
   "src/server/routes/v1.rs",
   "src/services/auto_queue.rs",

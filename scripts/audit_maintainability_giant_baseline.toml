@@ -17,6 +17,10 @@
 # documentation gate; extend this table to ratchet them too.
 
 [giant_file_ratchet]
+# #3038 execute_streaming S3: lowered claude.rs 3989 -> 2950 by moving the
+# TUI warm/follow-up hosting helpers into claude_tui/hosting/ child modules.
+# #3262 turn-lock acquisition/state/tests intentionally remain in claude.rs root.
+"src/services/claude.rs" = 2950
 # #3034 batch-8: the dead_code lint went live for the discord tree; the two
 # test-only `#[allow(dead_code)]` attributes on
 # `watcher_inflight_is_external_input_for_session` / the lease alias add +2 and
@@ -125,7 +129,10 @@
 # into `runtime_bootstrap/shared_data.rs` (gated on the SharedData S1-S3
 # slices, now merged). The root keeps only RunBotContext + run_bot +
 # mod/re-export plumbing; final registry/baseline cleanup is the S5 slice.
-"src/services/discord/runtime_bootstrap.rs" = 369
+# #3038 run_bot S5: lowered 369 -> 274 by moving the 120-line leader gateway
+# runtime tail into `runtime_bootstrap/gateway_runtime.rs`; all
+# `runtime_bootstrap/` child modules remain under the 700-line namespace cap.
+"src/services/discord/runtime_bootstrap.rs" = 274
 # #3034 batch-8: lowered 2655 -> 2645 (dead-code removal: `stop_provider_channel_runtime`).
 # #3293: lowered 2645 -> 2641 (mailbox probe routed through the non-creating
 # `health/mailbox.rs::peeked_provider_mailbox_state`).
@@ -177,17 +184,20 @@
 "src/services/discord/commands/config.rs" = 954
 "src/services/discord/commands/diagnostics.rs" = 1026
 
-# #3038 slice 1: decision_route.rs (4392 prod LoC) was decomposed into a 139-line
-# module root + 8 directory modules. Each split output is frozen at its landed
-# production LoC so the win is locked in — re-inflation past the giant threshold
-# AND the frozen value fails the ratchet. Lower these as the planned slice-2
-# services relocation lands.
-"src/server/routes/review_verdict/decision_route.rs" = 139
-"src/server/routes/review_verdict/decision_route/accept.rs" = 703
-"src/server/routes/review_verdict/decision_route/adapters.rs" = 227
-"src/server/routes/review_verdict/decision_route/dismiss_finalize.rs" = 182
-"src/server/routes/review_verdict/decision_route/dispute.rs" = 746
-"src/server/routes/review_verdict/decision_route/pending.rs" = 636
-"src/server/routes/review_verdict/decision_route/repo_card.rs" = 748
-"src/server/routes/review_verdict/decision_route/repo_dispatch.rs" = 650
-"src/server/routes/review_verdict/decision_route/worktree_stale.rs" = 553
+# #3038 slice 1: decision_route.rs (4392 prod LoC) was decomposed into a
+# 139-line module root + 8 directory modules. #3038 review-decision S1 lowers
+# the route root 139 -> 26 by moving the orchestrator and verbatim phase
+# modules into services::review_decision; the service root and child modules
+# are frozen at their landed production LoC to prevent re-inflation.
+"src/server/routes/review_verdict/decision_route.rs" = 26
+"src/services/review_decision.rs" = 335
+"src/services/review_decision/accept.rs" = 703
+"src/services/review_decision/adapters.rs" = 226
+"src/services/review_decision/dismiss_finalize.rs" = 182
+"src/services/review_decision/dispute.rs" = 746
+"src/services/review_decision/pending.rs" = 636
+"src/services/review_decision/repo_card.rs" = 748
+"src/services/review_decision/repo_dispatch.rs" = 650
+"src/services/review_decision/review_state_repo.rs" = 35
+"src/services/review_decision/tuning_aggregate.rs" = 469
+"src/services/review_decision/worktree_stale.rs" = 553
