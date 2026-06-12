@@ -1,4 +1,4 @@
-//! #3038 S1/S2/S3 — extracted field clusters of [`SharedData`].
+//! #3038 S1/S2/S3/S4 — extracted field clusters of [`SharedData`].
 //!
 //! This module hosts named sub-structs that group cohesive `SharedData` fields
 //! together with the inherent `impl SharedData` methods that exclusively own
@@ -22,7 +22,40 @@ use poise::serenity_prelude::{ChannelId, MessageId};
 
 use crate::services::provider::ProviderKind;
 
-use super::{ModelPickerPendingState, QueueExitVisibleCard, SharedData};
+use super::{
+    ModelPickerPendingState, QueueExitVisibleCard, SharedData, placeholder_cleanup,
+    placeholder_controller, placeholder_live_events,
+};
+
+/// #3038 cluster F — live-placeholder/status-panel state.
+///
+/// Groups the five contiguous fields that together own the user-visible live
+/// placeholder card surface: cleanup tombstones, serialized placeholder edits,
+/// the recent live-event/status-panel feed, and the two feature gates that
+/// decide whether those events render into placeholder cards or separate
+/// status panels. Field declarations, docs, and types moved verbatim from
+/// `discord/mod.rs`; the members keep their original
+/// `pub(in crate::services::discord)` visibility.
+pub(in crate::services::discord) struct PlaceholderState {
+    /// Last known placeholder cleanup outcome keyed by provider/channel/message.
+    /// This local tombstone lets watcher finalization reason about cleanup
+    /// even after the inflight file has already been cleared.
+    pub(in crate::services::discord) placeholder_cleanup:
+        Arc<placeholder_cleanup::PlaceholderCleanupRegistry>,
+    /// Lifecycle FSM + edit coalescer for live-turn placeholder cards (#1255).
+    /// Both the `tmux_handed_off` async-dispatch path and the new Monitor /
+    /// `Bash run_in_background` live-turn path go through this controller so
+    /// that concurrent edits to the same placeholder message_id serialize
+    /// instead of racing.
+    pub(in crate::services::discord) placeholder_controller:
+        Arc<placeholder_controller::PlaceholderController>,
+    /// Per-channel recent tool/system events rendered in Active placeholder
+    /// cards when `placeholder.live_events_enabled` is enabled.
+    pub(in crate::services::discord) placeholder_live_events:
+        Arc<placeholder_live_events::PlaceholderLiveEvents>,
+    pub(in crate::services::discord) placeholder_live_events_enabled: bool,
+    pub(in crate::services::discord) status_panel_v2_enabled: bool,
+}
 
 /// #3038 cluster C — the queued-placeholder handoff state.
 ///

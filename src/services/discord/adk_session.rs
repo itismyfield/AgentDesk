@@ -916,8 +916,8 @@ pub(super) async fn backfill_completed_panel_usage_and_maybe_inject_compact(
     // write ONLY; it must NOT gate the compact trigger below (#3262 issue #4: a
     // post-compact drop to ~0 usage is exactly the re-arm signal the trigger
     // needs, so a zero-usage turn-completion must still reach the trigger).
-    if occupied != 0 && context_window != 0 && shared.status_panel_v2_enabled {
-        shared.placeholder_live_events.set_context_panel_usage(
+    if occupied != 0 && context_window != 0 && shared.ui.status_panel_v2_enabled {
+        shared.ui.placeholder_live_events.set_context_panel_usage(
             channel_id,
             state.last_session_id.as_deref(),
             usage.input_tokens,

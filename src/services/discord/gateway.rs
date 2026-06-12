@@ -387,6 +387,7 @@ pub(super) async fn drain_merged_queued_placeholders(
             .remove(&(channel_id, *message_id))
         {
             shared
+                .ui
                 .placeholder_controller
                 .detach_by_message(channel_id, placeholder_msg_id);
             to_delete.push(placeholder_msg_id);

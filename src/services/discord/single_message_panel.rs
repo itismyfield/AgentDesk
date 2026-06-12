@@ -227,7 +227,7 @@ pub(in crate::services::discord) fn completion_footer_edit_for_registered_target
     } else {
         indicator
     };
-    let rendered = shared.placeholder_live_events.render_completion_footer(
+    let rendered = shared.ui.placeholder_live_events.render_completion_footer(
         channel_id,
         &target.provider,
         render_indicator,
@@ -577,7 +577,7 @@ mod tests {
 
     fn push_unfinished_subagent(channel_id: ChannelId) -> std::sync::Arc<super::super::SharedData> {
         let shared = super::super::make_shared_data_for_tests();
-        shared.placeholder_live_events.push_status_event(
+        shared.ui.placeholder_live_events.push_status_event(
             channel_id,
             StatusEvent::SubagentStart {
                 subagent_type: Some("reviewer".to_string()),

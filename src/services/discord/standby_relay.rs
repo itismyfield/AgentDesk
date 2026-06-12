@@ -612,7 +612,7 @@ async fn deliver_response(
     provider: &ProviderKind,
     response_text: &str,
 ) -> bool {
-    let formatted = if shared.status_panel_v2_enabled {
+    let formatted = if shared.ui.status_panel_v2_enabled {
         formatting::format_for_discord_with_status_panel(response_text, provider)
     } else {
         formatting::format_for_discord_with_provider(response_text, provider)

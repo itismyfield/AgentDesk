@@ -267,6 +267,7 @@ pub(crate) async fn attach_live_context_usage(
         return;
     };
     let Some(live) = shared
+        .ui
         .placeholder_live_events
         .context_panel_snapshot(ChannelId::new(channel_id))
     else {

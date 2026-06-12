@@ -1314,7 +1314,7 @@ async fn cleanup_orphan_external_input_status_panel(
     tmux_session_name: &str,
     turn_is_external_input: bool,
 ) -> bool {
-    if !watcher_separate_status_panel_enabled(shared.status_panel_v2_enabled) {
+    if !watcher_separate_status_panel_enabled(shared.ui.status_panel_v2_enabled) {
         *status_panel_msg_id = None;
         return true;
     }
@@ -1424,7 +1424,7 @@ async fn complete_watcher_status_panel_v2(
     // for the turn the watcher actually finished. Recovery-driven
     // TurnCompleted still emits the guarded signal (see recovery_engine.rs)
     // because its state snapshot is pinned at recovery entry.
-    if !watcher_should_complete_separate_status_panel(shared.status_panel_v2_enabled) {
+    if !watcher_should_complete_separate_status_panel(shared.ui.status_panel_v2_enabled) {
         return true;
     }
     // EPIC #3078: completion parity is DEFERRED to the controller execute-cutover
@@ -1472,7 +1472,7 @@ async fn refresh_watcher_session_panel_from_lifecycle(
     user_msg_id: u64,
     tmux_session_name: &str,
 ) {
-    if !shared.status_panel_v2_enabled {
+    if !shared.ui.status_panel_v2_enabled {
         return;
     }
     let Some(pg_pool) = shared.pg_pool.as_ref() else {
@@ -1490,6 +1490,7 @@ async fn refresh_watcher_session_panel_from_lifecycle(
     {
         Ok(Some(event)) => {
             shared
+                .ui
                 .placeholder_live_events
                 .set_session_panel_lifecycle_event(
                     channel_id,
@@ -1500,6 +1501,7 @@ async fn refresh_watcher_session_panel_from_lifecycle(
         }
         Ok(None) => {
             shared
+                .ui
                 .placeholder_live_events
                 .clear_session_panel(channel_id);
         }
@@ -1984,7 +1986,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     &http,
                     &shared,
                     channel_id,
-                    shared.status_panel_v2_enabled,
+                    shared.ui.status_panel_v2_enabled,
                     &mut completion_footer_idle,
                 )
                 .await;
@@ -2303,7 +2305,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let mut placeholder_from_restored_inflight = placeholder_msg_id.is_some();
         let mut status_panel_msg_id: Option<serenity::MessageId> = stream_seed.status_panel_msg_id;
         let single_message_panel_footer_mode =
-            watcher_single_message_panel_footer_enabled(shared.status_panel_v2_enabled);
+            watcher_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled);
         if single_message_panel_footer_mode {
             status_panel_msg_id = None;
         }
@@ -2349,9 +2351,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             && status_panel_msg_id.is_none()
             && !restored_assistant_text_seen;
         if watcher_fresh_turn_frame
-            && (shared.placeholder_live_events_enabled || shared.status_panel_v2_enabled)
+            && (shared.ui.placeholder_live_events_enabled || shared.ui.status_panel_v2_enabled)
         {
-            shared.placeholder_live_events.clear_channel(channel_id);
+            shared.ui.placeholder_live_events.clear_channel(channel_id);
         }
         let mut last_status_panel_text = String::new();
         let status_panel_started_at = chrono::Utc::now().timestamp();
@@ -3062,7 +3064,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         continue;
                     }
 
-                    if shared.status_panel_v2_enabled
+                    if shared.ui.status_panel_v2_enabled
                         && (single_message_panel_footer_mode || status_panel_msg_id.is_some())
                     {
                         // #3055: re-derive this turn's session lifecycle panel
@@ -3079,10 +3081,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         )
                         .await;
                     }
-                    if watcher_separate_status_panel_enabled(shared.status_panel_v2_enabled)
+                    if watcher_separate_status_panel_enabled(shared.ui.status_panel_v2_enabled)
                         && let Some(status_msg_id) = status_panel_msg_id
                     {
-                        let panel_text = shared.placeholder_live_events.render_status_panel(
+                        let panel_text = shared.ui.placeholder_live_events.render_status_panel(
                             channel_id,
                             &watcher_provider,
                             status_panel_started_at,
@@ -3299,7 +3301,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             tool_state.current_tool_line.as_deref(),
                             task_notification_kind,
                         );
-                    if watcher_separate_status_panel_enabled(shared.status_panel_v2_enabled)
+                    if watcher_separate_status_panel_enabled(shared.ui.status_panel_v2_enabled)
                         && status_panel_msg_id.is_none()
                         && has_visible_streaming_work
                     {
@@ -3344,7 +3346,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             status_panel_msg_id = Some(persisted);
                         } else if watcher_should_create_separate_status_panel(
                             single_message_panel_footer_mode,
-                            shared.status_panel_v2_enabled,
+                            shared.ui.status_panel_v2_enabled,
                             status_panel_msg_id.is_some(),
                             panel_eligible_turn,
                         ) && !watcher_external_input_turn_abandoned(
@@ -3575,7 +3577,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         // is `false` here (the enclosing gate requires `status_panel_msg_id
                         // .is_none()`), so the controller re-derives the SAME decision from
                         // the raw inputs the legacy branch above read. Legacy still executes.
-                        crate::services::discord::watcher_panel_parity::assert_watcher_create_parity(&shared, channel_id, shared.status_panel_v2_enabled, false, panel_eligible_turn, persisted_panel_msg_id);
+                        crate::services::discord::watcher_panel_parity::assert_watcher_create_parity(&shared, channel_id, shared.ui.status_panel_v2_enabled, false, panel_eligible_turn, persisted_panel_msg_id);
                     }
 
                     loop {
@@ -3697,7 +3699,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         continue;
                     }
                     let display_text = build_watcher_streaming_edit_text(
-                        shared.status_panel_v2_enabled,
+                        shared.ui.status_panel_v2_enabled,
                         current_portion,
                         &status_block,
                         &watcher_provider,
@@ -6045,7 +6047,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             );
             false
         } else if watcher_direct_fallback_after_session_bound_ack {
-            let formatted = if shared.status_panel_v2_enabled {
+            let formatted = if shared.ui.status_panel_v2_enabled {
                 crate::services::discord::formatting::format_for_discord_with_status_panel(
                     direct_terminal_response,
                     &watcher_provider,
@@ -7782,7 +7784,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let recent_turn_stop =
             recent_turn_stop_for_watcher_range(channel_id, &tmux_session_name, data_start_offset);
         let placeholder_cleanup_committed = placeholder_msg_id.is_some_and(|msg_id| {
-            shared.placeholder_cleanup.terminal_cleanup_committed(
+            shared.ui.placeholder_cleanup.terminal_cleanup_committed(
                 &provider_kind,
                 channel_id,
                 msg_id,
