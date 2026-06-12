@@ -593,7 +593,7 @@ mod tests {
         channel_id: ChannelId,
     ) -> std::sync::Arc<super::super::SharedData> {
         let shared = super::super::make_shared_data_for_tests();
-        shared.placeholder_live_events.push_status_event(
+        shared.ui.placeholder_live_events.push_status_event(
             channel_id,
             StatusEvent::BackgroundTaskStart {
                 name: "Bash".to_string(),
