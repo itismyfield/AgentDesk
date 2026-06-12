@@ -1030,6 +1030,18 @@ mod placeholder_suppression_tests {
         build_streaming_placeholder_text(body, &footer_status_block())
     }
 
+    fn completion_footer_block() -> String {
+        "Context   📦 154.6k / 1.0M tokens (15%) · auto-compact 60%\n\nSubagents\n└ bgworker Long background job ✓".to_string()
+    }
+
+    fn completion_footer_only_placeholder() -> String {
+        completion_footer_block()
+    }
+
+    fn body_with_completion_footer(body: &str) -> String {
+        format!("{body}\n\n{}", completion_footer_block())
+    }
+
     fn orphan_state(
         full_response: &str,
         response_sent_offset: usize,
@@ -1072,6 +1084,16 @@ mod placeholder_suppression_tests {
     }
 
     #[test]
+    fn completion_footer_only_placeholder_deletes() {
+        let placeholder = completion_footer_only_placeholder();
+
+        assert_eq!(
+            suppressed_placeholder_action(true, &ProviderKind::Claude, 0, &placeholder),
+            SuppressedPlaceholderAction::Delete
+        );
+    }
+
+    #[test]
     fn real_body_with_footer_edits_label_and_strips_footer() {
         let placeholder = body_with_footer("visible assistant body");
         let action = suppressed_placeholder_action(true, &ProviderKind::Claude, 0, &placeholder);
@@ -1085,6 +1107,22 @@ mod placeholder_suppression_tests {
         );
         assert!(!content.contains("진행 중 — Claude"));
         assert!(!content.contains("Tools"));
+        assert!(!content.contains("Subagents"));
+    }
+
+    #[test]
+    fn real_body_with_completion_footer_edits_label_and_strips_footer() {
+        let placeholder = body_with_completion_footer("visible assistant body");
+        let action = suppressed_placeholder_action(true, &ProviderKind::Claude, 0, &placeholder);
+
+        let SuppressedPlaceholderAction::Edit(content) = action else {
+            panic!("real body plus completion footer should edit the terminal label");
+        };
+        assert_eq!(
+            content,
+            format!("visible assistant body\n\n{SUPPRESSED_INTERNAL_LABEL}")
+        );
+        assert!(!content.contains("Context   📦"));
         assert!(!content.contains("Subagents"));
     }
 

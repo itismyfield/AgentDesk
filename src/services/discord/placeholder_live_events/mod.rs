@@ -8,6 +8,7 @@ use crate::services::agent_protocol::StatusEvent;
 use crate::services::provider::ProviderKind;
 
 mod common;
+mod completion_footer;
 mod context_panel;
 mod recent_events;
 mod session_panel;
@@ -22,6 +23,7 @@ mod workflow_panel;
 mod tests;
 
 use common::CHANNEL_EVENT_CAPACITY;
+use completion_footer::{CompletionFooterRender, render_completion_footer};
 use context_panel::ContextPanelSnapshot;
 use recent_events::render_events;
 use session_panel::SessionPanelSnapshot;
@@ -409,5 +411,24 @@ impl PlaceholderLiveEvents {
             started_at_unix,
             heartbeat_at_unix,
         )
+    }
+
+    pub(in crate::services::discord) fn render_completion_footer(
+        &self,
+        channel_id: ChannelId,
+        provider: &ProviderKind,
+        indicator: &str,
+    ) -> CompletionFooterRender {
+        let snapshot = self
+            .status_by_channel
+            .get(&channel_id)
+            .map(|entry| {
+                entry
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone()
+            })
+            .unwrap_or_default();
+        render_completion_footer(snapshot, provider, indicator)
     }
 }

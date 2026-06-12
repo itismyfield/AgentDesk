@@ -1,6 +1,36 @@
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+use poise::serenity_prelude::{ChannelId, MessageId};
 
 pub(in crate::services::discord) const SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES: usize = 600;
+pub(in crate::services::discord) const SINGLE_MESSAGE_PANEL_SPINNER_FRAMES: &[&str] =
+    &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+pub(in crate::services::discord) fn single_message_panel_spinner_frame(
+    index: usize,
+) -> &'static str {
+    SINGLE_MESSAGE_PANEL_SPINNER_FRAMES[index % SINGLE_MESSAGE_PANEL_SPINNER_FRAMES.len()]
+}
+
+#[derive(Debug, Clone)]
+struct RegisteredCompletionFooter {
+    message_id: MessageId,
+    provider: super::ProviderKind,
+    base_body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) struct CompletionFooterEdit {
+    pub(in crate::services::discord) message_id: MessageId,
+    pub(in crate::services::discord) text: String,
+    pub(in crate::services::discord) remove_after_edit: bool,
+}
+
+fn completion_footer_registry() -> &'static Mutex<HashMap<u64, RegisteredCompletionFooter>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<u64, RegisteredCompletionFooter>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 pub(super) fn enabled() -> bool {
     static CACHED: OnceLock<bool> = OnceLock::new();
@@ -60,6 +90,122 @@ pub(in crate::services::discord) fn compose_footer_status_block(
         spinner
     };
     clamp_footer_status_block(status_block)
+}
+
+pub(in crate::services::discord) fn compose_completion_footer_text(
+    body: &str,
+    completion_block: Option<&str>,
+) -> String {
+    let body = body.trim_end();
+    let Some(block) = completion_block
+        .map(str::trim)
+        .filter(|block| !block.is_empty())
+    else {
+        return body.to_string();
+    };
+    if body.is_empty() {
+        return clamp_footer_status_block(block.to_string());
+    }
+
+    let suffix = format!("\n\n{block}");
+    let max_len = super::DISCORD_MSG_LIMIT.saturating_sub(suffix.len());
+    let base = if body.len() > max_len {
+        let safe_end = super::formatting::floor_char_boundary(body, max_len);
+        &body[..safe_end]
+    } else {
+        body
+    }
+    .trim_end();
+    format!("{base}{suffix}")
+}
+
+pub(in crate::services::discord) fn finalize_streaming_footer_with_completion(
+    last_edit_text: &str,
+    provider: &super::ProviderKind,
+    completion_block: Option<&str>,
+) -> Option<String> {
+    let cleaned = completion_footer_base_body(last_edit_text, provider);
+    let finalized = compose_completion_footer_text(&cleaned, completion_block);
+    if finalized.trim().is_empty() {
+        None
+    } else if finalized == last_edit_text {
+        None
+    } else {
+        Some(finalized)
+    }
+}
+
+pub(in crate::services::discord) fn completion_footer_base_body(
+    text: &str,
+    provider: &super::ProviderKind,
+) -> String {
+    strip_streaming_footer(text, provider).unwrap_or_else(|| text.trim_end().to_string())
+}
+
+pub(in crate::services::discord) fn register_completion_footer_target(
+    channel_id: ChannelId,
+    message_id: MessageId,
+    provider: &super::ProviderKind,
+    _started_at_unix: i64,
+    base_body: &str,
+    has_unfinished_entries: bool,
+) {
+    let mut guard = completion_footer_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if has_unfinished_entries {
+        guard.insert(
+            channel_id.get(),
+            RegisteredCompletionFooter {
+                message_id,
+                provider: provider.clone(),
+                base_body: completion_footer_base_body(base_body, provider),
+            },
+        );
+    } else {
+        guard.remove(&channel_id.get());
+    }
+}
+
+pub(in crate::services::discord) fn completion_footer_has_registered_target(
+    channel_id: ChannelId,
+) -> bool {
+    completion_footer_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains_key(&channel_id.get())
+}
+
+pub(in crate::services::discord) fn completion_footer_edit_for_registered_target(
+    shared: &super::SharedData,
+    channel_id: ChannelId,
+    indicator: &str,
+) -> Option<CompletionFooterEdit> {
+    let target = completion_footer_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&channel_id.get())
+        .cloned()?;
+    let rendered = shared.placeholder_live_events.render_completion_footer(
+        channel_id,
+        &target.provider,
+        indicator,
+    );
+    let text = compose_completion_footer_text(&target.base_body, rendered.block.as_deref());
+    (!text.trim().is_empty()).then_some(CompletionFooterEdit {
+        message_id: target.message_id,
+        text,
+        remove_after_edit: !rendered.has_unfinished_entries,
+    })
+}
+
+pub(in crate::services::discord) fn completion_footer_forget_registered_target(
+    channel_id: ChannelId,
+) {
+    completion_footer_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&channel_id.get());
 }
 
 fn compose_merged_footer_status_block(indicator: &str, panel_text: &str) -> Option<String> {
@@ -170,23 +316,34 @@ pub(in crate::services::discord) fn strip_streaming_footer(
     last_edit_text: &str,
     provider: &super::ProviderKind,
 ) -> Option<String> {
+    if footer_starts_with_spinner(last_edit_text) {
+        return Some(String::new());
+    }
+
+    if completion_footer_starts(last_edit_text) {
+        return Some(String::new());
+    }
+
+    if let Some(cleaned) = strip_completion_footer(last_edit_text, provider) {
+        return Some(cleaned);
+    }
+
+    if let Some((body, _footer)) = split_footer(last_edit_text) {
+        let cleaned = super::formatting::format_for_discord_with_status_panel(body, provider);
+        return if cleaned == last_edit_text {
+            None
+        } else {
+            Some(cleaned)
+        };
+    }
+
     if let Some(finalized) =
         super::formatting::finalize_stale_streaming_footer(last_edit_text, provider)
     {
         return Some(finalized);
     }
 
-    if footer_starts_with_spinner(last_edit_text) {
-        return Some(String::new());
-    }
-
-    let (body, _footer) = split_footer(last_edit_text)?;
-    let cleaned = super::formatting::format_for_discord_with_status_panel(body, provider);
-    if cleaned == last_edit_text {
-        None
-    } else {
-        Some(cleaned)
-    }
+    None
 }
 
 fn split_footer(text: &str) -> Option<(&str, &str)> {
@@ -200,6 +357,69 @@ fn split_footer(text: &str) -> Option<(&str, &str)> {
         search_end = idx;
     }
     None
+}
+
+fn strip_completion_footer(text: &str, provider: &super::ProviderKind) -> Option<String> {
+    let mut search_end = text.len();
+    while let Some(idx) = text[..search_end].rfind("\n\n") {
+        let body = &text[..idx];
+        let footer = &text[(idx + 2)..];
+        if completion_footer_starts(footer) {
+            if completion_footer_first_line_is_section_header(footer)
+                && (body_ends_with_completion_context_line(body)
+                    || body_ends_with_single_message_footer_status_line(body))
+            {
+                search_end = idx;
+                continue;
+            }
+            return Some(super::formatting::format_for_discord_with_status_panel(
+                body, provider,
+            ));
+        }
+        search_end = idx;
+    }
+
+    None
+}
+
+fn completion_footer_starts(footer: &str) -> bool {
+    let mut lines = footer.lines().filter(|line| !line.trim().is_empty());
+    let Some(first) = lines.next().map(str::trim) else {
+        return false;
+    };
+    completion_footer_context_line(first) || completion_footer_section_header(first)
+}
+
+fn completion_footer_context_line(line: &str) -> bool {
+    line.starts_with("Context   ")
+}
+
+fn completion_footer_section_header(line: &str) -> bool {
+    line == "Tasks" || line == "Subagents"
+}
+
+fn completion_footer_first_line_is_section_header(footer: &str) -> bool {
+    footer
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .is_some_and(completion_footer_section_header)
+}
+
+fn body_ends_with_completion_context_line(body: &str) -> bool {
+    body.lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .is_some_and(completion_footer_context_line)
+}
+
+fn body_ends_with_single_message_footer_status_line(body: &str) -> bool {
+    body.lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .is_some_and(is_single_message_footer_status_line)
 }
 
 fn footer_starts_with_spinner(footer: &str) -> bool {
@@ -481,6 +701,44 @@ mod tests {
         assert_eq!(
             super::finalize_streaming_footer(&rendered, &ProviderKind::Claude),
             None
+        );
+    }
+
+    #[test]
+    fn terminal_footer_replacement_keeps_completion_context_block() {
+        let panel = "🟢 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n└ review inspect";
+        let rendered = format!(
+            "Final answer\n\n{}",
+            super::compose_footer_status_block("⠸", panel)
+        );
+        let completion = "Context   📦 154.6k / 1.0M tokens (15%) · auto-compact 60%";
+
+        let finalized = super::finalize_streaming_footer_with_completion(
+            &rendered,
+            &ProviderKind::Claude,
+            Some(completion),
+        )
+        .expect("streaming footer should be replaced by completion block");
+
+        assert_eq!(finalized, format!("Final answer\n\n{completion}"));
+        assert!(!finalized.contains("진행 중 — Claude"));
+        assert!(!finalized.contains("Subagents"));
+    }
+
+    #[test]
+    fn completion_footer_strip_supports_suppression_exposure_test() {
+        let completion = "Context   📦 154.6k / 1.0M tokens (15%) · auto-compact 60%\n\nSubagents\n└ bgworker Long job ✓";
+
+        assert_eq!(
+            super::strip_streaming_footer(completion, &ProviderKind::Claude),
+            Some(String::new())
+        );
+        assert_eq!(
+            super::strip_streaming_footer(
+                &format!("visible assistant body\n\n{completion}"),
+                &ProviderKind::Claude,
+            ),
+            Some("visible assistant body".to_string())
         );
     }
 

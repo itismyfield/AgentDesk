@@ -25,7 +25,7 @@ pub(super) struct SubagentSlot {
     subagent_type: String,
     pub(super) desc: String,
     recent: Option<String>,
-    finished: Option<bool>,
+    pub(super) finished: Option<bool>,
     /// Task tool-use id that opened this slot. Lets `SubagentEnd` close the
     /// exact slot it belongs to (#3084) instead of the first unfinished one,
     /// which mis-attributes completion across parallel subagents.
@@ -617,7 +617,7 @@ fn render_derived_status(status: &DerivedStatus) -> String {
     }
 }
 
-fn render_subagent_slot(slot: &SubagentSlot) -> String {
+pub(super) fn render_subagent_slot(slot: &SubagentSlot) -> String {
     let marker = match slot.finished {
         Some(true) => "✓",
         Some(false) => "✗",
