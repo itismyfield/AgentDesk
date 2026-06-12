@@ -5075,3 +5075,131 @@ fn task_notification_xml_workflow_gates_workflow_end_on_terminal_status() {
         "status=failed workflow XML must emit WorkflowEnd{{success:false}}: {failed_events:?}"
     );
 }
+
+// #3394: fence-safe truncation regression coverage.
+
+fn fence_count(text: &str) -> usize {
+    text.matches("```").count()
+}
+
+/// #3394 (1): when the joined panel exceeds the limit, the trailing fenced
+/// Recent block must be DROPPED WHOLE — not chopped into a dangling ```text — and
+/// the earlier sections must survive intact, with an even (balanced) fence count.
+#[test]
+fn truncate_panel_drops_trailing_fenced_section_whole_when_over_limit() {
+    let tasks = format!("Tasks\n{}", "T".repeat(880));
+    let subagents = format!("Subagents\n{}", "S".repeat(880));
+    let recent = format!("🖥️ Recent\n```text\n{}\n```", "R".repeat(400));
+    let sections = vec![tasks.clone(), subagents.clone(), recent];
+    // Precondition: the full join overflows, but Tasks+Subagents alone fit — so
+    // dropping ONLY the trailing fenced Recent block is the correct degradation.
+    assert!(sections.join("\n\n").chars().count() > STATUS_PANEL_MAX_CHARS);
+    assert!(
+        format!("{tasks}\n\n{subagents}").chars().count() <= STATUS_PANEL_MAX_CHARS,
+        "fixture sizing: earlier sections must fit once Recent is dropped"
+    );
+
+    let rendered = truncate_status_panel_sections(sections);
+
+    assert!(rendered.chars().count() <= STATUS_PANEL_MAX_CHARS);
+    // No unterminated fence and no literal dangling ```text.
+    assert_eq!(fence_count(&rendered) % 2, 0, "odd fence count: {rendered}");
+    assert!(!rendered.contains("```text"), "literal ```text leaked");
+    // Degradation is visible: Recent gone, earlier sections kept verbatim.
+    assert!(!rendered.contains("🖥️ Recent"), "Recent not dropped");
+    assert!(rendered.contains(&tasks), "Tasks section was cut");
+    assert!(rendered.contains(&subagents), "Subagents section was cut");
+}
+
+/// #3394 (2): a single fenced section that ALONE exceeds the limit can't be
+/// dropped (nothing else to shed), so it is fence-safe truncated — never left
+/// with a dangling opener.
+#[test]
+fn truncate_panel_fence_safe_when_single_section_overflows() {
+    let oversized = format!(
+        "🖥️ Recent\n```text\n{}\n```",
+        "X".repeat(STATUS_PANEL_MAX_CHARS + 200)
+    );
+    let rendered = truncate_status_panel_sections(vec![oversized]);
+
+    assert!(rendered.chars().count() <= STATUS_PANEL_MAX_CHARS);
+    assert_eq!(fence_count(&rendered) % 2, 0, "odd fence count: {rendered}");
+}
+
+/// #3394 (3): parity helper — balanced/odd, exact boundary, and the Discord
+/// no-nesting semantic (a ``` INSIDE a fenced block CLOSES it).
+#[test]
+fn repair_fence_parity_unit_cases() {
+    use crate::services::discord::single_message_panel::repair_fence_parity;
+    // Balanced input is returned unchanged.
+    let balanced = "a\n```text\nbody\n```\ntail";
+    assert_eq!(repair_fence_parity(balanced), balanced);
+    // No fences at all is unchanged.
+    assert_eq!(repair_fence_parity("plain text"), "plain text");
+    // Odd (dangling opener): the opener and everything after it is removed.
+    let odd = "header\n\n```text\nchopped body";
+    let repaired = repair_fence_parity(odd);
+    assert_eq!(fence_count(&repaired) % 2, 0);
+    assert!(!repaired.contains("```"));
+    assert_eq!(repaired, "header");
+    // Fence at the exact end (closer present) stays balanced/unchanged.
+    let closed = "```text\nx\n```";
+    assert_eq!(repair_fence_parity(closed), closed);
+    // Three fences (open/close/open) — the third is a dangling opener and is
+    // dropped; the first open+close pair (no nesting) is preserved.
+    let three = "```text\nfirst\n```\nmid\n```text\nsecond";
+    let repaired_three = repair_fence_parity(three);
+    assert_eq!(fence_count(&repaired_three) % 2, 0);
+    assert_eq!(repaired_three, "```text\nfirst\n```\nmid");
+}
+
+/// #3394 (3): a fence that LOOKS nested is a closer under Discord semantics, so
+/// a four-fence sequence is balanced and must be left untouched.
+#[test]
+fn repair_fence_parity_treats_inner_fence_as_closer() {
+    use crate::services::discord::single_message_panel::repair_fence_parity;
+    let four = "```\nouter\n```\n```\nsecond\n```";
+    assert_eq!(repair_fence_parity(four), four);
+    assert_eq!(fence_count(four) % 2, 0);
+}
+
+/// #3394 (3): the in-turn LIVE panel routes through the protected truncation
+/// path. With bloated Tasks/Subagents PLUS a fenced Recent live block (the
+/// reported screenshot shape), the rendered panel stays under the limit and never
+/// exposes a dangling fence (the ``` count is always even, balanced or dropped).
+#[test]
+fn live_status_panel_never_leaks_dangling_fence_when_bloated() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3394);
+
+    for idx in 0..STATUS_PANEL_SUBAGENT_LIMIT {
+        events.push_status_events(
+            channel_id,
+            status_events_from_tool_use(
+                "Task",
+                &json!({
+                    "subagent_type": "explorer",
+                    "description": format!("subagent {idx} {}", "d".repeat(180))
+                })
+                .to_string(),
+            ),
+        );
+    }
+    // Fenced Recent live block (mirrors recent_events.rs ```text fence).
+    for idx in 0..6 {
+        events.push_event(
+            channel_id,
+            RecentPlaceholderEvent::tool_use("Bash", &format!(r#"{{"command":"echo {idx}"}}"#))
+                .unwrap(),
+        );
+    }
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+
+    assert!(rendered.chars().count() <= STATUS_PANEL_MAX_CHARS);
+    assert_eq!(
+        fence_count(&rendered) % 2,
+        0,
+        "live panel leaked an unterminated fence: {rendered}"
+    );
+}

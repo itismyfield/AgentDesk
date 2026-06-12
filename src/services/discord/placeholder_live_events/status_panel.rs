@@ -33,9 +33,9 @@ pub(super) struct SubagentSlot {
     /// #3086: TUI-parity accounting from the finishing `SubagentEnd`; drives the
     /// `Done (N tools · M tokens · Xs)` summary on the render line.
     summary: Option<SubagentSummary>,
-    /// `true` when launched with `run_in_background`. Its immediate Task result
-    /// is only a launch ack (the slot keeps running), so an ack-only
-    /// `SubagentEnd` must NOT mark it ✓ — only a genuine completion finalizes it.
+    /// `true` when launched with `run_in_background`. Its immediate Task result is
+    /// only a launch ack (slot keeps running), so an ack-only `SubagentEnd` must
+    /// NOT mark it ✓ — only a genuine completion finalizes it.
     background: bool,
     /// #3391: monotonic, never-reused per-entry slot id (mirrors
     /// `TaskToolSlot::ordinal`) backing slot-identity subagent eviction.
@@ -100,8 +100,8 @@ pub(super) struct StatusPanelState {
 impl StatusPanelState {
     /// #3087: on a true session boundary (provider session id delta), clears the
     /// per-session content slots (subagents/tasks/todos/workflows) and resets the
-    /// derived status to `Running`, while PRESERVING the context/token usage and
-    /// session-panel snapshots. The ordinal counter is preserved (never cleared).
+    /// status to `Running`, PRESERVING context/token usage + session snapshots and
+    /// the ordinal counter (never cleared).
     pub(super) fn reset_session_content(&mut self) {
         self.status = DerivedStatus::Running;
         self.todos.clear();
@@ -212,21 +212,18 @@ impl StatusPanelState {
                 summary,
                 ack_only,
             } => {
-                // #3084: close the slot whose Task tool-use id matches the
-                // result (pairs a long-running subagent to its own result among
-                // parallels); fall back to the first unfinished slot only when
-                // no id is available or matches.
+                // #3084: close the slot whose Task tool-use id matches the result
+                // (pairs a long-running subagent to its own result among
+                // parallels); fall back to first-unfinished only without an id.
                 let id = tool_use_id.as_deref();
                 let matched = id.and_then(|id| {
                     self.subagents.iter().rposition(|slot| {
                         slot.finished.is_none() && slot.tool_use_id.as_deref() == Some(id)
                     })
                 });
-                // #3086 P1 / #3359: a summary-bearing OR id-bearing ack-only end
-                // is safe only on an exact id match — never fall back to the
-                // last-unfinished slot (would mis-mark an unrelated running
-                // subagent, or prematurely ✓ a still-running background dispatch).
-                // Id-less legacy acks may close only id-less slots.
+                // #3086 P1 / #3359: a summary- OR id-bearing ack-only end is safe
+                // only on an exact id match (else mis-marks a running/background
+                // subagent); id-less legacy acks may close only id-less slots.
                 let has_summary = summary.as_ref().is_some_and(|s| !s.is_empty());
                 let target = match matched {
                     Some(index) => Some(index),
@@ -400,8 +397,8 @@ impl StatusPanelState {
     }
 
     /// #3204/#3198: routes a running subagent's live step onto its slot's recent
-    /// line. Prefers the UNFINISHED slot whose Task id matches; an id-bearing
-    /// activity matching no slot is dropped (never mis-routed/resurrected).
+    /// line. Prefers the UNFINISHED id-matching slot; an id-bearing no-match is
+    /// dropped (never mis-routed/resurrected).
     fn set_subagent_activity(&mut self, tool_use_id: Option<String>, summary: String) {
         let id = tool_use_id.as_deref();
         let target =
@@ -543,22 +540,13 @@ pub(super) fn render_status_panel(
         cluster_enabled,
         local_instance_id.as_deref(),
     );
-    let recent_section = if matches!(header_status, DerivedStatus::Completed { .. }) {
-        None
-    } else {
-        live_block
-            .filter(|block| !block.trim().is_empty())
-            .map(|block| format!("{recent_header}\n{block}"))
-    };
-    if let Some(recent) = recent_section.as_ref() {
-        let mut with_recent = sections.clone();
-        with_recent.push(recent.clone());
-        let joined = join_status_panel_sections(&with_recent);
-        if joined.chars().count() <= STATUS_PANEL_MAX_CHARS {
-            return joined;
-        }
+    // #3394: append the fence-balanced Recent block as a trailing section so the
+    // protected truncation path drops it whole on overflow (never chops its ```).
+    if !matches!(header_status, DerivedStatus::Completed { .. })
+        && let Some(block) = live_block.filter(|block| !block.trim().is_empty())
+    {
+        sections.push(format!("{recent_header}\n{block}"));
     }
-
     truncate_status_panel_sections(sections)
 }
 
@@ -566,12 +554,24 @@ fn join_status_panel_sections(sections: &[String]) -> String {
     sections.join("\n\n")
 }
 
-pub(super) fn truncate_status_panel_sections(sections: Vec<String>) -> String {
+/// #3394: section-wise degradation. A blind char cut of the JOINED panel chops
+/// the trailing fenced section's closing ``` and Discord renders the dangling
+/// fence as literal text. So when the join overflows, DROP whole sections from
+/// the END (Recent first) — never cut inside one; only a lone surviving section
+/// that alone overflows is fence-safe-truncated. The shared `repair_fence_parity`
+/// backstop re-balances every return path.
+pub(super) fn truncate_status_panel_sections(mut sections: Vec<String>) -> String {
+    use crate::services::discord::single_message_panel::repair_fence_parity;
+    while sections.len() > 1
+        && join_status_panel_sections(&sections).chars().count() > STATUS_PANEL_MAX_CHARS
+    {
+        sections.pop();
+    }
     let joined = join_status_panel_sections(&sections);
     if joined.chars().count() <= STATUS_PANEL_MAX_CHARS {
-        return joined;
+        return repair_fence_parity(&joined);
     }
-    truncate_chars(&joined, STATUS_PANEL_MAX_CHARS)
+    repair_fence_parity(&truncate_chars(&joined, STATUS_PANEL_MAX_CHARS))
 }
 
 pub(super) fn render_recent_section_header(
@@ -656,8 +656,8 @@ pub(super) fn render_subagent_slot(slot: &SubagentSlot) -> String {
         line.push_str(" — ");
         line.push_str(&done);
     }
-    // #3391: reserve the marker width then append, so a finished subagent line
-    // always ENDS WITH its ✓/✗ (a long desc/summary can no longer swallow it).
+    // #3391: reserve marker width then append so a finished line always ENDS WITH
+    // its ✓/✗ (a long desc/summary can no longer swallow it).
     match slot.terminal_marker() {
         Some(marker) => truncate_chars_with_marker(&line, marker, EVENT_LINE_MAX_CHARS),
         None => truncate_chars(&line, EVENT_LINE_MAX_CHARS),

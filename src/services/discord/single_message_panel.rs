@@ -128,7 +128,9 @@ pub(in crate::services::discord) fn compose_completion_footer_text(
         body
     }
     .trim_end();
-    format!("{base}{suffix}")
+    // #3394: backstop the Discord-limit body trim — if it chopped a code fence in
+    // the streamed response body, re-balance before the block is appended.
+    repair_fence_parity(&format!("{base}{suffix}"))
 }
 
 pub(in crate::services::discord) fn finalize_streaming_footer_with_completion(
@@ -452,17 +454,59 @@ fn clamp_footer_panel_text(panel_text: &str) -> String {
 }
 
 fn clamp_footer_status_block(status_block: String) -> String {
+    // #3394: this is the universal live-panel finalization sink (every
+    // `compose_footer_status_block` call lands here, after the upstream 600-byte
+    // `clamp_footer_panel_text` body trim and this Discord-limit trim — either of
+    // which can chop the Recent block's closing ```). Re-balance fence parity on
+    // EVERY return path so Discord never renders a dangling fence as literal text.
     let max_bytes = super::DISCORD_MSG_LIMIT.saturating_sub(6);
-    if status_block.len() <= max_bytes {
-        return status_block;
+    let clamped = if status_block.len() <= max_bytes {
+        status_block
+    } else {
+        let ellipsis = "…";
+        let body_budget = max_bytes.saturating_sub(ellipsis.len());
+        if body_budget == 0 {
+            ellipsis.to_string()
+        } else {
+            let safe_end = super::formatting::floor_char_boundary(&status_block, body_budget);
+            format!("{}{}", &status_block[..safe_end], ellipsis)
+        }
+    };
+    repair_fence_parity(&clamped)
+}
+
+/// #3394: shared triple-backtick fence-parity backstop. Discord renders an
+/// UNTERMINATED code fence as literal text (the reported bug: a blind char cut
+/// chopped the closing ``` of the trailing fenced section). After ANY truncation
+/// of panel text, re-balance by counting ``` runs: if the count is ODD, the last
+/// opener is dangling, so REMOVE that opener and everything after it.
+///
+/// Removal is chosen over appending a closing fence because the truncated tail is
+/// already incomplete content — re-closing it would resurrect a tiny orphan code
+/// block of cut-off text; dropping it keeps the output clean. Under Discord
+/// semantics there is no fence nesting (a ``` inside a fenced block CLOSES it), so
+/// plain parity counting is correct. Lives here, the panel-text finalization
+/// layer; `status_panel.rs` calls it via the full crate path after its own
+/// section-wise truncation.
+pub(in crate::services::discord) fn repair_fence_parity(text: &str) -> String {
+    let mut count = 0usize;
+    let mut last_open: Option<usize> = None;
+    for (idx, _) in text.match_indices("```") {
+        // Every other fence (1st, 3rd, ...) is an opener; track the latest one.
+        if count % 2 == 0 {
+            last_open = Some(idx);
+        }
+        count += 1;
     }
-    let ellipsis = "…";
-    let body_budget = max_bytes.saturating_sub(ellipsis.len());
-    if body_budget == 0 {
-        return ellipsis.to_string();
+    if count % 2 == 0 {
+        return text.to_string();
     }
-    let safe_end = super::formatting::floor_char_boundary(&status_block, body_budget);
-    format!("{}{}", &status_block[..safe_end], ellipsis)
+    // Odd count: drop the dangling opener and its trailing content; trim the now
+    // exposed tail so no blank line is left where the fence used to start.
+    match last_open {
+        Some(cut) => text[..cut].trim_end().to_string(),
+        None => text.to_string(),
+    }
 }
 
 pub(in crate::services::discord) fn finalize_streaming_footer(
@@ -803,6 +847,26 @@ mod tests {
         assert!(panel.len() <= super::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES);
         assert!(panel.ends_with("\n…") || panel == "…");
         assert!(block.len() > super::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES);
+    }
+
+    /// #3394: the footer finalization sink must re-balance fence parity. A panel
+    /// whose fenced Recent block is chopped by the 600-byte body clamp must not
+    /// emit a dangling ``` for Discord to render as literal text.
+    #[test]
+    fn footer_status_block_repairs_dangling_fence_after_clamp_3394() {
+        let panel = format!(
+            "🟢 진행 중 — Claude (<t:1700000000:R>)\n🖥️ Recent\n```text\n{}\n```",
+            "echo hello\n".repeat(120)
+        );
+        let block = super::compose_footer_status_block("⠸", &panel);
+
+        let fences = block.matches("```").count();
+        assert_eq!(
+            fences % 2,
+            0,
+            "footer leaked an unterminated fence: {block}"
+        );
+        assert!(!block.contains("```text") || fences >= 2);
     }
 
     #[test]
